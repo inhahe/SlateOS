@@ -6390,12 +6390,7 @@ struct CliOptions {
 }
 
 impl CliOptions {
-    #[expect(
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
-        reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-    )]
-    /// Parse `argv`.
+    /// Parse this process's own command line.
     ///
     /// # Errors
     ///
@@ -6405,7 +6400,24 @@ impl CliOptions {
     /// because this file is a library now, and a library that ends the process
     /// cannot be called from a test -- which is the point of the split.
     fn parse_args() -> Result<Self, i32> {
-        let args: Vec<String> = env::args().collect();
+        Self::parse_from(env::args().skip(1))
+    }
+
+    /// Parse `args`, which does *not* include the program name.
+    ///
+    /// The walk is an iterator rather than an index into a collected `Vec`.
+    /// That is not a stylistic preference: the index form spelled "this option
+    /// takes a value" as `i += 1` followed by `if i < args.len()`, three
+    /// statements apart from the `args[i]` that depended on them, and the two
+    /// options that forgot the guard did not fail — they *silently ignored*
+    /// the missing value. `args.next()` returns an `Option`, so the question
+    /// cannot be skipped, and there is no subscript and no counter left to get
+    /// wrong.
+    ///
+    /// # Errors
+    ///
+    /// As [`CliOptions::parse_args`].
+    fn parse_from(args: impl IntoIterator<Item = String>) -> Result<Self, i32> {
         let mut opts = Self {
             port: None,
             config_file: "/etc/ssh/sshd_config".into(),
@@ -6417,26 +6429,19 @@ impl CliOptions {
             extended_test: false,
         };
 
-        let mut i = 1;
-        while i < args.len() {
-            match args[i].as_str() {
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
                 "-p" => {
-                    i += 1;
-                    if i < args.len() {
-                        if let Ok(p) = args[i].parse::<u16>() {
-                            opts.port = Some(p);
-                        } else {
-                            eprintln!("sshd: invalid port: {}", args[i]);
-                            return Err(1);
-                        }
-                    }
+                    let value = Self::operand(&mut args, "-p")?;
+                    let Ok(port) = value.parse::<u16>() else {
+                        eprintln!("sshd: invalid port: {value}");
+                        return Err(1);
+                    };
+                    opts.port = Some(port);
                 }
-                "-f" => {
-                    i += 1;
-                    if let Some(arg) = args.get(i) {
-                        arg.clone_into(&mut opts.config_file);
-                    }
-                }
+                "-f" => opts.config_file = Self::operand(&mut args, "-f")?,
+                "-h" => opts.host_key_file = Some(Self::operand(&mut args, "-h")?),
                 "-d" => {
                     opts.debug_mode = true;
                     opts.foreground = true;
@@ -6446,12 +6451,6 @@ impl CliOptions {
                 }
                 "-e" => {
                     opts.log_stderr = true;
-                }
-                "-h" => {
-                    i += 1;
-                    if i < args.len() {
-                        opts.host_key_file = Some(args[i].clone());
-                    }
                 }
                 "-t" => {
                     opts.test_config = true;
@@ -6469,10 +6468,23 @@ impl CliOptions {
                     return Err(1);
                 }
             }
-            i += 1;
         }
 
         Ok(opts)
+    }
+
+    /// The value belonging to `flag`.
+    ///
+    /// A missing value is refused rather than ignored. `sshd -p` used to start
+    /// on the default port, so a truncated line in an init script moved the
+    /// daemon to a port nobody had asked for and said nothing about it; the
+    /// administrator finds out when connections stop arriving.
+    fn operand(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, i32> {
+        let Some(value) = args.next() else {
+            eprintln!("sshd: option requires an argument: {flag}");
+            return Err(1);
+        };
+        Ok(value)
     }
 }
 
@@ -8896,6 +8908,101 @@ Z
         short.extend_from_slice(&ssh_string(b"ssh-ed25519"));
         short.extend_from_slice(&ssh_string(&[0u8; 31]));
         assert!(ed25519_key_from_blob(&short).is_none());
+    }
+
+    // ---- Command-line parsing ----
+
+    /// Parse a command line written the way it would be typed.
+    fn cli(args: &[&str]) -> Result<CliOptions, i32> {
+        CliOptions::parse_from(args.iter().map(|a| (*a).to_string()))
+    }
+
+    #[test]
+    fn an_empty_command_line_is_the_documented_defaults() {
+        let opts = cli(&[]).expect("no arguments is a valid way to start sshd");
+        assert_eq!(opts.port, None, "the port comes from the config file");
+        assert_eq!(opts.config_file, "/etc/ssh/sshd_config");
+        assert_eq!(opts.host_key_file, None);
+        assert!(!opts.debug_mode && !opts.foreground && !opts.log_stderr);
+        assert!(!opts.test_config && !opts.extended_test);
+    }
+
+    /// `-p` with nothing after it is refused, not ignored.
+    ///
+    /// The regression this guards is not a panic but a silence: the index-based
+    /// parser advanced past the flag, found itself at the end, and simply fell
+    /// through — so `sshd -p` started on whatever port the config file named,
+    /// with no message. An init script whose line had been truncated moved the
+    /// daemon to a port nobody asked for and reported success.
+    #[test]
+    fn an_option_whose_value_is_missing_is_refused_rather_than_ignored() {
+        for flag in ["-p", "-f", "-h"] {
+            assert_eq!(
+                cli(&[flag]).err(),
+                Some(1),
+                "{flag} takes a value, and one was not given"
+            );
+        }
+    }
+
+    #[test]
+    fn a_port_that_is_not_a_number_is_refused() {
+        assert_eq!(cli(&["-p", "ssh"]).err(), Some(1));
+        assert_eq!(
+            cli(&["-p", "65536"]).err(),
+            Some(1),
+            "a port is a u16, and 65536 is not one"
+        );
+        assert_eq!(cli(&["-p", "22"]).expect("22 is a port").port, Some(22));
+    }
+
+    /// A value is taken literally even when it looks like another option.
+    ///
+    /// This is what `getopt` does and what an administrator relies on: a host
+    /// key really can be called `-d`. The alternative — peeking at the value
+    /// and rejecting it for starting with a dash — would make a legal filename
+    /// unusable and is not what any other `sshd` does.
+    #[test]
+    fn a_value_that_looks_like_an_option_is_still_the_value() {
+        let opts = cli(&["-f", "-d"]).expect("a config file may be called -d");
+        assert_eq!(opts.config_file, "-d");
+        assert!(
+            !opts.debug_mode,
+            "the -d was consumed as -f's value, not acted on"
+        );
+    }
+
+    #[test]
+    fn the_flags_that_take_no_value_leave_the_next_argument_alone() {
+        let opts = cli(&["-d", "-e", "-p", "2222"]).expect("a normal debug run");
+        assert!(opts.debug_mode);
+        assert!(opts.foreground, "-d implies staying in the foreground");
+        assert!(opts.log_stderr);
+        assert_eq!(opts.port, Some(2222));
+    }
+
+    #[test]
+    fn extended_test_mode_also_asks_for_the_plain_test() {
+        let opts = cli(&["-T"]).expect("-T is a valid run");
+        assert!(opts.extended_test);
+        assert!(
+            opts.test_config,
+            "dumping the config implies checking it first"
+        );
+    }
+
+    #[test]
+    fn help_ends_the_run_successfully_and_an_unknown_option_does_not() {
+        assert_eq!(cli(&["--help"]).err(), Some(0));
+        assert_eq!(cli(&["--nonesuch"]).err(), Some(1));
+    }
+
+    /// The last of a repeated option wins, and parsing does not stop early.
+    #[test]
+    fn a_repeated_option_takes_its_last_value() {
+        let opts = cli(&["-p", "22", "-p", "2222", "-t"]).expect("repetition is allowed");
+        assert_eq!(opts.port, Some(2222));
+        assert!(opts.test_config, "the walk continued past the repetition");
     }
 
     // ---- Port validation ----

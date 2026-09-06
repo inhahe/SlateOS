@@ -120638,3 +120638,57 @@ for — how many shells may run at once — and the entries that accumulate are 
 ones that are *not* running. The question to ask of any bound is not "does this
 count the thing the feature is about?" but "what can a peer make that this does
 not count?"
+
+## TD-B-SSHD-DIES-BEFORE-ITS-FIRST-STATEMENT-ON-A-NON-UTF-8-COMMAND-LINE (lane B, 2026-09-05)
+
+**In short:** on this OS a filename may hold any byte except `/` and NUL — that
+is written down in `design.txt`, not an accident. `sshd` reads its command line
+as text that must be valid Unicode, so `sshd -f /etc/ssh/conf-<0x80>` does not
+report a bad filename: it aborts with a Rust panic message before running a
+single line this repository wrote. The same goes for `-h <hostkey>`. The daemon
+does not start, and the panic text says nothing about which argument caused it.
+
+Nobody can trigger this remotely — argv comes from an init script written by
+root, not from the network — so it is a robustness defect, not a
+vulnerability. But an init script is exactly where an odd byte goes unnoticed
+for months, and a daemon that fails to boot with a panic backtrace is the worst
+available way to report a bad path.
+
+### Where it lives
+
+`userspace/sshd/src/lib.rs`:
+
+```rust
+fn parse_args() -> Result<Self, i32> {
+    Self::parse_from(env::args().skip(1))     // <-- panics on a non-UTF-8 argument
+}
+```
+
+`std::env::args()`'s iterator is documented to panic on an argument that is not
+valid Unicode; its body is a literal `unwrap`. This is the same defect that
+`scripts/argv-utf8.py` gates for the 84 shipped coreutils, and for the same
+reason — but that gate's stated scope is `userspace/coreutils/`, so `sshd` is
+outside it and nothing catches this.
+
+### Why it is not simply `args_os()`
+
+The path does not stop at the parser. `CliOptions::config_file` and
+`host_key_file` are `String`, and so is `SshdConfig::host_key_file`, which is
+*also* filled from the config file's own text — so a host key path can arrive by
+two routes and both are UTF-8-only. Fixing only `parse_from` would move the
+panic to the first `fs_read_file` and change nothing a user sees.
+
+### The proper fix
+
+Carry the two paths as `OsString`/`PathBuf` from `parse_from` through
+`CliOptions`, `SshdConfig` and the config parser to `fs_read_file` /
+`HostKey::load_from_file`, which is the shape `coreutils::getopt` already uses
+for the utilities that are clean. Then extend `scripts/argv-utf8.py`'s scope, or
+add sshd to it explicitly, so the next daemon does not reintroduce it.
+
+### How it was found
+
+Opening the `#[expect(clippy::indexing_slicing, clippy::arithmetic_side_effects)]`
+on the argument parser during the sshd panic-lint audit. The suppression was
+covering `args[i]` and `i += 1`; the `String` in the line above them was not
+what the lint was pointing at, and is the larger defect of the two.

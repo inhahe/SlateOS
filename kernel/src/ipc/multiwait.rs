@@ -132,10 +132,7 @@ impl WaitTarget {
                 super::pipe::register_waiter(super::pipe::PipeHandle::from_raw(raw), task);
             }
             Self::EventFd(raw) => {
-                super::eventfd::register_waiter(
-                    super::eventfd::EventFdHandle::from_raw(raw),
-                    task,
-                );
+                super::eventfd::register_waiter(super::eventfd::EventFdHandle::from_raw(raw), task);
             }
             Self::StreamSocket(raw) => {
                 super::stream_socket::register_waiter(
@@ -144,10 +141,7 @@ impl WaitTarget {
                 );
             }
             Self::TimerFd(raw) => {
-                super::timerfd::register_waiter(
-                    super::timerfd::TimerFdHandle::from_raw(raw),
-                    task,
-                );
+                super::timerfd::register_waiter(super::timerfd::TimerFdHandle::from_raw(raw), task);
             }
             Self::Pty(raw) => {
                 crate::tty::pty::register_waiter(crate::tty::pty::PtyHandle::from_raw(raw), task);

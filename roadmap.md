@@ -953,6 +953,45 @@ Roadmap:
   shared by two *processes*, and `^C` has to reach the foreground group when it
   is typed rather than when somebody next calls `read`. Neither is expressible
   in libc — see design-decisions.md §345 for the alternative and why it fails.
+- `[-]` `[B]` **`/etc/users.yaml` is the truth; `/etc/passwd` and `/etc/shadow`
+  are generated from it — design-decisions.md §353.** An operator decision of
+  2026-08-21 that had no roadmap entry and was found entirely unimplemented on
+  2026-09-06: a user created with `useradd` could log in over SSH and did not
+  exist to the graphical login screen, which is the defect §353 was decided to
+  end. Four build items, tracked here:
+  - `[x]` **2. Generate on change** (2026-09-06). `UserDb::save` now writes
+    three files — the database and both renderings — each staged to a
+    temporary and all renamed together, so the window in which they can
+    disagree is three renames wide. The flat files' paths are *derived* from
+    the database's own directory, so generation cannot be forgotten by a
+    caller and a test cannot write over the real `/etc/passwd`. A record that
+    cannot be written as a colon-separated line fails the whole save
+    (`GenerateError`) rather than being skipped, because a skipped record is
+    exactly the one-file-and-not-the-other failure being fixed. Includes item
+    **4**'s generated header. `useradm` is live on it today; `useradd` is not,
+    which is item 1.
+  - `[ ]` **1. Redirect the two writers.** `useradd` and `passwd` still write
+    `/etc/passwd`, `/etc/shadow`, `/etc/group` and `/etc/gshadow` by hand and
+    have never heard of `userdb`. Until this lands the generated files are
+    stale the moment `useradd` runs. **Blocked on a prerequisite found while
+    scoping it (2026-09-06): `userdb` has no password-aging fields, and
+    `passwd` is largely *about* them** — `-n -x -w -i -e -S` all read and
+    write shadow fields 3–8 (last-changed, min, max, warn, inactive, expire),
+    which `to_shadow_text` currently emits as eight empty fields. Redirecting
+    `passwd` first would therefore *lose* every aging policy on the machine on
+    the next save. So item 1 splits: **1a** give `userdb` the six aging fields
+    and generate them; **1b** move `passwd` onto it; **1c** move `useradd`
+    onto it (which additionally needs a gid allocator, since `useradd` creates
+    the user-private group). `chage` (`userspace/chage`) reads the same six
+    fields from `/etc/shadow` directly and comes along with 1a.
+  - `[ ]` **3. Collapse `authlib`'s guess.** Its per-lookup "YAML if it has the
+    user, `/etc/shadow` otherwise" fallback is a policy invented before §353
+    and must become a straight YAML lookup, the shadow branch deleted.
+  - Adjacent, and newly *reachable* because of item 2: `known-issues.md` →
+    `B-USERS-YAML-IS-WORLD-READABLE-AND-HOLDS-EVERY-PASSWORD-HASH`.
+    `/etc/group`/`/etc/gshadow` are **not** in §353's scope and remain a
+    separate gap (eleven readers, one writer, and no gid allocator in
+    `userdb`).
 - `[B]` Translate POSIX calls to native syscalls (line ~1738)
 - `[B]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5343)
 - `[B]` Rust toolchain, CPython, fastpy compiler self-hosting (lines ~5344–5346)

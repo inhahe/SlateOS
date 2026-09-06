@@ -65,7 +65,6 @@ userspace/cbor-cli/src/main.rs:argv-as-string
 userspace/ccze-cli/src/main.rs:argv-as-string
 userspace/cemu-cli/src/main.rs:argv-as-string
 userspace/cgroup/src/main.rs:argv-as-string
-userspace/chage/src/main.rs:argv-as-string
 userspace/chattr/src/main.rs:argv-as-string
 userspace/chown/src/main.rs:argv-as-string
 userspace/chpasswd/src/main.rs:argv-as-string

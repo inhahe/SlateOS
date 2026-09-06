@@ -1395,6 +1395,19 @@ pub struct PacketCodec {
     mac_len: usize,
     seq_out: u32,
     seq_in: u32,
+    /// Bytes put on the wire under the *current* keys, in each direction.
+    ///
+    /// Unlike the sequence numbers beside them these reset at every
+    /// [`activate`](Self::activate), because what they exist to answer is "how
+    /// much has this key done?" — RFC 4253 §9's recommendation to rekey after a
+    /// gigabyte. A counter that ran for the life of the connection would fire
+    /// once and then be permanently over the threshold.
+    ///
+    /// Counted here rather than by the caller because this is the only place
+    /// that knows the true figure: the caller hands over a payload and gets back
+    /// a framed, padded, MAC'd packet, and it is the packet the key protected.
+    bytes_out: u64,
+    bytes_in: u64,
 }
 
 impl core::fmt::Debug for PacketCodec {
@@ -1431,6 +1444,8 @@ impl PacketCodec {
             mac_len: 0,
             seq_out: 0,
             seq_in: 0,
+            bytes_out: 0,
+            bytes_in: 0,
         }
     }
 
@@ -1445,7 +1460,10 @@ impl PacketCodec {
     ///
     /// The sequence numbers deliberately survive this call. §6.4 runs them for
     /// the life of the connection, not the life of a key, and resetting them at
-    /// a rekey would break the MAC on the very next packet.
+    /// a rekey would break the MAC on the very next packet. The traffic counters
+    /// behind [`bytes_under_current_keys`](Self::bytes_under_current_keys) do
+    /// the opposite and reset, for the reason given on the fields: they measure
+    /// a key's use, and this call is where a key's use begins.
     ///
     /// # Errors
     ///
@@ -1496,6 +1514,8 @@ impl PacketCodec {
         self.mac_key_in = derive(mac_in, 32);
         self.block_size = 16;
         self.mac_len = 32;
+        self.bytes_out = 0;
+        self.bytes_in = 0;
         Ok(())
     }
 
@@ -1503,6 +1523,21 @@ impl PacketCodec {
     #[must_use]
     pub fn is_encrypted(&self) -> bool {
         self.cipher_out.is_some()
+    }
+
+    /// How much traffic the keys installed by the last
+    /// [`activate`](Self::activate) have protected, in bytes.
+    ///
+    /// This is the larger of the two directions rather than their sum. The
+    /// threshold it feeds — RFC 4253 §9's "after each gigabyte of transmitted
+    /// data" — is a limit on how much one key may do, and the two directions
+    /// have different keys (§7.2 derives six values, three per direction). A sum
+    /// would rekey a bulk download at half the transferred volume, and, worse,
+    /// would let a session that is busy in one direction only run to twice the
+    /// intended amount on the key actually doing the work.
+    #[must_use]
+    pub fn bytes_under_current_keys(&self) -> u64 {
+        self.bytes_out.max(self.bytes_in)
     }
 
     /// The alignment a received packet's first block is read in.
@@ -1606,6 +1641,9 @@ impl PacketCodec {
         }
 
         self.seq_out = self.seq_out.wrapping_add(1);
+        self.bytes_out = self
+            .bytes_out
+            .saturating_add(pkt.len().try_into().unwrap_or(u64::MAX));
         Ok(pkt)
     }
 
@@ -1719,6 +1757,9 @@ impl PacketCodec {
             .to_vec();
 
         self.seq_in = self.seq_in.wrapping_add(1);
+        self.bytes_in = self
+            .bytes_in
+            .saturating_add(total.try_into().unwrap_or(u64::MAX));
         Ok(Some((payload, total)))
     }
 }
@@ -3949,6 +3990,65 @@ mod tests {
             assert_eq!(got, payload);
             assert_eq!(consumed, wire.len());
         }
+    }
+
+    /// The traffic counter measures whole packets on the wire, both ways, and a
+    /// rekey puts it back to zero.
+    ///
+    /// It exists to answer RFC 4253 §9's "after each gigabyte" question, so
+    /// what it must count is what the *key* protected — the framed, padded,
+    /// MAC'd packet — not the payload the caller handed in. Counting payloads
+    /// would undercount by the padding and the 36 bytes of frame and MAC on
+    /// every packet, which for an interactive session (a packet per keystroke)
+    /// is most of the traffic.
+    #[test]
+    fn the_traffic_counter_measures_whole_packets_and_resets_at_a_rekey() {
+        let (mut client, mut server) = a_keyed_pair();
+        assert_eq!(
+            client.bytes_under_current_keys(),
+            0,
+            "a freshly keyed codec has carried nothing"
+        );
+
+        let wire = encode(&mut client, b"outbound");
+        assert_eq!(
+            client.bytes_under_current_keys(),
+            u64::try_from(wire.len()).expect("a packet fits in u64"),
+            "the sender counted something other than the packet it produced"
+        );
+
+        let (_, consumed) = server
+            .decode(&wire)
+            .expect("a whole packet")
+            .expect("a whole packet");
+        assert_eq!(
+            server.bytes_under_current_keys(),
+            u64::try_from(consumed).expect("a packet fits in u64"),
+            "the receiver counted something other than the packet it consumed"
+        );
+
+        // The larger direction, not the sum: the two directions have separate
+        // keys, so a byte sent and a byte received are one byte of use each.
+        let back = encode(&mut server, b"and inbound");
+        assert_eq!(
+            server.bytes_under_current_keys(),
+            u64::try_from(wire.len().max(back.len())).expect("a packet fits in u64"),
+            "the two directions were added together"
+        );
+
+        // A rekey is where a key's life begins, so this is where its use
+        // restarts. A counter that survived would be over any threshold it had
+        // just crossed, and the connection would rekey on every packet from
+        // then on.
+        let secret = encode_mpint(&[0x11u8; 32]);
+        server
+            .activate(Role::Server, &secret, &[0x22u8; 32], &[0x77u8; 32])
+            .expect("32-byte inputs derive");
+        assert_eq!(
+            server.bytes_under_current_keys(),
+            0,
+            "the traffic counter survived a rekey"
+        );
     }
 
     /// Two ends that used the same letters for both directions would still pass

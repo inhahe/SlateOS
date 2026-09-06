@@ -3038,6 +3038,22 @@ pub struct ConnectionState {
     /// When this connection opened, for the login grace timer — or `None` if
     /// the clock could not be read at that moment. See [`clock_monotonic`].
     connection_start: Option<Instant>,
+    /// When the keys now in use were installed, for the rekey age threshold —
+    /// or `None` if the clock could not be read at that moment.
+    ///
+    /// Set in exactly one place, [`run_key_exchange`], immediately after
+    /// `codec.activate`. That is deliberate: "when did this key start being
+    /// used" has one answer, and putting the assignment anywhere else would
+    /// mean the first exchange and each rekey could drift apart, which is how
+    /// an age threshold ends up measuring the connection instead of the key.
+    ///
+    /// `None` disables the *age* half of [`rekey_is_due`](Self::rekey_is_due)
+    /// and only that half; the byte counter is not a clock and keeps working.
+    /// Failing open here is the opposite of the login grace timer's choice
+    /// (§775) and for the opposite reason: this timer bounds a peer that has
+    /// already authenticated, and refusing an established session because the
+    /// clock stuttered would drop the user's work to enforce a recommendation.
+    keys_installed_at: Option<Instant>,
     /// Where this connection's unpredictable bytes come from: the packet
     /// padding, the KEXINIT cookie and the Diffie-Hellman exponent.
     ///
@@ -3077,6 +3093,7 @@ impl ConnectionState {
             next_channel_id: 0,
             debug_mode,
             connection_start: clock_monotonic(),
+            keys_installed_at: None,
             secrets: sshwire::KERNEL_SECRETS,
         }
     }
@@ -3119,6 +3136,27 @@ impl ConnectionState {
     #[must_use]
     pub fn session_id(&self) -> Option<[u8; 32]> {
         self.session_id
+    }
+
+    /// Have the keys in use done enough work that RFC 4253 §9 wants new ones?
+    ///
+    /// Either threshold alone is enough, because they bound different things:
+    /// the byte count bounds how much ciphertext one key produces (the quantity
+    /// a cryptanalyst has to work with, and for a 128-bit block cipher in CTR
+    /// mode the point where counter collisions stop being negligible), while the
+    /// age bounds how long a key stays worth stealing — a key recovered from a
+    /// machine's memory is only useful for traffic it is still protecting.
+    ///
+    /// An unreadable clock disables the age half and leaves the byte half
+    /// running; see [`keys_installed_at`](Self::keys_installed_at) for why this
+    /// one fails open where the login grace timer fails closed.
+    #[must_use]
+    fn rekey_is_due(&self) -> bool {
+        let key_age = self
+            .keys_installed_at
+            .zip(clock_monotonic())
+            .map(|(installed, now)| now.saturating_since(installed));
+        thresholds_reached(self.codec.bytes_under_current_keys(), key_age)
     }
 
     /// Frame, encrypt and send one packet.
@@ -3421,6 +3459,113 @@ pub fn do_rekey(conn: &mut ConnectionState, client_kexinit: &[u8]) -> Result<(),
     Ok(())
 }
 
+/// How much traffic one set of keys may protect before this end asks for new
+/// ones (RFC 4253 §9: "after each gigabyte of transmitted data").
+///
+/// A gibibyte rather than a round 10^9, because the figure is a bound on a
+/// block cipher's output and the reasoning behind it is in powers of two.
+const REKEY_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// How long one set of keys may stay in use before this end asks for new ones
+/// (RFC 4253 §9: "after each gigabyte of transmitted data or after each hour of
+/// connection time, whichever comes sooner").
+///
+/// The two thresholds are not alternatives; §9 asks for whichever arrives
+/// first, which is why [`ConnectionState::rekey_is_due`] checks both.
+const REKEY_MAX_AGE: Elapsed = Elapsed::from_secs(60 * 60);
+
+/// RFC 4253 §9's two thresholds, as a decision about two numbers.
+///
+/// Separated from [`ConnectionState::rekey_is_due`] because the numbers it
+/// compares are ones no test can reach through the connection: the byte
+/// threshold is a gibibyte, so pushing a `ConnectionState` over it would mean
+/// actually encrypting a gibibyte, and the age threshold is an hour of the
+/// machine's monotonic clock, which cannot be moved. The boundaries are where
+/// off-by-one and unit errors live — this file has already shipped one timer
+/// that compared microseconds against seconds — so they have to be reachable
+/// somewhere, and here they are direct arguments.
+///
+/// `key_age` is `None` when the clock could not be read. That disables the age
+/// half and only the age half: the byte counter is not a clock.
+fn thresholds_reached(bytes_under_current_keys: u64, key_age: Option<Elapsed>) -> bool {
+    if bytes_under_current_keys >= REKEY_MAX_BYTES {
+        return true;
+    }
+    key_age.is_some_and(|age| age > REKEY_MAX_AGE)
+}
+
+/// The most packets that will be held back while waiting for the client's
+/// `KEXINIT` during a rekey we started.
+///
+/// There has to be *a* limit, because the packets are buffered in memory and
+/// the peer decides how many arrive: a client that answers our `KEXINIT` slowly
+/// while continuing to send would otherwise grow this without bound. There has
+/// to be *some* room, though, because the window is real — see [`start_rekey`].
+///
+/// Sixty-four is chosen against what can genuinely be in flight: the window is
+/// one network round trip, and a peer that has filled a socket buffer with
+/// back-to-back maximum-size packets in that time is doing something other than
+/// running a shell. A session that exceeds it is dropped rather than truncated,
+/// because silently discarding channel data would corrupt whatever the user was
+/// transferring while looking like a working connection.
+const MAX_PACKETS_DEFERRED_DURING_REKEY: usize = 64;
+
+/// Begin a key exchange on our own initiative (RFC 4253 §9).
+///
+/// # Why the server has to do this too
+///
+/// §9 recommends rekeying after an hour or a gigabyte, and it says either side
+/// may ask. Leaving it entirely to the client makes the security of a long
+/// session a property of whoever connected to us — a client that never asks
+/// leaves one set of keys protecting an unbounded amount of traffic. This is
+/// what [`ConnectionState::rekey_is_due`] is consulted for.
+///
+/// # The window this returns packets from
+///
+/// §7.1 stops a peer sending non-`KEX` traffic once *it* has sent `KEXINIT` —
+/// not once it has received ours. So between our `KEXINIT` going out and the
+/// client's arriving there is a round trip during which the client is still
+/// entitled to send channel data, and does: whatever was already in flight, plus
+/// whatever it writes before our message lands.
+///
+/// Those packets are neither part of the exchange nor discardable — they are the
+/// user's keystrokes and the shell's input. They are returned for the caller to
+/// dispatch once the exchange is over, which reorders them after the rekey but
+/// preserves their order among themselves, and that is the order that matters
+/// for a byte stream. (The alternative, dispatching them here as they arrive,
+/// would mean handling a `KEXINIT` inside a key exchange, which starts a second
+/// one.)
+///
+/// # Errors
+///
+/// The exchange failed, or the client sent more than
+/// [`MAX_PACKETS_DEFERRED_DURING_REKEY`] packets without answering.
+pub fn start_rekey(conn: &mut ConnectionState) -> Result<Vec<Vec<u8>>, SshdError> {
+    conn.debug_log("starting rekey (server-initiated)");
+    let server_kexinit = build_kexinit(conn.secrets)?;
+    conn.send_packet(&server_kexinit)?;
+    conn.debug_log("sent KEXINIT (rekey)");
+
+    let mut deferred: Vec<Vec<u8>> = Vec::new();
+    let client_kexinit = loop {
+        let packet = recv_during_kex(conn)?;
+        if packet.first().copied() == Some(msg::SSH_MSG_KEXINIT) {
+            break packet;
+        }
+        if deferred.len() >= MAX_PACKETS_DEFERRED_DURING_REKEY {
+            return Err(SshdError::ProtocolError(
+                "client kept sending data instead of answering our KEXINIT".into(),
+            ));
+        }
+        deferred.push(packet);
+    };
+    conn.debug_log("received client KEXINIT (rekey)");
+
+    run_key_exchange(conn, &server_kexinit, &client_kexinit)?;
+    conn.debug_log("rekey complete");
+    Ok(deferred)
+}
+
 /// Everything both exchanges do: Diffie-Hellman, the exchange hash, the host-key
 /// signature, `NEWKEYS`, and installing the ciphers.
 ///
@@ -3530,6 +3675,14 @@ fn run_key_exchange(
     // image by hand.
     conn.codec
         .activate(Role::Server, &shared_secret, &exchange_hash, &session_id)?;
+    // The rekey age threshold measures a *key's* life, so its anchor is set
+    // here, where a key's life begins, and nowhere else. Both the first
+    // exchange and every rekey pass through this line, which is what stops the
+    // two from drifting apart and turning the threshold into a measure of the
+    // connection's age -- a connection whose second hour started with a fresh
+    // key does not need a third exchange. The codec's traffic counter resets on
+    // the same call for the same reason.
+    conn.keys_installed_at = clock_monotonic();
     conn.debug_log("encryption activated");
 
     Ok(())
@@ -4416,6 +4569,25 @@ fn handle_channels(conn: &mut ConnectionState) -> Result<(), SshdError> {
     let mut idle_ns = IDLE_SLEEP_MIN_NS;
 
     loop {
+        // RFC 4253 §9 asks *either* end to rekey on the thresholds, and the
+        // check belongs here rather than beside the byte counter because this
+        // is the only point in a session where no exchange is half-finished and
+        // no packet is half-dispatched.
+        //
+        // Above the blocking branch below, so a session that has crossed a
+        // threshold rekeys before parking on the socket rather than after the
+        // client's next keystroke. A threshold crossed *while* parked waits for
+        // that keystroke, which is correct rather than merely tolerable: a
+        // connection with nothing in flight is producing no ciphertext to
+        // analyse, so the reason for the deadline is not accruing either.
+        if conn.rekey_is_due() {
+            for payload in start_rekey(conn)? {
+                if dispatch_channel_message(conn, &payload)? == Flow::Stop {
+                    return Ok(());
+                }
+            }
+        }
+
         // With no process running there is nothing to watch but the socket, so
         // block on it exactly as this loop always did: no polling, no wake-ups,
         // and no latency added to the client's next packet. Readiness polling
@@ -8858,6 +9030,115 @@ Z
             outcome.is_err(),
             "the peer sent no KEX_DH_INIT and then closed, so the exchange must \
              fail rather than report success"
+        );
+    }
+
+    /// Either of RFC 4253 §9's thresholds alone is enough, and neither fires a
+    /// moment early.
+    ///
+    /// The boundaries are the whole content of a threshold. This file has
+    /// already shipped a timer that compared microseconds against seconds and
+    /// therefore expired instantly, and a sibling daemon a rate window that was
+    /// sixty microseconds and therefore never expired at all — both of which a
+    /// test of the *middle* of the range passes happily.
+    #[test]
+    fn either_rekey_threshold_alone_is_enough_and_neither_fires_early() {
+        // Spelled out rather than taken from REKEY_MAX_BYTES/REKEY_MAX_AGE: a
+        // test that reuses the implementation's constant checks only that the
+        // code agrees with itself, and what is in doubt here is whether the
+        // constants mean a gibibyte and an hour at all.
+        let a_gibibyte: u64 = 1024 * 1024 * 1024;
+        let an_hour = Elapsed::from_secs(60 * 60);
+
+        assert!(
+            !thresholds_reached(a_gibibyte - 1, Some(an_hour)),
+            "a key that has moved one byte less than a gibibyte and is exactly \
+             an hour old has exceeded neither limit and must not rekey"
+        );
+        assert!(
+            thresholds_reached(a_gibibyte, Some(Elapsed::ZERO)),
+            "a gibibyte on a brand-new key must rekey on the byte count alone"
+        );
+        assert!(
+            thresholds_reached(0, Some(an_hour.saturating_add(Elapsed::from_nanos(1)))),
+            "an hour and a nanosecond on a silent key must rekey on the age alone"
+        );
+    }
+
+    /// An unreadable clock stops the age threshold and nothing else.
+    ///
+    /// The opposite call from the login grace timer's (design-decisions.md
+    /// §775), and deliberately: that one bounds a peer who has not proved who
+    /// they are, so it fails closed, while this one bounds a session already
+    /// authenticated and running the user's work. Dropping that session because
+    /// `SYS_CLOCK_MONOTONIC` stuttered would spend real data to enforce a
+    /// recommendation. The byte counter is not a clock and keeps working, so
+    /// the larger of the two guarantees survives.
+    #[test]
+    fn an_unreadable_clock_disables_the_age_threshold_but_not_the_byte_one() {
+        assert!(
+            !thresholds_reached(0, None),
+            "with no clock and no traffic there is nothing to act on"
+        );
+        assert!(
+            thresholds_reached(1024 * 1024 * 1024, None),
+            "the byte threshold does not need a clock and must still fire"
+        );
+    }
+
+    /// A client that answers our `KEXINIT` with an endless stream of anything
+    /// else is disconnected rather than buffered without limit.
+    ///
+    /// The deferral in [`start_rekey`] exists because RFC 4253 §7.1 leaves the
+    /// client entitled to keep sending for one round trip after our `KEXINIT`
+    /// goes out, and that traffic is the user's keystrokes rather than
+    /// something discardable. But the peer decides how much arrives and we hold
+    /// it in memory, so "as much as it likes" is a peer-controlled allocation.
+    /// This pins the other end of that: the limit is enforced, and enforced by
+    /// ending the connection rather than by silently dropping channel data,
+    /// which would corrupt a transfer while looking like a working session.
+    #[test]
+    fn a_client_that_floods_instead_of_answering_our_kexinit_is_refused() {
+        let (server_side, peer) = sshwire::memory_pair();
+        let mut conn = ConnectionState::new(
+            Box::new(server_side),
+            SshdConfig::default_config(),
+            HostKey::from_seed([9u8; 32]),
+            false,
+        )
+        .with_secret_source(counting_secrets);
+
+        // The peer talks in cleartext because no exchange has completed on this
+        // connection, so the codec is not yet encrypting. That is exactly the
+        // framing `recv_packet` expects, and it lets the flood be built without
+        // running a whole handshake first -- what is under test is the counting,
+        // not the crypto.
+        let flood = std::thread::spawn(move || {
+            let mut peer = peer;
+            let mut codec = sshwire::PacketCodec::new();
+            // One more than the limit: the last one is what must be refused.
+            for _ in 0..=MAX_PACKETS_DEFERRED_DURING_REKEY {
+                let pkt = framed(&mut codec, &[msg::SSH_MSG_CHANNEL_DATA]);
+                if peer.send(&pkt).is_err() {
+                    return;
+                }
+            }
+            // Held open until the daemon gives up, so that a daemon which
+            // *failed* to enforce the limit blocks here and the test reports a
+            // timeout rather than passing on a closed pipe.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+
+        let outcome = start_rekey(&mut conn);
+        drop(conn);
+        flood.join().expect("the flooding thread must not panic");
+
+        let Err(SshdError::ProtocolError(message)) = outcome else {
+            panic!("a client that never answered our KEXINIT must not succeed: {outcome:?}");
+        };
+        assert!(
+            message.contains("instead of answering"),
+            "the refusal must say what the client did wrong, not merely fail: {message}"
         );
     }
 

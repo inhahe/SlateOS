@@ -190,8 +190,26 @@ mod tests {
         one_handshake_with(sshd::HostKey::from_seed(HOST_KEY_SEED), known_hosts)
     }
 
-    /// Handshake, then let the client rekey `rekeys` times, returning each end's
-    /// session identifier as it stood after every exchange.
+    /// Which end asks for the rekey in [`handshake_then_rekeys`].
+    ///
+    /// RFC 4253 §9 lets either end ask, and both directions are live in this
+    /// tree: the client asks when the user's session outlives its keys, and the
+    /// daemon asks on its own thresholds (a gibibyte, or an hour) so that a long
+    /// session's security is not a property of whoever connected. The two paths
+    /// are different code at both ends -- the daemon's initiating path has to
+    /// hold back in-flight channel data for a round trip, and the client's
+    /// answering path has to recognise an unsolicited `KEXINIT` in its message
+    /// dispatch -- so a test of one says nothing about the other.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Initiator {
+        /// The client sends `KEXINIT` first; the daemon reads it and answers.
+        Client,
+        /// The daemon sends `KEXINIT` first, on one of §9's thresholds.
+        Server,
+    }
+
+    /// Handshake, then rekey `rekeys` times at `initiator`'s request, returning
+    /// each end's session identifier as it stood after every exchange.
     ///
     /// # Why more than one rekey is worth running
     ///
@@ -206,7 +224,11 @@ mod tests {
     /// those disagreed the server cannot read it. That makes a plain
     /// `expect("...")` on the outcome a real assertion about key agreement, with
     /// no need for this crate to invent traffic to send.
-    fn handshake_then_rekeys(known_hosts: &Path, rekeys: usize) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
+    fn handshake_then_rekeys(
+        known_hosts: &Path,
+        rekeys: usize,
+        initiator: Initiator,
+    ) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
         let (client_side, server_side) = sshwire::memory_pair();
         let host_key = sshd::HostKey::from_seed(HOST_KEY_SEED);
 
@@ -225,13 +247,33 @@ mod tests {
 
             let mut ids = vec![conn.session_id().ok_or("server has no session id")?];
             for i in 0..rekeys {
-                // Exactly what the daemon's own dispatch loop does with a
-                // KEXINIT that arrives mid-session: read the packet, hand it on.
-                let kexinit = conn
-                    .recv_packet()
-                    .map_err(|e| format!("server reading rekey {i} KEXINIT: {e}"))?;
-                sshd::do_rekey(&mut conn, &kexinit)
-                    .map_err(|e| format!("server rekey {i}: {e}"))?;
+                match initiator {
+                    Initiator::Client => {
+                        // Exactly what the daemon's own dispatch loop does with
+                        // a KEXINIT that arrives mid-session: read the packet,
+                        // hand it on.
+                        let kexinit = conn
+                            .recv_packet()
+                            .map_err(|e| format!("server reading rekey {i} KEXINIT: {e}"))?;
+                        sshd::do_rekey(&mut conn, &kexinit)
+                            .map_err(|e| format!("server rekey {i}: {e}"))?;
+                    }
+                    Initiator::Server => {
+                        // What `handle_channels` calls when `rekey_is_due`. The
+                        // deferred packets are the client's in-flight channel
+                        // data; there is none here, because the client's whole
+                        // job in this test is the exchange.
+                        let deferred = sshd::start_rekey(&mut conn)
+                            .map_err(|e| format!("server rekey {i}: {e}"))?;
+                        if !deferred.is_empty() {
+                            return Err(format!(
+                                "server rekey {i} deferred {} packets, but the client \
+                                 sent nothing but its KEXINIT",
+                                deferred.len()
+                            ));
+                        }
+                    }
+                }
                 ids.push(conn.session_id().ok_or("server lost its session id")?);
             }
             Ok::<Vec<[u8; 32]>, String>(ids)
@@ -257,11 +299,26 @@ mod tests {
 
             let mut ids = vec![*session.session_id().ok_or("client has no session id")?];
             for i in 0..rekeys {
-                // The client's key exchange is written to be run whenever, not
-                // only on a fresh connection, so a rekey is the same call again.
-                session
-                    .key_exchange()
-                    .map_err(|e| format!("client rekey {i}: {e}"))?;
+                match initiator {
+                    Initiator::Client => {
+                        // The client's key exchange is written to be run
+                        // whenever, not only on a fresh connection, so a rekey
+                        // is the same call again.
+                        session
+                            .key_exchange()
+                            .map_err(|e| format!("client rekey {i}: {e}"))?;
+                    }
+                    Initiator::Server => {
+                        // What `process_server_message` does with message type
+                        // 20 arriving mid-session: take the packet, answer it.
+                        let kexinit = session
+                            .recv_packet()
+                            .map_err(|e| format!("client reading rekey {i} KEXINIT: {e}"))?;
+                        session
+                            .do_rekey(&kexinit)
+                            .map_err(|e| format!("client rekey {i}: {e}"))?;
+                    }
+                }
                 ids.push(*session.session_id().ok_or("client lost its session id")?);
             }
             Ok::<Vec<[u8; 32]>, String>(ids)
@@ -398,7 +455,8 @@ mod tests {
     #[test]
     fn the_client_can_rekey_an_established_session_and_the_daemon_serves_it() {
         let scratch = scratchdir::ScratchDir::new("ssh-interop-rekey");
-        let (client_ids, server_ids) = handshake_then_rekeys(&scratch.path("known_hosts"), 2);
+        let (client_ids, server_ids) =
+            handshake_then_rekeys(&scratch.path("known_hosts"), 2, Initiator::Client);
 
         assert_eq!(client_ids.len(), 3, "one id per exchange");
         assert_eq!(server_ids.len(), 3, "one id per exchange");
@@ -406,6 +464,62 @@ mod tests {
             client_ids, server_ids,
             "the two ends disagree about the session identifier after rekeying"
         );
+    }
+
+    /// The daemon can rekey an established session, repeatedly, and the client
+    /// serves it.
+    ///
+    /// The mirror image of the test above, and it is not the same test with the
+    /// roles relabelled: both ends run *different code* in this direction. The
+    /// daemon's `start_rekey` sends first and then has to hold back whatever the
+    /// client is still entitled to send during the round trip before its answer
+    /// arrives (§7.1 gags a peer once *it* has sent `KEXINIT`, not once it has
+    /// received one), while the client has to recognise an unsolicited `KEXINIT`
+    /// among ordinary channel traffic and answer it rather than log it.
+    ///
+    /// Getting this direction wrong is worse than getting the other one wrong,
+    /// because the daemon decides when it happens: a client that mishandled it
+    /// would hang every long session against our own daemon, on a timer, with
+    /// nothing in either log. That is why the client's half shipped in the same
+    /// change as the daemon's thresholds rather than after them.
+    ///
+    /// Three exchanges again, for the reason in [`handshake_then_rekeys`]: the
+    /// second rekey travels under the first one's keys, so it cannot even be
+    /// read unless the first one agreed.
+    #[test]
+    fn the_daemon_can_rekey_an_established_session_and_the_client_serves_it() {
+        let scratch = scratchdir::ScratchDir::new("ssh-interop-server-rekey");
+        let (client_ids, server_ids) =
+            handshake_then_rekeys(&scratch.path("known_hosts"), 2, Initiator::Server);
+
+        assert_eq!(client_ids.len(), 3, "one id per exchange");
+        assert_eq!(server_ids.len(), 3, "one id per exchange");
+        assert_eq!(
+            client_ids, server_ids,
+            "the two ends disagree about the session identifier after a \
+             server-initiated rekey"
+        );
+    }
+
+    /// A server-initiated rekey leaves the session identifier alone too.
+    ///
+    /// The session id is fixed at the *first* exchange hash (RFC 4253 §7.2) no
+    /// matter who asks for the later ones. Checked separately from the
+    /// client-initiated case because the two run different code: the daemon's
+    /// initiating path is not its answering path.
+    #[test]
+    fn a_server_initiated_rekey_leaves_the_session_identifier_alone() {
+        let scratch = scratchdir::ScratchDir::new("ssh-interop-server-rekey-session-id");
+        let (client_ids, _) =
+            handshake_then_rekeys(&scratch.path("known_hosts"), 2, Initiator::Server);
+
+        for (i, id) in client_ids.iter().enumerate() {
+            assert_eq!(
+                id,
+                client_ids.first().expect("there is at least one exchange"),
+                "the session id changed at exchange {i}"
+            );
+        }
     }
 
     /// A rekey does not change the session identifier.
@@ -423,7 +537,8 @@ mod tests {
     #[test]
     fn a_rekey_leaves_the_session_identifier_alone() {
         let scratch = scratchdir::ScratchDir::new("ssh-interop-rekey-session-id");
-        let (client_ids, _) = handshake_then_rekeys(&scratch.path("known_hosts"), 2);
+        let (client_ids, _) =
+            handshake_then_rekeys(&scratch.path("known_hosts"), 2, Initiator::Client);
 
         for (i, id) in client_ids.iter().enumerate() {
             assert_eq!(

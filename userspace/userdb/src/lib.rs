@@ -572,8 +572,28 @@ impl Record {
     }
 
     /// Set the locked flag.
+    ///
+    /// Unlocking also strips a leading `!` from the stored entry, because
+    /// [`Record::is_locked`] honours both spellings and clearing only one of
+    /// them would leave the account locked by an unlocking call — the flag
+    /// would say `false` and the account would still refuse every password.
+    /// The `!` is a *prefix* on an otherwise intact entry, so removing it
+    /// restores exactly the password that was in force before the lock.
+    ///
+    /// A leading `*` is **not** stripped, and unlocking such a record leaves
+    /// [`Record::is_locked`] true. `*` is not a lock over a password; it is
+    /// the absence of one, so there is nothing underneath to restore, and
+    /// removing it would leave an empty entry — which is the spelling of "logs
+    /// in without being asked for anything". Turning "this account has never
+    /// had a password" into "this account needs no password" is not an unlock.
     pub fn set_locked(&mut self, locked: bool) {
         self.set_bare(field::LOCKED, if locked { "true" } else { "false" });
+        if !locked && let Some(entry) = self.get(field::PASSWORD_HASH) {
+            if let Some(bare) = entry.strip_prefix('!') {
+                let bare = bare.to_string();
+                self.set(field::PASSWORD_HASH, &bare);
+            }
+        }
     }
 
     /// Group memberships, parsed from the flow sequence `[a, b]`.
@@ -1988,6 +2008,41 @@ users:
                 .is_some_and(|rest| rest.iter().all(|f| f.is_empty())),
             "{line:?}"
         );
+    }
+
+    #[test]
+    fn unlocking_an_account_locked_by_a_bang_actually_unlocks_it() {
+        // The two spellings of a lock are both honoured on the way in, so
+        // clearing only the flag would leave `locked: false` beside an entry
+        // that still refuses every password -- an unlock that reports success
+        // and does nothing, which is the worst of the three outcomes.
+        let mut db = one_account();
+        let record = db.find_mut("dave").expect("record");
+        let intact = record.get(field::PASSWORD_HASH).expect("hash");
+        record.set_locked(true);
+        record.set(field::PASSWORD_HASH, &format!("!{intact}"));
+        assert!(record.is_locked());
+
+        record.set_locked(false);
+        assert!(!record.is_locked());
+        // ...and the password in force before the lock is the one restored,
+        // not some other one: the `!` was only ever a prefix on it.
+        assert_eq!(record.get(field::PASSWORD_HASH), Some(intact));
+        assert_eq!(record.check_password("hunter2"), Auth::Accepted);
+    }
+
+    #[test]
+    fn unlocking_a_starred_account_does_not_make_it_passwordless() {
+        // `*` is the absence of a password, not a lock over one, so there is
+        // nothing underneath to restore. Stripping it would leave an empty
+        // entry, which is this format's spelling of "logs in without being
+        // asked for anything" -- an unlock that hands out the account.
+        let mut db = one_account();
+        let record = db.find_mut("dave").expect("record");
+        record.set(field::PASSWORD_HASH, "*");
+        record.set_locked(false);
+        assert_eq!(record.get(field::PASSWORD_HASH), Some("*".to_string()));
+        assert!(record.is_locked());
     }
 
     #[test]

@@ -2261,11 +2261,16 @@ pub const SYS_PROCESS_GET_SID: u64 = 536;
 // loud.  These two numbers move it into the kernel, where every member of the
 // session observes the same value.
 //
-// Both take no terminal argument.  There is exactly one terminal (the
-// console), so "the caller's controlling terminal" identifies it completely;
-// libc validates the `fd` the POSIX signatures carry and the kernel never
-// sees it.  When a second terminal exists these gain a terminal handle rather
-// than changing meaning.
+// Both take no terminal argument: "the caller's controlling terminal" already
+// identifies one terminal completely, whatever else is mounted, and libc
+// validates the `fd` the POSIX signatures carry so the kernel never sees it.
+//
+// This paragraph used to add "there is exactly one terminal (the console)" and
+// to promise that "when a second terminal exists these gain a terminal handle
+// rather than changing meaning".  A second terminal does now exist, and that
+// is not what happened: widening 537/538 was impossible for the two reasons
+// given in the preamble to 870/871, so those numbers were created instead and
+// these two kept their signatures.  See 870/871 for the handle-taking forms.
 
 /// Query the foreground process group of the caller's controlling terminal
 /// (`tcgetpgrp(3)`).
@@ -2294,26 +2299,42 @@ pub const SYS_TTY_GET_PGRP: u64 = 537;
 /// session.  Chosen number 538.
 pub const SYS_TTY_SET_PGRP: u64 = 538;
 
-/// Claim the console as the caller's session's controlling terminal
+/// Claim a terminal as the caller's session's controlling terminal
 /// (`ioctl(fd, TIOCSCTTY)`).
 ///
-/// Takes no arguments.  This is the acquisition step POSIX spells "a session
-/// leader that has no controlling terminal opens a terminal that is not
-/// already the controlling terminal of another session".  We have no
-/// terminal-device open path yet, so the claim is explicit rather than a
-/// side effect of `open`; that is also what Linux programs already do
-/// (`setsid(); ioctl(fd, TIOCSCTTY, 0)`), so nothing has to change when one
-/// arrives.
+/// `arg0` names the terminal, under the family's naming convention: `0` is
+/// the caller's current terminal — the console, for a caller that has none —
+/// and `>= 2` is a pty end the caller owns.  It is **not** argument-less, and
+/// a caller that invokes it as `syscall0` hands the kernel whatever was left
+/// in `rdi`; see the preamble to 870/871 for why that is the hardest kind of
+/// break to find.
 ///
-/// Only a **session leader** may claim, and only if no other session holds
-/// the console: without both rules any process could take the terminal from
+/// This is the acquisition step POSIX spells "a session leader that has no
+/// controlling terminal opens a terminal that is not already the controlling
+/// terminal of another session".  We have no terminal-device open path yet, so
+/// the claim is explicit rather than a side effect of `open`; that is also
+/// what Linux programs already do (`setsid(); ioctl(fd, TIOCSCTTY, 0)`), so
+/// nothing has to change when one arrives.
+///
+/// Only a **session leader** may claim, and only if no other session holds the
+/// named terminal: without both rules any process could take the terminal from
 /// the session using it.  Claiming a terminal the caller's session already
 /// holds succeeds without changing the foreground group, so a program that
 /// calls this defensively at startup is not punished for it.
 ///
+/// It took a bare terminal *id* until ptys landed, and that was the one hole
+/// in the pty family's authority model: ids are small integers, so any session
+/// leader could claim any free pty by guessing the number and thereafter
+/// receive that terminal's input.  Requiring a handle closes it by
+/// construction and costs the legitimate caller nothing — a child about to
+/// `setsid` and claim a slave got the slave from `openpty` and holds it across
+/// `execve`.
+///
 /// Returns: 0 on success; `PermissionDenied` if the caller is not a session
-/// leader or another session holds the console; `NoSuchProcess` if the
-/// caller is not in the process table.  Chosen number 539.
+/// leader or another session holds the named terminal; `NoSuchProcess` if the
+/// caller is not in the process table; `InvalidHandle` if `arg0` names a
+/// terminal the caller does not own; `NotSupported` if the named terminal is
+/// not live.  Chosen number 539.
 pub const SYS_TTY_ACQUIRE_CTTY: u64 = 539;
 
 /// Give up the caller's session's controlling terminal
@@ -2410,8 +2431,10 @@ pub const SYS_TTY_READ: u64 = 543;
 //
 // # How these syscalls name a terminal
 //
-// Every one of them, plus the handle-taking forms of `SYS_TTY_GET_TERMIOS`,
-// `SYS_TTY_SET_TERMIOS` and `SYS_TTY_ACQUIRE_CTTY`, uses one convention:
+// Every one of them, plus the handle-taking forms of `SYS_TTY_GET_TERMIOS`
+// and `SYS_TTY_SET_TERMIOS` -- which are 555/556, different numbers from
+// 541/542 -- and `SYS_TTY_ACQUIRE_CTTY` (539), which has no separate
+// handle-taking form because it *is* one, uses one convention:
 //
 // | Argument | Means |
 // |---|---|

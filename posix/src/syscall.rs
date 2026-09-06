@@ -270,6 +270,41 @@ pub const SYS_PTY_MASTER_READ: u64 = 546;
 /// parking when the output ring is empty and the slave is still open.  Used
 /// when the master fd carries `O_NONBLOCK`.
 pub const SYS_PTY_MASTER_TRY_READ: u64 = 547;
+/// Non-blocking [`SYS_PTY_MASTER_WRITE`]: accepts what fits in the input ring
+/// and reports `WouldBlock` (→ `EAGAIN`) rather than parking when nothing does.
+/// `arg0` = master handle, `arg1` = bytes, `arg2` = length.  Used when the
+/// master fd carries `O_NONBLOCK`.
+///
+/// **The number is out of band on purpose**: 544–552 is contiguous and fully
+/// allocated, so this call took the next free number rather than displacing an
+/// existing one.  It is 545's twin despite sitting nowhere near it.
+///
+/// Returns: bytes accepted, **always ≥ 1** — a full ring is `WouldBlock`, never
+/// `Ok(0)`.  Lane A chose the error because `Ok(0)` on a non-empty buffer is
+/// indistinguishable from the legitimate answer to a zero-length write, so a
+/// caller that did not separately remember what it asked for could not tell
+/// "you asked for nothing" from "there is no room".  The count may still be
+/// short, and a short count is a success the caller must resume from.
+///
+/// Two asymmetries with [`SYS_PTY_MASTER_TRY_READ`], both deliberate, because
+/// each non-blocking call follows *its own blocking twin* rather than the other
+/// direction's non-blocking one:
+///
+/// - **A zero length is `InvalidArgument`**, where a zero-capacity read is
+///   `Ok(0)`.  Asking to read nothing is a reasonable no-op; asking to write
+///   nothing is a caller bug.  [`crate::file::write`] short-circuits `count ==
+///   0` before it ever reaches this dispatch, so the difference is invisible
+///   from libc — but the short-circuit is load-bearing, not incidental.
+/// - **Hangup is checked *before* the transfer**, where the read side checks it
+///   after.  Bytes handed to a dead slave will never be read by anyone, so
+///   `ChannelClosed` (→ `EPIPE`) comes back on the very first call even when the
+///   ring has room; bytes a dying program already *printed* are still its output
+///   and are drained first (`design-decisions.md` §259).
+///
+/// It never parks and never returns the restart sentinel, so there is no
+/// `SA_RESTART` case here.  ABI settled in
+/// `requests/a-b-pty-master-try-write-is-1065-and-it-returns-wouldblock-not-zero.md`.
+pub const SYS_PTY_MASTER_TRY_WRITE: u64 = 1065;
 /// Write program output into a pty from its slave end.  `arg0` = slave handle,
 /// or `0` for the caller's controlling terminal; `arg1` = bytes, `arg2` = len.
 ///
@@ -1534,6 +1569,47 @@ mod tests {
         assert_eq!(SYS_PTY_SET_TERMIOS, 556);
         assert!(SYS_RLIMIT_GET > SYS_PTY_SET_TERMIOS);
         assert!(SYS_RLIMIT_SET < SYS_PROCESS_SPAWN_EX2);
+    }
+
+    /// `SYS_PTY_MASTER_TRY_WRITE` is 1065 and is **deliberately nowhere near**
+    /// the pty block, for the same reason the test above exists.
+    ///
+    /// This one is not hypothetical.  Lane B's request for the call
+    /// (`requests/b-a-a-pty-master-write-cannot-be-non-blocking-there-is-no-try-write.md`)
+    /// read the pty band as contiguous *through 552* and proposed a slot after
+    /// it; 553-556 are `GET_WINSIZE`/`SET_WINSIZE`/`GET_TERMIOS`/`SET_TERMIOS`
+    /// and were already allocated, so lane A allocated 1065 instead.  The
+    /// number therefore looks like an oversight next to its 544-552 siblings
+    /// and invites exactly the tidy-up that would break it — and it would break
+    /// *silently*, because 553 is a real call: a `try_write` renumbered onto it
+    /// would hand a byte buffer and a length to `TIOCGWINSZ`, which writes a
+    /// `winsize` back through that pointer.  A wrong number here corrupts the
+    /// caller's buffer; it does not fail to build.
+    ///
+    /// The uniqueness sweep cannot catch this. 553 would be unique within this
+    /// file the moment someone renumbered onto it *and* deleted the constant it
+    /// collided with, which is precisely what a tidy-up looks like.
+    #[test]
+    fn pty_master_try_write_is_out_of_the_pty_band_on_purpose() {
+        assert_eq!(SYS_PTY_MASTER_TRY_WRITE, 1065);
+        // Every number from `PTY_CREATE` through the pair that follows the
+        // block is spoken for, so there is no gap to move it into.
+        assert!(
+            !(SYS_PTY_CREATE..=SYS_PROCESS_SPAWN_EX2).contains(&SYS_PTY_MASTER_TRY_WRITE),
+            "1065 moved into the 544-559 run, where every number already names \
+             another call"
+        );
+        // The four that made 553-556 unavailable, named so that deleting one
+        // to free a slot fails here rather than in a caller's buffer.
+        assert_eq!(SYS_PTY_GET_WINSIZE, 553);
+        assert_eq!(SYS_PTY_SET_WINSIZE, 554);
+        assert_eq!(SYS_PTY_GET_TERMIOS, 555);
+        assert_eq!(SYS_PTY_SET_TERMIOS, 556);
+        // It is 545's twin, not 547's: both master writes reject a zero
+        // length, where a zero-capacity read is a legal no-op.  See the
+        // constant's docs and `file::write`'s `count == 0` short-circuit.
+        assert_eq!(SYS_PTY_MASTER_WRITE, 545);
+        assert_eq!(SYS_PTY_MASTER_TRY_READ, 547);
     }
 
     // -- Syscall number ranges match zone allocation --

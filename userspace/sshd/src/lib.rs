@@ -91,12 +91,38 @@
 // known-issues.md ->
 // TD-B-THE-SERVERS-PACKET-DECODER-TRUSTED-A-LENGTH-IT-HAD-NOT-CHECKED-AND-A-MAC-IT-HAD-NOT-VERIFIED.
 //
-// What replaces it is a per-function `#[expect(..)]` on each function not yet
-// audited, so the rest of the file is linted now rather than once the audit
-// finishes. `expect` rather than `allow` on purpose: it warns as soon as the
-// lint it names stops firing, so cleaning a function deletes its own
-// suppression instead of leaving a stale one to be inherited by whatever is
-// written there next.
+// What replaced it was a per-function `#[expect(..)]` on each function not yet
+// audited, so the rest of the file was linted while the audit ran rather than
+// only once it finished. `expect` rather than `allow` on purpose: it warns as
+// soon as the lint it names stops firing, so cleaning a function deletes its
+// own suppression instead of leaving a stale one to be inherited by whatever
+// is written there next.
+//
+// That audit is finished. All twenty-three of those suppressions are gone and
+// both lints are live over every line of this file. (The two `expect`s that
+// remain name `unnecessary_wraps`, sit on test helpers, and were never part of
+// this.) Nothing here should need a new one: it would be a claim that some
+// function may panic on input a peer chose, which is the thing this file may
+// not do.
+//
+// It was worth doing for what it turned up rather than for the tidiness. Three
+// of the twenty-three were covering a defect a user could actually hit, and
+// none of the three is what the lint's own name would have suggested:
+//
+//   * the login grace timer compared microseconds against seconds, so no
+//     client could authenticate at all;
+//   * a channel closed from both ends was never freed, so an authenticated
+//     peer could grow the daemon's memory without limit;
+//   * `sshd -p` with no port started on the config file's port and said
+//     nothing, and `-h` with no path quietly generated a fresh host key.
+//
+// A fourth was a hazard rather than a live defect -- seven functions carrying a
+// position into a table that the channel fix had just made able to shrink --
+// and it is only luck that separates that from the first three.
+//
+// The lesson, recorded because the next such suppression will be written by
+// someone who has forgotten it: a suppression whose reason is "not yet audited"
+// is an unreviewed bug report, not an exemption. Read them that way.
 
 use std::env;
 use std::fmt;

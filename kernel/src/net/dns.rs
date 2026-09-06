@@ -22,11 +22,12 @@
 //! records containing the resolved IP addresses.
 //!
 //! Each query carries a transaction ID and is sent from an ephemeral
-//! source port (49152–65535); an off-path attacker forging a response has
-//! to guess both, so both must be unpredictable (RFC 5452 §9).  The port
-//! is assigned by `udp::bind`, which draws it from the kernel CSPRNG and,
-//! because it holds the socket table, also guarantees it is free rather
-//! than merely unlikely to collide.
+//! source port (49152–65535).  An off-path attacker forging a response
+//! has to guess both, so both are drawn from the kernel CSPRNG, giving
+//! the ~30 bits RFC 5452 §9 asks for; a value that merely does not repeat
+//! — a counter, say — is not the same as one he cannot predict.  The port
+//! is assigned by `udp::bind`, which because it holds the socket table
+//! also guarantees it is free rather than merely unlikely to collide.
 //!
 //! ## CNAME chasing
 //!
@@ -80,7 +81,7 @@
 use crate::sync::Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -146,31 +147,39 @@ const CLASS_IN: u16 = 1;
 /// DNS flags: standard query, recursion desired.
 const FLAGS_QUERY_RD: u16 = 0x0100;
 
-/// Counter mixed with TSC for query ID generation.
-///
-/// Combined with TSC jitter to produce unpredictable 16-bit transaction
-/// IDs.  Monotonic predictability is a classic DNS cache poisoning vector
-/// (CVE-2008-1447 / Kaminsky attack).
-static QUERY_ID_COUNTER: AtomicU16 = AtomicU16::new(1);
-
 /// Generate a randomized DNS transaction ID.
 ///
-/// Mixes a monotonic counter with the TSC (timestamp counter) to produce
-/// IDs that are:
-/// - Unique (counter prevents collisions within ~65K queries)
-/// - Unpredictable (TSC timing jitter varies per call)
-/// - Never zero (some resolvers treat 0 as invalid)
+/// Drawn from the kernel CSPRNG.  The transaction ID is one of the two
+/// values an off-path attacker must guess to forge a response — the source
+/// port is the other — so predicting it is the classic cache-poisoning
+/// vector (CVE-2008-1447 / Kaminsky).  Together with the random source
+/// port from `udp::bind` this gives the ~30 bits RFC 5452 §9 asks for.
+///
+/// This previously mixed a monotonic counter with `rdtsc`.  That is not a
+/// CSPRNG: the counter contributes no entropy at all, and `rdtsc` is a
+/// value an attacker who can run code on the machine — or merely time it
+/// well — can narrow considerably.  Using the real generator costs
+/// nothing here, since resolution already blocks on the network and the
+/// RNG is callable from any thread context.
+///
+/// Never returns 0, which some resolvers treat as invalid.  The old
+/// version tried to guarantee this by falling back to `counter + 1`, but
+/// that is itself 0 when the counter sits at `u16::MAX`; redrawing has no
+/// such edge, and terminates with probability 1.
 fn next_query_id() -> u16 {
-    let counter = QUERY_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    // SAFETY: rdtsc reads the hardware timestamp counter, always
-    // available on x86_64 CPUs.
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    // Mix lower TSC bits (high jitter) with the counter.
-    // Rotate the TSC bits to spread entropy across all 16 bits.
-    let tsc16 = (tsc as u16) ^ ((tsc >> 16) as u16) ^ ((tsc >> 5) as u16);
-    let id = counter ^ tsc16;
-    // Skip 0 on collision.
-    if id == 0 { counter.wrapping_add(1) } else { id }
+    /// Size of the 16-bit transaction ID space, i.e. one past `u16::MAX`.
+    const ID_SPACE: u64 = 1 << 16;
+
+    loop {
+        // Drawn in the range 1..=u16::MAX by rejecting 0 rather than by
+        // biasing it away (e.g. `1 + rand % 65535`), so every valid ID
+        // stays equally likely.
+        let id = crate::rng::next_bounded(ID_SPACE);
+        if id != 0 {
+            // Fits by construction: the bound is 65536.
+            return u16::try_from(id).unwrap_or(1);
+        }
+    }
 }
 
 // The source port for a query is no longer chosen here.  `dns_query_raw`

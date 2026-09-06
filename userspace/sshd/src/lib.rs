@@ -125,6 +125,7 @@
 // is an unreviewed bug report, not an exemption. Read them that way.
 
 use std::env;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -6503,13 +6504,31 @@ fn send_channel_close(conn: &mut ConnectionState, local_channel_id: u32) -> Resu
 // CLI parsing
 // ============================================================================
 
+/// The configuration file read when `-f` does not name one.
+///
+/// Spelled once because `run_cli` compares against it to tell "the
+/// administrator named this file" from "we fell back to the built-in path", and
+/// two copies of a literal that a comparison depends on is a behaviour change
+/// waiting for somebody to fix a typo in one of them.
+const DEFAULT_CONFIG_FILE: &str = "/etc/ssh/sshd_config";
+
 struct CliOptions {
     port: Option<u16>,
-    config_file: String,
+    /// The configuration file, as a path rather than as text.
+    ///
+    /// A path on this OS is bytes -- every byte but `/` and NUL -- and an
+    /// argument is bytes too, so there is no point in the round trip where
+    /// requiring UTF-8 buys anything. It cost: `env::args()` *panics* on an
+    /// argument that is not UTF-8, so `sshd -f /etc/ssh/conf\xff` ended the
+    /// process before its first statement, with a message from the standard
+    /// library naming neither sshd nor the argument.
+    config_file: PathBuf,
     debug_mode: bool,
     foreground: bool,
     log_stderr: bool,
-    host_key_file: Option<String>,
+    /// The host key named by `-h`, as a path for the reason
+    /// [`CliOptions::config_file`] is one.
+    host_key_file: Option<PathBuf>,
     test_config: bool,
     extended_test: bool,
 }
@@ -6525,7 +6544,7 @@ impl CliOptions {
     /// because this file is a library now, and a library that ends the process
     /// cannot be called from a test -- which is the point of the split.
     fn parse_args() -> Result<Self, i32> {
-        Self::parse_from(env::args().skip(1))
+        Self::parse_from(env::args_os().skip(1))
     }
 
     /// Parse `args`, which does *not* include the program name.
@@ -6539,13 +6558,30 @@ impl CliOptions {
     /// cannot be skipped, and there is no subscript and no counter left to get
     /// wrong.
     ///
+    /// # Why `OsString` and not `String`
+    ///
+    /// An argument on this OS is bytes, and two of these arguments are file
+    /// names, where "bytes" is the whole rule: every byte but `/` and NUL is a
+    /// legal path byte (`design.txt`). `env::args()` does not merely refuse a
+    /// non-UTF-8 argument, it **panics** on one -- its body is a literal
+    /// `unwrap` -- so `sshd -f /etc/ssh/conf\xff` died before this function's
+    /// first statement, with a standard-library message that named neither the
+    /// daemon nor the argument. `args_os` hands over the bytes, and they stay
+    /// bytes all the way to `open`.
+    ///
+    /// A *flag* is still text: `-p`, `-f` and the rest are ASCII by definition,
+    /// so the match asks for `to_str()` and an argument that has no `&str` form
+    /// simply is not one of them. That is the same answer as any other
+    /// misspelling -- "unknown option" -- rather than a separate failure mode,
+    /// because to the administrator it is the same mistake.
+    ///
     /// # Errors
     ///
     /// As [`CliOptions::parse_args`].
-    fn parse_from(args: impl IntoIterator<Item = String>) -> Result<Self, i32> {
+    fn parse_from(args: impl IntoIterator<Item = OsString>) -> Result<Self, i32> {
         let mut opts = Self {
             port: None,
-            config_file: "/etc/ssh/sshd_config".into(),
+            config_file: PathBuf::from(DEFAULT_CONFIG_FILE),
             debug_mode: false,
             foreground: false,
             log_stderr: false,
@@ -6556,40 +6592,52 @@ impl CliOptions {
 
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "-p" => {
+            // `to_str()` rather than a lossy conversion: a lossy one turns an
+            // argument that is *not* `-d` into the string `-d` whenever the
+            // difference is a byte that does not survive, which is how a
+            // mistyped option becomes a silently accepted one.
+            match arg.to_str() {
+                Some("-p") => {
                     let value = Self::operand(&mut args, "-p")?;
-                    let Ok(port) = value.parse::<u16>() else {
-                        eprintln!("sshd: invalid port: {value}");
+                    // A port is a number, so a value with no `&str` form is not
+                    // one, and is refused by the same message as `-p ssh`. The
+                    // message renders it lossily because it is being shown to a
+                    // human, not opened -- nothing downstream sees this text.
+                    let port = value.to_str().and_then(|v| v.parse::<u16>().ok());
+                    let Some(port) = port else {
+                        eprintln!("sshd: invalid port: {}", value.to_string_lossy());
                         return Err(1);
                     };
                     opts.port = Some(port);
                 }
-                "-f" => opts.config_file = Self::operand(&mut args, "-f")?,
-                "-h" => opts.host_key_file = Some(Self::operand(&mut args, "-h")?),
-                "-d" => {
+                Some("-f") => opts.config_file = Self::operand(&mut args, "-f")?.into(),
+                Some("-h") => opts.host_key_file = Some(Self::operand(&mut args, "-h")?.into()),
+                Some("-d") => {
                     opts.debug_mode = true;
                     opts.foreground = true;
                 }
-                "-D" => {
+                Some("-D") => {
                     opts.foreground = true;
                 }
-                "-e" => {
+                Some("-e") => {
                     opts.log_stderr = true;
                 }
-                "-t" => {
+                Some("-t") => {
                     opts.test_config = true;
                 }
-                "-T" => {
+                Some("-T") => {
                     opts.extended_test = true;
                     opts.test_config = true;
                 }
-                "--help" => {
+                Some("--help") => {
                     print_usage();
                     return Err(0);
                 }
-                other => {
-                    eprintln!("sshd: unknown option: {other}");
+                // Both a misspelled option and one that is not text at all. The
+                // rendering is lossy because this is a diagnostic; the argument
+                // itself was never used for anything.
+                _ => {
+                    eprintln!("sshd: unknown option: {}", arg.to_string_lossy());
                     return Err(1);
                 }
             }
@@ -6604,7 +6652,12 @@ impl CliOptions {
     /// on the default port, so a truncated line in an init script moved the
     /// daemon to a port nobody had asked for and said nothing about it; the
     /// administrator finds out when connections stop arriving.
-    fn operand(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, i32> {
+    ///
+    /// The value is handed back as it arrived. Two of the three flags that take
+    /// one name a file, and a file name is bytes: checking it for UTF-8 here
+    /// would put the conversion this daemon exists not to make between the
+    /// administrator's argument and `open`.
+    fn operand(args: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<OsString, i32> {
         let Some(value) = args.next() else {
             eprintln!("sshd: option requires an argument: {flag}");
             return Err(1);
@@ -6663,7 +6716,7 @@ pub fn run_cli() -> i32 {
     };
 
     // Load config.
-    let mut config = if let Ok(data) = fs_read_file(Path::new(&opts.config_file)) {
+    let mut config = if let Ok(data) = fs_read_file(&opts.config_file) {
         match SshdConfig::parse(&data) {
             Ok(c) => c,
             Err(e) => {
@@ -6672,9 +6725,9 @@ pub fn run_cli() -> i32 {
             }
         }
     } else {
-        if opts.config_file != "/etc/ssh/sshd_config" {
+        if opts.config_file != Path::new(DEFAULT_CONFIG_FILE) {
             log_error(
-                &format!("cannot read config: {}", opts.config_file),
+                &format!("cannot read config: {}", opts.config_file.display()),
                 opts.log_stderr,
             );
             return 1;
@@ -6688,7 +6741,7 @@ pub fn run_cli() -> i32 {
         config.port = port;
     }
     if let Some(hk) = &opts.host_key_file {
-        config.host_key_file = PathBuf::from(hk);
+        config.host_key_file = hk.clone();
     }
 
     // Test mode.
@@ -9147,14 +9200,14 @@ Z
 
     /// Parse a command line written the way it would be typed.
     fn cli(args: &[&str]) -> Result<CliOptions, i32> {
-        CliOptions::parse_from(args.iter().map(|a| (*a).to_string()))
+        CliOptions::parse_from(args.iter().map(OsString::from))
     }
 
     #[test]
     fn an_empty_command_line_is_the_documented_defaults() {
         let opts = cli(&[]).expect("no arguments is a valid way to start sshd");
         assert_eq!(opts.port, None, "the port comes from the config file");
-        assert_eq!(opts.config_file, "/etc/ssh/sshd_config");
+        assert_eq!(opts.config_file, Path::new("/etc/ssh/sshd_config"));
         assert_eq!(opts.host_key_file, None);
         assert!(!opts.debug_mode && !opts.foreground && !opts.log_stderr);
         assert!(!opts.test_config && !opts.extended_test);
@@ -9198,10 +9251,106 @@ Z
     #[test]
     fn a_value_that_looks_like_an_option_is_still_the_value() {
         let opts = cli(&["-f", "-d"]).expect("a config file may be called -d");
-        assert_eq!(opts.config_file, "-d");
+        assert_eq!(opts.config_file, Path::new("-d"));
         assert!(
             !opts.debug_mode,
             "the -d was consumed as -f's value, not acted on"
+        );
+    }
+
+    // ---- A command line is bytes ----
+    //
+    // These pin the reason `parse_from` takes `OsString`. It took `String`, and
+    // `parse_args` filled it from `env::args()`, whose body is a literal
+    // `unwrap`: an argument that is not UTF-8 ended the process before this
+    // parser's first statement, with a standard-library panic message that
+    // named neither sshd nor the argument. Two of the three flags that take a
+    // value name a *file*, where bytes are the whole rule -- every byte but `/`
+    // and NUL is legal -- so the values are the ones most likely to have odd
+    // bytes in them.
+    //
+    // Nothing below can call `env::args()`, so nothing below can reproduce that
+    // panic directly. The guard against its return is the item type: with
+    // `parse_from` taking `OsString`, `parse_args` cannot be written back to
+    // `env::args()` without a type error.
+
+    /// Parse a command line whose arguments are not all text.
+    #[cfg(any(unix, windows))]
+    fn cli_os(args: &[OsString]) -> Result<CliOptions, i32> {
+        CliOptions::parse_from(args.to_vec())
+    }
+
+    /// An argument that is not text, spelled the way the host spells one.
+    ///
+    /// Every platform this compiles for has such arguments, and no platform's
+    /// are the other's: on the target -- and on any unix -- an argument is
+    /// bytes, so byte 0xff will do, while on the Windows development host it is
+    /// UTF-16, where the equivalent is an unpaired surrogate. They share the
+    /// only property these tests rest on, `to_str() == None`, so the
+    /// host-independent assertions can be written once.
+    #[cfg(any(unix, windows))]
+    fn an_argument_that_is_not_text() -> OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            OsString::from_vec(b"/etc/ssh/conf\xff".to_vec())
+        }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::ffi::OsStringExt as _;
+            let mut wide: Vec<u16> = "/etc/ssh/conf".encode_utf16().collect();
+            wide.push(0xD800);
+            OsString::from_wide(&wide)
+        }
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn a_config_file_whose_name_is_not_text_is_accepted_rather_than_fatal() {
+        let named = an_argument_that_is_not_text();
+        let opts = cli_os(&["-f".into(), named.clone()])
+            .expect("a config file may have any byte in its name");
+        assert_eq!(
+            opts.config_file.as_os_str(),
+            named,
+            "the name must reach `open` as the administrator wrote it"
+        );
+        assert_ne!(
+            opts.config_file,
+            Path::new(DEFAULT_CONFIG_FILE),
+            "silently falling back to the default would read the wrong file"
+        );
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn a_host_key_whose_name_is_not_text_is_accepted_rather_than_fatal() {
+        let named = an_argument_that_is_not_text();
+        let opts = cli_os(&["-h".into(), named.clone()])
+            .expect("a host key may have any byte in its name");
+        assert_eq!(opts.host_key_file.as_deref(), Some(Path::new(&named)));
+    }
+
+    /// An argument that is not text, in flag position, is an unknown option.
+    ///
+    /// Not a separate failure mode, because to the administrator it is not a
+    /// separate mistake: they typed something that is not one of the options.
+    /// What matters is that it is *refused* rather than lossily converted --
+    /// a conversion turns an argument that is not `-d` into the string `-d`
+    /// whenever the difference is a byte that does not survive it.
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn an_option_that_is_not_text_is_refused_rather_than_guessed_at() {
+        assert_eq!(cli_os(&[an_argument_that_is_not_text()]).err(), Some(1));
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn a_port_that_is_not_text_is_refused() {
+        assert_eq!(
+            cli_os(&["-p".into(), an_argument_that_is_not_text()]).err(),
+            Some(1),
+            "a port is a number, so a value with no text form is not one"
         );
     }
 

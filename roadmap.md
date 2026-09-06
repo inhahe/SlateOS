@@ -953,10 +953,10 @@ Roadmap:
   shared by two *processes*, and `^C` has to reach the foreground group when it
   is typed rather than when somebody next calls `read`. Neither is expressible
   in libc — see design-decisions.md §345 for the alternative and why it fails.
-- `[-]` `[B]` **`/etc/users.yaml` is the truth; `/etc/passwd` and `/etc/shadow`
-  are generated from it — design-decisions.md §353.** An operator decision of
-  2026-08-21 that had no roadmap entry and was found entirely unimplemented on
-  2026-09-06: a user created with `useradd` could log in over SSH and did not
+- `[x]` `[B]` **`/etc/users.yaml` is the truth; `/etc/passwd` and `/etc/shadow`
+  are generated from it — design-decisions.md §353. Complete 2026-09-06.**
+  An operator decision of 2026-08-21 that had no roadmap entry and was found
+  entirely unimplemented on 2026-09-06: a user created with `useradd` could log in over SSH and did not
   exist to the graphical login screen, which is the defect §353 was decided to
   end. Four build items, tracked here:
   - `[x]` **2. Generate on change** (2026-09-06). `UserDb::save` now writes
@@ -970,16 +970,16 @@ Roadmap:
     exactly the one-file-and-not-the-other failure being fixed. Includes item
     **4**'s generated header. `useradm` is live on it today; `useradd` is not,
     which is item 1.
-  - `[ ]` **1. Redirect the two writers.** `useradd` and `passwd` still write
-    `/etc/passwd`, `/etc/shadow`, `/etc/group` and `/etc/gshadow` by hand and
-    have never heard of `userdb`. Until this lands the generated files are
-    stale the moment `useradd` runs. **Blocked on a prerequisite found while
+  - `[x]` **1. Redirect the two writers** (2026-09-06). `useradd` and `passwd`
+    wrote `/etc/passwd`, `/etc/shadow`, `/etc/group` and `/etc/gshadow` by hand
+    and had never heard of `userdb`, so the generated files were stale the
+    moment `useradd` ran. **Was blocked on a prerequisite found while
     scoping it (2026-09-06): `userdb` has no password-aging fields, and
     `passwd` is largely *about* them** — `-n -x -w -i -e -S` all read and
     write shadow fields 3–8 (last-changed, min, max, warn, inactive, expire),
-    which `to_shadow_text` currently emits as eight empty fields. Redirecting
-    `passwd` first would therefore *lose* every aging policy on the machine on
-    the next save. So item 1 splits:
+    which `to_shadow_text` then emitted as eight empty fields. Redirecting
+    `passwd` first would therefore have *lost* every aging policy on the
+    machine on the next save. So item 1 split:
     - `[x]` **1a. Give `userdb` the six aging fields** (2026-09-06). Read and
       written together as one `Aging` value, because they are one policy and a
       caller changing one must not silently drop the other five. `None` is the
@@ -1046,6 +1046,20 @@ Roadmap:
       treats `-1` as *clear the field*, implements the interactive form
       `chage USER` is supposed to show, and requires root to change a policy or
       to read another account's — it had no permission check at all.
+  - `[x]` **4. The generated files are read-only in intent** — landed with
+    item 2; `generated_header` names the source file in both of them, and says
+    what happens to an edit rather than merely that the file is generated.
+  - **Fallout, done in the same sweep (2026-09-06):** `login` authenticated out
+    of the two generated files, and its account-expiry check only treated the
+    single value `expire_date == 1` as expired — so every account with a real
+    expiry date in the past logged in. It reads the database now and compares
+    against today. And `/etc/users.yaml` could finally become mode 0600
+    (`known-issues.md` →
+    `B-USERS-YAML-IS-WORLD-READABLE-AND-HOLDS-EVERY-PASSWORD-HASH`): the two
+    unprivileged readers, `chown` and `chroot`, moved onto `pwdb` reading the
+    generated `/etc/passwd`, which also stopped both of them *inventing* the
+    group table — numbering groups from 101 in order of appearance, so `chgrp
+    audio` set a gid nothing else on the system agreed with.
   - `[x]` **3. Collapse `authlib`'s guess (2026-09-06).** `Authenticator` has
     one store. `DEFAULT_SHADOW`, the whole `authlib::shadow` module, and
     `with_stores`'s second argument are deleted rather than left as a fallback,

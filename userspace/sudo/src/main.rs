@@ -2783,9 +2783,7 @@ fn parse_sudoreplay_args(args: &[OsString]) -> Result<SudoreplayOpts, SudoError>
                 opts.speed_factor = value
                     .to_str()
                     .and_then(|v| v.parse::<f64>().ok())
-                    .ok_or_else(|| {
-                        SudoError::UsageError("invalid speed factor".to_string())
-                    })?;
+                    .ok_or_else(|| SudoError::UsageError("invalid speed factor".to_string()))?;
                 if opts.speed_factor <= 0.0 {
                     return Err(SudoError::UsageError(
                         "speed factor must be positive".to_string(),
@@ -3196,7 +3194,11 @@ fn run_sudoedit(files: &[OsString]) -> i32 {
         // the first original. A wrong-file write is the worst outcome an editor
         // wrapper can have, and it needed only a filename nobody chose to type.
         let mut temp_name = OsString::from(format!("/tmp/sudoedit-{}-", std::process::id()));
-        temp_name.push(original_path.file_name().unwrap_or_else(|| OsStr::new("file")));
+        temp_name.push(
+            original_path
+                .file_name()
+                .unwrap_or_else(|| OsStr::new("file")),
+        );
         let temp_path = PathBuf::from(temp_name);
 
         // Copy original to temp (if it exists).
@@ -3226,10 +3228,7 @@ fn run_sudoedit(files: &[OsString]) -> i32 {
             Ok(s) if s.success() => {
                 // Copy edited temp back to original.
                 if let Err(e) = fs::copy(&temp_path, original_path) {
-                    eprintln!(
-                        "sudoedit: cannot write back to {}: {e}",
-                        quoteaf_os(file)
-                    );
+                    eprintln!("sudoedit: cannot write back to {}: {e}", quoteaf_os(file));
                     exit_code = 1;
                 }
             }
@@ -4700,7 +4699,12 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     #[test]
     fn command_no_match() {
         let aliases = HashMap::new();
-        assert!(!command_matches("/usr/bin/ls", "", b"/usr/bin/rm", &aliases));
+        assert!(!command_matches(
+            "/usr/bin/ls",
+            "",
+            b"/usr/bin/rm",
+            &aliases
+        ));
     }
 
     #[test]

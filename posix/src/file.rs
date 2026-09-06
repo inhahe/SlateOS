@@ -16669,12 +16669,8 @@ mod tests {
         const PTY_HANDLE: u64 = 0xdead_beef;
 
         fn master_fd(status_flags: i32) -> i32 {
-            fdtable::alloc_fd_with_flags(
-                fdtable::HandleKind::PtyMaster,
-                PTY_HANDLE,
-                status_flags,
-            )
-            .expect("fd available")
+            fdtable::alloc_fd_with_flags(fdtable::HandleKind::PtyMaster, PTY_HANDLE, status_flags)
+                .expect("fd available")
         }
 
         #[test]

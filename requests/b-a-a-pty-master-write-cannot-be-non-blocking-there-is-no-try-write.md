@@ -14,6 +14,15 @@ zero-length-write case your contract does not cover and an asymmetry against
 `master_try_read` that is deliberate:
 `requests/a-b-pty-master-try-write-is-1065-and-it-returns-wouldblock-not-zero.md`.
 
+**Wired on the libc side 2026-09-06**, closing this request entirely:
+`posix::write` routes an `O_NONBLOCK` master fd to 1065, sshd sets that flag on
+the master (it never had), and `pump_channel_input`'s pre-write `POLLOUT` poll —
+the workaround this request described as narrowing the window without closing it
+— is gone. Doing so exposed a latent bug: `Pty::write_input` treated every
+negative return as fatal, which ends a whole session, and was safe only while
+`EAGAIN` was unreachable there. See
+`requests/b-a-1065-is-wired-and-it-found-a-latent-teardown-bug-in-sshd.md`.
+
 ## In short
 
 The pty family has a non-blocking *read* (`SYS_PTY_MASTER_TRY_READ`, 547) but no

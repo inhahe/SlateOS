@@ -821,8 +821,9 @@ struct Pollfd {
 
 /// Data may be read without blocking.
 const POLLIN: i16 = 0x0001;
-/// Data may be written without blocking.
-const POLLOUT: i16 = 0x0004;
+// No `POLLOUT`. This daemon never polls for writability: see `set_nonblocking`
+// for why the answer would not have been usable, and `pump_channel_input` for
+// what replaced it.
 /// Error condition.
 const POLLERR: i16 = 0x0008;
 /// The peer has gone.
@@ -973,34 +974,37 @@ enum StreamRead {
     Hangup,
 }
 
-/// Whether a descriptor can be read or written without blocking.
+/// Whether a descriptor has something to read.
 ///
-/// Returns `(readable, writable)`. Hangup is folded into `readable`
-/// deliberately: a read on a hung-up descriptor returns immediately —
-/// delivering whatever was buffered ahead of the end-of-stream — and an event
-/// loop that treated hangup as "not ready" would sleep through the end of the
-/// session. A failed `poll` also reports readable, so the caller performs the
-/// read and learns the real reason rather than spinning on a descriptor whose
-/// state it cannot query.
-fn fd_ready(fd: i32) -> (bool, bool) {
+/// Hangup is folded into readable deliberately: a read on a hung-up descriptor
+/// returns immediately — delivering whatever was buffered ahead of the
+/// end-of-stream — and an event loop that treated hangup as "not ready" would
+/// sleep through the end of the session. A failed `poll` also reports readable,
+/// so the caller performs the read and learns the real reason rather than
+/// spinning on a descriptor whose state it cannot query.
+///
+/// **Readability only.** This used to answer `(readable, writable)`, and the
+/// writable half was a trap: it is a claim about the past that its caller then
+/// acted on in the future. It is gone rather than merely unused, so that the
+/// next reader cannot pick it back up. On the read side the same objection does
+/// not apply — a spurious "readable" costs one non-blocking read that returns
+/// nothing, where a spurious "writable" cost a blocked daemon.
+fn fd_readable(fd: i32) -> bool {
     if fd < 0 {
-        return (false, false);
+        return false;
     }
     let mut pfd = Pollfd {
         fd,
-        events: POLLIN | POLLOUT,
+        events: POLLIN,
         revents: 0,
     };
     // SAFETY: `pfd` is a single live `Pollfd`; `nfds` is 1 to match; a zero
     // timeout makes the call non-blocking.
     let ret = unsafe { ptylibc::poll(&raw mut pfd, 1, 0) };
     if ret < 0 || pfd.revents & (POLLERR | POLLNVAL) != 0 {
-        return (true, false);
+        return true;
     }
-    (
-        pfd.revents & (POLLIN | POLLHUP) != 0,
-        pfd.revents & POLLOUT != 0,
-    )
+    pfd.revents & (POLLIN | POLLHUP) != 0
 }
 
 /// Put a descriptor into non-blocking mode.
@@ -1129,11 +1133,6 @@ impl Pipes {
         Some(pipes)
     }
 
-    /// Whether the child's stdin will accept a write without blocking.
-    fn input_ready(&self) -> bool {
-        fd_ready(self.stdin).1
-    }
-
     /// Hand client input to the child's stdin.
     ///
     /// Returns the number of bytes accepted, which may be short — a full pipe
@@ -1205,7 +1204,7 @@ impl Pipes {
         }
         for stderr in [false, true] {
             let fd = if stderr { self.stderr } else { self.stdout };
-            if fd < 0 || !fd_ready(fd).0 {
+            if fd < 0 || !fd_readable(fd) {
                 continue;
             }
             match read_pipe(fd, slice) {
@@ -1287,7 +1286,26 @@ impl Pty {
         if ret != 0 {
             return Err(SshdError::IoError(io::Error::last_os_error()));
         }
-        Ok(Self { master, slave })
+        // Constructed before the flag is set so that an early return still runs
+        // `Drop` and closes both ends.
+        let pty = Self { master, slave };
+        // The master joins the pipes in non-blocking mode, for the reason
+        // [`set_nonblocking`] gives: this daemon drives every session from one
+        // loop, so any descriptor that can block is one that can hang every
+        // other connection on the machine.
+        //
+        // Until `SYS_PTY_MASTER_TRY_WRITE` existed there was no point setting
+        // it — libc had no non-blocking master write to route to, so the flag
+        // would have been honoured on reads and silently ignored on writes,
+        // which is worse than not setting it: it reads as a guarantee the write
+        // side does not keep. Now both directions honour it.
+        //
+        // Only *this* fd is affected. The slave the child adopts stays blocking,
+        // which is what a shell expects of its terminal.
+        if !set_nonblocking(pty.master) {
+            return Err(SshdError::IoError(io::Error::last_os_error()));
+        }
+        Ok(pty)
     }
 
     /// The slave fd, for a child that is about to adopt it.
@@ -1310,12 +1328,13 @@ impl Pty {
         }
     }
 
-    /// Whether the master can be read or written without blocking.
+    /// Whether the master has program output waiting.
     ///
-    /// See [`fd_ready`] for why hangup counts as readable and why a failed
-    /// `poll` does too.
-    fn ready(&self) -> (bool, bool) {
-        fd_ready(self.master)
+    /// See [`fd_readable`] for why hangup counts as readable and why a failed
+    /// `poll` does too. There is no writability counterpart: input is offered
+    /// to [`Self::write_input`] and its answer is the readiness.
+    fn readable(&self) -> bool {
+        fd_readable(self.master)
     }
 
     /// Read program output from the master, at most `budget` bytes.
@@ -1364,6 +1383,23 @@ impl Pty {
         // SAFETY: `data` is a live slice; the length passed is its own.
         let n = unsafe { ptylibc::write(self.master, data.as_ptr(), data.len()) };
         if n < 0 {
+            // SAFETY: called immediately after the failing `write`, on this
+            // thread, with nothing in between.
+            if unsafe { ptylibc::errno() } == EAGAIN {
+                // The input ring is full. Not an error, and emphatically not
+                // the end of the session: report zero taken and the same bytes
+                // are offered again next pass, exactly as for a full pipe.
+                //
+                // This arm is what makes the master safe to put in non-blocking
+                // mode. Before `SYS_PTY_MASTER_TRY_WRITE`, a full ring parked
+                // the caller and `EAGAIN` was unreachable here — so the blanket
+                // `Err` below was harmless. It stopped being harmless the
+                // moment the flag was set: a shell that had merely stopped
+                // reading for a moment would have been read as a dead session
+                // and, because a terminal carries both directions on one
+                // descriptor, torn the whole thing down mid-keystroke.
+                return Ok(0);
+            }
             return Err(SshdError::IoError(io::Error::last_os_error()));
         }
         #[allow(clippy::cast_sign_loss)] // guarded non-negative
@@ -1477,14 +1513,10 @@ impl SessionIo {
         }
     }
 
-    /// Whether a write of client input would proceed without blocking.
-    fn input_ready(&self) -> bool {
-        match self {
-            Self::None => false,
-            Self::Terminal(pty) => pty.ready().1,
-            Self::Pipes(pipes) => pipes.input_ready(),
-        }
-    }
+    // There is deliberately no `input_ready` here. Asking whether a write
+    // *would* block, and then writing, is two answers to one question with a
+    // gap in between; every destination is non-blocking, so `write_input`'s own
+    // return is the same information without the gap. See `pump_channel_input`.
 
     /// Deliver client input, returning how many bytes were accepted.
     fn write_input(&self, data: &[u8]) -> Result<usize, SshdError> {
@@ -5779,7 +5811,7 @@ fn pump_channel_output(
         let (stderr, outcome) = match &mut channel.io {
             SessionIo::None => (false, StreamRead::Empty),
             SessionIo::Terminal(pty) => {
-                if pty.ready().0 {
+                if pty.readable() {
                     (false, pty.read_output(&mut buf, budget))
                 } else {
                     (false, StreamRead::Empty)
@@ -5845,11 +5877,11 @@ fn pump_channel_output(
 /// Three things make this a loop over a queue rather than a plain `write`:
 ///
 /// * **The destination can be full.** A program that has stopped reading its
-///   stdin leaves the kernel's buffer full, and the write returns short — or,
-///   on a pty master, because `write` there does not honour `O_NONBLOCK` (there
-///   is no `SYS_PTY_MASTER_TRY_WRITE`), *blocks*. The readiness check is
-///   therefore not an optimisation but the thing that keeps one uninterested
-///   process from freezing the whole daemon.
+///   stdin leaves the kernel's buffer full, and the write returns short or takes
+///   nothing at all. Every destination is non-blocking — pipes since they were
+///   opened, the pty master since `SYS_PTY_MASTER_TRY_WRITE` gave libc a
+///   non-blocking master write to route to — so "full" arrives as a short count
+///   or `EAGAIN`, never as a stalled daemon.
 /// * **Short writes are normal**, not an error, so the remainder must survive
 ///   to the next pass instead of being silently lost mid-keystroke.
 /// * **The window must follow consumption, not arrival.** Crediting only what
@@ -5880,11 +5912,21 @@ fn pump_channel_input(conn: &mut ConnectionState, local_id: u32) -> Result<bool,
         let Some(rest) = channel.pending_input.get(written..) else {
             break;
         };
-        if rest.is_empty() || !channel.io.input_ready() {
+        if rest.is_empty() {
             break;
         }
+        // No `POLLOUT` poll first. It used to be here and it was never able to
+        // do its job: `poll` reports that there *was* room, and another writer
+        // on a dup'd master — or the program itself, still consuming — can
+        // change that before the write lands. The check and the transfer now
+        // happen under one lock inside the kernel call, so the write's own
+        // answer is the only non-racy reading of the destination's state.
+        //
+        // Removing it is a saving as well as a simplification: the poll cost a
+        // syscall per channel per pass to predict the answer of the syscall
+        // that immediately followed it.
         match channel.io.write_input(rest) {
-            // Accepted nothing despite reporting itself writable. Retrying
+            // Accepted nothing: the destination is full right now. Retrying
             // inside this loop would spin; the next pass will try again.
             Ok(0) => break,
             Ok(n) => written = written.saturating_add(n),
@@ -10183,8 +10225,12 @@ Z
     }
 
     #[test]
-    fn a_negative_descriptor_is_never_ready_and_never_readable() {
-        assert_eq!(fd_ready(-1), (false, false));
+    fn a_negative_descriptor_is_never_readable() {
+        // There is no writability half to check any more: the pre-write
+        // `POLLOUT` poll went away when `SYS_PTY_MASTER_TRY_WRITE` (1065) made
+        // a non-blocking master write possible, and `fd_ready` was reduced to
+        // `fd_readable` rather than left half-unused. See `set_nonblocking`.
+        assert!(!fd_readable(-1));
         assert_eq!(read_pipe(-1, &mut [0u8; 16]), StreamRead::Empty);
         assert_eq!(read_pipe(3, &mut []), StreamRead::Empty);
         // Nothing to configure, so nothing can fail: a channel with no stdin
@@ -10199,7 +10245,11 @@ Z
         let io = SessionIo::None;
         assert!(io.output_finished());
         assert!(!io.accepts_input());
-        assert!(!io.input_ready());
+        // `input_ready` used to be asserted here too. It is gone along with
+        // the pre-write poll it fed; `write_input` below is now the only
+        // question asked before a write, and on `None` it must report the
+        // bytes as consumed rather than error, or the pump would treat an
+        // unattached session as a failed one.
         assert_eq!(io.write_input(b"anything").unwrap(), 0);
         assert!(io.pty().is_none());
     }

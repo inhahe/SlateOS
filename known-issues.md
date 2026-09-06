@@ -59165,6 +59165,27 @@ does not honour `O_NONBLOCK` (there is no `SYS_PTY_MASTER_TRY_WRITE`), the
 readiness check is what stops one uninterested process from freezing the whole
 daemon.
 
+> **Amended 2026-09-06.** The second half of that sentence no longer holds, and
+> the readiness check it justified is gone. Lane A built the missing call —
+> `SYS_PTY_MASTER_TRY_WRITE` is **1065**
+> (`requests/a-b-pty-master-try-write-is-1065-and-it-returns-wouldblock-not-zero.md`)
+> — so `posix::write` now routes a master fd carrying `O_NONBLOCK` to it, `Pty`
+> sets that flag on the master alongside the pipes, and `pump_channel_input`
+> writes without polling first. The poll was never able to do the job claimed
+> for it: it reported that there *was* room, and another writer on a dup'd
+> master could take it before the write landed. The check and the transfer now
+> happen under one lock inside the kernel, so the write's own return is the only
+> non-racy reading of the destination.
+>
+> One thing had to be fixed in the same change or the flag would have been
+> actively harmful: `Pty::write_input` treated every negative return as a fatal
+> error, and a terminal's input half failing tears down the whole session
+> because one descriptor carries both directions. That was safe only while
+> `EAGAIN` was unreachable there. With the flag set, a shell that had merely
+> stopped reading for a moment would have been read as a dead session and hung
+> up mid-keystroke. It now returns `Ok(0)` for `EAGAIN`, exactly as the pipe
+> path always has.
+
 **5. Ending a session waits for both halves.** The channel closes only once the
 process has exited *and* the terminal has run dry — tracked as two separate
 facts — so a shell's final `logout`, or the last screen a full-screen program

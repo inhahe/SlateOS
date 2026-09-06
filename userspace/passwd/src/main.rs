@@ -825,7 +825,7 @@ fn cmd_show_status(accounts: &Accounts, target: &str) -> i32 {
         "{} {} {} {} {} {} {}",
         target,
         status_char(record),
-        days_to_date_string(aging.changed.unwrap_or(0)),
+        userdb::date_from_days(aging.changed.unwrap_or(0)),
         policy(aging.min_days),
         policy(aging.max_days),
         policy(aging.warn_days),
@@ -904,51 +904,16 @@ fn set_aging_field(
 }
 
 // ============================================================================
-// Date helper
+// Date helper -- deleted
 // ============================================================================
-
-/// Convert days since epoch to a YYYY-MM-DD string.
-fn days_to_date_string(days: i64) -> String {
-    if days <= 0 {
-        return "1970-01-01".to_string();
-    }
-
-    // Simple Gregorian calendar conversion.
-    let mut remaining = days as u64;
-    let mut year: u64 = 1970;
-
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if remaining < days_in_year {
-            break;
-        }
-        remaining -= days_in_year;
-        year += 1;
-    }
-
-    let days_in_months: [u64; 12] = if is_leap_year(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-
-    let mut month: u64 = 1;
-    for &dm in &days_in_months {
-        if remaining < dm {
-            break;
-        }
-        remaining -= dm;
-        month += 1;
-    }
-
-    let day = remaining + 1;
-    format!("{year:04}-{month:02}-{day:02}")
-}
-
-/// Check if a year is a leap year.
-fn is_leap_year(year: u64) -> bool {
-    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
-}
+//
+// `days_to_date_string` and its `is_leap_year` stood here, walking a year at a
+// time from 1970. They are `userdb::date_from_days` now, next to the fields
+// that are day numbers, and shared with `chage` and `useradd` -- which had
+// their own copies, disagreeing about what a day number before the epoch
+// means. This one clamped such a date to `1970-01-01`; the shared one converts
+// it, so `-S` on a record hand-edited to a negative date now prints the date
+// it says rather than one it does not.
 
 // ============================================================================
 // Main entry point
@@ -1543,50 +1508,21 @@ mod tests {
         assert!(parse_args(&args).is_err());
     }
 
-    // ---- Date conversion tests ----
+    // ---- Date conversion ----
+    //
+    // The conversion itself is `userdb`'s and is tested there. What is checked
+    // here is that `-S` prints the field it means to: the four dates below are
+    // the ones this file's own printer was tested with, kept so that removing
+    // that printer cannot have changed the output.
 
     #[test]
-    fn days_to_date_epoch() {
-        assert_eq!(days_to_date_string(0), "1970-01-01");
-    }
-
-    #[test]
-    fn days_to_date_known() {
-        // 2024-01-01 is day 19723 since epoch.
-        assert_eq!(days_to_date_string(19723), "2024-01-01");
-    }
-
-    #[test]
-    fn days_to_date_negative() {
-        assert_eq!(days_to_date_string(-5), "1970-01-01");
-    }
-
-    #[test]
-    fn days_to_date_leap_year() {
-        // 2000-03-01 is day 11017 since epoch.
-        assert_eq!(days_to_date_string(11017), "2000-03-01");
-    }
-
-    // ---- Leap year tests ----
-
-    #[test]
-    fn leap_year_2000() {
-        assert!(is_leap_year(2000));
-    }
-
-    #[test]
-    fn leap_year_2024() {
-        assert!(is_leap_year(2024));
-    }
-
-    #[test]
-    fn not_leap_year_1900() {
-        assert!(!is_leap_year(1900));
-    }
-
-    #[test]
-    fn not_leap_year_2023() {
-        assert!(!is_leap_year(2023));
+    fn the_status_line_prints_the_date_of_the_last_change() {
+        assert_eq!(userdb::date_from_days(0), "1970-01-01");
+        assert_eq!(userdb::date_from_days(19723), "2024-01-01");
+        assert_eq!(userdb::date_from_days(11017), "2000-03-01");
+        // A date before the epoch converts rather than clamping to it, which
+        // is the one thing that changed when the three copies became one.
+        assert_eq!(userdb::date_from_days(-5), "1969-12-27");
     }
 
     // ---- The commands, run against a real database in a scratch directory ----

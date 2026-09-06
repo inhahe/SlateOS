@@ -210,6 +210,110 @@ pub fn today() -> Option<i64> {
     i64::try_from(since.as_secs() / 86_400).ok()
 }
 
+// ---- Dates, because four of the aging fields are day numbers ----
+//
+// `/etc/shadow` counts days since 1970-01-01 in its `lastchg`, `inactive` and
+// `expire` columns, while every tool that sets one of them takes a
+// `YYYY-MM-DD` from a person and every tool that shows one prints a date. The
+// conversion therefore happens at the edge of `chage`, `passwd` and `useradd`
+// alike -- and did, in three private copies of the leap-year rule and two
+// different date printers that disagreed about what a negative day number
+// means. It lives here instead, beside the fields whose meaning it is.
+//
+// Hinnant's `days_from_civil`/`civil_from_days`, which are exact over the
+// whole `i64` range and need no table and no loop. The loop-over-years form
+// the printers used is fine for today's date and is not fine for a date a
+// person chose, since nothing stops that being the year 300000.
+
+/// The day number of a `YYYY-MM-DD` date, or `None` if it is not one.
+///
+/// Strict about what it accepts: three fields, all numeric, a month in 1..=12,
+/// and a day that exists in that month of that year. A caller storing the
+/// result puts it in a column that some later reader will believe, so a date
+/// that is not a date has to be refused rather than mapped to a nearby one.
+#[must_use]
+pub fn days_from_date(text: &str) -> Option<i64> {
+    let mut parts = text.trim().split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
+        return None;
+    }
+    Some(days_from_civil(year, month, day))
+}
+
+/// A day number as `YYYY-MM-DD`.
+///
+/// Converts exactly, including before the epoch: day -1 is `1969-12-31`. What
+/// an out-of-range or absent value should *say* -- "never", or nothing at all
+/// -- is the caller's policy and not this function's, because the three
+/// callers spell it three different ways and each is right for its own output.
+#[must_use]
+pub fn date_from_days(days: i64) -> String {
+    let (year, month, day) = civil_from_days(days);
+    let mut out = String::new();
+    let _ = write!(out, "{year:04}-{month:02}-{day:02}");
+    out
+}
+
+/// Length of a month, in days. Zero for a month that does not exist, so that
+/// [`days_from_date`]'s range check rejects it.
+#[must_use]
+pub fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// The proleptic Gregorian leap-year rule.
+#[must_use]
+pub fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// Days from 1970-01-01 to `y-m-d`, proleptic Gregorian.
+//
+// The arithmetic is Hinnant's and its intermediate ranges are the commented
+// ones; it cannot overflow for any year that `days_from_date` can parse into
+// an `i64`, and a year large enough to overflow cannot be spelled in four
+// digits. Written as plain arithmetic rather than `checked_*` because the
+// algorithm's correctness is in the exact expressions, and a chain of
+// `checked_add` would obscure that to guard against a case the parser above
+// has already excluded.
+#[allow(clippy::arithmetic_side_effects)]
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = (m + 9) % 12; // March = 0
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
+/// The inverse of [`days_from_civil`]: `(year, month, day)`.
+#[allow(clippy::arithmetic_side_effects)]
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 /// One line of a record, kept as close to as-written as it can be.
 #[derive(Debug, Clone)]
 enum Line {
@@ -2372,5 +2476,94 @@ users:
         let db = UserDb::parse("");
         assert!(db.records().is_empty());
         assert_eq!(db.to_text(), "");
+    }
+
+    // ---- Dates ----
+    //
+    // Three crates used to convert these day numbers themselves, so the
+    // known-answer values below are deliberately the ones their own tests
+    // used: if this implementation disagreed with any of the three it
+    // replaced, one of these would say so.
+
+    #[test]
+    fn a_date_converts_to_the_day_number_the_shadow_file_holds() {
+        assert_eq!(days_from_date("1970-01-01"), Some(0));
+        assert_eq!(days_from_date("2024-01-01"), Some(19723));
+        assert_eq!(days_from_date("2000-03-01"), Some(11017));
+        assert_eq!(days_from_date("2024-02-29"), Some(19782));
+        assert_eq!(days_from_date("2000-02-29"), Some(11016));
+    }
+
+    #[test]
+    fn a_day_number_converts_back_to_the_date_it_came_from() {
+        for date in [
+            "1970-01-01",
+            "2024-01-01",
+            "2000-03-01",
+            "2024-02-29",
+            "2000-02-29",
+            "1900-01-01",
+            "2262-04-11",
+        ] {
+            let days = days_from_date(date).expect(date);
+            assert_eq!(date_from_days(days), date);
+        }
+    }
+
+    /// Before the epoch converts rather than clamping. `passwd`'s own printer
+    /// used to answer `1970-01-01` for every negative day number, which turns
+    /// a hand-edited field into a date the file does not contain.
+    #[test]
+    fn a_day_number_before_the_epoch_is_a_date_before_the_epoch() {
+        assert_eq!(date_from_days(-1), "1969-12-31");
+        assert_eq!(date_from_days(-5), "1969-12-27");
+        assert_eq!(days_from_date("1969-12-31"), Some(-1));
+    }
+
+    /// The leap-year rule at the three dates that distinguish its clauses:
+    /// divisible by 4, by 100, and by 400.
+    #[test]
+    fn the_leap_day_exists_in_the_years_it_exists_in() {
+        assert!(is_leap_year(2024));
+        assert!(!is_leap_year(1900));
+        assert!(is_leap_year(2000));
+        assert_eq!(days_in_month(2024, 2), 29);
+        assert_eq!(days_in_month(1900, 2), 28);
+        assert_eq!(days_in_month(2000, 2), 29);
+        assert!(days_from_date("1900-02-29").is_none());
+    }
+
+    /// A string that is not a date is refused rather than mapped to a nearby
+    /// one. Every caller stores the result in a column a later reader will
+    /// believe.
+    #[test]
+    fn a_date_that_is_not_a_date_is_refused() {
+        for bad in [
+            "",
+            "2024",
+            "2024-01",
+            "2024-01-01-01",
+            "2024-13-01",
+            "2024-00-10",
+            "2024-01-00",
+            "2024-02-30",
+            "2024-04-31",
+            "next tuesday",
+            "20x4-01-01",
+            "2024-1x-01",
+        ] {
+            assert!(days_from_date(bad).is_none(), "accepted {bad:?}");
+        }
+    }
+
+    /// Every day of a four-century span round-trips. The two functions are
+    /// each other's inverse or neither is trustworthy, and 400 years is the
+    /// whole period of the Gregorian rule, so this covers every case there is.
+    #[test]
+    fn every_day_of_a_gregorian_cycle_round_trips() {
+        for days in -146_097..146_097 {
+            let text = date_from_days(days);
+            assert_eq!(days_from_date(&text), Some(days), "{text}");
+        }
     }
 }

@@ -75,6 +75,13 @@
 //! A record that cannot be written as a colon-separated line fails the whole
 //! save ([`GenerateError`]) rather than being skipped. Skipping would put a
 //! user in one file and not the other, which is the thing being fixed.
+//!
+//! Because the generated file is the only `/etc/shadow` there is, everything
+//! that file can say has to be sayable here — so the database carries the
+//! password-aging policy too ([`Aging`]), and not as a convenience. `passwd`
+//! and `chage` are largely *about* those six numbers; had they been left out,
+//! moving those two tools onto this crate would have silently erased every
+//! expiry policy on the machine at the first save.
 
 use std::fmt::Write as _;
 
@@ -131,10 +138,76 @@ pub mod field {
     /// Count of successful logins.
     pub const LOGIN_COUNT: &str = "login_count";
 
+    // ---- Password aging: `/etc/shadow` fields 3 through 8 ----
+    //
+    // Six numbers that together are one policy, so they are read and written
+    // together through [`crate::Aging`]. Each is *optional*, and absent is
+    // not zero: the shadow file spells "no policy for this" as an empty
+    // field, and a zero in `MIN_DAYS` means "may be changed again at once"
+    // while an empty one means the question was never asked. A record that
+    // has never carried aging generates the same eight empty fields it
+    // always did.
+
+    /// Days since the Unix epoch on which the password was last changed.
+    /// Maintained by [`crate::Record::set_password`]; see there for why a
+    /// password whose age is unknown is one no policy can act on.
+    pub const PASSWORD_CHANGED: &str = "password_changed";
+    /// Days that must pass before the password may be changed again.
+    pub const PASSWORD_MIN_DAYS: &str = "password_min_days";
+    /// Days a password stays valid before it must be changed.
+    pub const PASSWORD_MAX_DAYS: &str = "password_max_days";
+    /// Days before expiry that the user starts being warned.
+    pub const PASSWORD_WARN_DAYS: &str = "password_warn_days";
+    /// Days after expiry before the account stops accepting the password.
+    pub const PASSWORD_INACTIVE_DAYS: &str = "password_inactive_days";
+    /// Days since the Unix epoch on which the account itself expires.
+    pub const ACCOUNT_EXPIRES: &str = "account_expires";
+
     /// The salt fields the two old writers used. Read to recognise a legacy
     /// entry; never written, because a `crypt(3)` entry carries its own salt
     /// and a salt stored beside it is a second copy that can disagree.
     pub const LEGACY_SALT: [&str; 2] = ["password_salt", "salt"];
+}
+
+/// A record's password-aging policy: `/etc/shadow` fields 3 through 8.
+///
+/// Every member is optional, and `None` means the field is *empty* in the
+/// generated file — the shadow format's spelling of "no policy", which is not
+/// the same as zero. In particular `None` is how "never expires" is spelled
+/// here; `-1` is **not**, even though `chage(1)` and `passwd(1)` accept `-1`
+/// on their command lines to mean it. Those two translate at their own edge,
+/// because a `-1` that reached the file would be read back by glibc as a date
+/// one day before the epoch rather than as "never".
+///
+/// [`Record::aging`] reads the whole policy and [`Record::set_aging`] writes
+/// it, so a caller changing one member cannot drop the other five.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Aging {
+    /// Days since the Unix epoch on which the password was last changed.
+    pub changed: Option<i64>,
+    /// Days that must pass before the password may be changed again.
+    pub min_days: Option<i64>,
+    /// Days a password stays valid before it must be changed.
+    pub max_days: Option<i64>,
+    /// Days before expiry that the user starts being warned.
+    pub warn_days: Option<i64>,
+    /// Days after expiry before the account stops accepting the password.
+    pub inactive_days: Option<i64>,
+    /// Days since the Unix epoch on which the account itself expires.
+    pub expires: Option<i64>,
+}
+
+/// Today, as days since the Unix epoch, or `None` if the clock is before it.
+///
+/// The clock going backwards is not fatal here: the one caller stamps a
+/// password change, and a stamp it cannot compute is left absent — which
+/// reads as "the age of this password is unknown", the truthful answer.
+#[must_use]
+pub fn today() -> Option<i64> {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    i64::try_from(since.as_secs() / 86_400).ok()
 }
 
 /// One line of a record, kept as close to as-written as it can be.
@@ -423,6 +496,66 @@ impl Record {
         }
     }
 
+    /// The password-aging policy, as one value.
+    ///
+    /// The six numbers are read together rather than one at a time because
+    /// they *are* one policy — `chage -l` prints all six, `passwd -S` prints
+    /// four of them, and a caller changing one has to write back the other
+    /// five unchanged or silently drop them. See [`Aging`].
+    #[must_use]
+    pub fn aging(&self) -> Aging {
+        Aging {
+            changed: self.day(field::PASSWORD_CHANGED),
+            min_days: self.day(field::PASSWORD_MIN_DAYS),
+            max_days: self.day(field::PASSWORD_MAX_DAYS),
+            warn_days: self.day(field::PASSWORD_WARN_DAYS),
+            inactive_days: self.day(field::PASSWORD_INACTIVE_DAYS),
+            expires: self.day(field::ACCOUNT_EXPIRES),
+        }
+    }
+
+    /// Replace the password-aging policy.
+    ///
+    /// A `None` **removes** the field rather than writing a zero, because the
+    /// shadow file distinguishes the two and so does every tool that reads
+    /// it: an empty `max` field is "this password does not expire", a `0` is
+    /// "it expired the day it was set".
+    pub fn set_aging(&mut self, aging: &Aging) {
+        self.set_day(field::PASSWORD_CHANGED, aging.changed);
+        self.set_day(field::PASSWORD_MIN_DAYS, aging.min_days);
+        self.set_day(field::PASSWORD_MAX_DAYS, aging.max_days);
+        self.set_day(field::PASSWORD_WARN_DAYS, aging.warn_days);
+        self.set_day(field::PASSWORD_INACTIVE_DAYS, aging.inactive_days);
+        self.set_day(field::ACCOUNT_EXPIRES, aging.expires);
+    }
+
+    /// One aging field, or `None` if it is absent, empty or not a number.
+    ///
+    /// A value that will not parse reads as absent rather than as an error,
+    /// because the alternative is that one typo in a hand-edited file makes
+    /// every later save of the whole database fail. Absent is also the state
+    /// the field was in before anyone set a policy, so the degradation is to
+    /// the status quo and not to a surprise.
+    fn day(&self, key: &str) -> Option<i64> {
+        self.get(key)?.trim().parse().ok()
+    }
+
+    /// Write one aging field, removing it when `value` is `None`.
+    fn set_day(&mut self, key: &str, value: Option<i64>) {
+        match value {
+            Some(days) => {
+                let mut buf = String::new();
+                // `write!` to a `String` is infallible; the result is
+                // discarded rather than unwrapped so no path can panic.
+                let _ = write!(buf, "{days}");
+                self.set_bare(key, &buf);
+            }
+            None => {
+                self.remove(key);
+            }
+        }
+    }
+
     /// Whether the account is barred from logging in.
     ///
     /// Two things can say so: an explicit `locked: true`, or a password entry
@@ -576,6 +709,17 @@ impl Record {
         // old format broke, so the legacy fields go rather than linger.
         for key in field::LEGACY_SALT {
             self.remove(key);
+        }
+        // Stamp the change here rather than leaving it to the caller. A
+        // password whose age is unknown is one that no aging policy can act
+        // on: `max_days` measures from this field, so a writer that forgot it
+        // would not merely lose a date, it would quietly exempt that one
+        // account from expiry for good. Every writer wanting that is a worse
+        // bet than every writer remembering. If the clock cannot say what day
+        // it is the field is left as it was, since a wrong date is worse than
+        // a stale one.
+        if let Some(day) = today() {
+            self.set_day(field::PASSWORD_CHANGED, Some(day));
         }
         Ok(())
     }
@@ -933,14 +1077,27 @@ impl UserDb {
         for (index, record) in self.records.iter().enumerate() {
             let username = login_name(record, index)?;
             let entry = writable(shadow_entry(record), &username, field::PASSWORD_HASH)?;
+            let a = record.aging();
             // `login:password:lastchg:min:max:warn:inactive:expire:reserved`.
-            // The seven ageing fields are empty because the database has no
-            // ageing policy to render, and empty is `/etc/shadow`'s spelling
-            // of "no policy". A plausible-looking default — `0:0:99999:7` is
-            // the one `useradd` writes — would be an invention presented as a
-            // fact, and the fact it would hide is that nothing on this system
-            // expires passwords yet.
-            let _ = writeln!(out, "{username}:{entry}:::::::");
+            // A field the record does not carry is written empty, which is
+            // `/etc/shadow`'s own spelling of "no policy for this" — not
+            // filled in with a plausible default. `0:0:99999:7` is the one
+            // `useradd` writes, and writing it here would present an
+            // invention as a fact, hiding the fact that nothing has set a
+            // policy for this account. The trailing field is reserved and has
+            // been empty in every implementation since the format was
+            // defined. `writeln!` to a `String` is infallible; the result is
+            // discarded rather than unwrapped so no path can panic.
+            let _ = writeln!(
+                out,
+                "{username}:{entry}:{}:{}:{}:{}:{}:{}:",
+                day(a.changed),
+                day(a.min_days),
+                day(a.max_days),
+                day(a.warn_days),
+                day(a.inactive_days),
+                day(a.expires),
+            );
         }
         Ok(out)
     }
@@ -1064,6 +1221,17 @@ impl std::error::Error for GenerateError {}
 /// `InvalidData` and not `Other`: the failure is a property of the bytes being
 /// written, and a caller that distinguishes kinds should be able to tell it
 /// from a full disk.
+/// Render one aging field: the number, or nothing at all when unset.
+fn day(value: Option<i64>) -> String {
+    let mut buf = String::new();
+    if let Some(days) = value {
+        // `write!` to a `String` is infallible; the result is discarded
+        // rather than unwrapped so that no formatting path can panic.
+        let _ = write!(buf, "{days}");
+    }
+    buf
+}
+
 fn unrepresentable(e: GenerateError) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, e)
 }
@@ -1810,13 +1978,102 @@ users:
             .and_then(|r| r.get(field::PASSWORD_HASH))
             .expect("hash");
         assert_eq!(fields.get(1), Some(&stored.as_str()));
-        // Seven empty ageing fields: the database has no ageing policy, and an
-        // empty field is this format's way of saying so.
+        // Field 3 is stamped, because a password was set. The remaining six
+        // are empty: nothing has set a policy for this account, and an empty
+        // field is this format's way of saying so.
+        assert_eq!(fields.get(2).map(|f| f.parse().ok()), Some(today()));
         assert!(
             fields
-                .get(2..)
-                .is_some_and(|rest| rest.iter().all(|f| f.is_empty()))
+                .get(3..)
+                .is_some_and(|rest| rest.iter().all(|f| f.is_empty())),
+            "{line:?}"
         );
+    }
+
+    #[test]
+    fn setting_a_password_records_the_day_it_was_set() {
+        // Without this, `max_days` has nothing to measure from, and an account
+        // whose password was set by a writer that forgot the stamp is exempt
+        // from expiry for good rather than merely late.
+        let db = one_account();
+        assert_eq!(
+            db.find("dave").map(|r| r.aging().changed),
+            Some(today()),
+            "a set password should stamp its own date"
+        );
+    }
+
+    #[test]
+    fn an_aging_policy_reaches_the_generated_shadow_in_the_order_the_format_defines() {
+        let mut db = one_account();
+        db.find_mut("dave").expect("record").set_aging(&Aging {
+            changed: Some(19_000),
+            min_days: Some(1),
+            max_days: Some(90),
+            warn_days: Some(7),
+            inactive_days: Some(14),
+            expires: Some(20_000),
+        });
+        let text = db
+            .to_shadow_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
+        // The order is the whole point: a policy written in the wrong columns
+        // is not a wrong policy, it is a different one -- 90 in the `warn`
+        // column warns for longer than the password lasts.
+        assert!(text.contains(":19000:1:90:7:14:20000:"), "{text:?}");
+    }
+
+    #[test]
+    fn an_unset_aging_field_is_generated_empty_rather_than_zero() {
+        // Zero and empty are different answers in this format: an empty `max`
+        // is "this password does not expire", a `0` is "it expired the day it
+        // was set". A generator that filled unset fields with zeroes would
+        // expire every account on the machine at once.
+        let mut db = one_account();
+        let record = db.find_mut("dave").expect("record");
+        record.set_aging(&Aging {
+            max_days: Some(90),
+            ..Aging::default()
+        });
+        assert_eq!(record.aging().min_days, None);
+        let text = db
+            .to_shadow_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
+        assert!(text.contains("::90::::"), "{text:?}");
+    }
+
+    #[test]
+    fn clearing_one_aging_field_leaves_the_rest_standing() {
+        let mut db = one_account();
+        let record = db.find_mut("dave").expect("record");
+        record.set_aging(&Aging {
+            min_days: Some(1),
+            max_days: Some(90),
+            ..Aging::default()
+        });
+        // The read-modify-write a caller like `passwd -x` performs. Reading
+        // the policy whole is what stops it dropping the five it did not name.
+        let mut aging = record.aging();
+        aging.max_days = None;
+        record.set_aging(&aging);
+        assert_eq!(record.aging().min_days, Some(1));
+        assert_eq!(record.aging().max_days, None);
+        // ...and the field is gone from the file, not left holding its old
+        // value under a key nothing writes any more.
+        assert!(!db.to_text().contains(field::PASSWORD_MAX_DAYS));
+    }
+
+    #[test]
+    fn an_aging_field_that_is_not_a_number_reads_as_no_policy() {
+        // A hand-edited typo must not make every later save of the whole
+        // database fail; absent is where the field was before anyone set it.
+        let mut db = one_account();
+        db.find_mut("dave")
+            .expect("record")
+            .set(field::PASSWORD_MAX_DAYS, "soon");
+        assert_eq!(db.find("dave").map(|r| r.aging().max_days), Some(None));
+        db.to_shadow_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
     }
 
     #[test]
@@ -1860,7 +2117,16 @@ users:
         let text = db
             .to_shadow_text(std::path::Path::new(DEFAULT_PATH))
             .expect("generate");
-        assert!(text.contains("dave::::"), "{text:?}");
+        let line = text
+            .lines()
+            .find(|l| !l.starts_with('#'))
+            .expect("one record");
+        let fields: Vec<&str> = line.split(':').collect();
+        assert_eq!(fields.first(), Some(&"dave"));
+        // Empty, not `*` or `!`: this account logs in without being asked for
+        // anything, which is a state the format has a spelling for and which
+        // is not the same as either kind of denial.
+        assert_eq!(fields.get(1), Some(&""));
     }
 
     #[test]

@@ -979,11 +979,21 @@ Roadmap:
     write shadow fields 3–8 (last-changed, min, max, warn, inactive, expire),
     which `to_shadow_text` currently emits as eight empty fields. Redirecting
     `passwd` first would therefore *lose* every aging policy on the machine on
-    the next save. So item 1 splits: **1a** give `userdb` the six aging fields
-    and generate them; **1b** move `passwd` onto it; **1c** move `useradd`
-    onto it (which additionally needs a gid allocator, since `useradd` creates
-    the user-private group). `chage` (`userspace/chage`) reads the same six
-    fields from `/etc/shadow` directly and comes along with 1a.
+    the next save. So item 1 splits:
+    - `[x]` **1a. Give `userdb` the six aging fields** (2026-09-06). Read and
+      written together as one `Aging` value, because they are one policy and a
+      caller changing one must not silently drop the other five. `None` is the
+      file's *empty* field — "no policy", which is not zero — and deliberately
+      not `-1`, which `chage(1)` and `passwd(1)` accept on their command lines
+      for "never" and must translate at their own edge. `set_password` stamps
+      the change date itself, since a writer that forgot it would exempt that
+      account from expiry for good rather than merely be late.
+    - `[ ]` **1b.** Move `passwd` onto it.
+    - `[ ]` **1c.** Move `useradd` onto it — additionally needs a gid
+      allocator, since `useradd` creates the user-private group.
+    - `[ ]` **1d.** `chage` (`userspace/chage`, 663 lines) reads and writes the
+      same six fields in `/etc/shadow` directly, so it has to move too or it
+      will keep writing into a file the next save overwrites.
   - `[ ]` **3. Collapse `authlib`'s guess.** Its per-lookup "YAML if it has the
     user, `/etc/shadow` otherwise" fallback is a policy invented before §353
     and must become a straight YAML lookup, the shadow branch deleted.

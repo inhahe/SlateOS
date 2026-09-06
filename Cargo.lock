@@ -3842,6 +3842,7 @@ dependencies = [
  "inputsettings",
  "keylayout",
  "oswindow",
+ "settingsfile",
  "tzrules",
  "yamldoc",
 ]

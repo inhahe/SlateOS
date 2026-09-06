@@ -21108,6 +21108,26 @@ behind a newly added field the way the hand-written check did.
    `drop_shadows`, `animation_speed`, `icon_size`, `cursor_size`,
    `cursor_scheme`, and `scaling_percent` — all now reachable on
    `DesktopShell::appearance`, none consulted.
+1a. **A running desktop now notices a change, but only when asked
+   (2026-09-06).** `settingsfile::Watcher` compares the file's *contents* --
+   not its modification time, which here both misses changes and invents them
+   (see design-decisions 812) -- and `DesktopShell::poll_appearance` applies
+   one, returning whether any *setting* actually differed. So the desktop and
+   the Settings app no longer agree only across a restart.
+
+   **What is still missing is the cadence, and deliberately so.** Nothing
+   calls `poll_appearance` on a timer, because `ShellSession::animations`
+   records that an empty animation set means no wake-up is registered and the
+   loop parks unbounded -- which is what keeps an idle desktop idle. A
+   once-a-second check would end that to notice a setting nobody is changing.
+   Polling on wake-ups that already happen was tried and backed out: a `$HOME`
+   read inside `pump()` makes every session test machine-dependent, and it
+   broke two of the shell's own tests against the developer's real
+   `appearance.yaml`. The finished shape is the `ReloadAppearance`
+   notification the compositor already receives, relayed to shell clients --
+   immediate *and* idle-preserving, which no poll can be at once. See
+   `todo.txt`.
+
 2. **The compositor still cannot see the setting**, so driving `ui_font`
    through `guitk::text::set_font_family` remains wrong for the reason above:
    the desktop would measure in the chosen family while the compositor drew in
@@ -21143,6 +21163,17 @@ Still open, as the end of this entry already noted: a running app has no way to
 learn the file changed, so a live desktop and a live Settings application agree
 only across a restart. That half belongs with the change-notification channel
 design-decisions.md §400 wants.
+
+**Update 2026-09-06 — the noticing half is built; the telling half is not.**
+`settingsfile::Watcher` plus `DesktopShell::poll_appearance` mean a running
+shell *can* pick up a change without a restart, and does so correctly: the
+watcher compares contents rather than timestamps (which would both miss a
+slider drag and repaint on every no-op re-save), and `poll_appearance` reports
+a change only when a setting actually differs, not merely when the file did.
+What is not built is anything that tells the shell *when* to look. That is on
+purpose -- a timer would end the idle desktop's unbounded park -- and the
+answer is the `ReloadAppearance` notification relayed from the compositor.
+See design-decisions 812 and `todo.txt`.
 
 **Superseded 2026-09-03 — step 3, and the third row of the table below.** Step 3
 said to leave `gui/toolkit`'s `ThemeMode` and `Theme` alone, and that the shared

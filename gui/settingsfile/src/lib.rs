@@ -184,6 +184,136 @@ pub fn store(name: &str, doc: &Document) -> io::Result<()> {
     }
 }
 
+/// Notices when a settings group's file has changed underneath a running
+/// process.
+///
+/// # The problem this exists for
+///
+/// Two processes share every settings file: the panel that writes it and the
+/// program the setting is *about*. Change the accent colour in Settings and
+/// the running desktop keeps the old one, because nothing tells it to look
+/// again -- the two agree only across a restart. That is the same class of bug
+/// as a stale cache, and it is the last open half of both
+/// `TD-APPEARANCE-SETTINGS-ARE-NEVER-WRITTEN-TO-DISK` and
+/// `TD-THREE-INDEPENDENT-APPEARANCE-MODELS`.
+///
+/// # Why it compares contents rather than a timestamp
+///
+/// The obvious watcher stats the file and compares the modification time. It
+/// is wrong here in both directions:
+///
+/// - **It misses changes.** Timestamps are coarse -- one second on some
+///   filesystems -- so two saves inside one tick are one timestamp. A user
+///   dragging a colour slider produces exactly that.
+/// - **It invents changes.** [`store`] writes a temporary and renames it over
+///   the target, so every save lands a new inode with a new timestamp even
+///   when the bytes are identical -- which is what saving a panel you did not
+///   change does. A timestamp watcher would repaint the desktop each time.
+///
+/// Comparing the bytes has neither failure, and costs less than the
+/// alternative rather than more: a settings file is a few kilobytes, so this
+/// is one small read per look, where stat-then-read is two syscalls in the
+/// case that matters. Should these files ever grow to where that is not true,
+/// the cheap gate to add is a stat *in front of* the comparison, not in place
+/// of it.
+///
+/// # Why there is no clock in it
+///
+/// [`poll`](Self::poll) looks exactly once and says what it found. It does not
+/// know how often it is called and has no opinion about it, for the reason
+/// `net80211::assoc`'s step function has no clock either: deciding *how often*
+/// to look is a policy of whoever holds a timer, and a poller that rate-limits
+/// itself cannot be driven at full speed by a test.
+///
+/// # What this is not
+///
+/// A poller, not a subscription. `design.txt` calls filesystem change
+/// notification "kernel-level, essential", and when that exists this type is
+/// where it plugs in -- `poll` keeps its signature and stops reading the file
+/// on a caller that has been told nothing happened. Until the kernel can
+/// deliver that, a process that wants to notice a change has to look, and the
+/// alternative to looking cheaply is not looking at all. See `todo.txt`.
+#[derive(Debug, Clone)]
+pub struct Watcher {
+    /// The settings group, as passed to [`load`] and [`store`].
+    name: String,
+    /// What the file held when it was last looked at.
+    seen: Seen,
+}
+
+/// What a [`Watcher`] found the last time it looked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Seen {
+    /// Not looked yet, so the next look reports whatever is there.
+    ///
+    /// This is what lets a caller use the watcher for its *first* read as well
+    /// as its later ones. A watcher constructed already-primed would leave the
+    /// caller to load the file separately, and a save landing between that
+    /// load and the priming would be invisible forever after -- a race that
+    /// only shows up on a machine where something writes settings at startup.
+    Unread,
+    /// The file's exact contents.
+    Contents(String),
+    /// There was no readable file.
+    ///
+    /// Deliberately the same state for "not there" and "there but unreadable",
+    /// because [`load`] already makes no distinction: both yield an empty
+    /// document, which every reader turns into its defaults. A watcher that
+    /// disagreed with `load` about that would make a program's startup state
+    /// differ from the state it reloads into, which is precisely the kind of
+    /// disagreement this type exists to remove.
+    Absent,
+}
+
+impl Watcher {
+    /// Watch a settings group, having seen nothing yet.
+    ///
+    /// The first [`poll`](Self::poll) therefore reports the current contents,
+    /// so a caller can use one watcher for both its initial load and its
+    /// reloads instead of reading the file two different ways.
+    #[must_use]
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: String::from(name),
+            seen: Seen::Unread,
+        }
+    }
+
+    /// The settings group being watched.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Look once. `Some(document)` if the file differs from the last look.
+    ///
+    /// Returns `None` when nothing has changed, which is the answer almost
+    /// every time and is what makes it cheap to call often: the caller does no
+    /// parsing, no re-derivation and no repaint.
+    ///
+    /// A file that is deleted reports `Some` too, holding an empty document --
+    /// the settings have genuinely changed, back to their defaults, and a
+    /// caller that ignored it would keep showing preferences the user has
+    /// removed.
+    pub fn poll(&mut self) -> Option<Document> {
+        let found = match path_for(&self.name).map(fs::read_to_string) {
+            Some(Ok(text)) => Seen::Contents(text),
+            // No configuration directory, no file, or a file this process
+            // cannot read -- all three are "nothing to read", as in `load`.
+            None | Some(Err(_)) => Seen::Absent,
+        };
+        if found == self.seen {
+            return None;
+        }
+        let doc = match &found {
+            Seen::Contents(text) => Document::parse(text),
+            Seen::Unread | Seen::Absent => Document::new(),
+        };
+        self.seen = found;
+        Some(doc)
+    }
+}
+
 // Test support, so panicking on a broken precondition is the right behaviour:
 // a test whose sandbox cannot be created must fail loudly rather than quietly
 // fall through to the developer's real configuration directory.
@@ -360,6 +490,203 @@ mod tests {
         }
         drop(guard);
         out
+    }
+
+    // -- Watcher --
+
+    /// Run `body` against a private configuration directory, with a `write`
+    /// that puts a settings file into it.
+    fn with_config_dir<T>(tag: &str, body: impl FnOnce(&dyn Fn(&str, &str)) -> T) -> T {
+        let dir = ScratchDir::new(tag);
+        let root = dir.path("cfg");
+        let root_str = root.to_str().expect("scratch path is UTF-8").to_string();
+        // Asks `path_for` where the file goes rather than rebuilding the path,
+        // because a fixture that computes its own answer can disagree with the
+        // code -- and the first version of this helper did exactly that,
+        // dropping the `slateos` component and writing files the watcher was
+        // never going to look at. Two of the tests still passed, on an absent
+        // file behaving like an absent file.
+        let write = |name: &str, text: &str| {
+            let path = path_for(name).expect("a config path, the env being set");
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create config dir");
+            }
+            fs::write(&path, text).expect("write settings file");
+        };
+        with_env(Some(&root_str), None, || body(&write))
+    }
+
+    #[test]
+    fn the_first_look_reports_what_is_there() {
+        with_config_dir("watch-first", |write| {
+            write("appearance", "theme_mode: light\n");
+            let mut w = Watcher::new("appearance");
+            let doc = w
+                .poll()
+                .expect("the first look reports, having seen nothing");
+            assert!(doc.to_text().contains("light"));
+        });
+    }
+
+    #[test]
+    fn the_first_look_reports_an_absent_file_too() {
+        // Not a change *from* anything, but the caller has still learned the
+        // current state -- which is the whole point of starting unread.
+        with_config_dir("watch-absent", |_write| {
+            let mut w = Watcher::new("appearance");
+            let doc = w.poll().expect("an absent file is still a first answer");
+            assert_eq!(doc.to_text(), Document::new().to_text());
+            assert!(w.poll().is_none(), "and it does not repeat");
+        });
+    }
+
+    #[test]
+    fn an_unchanged_file_reports_nothing() {
+        with_config_dir("watch-quiet", |write| {
+            write("appearance", "theme_mode: light\n");
+            let mut w = Watcher::new("appearance");
+            assert!(w.poll().is_some());
+            assert!(w.poll().is_none());
+            assert!(w.poll().is_none(), "and stays quiet");
+        });
+    }
+
+    #[test]
+    fn a_changed_file_reports_once() {
+        with_config_dir("watch-change", |write| {
+            write("appearance", "theme_mode: light\n");
+            let mut w = Watcher::new("appearance");
+            assert!(w.poll().is_some());
+
+            write("appearance", "theme_mode: dark\n");
+            let doc = w.poll().expect("the change is reported");
+            assert!(doc.to_text().contains("dark"));
+            assert!(w.poll().is_none(), "and not reported twice");
+        });
+    }
+
+    #[test]
+    fn two_changes_inside_one_timestamp_are_both_seen() {
+        // The first thing a modification-time watcher gets wrong. Timestamps
+        // are coarse -- a second, on some filesystems -- so two writes in one
+        // tick share one, and the second is invisible. Dragging a colour
+        // slider produces exactly this. These writes are back to back, so if
+        // the clock has any granularity at all they land inside it.
+        with_config_dir("watch-fast", |write| {
+            write("appearance", "accent: blue\n");
+            let mut w = Watcher::new("appearance");
+            assert!(w.poll().is_some());
+
+            write("appearance", "accent: red\n");
+            write("appearance", "accent: green\n");
+            let doc = w.poll().expect("the newest contents are seen");
+            assert!(doc.to_text().contains("green"), "{}", doc.to_text());
+        });
+    }
+
+    #[test]
+    fn rewriting_the_same_bytes_is_not_a_change() {
+        // The second thing a modification-time watcher gets wrong, and the
+        // more damaging one here: `store` renames a temporary over the target,
+        // so *every* save lands a new inode with a new timestamp -- including
+        // saving a panel nothing was changed in. A timestamp watcher would
+        // repaint the desktop each time somebody opened Settings and closed
+        // it.
+        with_config_dir("watch-rewrite", |write| {
+            write("appearance", "theme_mode: dark\n");
+            let mut w = Watcher::new("appearance");
+            assert!(w.poll().is_some());
+
+            write("appearance", "theme_mode: dark\n");
+            assert!(w.poll().is_none(), "identical bytes are not a change");
+        });
+    }
+
+    #[test]
+    fn a_real_store_is_seen_through_the_rename() {
+        // The path that actually matters: not a test writing bytes, but
+        // `store`'s write-a-temporary-and-rename. The watcher must follow the
+        // target across the replacement, and must not be fooled by the `.new`
+        // temporary sitting beside it.
+        with_config_dir("watch-store", |write| {
+            write("appearance", "theme_mode: dark\n");
+            let mut w = Watcher::new("appearance");
+            assert!(w.poll().is_some());
+
+            let mut doc = Document::parse("theme_mode: light\n");
+            store("appearance", &doc).expect("store");
+            let seen = w.poll().expect("a real save is seen");
+            assert!(seen.to_text().contains("light"));
+
+            // And the same document again is not a second change, even though
+            // the rename has replaced the file underneath.
+            doc = Document::parse(&seen.to_text());
+            store("appearance", &doc).expect("store again");
+            assert!(w.poll().is_none(), "an identical re-save is not a change");
+        });
+    }
+
+    #[test]
+    fn deleting_the_file_reports_the_defaults() {
+        // The settings really have changed -- back to the defaults -- and a
+        // caller that ignored it would keep showing preferences the user has
+        // removed.
+        with_config_dir("watch-delete", |write| {
+            write("appearance", "theme_mode: light\n");
+            let mut w = Watcher::new("appearance");
+            assert!(w.poll().is_some());
+
+            let path = path_for("appearance").expect("a path");
+            fs::remove_file(&path).expect("remove");
+            let doc = w.poll().expect("deletion is a change");
+            assert_eq!(doc.to_text(), Document::new().to_text());
+            assert!(w.poll().is_none(), "and only reported once");
+        });
+    }
+
+    #[test]
+    fn a_file_that_comes_back_is_a_change_again() {
+        with_config_dir("watch-return", |write| {
+            write("appearance", "theme_mode: light\n");
+            let mut w = Watcher::new("appearance");
+            assert!(w.poll().is_some());
+
+            let path = path_for("appearance").expect("a path");
+            fs::remove_file(&path).expect("remove");
+            assert!(w.poll().is_some());
+
+            write("appearance", "theme_mode: light\n");
+            let doc = w.poll().expect("the file returning is a change");
+            assert!(doc.to_text().contains("light"));
+        });
+    }
+
+    #[test]
+    fn watching_one_group_ignores_another() {
+        with_config_dir("watch-groups", |write| {
+            write("appearance", "theme_mode: dark\n");
+            let mut w = Watcher::new("appearance");
+            assert!(w.poll().is_some());
+            assert_eq!(w.name(), "appearance");
+
+            write("input", "repeat_delay: 400\n");
+            assert!(w.poll().is_none(), "another group is not this one");
+        });
+    }
+
+    #[test]
+    fn with_nowhere_to_look_the_answer_is_the_defaults_once() {
+        // Neither variable set: `path_for` yields nothing, which is the same
+        // "nothing to read" as an absent file, and must not report a change on
+        // every single look.
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        drop(guard);
+        with_env(None, None, || {
+            let mut w = Watcher::new("appearance");
+            assert!(w.poll().is_some(), "the first look still answers");
+            assert!(w.poll().is_none());
+            assert!(w.poll().is_none());
+        });
     }
 
     #[test]

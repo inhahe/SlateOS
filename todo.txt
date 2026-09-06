@@ -55654,3 +55654,56 @@ along with the field limits:
   and two earlier). They look like the residue of a common template that had a
   sidebar these apps never grew. Deleted in each case; worth a grep across the
   rest of `apps/` for the same shape.
+
+## Lane C — appearance live-reload, the half that is not done (2026-09-06)
+
+**Relay `ReloadAppearance` from the compositor to shell clients.** This is the
+proper completion of design-decisions 812, and the reason `poll_appearance` is
+an explicit call rather than something on a timer.
+
+- *What exists now.* An app that rewrites `appearance.yaml` sends
+  `guiremote::control::RequestBody::ReloadAppearance`; the compositor handles
+  it by re-reading the file (`Compositor::reload_appearance`). `apps/settings`
+  already sends it — `gui/window/src/app.rs` has the machinery and the tests.
+  `DesktopShell::poll_appearance` now exists and applies a change correctly,
+  with `settingsfile::Watcher` underneath it.
+- *What is missing.* The message goes client → compositor and stops there. The
+  desktop shell is a different process and is never told, so it applies a
+  change only when something calls `poll_appearance`, and nothing does on a
+  cadence — deliberately, see below.
+- *Why not just poll on a timer.* `ShellSession::animations` documents that an
+  empty animation set means **no wake-up is registered and the loop parks with
+  no bound at all**, which is what keeps an idle desktop idle. A once-a-second
+  check ends that: the machine wakes, reads a file, finds nothing, sleeps,
+  forever, on battery. Polling only on wake-ups that already happen was tried
+  and backed out too — a `$HOME` read inside `pump()` makes every session test
+  machine-dependent, and it broke two of the shell's own tests against the
+  developer's real `~/.config/slateos/appearance.yaml`.
+- *The fix.* A compositor → shell notification, so the shell is told exactly
+  when there is something to know. Wire-format change in `gui/remote`
+  (`gui/remote/src/control.rs`, the response/event side rather than the request
+  side) plus a broadcast in `gui/compositor`, and a `ShellSession` handler that
+  calls `poll_appearance`. Both crates are lane C's, so no request is needed.
+  It wants its own commit and its own compatibility argument —
+  `PROTOCOL_VERSION` last moved for `TextOverflow` (§427), and the same
+  reasoning about a silently desynchronising decoder applies.
+- *Trigger:* do this next, before anything else in the appearance area. Until
+  it lands, the feature works only for a caller that calls `poll_appearance`
+  itself.
+
+**And the question that is not mine to answer yet:** `poll_appearance` replaces
+what the shell holds, with no merge, which is right only while the shell has no
+appearance editor of its own. When the settings *window* is hosted in the shell
+(still unwired — "Settings" is a start-menu label returning a `Launch` with
+nowhere to send it), "whose copy wins while a panel is open with unsaved edits?"
+becomes a real question. `DesktopShell::poll_appearance` is where it will have
+to be answered.
+
+**Smaller finding, not chased.** There is a real `~/.config/slateos/appearance.yaml`
+and `input.yaml` on this development machine, dated 2026-08-14 and 2026-08-22.
+Something wrote them outside a scratch configuration directory — most likely a
+test or a demo binary run without `with_scratch_config`. Harmless here, but it
+means any test that reaches the real config path silently depends on this
+machine's state, which is how the `pump()` experiment above was caught. Worth a
+sweep for `AppearanceFile::load`/`config::load` calls in test and demo code that
+are not inside a scratch directory.

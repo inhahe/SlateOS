@@ -40,9 +40,9 @@
 # as an ordinary failure.  A status a caller cannot know about is a status the
 # caller cannot handle.
 #
-# IF YOU WRAP THIS IN scripts/run-timeout.py, GIVE IT AT LEAST 7200 SECONDS:
+# IF YOU WRAP THIS IN scripts/run-timeout.py, GIVE IT AT LEAST 28800 SECONDS:
 #
-#   python scripts/run-timeout.py --poll 60 7200 ./scripts/boot-test.sh
+#   python scripts/run-timeout.py --poll 300 28800 ./scripts/boot-test.sh
 #
 # This script runs QEMU under its *own* timeout, 2400s by default (--timeout).
 # An outer budget also has to cover the pre-build gates and the kernel build,
@@ -65,13 +65,29 @@
 # the pre-QEMU phase is now the *larger* of the two and swings widely with host
 # load -- an outer budget derived from the boot time alone will be wrong.
 #
-# Budget the outer as gates+build+inner, then round up: 7200 = ~3000 observed
-# pre-QEMU + 2400 inner + headroom.  Being generous costs nothing here:
-# run-timeout's real job is tearing down the whole process tree, grandchildren
-# included, and that is independent of the budget.  An outer budget that is too
-# tight does not merely delay the answer, it destroys the diagnostic -- which is
-# what happened twice on 2026-08-31 before this comment was rewritten.
-# See known-issues.md -> Lesson 50.
+# Budget the outer as gates+build+inner, then round up.  Being generous costs
+# nothing here: run-timeout exits when the child does, so the budget is a
+# ceiling and not a duration -- its real job is tearing down the whole process
+# tree, grandchildren included, and that is independent of the number.  An
+# outer budget that is too tight does not merely delay the answer, it destroys
+# the diagnostic -- which is what happened twice on 2026-08-31 before this
+# comment was rewritten.  See known-issues.md -> Lesson 50.
+#
+# 28800 is derived (2026-09-06) from the eight rows that carry phase columns,
+# NOT from a remembered console watch -- `python scripts/boot-history.py --list`
+# and the `script_seconds` field:
+#
+#   script_seconds: median 7414, max 12760 (2026-09-05T16:46, gates 10435)
+#
+# The 7200 this paragraph used to recommend was therefore below the *median*
+# run: it would have killed four of those eight.  It was set when ~3000s of
+# pre-QEMU was current, and the gate phase has since tripled -- which is the
+# failure mode the paragraph below warns about, caught in the act.
+#
+# The headroom over 12760 is not slack, it is `check_commit_headroom`: that
+# gate now waits proportionally to what the run has already spent (see
+# `commit_wait_budget`), so a contended host can legitimately add most of a
+# gate phase again rather than discard one.  12760 + ~10400 + rounding = 28800.
 #
 # STOP HAND-MEASURING THIS.  Both numbers above were obtained by watching a
 # console, because bench/boot-history.jsonl -- hundreds of rows, and the obvious
@@ -82,8 +98,10 @@
 #
 #   python scripts/boot-history.py --list      # per-run phase columns
 #
-# Re-derive the 7200 above from those rows rather than trusting this paragraph;
+# Re-derive the 28800 above from those rows rather than trusting this paragraph;
 # the gate phase grows every time a lane adds a checker, and a comment does not.
+# That is not hypothetical advice -- following it on 2026-09-06 is what showed
+# the previous number had fallen below the median run.
 #
 # Usage:
 #   ./scripts/boot-test.sh              # full build + test (waits for BOOT_OK)
@@ -228,14 +246,22 @@ set -euo pipefail
 # 501 for a run that took about ninety minutes, and every phase before the
 # emulator started is *absent* from the file rather than small in it.
 #
-# That gap has already cost real work twice.  The header above budgets
+# That gap has already cost real work three times.  The header above budgeted
 # run-timeout.py at 7200s on the strength of "~3000s observed pre-QEMU", and
 # that number came from watching a console on 2026-08-31 -- because the history
-# file, which has hundreds of rows and is the obvious place to ask, does not
+# file, which has hundreds of rows and is the obvious place to ask, did not
 # know.  Before that, the same header budgeted 900s from the boot half alone
 # and killed two healthy guests mid-diagnostics.  A phase nothing measures is a
 # phase every estimate has to guess at, and the guesses were wrong in the
 # direction that destroys the evidence.
+#
+# The third: 7200 outlived its own evidence.  By 2026-09-06 the eight rows that
+# do carry `script_seconds` had a median of 7414 -- the recommended budget had
+# quietly fallen below the *typical* run, and nobody noticed, because noticing
+# required exactly the query this field was added to make possible.  The fix
+# was to run it (see the header).  The lesson is that adding the measurement is
+# only half the job; a budget derived from it still ages, so re-derive rather
+# than trust either this paragraph or that one.
 #
 # Stamped here rather than after the re-exec below so it covers the snapshot
 # copy too, and threaded through that re-exec explicitly: the child re-runs
@@ -2171,7 +2197,54 @@ check_free_space() {
 # still too low and the evidence for raising it is that run -- record the
 # reading in known-issues.md rather than adjusting by feel.
 MIN_COMMIT_FREE_MB="${BOOT_TEST_MIN_COMMIT_FREE_MB:-12288}"
-COMMIT_WAIT="${BOOT_TEST_COMMIT_WAIT:-900}"
+
+# How long to wait for the host to recover before giving up -- a floor, not the
+# budget.  The budget is computed per call by `commit_wait_budget` below.
+#
+# This was a flat 900 until 2026-09-06, when a run spent 7402 seconds passing
+# every gate, reached the pre-build check, found another lane building, waited
+# its quarter of an hour and threw all 7402 seconds away.  That trade is upside
+# down: the thing being economised (fifteen minutes of *sleeping*) was an order
+# of magnitude cheaper than the thing being discarded, and the discarded work
+# then had to be redone on the same contended host.
+#
+# 3600 rather than 900 as the floor because the blocker this gate exists for is
+# another lane's cargo build, and `build_seconds` in bench/boot-history.jsonl
+# tops out at 1299 -- so an hour covers the realistic transient, plus a second
+# build starting as the first ends, with margin.  A wait shorter than the thing
+# being waited for is not a wait, it is a delayed refusal.
+COMMIT_WAIT_FLOOR=3600
+
+# Seconds this call is willing to wait, on stdout.
+#
+# Scales with the run's own elapsed time: never abandon an investment over a
+# wait shorter than the investment.  The worst case is that the run takes twice
+# what it has already spent; the best case is that a gate phase measured in
+# hours is not repeated.  Recomputed per call rather than once, which is the
+# point -- the same fifteen minutes is a fine deal 60 seconds into a run and an
+# absurd one 7402 seconds in, and this gate is called at both.
+#
+# An explicitly-set BOOT_TEST_COMMIT_WAIT is honoured verbatim and is NOT
+# floored, for the same reason the nap below never overshoots it: it is the
+# knob a test, or an operator in a hurry, reaches for first, and a knob that
+# silently rounds its own value up does not mean what it says.
+#
+# Deliberately uncapped.  The backstop is the caller's outer run-timeout
+# budget, and this file's header asks for one (28800s) sized to accommodate it.
+# A cap here would be a number with nothing anchoring it, which is precisely
+# the failure the MIN_COMMIT_FREE_MB comment above is at pains to avoid.
+commit_wait_budget() {
+    if [ -n "${BOOT_TEST_COMMIT_WAIT:-}" ]; then
+        echo "$BOOT_TEST_COMMIT_WAIT"
+        return 0
+    fi
+    local elapsed=$(( $(date +%s) - BOOT_TEST_START_EPOCH ))
+    if [ "$elapsed" -gt "$COMMIT_WAIT_FLOOR" ]; then
+        echo "$elapsed"
+    else
+        echo "$COMMIT_WAIT_FLOOR"
+    fi
+}
 
 # Free commit charge in MiB on stdout, or a non-zero status if it cannot be had.
 #
@@ -2216,8 +2289,17 @@ check_commit_headroom() {
         return 0
     fi
 
+    # Read once and held for the whole wait, so the "of Ns" in the progress
+    # line does not creep upward under the reader as the run's elapsed time
+    # grows.  A budget that moves while it is being counted down against is
+    # not a budget.
+    local COMMIT_WAIT
+    COMMIT_WAIT="$(commit_wait_budget)"
+
     echo "=== Waiting for commit headroom (${free_mb} MiB free, need ${MIN_COMMIT_FREE_MB} MiB, ${phase}) ==="
     echo "    Another lane is probably building.  This clears on its own; nothing is wrong with the tree."
+    echo "    Willing to wait ${COMMIT_WAIT}s: this run has already spent" \
+         "$(( $(date +%s) - BOOT_TEST_START_EPOCH ))s, and giving up throws all of it away."
     local waited=0
     local nap
     while [ "$waited" -lt "$COMMIT_WAIT" ]; do
@@ -2253,7 +2335,11 @@ check_commit_headroom() {
     echo "Windows' commit limit is RAM plus pagefile.  At the limit, no process can start:" >&2
     echo "fork() returns STATUS_COMMIT_LIMIT (0xC000012D) and the run dies wherever it happens" >&2
     echo "to be, which on 2026-09-02 was 395 seconds into a boot whose build had already cost" >&2
-    echo "twenty minutes.  Refusing now costs seconds instead." >&2
+    echo "twenty minutes.  Refusing here is the cheaper of the two failures, but it is not a" >&2
+    echo "cheap one: this run spent $(( $(date +%s) - BOOT_TEST_START_EPOCH ))s getting here and that time is gone." >&2
+    echo "It waited ${COMMIT_WAIT}s before concluding the host was not going to recover, which is" >&2
+    echo "longer than any build this host has recorded — so suspect something other than a" >&2
+    echo "sibling lane: a leaked QEMU, a runaway rustc, or a pagefile smaller than it was." >&2
     echo "" >&2
     echo "The usual cause is another lane's cargo build.  Do NOT kill it — it is another" >&2
     echo "agent's in-flight work.  Wait for it, or do work that does not need to boot." >&2

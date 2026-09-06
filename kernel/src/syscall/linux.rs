@@ -20938,9 +20938,9 @@ fn sys_unlinkat(args: &SyscallArgs) -> SyscallResult {
 /// `noreplace` routes to `Vfs::rename_noreplace`, which returns `EEXIST`
 /// (Linux `RENAME_NOREPLACE`) if the destination already exists. For the
 /// common same-mount case the check is atomic — performed under the same VFS
-/// lock as the rename — so no concurrent creator can be clobbered. (The
-/// cross-mount copy+delete convenience keeps a documented best-effort
-/// pre-check; Linux returns EXDEV for cross-mount rename anyway.)
+/// lock as the rename — so no concurrent creator can be clobbered.  The
+/// cross-mount case does not arise: it is refused with `EXDEV`, as on Linux,
+/// rather than served by a copy+delete that could not make the same promise.
 fn rename_common(
     old_dirfd: i32,
     old_ptr: u64,

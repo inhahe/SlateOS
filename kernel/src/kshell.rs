@@ -1005,6 +1005,23 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
             } else if next == b'(' {
                 // `$(command)` — command substitution.
                 // Find the matching `)`, tracking parenthesis nesting.
+                //
+                // `i` is *on* the `(`, so it has to be stepped over before the
+                // depth scan starts. Without that step the loop counted the
+                // opening paren a second time -- `depth` was seeded at 1 for
+                // the `$(` already consumed and then incremented again on the
+                // very first byte it looked at -- so the matching `)` took the
+                // count to 1 rather than 0 and the scan ran to end of input.
+                // Every `$(…)` therefore captured from the paren to the end of
+                // the line, parenthesis included:
+                //
+                //     echo $(pwd)/x   ->  capture_command("(pwd)/x")
+                //
+                // which is not a command, and which swallowed the `/x` that
+                // should have followed the substitution. The `$((…))` arm
+                // above steps over its `((` explicitly and was always right;
+                // this one did not.
+                i = i.saturating_add(1); // skip `(`
                 let start = i;
                 let mut depth: u32 = 1;
                 while i < len && depth > 0 {
@@ -1012,10 +1029,13 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
                         depth = depth.saturating_add(1);
                     } else if bytes[i] == b')' {
                         depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            // Stop *on* the closing paren, so `start..i` is the
+                            // command and the skip below has something to skip.
+                            break;
+                        }
                     }
-                    if depth > 0 {
-                        i = i.saturating_add(1);
-                    }
+                    i = i.saturating_add(1);
                 }
                 if let Some(cmd_bytes) = bytes.get(start..i) {
                     if let Ok(cmd) = core::str::from_utf8(cmd_bytes) {
@@ -22703,6 +22723,63 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
         }
         assert_eq!(cleaned, 3, "the rung-119 fixture outlived the rung");
+    }
+
+    serial_println!(
+        "  kshell::self_test 120: `$(cmd)` substitutes the command's output and \
+         nothing else -- the paren is not part of the command and the text \
+         after it survives"
+    );
+    {
+        // Rung 120 -- `$(…)` command substitution.
+        //
+        // There was no rung for this at all, and that is how the scan could
+        // count its own opening paren for four months without anyone noticing.
+        // `depth` was seeded at 1 for the `$(` already consumed and then
+        // incremented again on the first byte examined, which was that same
+        // `(`, so the matching `)` took the count to 1 instead of 0 and the
+        // scan ran to end of input. Every substitution captured from the paren
+        // to the end of the line:
+        //
+        //     echo $(pwd)/x   ->  capture_command("(pwd)/x")
+        //
+        // -- not a command, so the substitution produced nothing, and the `/x`
+        // that should have followed it was eaten as well. Found 2026-09-05
+        // while writing the speculative expander, which has to mirror this
+        // loop to decide whether a Tab press lands inside an open construct.
+        //
+        // The cases are chosen so that a regression to the old behaviour fails
+        // at least two of them: the trailing-text case pins where the scan
+        // *stops*, and the nesting case pins that it still counts depth at all.
+        assert_eq!(expand_vars("$(echo hi)"), "hi", "bare substitution");
+        assert_eq!(
+            expand_vars("$(echo hi)/x"),
+            "hi/x",
+            "the text after the closing paren was swallowed"
+        );
+        assert_eq!(
+            expand_vars("a$(echo hi)b"),
+            "ahib",
+            "the text on both sides of a substitution"
+        );
+        assert_eq!(
+            expand_vars("$(echo $(echo hi))"),
+            "hi",
+            "a nested substitution -- the outer scan must count depth"
+        );
+        assert_eq!(
+            expand_vars("$(echo a)$(echo b)"),
+            "ab",
+            "two substitutions in one word: the first must not eat the second"
+        );
+        // Backticks were always right -- they scan for a closing backtick and
+        // have no depth to get wrong -- so this is the cross-check that says
+        // the two spellings of one construct now agree.
+        assert_eq!(
+            expand_vars("`echo hi`/x"),
+            expand_vars("$(echo hi)/x"),
+            "the two spellings of command substitution disagree"
+        );
     }
 
     serial_println!("  kshell::self_test PASSED");

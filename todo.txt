@@ -55687,9 +55687,13 @@ an explicit call rather than something on a timer.
   It wants its own commit and its own compatibility argument —
   `PROTOCOL_VERSION` last moved for `TextOverflow` (§427), and the same
   reasoning about a silently desynchronising decoder applies.
-- *Trigger:* do this next, before anything else in the appearance area. Until
-  it lands, the feature works only for a caller that calls `poll_appearance`
-  itself.
+- *DONE 2026-09-06, the same day it was filed.* `Event::SettingsChanged
+  { group }` carries it: wire tag `0x0A`, `INPUT_VERSION` bumped to 3,
+  `DecodeError::BadSettingsGroup` for a group a build does not know,
+  `Compositor::announce_settings_change` fanning out to every window, and the
+  `SettingsChanged` arm of `ShellSession::dispatch`. Six tests, three mutations
+  checked. See design-decisions 812, whose "what the finished shape is" section
+  now describes something that exists.
 
 **And the question that is not mine to answer yet:** `poll_appearance` replaces
 what the shell holds, with no merge, which is right only while the shell has no

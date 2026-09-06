@@ -42,7 +42,9 @@
 //! reserved modifier bits and non-scalar-value Unicode codepoints are all
 //! reported as [`DecodeError`] variants naming the offending byte.
 
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{
+    Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, SettingsGroup,
+};
 
 use crate::{DecodeError, Reader, capacity_hint, write_f32, write_u32, write_u64};
 
@@ -58,7 +60,14 @@ pub const INPUT_MAGIC: [u8; 4] = *b"INPT";
 /// dropped, so a version-1 peer handed a volume key would reject the whole
 /// frame. "Incompatible" is about what the other end can read, not only about
 /// where the bytes sit.
-pub const INPUT_VERSION: u8 = 2;
+/// **3** — the event table gained [`Event::SettingsChanged`] (tag `0x0A`), so
+/// that a settings change reaches a running program instead of waiting for it
+/// to be restarted. Incompatible on the same terms as the volume keys above
+/// and not merely by convention: an unknown tag is
+/// [`DecodeError::BadEventTag`], which fails the *whole frame*, so a version-2
+/// peer handed one of these would drop the input batch it arrived in rather
+/// than ignore an event it did not know.
+pub const INPUT_VERSION: u8 = 3;
 
 /// Input-frame header: magic + version + flags + event count.
 const INPUT_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -140,6 +149,7 @@ enum EventTag {
     Tick = 0x07,
     ScaleChanged = 0x08,
     Moved = 0x09,
+    SettingsChanged = 0x0A,
 }
 
 impl EventTag {
@@ -154,10 +164,19 @@ impl EventTag {
             0x07 => Some(Self::Tick),
             0x08 => Some(Self::ScaleChanged),
             0x09 => Some(Self::Moved),
+            0x0A => Some(Self::SettingsChanged),
             _ => None,
         }
     }
 }
+
+/// Wire codes for [`SettingsGroup`].
+///
+/// Written out rather than taken from the enum's discriminants so that
+/// reordering or inserting a variant cannot silently renumber the protocol --
+/// the same reason the key table below is a table.
+const GROUP_APPEARANCE: u8 = 0x01;
+const GROUP_INPUT: u8 = 0x02;
 
 const MOUSE_PRESS: u8 = 0x01;
 const MOUSE_RELEASE: u8 = 0x02;
@@ -347,6 +366,13 @@ fn encode_event(out: &mut Vec<u8>, ev: &InputEvent) {
         Event::ScaleChanged { scale } => {
             out.push(EventTag::ScaleChanged as u8);
             write_f32(out, *scale);
+        }
+        Event::SettingsChanged { group } => {
+            out.push(EventTag::SettingsChanged as u8);
+            out.push(match group {
+                SettingsGroup::Appearance => GROUP_APPEARANCE,
+                SettingsGroup::Input => GROUP_INPUT,
+            });
         }
         Event::Moved { x, y } => {
             out.push(EventTag::Moved as u8);
@@ -556,6 +582,15 @@ fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
             },
             None,
         ),
+        EventTag::SettingsChanged => {
+            let byte = r.read_u8()?;
+            let group = match byte {
+                GROUP_APPEARANCE => SettingsGroup::Appearance,
+                GROUP_INPUT => SettingsGroup::Input,
+                other => return Err(DecodeError::BadSettingsGroup(other)),
+            };
+            (Event::SettingsChanged { group }, None)
+        }
         EventTag::Moved => (
             Event::Moved {
                 x: r.read_u32()?.cast_signed(),
@@ -719,11 +754,62 @@ mod tests {
             Event::Tick { elapsed_ms: 16 },
             Event::ScaleChanged { scale: 1.5 },
             Event::Moved { x: 100, y: 200 },
+            Event::SettingsChanged {
+                group: SettingsGroup::Appearance,
+            },
+            Event::SettingsChanged {
+                group: SettingsGroup::Input,
+            },
         ]
         .into_iter()
         .map(|e| InputEvent::new(9, e))
         .collect();
         assert_eq!(roundtrip(&events), events);
+    }
+
+    #[test]
+    fn every_settings_group_has_its_own_wire_code() {
+        // Two groups encoding to the same byte would round-trip individually
+        // and still be wrong: a client told its *input* settings changed would
+        // go and re-read its appearance. Compared as bytes, because a
+        // round-trip through one shared code agrees with itself.
+        let appearance = encode_input_frame(&[InputEvent::new(
+            1,
+            Event::SettingsChanged {
+                group: SettingsGroup::Appearance,
+            },
+        )]);
+        let input = encode_input_frame(&[InputEvent::new(
+            1,
+            Event::SettingsChanged {
+                group: SettingsGroup::Input,
+            },
+        )]);
+        assert_ne!(appearance, input);
+    }
+
+    #[test]
+    fn an_unknown_settings_group_is_an_error_and_not_a_guess() {
+        // A newer compositor naming a group this build does not have. The
+        // frame must be refused, not silently shortened: a frame is decoded
+        // whole, so skipping the event this byte belongs to would leave every
+        // event after it misaligned. Built by encoding a real frame and
+        // corrupting its last byte, so the test cannot drift from the layout
+        // the way a hand-assembled frame would.
+        let mut bytes = encode_input_frame(&[InputEvent::new(
+            1,
+            Event::SettingsChanged {
+                group: SettingsGroup::Appearance,
+            },
+        )]);
+        let last = bytes.len() - 1;
+        bytes[last] = 0x7F;
+
+        assert_eq!(
+            decode_input_frame(&bytes).err(),
+            Some(DecodeError::BadSettingsGroup(0x7F)),
+            "an unknown group must be refused, naming the byte"
+        );
     }
 
     #[test]

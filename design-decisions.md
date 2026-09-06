@@ -66701,7 +66701,7 @@ explicit, opted-into calls for precisely that reason — `DesktopShell::new` and
 So `poll_appearance` exists as an explicit call, on the same terms as the
 `load_appearance` beside it, and nothing puts it on a clock.
 
-### What the finished shape is
+### What the finished shape is — **built, in the commit after this one**
 
 Not a cadence at all: the notification that already exists. An application
 that rewrites `appearance.yaml` sends `guiremote`'s `ReloadAppearance`, and
@@ -66710,13 +66710,20 @@ the compositor re-reads. That design is already argued in
 rather than `SetAppearance(settings)`, so the receiver reads the user's file
 itself and a hostile sender achieves at most a redundant re-read.
 
-The shell needs the same message and has no way to receive it: the request
-travels client → compositor, and there is no compositor → shell relay. Adding
-one makes the update immediate *and* keeps the idle desktop idle, which is
-the combination no poll can reach. It is protocol work in `gui/remote` and
-`gui/compositor`, both lane C, so it is mine to do; it is filed in `todo.txt`
-rather than done here because it is a wire-format change and belongs in its
-own commit with its own compatibility argument.
+The shell needed the same message and had no way to receive it: the request
+travelled client → compositor and stopped there. It is relayed now.
+`Event::SettingsChanged { group }` (wire tag `0x0A`, `INPUT_VERSION` 3) is
+announced to every window when the compositor handles either reload, and
+`ShellSession` answers the appearance one by calling `poll_appearance`. The
+event carries the *group* and no settings, for the reason the request does
+not carry them either.
+
+That makes the update immediate **and** keeps the idle desktop idle, which is
+the combination no poll can reach — and it is why the polling this entry
+declines was worth declining rather than shipping as a stopgap. The announcement
+is per window, so the shell hears it once per surface; the second and later
+copies are free, because `poll_appearance` compares settings rather than
+trusting that being told means a difference.
 
 ### Why a settings change is compared, not a file change
 
@@ -66742,7 +66749,19 @@ notification already makes unnecessary for this particular case.
 **Where it lives:** `gui/settingsfile/src/lib.rs` (`Watcher`, `Seen`, 11
 tests); `DesktopShell::{poll_appearance, load_appearance}` and the
 `appearance_watch` field in `gui/desktop/src/lib.rs` (4 tests, both directions
-mutation-checked).
+mutation-checked). The relay: `guitk::event::{Event::SettingsChanged,
+SettingsGroup}`, `guiremote::input` (tag `0x0A`, `INPUT_VERSION` 3,
+`DecodeError::BadSettingsGroup`), `Compositor::announce_settings_change` and
+the two request handlers in `gui/compositor`, and the `SettingsChanged` arm of
+`ShellSession::dispatch`. Six further tests, three mutations checked — the
+announcement deleted, the group ignored, and the repaint dropped.
+
+One of those three is the reason to distrust a test that merely passes. The
+first version of the "an input announcement does not touch the shell" test
+announced `Input` against an *unchanged* appearance file, and the mutation that
+deletes the group check survived it: with nothing to find, a handler that
+ignored the group repainted nothing either. What separates them is announcing
+one group while the *other* group's file is dirty.
 
 
 ## 768. One libc per process: stateful `posix` is reachable only through the C ABI, never as a Rust dependency

@@ -21115,7 +21115,17 @@ behind a newly added field the way the hand-written check did.
    one, returning whether any *setting* actually differed. So the desktop and
    the Settings app no longer agree only across a restart.
 
-   **What is still missing is the cadence, and deliberately so.** Nothing
+   **Closed 2026-09-06 (same day): the shell is now told.** The compositor
+   relays `ReloadAppearance`/`ReloadInput` to every window as
+   `Event::SettingsChanged { group }` (wire tag `0x0A`, `INPUT_VERSION` 3),
+   and `ShellSession` answers the appearance one by calling
+   `poll_appearance`. So the chain runs end to end: the Settings app writes
+   the file and sends the request, the compositor re-reads and announces, the
+   shell re-reads and repaints. No timer anywhere. The paragraph below is kept
+   because it is the argument for why there is no timer, which is still the
+   live constraint on anything added here later.
+
+   **What is deliberately *not* here is a cadence.** Nothing
    calls `poll_appearance` on a timer, because `ShellSession::animations`
    records that an empty animation set means no wake-up is registered and the
    loop parks unbounded -- which is what keeps an idle desktop idle. A
@@ -21164,7 +21174,14 @@ learn the file changed, so a live desktop and a live Settings application agree
 only across a restart. That half belongs with the change-notification channel
 design-decisions.md §400 wants.
 
-**Update 2026-09-06 — the noticing half is built; the telling half is not.**
+**Update 2026-09-06 — both halves are built; this part is closed.**
+The telling half landed the same day: `Compositor::announce_settings_change`
+sends `Event::SettingsChanged { group }` to every window whenever it handles a
+reload request, and the shell acts on the appearance one. A live desktop and a
+live Settings app now agree without a restart. What follows is the record of
+the noticing half, which came first.
+
+**The noticing half.**
 `settingsfile::Watcher` plus `DesktopShell::poll_appearance` mean a running
 shell *can* pick up a change without a restart, and does so correctly: the
 watcher compares contents rather than timestamps (which would both miss a

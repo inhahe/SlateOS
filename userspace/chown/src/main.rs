@@ -301,6 +301,15 @@ fn resolve_uid(name: &str, users: &UserDb) -> Option<u32> {
 }
 
 /// Resolve a group name to a GID.
+/// The group a record's files belong to.
+///
+/// The explicit `gid`, or the uid when there is none -- the same fallback
+/// `userdb` uses when it generates the gid column of `/etc/passwd`, so that a
+/// record with no `gid` does not name one group here and another there.
+fn primary_gid(record: &userdb::Record) -> Option<u32> {
+    record.gid().or_else(|| record.uid())
+}
+
 fn resolve_gid(name: &str, groups: &[GroupEntry]) -> Option<u32> {
     // Try numeric first.
     if let Ok(n) = name.parse::<u32>() {
@@ -695,10 +704,20 @@ fn parse_owner_spec(
             resolve_uid(owner_str, users).ok_or_else(|| format!("unknown user: '{owner_str}'"))?;
 
         let gid = if group_str.is_empty() {
-            // `OWNER:` -- set group to the owner's primary group
-            users
-                .find_uid(uid)
-                .and_then(|u| u.groups().first().and_then(|g| resolve_gid(g, groups)))
+            // `OWNER:` -- set group to the owner's *primary* group, which is
+            // the record's `gid`, or its uid when it has none: that is the
+            // user-private-group convention, and it is what the generated
+            // `/etc/passwd` puts in the gid column for such a record, so the
+            // two cannot disagree.
+            //
+            // This used to be the first entry of the record's `groups` list,
+            // which is the *supplementary* list. On an account `useradd` put
+            // in `audio` and `video`, `chown alice:` would have set the group
+            // to `audio` -- a group alice is merely a member of, not the one
+            // her files belong to. It went unnoticed because nothing wrote
+            // that list for accounts made by `useradd`; now that `useradd`
+            // maintains it, the wrong answer would be the usual one.
+            users.find_uid(uid).and_then(primary_gid)
         } else {
             Some(
                 resolve_gid(group_str, groups)
@@ -1438,6 +1457,7 @@ mod tests {
              \x20   groups: [\"root\", \"admin\"]\n\
              \x20 - uid: 1000\n\
              \x20   username: \"alice\"\n\
+             \x20   gid: 100\n\
              \x20   groups: [\"users\", \"staff\"]\n",
         )
     }
@@ -1709,10 +1729,44 @@ mod tests {
     fn owner_spec_trailing_colon_uses_primary_group() {
         let users = sample_users();
         let groups = build_group_table(&users);
-        // alice's primary (first) group is "users" = gid 100.
+        // alice's primary group is her `gid`, 100 -- not the first entry of
+        // her supplementary list, which happens to have the same name here and
+        // would not on an account whose own group is its private one.
         let spec = parse_owner_spec("alice:", &users, &groups).unwrap();
         assert_eq!(spec.uid, Some(1000));
         assert_eq!(spec.gid, Some(100));
+    }
+
+    /// `chown alice:` follows the primary group, not the first supplementary
+    /// one. An account in `audio` and `video` whose own group is its private
+    /// one used to have its files handed to `audio`.
+    #[test]
+    fn owner_spec_trailing_colon_ignores_the_supplementary_groups() {
+        let users = UserDb::parse(
+            "users:\n\
+             \x20 - uid: 1000\n\
+             \x20   username: \"alice\"\n\
+             \x20   gid: 1000\n\
+             \x20   groups: [\"audio\", \"video\"]\n",
+        );
+        let groups = build_group_table(&users);
+        let spec = parse_owner_spec("alice:", &users, &groups).unwrap();
+        assert_eq!(spec.gid, Some(1000));
+    }
+
+    /// A record with no `gid` is in the group numbered after its uid, which is
+    /// what the generated `/etc/passwd` says about it too.
+    #[test]
+    fn a_record_with_no_gid_falls_back_to_its_uid() {
+        let users = UserDb::parse(
+            "users:\n\
+             \x20 - uid: 1000\n\
+             \x20   username: \"alice\"\n\
+             \x20   groups: [\"audio\"]\n",
+        );
+        let groups = build_group_table(&users);
+        let spec = parse_owner_spec("alice:", &users, &groups).unwrap();
+        assert_eq!(spec.gid, Some(1000));
     }
 
     #[test]

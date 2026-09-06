@@ -6,9 +6,13 @@
 //! (H.264, H.265, VP9, AV1, AAC, Opus, FLAC).
 
 use guitk::color::Color;
+use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
+use oswindow::app::{self, App, Response};
+use oswindow::{Event, RenderTree};
+use std::process::ExitCode;
 
 /// Seed used when the system has no entropy to offer.
 ///
@@ -42,6 +46,53 @@ const OVERLAY0: Color = Color::from_hex(0x6C7086);
 #[allow(dead_code)]
 const TEAL: Color = Color::from_hex(0x94E2D5);
 const MAUVE: Color = Color::from_hex(0xCBA6F7);
+
+/// How long the controls stay up after the last sign of life.
+const CONTROLS_HIDE_MS: u64 = 3000;
+/// Height of the control bar along the bottom.
+const CONTROLS_HEIGHT: f32 = 80.0;
+/// Distance from the top of the control bar to the seek bar inside it.
+const SEEK_BAR_OFFSET: f32 = 8.0;
+/// How far the seek bar is inset from either window edge.
+const SEEK_BAR_INSET: f32 = 16.0;
+/// How thick the seek bar is drawn.
+const SEEK_BAR_HEIGHT: f32 = 6.0;
+/// How thick it is to grab. A 6px line is not a thing a pointer can reliably
+/// land on, so the band that answers a click is taller than the one drawn.
+const SEEK_BAR_GRAB_HEIGHT: f32 = 18.0;
+/// Height of the tab strip along the top.
+const TAB_BAR_HEIGHT: f32 = 36.0;
+/// Y the player's own content starts at, below the tab strip.
+const CONTENT_TOP: f32 = 40.0;
+/// Widest a tab is allowed to get.
+const TAB_MAX_WIDTH: f32 = 120.0;
+/// Air around a tab inside its slot.
+const TAB_PADDING: f32 = 4.0;
+/// How often the picture and the on-screen message are advanced.
+///
+/// `std::time::Duration`, not this file's own millisecond `Duration`: the two
+/// share a name and only one of them is what the harness's clock speaks.
+const FRAME_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+const WINDOW_WIDTH: f32 = 1280.0;
+const WINDOW_HEIGHT: f32 = 720.0;
+/// A window smaller than this has no room left for the controls.
+const MIN_WINDOW_WIDTH: f32 = 480.0;
+const MIN_WINDOW_HEIGHT: f32 = 320.0;
+
+/// A rectangle on screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Rect {
+    fn contains(self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+}
 
 // ============================================================================
 // Media container and codec types
@@ -735,11 +786,17 @@ impl MediaFile {
         format_bytes(self.file_size)
     }
 
+    /// Bits per second, or zero for a file whose header says nothing about
+    /// how long it is.
+    ///
+    /// One statement of that rule rather than two: this had an early return
+    /// for a zero duration *and* a bare division by it, so the guard was the
+    /// only thing keeping the division safe and nothing said so.
     pub fn overall_bitrate(&self) -> u64 {
-        if self.duration.as_secs() == 0 {
-            return 0;
-        }
-        self.file_size.saturating_mul(8) / self.duration.as_secs()
+        self.file_size
+            .saturating_mul(8)
+            .checked_div(self.duration.as_secs())
+            .unwrap_or(0)
     }
 }
 
@@ -906,12 +963,10 @@ impl SyncOffset {
     }
 
     pub fn label(&self) -> String {
-        if self.ms == 0 {
-            "Sync: 0ms".to_string()
-        } else if self.ms > 0 {
-            format!("Sync: +{}ms", self.ms)
-        } else {
-            format!("Sync: {}ms", self.ms)
+        match self.ms.cmp(&0) {
+            core::cmp::Ordering::Equal => "Sync: 0ms".to_string(),
+            core::cmp::Ordering::Greater => format!("Sync: +{}ms", self.ms),
+            core::cmp::Ordering::Less => format!("Sync: {}ms", self.ms),
         }
     }
 }
@@ -1143,7 +1198,8 @@ impl Playlist {
             title,
         });
         if self.shuffle {
-            self.shuffle_order.push(self.entries.len() - 1);
+            self.shuffle_order
+                .push(self.entries.len().saturating_sub(1));
         }
     }
 
@@ -1158,11 +1214,11 @@ impl Playlist {
                 if self.entries.is_empty() {
                     self.current_index = None;
                 } else {
-                    self.current_index = Some(ci.min(self.entries.len() - 1));
+                    self.current_index = Some(ci.min(self.entries.len().saturating_sub(1)));
                 }
             }
             Some(ci) if ci > index => {
-                self.current_index = Some(ci - 1);
+                self.current_index = Some(ci.saturating_sub(1));
             }
             _ => {}
         }
@@ -1188,9 +1244,9 @@ impl Playlist {
             if ci == from {
                 self.current_index = Some(to);
             } else if from < ci && ci <= to {
-                self.current_index = Some(ci - 1);
+                self.current_index = Some(ci.saturating_sub(1));
             } else if to <= ci && ci < from {
-                self.current_index = Some(ci + 1);
+                self.current_index = Some(ci.saturating_add(1));
             }
         }
     }
@@ -1233,7 +1289,7 @@ impl Playlist {
         match (self.current_index, repeat) {
             (Some(ci), RepeatMode::One) => Some(ci),
             (Some(ci), _) => {
-                let next = ci + 1;
+                let next = ci.saturating_add(1);
                 if next < self.entries.len() {
                     self.current_index = Some(next);
                     self.current_index
@@ -1262,7 +1318,7 @@ impl Playlist {
 
         if self.shuffle {
             if self.shuffle_position > 0 {
-                self.shuffle_position -= 1;
+                self.shuffle_position = self.shuffle_position.saturating_sub(1);
                 let idx = self
                     .shuffle_order
                     .get(self.shuffle_position)
@@ -1280,7 +1336,7 @@ impl Playlist {
                 self.current_index
             }
             Some(ci) => {
-                self.current_index = Some(ci - 1);
+                self.current_index = Some(ci.saturating_sub(1));
                 self.current_index
             }
         }
@@ -1570,44 +1626,339 @@ impl DeinterlaceMode {
 // ============================================================================
 
 /// All keyboard shortcuts for the video player.
+/// What a shortcut does when its keys are pressed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    TogglePlayPause,
+    Stop,
+    ToggleFullscreen,
+    ToggleMute,
+    VolumeUp,
+    VolumeDown,
+    /// Move by this many milliseconds; negative goes back.
+    SeekBy(i64),
+    /// Jump to the tenth of the file named by the digit that was pressed.
+    SeekToDigit,
+    PlaylistNext,
+    PlaylistPrevious,
+    SpeedUp,
+    SpeedDown,
+    SpeedReset,
+    CycleAspect,
+    CycleSubtitleTrack,
+    CycleAudioTrack,
+    ToggleSubtitles,
+    ToggleChapterList,
+    TogglePlaylist,
+    ToggleInfo,
+    ToggleEqualizer,
+    /// Shift the subtitles against the picture by this many milliseconds.
+    SubtitleDelay(i64),
+    /// Shift the sound against the picture by this many milliseconds.
+    AudioSync(i64),
+    AddBookmark,
+}
+
+/// Which keystroke runs a command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Press {
+    /// This key with no modifier held.
+    Plain(Key),
+    /// This key with shift.
+    Shift(Key),
+    /// This key with control.
+    Ctrl(Key),
+    /// Any of `Num0`..=`Num9`, the digit being the argument.
+    Digit,
+}
+
+impl Press {
+    /// Does this keystroke run it?
+    ///
+    /// `Plain` insists the modifiers are *clear* rather than merely ignoring
+    /// them, so `Shift+Right` cannot also be `Right`. That makes the table's
+    /// order irrelevant, which is what stops a row added at the top from
+    /// silently shadowing one below it.
+    pub fn matches(self, event: &KeyEvent) -> bool {
+        let mods = event.modifiers;
+        match self {
+            Self::Plain(key) => event.key == key && !mods.shift && !mods.ctrl && !mods.alt,
+            Self::Shift(key) => event.key == key && mods.shift && !mods.ctrl && !mods.alt,
+            Self::Ctrl(key) => event.key == key && mods.ctrl && !mods.alt,
+            Self::Digit => Self::digit_of(event.key).is_some() && !mods.ctrl && !mods.alt,
+        }
+    }
+
+    /// The digit a key names, if it names one.
+    pub fn digit_of(key: Key) -> Option<u32> {
+        Some(match key {
+            Key::Num0 => 0,
+            Key::Num1 => 1,
+            Key::Num2 => 2,
+            Key::Num3 => 3,
+            Key::Num4 => 4,
+            Key::Num5 => 5,
+            Key::Num6 => 6,
+            Key::Num7 => 7,
+            Key::Num8 => 8,
+            Key::Num9 => 9,
+            _ => return None,
+        })
+    }
+}
+
+/// One row of the keymap: what to press, what it says it does, and what it
+/// actually does.
+///
+/// These were three separate things, of which only two existed. `Shortcuts`
+/// was a `Vec<(&str, &str)>` -- a keys column and an action column, drawn in
+/// its own tab -- and the program had no key handler at all, so every one of
+/// the thirty-two rows was a promise nothing kept. Holding the dispatch in the
+/// same row as the text is what makes that impossible to repeat: a shortcut
+/// cannot be documented without being bound, or bound without being
+/// documented.
+#[derive(Clone, Copy, Debug)]
+pub struct Shortcut {
+    /// The keys, as the help panel prints them.
+    pub keys: &'static str,
+    /// What it does, as the help panel prints it.
+    pub action: &'static str,
+    /// The keystroke that runs it.
+    pub press: Press,
+    /// What running it does.
+    pub command: Command,
+}
+
 pub struct Shortcuts;
 
 impl Shortcuts {
-    pub fn list() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("Space", "Play / Pause"),
-            ("S", "Stop"),
-            ("F", "Toggle Fullscreen"),
-            ("M", "Toggle Mute"),
-            ("Up", "Volume Up"),
-            ("Down", "Volume Down"),
-            ("Right", "Seek Forward 10s"),
-            ("Left", "Seek Backward 10s"),
-            ("Shift+Right", "Seek Forward 60s"),
-            ("Shift+Left", "Seek Backward 60s"),
-            ("N", "Next in Playlist"),
-            ("P", "Previous in Playlist"),
-            ("[", "Decrease Speed"),
-            ("]", "Increase Speed"),
-            ("\\", "Reset Speed"),
-            ("A", "Cycle Aspect Ratio"),
-            ("V", "Cycle Subtitles"),
-            ("B", "Cycle Audio Track"),
-            ("T", "Toggle Subtitle"),
-            ("C", "Toggle Chapter List"),
-            ("L", "Toggle Playlist"),
-            ("I", "Show Media Info"),
-            ("E", "Toggle Equalizer"),
-            ("J", "Subtitle Delay -100ms"),
-            ("K", "Subtitle Delay +100ms"),
-            ("G", "Audio Sync -100ms"),
-            ("H", "Audio Sync +100ms"),
-            ("Ctrl+O", "Open File"),
-            ("Ctrl+S", "Take Screenshot"),
-            ("Ctrl+B", "Add Bookmark"),
-            ("1-9", "Seek to 10%-90%"),
-            ("0", "Seek to Start"),
-        ]
+    /// Every shortcut the player has.
+    ///
+    /// `Ctrl+O` (open a file) and `Ctrl+S` (take a screenshot) were listed
+    /// here and are not: this tree has neither a file chooser nor a way to
+    /// read back the framebuffer, and a help panel that promises what the
+    /// program cannot do is the same defect one level up. See `todo.txt`.
+    pub const fn list() -> &'static [Shortcut] {
+        const fn sc(
+            keys: &'static str,
+            action: &'static str,
+            press: Press,
+            command: Command,
+        ) -> Shortcut {
+            Shortcut {
+                keys,
+                action,
+                press,
+                command,
+            }
+        }
+        static TABLE: &[Shortcut] = &[
+            sc(
+                "Space",
+                "Play / Pause",
+                Press::Plain(Key::Space),
+                Command::TogglePlayPause,
+            ),
+            sc("S", "Stop", Press::Plain(Key::S), Command::Stop),
+            sc(
+                "F",
+                "Toggle Fullscreen",
+                Press::Plain(Key::F),
+                Command::ToggleFullscreen,
+            ),
+            sc(
+                "M",
+                "Toggle Mute",
+                Press::Plain(Key::M),
+                Command::ToggleMute,
+            ),
+            sc("Up", "Volume Up", Press::Plain(Key::Up), Command::VolumeUp),
+            sc(
+                "Down",
+                "Volume Down",
+                Press::Plain(Key::Down),
+                Command::VolumeDown,
+            ),
+            sc(
+                "Right",
+                "Seek Forward 10s",
+                Press::Plain(Key::Right),
+                Command::SeekBy(10_000),
+            ),
+            sc(
+                "Left",
+                "Seek Backward 10s",
+                Press::Plain(Key::Left),
+                Command::SeekBy(-10_000),
+            ),
+            sc(
+                "Shift+Right",
+                "Seek Forward 60s",
+                Press::Shift(Key::Right),
+                Command::SeekBy(60_000),
+            ),
+            sc(
+                "Shift+Left",
+                "Seek Backward 60s",
+                Press::Shift(Key::Left),
+                Command::SeekBy(-60_000),
+            ),
+            sc(
+                "N",
+                "Next in Playlist",
+                Press::Plain(Key::N),
+                Command::PlaylistNext,
+            ),
+            sc(
+                "P",
+                "Previous in Playlist",
+                Press::Plain(Key::P),
+                Command::PlaylistPrevious,
+            ),
+            sc(
+                "[",
+                "Decrease Speed",
+                Press::Plain(Key::LeftBracket),
+                Command::SpeedDown,
+            ),
+            sc(
+                "]",
+                "Increase Speed",
+                Press::Plain(Key::RightBracket),
+                Command::SpeedUp,
+            ),
+            sc(
+                "\\",
+                "Reset Speed",
+                Press::Plain(Key::Backslash),
+                Command::SpeedReset,
+            ),
+            sc(
+                "A",
+                "Cycle Aspect Ratio",
+                Press::Plain(Key::A),
+                Command::CycleAspect,
+            ),
+            sc(
+                "V",
+                "Cycle Subtitles",
+                Press::Plain(Key::V),
+                Command::CycleSubtitleTrack,
+            ),
+            sc(
+                "B",
+                "Cycle Audio Track",
+                Press::Plain(Key::B),
+                Command::CycleAudioTrack,
+            ),
+            sc(
+                "T",
+                "Toggle Subtitle",
+                Press::Plain(Key::T),
+                Command::ToggleSubtitles,
+            ),
+            sc(
+                "C",
+                "Toggle Chapter List",
+                Press::Plain(Key::C),
+                Command::ToggleChapterList,
+            ),
+            sc(
+                "L",
+                "Toggle Playlist",
+                Press::Plain(Key::L),
+                Command::TogglePlaylist,
+            ),
+            sc(
+                "I",
+                "Show Media Info",
+                Press::Plain(Key::I),
+                Command::ToggleInfo,
+            ),
+            sc(
+                "E",
+                "Toggle Equalizer",
+                Press::Plain(Key::E),
+                Command::ToggleEqualizer,
+            ),
+            sc(
+                "J",
+                "Subtitle Delay -100ms",
+                Press::Plain(Key::J),
+                Command::SubtitleDelay(-100),
+            ),
+            sc(
+                "K",
+                "Subtitle Delay +100ms",
+                Press::Plain(Key::K),
+                Command::SubtitleDelay(100),
+            ),
+            sc(
+                "G",
+                "Audio Sync -100ms",
+                Press::Plain(Key::G),
+                Command::AudioSync(-100),
+            ),
+            sc(
+                "H",
+                "Audio Sync +100ms",
+                Press::Plain(Key::H),
+                Command::AudioSync(100),
+            ),
+            sc(
+                "Ctrl+B",
+                "Add Bookmark",
+                Press::Ctrl(Key::B),
+                Command::AddBookmark,
+            ),
+            sc("0-9", "Seek to 0%-90%", Press::Digit, Command::SeekToDigit),
+            // The keyboard's own media keys, which a player should honour and
+            // which cost nothing to bind now that there is one table to bind
+            // them in.
+            sc(
+                "Play/Pause",
+                "Play / Pause",
+                Press::Plain(Key::MediaPlayPause),
+                Command::TogglePlayPause,
+            ),
+            sc("Stop", "Stop", Press::Plain(Key::MediaStop), Command::Stop),
+            sc(
+                "Next Track",
+                "Next in Playlist",
+                Press::Plain(Key::MediaNextTrack),
+                Command::PlaylistNext,
+            ),
+            sc(
+                "Prev Track",
+                "Previous in Playlist",
+                Press::Plain(Key::MediaPrevTrack),
+                Command::PlaylistPrevious,
+            ),
+            sc(
+                "Vol Up",
+                "Volume Up",
+                Press::Plain(Key::VolumeUp),
+                Command::VolumeUp,
+            ),
+            sc(
+                "Vol Down",
+                "Volume Down",
+                Press::Plain(Key::VolumeDown),
+                Command::VolumeDown,
+            ),
+            sc(
+                "Mute",
+                "Toggle Mute",
+                Press::Plain(Key::VolumeMute),
+                Command::ToggleMute,
+            ),
+        ];
+        TABLE
+    }
+
+    /// The shortcut a keystroke runs, if any.
+    pub fn for_event(event: &KeyEvent) -> Option<&'static Shortcut> {
+        Self::list().iter().find(|sc| sc.press.matches(event))
     }
 }
 
@@ -1898,7 +2249,16 @@ pub struct VideoPlayerApp {
 
     // OSD messages
     pub osd_message: Option<String>,
-    pub osd_timestamp: u64,
+    /// How much longer the message stays up, in milliseconds.
+    ///
+    /// A countdown rather than a timestamp: this was `osd_timestamp: u64`,
+    /// set to `0` with the comment "would be set to current time in real
+    /// impl", and nothing ever read it or `osd_duration_ms` beside it. The
+    /// message therefore never expired -- turn the volume up once and
+    /// "Volume: 80" stayed on the picture for the rest of the film. The player
+    /// has no wall clock and does not need one; the tick already knows how
+    /// long it has been.
+    pub osd_remaining_ms: u64,
 }
 
 /// UI tabs/panels.
@@ -1978,7 +2338,7 @@ impl VideoPlayerApp {
             preferences: PlayerPreferences::default(),
             active_tab: PlayerTab::Player,
             osd_message: None,
-            osd_timestamp: 0,
+            osd_remaining_ms: 0,
         }
     }
 
@@ -2065,9 +2425,9 @@ impl VideoPlayerApp {
 
     pub fn next_chapter(&mut self) {
         if let Some((idx, _)) = self.current_chapter()
-            && idx + 1 < self.chapters.len()
+            && idx.saturating_add(1) < self.chapters.len()
         {
-            self.seek_to_chapter(idx + 1);
+            self.seek_to_chapter(idx.saturating_add(1));
         }
     }
 
@@ -2077,7 +2437,7 @@ impl VideoPlayerApp {
             if self.position.saturating_sub(ch.start).as_secs() > 3 {
                 self.position = ch.start;
             } else if idx > 0 {
-                self.seek_to_chapter(idx - 1);
+                self.seek_to_chapter(idx.saturating_sub(1));
             }
         }
     }
@@ -2096,8 +2456,8 @@ impl VideoPlayerApp {
                 Some(current) => {
                     let pos = file.audio_streams.iter().position(|s| s.index == current);
                     match pos {
-                        Some(p) if p + 1 < file.audio_streams.len() => {
-                            file.audio_streams.get(p + 1).map(|s| s.index)
+                        Some(p) if p.saturating_add(1) < file.audio_streams.len() => {
+                            file.audio_streams.get(p.saturating_add(1)).map(|s| s.index)
                         }
                         _ => file.audio_streams.first().map(|s| s.index),
                     }
@@ -2130,9 +2490,11 @@ impl VideoPlayerApp {
                         .iter()
                         .position(|s| s.index == current);
                     match pos {
-                        Some(p) if p + 1 < file.subtitle_streams.len() => {
-                            self.selected_subtitle_track =
-                                file.subtitle_streams.get(p + 1).map(|s| s.index);
+                        Some(p) if p.saturating_add(1) < file.subtitle_streams.len() => {
+                            self.selected_subtitle_track = file
+                                .subtitle_streams
+                                .get(p.saturating_add(1))
+                                .map(|s| s.index);
                             self.subtitle_enabled = true;
                         }
                         _ => {
@@ -2269,7 +2631,7 @@ impl VideoPlayerApp {
 
     fn show_osd(&mut self, message: &str) {
         self.osd_message = Some(message.to_string());
-        self.osd_timestamp = 0; // Would be set to current time in real impl
+        self.osd_remaining_ms = self.preferences.osd_duration_ms;
     }
 
     // ========================================================================
@@ -2315,7 +2677,7 @@ impl VideoPlayerApp {
                 .saturating_add(Duration::from_millis(self.subtitle_delay.ms as u64))
         } else {
             self.position
-                .saturating_sub(Duration::from_millis((-self.subtitle_delay.ms) as u64))
+                .saturating_sub(Duration::from_millis(self.subtitle_delay.ms.unsigned_abs()))
         };
         self.external_subtitles
             .iter()
@@ -2326,7 +2688,327 @@ impl VideoPlayerApp {
     // Rendering
     // ========================================================================
 
-    pub fn render(&self) -> Vec<RenderCommand> {
+    // ------------------------------------------------------------------
+    // Input
+    // ------------------------------------------------------------------
+
+    /// Handle one input event. Returns whether anything changed.
+    pub fn handle_event(&mut self, event: &Event) -> bool {
+        match event {
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Tick { elapsed_ms } => self.tick(*elapsed_ms),
+            _ => false,
+        }
+    }
+
+    /// Run whatever the keystroke is bound to.
+    fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        let Some(shortcut) = Shortcuts::for_event(event) else {
+            return false;
+        };
+        // Any keystroke the player acted on is a sign of life, so the controls
+        // come back and start their countdown again.
+        self.wake_controls();
+        self.run(shortcut.command, Press::digit_of(event.key));
+        true
+    }
+
+    /// Carry out a command. `digit` is read only by `SeekToDigit`.
+    pub fn run(&mut self, command: Command, digit: Option<u32>) {
+        match command {
+            Command::TogglePlayPause => self.toggle_play_pause(),
+            Command::Stop => self.stop(),
+            Command::ToggleFullscreen => self.toggle_fullscreen(),
+            Command::ToggleMute => self.toggle_mute(),
+            Command::VolumeUp => self.volume_up(),
+            Command::VolumeDown => self.volume_down(),
+            Command::SeekBy(ms) => {
+                if ms < 0 {
+                    self.seek_backward(ms.unsigned_abs());
+                } else {
+                    self.seek_forward(ms.unsigned_abs());
+                }
+            }
+            Command::SeekToDigit => {
+                if let Some(digit) = digit {
+                    self.seek_to_fraction(f64::from(digit) / 10.0);
+                    self.show_osd(&format!("Seek: {}%", digit.saturating_mul(10)));
+                }
+            }
+            Command::PlaylistNext => self.playlist_next(),
+            Command::PlaylistPrevious => self.playlist_previous(),
+            Command::SpeedUp => self.increase_speed(),
+            Command::SpeedDown => self.decrease_speed(),
+            Command::SpeedReset => self.reset_speed(),
+            Command::CycleAspect => {
+                self.aspect_mode = self.aspect_mode.cycle();
+                self.show_osd(&format!("Aspect: {}", self.aspect_mode.label()));
+            }
+            Command::CycleSubtitleTrack => self.cycle_subtitle_track(),
+            Command::CycleAudioTrack => self.cycle_audio_track(),
+            Command::ToggleSubtitles => self.toggle_subtitles(),
+            Command::ToggleChapterList => {
+                self.chapter_list_visible = !self.chapter_list_visible;
+            }
+            Command::TogglePlaylist => {
+                self.playlist_visible = !self.playlist_visible;
+                self.active_tab = if self.playlist_visible {
+                    PlayerTab::Playlist
+                } else {
+                    PlayerTab::Player
+                };
+            }
+            Command::ToggleInfo => {
+                self.info_visible = !self.info_visible;
+                self.active_tab = if self.info_visible {
+                    PlayerTab::MediaInfo
+                } else {
+                    PlayerTab::Player
+                };
+            }
+            Command::ToggleEqualizer => {
+                self.equalizer_visible = !self.equalizer_visible;
+                self.active_tab = if self.equalizer_visible {
+                    PlayerTab::Equalizer
+                } else {
+                    PlayerTab::Player
+                };
+            }
+            Command::SubtitleDelay(ms) => {
+                self.subtitle_delay.adjust(ms);
+                self.show_osd(&format!("Subtitle {}", self.subtitle_delay.label()));
+            }
+            Command::AudioSync(ms) => {
+                self.audio_sync.adjust(ms);
+                self.show_osd(&format!("Audio {}", self.audio_sync.label()));
+            }
+            Command::AddBookmark => {
+                let label = format!("Bookmark at {}", self.position.format());
+                self.add_bookmark(label);
+                self.show_osd("Bookmark added");
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // The clock
+    // ------------------------------------------------------------------
+
+    /// Advance everything that moves on its own. Returns whether anything did.
+    ///
+    /// Three things keep time and none of them could: the position, which is
+    /// what makes a playing film play; the on-screen message, which had no way
+    /// to expire; and the controls, which are supposed to fade out of a
+    /// fullscreen picture and never did.
+    pub fn tick(&mut self, elapsed_ms: u64) -> bool {
+        let mut moved = false;
+
+        if self.state == PlaybackState::Playing {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss,
+                reason = "a tick is milliseconds and the speed is one of seven small presets"
+            )]
+            let advanced = (elapsed_ms as f64 * self.speed.value()) as u64;
+            self.position = self
+                .position
+                .saturating_add(Duration::from_millis(advanced));
+            if let Some(file) = &self.current_file
+                && self.position >= file.duration
+            {
+                // The end of a file is the start of the next one, or a stop.
+                self.position = file.duration;
+                self.at_end_of_file();
+            }
+            moved = true;
+        }
+
+        if self.osd_remaining_ms > 0 {
+            self.osd_remaining_ms = self.osd_remaining_ms.saturating_sub(elapsed_ms);
+            if self.osd_remaining_ms == 0 {
+                self.osd_message = None;
+            }
+            moved = true;
+        }
+
+        if self.controls_visible && self.state == PlaybackState::Playing {
+            self.controls_hide_timer = self.controls_hide_timer.saturating_sub(elapsed_ms);
+            if self.controls_hide_timer == 0 {
+                self.controls_visible = false;
+                moved = true;
+            }
+        }
+
+        moved
+    }
+
+    /// What happens when the picture runs out.
+    fn at_end_of_file(&mut self) {
+        match self.repeat {
+            RepeatMode::One => self.position = Duration::ZERO,
+            RepeatMode::All => self.playlist_next(),
+            RepeatMode::Off => {
+                if self
+                    .playlist
+                    .current_index()
+                    .is_some_and(|i| i.saturating_add(1) < self.playlist.len())
+                {
+                    self.playlist_next();
+                } else {
+                    self.pause();
+                }
+            }
+        }
+    }
+
+    /// Show the controls and restart their countdown.
+    fn wake_controls(&mut self) {
+        self.controls_visible = true;
+        self.controls_hide_timer = CONTROLS_HIDE_MS;
+    }
+
+    /// Is anything still moving?
+    pub fn has_work(&self) -> bool {
+        // The controls only count down while playing, so "visible and
+        // playing" is already covered by the first clause.
+        self.state == PlaybackState::Playing || self.osd_remaining_ms > 0
+    }
+
+    // ------------------------------------------------------------------
+    // Layout the renderer draws and the mouse reads
+    // ------------------------------------------------------------------
+
+    /// Adopt a new window size. Returns whether it changed.
+    pub fn set_window_size(&mut self, width: f32, height: f32) -> bool {
+        let width = width.max(MIN_WINDOW_WIDTH);
+        let height = height.max(MIN_WINDOW_HEIGHT);
+        if (self.width - width).abs() < f32::EPSILON && (self.height - height).abs() < f32::EPSILON
+        {
+            return false;
+        }
+        self.width = width;
+        self.height = height;
+        true
+    }
+
+    /// The tab strip, one rectangle per tab.
+    ///
+    /// The width follows the window, so the renderer could not have hard-coded
+    /// it and the hit test could not have guessed it -- which is the argument
+    /// for there being one of these rather than two.
+    pub fn tab_rects(&self) -> Vec<(PlayerTab, Rect)> {
+        let tabs = PlayerTab::all();
+        #[allow(clippy::cast_precision_loss, reason = "there are seven tabs")]
+        let slot = (self.width / tabs.len() as f32).min(TAB_MAX_WIDTH);
+        tabs.iter()
+            .enumerate()
+            .map(|(i, tab)| {
+                #[allow(clippy::cast_precision_loss, reason = "there are seven tabs")]
+                let x = TAB_PADDING + (i as f32) * slot;
+                (
+                    *tab,
+                    Rect {
+                        x,
+                        y: TAB_PADDING,
+                        width: (slot - TAB_PADDING).max(1.0),
+                        height: TAB_BAR_HEIGHT - TAB_PADDING * 2.0,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Which tab a point is on, if any.
+    pub fn tab_at(&self, x: f32, y: f32) -> Option<PlayerTab> {
+        self.tab_rects()
+            .into_iter()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(tab, _)| tab)
+    }
+
+    /// The strip of the window that seeks when clicked or dragged.
+    pub fn seek_bar(&self) -> Rect {
+        let drawn_y = self.controls_top() + SEEK_BAR_OFFSET;
+        Rect {
+            x: SEEK_BAR_INSET,
+            // Centred on the line that is drawn, so the grab band reaches as
+            // far above it as below.
+            y: drawn_y - (SEEK_BAR_GRAB_HEIGHT - SEEK_BAR_HEIGHT) / 2.0,
+            width: (self.width - SEEK_BAR_INSET * 2.0).max(1.0),
+            height: SEEK_BAR_GRAB_HEIGHT,
+        }
+    }
+
+    /// Y the control bar starts at.
+    pub fn controls_top(&self) -> f32 {
+        self.height - CONTROLS_HEIGHT
+    }
+
+    /// Where along the file a point on the seek bar is.
+    fn seek_fraction_at(&self, x: f32) -> f64 {
+        let bar = self.seek_bar();
+        f64::from(((x - bar.x) / bar.width).clamp(0.0, 1.0))
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                self.wake_controls();
+                if let Some(tab) = self.tab_at(event.x, event.y) {
+                    self.active_tab = tab;
+                    return true;
+                }
+                if self.seek_bar().contains(event.x, event.y) {
+                    // A press on the bar starts a drag: the preview follows the
+                    // pointer and the picture only moves when it is let go, so
+                    // dragging across a film does not seek to every pixel of
+                    // the way there.
+                    self.seeking = true;
+                    self.seek_preview_position = Some(self.preview_at(event.x));
+                    return true;
+                }
+                false
+            }
+            MouseEventKind::Move => {
+                let woke = !self.controls_visible;
+                self.wake_controls();
+                if self.seeking {
+                    self.seek_preview_position = Some(self.preview_at(event.x));
+                    return true;
+                }
+                woke
+            }
+            MouseEventKind::Release(MouseButton::Left) => {
+                if !self.seeking {
+                    return false;
+                }
+                self.seeking = false;
+                self.seek_preview_position = None;
+                self.seek_to_fraction(self.seek_fraction_at(event.x));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The position a point on the seek bar names.
+    fn preview_at(&self, x: f32) -> Duration {
+        let fraction = self.seek_fraction_at(x);
+        self.current_file.as_ref().map_or(Duration::ZERO, |file| {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss,
+                reason = "the fraction is clamped to 0..=1 and a duration in ms fits f64"
+            )]
+            let ms = (file.duration.as_millis() as f64 * fraction) as u64;
+            Duration::from_millis(ms)
+        })
+    }
+
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(256);
 
         // Background
@@ -2356,39 +3038,33 @@ impl VideoPlayerApp {
     }
 
     fn render_tab_bar(&self, cmds: &mut Vec<RenderCommand>) {
-        let tab_bar_h = 36.0;
-
         // Tab bar background
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width: self.width,
-            height: tab_bar_h,
+            height: TAB_BAR_HEIGHT,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
-        // Tab items
-        let tabs = PlayerTab::all();
-        let tab_width = (self.width / tabs.len() as f32).min(120.0);
-        let mut tx = 4.0;
-
-        for &tab in tabs {
+        // Tab items, from the rectangles the hit test reads.
+        for (tab, rect) in self.tab_rects() {
             let active = tab == self.active_tab;
             let bg = if active { SURFACE0 } else { MANTLE };
             let fg = if active { BLUE } else { SUBTEXT0 };
 
             cmds.push(RenderCommand::FillRect {
-                x: tx,
-                y: 4.0,
-                width: tab_width - 4.0,
-                height: tab_bar_h - 8.0,
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
                 color: bg,
                 corner_radii: CornerRadii::all(4.0),
             });
 
             cmds.push(RenderCommand::Text {
-                x: tx + (tab_width - 4.0) / 2.0 - 24.0,
+                x: rect.x + rect.width / 2.0 - 24.0,
                 y: 12.0,
                 text: tab.label().to_string(),
                 font_size: 12.0,
@@ -2398,38 +3074,36 @@ impl VideoPlayerApp {
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(tab_width - 12.0),
+                max_width: Some((rect.width - 8.0).max(1.0)),
                 overflow: TextOverflow::Ellipsis,
             });
 
             if active {
                 cmds.push(RenderCommand::FillRect {
-                    x: tx + 2.0,
-                    y: tab_bar_h - 3.0,
-                    width: tab_width - 8.0,
+                    x: rect.x + 2.0,
+                    y: TAB_BAR_HEIGHT - 3.0,
+                    width: (rect.width - 4.0).max(1.0),
                     height: 2.0,
                     color: BLUE,
                     corner_radii: CornerRadii::all(1.0),
                 });
             }
-
-            tx += tab_width;
         }
 
         // Separator
         cmds.push(RenderCommand::Line {
             x1: 0.0,
-            y1: tab_bar_h,
+            y1: TAB_BAR_HEIGHT,
             x2: self.width,
-            y2: tab_bar_h,
+            y2: TAB_BAR_HEIGHT,
             color: SURFACE0,
             width: 1.0,
         });
     }
 
     fn render_player_view(&self, cmds: &mut Vec<RenderCommand>) {
-        let top = 40.0;
-        let controls_h = 80.0;
+        let top = CONTENT_TOP;
+        let controls_h = CONTROLS_HEIGHT;
         let video_h = self.height - top - controls_h;
 
         // Video area background (black for letterbox)
@@ -2572,11 +3246,13 @@ impl VideoPlayerApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // Seek bar
-        let seek_y = y + 8.0;
-        let seek_x = 16.0;
-        let seek_w = self.width - 32.0;
-        let seek_h = 6.0;
+        // Seek bar. The x and width come from the same rectangle the mouse
+        // is hit-tested against, so a click lands where the line was drawn.
+        let bar = self.seek_bar();
+        let seek_y = y + SEEK_BAR_OFFSET;
+        let seek_x = bar.x;
+        let seek_w = bar.width;
+        let seek_h = SEEK_BAR_HEIGHT;
 
         // Seek track background
         cmds.push(RenderCommand::FillRect {
@@ -2786,7 +3462,7 @@ impl VideoPlayerApp {
             y: btn_y + 6.0,
             text: self.speed.label(),
             font_size: 11.0,
-            color: if self.speed.value() != 1.0 {
+            color: if self.speed != PlaybackSpeed::NORMAL {
                 PEACH
             } else {
                 SUBTEXT0
@@ -3006,7 +3682,7 @@ impl VideoPlayerApp {
             cmds.push(RenderCommand::Text {
                 x: 16.0,
                 y: ey + 8.0,
-                text: format!("{}", i + 1),
+                text: format!("{}", i.saturating_add(1)),
                 font_size: 11.0,
                 color: if is_current { BLUE } else { OVERLAY0 },
                 font_weight: FontWeightHint::Regular,
@@ -3147,7 +3823,11 @@ impl VideoPlayerApp {
 
             // Video streams
             for (i, vs) in file.video_streams.iter().enumerate() {
-                info_section(cmds, &mut line_y, &format!("Video Stream #{}", i + 1));
+                info_section(
+                    cmds,
+                    &mut line_y,
+                    &format!("Video Stream #{}", i.saturating_add(1)),
+                );
                 info_row(cmds, &mut line_y, "Codec", vs.codec.display_name());
                 info_row(
                     cmds,
@@ -3184,7 +3864,11 @@ impl VideoPlayerApp {
 
             // Audio streams
             for (i, audio) in file.audio_streams.iter().enumerate() {
-                info_section(cmds, &mut line_y, &format!("Audio Stream #{}", i + 1));
+                info_section(
+                    cmds,
+                    &mut line_y,
+                    &format!("Audio Stream #{}", i.saturating_add(1)),
+                );
                 info_row(cmds, &mut line_y, "Codec", audio.codec.display_name());
                 info_row(
                     cmds,
@@ -3221,7 +3905,11 @@ impl VideoPlayerApp {
 
             // Subtitle streams
             for (i, sub) in file.subtitle_streams.iter().enumerate() {
-                info_section(cmds, &mut line_y, &format!("Subtitle Stream #{}", i + 1));
+                info_section(
+                    cmds,
+                    &mut line_y,
+                    &format!("Subtitle Stream #{}", i.saturating_add(1)),
+                );
                 info_row(cmds, &mut line_y, "Format", sub.format.display_name());
                 if let Some(lang) = &sub.language {
                     info_row(cmds, &mut line_y, "Language", lang);
@@ -3843,11 +4531,11 @@ impl VideoPlayerApp {
 
         let half = shortcuts.len().div_ceil(2);
 
-        for (i, (key, action)) in shortcuts.iter().enumerate() {
+        for (i, shortcut) in shortcuts.iter().enumerate() {
             let (kx, vx, row) = if i < half {
                 (col1_x, col1_val, i)
             } else {
-                (col2_x, col2_val, i - half)
+                (col2_x, col2_val, i.saturating_sub(half))
             };
 
             let sy = top + 52.0 + row as f32 * 24.0;
@@ -3864,7 +4552,7 @@ impl VideoPlayerApp {
             cmds.push(RenderCommand::Text {
                 x: kx + 4.0,
                 y: sy + 2.0,
-                text: key.to_string(),
+                text: shortcut.keys.to_string(),
                 font_size: 11.0,
                 color: MAUVE,
                 font_weight: FontWeightHint::Bold,
@@ -3876,7 +4564,7 @@ impl VideoPlayerApp {
             cmds.push(RenderCommand::Text {
                 x: vx,
                 y: sy + 2.0,
-                text: action.to_string(),
+                text: shortcut.action.to_string(),
                 font_size: 11.0,
                 color: SUBTEXT1,
                 font_weight: FontWeightHint::Regular,
@@ -4029,19 +4717,90 @@ fn sample_subtitle_srt() -> &'static str {
      A minute into the movie.\n"
 }
 
-fn main() {
-    let mut app = VideoPlayerApp::new(1280.0, 720.0);
+impl App for VideoPlayerApp {
+    fn title(&self) -> String {
+        // What is on screen, because that is what the window is. A player
+        // behind three other windows is found again by its title.
+        match &self.current_file {
+            None => "Video Player".to_string(),
+            Some(file) => {
+                let name = &file.file_name;
+                match self.state {
+                    PlaybackState::Paused => format!("{name} (paused) - Video Player"),
+                    PlaybackState::Buffering => format!("{name} (buffering) - Video Player"),
+                    PlaybackState::Error => format!("{name} (error) - Video Player"),
+                    PlaybackState::Playing | PlaybackState::Stopped => {
+                        format!("{name} - Video Player")
+                    }
+                }
+            }
+        }
+    }
 
-    // Load sample media file
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive and well inside u32"
+        )]
+        {
+            (self.width as u32, self.height as u32)
+        }
+    }
+
+    /// A clock while a film is playing or a message is on its way out.
+    ///
+    /// A paused player with the controls up has nothing to advance, and waking
+    /// the machine to establish that is `known-issues.md` lesson 47.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        self.has_work().then_some(FRAME_TICK)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        match event {
+            Event::CloseRequested => Response::Exit,
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension in pixels is exact in f32"
+                )]
+                let (w, h) = (*width as f32, *height as f32);
+                if self.set_window_size(w, h) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            other => {
+                if self.handle_event(other) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The handed size wins over the recorded one: the first frame is drawn
+        // before any `Event::Resize` arrives, so a window opened at another
+        // size would be laid out for the size that was asked for, and every
+        // hit box in it would name the wrong rectangle.
+        self.set_window_size(width, height);
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+/// Sample content, so the first window is not an empty black rectangle.
+fn seeded_player() -> VideoPlayerApp {
+    let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
     app.current_file = Some(sample_media_file());
     app.chapters = sample_chapters();
     app.selected_audio_track = Some(1);
     app.selected_subtitle_track = Some(4);
-
-    // Load SRT subtitles
     app.external_subtitles = parse_srt(sample_subtitle_srt());
-
-    // Add to playlist
     app.playlist.add(
         "/home/user/Videos/sample.mkv".to_string(),
         "sample.mkv".to_string(),
@@ -4061,30 +4820,13 @@ fn main() {
         Some("Live Concert 2024".to_string()),
     );
     app.playlist.set_current(0);
-
-    // Simulate some interaction
-    app.play();
-    app.position = Duration::from_secs(300);
-    app.volume.set_level(80);
-
-    // Add a bookmark
-    app.add_bookmark("Favorite scene".to_string());
-
-    // Render
-    let commands = app.render();
-    let _ = commands.len();
-
-    // Verify all tabs render
-    for tab in PlayerTab::all() {
-        app.active_tab = *tab;
-        let cmds = app.render();
-        let _ = cmds.len();
-    }
+    app
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
+fn main() -> ExitCode {
+    let mut app = seeded_player();
+    app::launch("videoplayer", &mut app)
+}
 
 #[cfg(test)]
 mod tests {
@@ -4610,7 +5352,11 @@ mod tests {
         let orders = repeated_shuffle_orders(0xF1D0_1234_ABCD_5678, 6, 60);
         let firsts: std::collections::HashSet<usize> =
             orders.iter().filter_map(|o| o.first().copied()).collect();
-        assert_eq!(firsts.len(), 6, "only these tracks ever came first: {firsts:?}");
+        assert_eq!(
+            firsts.len(),
+            6,
+            "only these tracks ever came first: {firsts:?}"
+        );
     }
 
     /// A fresh playlist is seeded by the system, not by a literal.
@@ -5052,7 +5798,7 @@ mod tests {
 
         for tab in PlayerTab::all() {
             app.active_tab = *tab;
-            let cmds = app.render();
+            let cmds = app.render_commands();
             assert!(
                 !cmds.is_empty(),
                 "Tab {:?} produced no render commands",
@@ -5064,7 +5810,7 @@ mod tests {
     #[test]
     fn test_render_empty_state() {
         let app = VideoPlayerApp::new(800.0, 600.0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -5073,7 +5819,7 @@ mod tests {
         let mut app = VideoPlayerApp::new(800.0, 600.0);
         app.current_file = Some(sample_media_file());
         app.osd_message = Some("Test OSD".to_string());
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -5082,7 +5828,7 @@ mod tests {
         let mut app = VideoPlayerApp::new(800.0, 600.0);
         app.current_file = Some(sample_media_file());
         app.state = PlaybackState::Paused;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -5115,8 +5861,8 @@ mod tests {
     fn test_shortcuts_list() {
         let shortcuts = Shortcuts::list();
         assert!(shortcuts.len() > 20);
-        assert!(shortcuts.iter().any(|(k, _)| *k == "Space"));
-        assert!(shortcuts.iter().any(|(_, a)| *a == "Toggle Fullscreen"));
+        assert!(shortcuts.iter().any(|sc| sc.keys == "Space"));
+        assert!(shortcuts.iter().any(|sc| sc.action == "Toggle Fullscreen"));
     }
 
     // Recent file tests
@@ -5282,5 +6028,742 @@ mod tests {
             parse_srt_time("00:00:07"),
             Some(Duration::from_millis(7_000))
         );
+    }
+
+    // ======================================================================
+    // The keymap, the clock and the window
+    // ======================================================================
+
+    use guitk::event::Modifiers;
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn press_with(k: Key, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::NONE
+        }
+    }
+
+    fn ctrl() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            ..Modifiers::NONE
+        }
+    }
+
+    fn mouse(x: f32, y: f32, kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    fn loaded() -> VideoPlayerApp {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.current_file = Some(sample_media_file());
+        app.chapters = sample_chapters();
+        app
+    }
+
+    // --- the table is the keymap ---
+
+    #[test]
+    fn every_documented_shortcut_is_bound_to_something() {
+        // The point of holding the text and the dispatch in one row: the help
+        // panel cannot list a key that does nothing, because there is nowhere
+        // to write the row without also writing what it does.
+        for shortcut in Shortcuts::list() {
+            assert!(
+                !shortcut.keys.is_empty() && !shortcut.action.is_empty(),
+                "a row with no text is a row nobody can read: {shortcut:?}"
+            );
+        }
+        assert!(
+            Shortcuts::list().len() > 30,
+            "the panel used to list 32 rows and must not have lost them"
+        );
+    }
+
+    #[test]
+    fn no_two_shortcuts_answer_the_same_keystroke() {
+        let list = Shortcuts::list();
+        for (i, a) in list.iter().enumerate() {
+            for b in list.iter().skip(i + 1) {
+                assert_ne!(
+                    a.press, b.press,
+                    "{} and {} both answer the same keystroke, so one of them \
+                     is drawn in the help panel and never runs",
+                    a.keys, b.keys
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_modifier_shortcut_is_not_also_the_plain_one() {
+        // Shift+Right seeks a minute and Right seeks ten seconds. If `Plain`
+        // merely ignored the modifiers, whichever came first in the table
+        // would answer both.
+        let mut app = loaded();
+        app.play();
+        app.seek_to(Duration::from_secs(600));
+        app.handle_event(&press(Key::Right));
+        assert_eq!(app.position, Duration::from_secs(610));
+        app.handle_event(&press_with(Key::Right, shift()));
+        assert_eq!(
+            app.position,
+            Duration::from_secs(670),
+            "Shift+Right must be the sixty-second seek, not the ten-second one"
+        );
+    }
+
+    #[test]
+    fn space_plays_and_pauses() {
+        let mut app = loaded();
+        assert!(app.handle_event(&press(Key::Space)));
+        assert_eq!(app.state, PlaybackState::Playing);
+        app.handle_event(&press(Key::Space));
+        assert_eq!(app.state, PlaybackState::Paused);
+    }
+
+    #[test]
+    fn the_media_keys_work_as_well_as_the_letters() {
+        let mut app = loaded();
+        app.handle_event(&press(Key::MediaPlayPause));
+        assert_eq!(app.state, PlaybackState::Playing);
+        app.handle_event(&press(Key::MediaStop));
+        assert_eq!(app.state, PlaybackState::Stopped);
+    }
+
+    #[test]
+    fn the_volume_keys_move_the_volume() {
+        let mut app = loaded();
+        let before = app.volume.level();
+        app.handle_event(&press(Key::Up));
+        assert!(app.volume.level() > before);
+        app.handle_event(&press(Key::Down));
+        assert_eq!(app.volume.level(), before);
+        app.handle_event(&press(Key::M));
+        assert!(app.volume.is_muted());
+    }
+
+    #[test]
+    fn the_bracket_keys_change_the_speed() {
+        let mut app = loaded();
+        app.handle_event(&press(Key::RightBracket));
+        assert!(app.speed.value() > 1.0);
+        app.handle_event(&press(Key::Backslash));
+        assert_eq!(app.speed, PlaybackSpeed::NORMAL);
+        app.handle_event(&press(Key::LeftBracket));
+        assert!(app.speed.value() < 1.0);
+    }
+
+    #[test]
+    fn a_digit_seeks_to_its_tenth_of_the_file() {
+        let mut app = loaded();
+        let duration = app.current_file.as_ref().expect("a file").duration;
+        app.handle_event(&press(Key::Num5));
+        assert_eq!(
+            app.position.as_millis(),
+            duration.as_millis() / 2,
+            "5 is halfway through"
+        );
+        app.handle_event(&press(Key::Num0));
+        assert_eq!(app.position, Duration::ZERO, "0 is the start");
+    }
+
+    #[test]
+    fn a_shortcut_that_is_not_bound_leaves_the_player_alone() {
+        let mut app = loaded();
+        assert!(!app.handle_event(&press(Key::F9)));
+        assert!(
+            !app.handle_event(&press_with(Key::O, ctrl())),
+            "Ctrl+O opens a file and this tree has no file chooser -- the row \
+             was removed from the help panel rather than left as a promise"
+        );
+    }
+
+    #[test]
+    fn ctrl_b_adds_a_bookmark_where_the_film_is() {
+        let mut app = loaded();
+        app.play();
+        app.seek_to(Duration::from_secs(125));
+        assert!(app.handle_event(&press_with(Key::B, ctrl())));
+        assert_eq!(app.bookmarks.len(), 1);
+        assert_eq!(app.bookmarks[0].position, Duration::from_secs(125));
+        assert!(
+            app.bookmarks[0].label.contains("2:05"),
+            "the label should say where it is: {:?}",
+            app.bookmarks[0].label
+        );
+    }
+
+    #[test]
+    fn plain_b_cycles_the_audio_track_and_ctrl_b_does_not() {
+        // The two share a key and differ only by the modifier.
+        let mut app = loaded();
+        app.selected_audio_track = Some(1);
+        app.handle_event(&press(Key::B));
+        assert!(app.bookmarks.is_empty(), "plain B is not a bookmark");
+        app.handle_event(&press_with(Key::B, ctrl()));
+        assert_eq!(app.bookmarks.len(), 1);
+    }
+
+    #[test]
+    fn the_sync_keys_shift_the_subtitles_and_the_sound() {
+        let mut app = loaded();
+        app.handle_event(&press(Key::K));
+        assert_eq!(app.subtitle_delay.ms, 100);
+        app.handle_event(&press(Key::J));
+        assert_eq!(app.subtitle_delay.ms, 0);
+        app.handle_event(&press(Key::H));
+        assert_eq!(app.audio_sync.ms, 100);
+        app.handle_event(&press(Key::G));
+        assert_eq!(app.audio_sync.ms, 0);
+    }
+
+    #[test]
+    fn a_cycles_the_aspect_ratio() {
+        let mut app = loaded();
+        assert_eq!(app.aspect_mode, AspectMode::Fit);
+        app.handle_event(&press(Key::A));
+        assert_eq!(app.aspect_mode, AspectMode::Fill);
+    }
+
+    #[test]
+    fn the_panel_keys_open_and_close_their_tabs() {
+        let mut app = loaded();
+        for (key, tab) in [
+            (Key::L, PlayerTab::Playlist),
+            (Key::I, PlayerTab::MediaInfo),
+            (Key::E, PlayerTab::Equalizer),
+        ] {
+            app.active_tab = PlayerTab::Player;
+            app.handle_event(&press(key));
+            assert_eq!(app.active_tab, tab, "{key:?} must open {tab:?}");
+            app.handle_event(&press(key));
+            assert_eq!(
+                app.active_tab,
+                PlayerTab::Player,
+                "{key:?} must close it again"
+            );
+        }
+    }
+
+    // --- the on-screen display expires ---
+
+    #[test]
+    fn an_on_screen_message_goes_away_by_itself() {
+        let mut app = loaded();
+        app.handle_event(&press(Key::Up));
+        assert!(
+            app.osd_message.is_some(),
+            "turning the volume up says so on screen"
+        );
+        let life = app.preferences.osd_duration_ms;
+        app.tick(life / 2);
+        assert!(app.osd_message.is_some(), "it has not been long enough yet");
+        app.tick(life);
+        assert_eq!(
+            app.osd_message, None,
+            "the message had no way to expire before there was a clock: \
+             'Volume: 80' stayed on the picture for the rest of the film"
+        );
+    }
+
+    #[test]
+    fn a_new_message_gets_the_full_time_again() {
+        let mut app = loaded();
+        app.handle_event(&press(Key::Up));
+        app.tick(app.preferences.osd_duration_ms - 1);
+        app.handle_event(&press(Key::Down));
+        assert_eq!(app.osd_remaining_ms, app.preferences.osd_duration_ms);
+    }
+
+    // --- the picture advances ---
+
+    #[test]
+    fn a_playing_film_advances_with_the_clock() {
+        let mut app = loaded();
+        app.play();
+        app.tick(1000);
+        assert_eq!(app.position, Duration::from_millis(1000));
+        app.tick(500);
+        assert_eq!(app.position, Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn a_paused_film_does_not() {
+        let mut app = loaded();
+        app.play();
+        app.tick(1000);
+        app.pause();
+        app.tick(5000);
+        assert_eq!(app.position, Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn double_speed_advances_twice_as_fast() {
+        let mut app = loaded();
+        app.play();
+        app.speed = PlaybackSpeed::DOUBLE;
+        app.tick(1000);
+        assert_eq!(
+            app.position,
+            Duration::from_millis(2000),
+            "the speed is what the speed control is for"
+        );
+    }
+
+    #[test]
+    fn the_end_of_a_file_stops_rather_than_running_past_it() {
+        let mut app = loaded();
+        let duration = app.current_file.as_ref().expect("a file").duration;
+        app.play();
+        app.seek_to(Duration::from_millis(duration.as_millis() - 100));
+        app.tick(5000);
+        assert_eq!(app.position, duration, "the film cannot get longer");
+        assert_ne!(
+            app.state,
+            PlaybackState::Playing,
+            "with nothing queued behind it, the end of the file is a stop"
+        );
+    }
+
+    #[test]
+    fn repeat_one_starts_the_same_file_again() {
+        let mut app = loaded();
+        let duration = app.current_file.as_ref().expect("a file").duration;
+        app.repeat = RepeatMode::One;
+        app.play();
+        app.seek_to(Duration::from_millis(duration.as_millis() - 10));
+        app.tick(1000);
+        assert_eq!(app.position, Duration::ZERO);
+        assert_eq!(app.state, PlaybackState::Playing);
+    }
+
+    // --- the controls fade ---
+
+    #[test]
+    fn the_controls_fade_out_of_a_playing_picture() {
+        let mut app = loaded();
+        app.play();
+        assert!(app.controls_visible);
+        app.tick(CONTROLS_HIDE_MS + 1);
+        assert!(
+            !app.controls_visible,
+            "the controls have a hide timer and nothing ever counted it down"
+        );
+    }
+
+    #[test]
+    fn any_sign_of_life_brings_the_controls_back() {
+        let mut app = loaded();
+        app.play();
+        app.tick(CONTROLS_HIDE_MS + 1);
+        assert!(!app.controls_visible);
+        app.handle_event(&mouse(400.0, 300.0, MouseEventKind::Move));
+        assert!(app.controls_visible);
+    }
+
+    #[test]
+    fn the_controls_stay_up_while_the_film_is_paused() {
+        let mut app = loaded();
+        app.play();
+        app.pause();
+        app.tick(CONTROLS_HIDE_MS * 4);
+        assert!(
+            app.controls_visible,
+            "nothing is happening behind them, so there is nothing to get out \
+             of the way of"
+        );
+    }
+
+    // --- the seek bar and the tabs ---
+
+    #[test]
+    fn clicking_a_tab_opens_it() {
+        let mut app = loaded();
+        let rects = app.tab_rects();
+        let (tab, rect) = rects[3];
+        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        assert_eq!(app.tab_at(x, y), Some(tab));
+        assert!(app.handle_event(&mouse(x, y, MouseEventKind::Press(MouseButton::Left))));
+        assert_eq!(app.active_tab, tab);
+    }
+
+    #[test]
+    fn every_tab_is_reachable_where_it_is_drawn() {
+        let app = loaded();
+        for (tab, rect) in app.tab_rects() {
+            assert_eq!(
+                app.tab_at(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+                Some(tab),
+                "{tab:?} is drawn at {rect:?} and must be clickable there"
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_below_the_tab_strip_is_not_a_tab() {
+        let app = loaded();
+        assert_eq!(app.tab_at(20.0, TAB_BAR_HEIGHT + 4.0), None);
+    }
+
+    #[test]
+    fn dragging_the_seek_bar_previews_and_only_seeks_on_release() {
+        let mut app = loaded();
+        app.play();
+        let bar = app.seek_bar();
+        let y = bar.y + bar.height / 2.0;
+        let quarter = bar.x + bar.width / 4.0;
+
+        app.handle_event(&mouse(quarter, y, MouseEventKind::Press(MouseButton::Left)));
+        assert!(app.seeking);
+        assert!(app.seek_preview_position.is_some());
+        assert_eq!(
+            app.position,
+            Duration::ZERO,
+            "dragging across a film must not seek to every pixel of the way"
+        );
+
+        let three_quarters = bar.x + bar.width * 0.75;
+        app.handle_event(&mouse(three_quarters, y, MouseEventKind::Move));
+        assert_eq!(app.position, Duration::ZERO);
+
+        app.handle_event(&mouse(
+            three_quarters,
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        ));
+        assert!(!app.seeking);
+        assert_eq!(app.seek_preview_position, None);
+        let duration = app.current_file.as_ref().expect("a file").duration;
+        let want = duration.as_millis() * 3 / 4;
+        assert!(
+            app.position.as_millis().abs_diff(want) < duration.as_millis() / 100,
+            "released three quarters along: {} of {}",
+            app.position.as_millis(),
+            duration.as_millis()
+        );
+    }
+
+    #[test]
+    fn the_seek_bar_is_thicker_to_grab_than_it_is_to_look_at() {
+        let app = loaded();
+        let bar = app.seek_bar();
+        assert!(
+            bar.height > SEEK_BAR_HEIGHT,
+            "a six-pixel line is not a thing a pointer can land on"
+        );
+        let drawn_top = app.controls_top() + SEEK_BAR_OFFSET;
+        assert!(
+            bar.y < drawn_top && bar.y + bar.height > drawn_top + SEEK_BAR_HEIGHT,
+            "the grab band must reach above and below the line it is for"
+        );
+    }
+
+    #[test]
+    fn a_release_without_a_drag_does_not_seek() {
+        let mut app = loaded();
+        app.play();
+        app.seek_to(Duration::from_secs(300));
+        let bar = app.seek_bar();
+        assert!(!app.handle_event(&mouse(
+            bar.x + 10.0,
+            bar.y + 2.0,
+            MouseEventKind::Release(MouseButton::Left)
+        )));
+        assert_eq!(app.position, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn the_seek_bar_moves_with_the_window() {
+        let mut app = loaded();
+        let narrow = app.seek_bar();
+        app.set_window_size(1920.0, 1080.0);
+        let wide = app.seek_bar();
+        assert!(wide.width > narrow.width, "the bar spans the window");
+        assert!(wide.y > narrow.y, "the controls sit on the bottom edge");
+    }
+
+    // --- the strap ---
+
+    #[test]
+    fn the_title_names_the_file_and_says_when_it_is_paused() {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(app.title(), "Video Player");
+        app.current_file = Some(sample_media_file());
+        let name = app.current_file.as_ref().expect("a file").file_name.clone();
+        app.play();
+        assert_eq!(app.title(), format!("{name} - Video Player"));
+        app.pause();
+        assert_eq!(app.title(), format!("{name} (paused) - Video Player"));
+    }
+
+    #[test]
+    fn the_clock_runs_only_while_there_is_something_to_advance() {
+        let mut app = loaded();
+        assert_eq!(app.tick_interval(), None);
+        app.play();
+        assert_eq!(app.tick_interval(), Some(FRAME_TICK));
+        app.pause();
+        assert_eq!(
+            app.tick_interval(),
+            Some(FRAME_TICK),
+            "pausing says 'Paused' on screen, and that message still has to              be taken off it"
+        );
+        app.tick(app.preferences.osd_duration_ms);
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "once the message is gone a paused player has nothing left to              advance"
+        );
+        app.handle_event(&press(Key::Up));
+        assert_eq!(app.tick_interval(), Some(FRAME_TICK));
+    }
+
+    #[test]
+    fn a_tick_with_nothing_to_do_asks_for_no_frame() {
+        let mut app = loaded();
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 100 }),
+            Response::Idle
+        );
+    }
+
+    #[test]
+    fn a_resize_relays_out_and_a_repeat_of_it_does_not() {
+        let mut app = loaded();
+        let resize = Event::Resize {
+            width: 800,
+            height: 600,
+        };
+        assert_eq!(app.on_event(&resize), Response::Redraw);
+        assert_eq!(app.width, 800.0);
+        assert_eq!(app.on_event(&resize), Response::Idle);
+    }
+
+    #[test]
+    fn a_window_dragged_tiny_keeps_a_layout() {
+        let mut app = loaded();
+        app.set_window_size(1.0, 1.0);
+        assert!(app.width >= MIN_WINDOW_WIDTH);
+        assert!(app.height >= MIN_WINDOW_HEIGHT);
+        assert!(app.seek_bar().width >= 1.0);
+    }
+
+    #[test]
+    fn the_first_frame_uses_the_size_the_compositor_gave() {
+        let mut app = loaded();
+        let tree = app.render(1600.0, 900.0);
+        assert_eq!(app.width, 1600.0);
+        assert_eq!(app.height, 900.0);
+        assert!(!tree.commands.is_empty());
+    }
+
+    #[test]
+    fn the_close_button_exits() {
+        let mut app = loaded();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn the_seeded_player_opens_on_something_to_watch() {
+        let app = seeded_player();
+        assert!(app.current_file.is_some());
+        assert!(!app.chapters.is_empty());
+        assert!(!app.playlist.is_empty());
+        assert!(!app.external_subtitles.is_empty());
+    }
+
+    #[test]
+    fn a_modifier_a_shortcut_does_not_ask_for_runs_nothing() {
+        // `Plain` insisting the modifiers are clear is only half of it: each
+        // arm has to insist on its own modifier too, or Ctrl+Right becomes the
+        // shift binding and Shift+B becomes the control one -- keystrokes
+        // nobody documented, doing things nobody asked for.
+        let mut app = loaded();
+        app.play();
+        app.seek_to(Duration::from_secs(600));
+        assert!(!app.handle_event(&press_with(Key::Right, ctrl())));
+        assert_eq!(app.position, Duration::from_secs(600));
+
+        assert!(!app.handle_event(&press_with(Key::B, shift())));
+        assert!(app.bookmarks.is_empty());
+
+        assert!(
+            !app.handle_event(&press_with(Key::Num5, ctrl())),
+            "Ctrl+5 is not the seek-to-halfway shortcut"
+        );
+        assert_eq!(app.position, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn the_left_arrow_seeks_backward() {
+        let mut app = loaded();
+        app.play();
+        app.seek_to(Duration::from_secs(600));
+        app.handle_event(&press(Key::Left));
+        assert_eq!(app.position, Duration::from_secs(590));
+        app.handle_event(&press_with(Key::Left, shift()));
+        assert_eq!(app.position, Duration::from_secs(530));
+    }
+
+    #[test]
+    fn a_keystroke_brings_the_controls_back_and_keeps_them_up() {
+        let mut app = loaded();
+        app.play();
+        app.tick(CONTROLS_HIDE_MS + 1);
+        assert!(!app.controls_visible);
+
+        app.handle_event(&press(Key::Up));
+        assert!(app.controls_visible, "a keystroke is a sign of life");
+        app.tick(CONTROLS_HIDE_MS / 2);
+        assert!(
+            app.controls_visible,
+            "waking them without restarting the countdown puts them straight \
+             back down on the next tick"
+        );
+    }
+
+    #[test]
+    fn the_tab_strip_does_not_stretch_across_a_wide_window() {
+        let mut app = loaded();
+        app.set_window_size(2560.0, 1440.0);
+        for (tab, rect) in app.tab_rects() {
+            assert!(
+                rect.width <= TAB_MAX_WIDTH,
+                "{tab:?} is {} wide on a 2560px window; a tab strip that \
+                 grows without limit is a row of seven enormous buttons",
+                rect.width
+            );
+        }
+    }
+
+    #[test]
+    fn dragging_off_the_end_of_the_bar_stops_at_the_end_of_the_film() {
+        // A drag is not bounded by the bar the way a click is: the pointer
+        // leaves it and the moves keep coming.
+        let mut app = loaded();
+        app.play();
+        let bar = app.seek_bar();
+        let y = bar.y + bar.height / 2.0;
+        app.handle_event(&mouse(
+            bar.x + 10.0,
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        app.handle_event(&mouse(bar.x + bar.width * 3.0, y, MouseEventKind::Move));
+        app.handle_event(&mouse(
+            bar.x + bar.width * 3.0,
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        ));
+        let duration = app.current_file.as_ref().expect("a file").duration;
+        assert_eq!(app.position, duration, "the film cannot be seeked past");
+
+        app.handle_event(&mouse(
+            bar.x + 10.0,
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        app.handle_event(&mouse(
+            bar.x - bar.width,
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        ));
+        assert_eq!(app.position, Duration::ZERO, "nor before its start");
+    }
+
+    #[test]
+    fn the_preview_follows_the_pointer_during_a_drag() {
+        let mut app = loaded();
+        app.play();
+        let bar = app.seek_bar();
+        let y = bar.y + bar.height / 2.0;
+        app.handle_event(&mouse(
+            bar.x + bar.width * 0.1,
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        let first = app.seek_preview_position.expect("a preview");
+        app.handle_event(&mouse(bar.x + bar.width * 0.9, y, MouseEventKind::Move));
+        let second = app.seek_preview_position.expect("a preview");
+        assert!(
+            second > first,
+            "the preview is what a drag is for: {first:?} then {second:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_duration_has_no_bitrate_rather_than_dividing_by_zero() {
+        // The division is guarded once, by `checked_div`, rather than by an
+        // early return standing in front of a bare `/`.
+        let mut file = sample_media_file();
+        file.duration = Duration::ZERO;
+        assert_eq!(file.overall_bitrate(), 0);
+    }
+
+    #[test]
+    fn each_binding_insists_on_its_own_modifier() {
+        // Asserted on `Press` directly rather than through the table, because
+        // through the table it is masked: the plain binding for a key sits
+        // above the shifted one and answers first. That masking is the thing
+        // being ruled out -- a row moved up the table must not change what
+        // any other row answers.
+        let plain_right = KeyEvent {
+            key: Key::Right,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        assert!(Press::Plain(Key::Right).matches(&plain_right));
+        assert!(
+            !Press::Shift(Key::Right).matches(&plain_right),
+            "the sixty-second seek must not answer an unshifted arrow,              whatever order the table happens to be in"
+        );
+        let shifted = KeyEvent {
+            modifiers: shift(),
+            ..plain_right.clone()
+        };
+        assert!(Press::Shift(Key::Right).matches(&shifted));
+        assert!(!Press::Plain(Key::Right).matches(&shifted));
+    }
+
+    #[test]
+    fn a_preview_dragged_off_the_end_still_names_a_point_in_the_film() {
+        let mut app = loaded();
+        app.play();
+        let bar = app.seek_bar();
+        let y = bar.y + bar.height / 2.0;
+        let duration = app.current_file.as_ref().expect("a file").duration;
+        app.handle_event(&mouse(
+            bar.x + 10.0,
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        app.handle_event(&mouse(bar.x + bar.width * 5.0, y, MouseEventKind::Move));
+        assert_eq!(
+            app.seek_preview_position,
+            Some(duration),
+            "the time shown under a pointer dragged off the right of the bar              must be the end of the film, not a time past it"
+        );
+        app.handle_event(&mouse(bar.x - bar.width, y, MouseEventKind::Move));
+        assert_eq!(app.seek_preview_position, Some(Duration::ZERO));
     }
 }

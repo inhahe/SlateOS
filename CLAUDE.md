@@ -80,6 +80,23 @@ Work only roadmap items tagged with your own lane letter. When you need a
 change in another lane's tree, file `requests/<from>-<to>-<slug>.md` and
 pick up something else rather than making the change yourself.
 
+**`requests/` is for technical exchange, not for saying "stop".** A request
+lives on a branch, so the lane it is addressed to cannot see it until they
+fetch and merge — which makes it useless for anything time-sensitive. When you
+need every lane quiescent (a shared-file repair, a migration, anything that
+cannot be done while three agents are writing), **raise a halt** rather than
+filing a request or asking the operator to relay it:
+
+    python scripts/check-lane-signals.py --raise-halt "why"
+    python scripts/check-lane-signals.py --clear-halt      # when it has passed
+
+It is stored in the git *common* directory, which every worktree shares, so it
+is visible to all three lanes immediately with no merge and no push. The boot
+test checks it as its first gate and refuses to start while it is in force —
+which is the point, since a run is two to three hours and a halt is only worth
+anything if it is seen before one begins. Lift it explicitly when done; nothing
+expires it.
+
 **Fetch and merge `origin/main` at the start of every task, and merge your
 lane up to `main` at the end of every green one.** Every shared document —
 `roadmap.md`, `known-issues.md`, `design-decisions.md`, `open-questions.md`,

@@ -321,6 +321,37 @@ the rule was written and had been wrong by 6× for weeks; the argument does not
 depend on the number, but a stale one invites the reader to re-derive the
 conclusion from a figure that no longer holds.)
 
+#### What `requests/` is *not* for: saying "stop"
+
+A request lives on a branch, so the lane it addresses cannot see it until they
+`git fetch && git merge origin/main`. That is fine for technical exchange and
+useless for anything time-sensitive. Measured on 2026-09-06: lane A needed B
+and C quiescent for a drive migration, filed a request, pushed it to `main` —
+and checked afterwards. Lane B could not see it at all (47 commits behind), and
+lane C had it physically in its tree and had never been prompted to look. The
+operator ended up carrying the message by hand.
+
+For that traffic use a **halt**, which lives in the git *common* directory that
+every worktree shares, so it reaches all three lanes immediately with no merge
+and no push:
+
+    python scripts/check-lane-signals.py --raise-halt "why"     # ask everyone to stop
+    python scripts/check-lane-signals.py                        # what is pending for me
+    python scripts/check-lane-signals.py --clear-halt           # lift it when done
+    python scripts/check-lane-signals.py --to c --notice "text" # inform without blocking
+
+Two levels, and the difference is deliberate. A **notice** informs and exits 0.
+A **halt** exits 1, and `boot-test.sh` runs the check as its *first* gate — so
+a halt stops a two-to-three-hour run before it starts rather than being
+discovered after. That ordering is the whole value: every other gate grades the
+tree, this one grades whether the tree should be graded right now.
+
+Nothing expires a halt; lift it explicitly, because one that cleared itself on
+a timer would do so in the middle of the maintenance it exists to protect.
+
+This does not replace `requests/`. Bug reports, design proposals and decisions
+still belong there, in git, where they are reviewable and attributable.
+
 ### 3. Shared documents are append-only, with per-lane sections
 
 These files are read by all three lanes and would otherwise be the worst

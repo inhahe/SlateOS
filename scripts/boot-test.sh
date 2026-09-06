@@ -3117,11 +3117,20 @@ check_prerequisites
 # checkers, the whole tooling test-suite sweep, shellcheck, and a full clippy
 # pass over the kernel.  The phase is recorded as `gates_seconds`.
 #
-# Whether it is bigger than the build is an open question, and deliberately
-# left open here.  The only measurement in the header above -- "~3000s before
-# QEMU was even started" -- is of gates *and* clippy *and* build together, so it
-# cannot answer it, and writing a guess into this comment would put the same
-# unsourced number back in circulation that this stamp exists to replace.
+# Whether it is bigger than the build was an open question when this stamp was
+# added, and `gates_seconds` has now answered it, decisively and in the
+# direction nobody expected.  Boot20 (2026-09-05, `6f21db1b5`, a PASS):
+#
+#     script 11608s = gates 10000s (86%) + qemu 806s (7%) + build 107s (1%)
+#
+# The gates are not merely bigger than the build, they are two orders of
+# magnitude bigger, and bigger than everything else in the run combined.  The
+# header's old "~3000s before QEMU was even started" measured gates *and* clippy
+# *and* build together and so could not attribute it; this can.
+#
+# That reframes the next question from "is it the gates?" to "*which* gate?",
+# which no phase stamp can answer -- so the gates are individually timed via
+# CHECKER_TIMING_LOG below.
 #
 # Stamped AFTER check_prerequisites, and matching the reason `BUILD_START_EPOCH`
 # does not use `SECONDS`: locating a toolchain is not a gate, and folding it in
@@ -3136,6 +3145,21 @@ check_prerequisites
 # like an expensive checker.  It shows up in `script_seconds` minus the three
 # phases, which is where an unexplained wait belongs.
 GATES_START_EPOCH="$(date +%s)"
+
+# Per-gate wall-clock, appended by `run_checker` (scripts/run-checker.sh) as one
+# `<label>\t<seconds>\t<exit>` row per gate.  Read back at the end of the phase.
+#
+# In CHECKER_LOGDIR, which is the worktree's own git dir, so three lanes running
+# at once do not share one file -- and with `$$` in the name so two overlapping
+# runs *within* one lane do not either.  That is the same pair of hazards, and
+# the same fix, as the checker logs beside it.
+#
+# Truncated rather than appended-to at the start of each run: this answers
+# "where did THIS run's 10000s go", and a file that accumulated across runs
+# would silently average a cold first run with warm later ones.
+CHECKER_TIMING_LOG="$CHECKER_LOGDIR/boot-test-gate-timing.$$.tsv"
+export CHECKER_TIMING_LOG
+: >"$CHECKER_TIMING_LOG" 2>/dev/null || CHECKER_TIMING_LOG=""
 
 # A landed request is stamped, not deleted (roadmap.md rule 2, §315).
 #
@@ -6261,6 +6285,45 @@ check_cfg_unix
 # what this number is evidence for.
 GATES_SECONDS=$(( $(date +%s) - GATES_START_EPOCH ))
 echo "=== Gates OK (${GATES_SECONDS}s) ==="
+
+# Where those seconds went, per gate.
+#
+# The phase total above says the gates cost 86% of a passing run (see the
+# comment at GATES_START_EPOCH); this says which of them to look at first.
+# Without it the only way to act on the total is to instrument sixty call sites
+# by hand, which is why the total sat unattributed for the whole life of the
+# stamp.
+#
+# Printed as a top-N rather than the full table on purpose: sixty rows is a
+# scroll, and the actionable claim -- "these few are the phase" -- is exactly
+# what a long table buries.  The unaccounted remainder is stated rather than
+# left to subtraction, because it is the number that says whether the top-N is
+# the story or a distraction: gates are not the only thing in the phase (the
+# tooling test-suite sweep, shellcheck and clippy do not go through
+# `run_checker`), so a small top-N over a large remainder means the expensive
+# work is somewhere this instrument cannot see, and that is worth knowing
+# immediately rather than concluding after optimising the wrong thing.
+if [ -n "${CHECKER_TIMING_LOG:-}" ] && [ -s "$CHECKER_TIMING_LOG" ]; then
+    _gt_n=$(wc -l <"$CHECKER_TIMING_LOG" | tr -d ' ')
+    _gt_sum=$(awk -F'\t' '{s += $2} END {print s + 0}' "$CHECKER_TIMING_LOG")
+    echo "=== Slowest gates (of ${_gt_n} timed, ${_gt_sum}s of the ${GATES_SECONDS}s phase) ==="
+    sort -t"$(printf '\t')" -k2,2nr "$CHECKER_TIMING_LOG" | head -12 |
+        while IFS="$(printf '\t')" read -r _gt_label _gt_secs _gt_rc; do
+            # The exit code is carried through rather than dropped: a gate that
+            # skipped (2 at a --may-skip site) or found something (1) did not do
+            # the same amount of work as one that passed, and a bare seconds
+            # column would present those as comparable.
+            case "$_gt_rc" in
+            0) _gt_note="" ;;
+            *) _gt_note="  (exit $_gt_rc)" ;;
+            esac
+            printf '    %6ss  %s%s\n' "$_gt_secs" "$_gt_label" "$_gt_note"
+        done
+    echo "    ---"
+    echo "    $(( GATES_SECONDS - _gt_sum ))s of the phase was NOT in a run_checker gate"
+    echo "    (the tooling test-suite sweep, shellcheck and clippy are not routed"
+    echo "     through run_checker, so they are in the remainder, not the table)."
+fi
 
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then

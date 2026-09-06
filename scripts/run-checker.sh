@@ -164,6 +164,23 @@
 #   CHECKER_NOTE      one extra paragraph for the no-verdict message, or empty.
 #                     The hook uses it to say why the gate's bypass is the wrong
 #                     reaction; boot-test has no bypass and leaves it unset.
+#   CHECKER_TIMING_LOG  a file to append one `<label>\t<seconds>\t<exit>` row to
+#                     per gate, or empty to record nothing. Unset by default, so
+#                     a caller that has not asked for it -- the pre-push hook --
+#                     is byte-for-byte unaffected, not even paying two `date`s.
+#
+# ## Why the gates are worth timing at all
+#
+# Measured on boot20 (2026-09-05, `bench/boot-history.jsonl` at `6f21db1b5`): a
+# passing run took 11608 s, of which the **gates were 10000 s — 86%**, against
+# 806 s in QEMU (7%) and 107 s actually compiling the kernel (1%). The harness
+# has always been able to say that much, because it stamps the phase boundaries
+# itself. What it could not say is *which* gate, and with sixty-odd of them
+# behind one `run_checker` the answer was unobtainable without instrumenting
+# each call site by hand.
+#
+# One sample point here answers it for all of them, which is the same argument
+# that put the crash/finding distinction in this file rather than in each gate.
 
 # run_checker [--may-skip] <label> <command> [args...]
 run_checker() {
@@ -234,8 +251,42 @@ run_checker() {
     # adopted lane B's --may-skip implementation wholesale -- correctly, but the
     # buffering fix rode along in the file that was replaced. It is restored here
     # rather than in the caller so it cannot be lost the same way twice.)
+    # Wall-clock is sampled around the child and recorded before anything is
+    # decided about it -- see the block below on why the write cannot wait.
+    _rc_t0=
+    [ -n "${CHECKER_TIMING_LOG:-}" ] && _rc_t0=$(date +%s 2>/dev/null)
+
     PYTHONUNBUFFERED=1 "$@" >"$_rc_log" 2>&1
     _rc=$?
+
+    # Record this gate's cost NOW, before the outcome is classified.
+    #
+    # Every arm below this point either returns or `exit`s, and the no-verdict
+    # arm exits from inside the function -- so a timing write placed after the
+    # classification is lost on precisely the runs where it is most wanted. The
+    # gate that fell over is a strong candidate for the gate that ran long
+    # (a `MemoryError` in `strip_noise` arrives after the memory was spent), and
+    # an accounting that silently drops its slowest sample is worse than none:
+    # it reads as a complete profile.
+    #
+    # The exit code is recorded rather than a classification because it is
+    # available here and the classification is not -- rc=2 is a skip at a
+    # `--may-skip` call site and an abort elsewhere, a distinction the consumer
+    # can make later but this line cannot make yet without duplicating all four
+    # conditions above. One field, no second copy of the logic.
+    #
+    # `>>` on a line under PIPE_BUF is atomic on every platform this runs on, so
+    # concurrent lanes appending to one file interleave rows but never bytes.
+    if [ -n "${CHECKER_TIMING_LOG:-}" ] && [ -n "$_rc_t0" ]; then
+        _rc_t1=$(date +%s 2>/dev/null)
+        # A clock that failed to read leaves the field empty rather than
+        # inventing a 0 -- a gate that appears to have taken no time is a claim,
+        # and this is not in a position to make it.
+        if [ -n "$_rc_t1" ]; then
+            echo "$_rc_label	$((_rc_t1 - _rc_t0))	$_rc" >>"$CHECKER_TIMING_LOG" 2>/dev/null
+        fi
+    fi
+
     cat "$_rc_log" >&2
 
     if [ "$_rc" = "0" ]; then

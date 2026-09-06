@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
@@ -312,42 +313,62 @@ fn expiry_warning(aging: &userdb::Aging, today: Option<i64>) -> Option<i64> {
 // Session setup
 // ---------------------------------------------------------------------------
 
+/// Put one variable in the environment being built.
+///
+/// A free function rather than a closure over the map, because the
+/// preserve-environment branch inserts into the same map in a loop and a
+/// closure holding it would own the only mutable borrow.
+fn set(env_map: &mut HashMap<OsString, OsString>, key: &str, value: &OsStr) {
+    env_map.insert(OsString::from(key), value.to_os_string());
+}
+
 /// Build the login environment
-fn build_environment(user: &PasswdEntry, preserve_env: bool) -> HashMap<String, String> {
-    let mut env_map = HashMap::new();
+fn build_environment(user: &PasswdEntry, preserve_env: bool) -> HashMap<OsString, OsString> {
+    let mut env_map: HashMap<OsString, OsString> = HashMap::new();
 
     if !preserve_env {
         // Start fresh
-        env_map.insert("HOME".to_string(), user.home_dir.display().to_string());
-        env_map.insert("SHELL".to_string(), user.shell.display().to_string());
-        env_map.insert("USER".to_string(), user.username.clone());
-        env_map.insert("LOGNAME".to_string(), user.username.clone());
+        set(&mut env_map, "HOME", user.home_dir.as_os_str());
+        set(&mut env_map, "SHELL", user.shell.as_os_str());
+        set(&mut env_map, "USER", OsStr::new(&user.username));
+        set(&mut env_map, "LOGNAME", OsStr::new(&user.username));
 
         if user.uid == 0 {
-            env_map.insert("PATH".to_string(), DEFAULT_ROOT_PATH.to_string());
+            set(&mut env_map, "PATH", OsStr::new(DEFAULT_ROOT_PATH));
         } else {
-            env_map.insert("PATH".to_string(), DEFAULT_PATH.to_string());
+            set(&mut env_map, "PATH", OsStr::new(DEFAULT_PATH));
         }
 
-        // Preserve TERM if set
-        if let Ok(term) = env::var("TERM") {
-            env_map.insert("TERM".to_string(), term);
-        } else {
-            env_map.insert("TERM".to_string(), "linux".to_string());
+        // Preserve TERM if set. `var_os`, not `var`: a terminal name is
+        // whatever the thing that set it put there, and a `TERM` this cannot
+        // decode is a reason to pass it through unread, not to lose it.
+        match env::var_os("TERM") {
+            Some(term) => set(&mut env_map, "TERM", &term),
+            None => set(&mut env_map, "TERM", OsStr::new("linux")),
         }
     } else {
-        // Preserve current environment, just update user-specific vars
-        for (key, val) in env::vars() {
+        // Preserve current environment, just update user-specific vars.
+        //
+        // `vars_os`, not `vars`: `env::vars`'s iterator panics on a variable
+        // whose name or value is not valid UTF-8, and this is the branch that
+        // exists precisely to hand the caller's environment through unaltered
+        // -- so the one shape of environment it must not lose is the one it
+        // used to die on.
+        for (key, val) in env::vars_os() {
             env_map.insert(key, val);
         }
-        env_map.insert("HOME".to_string(), user.home_dir.display().to_string());
-        env_map.insert("SHELL".to_string(), user.shell.display().to_string());
-        env_map.insert("USER".to_string(), user.username.clone());
-        env_map.insert("LOGNAME".to_string(), user.username.clone());
+        set(&mut env_map, "HOME", user.home_dir.as_os_str());
+        set(&mut env_map, "SHELL", user.shell.as_os_str());
+        set(&mut env_map, "USER", OsStr::new(&user.username));
+        set(&mut env_map, "LOGNAME", OsStr::new(&user.username));
     }
 
-    // Mail
-    env_map.insert("MAIL".to_string(), format!("{MAIL_DIR}/{}", user.username));
+    // Mail. Built as an `OsString` rather than through `format!`, because
+    // `MAIL_DIR` joined to a name is a path and a path is not text.
+    let mut mail = OsString::from(MAIL_DIR);
+    mail.push("/");
+    mail.push(&user.username);
+    set(&mut env_map, "MAIL", &mail);
 
     env_map
 }
@@ -407,21 +428,29 @@ fn record_faillog(username: &str, tty: &str) {
 
 #[derive(Debug, Clone, Default)]
 struct Config {
-    username: Option<String>,
-    force_login: bool,        // -f: skip authentication
-    hostname: Option<String>, // -h: remote host
-    preserve_env: bool,       // -p: preserve environment
+    /// The account named on the command line, still as the bytes `getty` (or
+    /// whoever) passed. Not a `String`: `env::args()` *panics* on an argument
+    /// that is not valid UTF-8, which on this OS is legal input, and a login
+    /// prompt that dies before running a line of its own is the worst place
+    /// for that. See `known-issues.md` ->
+    /// `B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`.
+    username: Option<OsString>,
+    force_login: bool, // -f: skip authentication
+    /// The remote host `-h` names, for the log. Kept as given for the same
+    /// reason: it is somebody else's bytes and this only ever records them.
+    hostname: Option<OsString>, // -h: remote host
+    preserve_env: bool, // -p: preserve environment
     show_help: bool,
     show_version: bool,
 }
 
-fn parse_args(args: &[String]) -> Result<Config, String> {
+fn parse_args(args: &[OsString]) -> Result<Config, String> {
     let mut cfg = Config::default();
     let mut i = 1;
     let mut seen_dashdash = false;
 
     while i < args.len() {
-        let arg = &args[i];
+        let Some(arg) = args.get(i) else { break };
 
         if seen_dashdash {
             if cfg.username.is_none() {
@@ -431,11 +460,16 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
             continue;
         }
 
-        match arg.as_str() {
+        // An argument that is not valid UTF-8 matches no option, so it falls
+        // to the last arm and is taken as a name -- which is what it would
+        // have to be.
+        match arg.to_str().unwrap_or_default() {
             "--" => seen_dashdash = true,
             "-h" if i + 1 < args.len() => {
                 i += 1;
-                cfg.hostname = Some(args[i].clone());
+                if let Some(host) = args.get(i) {
+                    cfg.hostname = Some(host.clone());
+                }
             }
             "-f" => cfg.force_login = true,
             "-p" => cfg.preserve_env = true,
@@ -515,13 +549,19 @@ fn do_login(
     users_yaml: &std::path::Path,
     reader: &mut dyn BufRead,
     writer: &mut dyn Write,
-) -> Result<(PasswdEntry, HashMap<String, String>), LoginError> {
+) -> Result<(PasswdEntry, HashMap<OsString, OsString>), LoginError> {
     let mut attempts = 0u32;
 
     loop {
-        // Get username
+        // Get username. A name given on the command line that is not text
+        // names no account -- an account name is text -- so it is carried
+        // through as the empty string, which no account has either, and is
+        // refused by the same "user does not exist" path. Refusing it here
+        // instead would make `login` answer differently for a name that
+        // cannot exist and one that merely does not, which is an account
+        // oracle.
         let username = if let Some(ref name) = cfg.username {
-            name.clone()
+            name.to_str().unwrap_or_default().to_string()
         } else {
             write!(writer, "login: ").map_err(|e| LoginError::SystemError(e.to_string()))?;
             writer
@@ -668,7 +708,11 @@ fn do_login(
         let env_map = build_environment(&user, cfg.preserve_env);
 
         // Record successful login
-        let host = cfg.hostname.as_deref().unwrap_or("localhost");
+        let host = cfg
+            .hostname
+            .as_deref()
+            .and_then(OsStr::to_str)
+            .unwrap_or("localhost");
         record_lastlog(&username, &tty, host);
 
         // Display motd and mail check (unless hushlogin)
@@ -710,7 +754,9 @@ fn print_version() {
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
-    let args: Vec<String> = env::args().collect();
+    // `args_os`, not `args`: the latter's iterator is a literal `unwrap` and
+    // panics on an argument that is not valid UTF-8.
+    let args: Vec<OsString> = env::args_os().collect();
 
     let cfg = match parse_args(&args) {
         Ok(c) => c,
@@ -755,7 +801,9 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
             );
             eprintln!(
                 "login: environment: HOME={}",
-                env_map.get("HOME").unwrap_or(&String::new())
+                env_map
+                    .get(OsStr::new("HOME"))
+                    .map_or_else(String::new, quoting::quoteaf_os)
             );
             0
         }
@@ -776,66 +824,84 @@ mod tests {
     use scratchdir::ScratchDir;
     use std::io::Cursor;
 
+    /// The command line, as `env::args_os` would deliver it.
+    fn argv(parts: &[&str]) -> Vec<OsString> {
+        parts.iter().map(OsString::from).collect()
+    }
+
+    /// An argument that a `String` cannot hold. The development host is
+    /// Windows, where argv arrives as UTF-16 and the unrepresentable case is
+    /// an unpaired surrogate rather than a stray byte -- so the fixture is
+    /// written both ways, and each test asserts that it really is
+    /// unrepresentable rather than leaving that to the reader.
+    fn not_text() -> OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            OsString::from_vec(vec![b'a', 0x80, b'b'])
+        }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::ffi::OsStringExt as _;
+            OsString::from_wide(&[0x0061, 0xD800, 0x0062])
+        }
+    }
+
     #[test]
     fn test_parse_args_basic() {
-        let args = vec!["login".to_string(), "testuser".to_string()];
+        let args = argv(&["login", "testuser"]);
         let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.username, Some("testuser".to_string()));
+        assert_eq!(cfg.username.as_deref(), Some(OsStr::new("testuser")));
         assert!(!cfg.force_login);
     }
 
     #[test]
     fn test_parse_args_force() {
-        let args = vec!["login".to_string(), "-f".to_string(), "root".to_string()];
+        let args = argv(&["login", "-f", "root"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.force_login);
-        assert_eq!(cfg.username, Some("root".to_string()));
+        assert_eq!(cfg.username.as_deref(), Some(OsStr::new("root")));
     }
 
     #[test]
     fn test_parse_args_host() {
-        let args = vec![
-            "login".to_string(),
-            "-h".to_string(),
-            "remote.host".to_string(),
-            "user1".to_string(),
-        ];
+        let args = argv(&["login", "-h", "remote.host", "user1"]);
         let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.hostname, Some("remote.host".to_string()));
-        assert_eq!(cfg.username, Some("user1".to_string()));
+        assert_eq!(cfg.hostname.as_deref(), Some(OsStr::new("remote.host")));
+        assert_eq!(cfg.username.as_deref(), Some(OsStr::new("user1")));
     }
 
     #[test]
     fn test_parse_args_preserve() {
-        let args = vec!["login".to_string(), "-p".to_string(), "user1".to_string()];
+        let args = argv(&["login", "-p", "user1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.preserve_env);
     }
 
     #[test]
     fn test_parse_args_dashdash() {
-        let args = vec!["login".to_string(), "--".to_string(), "-user".to_string()];
+        let args = argv(&["login", "--", "-user"]);
         let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.username, Some("-user".to_string()));
+        assert_eq!(cfg.username.as_deref(), Some(OsStr::new("-user")));
     }
 
     #[test]
     fn test_parse_args_no_username() {
-        let args = vec!["login".to_string()];
+        let args = argv(&["login"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.username, None);
     }
 
     #[test]
     fn test_parse_args_help() {
-        let args = vec!["login".to_string(), "--help".to_string()];
+        let args = argv(&["login", "--help"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.show_help);
     }
 
     #[test]
     fn test_parse_args_version() {
-        let args = vec!["login".to_string(), "--version".to_string()];
+        let args = argv(&["login", "--version"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.show_version);
     }
@@ -1049,12 +1115,20 @@ mod tests {
             shell: PathBuf::from("/bin/sh"),
         };
         let env = build_environment(&user, false);
-        assert_eq!(env.get("HOME").unwrap(), "/root");
-        assert_eq!(env.get("SHELL").unwrap(), "/bin/sh");
-        assert_eq!(env.get("USER").unwrap(), "root");
-        assert_eq!(env.get("LOGNAME").unwrap(), "root");
-        assert!(env.get("PATH").unwrap().contains("sbin"));
-        assert_eq!(env.get("MAIL").unwrap(), "/var/mail/root");
+        assert_eq!(env.get(OsStr::new("HOME")).unwrap(), OsStr::new("/root"));
+        assert_eq!(env.get(OsStr::new("SHELL")).unwrap(), OsStr::new("/bin/sh"));
+        assert_eq!(env.get(OsStr::new("USER")).unwrap(), OsStr::new("root"));
+        assert_eq!(env.get(OsStr::new("LOGNAME")).unwrap(), OsStr::new("root"));
+        assert!(
+            env.get(OsStr::new("PATH"))
+                .unwrap()
+                .to_string_lossy()
+                .contains("sbin")
+        );
+        assert_eq!(
+            env.get(OsStr::new("MAIL")).unwrap(),
+            OsStr::new("/var/mail/root")
+        );
     }
 
     #[test]
@@ -1068,8 +1142,16 @@ mod tests {
             shell: PathBuf::from("/bin/bash"),
         };
         let env = build_environment(&user, false);
-        assert_eq!(env.get("HOME").unwrap(), "/home/john");
-        assert!(!env.get("PATH").unwrap().contains("sbin"));
+        assert_eq!(
+            env.get(OsStr::new("HOME")).unwrap(),
+            OsStr::new("/home/john")
+        );
+        assert!(
+            !env.get(OsStr::new("PATH"))
+                .unwrap()
+                .to_string_lossy()
+                .contains("sbin")
+        );
     }
 
     #[test]
@@ -1083,8 +1165,11 @@ mod tests {
             shell: PathBuf::from("/bin/bash"),
         };
         let env = build_environment(&user, true);
-        assert_eq!(env.get("HOME").unwrap(), "/home/john");
-        assert_eq!(env.get("USER").unwrap(), "john");
+        assert_eq!(
+            env.get(OsStr::new("HOME")).unwrap(),
+            OsStr::new("/home/john")
+        );
+        assert_eq!(env.get(OsStr::new("USER")).unwrap(), OsStr::new("john"));
     }
 
     // ---- The account's own policy ----
@@ -1268,7 +1353,7 @@ mod tests {
     #[test]
     fn test_do_login_force_with_unknown_user() {
         let cfg = Config {
-            username: Some("nonexistent_user_xyz".to_string()),
+            username: Some(OsString::from("nonexistent_user_xyz")),
             force_login: true,
             ..Default::default()
         };
@@ -1315,7 +1400,7 @@ mod tests {
         let before = auth.failures("someone");
 
         let cfg = Config {
-            username: Some("someone".to_string()),
+            username: Some(OsString::from("someone")),
             ..Default::default()
         };
         let mut reader = Cursor::new(b"whatever\n".as_slice());
@@ -1343,7 +1428,7 @@ mod tests {
         assert_eq!(auth.failures("ghost"), 0);
 
         let cfg = Config {
-            username: Some("ghost".to_string()),
+            username: Some(OsString::from("ghost")),
             ..Default::default()
         };
         let mut reader = Cursor::new(b"whatever\n".as_slice());
@@ -1369,19 +1454,12 @@ mod tests {
 
     #[test]
     fn test_parse_args_combined() {
-        let args = vec![
-            "login".to_string(),
-            "-f".to_string(),
-            "-p".to_string(),
-            "-h".to_string(),
-            "host1".to_string(),
-            "admin".to_string(),
-        ];
+        let args = argv(&["login", "-f", "-p", "-h", "host1", "admin"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.force_login);
         assert!(cfg.preserve_env);
-        assert_eq!(cfg.hostname, Some("host1".to_string()));
-        assert_eq!(cfg.username, Some("admin".to_string()));
+        assert_eq!(cfg.hostname.as_deref(), Some(OsStr::new("host1")));
+        assert_eq!(cfg.username.as_deref(), Some(OsStr::new("admin")));
     }
 
     /// Every method a `shadow(5)` entry can name must round-trip, so that
@@ -1438,7 +1516,7 @@ mod tests {
         let scratch = ScratchDir::new("login-end-to-end");
         let path = scratch_db(&scratch, &userdb::Aging::default(), false);
         let cfg = Config {
-            username: Some("alice".to_string()),
+            username: Some(OsString::from("alice")),
             ..Default::default()
         };
         let mut reader = Cursor::new(b"correct horse\n".as_slice());
@@ -1450,7 +1528,10 @@ mod tests {
 
         assert_eq!(user.username, "alice");
         assert_eq!(user.uid, 1000);
-        assert_eq!(env_map.get("HOME").map(String::as_str), Some("/home/alice"));
+        assert_eq!(
+            env_map.get(OsStr::new("HOME")).map(OsString::as_os_str),
+            Some(OsStr::new("/home/alice"))
+        );
         assert_eq!(auth.failures("alice"), 0);
     }
 
@@ -1459,7 +1540,7 @@ mod tests {
         let scratch = ScratchDir::new("login-end-to-end-wrong");
         let path = scratch_db(&scratch, &userdb::Aging::default(), false);
         let cfg = Config {
-            username: Some("alice".to_string()),
+            username: Some(OsString::from("alice")),
             ..Default::default()
         };
         let mut reader = Cursor::new(b"wrong horse\n".as_slice());
@@ -1478,7 +1559,7 @@ mod tests {
         let scratch = ScratchDir::new("login-end-to-end-locked");
         let path = scratch_db(&scratch, &userdb::Aging::default(), true);
         let cfg = Config {
-            username: Some("alice".to_string()),
+            username: Some(OsString::from("alice")),
             ..Default::default()
         };
         let mut reader = Cursor::new(b"correct horse\n".as_slice());
@@ -1503,7 +1584,7 @@ mod tests {
             false,
         );
         let cfg = Config {
-            username: Some("alice".to_string()),
+            username: Some(OsString::from("alice")),
             ..Default::default()
         };
         let mut reader = Cursor::new(b"correct horse\n".as_slice());
@@ -1531,7 +1612,7 @@ mod tests {
             false,
         );
         let cfg = Config {
-            username: Some("alice".to_string()),
+            username: Some(OsString::from("alice")),
             ..Default::default()
         };
         let mut reader = Cursor::new(b"correct horse\n".as_slice());
@@ -1544,6 +1625,86 @@ mod tests {
         assert!(
             shown.contains("your password expires in 3 days"),
             "expected an expiry warning; got {shown:?}"
+        );
+    }
+
+    // ---- argv and the environment as bytes ----
+
+    /// A username argument that a `String` cannot hold is a name, not a crash.
+    ///
+    /// `env::args()`'s iterator is a literal `unwrap`, so `login` used to die
+    /// before running a line of its own file -- at the one prompt on the
+    /// machine that an unauthenticated party can reach.
+    #[test]
+    fn a_username_argument_that_is_not_text_is_a_name_and_not_a_crash() {
+        let odd = not_text();
+        assert!(
+            odd.to_str().is_none(),
+            "the fixture must be unrepresentable as a `String`, or this test \
+             asserts nothing"
+        );
+
+        let args = vec![OsString::from("login"), odd.clone()];
+        let cfg = parse_args(&args).expect("a name, however spelled, parses");
+        assert_eq!(cfg.username.as_deref(), Some(odd.as_os_str()));
+        assert!(!cfg.force_login);
+    }
+
+    /// ...and such a name is refused, by the same path as any other name that
+    /// names no account. Answering differently for a name that *cannot* exist
+    /// and one that merely does not would be an account oracle.
+    #[test]
+    fn a_username_that_is_not_text_is_refused_like_any_other_unknown_name() {
+        let cfg = Config {
+            username: Some(not_text()),
+            ..Default::default()
+        };
+        let mut reader = Cursor::new(b"whatever\n".as_slice());
+        let mut writer = Vec::new();
+        let mut auth = scratch_authenticator();
+
+        assert!(do_login(&cfg, &mut auth, &missing_db(), &mut reader, &mut writer).is_err());
+    }
+
+    /// `-h` records a host given by whoever invoked this program, so it is
+    /// kept as given rather than decoded.
+    #[test]
+    fn a_hostname_that_is_not_text_is_kept_as_given() {
+        let odd = not_text();
+        let args = vec![
+            OsString::from("login"),
+            OsString::from("-h"),
+            odd.clone(),
+            OsString::from("alice"),
+        ];
+        let cfg = parse_args(&args).expect("parses");
+        assert_eq!(cfg.hostname.as_deref(), Some(odd.as_os_str()));
+        assert_eq!(cfg.username.as_deref(), Some(OsStr::new("alice")));
+    }
+
+    /// A home directory that is not text reaches `HOME` intact.
+    ///
+    /// It used to go through `Path::display().to_string()`, which replaces
+    /// what it cannot decode with U+FFFD -- so the shell would have been
+    /// handed a `HOME` naming a directory that does not exist, silently, for
+    /// exactly the paths this OS says are legal.
+    #[test]
+    fn a_home_directory_that_is_not_text_reaches_the_environment_intact() {
+        let odd_home = PathBuf::from(not_text());
+        let user = PasswdEntry {
+            username: "alice".to_string(),
+            uid: 1000,
+            gid: 1000,
+            gecos: String::new(),
+            home_dir: odd_home.clone(),
+            shell: PathBuf::from("/bin/sh"),
+        };
+
+        let env = build_environment(&user, false);
+        assert_eq!(
+            env.get(OsStr::new("HOME")).map(OsString::as_os_str),
+            Some(odd_home.as_os_str()),
+            "a lossy conversion here hands the shell a HOME that does not exist"
         );
     }
 }

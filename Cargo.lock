@@ -6213,6 +6213,9 @@ dependencies = [
 [[package]]
 name = "getty"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ggez-cli"
@@ -9444,6 +9447,7 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "posix",
+ "quoting",
  "scratchdir",
  "userdb",
 ]

@@ -262,6 +262,7 @@ walking the real string and therefore only ever returns offsets into it:
 
 | App | Site |
 |---|---|
+| `ircclient` | IRC parsing, channels, users, slash commands | anything to type with. `input_text` was drawn by the renderer and written by nobody, and `input_history`/`input_history_idx` beside it were written once in `new` and never touched | `None` -- messages come from a server, not a timer |
 | `whiteboard` | drawing tools, layers, pages, undo, sticky notes | events. `on_canvas_press`/`move`/`release`/`scroll` and `start_pan` were all written and none was called, and `Tool::shortcut` named a letter per tool that nothing dispatched on | `None` -- nothing on a board moves on its own |
 | `photomanager` | albums, EXIF, ratings, tags, smart albums, duplicates | any input at all, and a scroll offset: the grid cut itself off at the window edge with no offset to move, so a library of four hundred photos showed the first screenful and hid the rest for good | `SLIDESHOW_TICK` while a slideshow runs |
 | `videoplayer` | playback, playlist, chapters, subtitles, equalizer | any input at all -- and it drew a **Keyboard Shortcuts** tab listing thirty-two keys, none of which were bound to anything, because the file did not import `guitk::event` | `FRAME_TICK` while playing or a message is expiring |
@@ -57307,7 +57308,7 @@ and that is exactly the shape that survives a reading.
 screenful of information that is a constant compiled into the program. The
 drawing is real, the filtering and sorting and searching are real, the parsing
 is real — and there is no source. This entry names the pattern, because it has
-now been found fourteen times and writing it up fourteen times separately would train
+now been found fifteen times and writing it up fifteen times separately would train
 the reader to skim it.
 
 **`email` is the sharpest case and the least fixable today.** The client is

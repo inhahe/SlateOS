@@ -55411,3 +55411,24 @@ that used to be listed had nothing to bind them to and were removed:
 
 Put the rows back -- with a `Command` each -- when either prerequisite lands.
 Restoring one is two lines in the table plus an arm in `run`.
+
+## ircclient: no transport, and no clock a message can be stamped with
+
+`apps/ircclient` parses IRC and renders it, and has no socket. Two consequences
+are visible in the code and both are deliberate:
+
+* **Slash commands are applied locally and logged, not sent.** `parse_command`
+  builds the wire line; `run_command` applies the effect of the ones that have
+  a local meaning (`/join`, `/part`, `/nick`, `/me`, `/msg`) and pushes
+  `-> <line>` into the server buffer for the rest, so what would have gone out
+  is visible rather than dropped. When there is a TCP socket, `run_command`
+  sends the line instead and `handle_message` picks the server's echo back up
+  -- which is already written and already tested.
+* **`IrcClientApp::timestamp` reuses the stamp of the previous message.** This
+  tree has no wall clock a userspace program can read, and inventing a time
+  would be wrong in a way nobody could see. Replace it with the real clock when
+  one exists; every `ChatMessage` already carries a `timestamp` string.
+
+`tick_interval` returns `None` for the same reason: nothing arrives on a timer.
+It becomes `Some(...)` -- or better, a wakeup on the socket -- when there is a
+connection to read from.

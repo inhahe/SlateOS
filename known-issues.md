@@ -262,6 +262,8 @@ walking the real string and therefore only ever returns offsets into it:
 
 | App | Site |
 |---|---|
+| `videoplayer` | playback, playlist, chapters, subtitles, equalizer | any input at all -- and it drew a **Keyboard Shortcuts** tab listing thirty-two keys, none of which were bound to anything, because the file did not import `guitk::event` | `FRAME_TICK` while playing or a message is expiring |
+| `podcast` | subscriptions, playback, downloads, queue, search, OPML | any input at all. The file did not import `guitk::event`: there was no key handler and no click handler, so every one of those features was reachable only from a test | `PLAYBACK_TICK` while playing or downloading |
 | `ebook` | `find_all_matches` |
 | `pdfviewer` | `PdfDocument::search` |
 | `spreadsheet` | `case_insensitive_replace`, `SearchState::find_all` |
@@ -16268,6 +16270,18 @@ all while the checker measured a string it had invented itself.
 the word *begins*, and none of its five expectations move when what is
 *inserted* becomes escaped. Three independent defects in one function, and the
 fix for each leaves the other two's evidence intact.
+
+> **Both rung citations above were dangling until 2026-09-05, and the evidence
+> trail now reads as though they never were.** Rungs 116–119 ran and passed
+> from the day they were written, but announced themselves with a `// --- N:`
+> *comment* instead of a `serial_println!`, so they printed nothing. Grepping a
+> boot log for "rung 119" — the route this table tells you to take — found
+> nothing, for either of the two rungs cited on this page. The banners were
+> added in the same batch that added this note, so the citations are true now;
+> they were not when they were written. `scripts/check-selftest-rung-numbers.py`
+> gained a rule that fails the build on any rung citation naming a rung no
+> banner announces, so this cannot recur silently. It found five citations
+> across `kshell.rs` and this file, covering exactly rungs 116–119.
 
 *Still not fixed here:* completion looks the word up **unexpanded** — see
 `A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD` immediately below. §9's
@@ -57377,7 +57391,7 @@ and that is exactly the shape that survives a reading.
 screenful of information that is a constant compiled into the program. The
 drawing is real, the filtering and sorting and searching are real, the parsing
 is real — and there is no source. This entry names the pattern, because it has
-now been found ten times and writing it up ten times separately would train
+now been found twelve times and writing it up twelve times separately would train
 the reader to skim it.
 
 **`email` is the sharpest case and the least fixable today.** The client is

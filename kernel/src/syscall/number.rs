@@ -2499,6 +2499,25 @@ pub const SYS_PTY_MASTER_READ: u64 = 546;
 /// empty and the slave is still open.  Chosen number 547.
 pub const SYS_PTY_MASTER_TRY_READ: u64 = 547;
 
+/// Non-blocking [`SYS_PTY_MASTER_WRITE`].
+///
+/// Returns `WouldBlock` (EAGAIN) rather than parking when the input ring is
+/// full and the slave is still open.  A short count is a success, not an
+/// error: the caller is expected to resubmit the tail, exactly as on a pipe.
+///
+/// This is what lets one loop drive a socket and a terminal together.  With
+/// only the blocking form, a caller forwarding a socket into a pty had to
+/// choose between parking the whole loop on a full input ring and never
+/// writing to the pty at all — which is why sshd asked for it.
+///
+/// **Chosen number 1065, not 548**, even though its twin is 547: the pty block
+/// 544–552 is contiguous and entirely allocated, so there is no gap beside the
+/// twin to take.  Numbers are allocated at the high-water mark rather than by
+/// renumbering the block, because a syscall number is ABI — moving one to keep
+/// a family tidy would silently repoint every already-compiled caller.  The
+/// name, not the number, is what says where this belongs.
+pub const SYS_PTY_MASTER_TRY_WRITE: u64 = 1065;
+
 /// Write program output into a pty from its slave end.
 ///
 /// `arg0`: slave handle, or 0 for the caller's controlling terminal.

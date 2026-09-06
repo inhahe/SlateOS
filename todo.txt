@@ -55394,3 +55394,20 @@ tool and the suite is not.
 The rule the audit produced is in known-issues lesson 93: the fault
 appears when the `measure` and the `text_at` are in different functions.
 Re-run the grep when a new app is wired.
+
+## videoplayer: two shortcuts removed from the help panel, not implemented
+
+`Shortcuts::list()` in `apps/videoplayer/src/main.rs` is now the keymap itself
+-- each row carries the keystroke and the command as well as the two columns
+the help tab prints -- so a row cannot be listed without being bound. Two rows
+that used to be listed had nothing to bind them to and were removed:
+
+* **Ctrl+O, Open File.** Needs a file chooser. There is no file-picker dialog
+  in this tree; `apps/filemanager` has a browser but nothing exposes it as a
+  modal chooser another app can call.
+* **Ctrl+S, Take Screenshot.** Needs a way to read back the composited
+  framebuffer. `PlayerPreferences::screenshot_config` (format, quality,
+  include-subtitles) is still there and still configurable, for when there is.
+
+Put the rows back -- with a `Command` each -- when either prerequisite lands.
+Restoring one is two lines in the table plus an arm in `run`.

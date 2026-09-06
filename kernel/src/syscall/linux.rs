@@ -30611,9 +30611,13 @@ fn caller_has_deliverable_signal(pid: Option<u64>) -> bool {
 /// if a deliverable signal is (or becomes) pending — in which case the caller
 /// must return `-EINTR`.
 ///
-/// poll/select/epoll wait in short timer slices and re-poll fd readiness when
-/// each slice expires (another task can change a polled fd's state without
-/// waking us, so a periodic re-poll is the readiness mechanism).  But a posted
+/// `epoll_wait` waits in short timer slices and re-polls fd readiness when each
+/// slice expires (another task can change a polled fd's state without waking us,
+/// so a periodic re-poll is the readiness mechanism).  `poll` and `select` no
+/// longer do: they park on the objects themselves via
+/// [`crate::ipc::multiwait::wait_multiple`], and only the bounded sleep in
+/// [`interruptible_sleep_ms`] and `epoll_wait_core` still come through here.
+/// But a posted
 /// signal must interrupt the wait *promptly*, not after the full slice:
 /// `set_pending` wakes registered signal-waiters, so we register before
 /// parking and `try_wake` pulls us out of the timed sleep early.  The
@@ -30987,12 +30991,24 @@ fn fd_set_byte_len(nfds: i32) -> Result<usize, SyscallResult> {
 
 /// Shared core for `sys_select` / `sys_pselect6` — does the
 /// readfds/writefds/exceptfds copy_from_user, the per-fd readiness
-/// check using `poll_compute_revents`, the write-back, and the timed
-/// re-poll loop.  `len` is the byte size of each fd_set (matches
-/// `fd_set_byte_len`).
+/// check using `poll_compute_revents`, and the write-back.  `len` is the
+/// byte size of each fd_set (matches `fd_set_byte_len`).
 ///
 /// `timeout_ms_signed` follows the same convention as `poll_core`:
 /// positive = ms deadline, 0 = no wait, negative = wait forever.
+///
+/// # Blocking, not spinning
+///
+/// Like [`poll_core`], this used to re-scan every fd in the three sets on a flat
+/// 10 ms tick. It now parks in [`crate::ipc::multiwait::wait_multiple`] on the
+/// waiter sets of the fds the caller actually named, and the same
+/// "worst-member-decides" rule applies: a set of pipes/eventfds/timerfds blocks
+/// with no wakeups at all, while one containing a daemon-backed socket falls
+/// back to the adaptive 0.5 ms → 20 ms rescan.
+///
+/// The target list is safe to resolve once here in a way it is not for
+/// `epoll_wait`: select's watch set is the caller's own three bitmaps, fixed for
+/// the duration of the call, so no other thread can add an fd to it mid-wait.
 fn select_core(
     nfds: i32,
     readfds_ptr: u64,
@@ -31035,13 +31051,62 @@ fn select_core(
     let mut ex_out: Vec<u8> = vec![0; len];
 
     let pid = caller_pid();
-    let mut remaining_ms: i64 = timeout_ms_signed;
     #[allow(clippy::cast_sign_loss)]
     let nfds_usize = nfds as usize;
 
-    loop {
-        // Reset the output buffers each iteration so a transient
-        // earlier-iteration readiness doesn't bleed through.
+    // Resolve every fd the caller named to the set it can be parked on, once,
+    // before the wait.  An fd that is not in the table contributes no target
+    // rather than a `PollOnly`: it is about to fail the whole call with EBADF on
+    // the first scan, so pushing the wait onto the backoff path for it would be
+    // paying a cost that can never be collected.
+    //
+    // `.get()` rather than `rd[byte]` for the same reason the scan below uses it:
+    // the three vectors are `len` bytes and `nfds_usize` bits can exceed that if
+    // `nfds` and `len` ever disagree, and a bounds-checked miss is the honest
+    // answer there.
+    let mut targets: Vec<crate::ipc::multiwait::WaitTarget> = Vec::new();
+    for fd_usize in 0..nfds_usize {
+        let byte = fd_usize >> 3;
+        let bit = 1u8 << (fd_usize & 7);
+        let (Some(rb), Some(wb), Some(xb)) = (rd.get(byte), wr.get(byte), ex.get(byte)) else {
+            break;
+        };
+        if (rb | wb | xb) & bit == 0 {
+            continue;
+        }
+        let Some(p) = pid else { continue };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let fd_i32 = fd_usize as i32;
+        let Some(entry) = pcb::linux_fd_lookup(p, fd_i32) else {
+            continue;
+        };
+        targets.push(wait_target_for_handle(entry.kind, entry.raw_handle));
+    }
+
+    let timeout_ns: Option<u64> = if timeout_ms_signed < 0 {
+        None
+    } else {
+        #[allow(clippy::cast_sign_loss)]
+        Some((timeout_ms_signed as u64).saturating_mul(1_000_000))
+    };
+    // An in-kernel caller (no PCB) has no signal queue, so an unbounded park
+    // could never be broken.  Same guard, same reason, as `poll_core`.
+    let timeout_ns = if timeout_ns.is_none() && pid.is_none() {
+        Some(0)
+    } else {
+        timeout_ns
+    };
+
+    // select(2) fails the *whole call* with EBADF on any invalid fd, where
+    // poll(2) reports POLLNVAL for that one fd and keeps going.  The scan cannot
+    // return an error, so it records the fact and reports a non-zero count,
+    // which ends the wait on that very first pass; the flag is what turns that
+    // into EBADF rather than a readiness report.
+    let mut bad_fd = false;
+
+    let outcome = crate::ipc::multiwait::wait_multiple(&targets, timeout_ns, || {
+        // Reset the output buffers each scan so a transient
+        // earlier-scan readiness doesn't bleed through.
         for b in rd_out.iter_mut() {
             *b = 0;
         }
@@ -31052,16 +31117,16 @@ fn select_core(
             *b = 0;
         }
 
-        let mut count: i64 = 0;
+        let mut count: usize = 0;
         for fd_usize in 0..nfds_usize {
             let byte = fd_usize >> 3;
             let bit = 1u8 << (fd_usize & 7);
-            if byte >= len {
+            let (Some(rb), Some(wb), Some(xb)) = (rd.get(byte), wr.get(byte), ex.get(byte)) else {
                 break;
-            }
-            let want_r = rd[byte] & bit != 0;
-            let want_w = wr[byte] & bit != 0;
-            let want_x = ex[byte] & bit != 0;
+            };
+            let want_r = rb & bit != 0;
+            let want_w = wb & bit != 0;
+            let want_x = xb & bit != 0;
             if !(want_r || want_w || want_x) {
                 continue;
             }
@@ -31086,10 +31151,11 @@ fn select_core(
             // three sets as an immediate hard error (EBADF) — unlike
             // poll(2), which reports POLLNVAL in revents for that fd
             // and keeps going.  Mirror that: as soon as we observe
-            // POLLNVAL for a fd the caller actually asked about, fail
-            // the whole call.
+            // POLLNVAL for a fd the caller actually asked about, abandon
+            // the scan and let the caller fail the whole call.
             if revents & poll_bits::POLLNVAL != 0 {
-                return linux_err(errno::EBADF);
+                bad_fd = true;
+                return 1;
             }
 
             // Map revents back to the three Linux fd_set categories.
@@ -31111,67 +31177,62 @@ fn select_core(
                         | poll_bits::POLLHUP
                         | poll_bits::POLLERR)
                     != 0
+                && let Some(b) = rd_out.get_mut(byte)
             {
-                rd_out[byte] |= bit;
+                *b |= bit;
                 bumped = true;
             }
             if want_w
                 && revents & (poll_bits::POLLOUT | poll_bits::POLLWRNORM | poll_bits::POLLERR) != 0
+                && let Some(b) = wr_out.get_mut(byte)
             {
-                wr_out[byte] |= bit;
+                *b |= bit;
                 bumped = true;
             }
-            if want_x && revents & poll_bits::POLLPRI != 0 {
-                ex_out[byte] |= bit;
+            if want_x
+                && revents & poll_bits::POLLPRI != 0
+                && let Some(b) = ex_out.get_mut(byte)
+            {
+                *b |= bit;
                 bumped = true;
             }
             if bumped {
                 count = count.saturating_add(1);
             }
         }
+        count
+    });
 
-        if count > 0 || remaining_ms == 0 {
-            // Write back: only the sets the caller actually passed
-            // (Linux preserves NULL — it doesn't make NULL into a
-            // zero-filled buffer).
-            for (ptr, src) in [
-                (readfds_ptr, &rd_out),
-                (writefds_ptr, &wr_out),
-                (exceptfds_ptr, &ex_out),
-            ] {
-                if ptr != 0 {
-                    let w = unsafe { crate::mm::user::copy_to_user(src.as_ptr(), ptr, len) };
-                    if let Err(e) = w {
-                        return linux_err(linux_errno_for(e));
-                    }
-                }
-            }
-            return SyscallResult::ok(count);
-        }
+    if bad_fd {
+        return linux_err(errno::EBADF);
+    }
 
-        // No fd is ready yet and we still have time to wait.  A deliverable
-        // signal interrupts select with -EINTR (never restarted, even under
-        // SA_RESTART); the handler runs at the syscall-return checkpoint.
-        // Same 10 ms slicing as poll_core; `interruptible_wait_slice` registers
-        // a signal-waiter so a signal posted mid-slice wakes us immediately.
-        let slice_ms: u64 = if remaining_ms < 0 {
-            10
-        } else {
-            #[allow(clippy::cast_sign_loss)]
-            core::cmp::min(remaining_ms as u64, 10)
-        };
-        if interruptible_wait_slice(pid, slice_ms) {
-            return linux_err(errno::EINTR);
-        }
-        if remaining_ms > 0 {
-            #[allow(clippy::cast_possible_wrap)]
-            let consumed = slice_ms as i64;
-            remaining_ms = remaining_ms.saturating_sub(consumed);
-            if remaining_ms < 0 {
-                remaining_ms = 0;
+    // select is always interrupted by a signal and never restarted, even under
+    // SA_RESTART; the handler runs at the syscall-return checkpoint.
+    let count = match outcome {
+        Ok(n) => n,
+        Err(crate::error::KernelError::Interrupted) => return linux_err(errno::EINTR),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+
+    // Write back on both the ready and the timed-out path: a caller that got 0
+    // still needs the cleared sets the last scan left behind.  Only the sets the
+    // caller actually passed (Linux preserves NULL — it doesn't make NULL into a
+    // zero-filled buffer).
+    for (ptr, src) in [
+        (readfds_ptr, &rd_out),
+        (writefds_ptr, &wr_out),
+        (exceptfds_ptr, &ex_out),
+    ] {
+        if ptr != 0 {
+            let w = unsafe { crate::mm::user::copy_to_user(src.as_ptr(), ptr, len) };
+            if let Err(e) = w {
+                return linux_err(linux_errno_for(e));
             }
         }
     }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(count as i64)
 }
 
 /// `select(nfds, readfds*, writefds*, exceptfds*, timeval*)` — classic

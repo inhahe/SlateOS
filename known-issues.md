@@ -121855,9 +121855,10 @@ one:
 - there is no CI
 
 So the compile error was reachable by one command that nobody has reason to run.
-There are ~200 crates under `apps/`; this sweep has now compiled a few dozen of
-them, and this is the first one found broken — but the sweep is the only thing
-that has ever looked.
+All 143 app crates were then checked in one go: this is the only broken one,
+and the check took 58 seconds warm. The breakage is rare and the guarantee is
+cheap — see open question C-Q11, where that measurement changed the
+recommendation.
 
 **The proper fix** is a check that builds every workspace member for the host
 target and fails on error, run the way `scripts/check-window-wiring.py` and

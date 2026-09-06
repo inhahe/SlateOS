@@ -3112,3 +3112,109 @@ These numbers are not to be extended; new questions use `A-Q<n>` / `B-Q<n>` /
   option C** (Claude recommended C): keep `nft`/`iptables` as an explicit
   parser/pretty-printer only, fix the docs, steer users to `fw`; defer full/minimal
   kernel wiring (§62).
+
+## C-Q11: Should something build every crate before a merge? (raised by lane C, 2026-09-06)
+
+**In short:** The lock screen — the program that asks for your password when
+the machine is locked — was broken for a day and nobody knew, because nothing
+in this project ever tries to build it. Somebody changed a shared library, the
+lock screen still referred to the old version, and no test anywhere failed. It
+was found by accident. There are roughly 200 more programs in the same
+position. The question is whether to add a slow check that compiles everything
+before work is merged, and if so, what shape it takes — because whatever we
+pick, all three lanes have to live with it.
+
+### What happened
+
+`5264cba7a` (lane B) removed a function argument and a module from `authlib`,
+a shared login library. Its commit message says "no caller changes", which was
+true of every caller *that lane can see*. `apps/lockscreen` is a caller in lane
+C's tree. It stopped compiling and stayed that way until an unrelated tidy-up
+happened to run clippy on it.
+
+Nothing caught it because nothing builds `apps/`:
+
+| What runs today | Why it misses this |
+|---|---|
+| the boot test | builds for the bare-metal target; `apps/*` are not in `default-members` there |
+| each lane's own `cargo test -p …` | a lane only builds what it touched |
+| `check-window-wiring.py`, `check-gates-are-wired.py` | read source text; they never invoke the compiler |
+| CI | there is none |
+
+A `cargo check --workspace --target x86_64-pc-windows-gnu` would have caught it.
+Nobody has a reason to run one.
+
+### Why this is yours and not mine
+
+Any answer gates all three lanes' merges, and the cost lands on whoever is
+merging — not on me proposing it. It is also genuinely slow: a cold check of
+the whole workspace is minutes, and it is minutes *added to every merge*.
+
+### Options
+
+**A. A pre-merge `cargo check --workspace` for the host target.**
+*What changes:* merging to `main` takes a few minutes longer, every time, and a
+lane cannot merge while any crate in the tree is broken — including one broken
+by a different lane.
+The strongest guarantee, and the harshest: lane A is blocked by lane C's typo.
+That is already true of the boot test, which builds the whole workspace, so
+this is a difference of degree.
+
+**B. A nightly (or once-per-session) sweep that only reports.**
+*What changes:* nothing blocks; a broken crate is found within a day instead of
+within a chance encounter, and lands as a `known-issues.md` entry or a
+`requests/` file for whoever owns it.
+Cheap and unintrusive. Does not stop a breakage being merged, only shortens how
+long it lives.
+
+**C. Require the grep before the claim.**
+*What changes:* nothing mechanical; the convention becomes that a commit
+message may not say "no caller changes" about a shared library until
+`grep -rl <symbol> apps/ gui/ net/` has been run.
+Costs nothing and would have caught this exact case, but it is a rule enforced
+by remembering it, which is the kind that decays.
+
+**D. Do nothing.**
+*What changes:* nothing. Broken app crates accumulate silently and are found
+one at a time by whoever next touches them.
+
+### Measured, not guessed
+
+I wrote a recommendation for B on the assumption that A costs "minutes added to
+every merge", then measured it. Both numbers moved:
+
+- **How widespread:** `cargo check` over **all 143 app crates** — every one, not
+  a sample — finds **exactly one** broken, the lockscreen already repaired. The
+  failure is rare.
+- **What it costs:** **58 seconds**, warm, for all 143. Not minutes. A merge is
+  almost always warm, because the lane just built and tested the thing it is
+  merging. Cold — a fresh clone, or after a toolchain bump — is far longer, but
+  that is not the case that runs on every merge.
+
+So the argument I actually made for B was wrong on the fact it rested on. B was
+recommended because A seemed expensive; A costs about a minute.
+
+### Recommendation
+
+**A, plus C.** A minute per merge is a fair price for "the tree compiles", and
+it is the only option that stops a breakage rather than shortening its life.
+The rarity of the failure argues for the cheap option only if the guarantee is
+expensive, and it is not.
+
+The one real objection to A stands and should be weighed: it means lane A can
+be blocked from merging by lane C's typo. That is already true of the boot test,
+which builds the whole workspace, so it is a difference of degree rather than
+kind — but it is a difference that lands on whoever is merging at the time, not
+on whoever broke it.
+
+C costs nothing and is worth adopting whichever of A or B you pick: it catches
+this specific failure — a shared-library change whose callers live in another
+lane — at the moment it is cheapest to fix, before the commit is even written.
+
+### If this is never answered
+
+The current state is safe but degrading. Nothing is blocked — lockscreen is
+repaired and the tree builds — but the gap stays open, and every shared-library
+change is another chance for a silent breakage that is found weeks later by
+somebody who did not cause it. The cost grows with the number of app crates,
+which is growing.

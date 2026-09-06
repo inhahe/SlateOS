@@ -3198,6 +3198,64 @@ check_prerequisites() {
 check_prerequisites
 
 # --- The gate phase starts here ----------------------------------------------
+
+# Before anything expensive: has another lane asked everyone to stop?
+#
+# This is deliberately the FIRST thing the gate phase does. A boot test is two
+# to three hours on this hardware, and the whole value of a halt is that it is
+# seen *before* one starts rather than discovered after. Every other gate here
+# grades the tree; this one grades whether the tree should be being graded at
+# all right now.
+#
+# The signal lives in the git *common* directory, which every worktree shares,
+# so it needs no fetch, no merge and no branch -- unlike `requests/`, which is
+# per-branch and therefore invisible to its addressee until they merge. That
+# gap is why this exists: on 2026-09-06 lane A had to stop lanes B and C for a
+# drive migration and had no channel to do it with, and the operator carried
+# the message by hand.
+check_lane_signals() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== lane-signal check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # Its own cases first, for this family's usual reason: a reader that has
+    # stopped finding signals reports an empty directory, which is spelled
+    # exactly like a tree with nothing pending.
+    if ! run_checker check-lane-signals-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-lane-signals.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The lane-signal reader fails its own" >&2
+        echo "cases, so 'nothing pending' cannot be distinguished from 'not" >&2
+        echo "reading', and a halt raised by another lane could pass unseen." >&2
+        return 1
+    fi
+
+    echo "=== Checking whether another lane has asked everyone to stop ==="
+    if run_checker check-lane-signals "$py" \
+            "$PROJECT_ROOT/scripts/check-lane-signals.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "STOPPING: another lane has raised a halt (details above)." >&2
+    echo "" >&2
+    echo "This is not a failure of your tree.  Someone needs every lane at a" >&2
+    echo "clean point -- a drive migration, a shared-file repair, something" >&2
+    echo "that cannot be done while three agents are writing." >&2
+    echo "" >&2
+    echo "Commit and push what you have, then stop.  Do not start another task." >&2
+    echo "When the reason has passed, whoever raised it lifts it with:" >&2
+    echo "    python scripts/check-lane-signals.py --clear-halt" >&2
+    exit 1
+}
+
+check_lane_signals
 #
 # Everything from this line to `check_cfg_unix` is a gate: thirty-odd static
 # checkers, the whole tooling test-suite sweep, shellcheck, and a full clippy

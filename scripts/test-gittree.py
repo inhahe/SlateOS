@@ -975,6 +975,257 @@ def case_an_ambient_git_dir_does_not_redirect_the_read(work: str) -> None:
                 os.environ[key] = value
 
 
+def build_wide_repo(tmp: str, name: str = "wide") -> tuple[str, dict[str, bytes]]:
+    """A repo with more files than the bulk read's fan-out threshold.
+
+    `GitTree.read_many` reads serially below `_FANOUT * 2` paths, so a fixture
+    of eight files exercises the fallback and never the strided reassembly that
+    is the part able to go wrong. This one is sized from the constant rather
+    than from a literal, so tuning `_FANOUT` cannot silently stop the fan-out
+    being tested.
+
+    Every file's bytes name the file, and no two are the same length. Both
+    matter: shard reassembly is index arithmetic, and its failure mode is the
+    right *count* of correct-looking blobs stored under each other's names.
+    Content that does not identify itself would let that pass.
+    """
+    work = os.path.join(tmp, name)
+    os.makedirs(work, exist_ok=True)
+    git(work, "init", "--quiet", "-b", "main", ".")
+    git(work, "config", "user.name", "Real Person")
+    git(work, "config", "user.email", "real@example.org.uk")
+    git(work, "config", "commit.gpgsign", "false")
+    git(work, "config", "core.autocrlf", "false")
+
+    files: dict[str, bytes] = {}
+    for i in range(gittree._FANOUT * 3):
+        rel = f"src/f{i:03d}.rs"
+        files[rel] = b"// " + rel.encode() + b"\n" + b"x" * (i * 37) + b"\n"
+    # The awkward shapes, kept inside the same request so they are read by the
+    # fan-out rather than only by the serial fallback.
+    files["src/empty.rs"] = b""
+    files["src/nonl.rs"] = b"fn a() {}"
+    files["src/crlf.rs"] = b"fn b() {}\r\nfn c() {}\r\n"
+    files["data/blob.bin"] = bytes(range(256)) * 8
+    # Many pipe buffers, so a `read(n)` that came back short would be caught
+    # here -- and caught *while 16 workers are in flight*, which is the case a
+    # serial fixture cannot produce.
+    files["data/big.bin"] = (b"0123456789abcdef" * 64 + b"\n") * 1000
+
+    for rel, body in files.items():
+        path = os.path.join(work, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(body)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "wide")
+    return work, files
+
+
+def _bulk_request(files: dict[str, bytes]) -> list[str]:
+    """The path list a bulk read is asked for: real files with holes in it.
+
+    Missing paths are interleaved rather than appended, because they are the
+    one entry that produces *no payload* on the batch pipe. Grouped at the end
+    they would all land in the last shard; every third position puts one in
+    almost every shard, so a worker that desynced would be reading its own
+    later paths as the wrong objects while its neighbours stayed correct --
+    which is exactly how a partial desync would reach production.
+    """
+    request: list[str] = []
+    for i, rel in enumerate(sorted(files)):
+        if i % 3 == 2:
+            request.append(f"gone/{i}.rs")
+        request.append(rel)
+    return request
+
+
+def case_read_many_agrees_with_reading_one_at_a_time(work: str,
+                                                     files: dict[str, bytes]
+                                                     ) -> None:
+    """The bulk read's whole contract: same answers, fewer waits.
+
+    Stated as equality against the loop it replaces, on both implementations,
+    because that is the only claim it makes. It is faster -- 50.4 s to 3.4 s on
+    disk, 75.6 s to 4.8 s on a revision, measured over the 647 files
+    `argv-utf8.py` gates -- and speed is not a property this suite can assert
+    without becoming a flaky benchmark. Correctness is, and correctness is what
+    a reader would otherwise have to take on trust from a comment.
+
+    Three separate things are checked, because each fails independently:
+
+    * **Value.** Every path's bytes are its own. Compared against the literals
+      this fixture wrote *and* against a serial `read_bytes` loop: the first
+      catches a systematic error both paths share, the second catches one that
+      only the fan-out has.
+    * **Keys.** The caller's own spellings, in the caller's own order, every
+      one present. A `dict` built by zipping two lists of different lengths
+      truncates in silence, which would drop findings rather than report them.
+    * **Alignment afterwards.** A single `read` after the bulk pass, on the
+      same process, must still be right. The workers share the primary's
+      `GitTree` for shard 0, so a bulk read that left the pipe mid-answer
+      would corrupt every later read the checker makes -- and the checker
+      would report those wrong contents as findings without any error.
+    """
+    request = _bulk_request(files)
+    check("the fixture is wide enough to fan out",
+          len(request) >= gittree._FANOUT * 2, True)
+
+    with gittree.WorkTree(work) as disk, gittree.RevTree("HEAD", work) as rev:
+        for label, tree in (("disk", disk), ("rev", rev)):
+            bulk = tree.read_many(request)
+            check(f"{label}: every requested path has an answer",
+                  list(bulk), list(dict.fromkeys(request)))
+            check(f"{label}: a path that is not there answers None",
+                  sorted({k for k, v in bulk.items() if v is None}),
+                  sorted({p for p in request if p not in files}))
+            check(f"{label}: every blob is its own file's bytes",
+                  [p for p in request
+                   if p in files and bulk[p] != files[p]], [])
+            serial = {rel: tree.read_bytes(rel) for rel in request}
+            check(f"{label}: bulk and serial agree exactly", bulk, serial)
+            # The base class's loop is the definition the overrides are
+            # optimising. Comparing against it directly means a future
+            # implementation cannot drift from the documented behaviour while
+            # this suite's own expectations drift with it.
+            check(f"{label}: ...and so does the base implementation",
+                  gittree.Tree.read_many(tree, request), bulk)
+
+        check("a single read after the bulk pass is still correct",
+              rev.read_bytes("data/blob.bin"), files["data/blob.bin"])
+        check("...including one whose name was never in the request",
+              rev.read_bytes("src/f000.rs"), files["src/f000.rs"])
+
+
+def case_read_many_really_fans_out(work: str, files: dict[str, bytes]) -> None:
+    """The fan-out is used above the threshold and not below it.
+
+    Every assertion in the case above passes with the fan-out deleted, because
+    the serial fallback returns the same answers -- that is the point of it.
+    What distinguishes them is 15 `git cat-file` processes, so that is what
+    this asserts, in both directions: a small request must not pay for them
+    (16 process startups at ~0.3 s each, to save 20 ms a blob) and a large one
+    must actually get them.
+    """
+    small = sorted(files)[:4]
+    request = _bulk_request(files)
+
+    with gittree.RevTree("HEAD", work) as rev:
+        rev.read_many(small)
+        check("a small request starts no extra processes",
+              rev._git._extra, None)
+        rev.read_many(request)
+        started = rev._git._extra
+        check("a large one starts a full fan-out",
+              started is not None and len(started) == gittree._FANOUT - 1, True)
+        # Held rather than respawned: `argv-utf8.py` makes two bulk reads, one
+        # for 2,760 manifests and one for the sources, and paying 15 startups
+        # twice would give most of the win back.
+        rev.read_many(request)
+        check("a second large request reuses them", rev._git._extra, started)
+
+    # And `close` takes them with it. A `close` that returned early on the
+    # already-closed primary would strand 15 processes per run, each holding
+    # the repository open -- on Windows that is a directory nobody can delete,
+    # which is how a leak here would first be noticed: as a fixture teardown
+    # failing somewhere else entirely.
+    check("closing the tree closes the whole fan-out",
+          [w for w in (started or ()) if w._proc is not None], [])
+    check("...and they refuse to be read afterwards",
+          all(_raises(lambda w=w: w.read("HEAD", "src/f000.rs"))
+              for w in (started or ())), True)
+
+
+def case_read_many_keeps_the_callers_order(work: str,
+                                           files: dict[str, bytes]) -> None:
+    """Strided shards, reassembled into the order asked for.
+
+    `GitTree.read_many` is the layer where the arithmetic lives, so it is
+    asserted directly here rather than through `RevTree`: shard `i` holds
+    `paths[i::width]`, and putting its `j`th answer anywhere but `i + j*width`
+    yields a result that is complete, plausible, and wrong. A caller cannot
+    detect that -- every path it asked for is present with bytes that are
+    genuinely from the repository.
+    """
+    request = _bulk_request(files)
+    with gittree.GitTree(work) as git_tree:
+        pairs = git_tree.read_many("HEAD", request)
+        check("one answer per request, in order",
+              [p for p, _ in pairs], request)
+        check("each answer belongs to the path beside it",
+              [p for p, data in pairs if data != files.get(p)], [])
+
+        # Duplicates are not de-duplicated on the way in: the shard arithmetic
+        # indexes by position, so a request list that collapses to fewer keys
+        # in the caller's dict must still be answered position by position.
+        doubled = request + request
+        pairs = git_tree.read_many("HEAD", doubled)
+        check("a repeated path is answered at both positions",
+              [p for p, data in pairs if data != files.get(p)], [])
+        check("...and the length still matches the request",
+              len(pairs), len(doubled))
+
+
+def case_read_many_text_decodes_like_read_text(work: str,
+                                               files: dict[str, bytes]) -> None:
+    """`read_many_text` is `read_text`, in bulk, including on bad bytes.
+
+    The checkers all want text, and a file with one bad byte is still a file
+    whose other 40 KB may hold a finding -- so `replace` rather than a raise is
+    the documented behaviour of the single-file call, and the bulk one must not
+    quietly differ. `data/blob.bin` in this fixture is every byte value, which
+    is not valid UTF-8 anywhere.
+    """
+    request = ["data/blob.bin", "src/f000.rs", "gone/x.rs"] + sorted(files)
+    with gittree.WorkTree(work) as disk, gittree.RevTree("HEAD", work) as rev:
+        for label, tree in (("disk", disk), ("rev", rev)):
+            bulk = tree.read_many_text(request)
+            check(f"{label}: text matches read_text file by file",
+                  {k: v for k, v in bulk.items()
+                   if v != tree.read_text(k)}, {})
+            check(f"{label}: a missing path is None, not an empty string",
+                  bulk["gone/x.rs"], None)
+            check(f"{label}: undecodable bytes are replaced, not refused",
+                  isinstance(bulk["data/blob.bin"], str), True)
+
+
+def case_a_directory_is_not_a_file_on_either_side(work: str,
+                                                  files: dict[str, bytes]
+                                                  ) -> None:
+    """Reading a directory answers `None`, and does not desync the pipe.
+
+    `git cat-file --batch` will happily name a tree: `HEAD:src` answers
+    `<oid> tree <size>` and then emits the serialised directory listing. Read
+    as though it were a blob, `RevTree.read_bytes("src")` hands the caller a
+    directory's raw bytes while `WorkTree.read_bytes("src")` answers `None`,
+    because `open()` on a directory fails. The seam's one promise is that a
+    checker cannot tell the two apart, and this is a disagreement it cannot
+    even see -- it gets bytes, not an error.
+
+    The second half is the trap in fixing it. The payload arrives whether or
+    not the caller wants it, so the type check has to happen *after* the bytes
+    are consumed. Refusing early leaves a tree object in the pipe where the
+    next answer's header should be, and from then on every read returns some
+    other object's contents under the right name.
+    """
+    with gittree.WorkTree(work) as disk, gittree.RevTree("HEAD", work) as rev:
+        for label, tree in (("disk", disk), ("rev", rev)):
+            check(f"{label}: a directory does not read as a file",
+                  tree.read_bytes("src"), None)
+            check(f"{label}: nor does the root", tree.read_bytes(""), None)
+            check(f"{label}: and it is still a directory",
+                  tree.is_dir("src"), True)
+            check(f"{label}: the read after it is still correct",
+                  tree.read_bytes("src/f000.rs"), files["src/f000.rs"])
+        # In bulk too, where a desync would spread across a whole shard.
+        mixed = ["src", "src/f000.rs", "data", "data/blob.bin", ""]
+        check("bulk agrees with serial over directories and files",
+              rev.read_many(mixed),
+              {rel: rev.read_bytes(rel) for rel in mixed})
+        check("...and the file entries in it are right",
+              rev.read_bytes("data/blob.bin"), files["data/blob.bin"])
+
+
 def _decoy_head_differs(work: str, decoy: str) -> bool:
     """Guard against a fixture that would pass without the fix."""
     a = git(work, "rev-parse", "HEAD").stdout.strip()
@@ -1013,6 +1264,17 @@ def main() -> int:
                                    case_tree_reads_the_commit_not_the_disk,
                                    case_an_ambient_git_dir_does_not_redirect_the_read)):
             tcase(build_tree_repo(tmp, f"t{i}"))
+
+        # The bulk-read cases share one fixture: it is the expensive one here
+        # (48 committed files plus a megabyte, so that the fan-out threshold is
+        # genuinely crossed) and none of these cases mutates it.
+        wide, wide_files = build_wide_repo(tmp)
+        for wcase in (case_read_many_agrees_with_reading_one_at_a_time,
+                      case_read_many_really_fans_out,
+                      case_read_many_keeps_the_callers_order,
+                      case_read_many_text_decodes_like_read_text,
+                      case_a_directory_is_not_a_file_on_either_side):
+            wcase(wide, wide_files)
 
     if failures:
         print(f"\n{len(failures)} gittree test(s) failed:", file=sys.stderr)

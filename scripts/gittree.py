@@ -62,11 +62,26 @@ reports nothing -- so both git calls below select their repository through
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import os
 import re
 import subprocess
 import sys
-from typing import Iterable, Iterator, Optional, Sequence
+from typing import Iterable, Optional, Sequence
+
+# How many `git cat-file --batch` processes a bulk read spreads itself over,
+# and how many threads `WorkTree` opens files on. One number because it is one
+# fact: on this machine a read costs ~20 ms of waiting that is not this
+# process's CPU, on either side of the seam, and the fix is the same depth of
+# queue. Measured 7x at 16 against 1.9x at 4; past 16 the curve flattens.
+_FANOUT = 16
+
+# How many blobs `materialise` asks for at a time. It writes each one to disk as
+# it arrives, so it never needs more than a batch in memory -- and the batch is
+# the only thing between it and the 204 MB this tree weighs, now that
+# `read_many` answers with a list rather than a generator. Well above the
+# fan-out threshold, so bounding the memory costs none of the speed.
+_MATERIALISE_CHUNK = _FANOUT * 32
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -127,6 +142,11 @@ class GitTree:
 
     def __init__(self, repo: Optional[str] = None) -> None:
         self._repo = repo
+        # Spawned on the first bulk read and not before, so that the common
+        # case -- a checker that opens a tree and reads a handful of files --
+        # still costs exactly one git process, as it did before `read_many`
+        # existed.
+        self._extra: Optional[list["GitTree"]] = None
         try:
             # `-c core.quotePath=false` for the same reason the hook passes it:
             # git otherwise octal-escapes a non-ASCII path into something that
@@ -151,7 +171,13 @@ class GitTree:
         self.close()
 
     def close(self) -> None:
-        """Shut the batch process down. Idempotent."""
+        """Shut the batch process down, fan-out included. Idempotent."""
+        # The fan-out first, and unconditionally: a `close` that returned
+        # early on an already-closed primary would strand 15 `git cat-file`
+        # processes per run, each holding the repository open.
+        extra, self._extra = self._extra, None
+        for worker in extra or ():
+            worker.close()
         proc = getattr(self, "_proc", None)
         if proc is None:
             return
@@ -208,14 +234,104 @@ class GitTree:
         if data is None or len(data) != size:
             raise GitTreeError("git cat-file truncated a blob")
         stdout.read(1)  # the newline git appends after the payload
+        # A tree, a commit or a tag is not a file, and its raw bytes are not
+        # something any caller here could use -- `RevTree.read_bytes("posix")`
+        # would hand back a serialised directory listing where `WorkTree`
+        # answers `None`, because `open()` on a directory fails. That is the
+        # one thing the seam promises does not happen, and it is invisible:
+        # the caller gets bytes, not an error.
+        #
+        # The payload is consumed *first* and discarded afterwards, never
+        # skipped. Git emits `<oid> <type> <size>` and then that many bytes for
+        # every object it can name, whatever the type; returning before reading
+        # them leaves the payload in the pipe as the next answer's header, and
+        # every later read comes back as some other object's contents under the
+        # right name -- the desync `case_missing_does_not_desync` exists for.
+        if fields[1] != b"blob":
+            return None
         return data
 
     def read_many(
         self, rev: str, paths: Iterable[str]
-    ) -> Iterator[tuple[str, Optional[bytes]]]:
-        """`read` over an iterable, yielding `(path, bytes-or-None)` in order."""
-        for path in paths:
-            yield path, self.read(rev, path)
+    ) -> list[tuple[str, Optional[bytes]]]:
+        """The bytes of every path, in the order given, over `_FANOUT` pipes.
+
+        One `--batch` process answers ~20 ms a blob on this machine, and that
+        figure does not move with the blob's size: 180 blobs of 2 KB cost 20.0
+        ms each, 134 of 56 KB cost 29.2 s in total for 7.5 MB. It is not
+        decompression and it is not this repository being unusual -- 5,697
+        loose objects in 12 packs is a healthy store. It is per-object work
+        outside git's control, the same on-access scanning that makes
+        `WorkTree.read_bytes` cost 80 ms/MB, and it is latency rather than
+        throughput.
+
+        Pipelining the protocol was tried first and is the obvious fix -- the
+        `--batch` stream is designed to be fed faster than it is drained -- and
+        it bought nothing, because the wait is inside git and not in the
+        round-trip. What does work is the same answer as on the working-tree
+        side: stop serialising. Sharding the paths over 16 processes took the
+        134-file case from 29.2 s to 4.2 s, 7x, and the shape of that curve
+        (1.9x at 4, 7x at 16) is what a latency-bound queue looks like.
+
+        Shards are strided (`paths[i::k]`) rather than sliced into blocks, so
+        one worker cannot draw the whole of a large directory while the rest
+        finish early on small files.
+
+        Not thread-safety by accident: each shard is read by a *different*
+        `GitTree`, so no two threads ever share the one request/response pipe
+        that the class docstring warns about.
+        """
+        paths = list(paths)
+        if self._proc is None:
+            raise GitTreeError("read after close")
+        # Below roughly two blobs a worker the fan-out is all overhead: 15
+        # extra `git cat-file` startups at ~0.3 s each, to save 20 ms a blob.
+        if len(paths) < _FANOUT * 2:
+            return [(path, self.read(rev, path)) for path in paths]
+
+        workers = self._fanout()
+        width = len(workers)
+        shards = [paths[i::width] for i in range(width)]
+
+        def drain(job: tuple["GitTree", list[str]]) -> list[Optional[bytes]]:
+            worker, shard = job
+            return [worker.read(rev, path) for path in shard]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=width) as pool:
+            answers = list(pool.map(drain, zip(workers, shards)))
+
+        out: list[Optional[bytes]] = [None] * len(paths)
+        for i, shard_answers in enumerate(answers):
+            for j, data in enumerate(shard_answers):
+                out[i + j * width] = data
+        return list(zip(paths, out))
+
+    def _fanout(self) -> list["GitTree"]:
+        """This process plus `_FANOUT - 1` more, spawned once and kept.
+
+        Kept rather than spawned per call because a checker makes several bulk
+        reads -- `argv-utf8.py` makes two, one for 2,760 manifests and one for
+        the source -- and 15 process startups is a real cost to pay twice.
+        They are shut down by `close`, which is why every caller of this
+        module uses it as a context manager.
+
+        A failure part-way through leaves nothing running: the ones already
+        started are closed before the error is re-raised. Otherwise a tree
+        that could not be opened would still leak most of a fan-out, and the
+        `GitTreeError` that reported it would be the last thing anyone looked
+        at.
+        """
+        if self._extra is None:
+            started: list["GitTree"] = []
+            try:
+                while len(started) < _FANOUT - 1:
+                    started.append(GitTree(self._repo))
+            except GitTreeError:
+                for worker in started:
+                    worker.close()
+                raise
+            self._extra = started
+        return [self] + self._extra
 
     def list_paths(self, rev: str, *pathspec: str) -> list[str]:
         """Every file path under `rev` matching `pathspec` (all files if none).
@@ -452,6 +568,50 @@ class Tree:
             return None
         return data.decode("utf-8", errors)
 
+    # -- reading a lot of files at once -------------------------------------
+    #
+    # A checker that reads one file at a time pays the same fixed cost per
+    # file on both backends, and on this tree that cost dominates everything
+    # else it does. Measured 2026-09-05 on the 647 `.rs` files (30 MB) that
+    # `argv-utf8.py` gates:
+    #
+    #   | backend  | per file        | total  |
+    #   |----------|-----------------|--------|
+    #   | WorkTree | ~80 ms/MB       |  50 s  |
+    #   | RevTree  | ~20 ms/blob     | 220 s  |
+    #
+    # Neither is bandwidth. `WorkTree`'s is per-`open` work outside this
+    # process -- on-access antivirus scanning, which is why 32 threads take it
+    # to 3.4 s while doing exactly the same reads. `RevTree`'s is a pipe
+    # round-trip per blob: `read` writes one request, flushes, and blocks for
+    # the answer, so 647 blobs cost 647 latencies where the batch protocol is
+    # built to answer a stream.
+    #
+    # So the fix is the same shape on both -- stop serialising -- and it goes
+    # here rather than in each checker, because a checker that spells its own
+    # thread pool is a checker that gets it wrong once per checker.
+
+    def read_many(self, rels: Sequence[str]) -> dict[str, Optional[bytes]]:
+        """`{rel: bytes-or-None}` for every path in `rels`.
+
+        `None` is a real answer and not an error, exactly as in `read_bytes`:
+        a path that is not in this tree is a normal thing to ask about.
+
+        The default is the honest, slow one -- a loop -- so that a `Tree`
+        implementation added later is correct before it is fast. Both
+        implementations in this module override it.
+        """
+        return {rel: self.read_bytes(rel) for rel in rels}
+
+    def read_many_text(
+        self, rels: Sequence[str], errors: str = "replace"
+    ) -> dict[str, Optional[str]]:
+        """`read_many`, decoded the way `read_text` decodes."""
+        return {
+            rel: None if data is None else data.decode("utf-8", errors)
+            for rel, data in self.read_many(rels).items()
+        }
+
     # -- context manager, so callers can use either one the same way --------
 
     def __enter__(self) -> "Tree":
@@ -569,6 +729,32 @@ class WorkTree(Tree):
         except OSError:
             return None
 
+    def read_many(self, rels: Sequence[str]) -> dict[str, Optional[bytes]]:
+        """`read_bytes` over a thread pool.
+
+        Threads rather than processes because the work being waited on is not
+        Python: `open` and `read` release the GIL, and what they are waiting
+        for -- the filesystem, and on this machine an on-access scanner ahead
+        of it -- parallelises across cores whether or not the caller does.
+        Measured on the 647 files `argv-utf8.py` gates: 50.4 s serial, 11.0 s
+        at 8 workers, 3.4 s at 32.
+
+        `_FANOUT` is a fixed number rather than one derived from the core
+        count because the limiting resource is not this machine's CPUs -- it
+        is how many reads the filesystem will answer at once, which no
+        property Python can see predicts. A number from `os.cpu_count()` would
+        look principled and be a different arbitrary number.
+
+        `read_bytes` swallows `OSError` into `None`, so nothing raised inside
+        a worker can escape and there is no partial-failure state to design
+        for: every path in gets a key out.
+        """
+        rels = list(rels)
+        if len(rels) < 2:
+            return {rel: self.read_bytes(rel) for rel in rels}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=_FANOUT) as pool:
+            return dict(zip(rels, pool.map(self.read_bytes, rels)))
+
 
 class RevTree(Tree):
     """The files as they are at a git revision.
@@ -660,6 +846,20 @@ class RevTree(Tree):
 
     def read_bytes(self, rel: str) -> Optional[bytes]:
         return self._git.read(self.rev, _norm(rel))
+
+    def read_many(self, rels: Sequence[str]) -> dict[str, Optional[bytes]]:
+        """One fanned-out pass over the shared `git cat-file --batch`.
+
+        `_norm` is applied here and the *original* spelling is the key, so a
+        caller that asked for `a\\b` finds `a\\b` in the result rather than
+        the normalised `a/b` it never mentioned. Duplicates collapse into one
+        key, as they would in any dict; git is still asked twice, which costs
+        one pipelined request and is not worth a de-duplication pass that
+        would have to preserve order to stay correct.
+        """
+        rels = list(rels)
+        answers = self._git.read_many(self.rev, [_norm(r) for r in rels])
+        return {rel: data for rel, (_path, data) in zip(rels, answers)}
 
 
 def open_tree(root: str, head: Optional[str] = None) -> Tree:
@@ -755,15 +955,24 @@ def materialise(
     back off so it names a file the caller can actually open.
     """
     written: list[str] = []
+    todo = list(paths)
     with GitTree(repo) as tree:
-        for path, data in tree.read_many(rev, paths):
-            if data is None:
-                continue
-            out_path = _under(dest, path)
-            os.makedirs(out_path.rsplit("/", 1)[0], exist_ok=True)
-            with open(out_path, "wb") as handle:
-                handle.write(data)
-            written.append(path)
+        # In chunks, because `read_many` answers with a list rather than a
+        # generator: one call over the whole input would hold every blob in
+        # memory at once, and this repository's tree is 204 MB. A chunk is
+        # still 32 blobs per worker -- far above the threshold below which the
+        # fan-out is not used -- so the bound costs nothing but bounds the
+        # peak at the chunk rather than at whatever the caller asked for.
+        for start in range(0, len(todo), _MATERIALISE_CHUNK):
+            batch = todo[start:start + _MATERIALISE_CHUNK]
+            for path, data in tree.read_many(rev, batch):
+                if data is None:
+                    continue
+                out_path = _under(dest, path)
+                os.makedirs(out_path.rsplit("/", 1)[0], exist_ok=True)
+                with open(out_path, "wb") as handle:
+                    handle.write(data)
+                written.append(path)
     if stub_rust_mods:
         _seed_rust_mod_stubs(dest, written)
     return [_under(dest, p) for p in written]

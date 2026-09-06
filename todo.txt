@@ -55505,3 +55505,29 @@ a decision §353 did not take, so it needs the operator: see
 
 Trigger: do it when something other than `useradd` needs to *write* a group,
 or when the duplicated membership is observed to have drifted.
+
+## login cannot make a user change an expired password (lane B, 2026-09-06)
+
+`/etc/shadow`'s aging fields describe two different endings for a password that
+has reached its maximum age:
+
+* **Expired** -- it must be changed at the next login, and until it is, the
+  session does not start. This is what `PASS_MAX_DAYS` is *for*.
+* **Inactive, then dead** -- once the `inactive` field's further grace period
+  has also passed, the account stops accepting the password at all.
+
+`userspace/login/src/main.rs` now enforces the second (`check_account_expired`)
+and the account's own expiry date, and warns about the first
+(`expiry_warning`), but it cannot enforce the first: making the user change the
+password means running `passwd` as that user before exec'ing the shell, and
+`login` has no way to exec anything yet -- its success path ends in an
+`eprintln!` saying what it *would* exec.
+
+So today an expired password logs in with a warning. That is shadow-utils'
+behaviour when `PASS_MAX_DAYS` has passed but the inactive period has not,
+which is the common case; what is missing is the refusal when there is no
+inactive period at all, where shadow-utils forces the change instead.
+
+Do this when `login` can exec: the same change that replaces the `would exec
+shell` line. The order matters -- `passwd` must run *before* the shell, with
+the user's own uid, and the shell must not start if it fails.

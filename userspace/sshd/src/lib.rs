@@ -2912,8 +2912,26 @@ struct Channel {
     term_width_px: u32,
     /// Terminal height in pixels, as the client reported it (0 when unknown).
     term_height_px: u32,
-    /// Whether the channel has been closed.
+    /// Whether *we* have sent `SSH_MSG_CHANNEL_CLOSE`.
+    ///
+    /// Half of the two-way close RFC 4254 §5.3 describes; see
+    /// [`close_received`](Self::close_received) for why both halves are
+    /// tracked separately rather than collapsed into one "closed" flag.
     closed: bool,
+    /// Whether the *peer* has sent `SSH_MSG_CHANNEL_CLOSE`.
+    ///
+    /// RFC 4254 §5.3 frees a channel number once each side has both sent and
+    /// received the close, and nothing before that: until the peer's close
+    /// arrives it may still have messages in flight naming this channel.
+    ///
+    /// The two flags exist apart because the connection has to answer two
+    /// different questions with them. "Is there any session left to serve?"
+    /// is answered by `closed` alone — that is what ends the connection, and
+    /// it must not wait on a peer that never replies. "May this channel's
+    /// storage go?" needs both, and that is what stops a peer from cycling
+    /// channels to accumulate `Channel` structs — each holding up to a
+    /// window's worth of `pending_input` — for the life of the connection.
+    close_received: bool,
     /// Whether EOF has been sent.
     eof_sent: bool,
     /// Where this session's standard streams go: a terminal, pipes, or nothing
@@ -2975,6 +2993,7 @@ impl Channel {
             term_width_px: 0,
             term_height_px: 0,
             closed: false,
+            close_received: false,
             eof_sent: false,
             io: SessionIo::None,
             child: None,
@@ -3038,6 +3057,14 @@ pub struct ConnectionState {
     username: String,
     channels: Vec<Channel>,
     next_channel_id: u32,
+    /// Whether this connection has ever had a channel open on it.
+    ///
+    /// The connection ends when every channel it has is closed — but closed
+    /// channels are reaped, so "every channel is closed" and "no channel was
+    /// ever opened" are both the empty list. Without this flag the connection
+    /// loop would exit the instant it started, before the client had a chance
+    /// to send its first `CHANNEL_OPEN`.
+    channel_ever_opened: bool,
     debug_mode: bool,
     /// When this connection opened, for the login grace timer — or `None` if
     /// the clock could not be read at that moment. See [`clock_monotonic`].
@@ -3095,6 +3122,7 @@ impl ConnectionState {
             username: String::new(),
             channels: Vec::new(),
             next_channel_id: 0,
+            channel_ever_opened: false,
             debug_mode,
             connection_start: clock_monotonic(),
             keys_installed_at: None,
@@ -3161,6 +3189,24 @@ impl ConnectionState {
             .zip(clock_monotonic())
             .map(|(installed, now)| now.saturating_since(installed));
         thresholds_reached(self.codec.bytes_under_current_keys(), key_age)
+    }
+
+    /// Is there no session left on this connection to serve?
+    ///
+    /// True once a channel has been opened and every channel now held has had
+    /// our `CHANNEL_CLOSE` sent on it. Note the asymmetry with reaping, which
+    /// waits for the peer's close as well: ending the connection deliberately
+    /// does *not* wait for that, because a peer that never answers a close
+    /// would otherwise hold an idle connection open indefinitely, and there is
+    /// by then nothing left for it to say on any channel.
+    ///
+    /// The `channel_ever_opened` half is not a formality. Reaping empties the
+    /// list, so "all closed" and "never opened" are the same empty list, and
+    /// `all()` is vacuously true on it — without the flag this would be true at
+    /// the top of the very first pass, before the client had said anything.
+    #[must_use]
+    fn every_channel_is_closed(&self) -> bool {
+        self.channel_ever_opened && self.channels.iter().all(|ch| ch.closed)
     }
 
     /// Frame, encrypt and send one packet.
@@ -4641,7 +4687,7 @@ fn handle_channels(conn: &mut ConnectionState) -> Result<(), SshdError> {
             worked = true;
         }
 
-        if conn.channels.iter().all(|ch| ch.closed) && !conn.channels.is_empty() {
+        if conn.every_channel_is_closed() {
             return Ok(());
         }
 
@@ -4686,7 +4732,7 @@ fn dispatch_channel_message(conn: &mut ConnectionState, payload: &[u8]) -> Resul
         }
         msg::SSH_MSG_CHANNEL_CLOSE => {
             handle_channel_close(conn, payload)?;
-            if conn.channels.iter().all(|ch| ch.closed) {
+            if conn.every_channel_is_closed() {
                 return Ok(Flow::Stop);
             }
         }
@@ -4794,10 +4840,10 @@ fn global_request_reply(payload: &[u8]) -> Result<(String, Option<Vec<u8>>), Ssh
 }
 
 /// Handle `CHANNEL_OPEN`.
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
+///
+/// Two refusals guard the channel table, and both are `MaxSessions` doing its
+/// job rather than a safety net bolted on beside it: the table is full, or the
+/// supply of channel numbers is exhausted.
 fn handle_channel_open(conn: &mut ConnectionState, payload: &[u8]) -> Result<(), SshdError> {
     let (chan_type_bytes, off) = read_ssh_string(payload, 1)?;
     let chan_type = String::from_utf8_lossy(chan_type_bytes);
@@ -4810,30 +4856,39 @@ fn handle_channel_open(conn: &mut ConnectionState, payload: &[u8]) -> Result<(),
     ));
 
     if chan_type != "session" {
-        // Reject non-session channels.
-        let mut reply = Vec::new();
-        reply.push(msg::SSH_MSG_CHANNEL_OPEN_FAILURE);
-        reply.extend_from_slice(&sender_channel.to_be_bytes());
-        reply.extend_from_slice(&1u32.to_be_bytes()); // reason: administratively prohibited
-        reply.extend_from_slice(&ssh_string(b"only session channels supported"));
-        reply.extend_from_slice(&ssh_string(b""));
-        return conn.send_packet(&reply);
+        return refuse_channel_open_prohibited(
+            conn,
+            sender_channel,
+            b"only session channels supported",
+        );
     }
 
-    // Check max sessions.
-    let active = conn.channels.iter().filter(|ch| !ch.closed).count();
-    if active >= conn.config.max_sessions as usize {
-        let mut reply = Vec::new();
-        reply.push(msg::SSH_MSG_CHANNEL_OPEN_FAILURE);
-        reply.extend_from_slice(&sender_channel.to_be_bytes());
-        reply.extend_from_slice(&4u32.to_be_bytes()); // reason: resource shortage
-        reply.extend_from_slice(&ssh_string(b"max sessions exceeded"));
-        reply.extend_from_slice(&ssh_string(b""));
-        return conn.send_packet(&reply);
+    // `MaxSessions` bounds every channel this connection is holding, not just
+    // the ones still running. It used to count only the un-closed ones, which
+    // made the limit unenforceable in the direction that matters: a channel
+    // this side has closed sits in the table until the peer's own close
+    // arrives, so a peer that simply never answers a close could open sessions
+    // forever, each leaving behind a `Channel` — up to a 2 MiB window of
+    // undeliverable `pending_input` among it — that nothing would ever free.
+    // Counting the whole table turns that into the refusal below, which is
+    // what a resource limit is for. A peer that closes its channels normally
+    // is unaffected: the reply reaps the entry and returns the slot.
+    if conn.channels.len() >= conn.config.max_sessions as usize {
+        return refuse_channel_open(conn, sender_channel, b"max sessions exceeded");
     }
 
+    // Channel numbers are handed out once and never reused, so that a number
+    // in a log names one session for the life of the connection. That makes
+    // the supply finite, and running out is a refusal rather than a wrap:
+    // wrapping would hand a new session the number of a live one, and every
+    // message for either would then be delivered to whichever the search found
+    // first.
     let local_id = conn.next_channel_id;
-    conn.next_channel_id += 1;
+    let Some(next) = conn.next_channel_id.checked_add(1) else {
+        return refuse_channel_open(conn, sender_channel, b"channel numbers exhausted");
+    };
+    conn.next_channel_id = next;
+    conn.channel_ever_opened = true;
 
     let channel = Channel::new(local_id, sender_channel, initial_window, max_packet);
     let local_window = channel.local_window;
@@ -4846,6 +4901,65 @@ fn handle_channel_open(conn: &mut ConnectionState, payload: &[u8]) -> Result<(),
     reply.extend_from_slice(&local_id.to_be_bytes());
     reply.extend_from_slice(&local_window.to_be_bytes());
     reply.extend_from_slice(&(32768u32).to_be_bytes()); // max packet size
+    conn.send_packet(&reply)
+}
+
+/// Reason codes for `SSH_MSG_CHANNEL_OPEN_FAILURE` (RFC 4254 §5.1).
+mod open_failure {
+    /// The channel is one we will not open for anybody — a policy answer, and
+    /// retrying will not change it.
+    pub const ADMINISTRATIVELY_PROHIBITED: u32 = 1;
+    /// We would have opened it but have nothing left to open it with. Unlike
+    /// the code above, this one invites the client to try again later.
+    pub const RESOURCE_SHORTAGE: u32 = 4;
+}
+
+/// Refuse a `CHANNEL_OPEN` for want of room, naming the shortage.
+fn refuse_channel_open(
+    conn: &mut ConnectionState,
+    sender_channel: u32,
+    description: &[u8],
+) -> Result<(), SshdError> {
+    send_channel_open_failure(
+        conn,
+        sender_channel,
+        open_failure::RESOURCE_SHORTAGE,
+        description,
+    )
+}
+
+/// Refuse a `CHANNEL_OPEN` on policy grounds, naming the policy.
+fn refuse_channel_open_prohibited(
+    conn: &mut ConnectionState,
+    sender_channel: u32,
+    description: &[u8],
+) -> Result<(), SshdError> {
+    send_channel_open_failure(
+        conn,
+        sender_channel,
+        open_failure::ADMINISTRATIVELY_PROHIBITED,
+        description,
+    )
+}
+
+/// Build and send `SSH_MSG_CHANNEL_OPEN_FAILURE` (RFC 4254 §5.1).
+///
+/// The refusal must name the *client's* channel number, not one of ours: we
+/// never allocated one, and a client matching the reply to its request has
+/// nothing else to match it by.
+fn send_channel_open_failure(
+    conn: &mut ConnectionState,
+    sender_channel: u32,
+    reason: u32,
+    description: &[u8],
+) -> Result<(), SshdError> {
+    let mut reply = Vec::new();
+    reply.push(msg::SSH_MSG_CHANNEL_OPEN_FAILURE);
+    reply.extend_from_slice(&sender_channel.to_be_bytes());
+    reply.extend_from_slice(&reason.to_be_bytes());
+    reply.extend_from_slice(&ssh_string(description));
+    // The trailing language tag, which RFC 3066 lets us leave empty.
+    reply.extend_from_slice(&ssh_string(b""));
     conn.send_packet(&reply)
 }
 
@@ -5880,7 +5994,14 @@ fn handle_channel_close(conn: &mut ConnectionState, payload: &[u8]) -> Result<()
         .iter_mut()
         .find(|ch| ch.local_id == recipient)
         .and_then(|ch| {
+            ch.close_received = true;
             ch.io = SessionIo::None;
+            // Nothing will ever read these bytes: the only thing that could
+            // was the session whose descriptors were just dropped. Up to a
+            // full window — 2 MiB — can be sitting here when a client closes
+            // a channel while a program has stopped reading its input, which
+            // is what `ssh host 'sleep 1000' < bigfile` does.
+            ch.pending_input = Vec::new();
             ch.child.take()
         });
     if let Some(mut child) = child {
@@ -5895,7 +6016,21 @@ fn handle_channel_close(conn: &mut ConnectionState, payload: &[u8]) -> Result<()
     }
 
     // Answer with our own EOF (if it has not gone already) and close.
-    send_channel_close(conn, recipient)
+    send_channel_close(conn, recipient)?;
+
+    // Both closes have now been exchanged, so RFC 4254 §5.3 says the channel is
+    // over and its storage can go. Reaping here rather than at the end of the
+    // connection is what keeps `MaxSessions` a bound on memory and not merely
+    // on concurrency: the entry would otherwise survive until the client hung
+    // up, and a client is under no obligation to do that soon.
+    //
+    // `send_channel_close` may legitimately have declined to set `closed` — it
+    // is a no-op for a channel we already closed — so the flag is re-read here
+    // instead of assumed.
+    conn.channels
+        .retain(|ch| !(ch.local_id == recipient && ch.closed && ch.close_received));
+
+    Ok(())
 }
 
 /// Send data on a channel.
@@ -9478,6 +9613,25 @@ Z
     /// A test that holds the far end can put bytes on the wire the way a client
     /// would, and the server reads them through the same `fill_once` the session
     /// pump uses — so what is exercised is the receive path, not a field.
+    /// A server connection with an empty channel table, able to send.
+    ///
+    /// The far end of the transport is dropped, so writes go nowhere and reads
+    /// report a hangup. The secret source is the deterministic stand-in rather
+    /// than the kernel's, because a test host has no `/dev/urandom` equivalent
+    /// and every packet this daemon sends is padded from that source — so
+    /// without it the first `send_packet` fails and the test learns nothing
+    /// about the thing it was written for.
+    fn conn_with_no_channels() -> ConnectionState {
+        let (near, _far) = sshwire::memory_pair();
+        ConnectionState::new(
+            Box::new(near),
+            SshdConfig::default_config(),
+            HostKey::from_seed([0u8; 32]),
+            false,
+        )
+        .with_secret_source(counting_secrets)
+    }
+
     fn conn_with_peer(remote_window: u32) -> (ConnectionState, sshwire::MemoryTransport) {
         let (near, far) = sshwire::memory_pair();
         let mut conn = ConnectionState::new(
@@ -9485,8 +9639,14 @@ Z
             SshdConfig::default_config(),
             HostKey::from_seed([0u8; 32]),
             false,
-        );
+        )
+        .with_secret_source(counting_secrets);
         conn.channels.push(Channel::new(1, 2, remote_window, 32768));
+        // Pushing the channel by hand skips `handle_channel_open`, which is
+        // what normally records this. Setting it keeps the harness honest:
+        // `every_channel_is_closed` reads it, and a connection whose channel
+        // arrived without it would claim to have had none.
+        conn.channel_ever_opened = true;
         (conn, far)
     }
 
@@ -9525,6 +9685,164 @@ Z
         let (worked, finished) = pump_channel_output(&mut conn, 0, 1).unwrap();
         assert!(!worked);
         assert!(finished);
+    }
+
+    // ---- Channel lifetime (RFC 4254 §5.3) ----
+
+    /// A `CHANNEL_CLOSE` payload naming one of our channel numbers.
+    fn close_payload(local_id: u32) -> Vec<u8> {
+        let mut p = vec![msg::SSH_MSG_CHANNEL_CLOSE];
+        p.extend_from_slice(&local_id.to_be_bytes());
+        p
+    }
+
+    /// A `CHANNEL_OPEN` for a session, as a client sends it.
+    fn session_open_payload(sender_channel: u32) -> Vec<u8> {
+        let mut p = vec![msg::SSH_MSG_CHANNEL_OPEN];
+        p.extend_from_slice(&ssh_string(b"session"));
+        p.extend_from_slice(&sender_channel.to_be_bytes());
+        p.extend_from_slice(&INITIAL_LOCAL_WINDOW.to_be_bytes());
+        p.extend_from_slice(&32768u32.to_be_bytes());
+        p
+    }
+
+    /// Once both closes have been exchanged the channel is over, and what it was
+    /// holding has to go with it — not at the end of the connection.
+    ///
+    /// The queued input is the reason this matters. `pending_input` is bounded
+    /// by the SSH window, so a channel can be carrying two megabytes when the
+    /// client closes it, and after the close there is nothing left that could
+    /// ever read them: the session's descriptors are dropped on the same pass.
+    #[test]
+    fn a_channel_closed_from_both_ends_is_reaped_along_with_its_queued_input() {
+        let (mut conn, _peer) = conn_with_peer(32768);
+        conn.channels[0].pending_input = vec![0xAB; 4096];
+
+        handle_channel_close(&mut conn, &close_payload(1)).expect("close is answerable offline");
+
+        assert!(
+            conn.channels.is_empty(),
+            "the channel was closed from both ends and must not outlive that"
+        );
+        assert!(
+            conn.every_channel_is_closed(),
+            "an emptied table on a connection that once had a channel is finished, \
+             not fresh"
+        );
+    }
+
+    /// Reaping must not make a connection that has not yet opened a channel look
+    /// like one whose last channel just went.
+    ///
+    /// Both are the empty list, and `all()` is vacuously true on an empty list —
+    /// so the flag is the only thing separating "nothing left to serve" from
+    /// "the client has not spoken yet". Without it the connection loop would
+    /// hang up on its first pass.
+    #[test]
+    fn a_connection_that_has_opened_no_channel_yet_is_not_finished() {
+        let conn = conn_with_no_channels();
+        assert!(conn.channels.is_empty());
+        assert!(
+            !conn.every_channel_is_closed(),
+            "a client that has sent no CHANNEL_OPEN has not finished with the \
+             connection; hanging up here would break every session before it started"
+        );
+    }
+
+    /// Our own close, unanswered, still ends the connection.
+    ///
+    /// This is the asymmetry between ending and reaping, and it is deliberate:
+    /// a peer that never replies to a close would otherwise pin an idle
+    /// connection open for as long as it liked.
+    #[test]
+    fn a_close_the_peer_never_answers_still_ends_the_connection() {
+        let (mut conn, _peer) = conn_with_peer(32768);
+        send_channel_close(&mut conn, 1).expect("close is sendable offline");
+
+        assert_eq!(
+            conn.channels.len(),
+            1,
+            "without the peer's close the number is not free to reuse, so the \
+             entry stays"
+        );
+        assert!(conn.every_channel_is_closed());
+    }
+
+    /// `MaxSessions` has to bound the whole table, not just the running part.
+    ///
+    /// The regression: the limit counted only un-closed channels, so a peer that
+    /// simply never answered a `CHANNEL_CLOSE` could open sessions without end,
+    /// each leaving a `Channel` behind that nothing would free until the
+    /// connection dropped. Here every channel is closed from our side and none
+    /// is answered, which is exactly that peer — and the limit must still bite.
+    #[test]
+    fn half_closed_channels_the_peer_never_answers_still_count_against_max_sessions() {
+        let mut conn = conn_with_no_channels();
+        let limit = conn.config.max_sessions as usize;
+        assert!(limit > 0, "the default configuration must allow a session");
+
+        for i in 0..limit {
+            handle_channel_open(&mut conn, &session_open_payload(u32::try_from(i).unwrap()))
+                .expect("an open is answerable offline");
+            // We close it; the peer never does. The entry is half-closed and
+            // must keep occupying its slot.
+            let local_id = conn.channels[i].local_id;
+            send_channel_close(&mut conn, local_id).expect("close is sendable offline");
+        }
+        assert_eq!(conn.channels.len(), limit);
+
+        handle_channel_open(&mut conn, &session_open_payload(9999))
+            .expect("a refusal is a reply, not an error");
+        assert_eq!(
+            conn.channels.len(),
+            limit,
+            "the table is full of half-closed channels and the open must be refused"
+        );
+    }
+
+    /// A number handed out once is not handed out again, so a channel number in
+    /// a log names one session for the life of the connection.
+    #[test]
+    fn a_reaped_channel_number_is_not_reissued() {
+        let mut conn = conn_with_no_channels();
+
+        handle_channel_open(&mut conn, &session_open_payload(0)).expect("open is answerable");
+        let first = conn.channels[0].local_id;
+        handle_channel_close(&mut conn, &close_payload(first)).expect("close is answerable");
+        assert!(conn.channels.is_empty(), "reaped");
+
+        handle_channel_open(&mut conn, &session_open_payload(1)).expect("open is answerable");
+        assert_ne!(
+            conn.channels[0].local_id, first,
+            "reusing the number would make every log line naming it ambiguous, and \
+             would deliver a straggling message for the old channel to the new one"
+        );
+    }
+
+    /// Running out of channel numbers is a refusal, not a wrap and not a panic.
+    ///
+    /// Unreachable in practice — it takes four billion opens on one connection —
+    /// which is exactly why it was an unchecked `+= 1` guarded by nothing. In a
+    /// debug build that increment panics, taking the daemon down; in a release
+    /// build it wraps, and the new channel then shares a number with a live one.
+    #[test]
+    fn an_exhausted_supply_of_channel_numbers_refuses_rather_than_wrapping() {
+        let mut conn = conn_with_no_channels();
+        conn.next_channel_id = u32::MAX;
+
+        handle_channel_open(&mut conn, &session_open_payload(0))
+            .expect("a refusal is a reply, not an error");
+
+        assert!(
+            conn.channels.is_empty(),
+            "no channel may be created once the numbers are gone"
+        );
+        assert_eq!(
+            conn.next_channel_id,
+            u32::MAX,
+            "the counter must stay put rather than wrap to zero, where it would \
+             start handing out numbers that are already in use"
+        );
     }
 
     // ---- Environment requests (RFC 4254 §6.4) ----

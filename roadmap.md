@@ -1004,8 +1004,27 @@ Roadmap:
       real database in a scratch directory: 58 tests, including the end-to-end
       one that a password `passwd` saves is one `authlib` accepts when read
       back out of the *generated* `/etc/shadow`.
-    - `[ ]` **1c.** Move `useradd` onto it — additionally needs a gid
-      allocator, since `useradd` creates the user-private group.
+    - `[x]` **1c. `useradd`/`userdel`/`usermod` (2026-09-06).** The user half
+      of the seven-personality binary now reads and writes `/etc/users.yaml`
+      through `userdb`; `PasswdEntry`, `ShadowEntry` and their parse/serialize
+      pairs are deleted. This was the worst of the three gaps: an account
+      `useradd` created existed only in `/etc/passwd`, so the next save from
+      *any* other tool regenerated that file from a database the account was
+      not in and the account silently ceased to exist. The gid allocator was
+      already there (`next_gid` over `/etc/group`) — groups are outside §353
+      and `/etc/group`/`/etc/gshadow` are still written here directly, so
+      `Database` now holds both stores and saves the group files first, the
+      account database last, the direction that leaves a group nobody is in
+      rather than an account whose group does not exist. Membership is the one
+      fact both stores hold, so no command touches either list directly: five
+      `Database` methods change both, and `groupmod --new-name`/`groupdel` now
+      reach into the accounts too, which they never did. Two behaviour fixes:
+      `-e` converts its date to a day number instead of copying `2027-01-01`
+      into a numeric column where glibc reads it as *no* expiry, and a new
+      account gets no invented `0:99999:7` aging policy (which meant exactly
+      what empty means). Fallout fixed in the same push: `chown alice:` took
+      the first *supplementary* group as the primary one, which was invisible
+      while nothing wrote that list and would have become the usual answer.
     - `[ ]` **1d.** `chage` (`userspace/chage`, 663 lines) reads and writes the
       same six fields in `/etc/shadow` directly, so it has to move too or it
       will keep writing into a file the next save overwrites.

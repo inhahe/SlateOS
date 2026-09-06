@@ -55437,3 +55437,36 @@ directly here, or -- better, since `login`, `sshd` and `getty` all want the
 same thing -- add a small helper next to `posix`'s process spawn that takes
 (program, argv0, args) and use it from all four. Do this when one of the other
 three needs it, so the helper is shaped by more than one caller.
+
+## /etc/group and /etc/gshadow are still hand-written, not generated (lane B, 2026-09-06)
+
+`design-decisions.md` §353 made `/etc/passwd` and `/etc/shadow` generated from
+`/etc/users.yaml`. It said nothing about the two *group* files, and they are
+still parsed and written by hand -- by `userspace/useradd` (which is also
+groupadd/groupdel/groupmod), and read by `pwdb`, `chown`, `chroot` and `id`.
+
+Two consequences, both live today:
+
+1. **Group membership is stored twice.** `/etc/group` has a member list per
+   group; the account record has a `groups` list per user. `Database` in
+   `userspace/useradd/src/main.rs` now changes both together through
+   `add_to_group`, `remove_user_from_groups`, `rename_group_everywhere` and
+   `forget_group`, so nothing in *this* binary can update one and forget the
+   other. Nothing enforces that for a future writer.
+
+2. **A save is not atomic across the two stores.** `userdb::UserDb::save`
+   stages its three files and renames them together; the group files are a
+   write-temp-and-rename each, done first, so a failure between them leaves a
+   group nobody is in (inert) rather than an account whose primary group does
+   not exist. The window is small and the failure direction is the safe one,
+   but it is a window.
+
+The proper fix is the same one §353 chose for users: a `/etc/groups.yaml` that
+is the truth, with `/etc/group` and `/etc/gshadow` generated from it by the
+same staged save, and the per-user `groups` list dropped in favour of the
+group's own member list (or the reverse -- but one of them has to go). That is
+a decision §353 did not take, so it needs the operator: see
+`open-questions.md`.
+
+Trigger: do it when something other than `useradd` needs to *write* a group,
+or when the duplicated membership is observed to have drifted.

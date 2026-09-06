@@ -18681,6 +18681,7 @@ name = "useradd"
 version = "0.1.0"
 dependencies = [
  "scratchdir",
+ "userdb",
 ]
 
 [[package]]

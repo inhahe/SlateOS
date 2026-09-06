@@ -3,6 +3,13 @@ name = "useradd"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# The account store. `design-decisions.md` §353 settles that `/etc/users.yaml`
+# is the truth and `/etc/passwd` and `/etc/shadow` are generated from it. This
+# binary used to write both flat files by hand, which meant an account it
+# created was deleted again by the next save from any other tool -- the account
+# was never in the database those files are generated from. Groups are not part
+# of §353 and `/etc/group` and `/etc/gshadow` are still written here directly.
+userdb = { path = "../userdb" }
 
 # `TestEnv` drew its directory name from a process-wide counter alone. A counter
 # separates the threads of one run, which is the axis a clock misses — but it

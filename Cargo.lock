@@ -3937,6 +3937,9 @@ dependencies = [
 [[package]]
 name = "dig"
 version = "0.1.0"
+dependencies = [
+ "randrange",
+]
 
 [[package]]
 name = "digitalocean-cli"

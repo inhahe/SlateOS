@@ -21,9 +21,12 @@
 //! the domain name and record type.  The server responds with answer
 //! records containing the resolved IP addresses.
 //!
-//! Each query uses a unique transaction ID (monotonically incrementing
-//! AtomicU16) and a unique ephemeral source port (from the 49152–65535
-//! range) to prevent spoofed responses and port collisions.
+//! Each query carries a transaction ID and is sent from an ephemeral
+//! source port (49152–65535); an off-path attacker forging a response has
+//! to guess both, so both must be unpredictable (RFC 5452 §9).  The port
+//! is assigned by `udp::bind`, which draws it from the kernel CSPRNG and,
+//! because it holds the socket table, also guarantees it is free rather
+//! than merely unlikely to collide.
 //!
 //! ## CNAME chasing
 //!
@@ -170,32 +173,19 @@ fn next_query_id() -> u16 {
     if id == 0 { counter.wrapping_add(1) } else { id }
 }
 
-/// Counter mixed with TSC for ephemeral port allocation.
-///
-/// Each query binds a unique local port to avoid collisions when
-/// multiple resolutions are in flight (e.g., during CNAME chasing).
-/// Range: 49152–65535 (IANA dynamic/private port range, 16384 ports).
-///
-/// Random port selection prevents an attacker from predicting the source
-/// port of a DNS query, which is essential for cache poisoning resistance
-/// alongside random query IDs.
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
-
-/// Ephemeral port range start (IANA dynamic/private range).
-const EPHEMERAL_PORT_START: u16 = 49152;
-/// Ephemeral port range size.
-const EPHEMERAL_PORT_RANGE: u16 = 16384; // 65535 - 49152 + 1
-
-/// Allocate a randomized ephemeral port for DNS.
-fn next_dns_port() -> u16 {
-    let counter = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    // SAFETY: rdtsc is always available on x86_64.
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    let tsc16 = (tsc as u16) ^ ((tsc >> 11) as u16) ^ ((tsc >> 23) as u16);
-    let mixed = counter ^ tsc16;
-    // Map to ephemeral range [49152, 65535].
-    EPHEMERAL_PORT_START.wrapping_add(mixed % EPHEMERAL_PORT_RANGE)
-}
+// The source port for a query is no longer chosen here.  `dns_query_raw`
+// asks `udp::bind` for an ephemeral port and reads back what it was given;
+// see the note on `udp::random_ephemeral_offset` for why the allocator now
+// draws its start from the CSPRNG.
+//
+// This module used to pick its own port and bind it explicitly, because
+// the allocator handed out 49152, 49153, ... in order and a predictable
+// source port defeats cache-poisoning resistance.  That workaround had a
+// defect of its own: an explicitly-bound port that is already taken makes
+// `bind` return `AlreadyExists`, which failed the whole lookup, and the
+// retry loop sits after the bind so it could not recover.  Asking the
+// allocator instead removes the collision by construction -- it holds the
+// socket table, so it only ever returns a port it has checked is free.
 
 /// Maximum CNAME hops to follow before giving up.
 const MAX_CNAME_HOPS: usize = 8;
@@ -1195,16 +1185,25 @@ fn pick_dns_server() -> KernelResult<DnsServer> {
 /// address family.  The DNS query format is identical regardless of
 /// transport — only the UDP send/receive changes.
 ///
+/// The source port is assigned by `udp::bind` rather than chosen here, so
+/// it is both unpredictable and guaranteed free; see the note where
+/// `next_dns_port` used to live.
+///
 /// Returns the raw DNS response payload on success, or `TimedOut` after
 /// exhausting all retry attempts.
 #[allow(clippy::arithmetic_side_effects)]
-fn dns_query_raw(
-    server: &DnsServer,
-    local_port: u16,
-    query: &[u8],
-    name: &str,
-) -> KernelResult<Vec<u8>> {
-    let sock = super::udp::bind(crate::netns::ROOT_NS, local_port)?;
+fn dns_query_raw(server: &DnsServer, query: &[u8], name: &str) -> KernelResult<Vec<u8>> {
+    // Port 0 means "any free port", which the allocator draws from the
+    // CSPRNG.  Reading it back is necessary because `udp::send` is keyed by
+    // port rather than by socket handle.
+    let sock = super::udp::bind(crate::netns::ROOT_NS, 0)?;
+    let Some(local_port) = super::udp::local_port(sock) else {
+        // Unreachable: the handle was just returned by a successful bind.
+        // Closed rather than leaked, since an early return here would
+        // otherwise strand the socket slot for the life of the system.
+        super::udp::close(sock);
+        return Err(KernelError::InternalError);
+    };
 
     for attempt in 0..MAX_DNS_ATTEMPTS {
         // Send (or re-send) the query via the appropriate transport.
@@ -1305,10 +1304,9 @@ fn resolve_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<Ip
     *cname_out = None;
 
     let query_id = next_query_id();
-    let local_port = next_dns_port();
     let query = build_query(name, query_id);
 
-    let response_data = dns_query_raw(&server, local_port, &query, name)?;
+    let response_data = dns_query_raw(&server, &query, name)?;
 
     match parse_response(&response_data, query_id, cname_out) {
         Ok(result) => {
@@ -1381,11 +1379,10 @@ pub fn reverse_resolve(ip: Ipv4Addr) -> KernelResult<String> {
     crate::serial_println!("[dns] Reverse resolving {} via {}...", ip, server);
 
     let query_id = next_query_id();
-    let local_port = next_dns_port();
     let query = build_ptr_query(ip, query_id);
     let arpa_name = alloc::format!("{}", ip); // For timeout logging.
 
-    let response_data = dns_query_raw(&server, local_port, &query, &arpa_name)?;
+    let response_data = dns_query_raw(&server, &query, &arpa_name)?;
 
     match parse_ptr_response(&response_data, query_id) {
         Ok(name) => {
@@ -1629,10 +1626,9 @@ fn resolve6_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<I
     *cname_out = None;
 
     let query_id = next_query_id();
-    let local_port = next_dns_port();
     let query = build_aaaa_query(name, query_id);
 
-    let response_data = dns_query_raw(&server, local_port, &query, name)?;
+    let response_data = dns_query_raw(&server, &query, name)?;
 
     match parse_aaaa_response(&response_data, query_id, cname_out) {
         Ok(result) => {
@@ -1690,11 +1686,10 @@ pub fn reverse_resolve6(ip: &Ipv6Addr) -> KernelResult<String> {
     crate::serial_println!("[dns] Reverse resolving {} via {}...", ip, server);
 
     let query_id = next_query_id();
-    let local_port = next_dns_port();
     let query = build_ptr6_query(ip, query_id);
     let name_for_log = alloc::format!("{}", ip);
 
-    let response_data = dns_query_raw(&server, local_port, &query, &name_for_log)?;
+    let response_data = dns_query_raw(&server, &query, &name_for_log)?;
 
     match parse_ptr_response(&response_data, query_id) {
         Ok(name) => {

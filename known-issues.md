@@ -110864,6 +110864,8 @@ Three things worth carrying forward:
    successful run used. It is not a generous number; it is roughly 2× the
    measured gate phase, which is the smallest multiple that leaves room for the
    build and the boot.
+   **→ Superseded the same day by "Correction" below: 21600 was still derived
+   from one observation, and the history file had eight. Use 28800.**
 2. **The split has moved.** The 2026-09-02 measurement above put >3000s in
    `run_checker` gates. Today the *timed* gates are 3717s and the untimed
    remainder — the `scripts/test-*.py` sweep, shellcheck, clippy — is 3685s,
@@ -110885,6 +110887,79 @@ test skip gates — is one `boot-test.sh` already refuses on purpose
 that judgment is right. The honest response is a bigger budget and the
 knowledge that a full boot test is now a ~2.5h operation, which is what this
 addendum records.
+
+#### Correction, same day: 28800s, and I made the same mistake I was documenting
+
+Point 1 above says 21600 "because that is what the successful run used". That
+is one observation — exactly the error the entry it corrects was written about.
+`bench/boot-history.jsonl` has carried `script_seconds`, `gates_seconds` and
+`build_seconds` on every row since 2026-09-04 precisely so nobody has to do
+this, and `boot-test.sh`'s own header says to query it. I did not, until the
+run above failed a second time. Querying it (`python scripts/boot-history.py
+--list`, plus the raw rows for the phase columns) gives eight rows:
+
+| when | script | gates | build | qemu | verdict |
+|---|---|---|---|---|---|
+| 2026-09-04T13:44 | 5278 | 4229 | 553 | 115 | PANIC |
+| 2026-09-04T16:11 | 6710 | 5067 | 790 | 449 | PANIC |
+| 2026-09-04T18:41 | 8118 | 5427 | 941 | 909 | PANIC |
+| 2026-09-04T23:23 | 4373 | 3560 | 44 | 454 | PASS |
+| 2026-09-05T02:32 | 5881 | 5027 | 36 | 490 | PASS |
+| 2026-09-05T12:56 | 10712 | 8732 | 1032 | 466 | PASS |
+| 2026-09-05T16:46 | **12760** | **10435** | 1299 | 513 | PASS |
+| 2026-09-05T23:30 | 11608 | 10000 | 107 | 806 | PASS |
+
+Median `script_seconds` **7414**, max **12760**. So 7200 was not merely tight,
+it was *below the median run* and would have killed four of the eight; and the
+7402 in this addendum's title is unremarkable rather than exceptional — it is
+the middle of the distribution. Two further things the table shows that a
+single observation could not:
+
+- **QEMU is now the small half by a wide margin.** 115–909s of runs lasting
+  4373–12760s. Any budget reasoned from boot time is off by an order of
+  magnitude, which is the 2026-08-31 failure mode still lying in wait.
+- **`build_seconds` tops out at 1299**, and is often ~40s on a warm cache. This
+  is what sizes the *commit-headroom* wait, below — the thing being waited for
+  is a sibling lane's build, so a 900s wait was shorter than the event it
+  existed to wait out.
+
+`scripts/boot-test.sh` now says 28800 (max 12760 + the adaptive commit wait +
+rounding), with the derivation and the query in the header so the next person
+does not repeat this.
+
+#### The related bug this run actually died of: exit 5 after 8754s
+
+The re-run with the larger budget did not time out. It failed at
+`check_commit_headroom`:
+
+```
+ERROR: gave up after 900s waiting for commit headroom (6742 MiB free,
+floor 12288 MiB, before building).
+NOTHING WAS BUILT AND NOTHING WAS BOOTED — this says nothing about the code
+under test.
+```
+
+8754s elapsed, **7402s of which was a gate phase that had passed**. The gate
+threw all of it away rather than wait past fifteen minutes for a sibling
+lane's `cargo` to finish. The script's own error text — "Refusing now costs
+seconds instead" — was written for a check that runs before any investment,
+and is simply false at the point the check actually runs.
+
+Fixed in `943381d7b`: the wait budget is now the run's own elapsed time,
+floored at 3600 (above the 1299s worst-case build in the table), recomputed
+per call, uncapped, with an explicit `BOOT_TEST_COMMIT_WAIT` still honoured
+verbatim. The rule is *never abandon an investment over a wait shorter than
+the investment*. `scripts/test-boot-test.py` asserts the property rather than
+the constant, and was checked against three mutants (flat 900, capped growth,
+ignored env knob) to confirm it fails on each.
+
+**Lesson, and it is the same one twice.** Both halves of this entry are a
+number that outlived its evidence: 7200 was derived in August from ~3000s of
+pre-QEMU, 900 was derived from a build that no longer takes 900s. Neither was
+wrong when written. The defence is not a better constant — it is deriving the
+number from `bench/boot-history.jsonl` at the moment of use, which is what the
+adaptive wait does structurally and what the header now tells a reader to do
+manually.
 
 ---
 
@@ -112863,10 +112938,10 @@ For a backgrounded run, redirect instead, and read the status explicitly:
 
 ```bash
 # WRONG — notification reports tail's status, not the build's
-python scripts/run-timeout.py 21600 ./scripts/boot-test.sh 2>&1 | tail -80
+python scripts/run-timeout.py 28800 ./scripts/boot-test.sh 2>&1 | tail -80
 
 # RIGHT — full output kept, status preserved and printed
-python scripts/run-timeout.py 21600 ./scripts/boot-test.sh > /tmp/boot.log 2>&1
+python scripts/run-timeout.py 28800 ./scripts/boot-test.sh > /tmp/boot.log 2>&1
 echo "EXIT=$?"
 ```
 

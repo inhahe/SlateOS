@@ -66,7 +66,23 @@ chmod +x "$tmp/guarded.sh"
 # so the thing under test stays byte-identical to what boot-test.sh runs.
 # The value is arbitrary; nothing in the preamble reads it, it only
 # forwards it.
-guarded_out="$(BOOT_TEST_START_EPOCH="$(date +%s)" bash "$tmp/guarded.sh" 2>&1)"
+# `env -u BOOT_TEST_REEXEC` is what makes this valid when the boot test is
+# the caller, and it is the whole test when it is.  The preamble's first act
+# is `if [ -z "${BOOT_TEST_REEXEC:-}" ]`, and boot-test.sh re-execs itself
+# with that variable set to 1 -- which every child inherits, this checker
+# included.  Left in place, the guarded script takes the already-re-exec'd
+# branch, skips the snapshot entirely, and runs from disk: precisely the
+# unprotected behaviour the control is supposed to be the only example of.
+#
+# It does not then look like a failure of the guard, which is why this cost
+# a boot test to find.  The edit truncates the file, bash's byte offset into
+# it lands past the new end, and the script stops after PHASE-1 -- printing
+# neither PHASE-2 nor CLOBBERED, i.e. the "inconclusive" arm rather than the
+# "snapshot did not isolate" one.
+#
+# So: the gate was inert in the one context it was wired into.  Cleared here
+# rather than at the call site, so the checker is correct however it is run.
+guarded_out="$(env -u BOOT_TEST_REEXEC BOOT_TEST_START_EPOCH="$(date +%s)" bash "$tmp/guarded.sh" 2>&1)"
 wait
 
 fails=0

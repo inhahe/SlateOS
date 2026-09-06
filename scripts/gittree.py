@@ -131,6 +131,53 @@ class GitTreeError(RuntimeError):
     """git could not be started, or died mid-conversation."""
 
 
+def parse_ls_tree_z(out: bytes) -> list[tuple[str, str, str]]:
+    """`git ls-tree -r -z` output as `(path, type, object id)` records.
+
+    A module-level function rather than a method because it is pure, and
+    because the input that would break it **cannot be constructed on
+    Windows**: the one record shape a naive parser gets wrong is a filename
+    containing a tab, and NTFS forbids every byte below 0x20 in a name. A test
+    that had to commit such a file could only run on one of the two platforms
+    this repository is worked on. Feeding the bytes straight in tests the
+    parser everywhere.
+
+    Each record is `<mode> SP <type> SP <oid> TAB <path>`, NUL-terminated.
+    Splitting on the **first** tab is the whole trick: the mode/type/oid half
+    is fixed-width ASCII and cannot contain one, while the path half may
+    contain any byte except `/` and NUL -- tab and newline included. A
+    `record.split()` on whitespace reads a tabbed filename as extra fields and
+    silently truncates the name; that is why `-z` is used for the record
+    separator and why the field separator is handled separately from it.
+
+    Paths are decoded with `surrogateescape` so an undecodable name survives
+    the round trip; `type` and `oid` are ASCII by construction.
+
+    A record that does not have this shape raises rather than being skipped.
+    Skipping would turn "git changed its output format" into "this revision
+    contains fewer files than it does", which every caller here would report
+    as a clean result.
+    """
+    entries: list[tuple[str, str, str]] = []
+    for record in out.split(b"\0"):
+        if not record:
+            continue
+        meta, tab, raw_path = record.partition(b"\t")
+        if not tab:
+            raise GitTreeError(f"git ls-tree record has no tab: {record!r}")
+        fields = meta.split(b" ")
+        if len(fields) != 3:
+            raise GitTreeError(
+                f"git ls-tree record is not '<mode> <type> <oid>': {meta!r}"
+            )
+        entries.append((
+            raw_path.decode("utf-8", "surrogateescape"),
+            fields[1].decode("ascii", "replace"),
+            fields[2].decode("ascii", "replace"),
+        ))
+    return entries
+
+
 class GitTree:
     """A long-lived `git cat-file --batch`, plus the `ls-tree` calls that pair
     with it.
@@ -202,16 +249,40 @@ class GitTree:
         `None` is a real answer, not an error: a file added by one commit in a
         push and deleted by a later one is still enumerated by
         `git log --name-only`, and asking for it is normal.
+
+        Naming the blob by `<rev>:<path>` makes git re-walk commit -> tree ->
+        each path component on *every* request. Where the caller already knows
+        the object id -- which `list_entries` hands out for free, since
+        `ls-tree` prints it -- `read_spec` skips that and is measurably
+        cheaper. See `RevTree.__init__`.
+        """
+        return self.read_spec(f"{rev}:{path}")
+
+    def read_spec(self, spec: str) -> Optional[bytes]:
+        """The bytes of whatever `spec` names, or `None` if it is not a blob.
+
+        `spec` is anything `git cat-file --batch` accepts on its stdin: a raw
+        object id, `<rev>:<path>`, `<rev>^{tree}`, and so on. The two callers
+        that matter are `read` and `RevTree`, which pass a path expression and
+        a bare object id respectively.
+
+        Split out from `read` so that "ask git for one object and consume
+        exactly its answer" lives in one place. The protocol below is
+        stateful -- the pipe carries a payload whose length the previous line
+        declared -- and a second copy of it would be a second chance to leave
+        the stream desynchronised.
         """
         if self._proc is None:
             raise GitTreeError("read after close")
-        spec = f"{rev}:{path}".encode("utf-8", "surrogateescape")
+        # `surrogateescape`, because a path in this repository may hold any
+        # byte except `/` and NUL, and an object id is ASCII either way.
+        encoded = spec.encode("utf-8", "surrogateescape")
         stdin = self._proc.stdin
         stdout = self._proc.stdout
         if stdin is None or stdout is None:
             raise GitTreeError("git cat-file has no pipes")
         try:
-            stdin.write(spec + b"\n")
+            stdin.write(encoded + b"\n")
             stdin.flush()
         except OSError as exc:
             raise GitTreeError(f"git cat-file died: {exc}") from exc
@@ -282,29 +353,41 @@ class GitTree:
         that the class docstring warns about.
         """
         paths = list(paths)
+        return list(
+            zip(paths, self.read_many_specs([f"{rev}:{path}" for path in paths]))
+        )
+
+    def read_many_specs(self, specs: Sequence[str]) -> list[Optional[bytes]]:
+        """`read_spec` for every spec, in order, over `_FANOUT` pipes.
+
+        The fan-out primitive. `read_many` is this with `<rev>:<path>` specs
+        built for it; `RevTree` calls it with object ids, which is the same
+        work minus git's per-request path resolution.
+        """
+        specs = list(specs)
         if self._proc is None:
             raise GitTreeError("read after close")
         # Below roughly two blobs a worker the fan-out is all overhead: 15
         # extra `git cat-file` startups at ~0.3 s each, to save 20 ms a blob.
-        if len(paths) < _FANOUT * 2:
-            return [(path, self.read(rev, path)) for path in paths]
+        if len(specs) < _FANOUT * 2:
+            return [self.read_spec(spec) for spec in specs]
 
         workers = self._fanout()
         width = len(workers)
-        shards = [paths[i::width] for i in range(width)]
+        shards = [specs[i::width] for i in range(width)]
 
         def drain(job: tuple["GitTree", list[str]]) -> list[Optional[bytes]]:
             worker, shard = job
-            return [worker.read(rev, path) for path in shard]
+            return [worker.read_spec(spec) for spec in shard]
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=width) as pool:
             answers = list(pool.map(drain, zip(workers, shards)))
 
-        out: list[Optional[bytes]] = [None] * len(paths)
+        out: list[Optional[bytes]] = [None] * len(specs)
         for i, shard_answers in enumerate(answers):
             for j, data in enumerate(shard_answers):
                 out[i + j * width] = data
-        return list(zip(paths, out))
+        return out
 
     def _fanout(self) -> list["GitTree"]:
         """This process plus `_FANOUT - 1` more, spawned once and kept.
@@ -334,12 +417,31 @@ class GitTree:
         return [self] + self._extra
 
     def list_paths(self, rev: str, *pathspec: str) -> list[str]:
-        """Every file path under `rev` matching `pathspec` (all files if none).
+        """Every file path under `rev` matching `pathspec` (all files if none)."""
+        return [path for path, _type, _oid in self.list_entries(rev, *pathspec)]
+
+    def list_entries(
+        self, rev: str, *pathspec: str
+    ) -> list[tuple[str, str, str]]:
+        """`(path, type, object id)` for every file under `rev`.
 
         A separate `git ls-tree -r` call rather than part of the batch: the
         batch protocol answers "give me this object", not "enumerate". 1.5-4 s
         per directory, so callers should ask once for a wide pathspec rather
         than per-directory.
+
+        **The object id is why this exists.** `ls-tree` prints it on every line
+        whether or not anyone reads it, and this call used to pass
+        `--name-only` and throw it away -- then ask `cat-file` for the same
+        blobs by `<rev>:<path>`, which makes git resolve commit -> tree -> each
+        path component again per request. Measured on this tree: **20.0 ms per
+        blob by object id against 48.0 ms by path, both warm**, so the id that
+        was already on the line is worth ~2.4x to keep.
+
+        `type` is almost always `blob`. A submodule is a `commit`, and callers
+        that intend to read the object should check -- `read_spec` will hand
+        back `None` for one either way, but knowing beforehand saves the round
+        trip.
         """
         cmd = [
             "git",
@@ -348,7 +450,6 @@ class GitTree:
             "ls-tree",
             "-r",
             "-z",
-            "--name-only",
             rev,
         ]
         if pathspec:
@@ -361,14 +462,7 @@ class GitTree:
             ).stdout
         except (OSError, subprocess.CalledProcessError) as exc:
             raise GitTreeError(f"git ls-tree failed: {exc}") from exc
-        # `-z` rather than newline separation: a path in this repository may
-        # contain any byte except `/` and NUL, newline included, and utilities
-        # that handle exactly those names live in this tree.
-        return [
-            p.decode("utf-8", "surrogateescape")
-            for p in out.split(b"\0")
-            if p
-        ]
+        return parse_ls_tree_z(out)
 
 
 # --------------------------------------------------------------------------
@@ -784,10 +878,25 @@ class RevTree(Tree):
         self.rev = rev
         self._git = GitTree(repo)
         try:
-            paths = self._git.list_paths(rev)
+            entries = self._git.list_entries(rev)
         except GitTreeError:
             self._git.close()
             raise
+        # The object ids come off the same `ls-tree` line as the paths, at no
+        # extra cost, and reading a blob by its id costs 20.0 ms against 48.0
+        # ms for the `<rev>:<path>` spelling of the same blob -- git stops
+        # re-resolving commit -> tree -> path components on every request. The
+        # index is built once and every read after it is ~2.4x cheaper.
+        #
+        # Only blobs are recorded. A submodule is a `commit` entry, and asking
+        # `cat-file` for its id would return a commit object; leaving it out
+        # sends it down the `<rev>:<path>` path instead, which answers exactly
+        # as it did before this map existed. That keeps the fallback below a
+        # real code path rather than one nothing reaches.
+        self._oid = {
+            path: oid for path, kind, oid in entries if kind == "blob"
+        }
+        paths = [path for path, _kind, _oid in entries]
         # `target/` is gitignored, so it should never appear -- but a tree
         # that once committed one would otherwise make the two Tree
         # implementations disagree about a listing, which is the one thing
@@ -844,8 +953,21 @@ class RevTree(Tree):
         rel = _norm(rel)
         return rel == "" or rel in self._dirs
 
+    def _spec(self, rel: str) -> str:
+        """How to name `rel` to `git cat-file`: its object id if we have one.
+
+        The fallback matters and is not defensive padding. A path that is not
+        in the index at all -- deleted later in the same push, misspelled by a
+        caller, or a submodule -- has no id here, and `<rev>:<path>` is what
+        answers it: `None` for the first two, a commit object rejected by the
+        blob check for the third. Exactly the behaviour before the id map
+        existed, for exactly the cases the id map cannot cover.
+        """
+        oid = self._oid.get(rel)
+        return oid if oid is not None else f"{self.rev}:{rel}"
+
     def read_bytes(self, rel: str) -> Optional[bytes]:
-        return self._git.read(self.rev, _norm(rel))
+        return self._git.read_spec(self._spec(_norm(rel)))
 
     def read_many(self, rels: Sequence[str]) -> dict[str, Optional[bytes]]:
         """One fanned-out pass over the shared `git cat-file --batch`.
@@ -858,8 +980,10 @@ class RevTree(Tree):
         would have to preserve order to stay correct.
         """
         rels = list(rels)
-        answers = self._git.read_many(self.rev, [_norm(r) for r in rels])
-        return {rel: data for rel, (_path, data) in zip(rels, answers)}
+        answers = self._git.read_many_specs(
+            [self._spec(_norm(r)) for r in rels]
+        )
+        return dict(zip(rels, answers))
 
 
 def open_tree(root: str, head: Optional[str] = None) -> Tree:

@@ -200,6 +200,109 @@ def case_list_paths(work: str) -> None:
           ["mods/dirmod/mod.rs", "mods/lib.rs", "mods/present.rs"])
 
 
+def case_list_entries_carries_the_object_id(work: str) -> None:
+    """The id `ls-tree` prints is kept, and it is the right one.
+
+    `list_paths` used to pass `--name-only` and throw this away, which cost
+    every later read: `cat-file` asked by `<rev>:<path>` re-resolves commit ->
+    tree -> each path component per request, 48.0 ms/blob against 20.0 ms by
+    id on this tree.
+
+    Checked against `git rev-parse` rather than against itself, so a parser
+    that consistently picked the wrong field -- the mode, say, which is also
+    fixed-width digits -- would fail here rather than agreeing with itself.
+    """
+    with gittree.GitTree(work) as tree:
+        entries = tree.list_entries("HEAD")
+        paths = tree.list_paths("HEAD")
+
+    check("list_entries finds every committed file", len(entries), 9)
+    check("...the same ones list_paths does",
+          sorted(p for p, _t, _o in entries), sorted(paths))
+    check("...all of them blobs", sorted({t for _p, t, _o in entries}),
+          ["blob"])
+
+    expected = {
+        p: git(work, "rev-parse", f"HEAD:{p}").stdout.decode().strip()
+        for p in paths
+    }
+    check("...each with the object id git itself reports",
+          {p: o for p, _t, o in entries}, expected)
+
+
+def case_the_id_is_what_actually_gets_read(work: str) -> None:
+    """`RevTree` asks by id, and falls back to `<rev>:<path>` when it has none.
+
+    Every other assertion in this suite passes either way -- the bytes are the
+    same bytes whichever spelling names them, which is exactly why the slower
+    spelling survived unnoticed. So this one watches the specs going into
+    `git cat-file` instead of the bytes coming out.
+
+    The fallback is checked in the same breath because it is a real path, not
+    defensive padding: a path that is not in the revision has no id, and
+    `<rev>:<path>` is what makes it answer `None` instead of raising.
+    """
+    seen: list[str] = []
+    real = gittree.GitTree.read_spec
+
+    def spy(self, spec):  # type: ignore[no-untyped-def]
+        seen.append(spec)
+        return real(self, spec)
+
+    with gittree.RevTree("HEAD", work) as rev:
+        oid = rev._oid["src/main.rs"]
+        check("the index holds a 40-char object id for a committed file",
+              len(oid) == 40 and set(oid) <= set("0123456789abcdef"), True)
+        gittree.GitTree.read_spec = spy  # type: ignore[method-assign]
+        try:
+            body = rev.read_bytes("src/main.rs")
+            missing = rev.read_bytes("src/never-committed.rs")
+        finally:
+            gittree.GitTree.read_spec = real  # type: ignore[method-assign]
+
+    check("a committed file is read by object id", seen[:1], [oid])
+    check("...and the bytes are still right", body, b"fn main() {}\n")
+    check("a path with no id falls back to <rev>:<path>",
+          seen[1:], ["HEAD:src/never-committed.rs"])
+    check("...and that still answers None", missing, None)
+
+
+def case_a_tab_in_a_filename_does_not_truncate_it(_work: str) -> None:
+    """The record shape, fed straight in.
+
+    This is the input a `record.split()` parser gets wrong, and it cannot be
+    committed on Windows -- NTFS forbids every byte under 0x20 in a name, tab
+    included -- so the fixture is the bytes rather than a repository. That
+    restriction is the reason `parse_ls_tree_z` is a module-level function.
+
+    A whitespace split reads `weird\\tname.rs` as two more fields and hands
+    back `weird` as the path: a file silently renamed, and on the checkers'
+    side a finding filed against a path that does not exist.
+    """
+    oid = "0" * 40
+    out = (
+        b"100644 blob " + oid.encode() + b"\tsrc/plain.rs\0"
+        b"100644 blob " + oid.encode() + b"\tsrc/weird\tname.rs\0"
+        b"100644 blob " + oid.encode() + b"\tsrc/two\nlines.rs\0"
+        b"160000 commit " + oid.encode() + b"\tvendor/sub\0"
+    )
+    got = gittree.parse_ls_tree_z(out)
+    check("a tab inside the name survives",
+          [p for p, _t, _o in got],
+          ["src/plain.rs", "src/weird\tname.rs", "src/two\nlines.rs",
+           "vendor/sub"])
+    check("...and a submodule is reported as a commit, not a blob",
+          [t for _p, t, _o in got], ["blob", "blob", "blob", "commit"])
+    check("an empty record is skipped, not an error",
+          gittree.parse_ls_tree_z(b"\0\0"), [])
+    check("a record with no tab is an error, not a skipped file",
+          _raises(lambda: gittree.parse_ls_tree_z(b"100644 blob deadbeef\0")),
+          True)
+    check("nor is a short record silently accepted",
+          _raises(lambda: gittree.parse_ls_tree_z(b"100644 blob\tx.rs\0")),
+          True)
+
+
 def case_materialise_layout(work: str) -> None:
     """Files land at their real relative paths, under forward slashes only.
 
@@ -1246,6 +1349,9 @@ def main() -> int:
         work = build_repo(tmp)
         for case in (case_bytes_match_git, case_missing_does_not_desync,
                      case_read_after_close, case_list_paths,
+                     case_list_entries_carries_the_object_id,
+                     case_the_id_is_what_actually_gets_read,
+                     case_a_tab_in_a_filename_does_not_truncate_it,
                      case_materialise_layout, case_materialise_skips_absent,
                      case_stub_rules, case_cli_emits_lf,
                      case_cli_reports_crlf_input):

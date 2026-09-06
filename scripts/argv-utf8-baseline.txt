@@ -378,8 +378,6 @@ userspace/strings/src/main.rs:argv-as-string
 userspace/stty/src/main.rs:argv-as-string
 userspace/stylix-cli/src/main.rs:argv-as-string
 userspace/su/src/main.rs:argv-as-string
-userspace/sudo/src/main.rs:argv-as-string
-userspace/sudo/src/main.rs:env-as-string
 userspace/swapon/src/main.rs:argv-as-string
 userspace/swappy-cli/src/main.rs:argv-as-string
 userspace/swayidle-cli/src/main.rs:argv-as-string

@@ -15,14 +15,17 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![allow(dead_code)]
-
 use guitk::color::Color;
+use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, App, Response};
+use oswindow::{Event, RenderTree};
 
 use std::collections::VecDeque;
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha theme colors
@@ -39,9 +42,17 @@ const MOCHA_BLUE: Color = Color::from_hex(0x89B4FA);
 const MOCHA_GREEN: Color = Color::from_hex(0xA6E3A1);
 const MOCHA_RED: Color = Color::from_hex(0xF38BA8);
 const MOCHA_YELLOW: Color = Color::from_hex(0xF9E2AF);
+// Part of the complete Catppuccin Mocha palette, kept whole even though no
+// widget currently paints with these four: a named palette with holes in it is
+// not the palette it is named after, and the next widget to want one would
+// otherwise re-derive the hex by hand.
+#[allow(dead_code)]
 const MOCHA_PEACH: Color = Color::from_hex(0xFAB387);
+#[allow(dead_code)]
 const MOCHA_LAVENDER: Color = Color::from_hex(0xB4BEFE);
+#[allow(dead_code)]
 const MOCHA_TEAL: Color = Color::from_hex(0x94E2D5);
+#[allow(dead_code)]
 const MOCHA_MAUVE: Color = Color::from_hex(0xCBA6F7);
 const MOCHA_OVERLAY0: Color = Color::from_hex(0x6C7086);
 
@@ -57,6 +68,8 @@ const LAYER_ROW_HEIGHT: f32 = 30.0;
 const PALETTE_SWATCH_SIZE: f32 = 22.0;
 const PALETTE_GAP: f32 = 3.0;
 const PAGE_TAB_HEIGHT: f32 = 28.0;
+/// Narrowest a page tab gets, however short its name.
+const PAGE_TAB_MIN_WIDTH: f32 = 76.0;
 
 /// Inset of a sticky note's text from each edge of the note, in canvas units.
 const STICKY_PADDING: f32 = 8.0;
@@ -68,9 +81,23 @@ const STICKY_LINE_HEIGHT: f32 = 16.0;
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 10.0;
 const GRID_SIZE: f32 = 20.0;
-const SNAP_THRESHOLD: f32 = 8.0;
 const MAX_UNDO_STEPS: usize = 200;
 const MAX_THICKNESS: u8 = 20;
+/// A window smaller than this has no canvas left between the panels.
+const MIN_WINDOW_WIDTH: f32 = 480.0;
+const MIN_WINDOW_HEIGHT: f32 = 320.0;
+const WINDOW_WIDTH: f32 = 1280.0;
+const WINDOW_HEIGHT: f32 = 800.0;
+/// Height of a tool button, and the step between two of them.
+const TOOL_BUTTON_HEIGHT: f32 = 32.0;
+const TOOL_BUTTON_STEP: f32 = 38.0;
+/// How far in from the left edge of the toolbar a button starts.
+const TOOL_BUTTON_INSET: f32 = 6.0;
+const TOOL_BUTTON_WIDTH: f32 = 40.0;
+/// Air between the last tool and the rule under it, the rule and the heading,
+/// and the heading and the first swatch.
+const PALETTE_HEADING_GAP: f32 = 8.0;
+const PALETTE_HEADING_HEIGHT: f32 = 16.0;
 
 // ============================================================================
 // Preset palette colors (16 colors)
@@ -153,6 +180,19 @@ impl Tool {
             Self::Select => Some('S'),
             Self::StickyNote => Some('N'),
         }
+    }
+
+    /// The tool a letter picks, if any.
+    ///
+    /// Derived from `shortcut` rather than written out again: a second table
+    /// is a second chance for the toolbar's letter and the keyboard's letter
+    /// to stop agreeing.
+    pub fn from_shortcut(ch: char) -> Option<Self> {
+        let upper = ch.to_ascii_uppercase();
+        Self::all()
+            .iter()
+            .copied()
+            .find(|tool| tool.shortcut() == Some(upper))
     }
 
     pub fn all() -> &'static [Tool] {
@@ -745,6 +785,13 @@ pub struct WhiteboardApp {
 
     // UI panel visibility
     pub show_layers_panel: bool,
+
+    /// Whether shift was held on the last key seen.
+    ///
+    /// `on_canvas_press` takes a `shift_held` for multi-select, and a mouse
+    /// event carries no modifiers, so the only record of the key state is what
+    /// the last keyboard event said.
+    pub shift_held: bool,
 }
 
 impl WhiteboardApp {
@@ -775,6 +822,7 @@ impl WhiteboardApp {
             text_input_buffer: String::new(),
             active_layer_id: first_layer_id,
             show_layers_panel: true,
+            shift_held: false,
         }
     }
 
@@ -782,16 +830,32 @@ impl WhiteboardApp {
     // Page accessors
     // ========================================================================
 
+    /// The page being drawn on.
+    ///
+    /// A board always has at least one page and `active_page` always names
+    /// one: `new` makes the first, `add_page` and `switch_page` set the index
+    /// to a page they have just seen, and `delete_page` refuses to remove the
+    /// last and re-clamps the index. Returning an `Option` here would hand
+    /// that invariant to sixty call sites to re-check.
+    #[allow(
+        clippy::expect_used,
+        reason = "invariant established by `new` and preserved by every writer of `active_page`"
+    )]
     pub fn current_page(&self) -> &Page {
         self.pages
             .get(self.active_page)
-            .expect("active_page out of range")
+            .expect("a board always has at least one page and active_page names one")
     }
 
+    /// The page being drawn on, to be changed. See `current_page`.
+    #[allow(
+        clippy::expect_used,
+        reason = "invariant established by `new` and preserved by every writer of `active_page`"
+    )]
     pub fn current_page_mut(&mut self) -> &mut Page {
         self.pages
             .get_mut(self.active_page)
-            .expect("active_page out of range")
+            .expect("a board always has at least one page and active_page names one")
     }
 
     // ========================================================================
@@ -1166,10 +1230,10 @@ impl WhiteboardApp {
     pub fn move_layer_up(&mut self, layer_id: LayerId) {
         let page = self.current_page_mut();
         if let Some(idx) = page.find_layer_index(layer_id)
-            && idx + 1 < page.layers.len()
+            && idx.saturating_add(1) < page.layers.len()
         {
             let old_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
-            page.layers.swap(idx, idx + 1);
+            page.layers.swap(idx, idx.saturating_add(1));
             let new_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
             self.push_action(Action::ReorderLayers {
                 old_order,
@@ -1184,7 +1248,7 @@ impl WhiteboardApp {
             && idx > 0
         {
             let old_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
-            page.layers.swap(idx, idx - 1);
+            page.layers.swap(idx, idx.saturating_sub(1));
             let new_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
             self.push_action(Action::ReorderLayers {
                 old_order,
@@ -1490,7 +1554,11 @@ impl WhiteboardApp {
                     bounds
                 };
                 let bg_color = STICKY_COLORS
-                    .get(self.sticky_color_index % STICKY_COLORS.len())
+                    .get(
+                        self.sticky_color_index
+                            .checked_rem(STICKY_COLORS.len())
+                            .unwrap_or(0),
+                    )
                     .copied()
                     .unwrap_or(MOCHA_YELLOW);
                 let content = if self.text_input_buffer.is_empty() {
@@ -1745,8 +1813,331 @@ impl WhiteboardApp {
     // Rendering
     // ========================================================================
 
+    // ------------------------------------------------------------------
+    // Layout the renderer draws and the pointer reads
+    // ------------------------------------------------------------------
+
+    /// Adopt a new window size. Returns whether it changed.
+    pub fn set_window_size(&mut self, width: f32, height: f32) -> bool {
+        let width = width.max(MIN_WINDOW_WIDTH);
+        let height = height.max(MIN_WINDOW_HEIGHT);
+        if (self.win_width - width).abs() < f32::EPSILON
+            && (self.win_height - height).abs() < f32::EPSILON
+        {
+            return false;
+        }
+        self.win_width = width;
+        self.win_height = height;
+        true
+    }
+
+    /// Y the tool column starts at.
+    fn toolbar_top(&self) -> f32 {
+        TOP_BAR_HEIGHT + PAGE_TAB_HEIGHT
+    }
+
+    /// Every tool button, with the rectangle it is drawn in.
+    ///
+    /// The renderer walked a `ty` down the column, so the only record of where
+    /// a button was, was the pixels already drawn -- which is why none of them
+    /// could be pressed.
+    pub fn tool_buttons(&self) -> Vec<(Tool, Rect)> {
+        let mut ty = self.toolbar_top() + 8.0;
+        Tool::all()
+            .iter()
+            .map(|tool| {
+                let rect = Rect::new(TOOL_BUTTON_INSET, ty, TOOL_BUTTON_WIDTH, TOOL_BUTTON_HEIGHT);
+                ty += TOOL_BUTTON_STEP;
+                (*tool, rect)
+            })
+            .collect()
+    }
+
+    /// Y the colour swatches start at, under the tools and their heading.
+    fn palette_top(&self) -> f32 {
+        #[allow(clippy::cast_precision_loss, reason = "there are nine tools")]
+        let tools = Tool::all().len() as f32;
+        self.toolbar_top()
+            + 8.0
+            + tools * TOOL_BUTTON_STEP
+            + PALETTE_HEADING_GAP * 2.0
+            + PALETTE_HEADING_HEIGHT
+    }
+
+    /// Every colour swatch, with the rectangle it is drawn in.
+    pub fn palette_swatches(&self) -> Vec<(Color, Rect)> {
+        let top = self.palette_top();
+        PALETTE_COLORS
+            .iter()
+            .enumerate()
+            .map(|(i, color)| {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "the palette has sixteen colours"
+                )]
+                let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+                (
+                    *color,
+                    Rect::new(
+                        TOOL_BUTTON_INSET + col * (PALETTE_SWATCH_SIZE + PALETTE_GAP),
+                        top + row * (PALETTE_SWATCH_SIZE + PALETTE_GAP),
+                        PALETTE_SWATCH_SIZE,
+                        PALETTE_SWATCH_SIZE,
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    /// Which tool a point in the toolbar is on, if any.
+    pub fn tool_at(&self, x: f32, y: f32) -> Option<Tool> {
+        self.tool_buttons()
+            .into_iter()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(tool, _)| tool)
+    }
+
+    /// Which colour a point in the palette is on, if any.
+    pub fn swatch_at(&self, x: f32, y: f32) -> Option<Color> {
+        self.palette_swatches()
+            .into_iter()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(color, _)| color)
+    }
+
+    /// How wide a page's tab is: its name, or a minimum, whichever is more.
+    fn page_tab_width(name: &str) -> f32 {
+        text::padded_width_any_weight(name, 8.0, 12.0).max(PAGE_TAB_MIN_WIDTH)
+    }
+
+    /// The page tabs along the top, with the rectangle each is drawn in.
+    pub fn page_tabs(&self) -> Vec<(usize, Rect)> {
+        let mut tx = TOOLBAR_WIDTH + 4.0;
+        self.pages
+            .iter()
+            .enumerate()
+            .map(|(i, page)| {
+                let width = Self::page_tab_width(&page.name);
+                let rect = Rect::new(tx, TOP_BAR_HEIGHT + 2.0, width, PAGE_TAB_HEIGHT - 2.0);
+                tx += width + 4.0;
+                (i, rect)
+            })
+            .collect()
+    }
+
+    /// The button that adds a page, which sits after the last tab.
+    pub fn add_page_button(&self) -> Rect {
+        let x = self
+            .page_tabs()
+            .last()
+            .map_or(TOOLBAR_WIDTH + 4.0, |(_, r)| r.x + r.width + 4.0);
+        Rect::new(x, TOP_BAR_HEIGHT + 4.0, 24.0, 20.0)
+    }
+
+    /// Which page tab a point is on, if any.
+    pub fn page_tab_at(&self, x: f32, y: f32) -> Option<usize> {
+        self.page_tabs()
+            .into_iter()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(index, _)| index)
+    }
+
+    // ------------------------------------------------------------------
+    // Input
+    // ------------------------------------------------------------------
+
+    /// Handle one input event. Returns whether anything changed.
+    pub fn handle_event(&mut self, event: &Event) -> bool {
+        match event {
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            _ => false,
+        }
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        let (x, y) = (event.x, event.y);
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                if let Some(tool) = self.tool_at(x, y) {
+                    self.current_tool = tool;
+                    return true;
+                }
+                if let Some(color) = self.swatch_at(x, y) {
+                    self.set_stroke_color(color);
+                    return true;
+                }
+                if let Some(page) = self.page_tab_at(x, y) {
+                    self.switch_page(page);
+                    return true;
+                }
+                if self.add_page_button().contains(x, y) {
+                    self.add_page();
+                    return true;
+                }
+                if self.canvas_rect().contains(x, y) {
+                    self.on_canvas_press(x, y, self.shift_held);
+                    return true;
+                }
+                false
+            }
+            MouseEventKind::Press(MouseButton::Middle) => {
+                // The middle button pans, whatever tool is chosen -- which is
+                // what `start_pan` was written for and nothing called.
+                if self.canvas_rect().contains(x, y) {
+                    self.start_pan(x, y);
+                    return true;
+                }
+                false
+            }
+            MouseEventKind::Move => {
+                if matches!(self.drag, DragState::None) {
+                    return false;
+                }
+                self.on_canvas_move(x, y);
+                true
+            }
+            MouseEventKind::Release(MouseButton::Left | MouseButton::Middle) => {
+                if matches!(self.drag, DragState::None) {
+                    return false;
+                }
+                self.on_canvas_release(x, y);
+                true
+            }
+            MouseEventKind::Scroll { dy, .. } => {
+                if !self.canvas_rect().contains(x, y) {
+                    return false;
+                }
+                // `dy` is in notches, positive away from the user, which is
+                // the direction every program zooms in. `on_scroll` only reads
+                // its sign, so the notch count passes through untouched --
+                // multiplying it by a pixel constant is the mistake the
+                // toolkit's own doc warns about.
+                self.on_scroll(x, y, dy);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        // Shift is read by the canvas press for multi-select, and the only
+        // record of it is the modifier on whichever event arrives next.
+        self.shift_held = event.modifiers.shift;
+
+        if event.modifiers.ctrl {
+            return match event.key {
+                Key::Z => {
+                    if event.modifiers.shift {
+                        self.redo();
+                    } else {
+                        self.undo();
+                    }
+                    true
+                }
+                Key::Y => {
+                    self.redo();
+                    true
+                }
+                Key::A => {
+                    self.select_all();
+                    true
+                }
+                Key::L => {
+                    // Plain `L` is the Line tool, so the panel takes control.
+                    self.show_layers_panel = !self.show_layers_panel;
+                    true
+                }
+                _ => false,
+            };
+        }
+
+        match event.key {
+            Key::Delete | Key::Backspace => {
+                if self.selection.is_empty() {
+                    return false;
+                }
+                self.delete_selected();
+                true
+            }
+            Key::Escape => {
+                if self.selection.is_empty() && matches!(self.drag, DragState::None) {
+                    return false;
+                }
+                self.drag = DragState::None;
+                self.selection.clear();
+                true
+            }
+            Key::Left => self.nudge(-1.0, 0.0),
+            Key::Right => self.nudge(1.0, 0.0),
+            Key::Up => self.nudge(0.0, -1.0),
+            Key::Down => self.nudge(0.0, 1.0),
+            _ => self.handle_typed(event),
+        }
+    }
+
+    fn handle_typed(&mut self, event: &KeyEvent) -> bool {
+        let Some(ch) = event.typed().next() else {
+            return false;
+        };
+        // Single letters pick a tool, the way every drawing program binds
+        // them. `Tool::from_shortcut` is the one table both this and the
+        // toolbar's tooltips can read.
+        if let Some(tool) = Tool::from_shortcut(ch) {
+            self.current_tool = tool;
+            return true;
+        }
+        match ch {
+            '+' | '=' => {
+                self.zoom_in();
+                true
+            }
+            '-' | '_' => {
+                self.zoom_out();
+                true
+            }
+            '0' => {
+                self.zoom_to_fit();
+                true
+            }
+            'g' | 'G' => {
+                self.show_grid = !self.show_grid;
+                true
+            }
+            '#' => {
+                self.snap_to_grid = !self.snap_to_grid;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Select every shape on the current page.
+    pub fn select_all(&mut self) {
+        self.selection.shape_ids = self
+            .current_page()
+            .shapes
+            .iter()
+            .map(|shape| shape.id)
+            .collect();
+        self.selection.marquee = None;
+    }
+
+    /// Move the selection by a step. Returns whether anything moved.
+    fn nudge(&mut self, dx: f32, dy: f32) -> bool {
+        if self.selection.is_empty() {
+            return false;
+        }
+        // The arrow keys move by a whole grid square when the grid is being
+        // snapped to, so a nudged shape lands back on it rather than one
+        // pixel off it.
+        let step = if self.snap_to_grid { GRID_SIZE } else { 1.0 };
+        self.move_selected(dx * step, dy * step);
+        true
+    }
+
     /// Render the entire UI to a list of render commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background
@@ -1936,10 +2327,12 @@ impl WhiteboardApp {
             corner_radii: CornerRadii::ZERO,
         });
 
+        let tabs = self.page_tabs();
         let mut tx = TOOLBAR_WIDTH + 4.0;
-        for (i, page) in self.pages.iter().enumerate() {
-            let is_active = i == self.active_page;
-            let tab_width = text::padded_width_any_weight(&page.name, 8.0, 12.0).max(76.0);
+        for ((i, rect), page) in tabs.iter().zip(self.pages.iter()) {
+            let is_active = *i == self.active_page;
+            let (tx_start, tab_width) = (rect.x, rect.width);
+            tx = tx_start;
 
             let bg = if is_active {
                 MOCHA_BASE
@@ -1947,10 +2340,10 @@ impl WhiteboardApp {
                 MOCHA_SURFACE0
             };
             cmds.push(RenderCommand::FillRect {
-                x: tx,
-                y: y + 2.0,
-                width: tab_width,
-                height: PAGE_TAB_HEIGHT - 2.0,
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
                 color: bg,
                 corner_radii: CornerRadii {
                     top_left: 4.0,
@@ -1980,21 +2373,23 @@ impl WhiteboardApp {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            tx += tab_width + 4.0;
+            tx = tx_start + tab_width + 4.0;
         }
+        let _ = tx;
 
         // "+" button to add page
+        let plus = self.add_page_button();
         cmds.push(RenderCommand::FillRect {
-            x: tx,
-            y: y + 4.0,
-            width: 24.0,
-            height: 20.0,
+            x: plus.x,
+            y: plus.y,
+            width: plus.width,
+            height: plus.height,
             color: MOCHA_SURFACE0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: tx + 7.0,
-            y: y + 7.0,
+            x: plus.x + 7.0,
+            y: plus.y + 3.0,
             text: "+".to_string(),
             color: MOCHA_TEXT,
             font_size: 13.0,
@@ -2030,9 +2425,11 @@ impl WhiteboardApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // Tool buttons
+        // Tool buttons, from the same rectangles the pointer is tested
+        // against.
+        let buttons = self.tool_buttons();
         let mut ty = y_start + 8.0;
-        for tool in Tool::all() {
+        for (tool, rect) in &buttons {
             let is_active = *tool == self.current_tool;
             let bg = if is_active {
                 MOCHA_BLUE
@@ -2042,17 +2439,17 @@ impl WhiteboardApp {
             let fg = if is_active { MOCHA_CRUST } else { MOCHA_TEXT };
 
             cmds.push(RenderCommand::FillRect {
-                x: 6.0,
-                y: ty,
-                width: 40.0,
-                height: 32.0,
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
                 color: bg,
                 corner_radii: CornerRadii::all(6.0),
             });
 
             cmds.push(RenderCommand::Text {
-                x: 10.0,
-                y: ty + 10.0,
+                x: rect.x + 4.0,
+                y: rect.y + 10.0,
                 text: tool.label().to_string(),
                 color: fg,
                 font_size: 11.0,
@@ -2061,15 +2458,15 @@ impl WhiteboardApp {
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(36.0),
+                max_width: Some(rect.width - 4.0),
                 overflow: TextOverflow::Ellipsis,
             });
 
-            ty += 38.0;
+            ty = rect.y + TOOL_BUTTON_STEP;
         }
 
         // Color palette below tools
-        ty += 8.0;
+        ty += PALETTE_HEADING_GAP;
         cmds.push(RenderCommand::Line {
             x1: 6.0,
             y1: ty,
@@ -2091,26 +2488,22 @@ impl WhiteboardApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        ty += 16.0;
 
-        // 2-column palette swatches
-        for (i, color) in PALETTE_COLORS.iter().enumerate() {
-            let col = i % 2;
-            let row = i / 2;
-            let sx = 6.0 + col as f32 * (PALETTE_SWATCH_SIZE + PALETTE_GAP);
-            let sy = ty + row as f32 * (PALETTE_SWATCH_SIZE + PALETTE_GAP);
+        // 2-column palette swatches, from the rectangles the click reads.
+        for (color, swatch) in self.palette_swatches() {
+            let (sx, sy) = (swatch.x, swatch.y);
 
             cmds.push(RenderCommand::FillRect {
                 x: sx,
                 y: sy,
                 width: PALETTE_SWATCH_SIZE,
                 height: PALETTE_SWATCH_SIZE,
-                color: *color,
+                color,
                 corner_radii: CornerRadii::all(3.0),
             });
 
             // Highlight the active color
-            if *color == self.stroke_props.color {
+            if color == self.stroke_props.color {
                 cmds.push(RenderCommand::StrokeRect {
                     x: sx - 1.0,
                     y: sy - 1.0,
@@ -2507,7 +2900,11 @@ impl WhiteboardApp {
             DragState::PlacingStickyNote { start, current } => {
                 let r = Rect::from_points(*start, *current);
                 let bg = STICKY_COLORS
-                    .get(self.sticky_color_index % STICKY_COLORS.len())
+                    .get(
+                        self.sticky_color_index
+                            .checked_rem(STICKY_COLORS.len())
+                            .unwrap_or(0),
+                    )
                     .copied()
                     .unwrap_or(MOCHA_YELLOW);
                 cmds.push(RenderCommand::FillRect {
@@ -2790,16 +3187,92 @@ impl WhiteboardApp {
 // Entry point
 // ============================================================================
 
-fn main() {
-    let _app = WhiteboardApp::new(1280.0, 800.0);
+impl App for WhiteboardApp {
+    fn title(&self) -> String {
+        // The board being drawn on, because that is what the window is.
+        let page = self.current_page();
+        let shapes = page.shapes.len();
+        format!("{} ({shapes}) - Whiteboard", page.name)
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        }
+    }
+
+    /// No clock.
+    ///
+    /// Nothing on a whiteboard moves on its own: a stroke appears when it is
+    /// drawn and stays where it was put. Asking the harness for a tick would
+    /// wake the machine on a schedule to find the same drawing still there --
+    /// `known-issues.md` lesson 47.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        match event {
+            Event::CloseRequested => Response::Exit,
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension in pixels is exact in f32"
+                )]
+                let (w, h) = (*width as f32, *height as f32);
+                if self.set_window_size(w, h) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            other => {
+                if self.handle_event(other) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The handed size wins over the recorded one: the first frame is drawn
+        // before any `Event::Resize` arrives, so a window opened at another
+        // size would be laid out for the size that was asked for, and every
+        // hit box in it would name the wrong rectangle.
+        self.set_window_size(width, height);
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
+fn main() -> ExitCode {
+    let mut app = WhiteboardApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+    app::launch("whiteboard", &mut app)
+}
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it -- that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not,
+    // and a window size is a value the code was handed and stored verbatim.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // ---- Construction ----
@@ -4095,7 +4568,7 @@ mod tests {
     #[test]
     fn test_render_not_empty() {
         let app = WhiteboardApp::new(1280.0, 800.0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -4109,7 +4582,7 @@ mod tests {
         app.add_shape(ShapeKind::Rectangle {
             bounds: Rect::new(10.0, 10.0, 50.0, 50.0),
         });
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(cmds.len() > 10);
     }
 
@@ -4119,7 +4592,7 @@ mod tests {
     /// note's colour can be mistaken for its body.
     fn sticky_lines_drawn(app: &WhiteboardApp, bounds: &Rect) -> Vec<(f32, String)> {
         let left = (bounds.x + STICKY_PADDING) * app.zoom;
-        app.render()
+        app.render_commands()
             .into_iter()
             .filter_map(|c| match c {
                 RenderCommand::Text {
@@ -4216,7 +4689,7 @@ mod tests {
     fn test_render_with_layers_panel_hidden() {
         let mut app = WhiteboardApp::new(1280.0, 800.0);
         app.show_layers_panel = false;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -4228,7 +4701,7 @@ mod tests {
             start: Point::new(10.0, 10.0),
             current: Point::new(100.0, 100.0),
         };
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -4238,7 +4711,7 @@ mod tests {
         app.drag = DragState::DrawingFreehand {
             points: vec![Point::new(0.0, 0.0), Point::new(10.0, 10.0)],
         };
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -4249,7 +4722,7 @@ mod tests {
             start: Point::new(10.0, 10.0),
             current: Point::new(100.0, 100.0),
         };
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -4301,5 +4774,648 @@ mod tests {
         let id = app.current_page().layers[0].id;
         assert_eq!(app.current_page().find_layer_index(id), Some(0));
         assert_eq!(app.current_page().find_layer_index(999), None);
+    }
+
+    // ======================================================================
+    // Window, toolbar and keyboard
+    // ======================================================================
+
+    use guitk::event::Modifiers;
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn press_with(k: Key, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn typed(k: Key, ch: char) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: ch.to_string(),
+        })
+    }
+
+    fn ctrl() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            ..Modifiers::NONE
+        }
+    }
+
+    fn ctrl_shift() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::NONE
+        }
+    }
+
+    fn mouse(x: f32, y: f32, kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    fn click_at(x: f32, y: f32) -> Event {
+        mouse(x, y, MouseEventKind::Press(MouseButton::Left))
+    }
+
+    fn board() -> WhiteboardApp {
+        WhiteboardApp::new(WINDOW_WIDTH, WINDOW_HEIGHT)
+    }
+
+    /// The middle of the canvas, well away from every panel.
+    fn canvas_centre(app: &WhiteboardApp) -> (f32, f32) {
+        let r = app.canvas_rect();
+        (r.x + r.width / 2.0, r.y + r.height / 2.0)
+    }
+
+    // --- the toolbar can be clicked ---
+
+    #[test]
+    fn clicking_a_tool_button_picks_that_tool() {
+        let mut app = board();
+        let buttons = app.tool_buttons();
+        let (tool, rect) = buttons[3];
+        assert_ne!(tool, app.current_tool, "the fixture must change something");
+        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        assert_eq!(app.tool_at(x, y), Some(tool));
+        assert!(app.handle_event(&click_at(x, y)));
+        assert_eq!(app.current_tool, tool);
+    }
+
+    #[test]
+    fn every_tool_button_is_reachable_where_it_is_drawn() {
+        let app = board();
+        for (tool, rect) in app.tool_buttons() {
+            assert_eq!(
+                app.tool_at(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+                Some(tool),
+                "{tool:?} is drawn at {rect:?} and must be clickable there"
+            );
+        }
+    }
+
+    #[test]
+    fn the_gap_between_two_tool_buttons_is_not_a_button() {
+        let app = board();
+        let buttons = app.tool_buttons();
+        let first = buttons[0].1;
+        let gap_y = first.y + first.height + 1.0;
+        assert_eq!(
+            app.tool_at(first.x + 4.0, gap_y),
+            None,
+            "the air between two buttons belongs to neither"
+        );
+    }
+
+    #[test]
+    fn clicking_a_swatch_sets_the_stroke_colour() {
+        let mut app = board();
+        let swatches = app.palette_swatches();
+        let (color, rect) = swatches[5];
+        assert_ne!(color, app.stroke_props.color);
+        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        assert_eq!(app.swatch_at(x, y), Some(color));
+        assert!(app.handle_event(&click_at(x, y)));
+        assert_eq!(app.stroke_props.color, color);
+    }
+
+    #[test]
+    fn every_swatch_is_reachable_where_it_is_drawn() {
+        let app = board();
+        for (color, rect) in app.palette_swatches() {
+            assert_eq!(
+                app.swatch_at(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+                Some(color),
+                "a swatch drawn at {rect:?} must be clickable there"
+            );
+        }
+    }
+
+    #[test]
+    fn the_palette_starts_below_the_last_tool() {
+        let app = board();
+        let last = app
+            .tool_buttons()
+            .last()
+            .map_or(0.0, |(_, r)| r.y + r.height);
+        let first_swatch = app.palette_swatches().first().map_or(0.0, |(_, r)| r.y);
+        assert!(
+            first_swatch > last,
+            "the first swatch is at {first_swatch} and the last tool ends at \
+             {last}: a swatch drawn over a button is a click that does two \
+             things"
+        );
+    }
+
+    // --- the page strip ---
+
+    #[test]
+    fn clicking_a_page_tab_switches_to_it() {
+        let mut app = board();
+        app.add_page();
+        app.switch_page(0);
+        let tabs = app.page_tabs();
+        let (index, rect) = tabs[1];
+        assert!(app.handle_event(&click_at(
+            rect.x + rect.width / 2.0,
+            rect.y + rect.height / 2.0
+        )));
+        assert_eq!(app.active_page, index);
+    }
+
+    #[test]
+    fn the_plus_button_adds_a_page() {
+        let mut app = board();
+        let before = app.page_count();
+        let plus = app.add_page_button();
+        assert!(app.handle_event(&click_at(
+            plus.x + plus.width / 2.0,
+            plus.y + plus.height / 2.0
+        )));
+        assert_eq!(app.page_count(), before + 1);
+    }
+
+    #[test]
+    fn the_plus_button_sits_after_the_last_tab() {
+        let mut app = board();
+        app.add_page();
+        app.add_page();
+        let last = app.page_tabs().last().map_or(0.0, |(_, r)| r.x + r.width);
+        assert!(
+            app.add_page_button().x >= last,
+            "the button that adds a page must not be drawn over one"
+        );
+    }
+
+    #[test]
+    fn a_wider_tab_pushes_the_next_one_along() {
+        // Tab widths follow their names, so a fixed step would overlap them.
+        let mut app = board();
+        app.add_page();
+        if let Some(page) = app.pages.first_mut() {
+            page.name = "A page with a very long name indeed".to_string();
+        }
+        let tabs = app.page_tabs();
+        assert!(
+            tabs[1].1.x >= tabs[0].1.x + tabs[0].1.width,
+            "the second tab starts at {} and the first ends at {}",
+            tabs[1].1.x,
+            tabs[0].1.x + tabs[0].1.width
+        );
+    }
+
+    // --- the canvas ---
+
+    #[test]
+    fn a_press_and_drag_on_the_canvas_draws_a_shape() {
+        let mut app = board();
+        app.current_tool = Tool::Rectangle;
+        let (x, y) = canvas_centre(&app);
+        assert!(app.handle_event(&click_at(x, y)));
+        assert!(app.handle_event(&mouse(x + 80.0, y + 60.0, MouseEventKind::Move)));
+        assert!(app.handle_event(&mouse(
+            x + 80.0,
+            y + 60.0,
+            MouseEventKind::Release(MouseButton::Left)
+        )));
+        assert_eq!(
+            app.current_page().shapes.len(),
+            1,
+            "press, move and release are the three halves of drawing and all \
+             three had to arrive from somewhere"
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_toolbar_does_not_draw() {
+        let mut app = board();
+        app.current_tool = Tool::Rectangle;
+        let rect = app.tool_buttons()[0].1;
+        app.handle_event(&click_at(rect.x + 4.0, rect.y + 4.0));
+        assert!(
+            matches!(app.drag, DragState::None),
+            "pressing a tool button must not also start a rectangle"
+        );
+        assert!(app.current_page().shapes.is_empty());
+    }
+
+    #[test]
+    fn a_move_with_nothing_dragging_asks_for_no_frame() {
+        let mut app = board();
+        let (x, y) = canvas_centre(&app);
+        assert_eq!(
+            app.on_event(&mouse(x, y, MouseEventKind::Move)),
+            Response::Idle,
+            "redrawing on every pointer move over an idle canvas is a frame \
+             spent drawing what is already there"
+        );
+    }
+
+    #[test]
+    fn the_wheel_zooms_the_canvas() {
+        let mut app = board();
+        let (x, y) = canvas_centre(&app);
+        let before = app.zoom;
+        assert!(app.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 0.0, dy: 1.0 })));
+        assert!(app.zoom > before, "a notch away from the user zooms in");
+        assert!(app.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 0.0, dy: -1.0 })));
+        assert!((app.zoom - before).abs() < 0.001);
+    }
+
+    #[test]
+    fn the_wheel_outside_the_canvas_does_nothing() {
+        let mut app = board();
+        let before = app.zoom;
+        let rect = app.tool_buttons()[0].1;
+        assert!(!app.handle_event(&mouse(
+            rect.x + 4.0,
+            rect.y + 4.0,
+            MouseEventKind::Scroll { dx: 0.0, dy: 1.0 }
+        )));
+        assert!((app.zoom - before).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_middle_button_pans() {
+        let mut app = board();
+        let (x, y) = canvas_centre(&app);
+        assert!(app.handle_event(&mouse(x, y, MouseEventKind::Press(MouseButton::Middle))));
+        assert!(
+            matches!(app.drag, DragState::Panning { .. }),
+            "`start_pan` was written for this and nothing called it"
+        );
+        let before = app.pan_x;
+        app.handle_event(&mouse(x + 40.0, y, MouseEventKind::Move));
+        assert!((app.pan_x - before).abs() > f32::EPSILON);
+    }
+
+    // --- the keyboard ---
+
+    #[test]
+    fn a_letter_picks_the_tool_the_toolbar_says_it_does() {
+        let mut app = board();
+        for tool in Tool::all() {
+            let Some(ch) = tool.shortcut() else { continue };
+            app.current_tool = Tool::Select;
+            let key = match ch {
+                'P' => Key::P,
+                'L' => Key::L,
+                'R' => Key::R,
+                'O' => Key::O,
+                'A' => Key::A,
+                'T' => Key::T,
+                'E' => Key::E,
+                'S' => Key::S,
+                'N' => Key::N,
+                _ => continue,
+            };
+            assert!(app.handle_event(&typed(key, ch.to_ascii_lowercase())));
+            assert_eq!(
+                app.current_tool, *tool,
+                "{ch} is the letter this tool has advertised since it was \
+                 written, and nothing dispatched on it"
+            );
+        }
+    }
+
+    #[test]
+    fn from_shortcut_agrees_with_shortcut_in_both_cases() {
+        for tool in Tool::all() {
+            let Some(ch) = tool.shortcut() else { continue };
+            assert_eq!(Tool::from_shortcut(ch), Some(*tool));
+            assert_eq!(Tool::from_shortcut(ch.to_ascii_lowercase()), Some(*tool));
+        }
+        assert_eq!(Tool::from_shortcut('9'), None);
+    }
+
+    #[test]
+    fn ctrl_z_undoes_and_ctrl_shift_z_redoes() {
+        let mut app = board();
+        app.current_tool = Tool::Rectangle;
+        let (x, y) = canvas_centre(&app);
+        app.handle_event(&click_at(x, y));
+        app.handle_event(&mouse(x + 60.0, y + 40.0, MouseEventKind::Move));
+        app.handle_event(&mouse(
+            x + 60.0,
+            y + 40.0,
+            MouseEventKind::Release(MouseButton::Left),
+        ));
+        assert_eq!(app.current_page().shapes.len(), 1);
+
+        assert!(app.handle_event(&press_with(Key::Z, ctrl())));
+        assert_eq!(app.current_page().shapes.len(), 0);
+        assert!(app.handle_event(&press_with(Key::Z, ctrl_shift())));
+        assert_eq!(app.current_page().shapes.len(), 1);
+    }
+
+    #[test]
+    fn ctrl_a_selects_everything_and_delete_removes_it() {
+        let mut app = board();
+        app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+        });
+        app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect::new(20.0, 20.0, 10.0, 10.0),
+        });
+        assert!(app.handle_event(&press_with(Key::A, ctrl())));
+        assert_eq!(app.selection.shape_ids.len(), 2);
+        assert!(app.handle_event(&press(Key::Delete)));
+        assert!(app.current_page().shapes.is_empty());
+        assert!(
+            !app.handle_event(&press(Key::Delete)),
+            "deleting nothing must not cost a frame"
+        );
+    }
+
+    #[test]
+    fn escape_drops_the_selection_and_any_drag() {
+        let mut app = board();
+        let id = app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+        });
+        app.selection.add(id);
+        assert!(app.handle_event(&press(Key::Escape)));
+        assert!(app.selection.is_empty());
+        assert!(!app.handle_event(&press(Key::Escape)));
+    }
+
+    #[test]
+    fn the_arrows_nudge_the_selection() {
+        let mut app = board();
+        let id = app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect::new(10.0, 10.0, 20.0, 20.0),
+        });
+        app.selection.add(id);
+        assert!(app.handle_event(&press(Key::Right)));
+        let moved = app
+            .current_page()
+            .get_shape(id)
+            .and_then(|s| match &s.kind {
+                ShapeKind::Rectangle { bounds } => Some(bounds.x),
+                _ => None,
+            })
+            .expect("a rectangle");
+        assert!(moved > 10.0, "the shape did not move: x={moved}");
+    }
+
+    #[test]
+    fn the_arrows_do_nothing_with_no_selection() {
+        let mut app = board();
+        app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect::new(10.0, 10.0, 20.0, 20.0),
+        });
+        assert!(
+            !app.handle_event(&press(Key::Up)),
+            "an arrow key with nothing selected must not cost a frame"
+        );
+    }
+
+    #[test]
+    fn a_nudge_moves_a_whole_grid_square_when_snapping() {
+        let mut app = board();
+        let id = app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
+        });
+        app.selection.add(id);
+        app.snap_to_grid = true;
+        app.handle_event(&press(Key::Right));
+        let x = app
+            .current_page()
+            .get_shape(id)
+            .and_then(|s| match &s.kind {
+                ShapeKind::Rectangle { bounds } => Some(bounds.x),
+                _ => None,
+            })
+            .expect("a rectangle");
+        assert!(
+            (x - GRID_SIZE).abs() < 0.01,
+            "a shape nudged while snapping must land on the next grid line, \
+             not one pixel off it: x={x}"
+        );
+    }
+
+    #[test]
+    fn the_zoom_keys_work() {
+        let mut app = board();
+        let before = app.zoom;
+        assert!(app.handle_event(&typed(Key::Equals, '+')));
+        assert!(app.zoom > before);
+        assert!(app.handle_event(&typed(Key::Minus, '-')));
+        assert!((app.zoom - before).abs() < 0.001);
+        app.pan_x = 500.0;
+        assert!(app.handle_event(&typed(Key::Num0, '0')));
+    }
+
+    #[test]
+    fn g_toggles_the_grid_and_ctrl_l_the_layers_panel() {
+        let mut app = board();
+        let grid = app.show_grid;
+        assert!(app.handle_event(&typed(Key::G, 'g')));
+        assert_ne!(app.show_grid, grid);
+
+        let panel = app.show_layers_panel;
+        assert!(app.handle_event(&press_with(Key::L, ctrl())));
+        assert_ne!(
+            app.show_layers_panel, panel,
+            "plain L is the Line tool, so the panel takes the modifier"
+        );
+        app.current_tool = Tool::Select;
+        app.handle_event(&typed(Key::L, 'l'));
+        assert_eq!(app.current_tool, Tool::Line);
+    }
+
+    #[test]
+    fn shift_is_remembered_for_the_click_that_follows() {
+        let mut app = board();
+        let a = app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect::new(0.0, 0.0, 40.0, 40.0),
+        });
+        app.selection.add(a);
+        assert!(!app.shift_held);
+        app.handle_event(&press_with(
+            Key::Escape,
+            Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert!(
+            app.shift_held,
+            "a mouse event carries no modifiers, so the only record of shift \
+             is what the last keyboard event said"
+        );
+    }
+
+    #[test]
+    fn an_unbound_key_asks_for_no_frame() {
+        let mut app = board();
+        assert_eq!(app.on_event(&press(Key::F9)), Response::Idle);
+    }
+
+    // --- the strap ---
+
+    #[test]
+    fn the_title_names_the_page_and_counts_its_shapes() {
+        let mut app = board();
+        let name = app.current_page().name.clone();
+        assert_eq!(app.title(), format!("{name} (0) - Whiteboard"));
+        app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+        });
+        assert_eq!(app.title(), format!("{name} (1) - Whiteboard"));
+    }
+
+    #[test]
+    fn a_whiteboard_asks_for_no_clock() {
+        assert_eq!(
+            board().tick_interval(),
+            None,
+            "nothing on a whiteboard moves on its own"
+        );
+    }
+
+    #[test]
+    fn a_resize_relays_out_and_a_repeat_of_it_does_not() {
+        let mut app = board();
+        let resize = Event::Resize {
+            width: 1000,
+            height: 700,
+        };
+        assert_eq!(app.on_event(&resize), Response::Redraw);
+        assert_eq!(app.win_width, 1000.0);
+        assert_eq!(app.on_event(&resize), Response::Idle);
+    }
+
+    #[test]
+    fn the_canvas_follows_the_window() {
+        let mut app = board();
+        let narrow = app.canvas_rect();
+        app.set_window_size(1920.0, 1080.0);
+        let wide = app.canvas_rect();
+        assert!(wide.width > narrow.width);
+        assert!(wide.height > narrow.height);
+    }
+
+    #[test]
+    fn a_window_dragged_tiny_keeps_a_canvas() {
+        let mut app = board();
+        app.set_window_size(1.0, 1.0);
+        assert!(app.win_width >= MIN_WINDOW_WIDTH);
+        assert!(app.win_height >= MIN_WINDOW_HEIGHT);
+        assert!(app.canvas_rect().width >= 1.0);
+        assert!(app.canvas_rect().height >= 1.0);
+    }
+
+    #[test]
+    fn the_first_frame_uses_the_size_the_compositor_gave() {
+        let mut app = board();
+        let tree = app.render(1000.0, 700.0);
+        assert_eq!(app.win_width, 1000.0);
+        assert_eq!(app.win_height, 700.0);
+        assert!(!tree.commands.is_empty());
+    }
+
+    #[test]
+    fn the_close_button_exits() {
+        let mut app = board();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn the_palette_is_two_columns() {
+        let app = board();
+        let swatches = app.palette_swatches();
+        assert!(swatches.len() >= 4, "the fixture needs a few swatches");
+        assert!(
+            (swatches[0].1.y - swatches[1].1.y).abs() < f32::EPSILON,
+            "the first two swatches share a row"
+        );
+        assert!(
+            swatches[1].1.x > swatches[0].1.x,
+            "and differ in x -- a one-column palette would be taller than the              toolbar it lives in"
+        );
+        assert!(
+            swatches[2].1.y > swatches[0].1.y,
+            "the third starts the second row"
+        );
+    }
+
+    #[test]
+    fn a_long_page_name_gets_a_wider_tab() {
+        let mut app = board();
+        let narrow = app.page_tabs()[0].1.width;
+        if let Some(page) = app.pages.first_mut() {
+            page.name = "A page with a very long name indeed".to_string();
+        }
+        assert!(
+            app.page_tabs()[0].1.width > narrow,
+            "a tab that does not grow with its name draws the name outside              itself"
+        );
+    }
+
+    #[test]
+    fn a_press_below_the_canvas_does_not_draw() {
+        let mut app = board();
+        app.current_tool = Tool::Rectangle;
+        let canvas = app.canvas_rect();
+        // In the status bar, under the canvas.
+        let y = canvas.y + canvas.height + 4.0;
+        assert!(!app.handle_event(&click_at(canvas.x + 40.0, y)));
+        assert!(
+            matches!(app.drag, DragState::None),
+            "a press on the status bar must not start a rectangle"
+        );
+    }
+
+    #[test]
+    fn a_release_with_nothing_dragging_asks_for_no_frame() {
+        let mut app = board();
+        let (x, y) = canvas_centre(&app);
+        assert_eq!(
+            app.on_event(&mouse(x, y, MouseEventKind::Release(MouseButton::Left))),
+            Response::Idle,
+            "a release that ends nothing is not a reason to redraw"
+        );
+    }
+
+    #[test]
+    fn the_arrows_nudge_in_the_direction_they_point() {
+        let mut app = board();
+        let id = app.add_shape(ShapeKind::Rectangle {
+            bounds: Rect::new(100.0, 100.0, 20.0, 20.0),
+        });
+        app.selection.add(id);
+        let pos = |app: &WhiteboardApp| {
+            app.current_page()
+                .get_shape(id)
+                .and_then(|s| match &s.kind {
+                    ShapeKind::Rectangle { bounds } => Some((bounds.x, bounds.y)),
+                    _ => None,
+                })
+                .expect("a rectangle")
+        };
+        let start = pos(&app);
+        app.handle_event(&press(Key::Right));
+        assert!(pos(&app).0 > start.0, "Right moves right");
+        app.handle_event(&press(Key::Left));
+        assert!((pos(&app).0 - start.0).abs() < 0.01, "Left brings it back");
+        app.handle_event(&press(Key::Down));
+        assert!(pos(&app).1 > start.1, "Down moves down");
+        app.handle_event(&press(Key::Up));
+        assert!((pos(&app).1 - start.1).abs() < 0.01, "Up brings it back");
     }
 }

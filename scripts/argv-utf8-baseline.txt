@@ -224,8 +224,6 @@ userspace/locale/src/main.rs:argv-as-string
 userspace/localectl/src/main.rs:argv-as-string
 userspace/logfmt-cli/src/main.rs:argv-as-string
 userspace/logger/src/main.rs:argv-as-string
-userspace/login/src/main.rs:argv-as-string
-userspace/login/src/main.rs:env-as-string
 userspace/loginctl/src/main.rs:argv-as-string
 userspace/logind/src/main.rs:argv-as-string
 userspace/look/src/main.rs:argv-as-string

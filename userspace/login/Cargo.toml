@@ -25,6 +25,11 @@ posix = { path = "../../posix" }
 # account cannot be in one file and missing from the other when there is one
 # file.
 userdb = { path = "../userdb" }
+# One rendering of untrusted text inside a diagnostic. A login name reaches
+# this program's stderr, and a name may hold any byte but `/` and NUL --
+# including a newline, which would let whoever chose the name write extra lines
+# of a privileged program's output.
+quoting = { path = "../quoting" }
 
 [dev-dependencies]
 # The account lookup is exercised against a real database in a scratch

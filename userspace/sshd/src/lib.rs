@@ -4964,10 +4964,6 @@ fn send_channel_open_failure(
 }
 
 /// Handle `CHANNEL_REQUEST`.
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
 fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<(), SshdError> {
     let (recipient, off) = read_u32(payload, 1)?;
     let (req_type_bytes, off) = read_ssh_string(payload, off)?;
@@ -5110,14 +5106,21 @@ fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<
             // The pixel dimensions are optional in practice — clients that do
             // not know them send zeros — so a short payload updates what it
             // carries and leaves the rest alone.
-            let applied = if off + 8 <= payload.len() {
-                let (width, next) = read_u32(payload, off)?;
-                let (height, next) = read_u32(payload, next)?;
+            //
+            // Both blocks are taken by slicing rather than by adding eight to
+            // an offset the peer's own framing produced. `get` asks the
+            // question directly — are there eight more bytes — where `off + 8`
+            // asked it via an addition that is only safe because of an
+            // invariant stated in another function.
+            let rest = payload.get(off..).unwrap_or_default();
+            let applied = if let Some(size) = rest.get(..8) {
+                let (width, next) = read_u32(size, 0)?;
+                let (height, _) = read_u32(size, next)?;
                 channel.term_width = width;
                 channel.term_height = height;
-                if next + 8 <= payload.len() {
-                    let (wpx, next) = read_u32(payload, next)?;
-                    let (hpx, _) = read_u32(payload, next)?;
+                if let Some(pixels) = rest.get(8..16) {
+                    let (wpx, next) = read_u32(pixels, 0)?;
+                    let (hpx, _) = read_u32(pixels, next)?;
                     channel.term_width_px = wpx;
                     channel.term_height_px = hpx;
                 }
@@ -9685,6 +9688,127 @@ Z
         let (worked, finished) = pump_channel_output(&mut conn, 0, 1).unwrap();
         assert!(!worked);
         assert!(finished);
+    }
+
+    // ---- window-change (RFC 4254 §6.7) ----
+
+    /// A `CHANNEL_REQUEST` of type `window-change`, with `dims` as its body.
+    ///
+    /// `dims` is passed raw rather than built from four numbers so a test can
+    /// hand over a body that is deliberately the wrong length, which is the
+    /// case the parsing is about.
+    fn window_change_request(local_id: u32, dims: &[u8]) -> Vec<u8> {
+        let mut p = vec![msg::SSH_MSG_CHANNEL_REQUEST];
+        p.extend_from_slice(&local_id.to_be_bytes());
+        p.extend_from_slice(&ssh_string(b"window-change"));
+        p.push(0); // want_reply = false
+        p.extend_from_slice(dims);
+        p
+    }
+
+    /// Four dimensions, big-endian, as §6.7 orders them.
+    fn dims(cols: u32, rows: u32, wpx: u32, hpx: u32) -> Vec<u8> {
+        let mut d = Vec::new();
+        for n in [cols, rows, wpx, hpx] {
+            d.extend_from_slice(&n.to_be_bytes());
+        }
+        d
+    }
+
+    /// A full request sets all four dimensions.
+    #[test]
+    fn a_window_change_carrying_pixels_applies_all_four_dimensions() {
+        let (mut conn, _peer) = conn_with_peer(32768);
+        let body = dims(132, 50, 1056, 800);
+        handle_channel_request(&mut conn, &window_change_request(1, &body))
+            .expect("a size change is answerable offline");
+
+        let ch = &conn.channels[0];
+        assert_eq!((ch.term_width, ch.term_height), (132, 50));
+        assert_eq!((ch.term_width_px, ch.term_height_px), (1056, 800));
+    }
+
+    /// The pixel dimensions are optional, and a client that omits them must
+    /// still get its columns and rows.
+    ///
+    /// This is the ordinary case, not an edge one: a client that does not know
+    /// its pixel size sends the eight bytes it does know.
+    #[test]
+    fn a_window_change_without_pixels_applies_the_size_it_does_carry() {
+        let (mut conn, _peer) = conn_with_peer(32768);
+        conn.channels[0].term_width_px = 640;
+        conn.channels[0].term_height_px = 480;
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&100u32.to_be_bytes());
+        body.extend_from_slice(&40u32.to_be_bytes());
+        handle_channel_request(&mut conn, &window_change_request(1, &body))
+            .expect("a size change is answerable offline");
+
+        let ch = &conn.channels[0];
+        assert_eq!((ch.term_width, ch.term_height), (100, 40));
+        assert_eq!(
+            (ch.term_width_px, ch.term_height_px),
+            (640, 480),
+            "dimensions the request did not carry must be left alone, not zeroed"
+        );
+    }
+
+    /// A body too short to hold even the columns and rows applies nothing.
+    ///
+    /// The boundary matters because the test used to be an addition on the
+    /// peer's own offset — `off + 8 <= payload.len()` — and seven bytes is the
+    /// value one below where it changes answer.
+    #[test]
+    fn a_window_change_too_short_for_a_size_changes_nothing() {
+        let (mut conn, _peer) = conn_with_peer(32768);
+        let before = (
+            conn.channels[0].term_width,
+            conn.channels[0].term_height,
+            conn.channels[0].term_width_px,
+            conn.channels[0].term_height_px,
+        );
+
+        for short in [&[][..], &[0u8; 7][..]] {
+            handle_channel_request(&mut conn, &window_change_request(1, short))
+                .expect("a truncated size is refused, not an error");
+            let ch = &conn.channels[0];
+            assert_eq!(
+                (
+                    ch.term_width,
+                    ch.term_height,
+                    ch.term_width_px,
+                    ch.term_height_px
+                ),
+                before,
+                "a body of {} bytes cannot hold two dimensions",
+                short.len()
+            );
+        }
+    }
+
+    /// Fifteen bytes is one short of the pixel pair: the columns and rows are
+    /// there and are applied, and the half-present pixel block is not.
+    #[test]
+    fn a_window_change_with_a_truncated_pixel_pair_keeps_the_size_and_drops_the_pixels() {
+        let (mut conn, _peer) = conn_with_peer(32768);
+        conn.channels[0].term_width_px = 640;
+        conn.channels[0].term_height_px = 480;
+
+        let mut body = dims(90, 30, 720, 400);
+        body.pop();
+        assert_eq!(body.len(), 15);
+        handle_channel_request(&mut conn, &window_change_request(1, &body))
+            .expect("a truncated pixel pair is not an error");
+
+        let ch = &conn.channels[0];
+        assert_eq!((ch.term_width, ch.term_height), (90, 30));
+        assert_eq!(
+            (ch.term_width_px, ch.term_height_px),
+            (640, 480),
+            "half a pixel pair is not a pixel pair; reading it would take four \
+             bytes of the width and four bytes of nothing"
+        );
     }
 
     // ---- Channel lifetime (RFC 4254 §5.3) ----

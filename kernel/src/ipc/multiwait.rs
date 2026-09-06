@@ -438,6 +438,22 @@ extern "C" fn mw_pty_writer_task(raw: u64) {
     }
 }
 
+/// Helper task: sleep, then add an fd to an epoll instance's interest set.
+///
+/// The fd is never opened and never has to be: what is under test is the
+/// *interest-set-change* notification, which `ctl_add` raises regardless of
+/// whether the fd it names is one this instance could ever resolve. That is
+/// also why this task cannot be the pipe writer with a different name — a
+/// member becoming ready and the member *list* changing are two different
+/// wakes, and only the second one reaches [`WaitTarget::EpollCtl`].
+extern "C" fn mw_epoll_ctl_task(raw: u64) {
+    sched::sleep_ns_interruptible(20_000_000); // 20ms
+    let ep = super::epoll::EpollHandle::from_raw(raw);
+    if super::epoll::ctl_add(ep, 7, 0x1, 0).is_ok() {
+        MW_WROTE.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Helper task: sleep, then arm a **disarmed** timerfd.
 ///
 /// `settime` is a real wake (it drains `reader_waiters`), so this exercises the
@@ -853,6 +869,59 @@ pub fn self_test() -> KernelResult<()> {
         "[multiwait]   PollOnly member caps the wait ({capped_elapsed}ns vs {uncapped_elapsed}ns \
          without one): OK"
     );
+
+    // --- Phase 11: an `epoll_ctl` releases a park on `WaitTarget::EpollCtl`. ---
+    //
+    // The one target whose wake does not mean "something you are waiting for is
+    // ready" but "the set of things you are waiting for has changed". It is what
+    // stops `epoll_wait` blocking on a target list another thread has already
+    // invalidated, and nothing else in the tree exercises it: `epoll`'s own
+    // self-test can assert that the generation counter *moves*, but not that a
+    // task parked on the instance is actually woken when it does.
+    //
+    // Same discriminating shape as phase 3 — `EpollCtl` is the only target, so
+    // the park is uncapped and no timer can rescue a lost wake, and the 2 s
+    // timeout is far outside the window the assertion allows. The closure is
+    // deliberately the same generation comparison `epoll_wait_core` uses, so a
+    // wake that fired without the counter moving would still fail here.
+    MW_WROTE.store(0, SeqCst);
+    let ep = super::epoll::create();
+    let Some(g0) = super::epoll::generation(ep) else {
+        serial_println!(
+            "[multiwait]   FAIL: a freshly created epoll instance reports no generation"
+        );
+        super::epoll::close(ep);
+        return Err(KernelError::InternalError);
+    };
+    if let Err(e) = sched::spawn(b"mw-epctl", 16, mw_epoll_ctl_task, ep.raw(), 0) {
+        serial_println!("[multiwait]   FAIL: could not spawn the epoll_ctl task: {e}");
+        super::epoll::close(ep);
+        return Err(e);
+    }
+    let started = crate::hrtimer::now_ns();
+    let targets = [WaitTarget::EpollCtl(ep.raw())];
+    let n = match wait_multiple(&targets, Some(2_000_000_000), || {
+        usize::from(super::epoll::generation(ep) != Some(g0))
+    }) {
+        Ok(n) => n,
+        Err(e) => {
+            serial_println!("[multiwait]   FAIL: epoll-ctl wait errored: {e}");
+            super::epoll::close(ep);
+            return Err(e);
+        }
+    };
+    let elapsed = crate::hrtimer::now_ns().saturating_sub(started);
+    let ctled = MW_WROTE.load(SeqCst);
+    if n != 1 || ctled != 1 || elapsed > 1_000_000_000 {
+        serial_println!(
+            "[multiwait]   FAIL: epoll_ctl wake returned n={n} after {elapsed}ns (ctl ran: \
+             {ctled})"
+        );
+        super::epoll::close(ep);
+        return Err(KernelError::InternalError);
+    }
+    super::epoll::close(ep);
+    serial_println!("[multiwait]   Parked wait released by an epoll_ctl ({elapsed}ns): OK");
 
     serial_println!("[multiwait] multiwait::self_test PASSED");
     Ok(())

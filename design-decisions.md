@@ -67511,7 +67511,7 @@ the key it was.
 `fs_read_file`, `fs_write_private_file`, `fs_set_mode`. Commit `e0014a9b8`.
 
 
-## 780. Monotonic-clock units live in a shared newtype, but the syscall stays in each program
+## 1000. Monotonic-clock units live in a shared newtype, but the syscall stays in each program
 
 **Date:** 2026-09-05
 **Lane:** B
@@ -67573,7 +67573,7 @@ need to link, and `monoclock` can stay exactly as it is while the four-line
 functions collapse into it.
 
 
-## 781. The SSH daemon rekeys on its own thresholds, and an unreadable clock disables only half of them
+## 1001. The SSH daemon rekeys on its own thresholds, and an unreadable clock disables only half of them
 
 **Date:** 2026-09-05
 **Lane:** B

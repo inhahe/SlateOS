@@ -5020,6 +5020,52 @@ pub const SYS_DRM_CURSOR_MOVE: u64 = 1051;
 pub const SYS_DRM_ATOMIC_COMMIT: u64 = 1060;
 
 // ---------------------------------------------------------------------------
+// Multi-object waiting
+// ---------------------------------------------------------------------------
+
+/// Block until any one of several kernel objects becomes ready.
+///
+/// `arg0`: pointer to an array of `WaitItem` (below).
+/// `arg1`: number of items. 0 is legal and means "just sleep for the timeout".
+/// `arg2`: timeout in nanoseconds; `0` polls once without blocking and
+///         `u64::MAX` waits indefinitely.
+///
+/// Returns the number of items with a non-zero `revents`, or `0` if the timeout
+/// elapsed with nothing ready. `Interrupted` (EINTR) if a signal arrives first.
+///
+/// ```text
+/// #[repr(C)]                  offset  size
+/// struct WaitItem {
+///     handle:  u64,   //         0      8   the kernel object
+///     kind:    u32,   //         8      4   cap::ResourceType discriminant
+///     events:  u32,   //        12      4   requested POLLIN/POLLOUT/...
+///     revents: u32,   //        16      4   returned: what actually fired
+/// }                   // size 24, align 8 — note the 4 tail padding bytes
+/// ```
+///
+/// The event bits are Linux `poll(2)` values, because every caller is
+/// implementing `poll`/`select`/`epoll_wait` on top of this and translating a
+/// private bit layout at that boundary would be pure friction.
+///
+/// **`kind` is a [`ResourceType`](crate::cap::ResourceType) discriminant, not a
+/// private enum.** One value then selects the readiness test *and* names the
+/// authority being claimed, so the two cannot drift apart — which matters
+/// because [`ResourceType::Pty`](crate::cap::ResourceType::Pty) is the one
+/// handle space in this kernel that is enumerable and therefore ownership-
+/// checked. Each item is authorised exactly as that kind's own read/write
+/// syscalls authorise it, so waiting on an object can never confer authority
+/// that operating on it would not.
+///
+/// A malformed item (unknown `kind`, or a pty the caller does not own) sets
+/// `POLLNVAL` in *its own* `revents` and does not fail the call, matching
+/// `poll(2)`'s treatment of a bad fd: one bad entry in a large set must not
+/// deny the caller readiness for the other 99.
+///
+/// Chosen number 1066, at the high-water mark — see
+/// [`SYS_PTY_MASTER_TRY_WRITE`] for why numbers are never recycled.
+pub const SYS_WAIT_MULTIPLE: u64 = 1066;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

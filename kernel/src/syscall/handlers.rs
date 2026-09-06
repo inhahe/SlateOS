@@ -15239,3 +15239,270 @@ pub fn sys_tcp_set_keepalive_params(args: &SyscallArgs) -> SyscallResult {
         Err(e) => SyscallResult::err(e),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Multi-object waiting (1066)
+// ---------------------------------------------------------------------------
+
+/// One entry of the `SYS_WAIT_MULTIPLE` array, exactly as userspace lays it out.
+///
+/// `#[repr(C)]` with a `u64` first gives this 8-byte alignment and therefore
+/// **four bytes of tail padding after `revents` — 24 bytes, not 20**. Both
+/// sides have to agree on that, which is why the offsets are spelled out in
+/// [`SYS_WAIT_MULTIPLE`](crate::syscall::number::SYS_WAIT_MULTIPLE)'s docs
+/// rather than left to be inferred from the field list.
+///
+/// The padding is not a disclosure risk: every byte written back is a byte this
+/// call first read from the same user buffer, so the only thing it can leak to
+/// the caller is what the caller already wrote.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WaitItem {
+    handle: u64,
+    kind: u32,
+    events: u32,
+    revents: u32,
+}
+
+/// Which readiness test a resolved item uses.
+#[derive(Clone, Copy)]
+enum WaitTest {
+    /// Shares `poll`'s fifteen-arm test via
+    /// [`revents_for_handle`](super::linux::revents_for_handle). Most kinds are
+    /// this: a native handle and a Linux fd differ in how they are *named*, not
+    /// in what "ready" means for them.
+    Handle(crate::proc::linux_fd::HandleKind),
+    /// A `socketpair` endpoint. Native-only — there is no `HandleKind` for it.
+    StreamSocket,
+    /// A pty end. Native-only, and the one ownership-checked handle space.
+    Pty,
+}
+
+/// An item that resolved to something waitable.
+struct ResolvedWait {
+    /// Position in the caller's array, so `revents` goes back to the right one.
+    index: usize,
+    test: WaitTest,
+    raw: u64,
+    events: u16,
+}
+
+/// Map a wire `kind` onto its readiness test, or `None` if this resource type
+/// is not something one can wait on.
+///
+/// Deliberately not a catch-all: a type absent from this list gets `POLLNVAL`,
+/// which is a better answer than silently never becoming ready. The families
+/// here are exactly those with a readiness notion — a `Process` or a `PortIo`
+/// capability has none.
+fn wait_test_for(kind: ResourceType) -> Option<WaitTest> {
+    use crate::proc::linux_fd::HandleKind;
+    Some(match kind {
+        ResourceType::Pipe => WaitTest::Handle(HandleKind::Pipe),
+        ResourceType::EventFd => WaitTest::Handle(HandleKind::EventFd),
+        ResourceType::MemFd => WaitTest::Handle(HandleKind::MemFd),
+        ResourceType::Epoll => WaitTest::Handle(HandleKind::Epoll),
+        ResourceType::SignalFd => WaitTest::Handle(HandleKind::SignalFd),
+        ResourceType::Timerfd => WaitTest::Handle(HandleKind::Timerfd),
+        ResourceType::Inotify => WaitTest::Handle(HandleKind::Inotify),
+        ResourceType::AlsaPcm => WaitTest::Handle(HandleKind::AlsaPcm),
+        ResourceType::Drm => WaitTest::Handle(HandleKind::DrmCard),
+        ResourceType::NetSocket => WaitTest::Handle(HandleKind::Socket),
+        ResourceType::StreamSocket => WaitTest::StreamSocket,
+        ResourceType::Pty => WaitTest::Pty,
+        _ => return None,
+    })
+}
+
+/// Readiness bits for one resolved item, masked by what it asked for.
+///
+/// `POLLERR`/`POLLHUP`/`POLLNVAL` are reported whether or not they were
+/// requested, per `poll(2)`.
+fn wait_revents(test: WaitTest, raw: u64, events: u16, pid: u64) -> u16 {
+    use super::linux::poll_bits;
+    let always = poll_bits::POLLERR | poll_bits::POLLHUP | poll_bits::POLLNVAL;
+
+    let bits = match test {
+        // `status_flags` is 0 because a native handle has no fd status flags;
+        // only `HandleKind::Console` consults them, and no `ResourceType` maps
+        // to Console, so the value is never read.
+        WaitTest::Handle(kind) => super::linux::revents_for_handle(kind, raw, 0, Some(pid)),
+        WaitTest::StreamSocket => {
+            // `poll_status` already uses the Linux bit values.
+            let status = stream_socket::poll_status(StreamSocketHandle::from_raw(raw));
+            let mut r = status;
+            if status & poll_bits::POLLIN != 0 {
+                r |= poll_bits::POLLRDNORM;
+            }
+            if status & poll_bits::POLLOUT != 0 {
+                r |= poll_bits::POLLWRNORM;
+            }
+            r
+        }
+        WaitTest::Pty => {
+            let h = crate::tty::pty::PtyHandle::from_raw(raw);
+            if crate::tty::pty::exists(h) {
+                let mut r = 0u16;
+                if crate::tty::pty::readable(h) {
+                    r |= poll_bits::POLLIN | poll_bits::POLLRDNORM;
+                }
+                if crate::tty::pty::writable(h) {
+                    r |= poll_bits::POLLOUT | poll_bits::POLLWRNORM;
+                }
+                r
+            } else {
+                // The pty went away under us (the last peer closed between the
+                // ownership check and now). Reporting merely "not ready" would
+                // park the caller on an object that can never become ready
+                // again; POLLHUP is what tells it to close the handle.
+                poll_bits::POLLHUP
+            }
+        }
+    };
+
+    bits & (events | always)
+}
+
+/// Which waiter set(s) an item can sleep on, if any.
+///
+/// The families with a kernel waiter set announce their own changes and cost
+/// nothing while idle. Everything else is [`WaitTarget::PollOnly`], which puts
+/// the whole wait on the capped, backing-off path — correct, but the reason a
+/// mixed set is only as good as its worst member.
+fn wait_target_for(test: WaitTest, raw: u64) -> crate::ipc::multiwait::WaitTarget {
+    use crate::ipc::multiwait::WaitTarget;
+    use crate::proc::linux_fd::HandleKind;
+    match test {
+        WaitTest::Handle(HandleKind::Pipe) => WaitTarget::Pipe(raw),
+        WaitTest::Handle(HandleKind::EventFd) => WaitTarget::EventFd(raw),
+        WaitTest::Handle(HandleKind::Timerfd) => WaitTarget::TimerFd(raw),
+        WaitTest::StreamSocket => WaitTarget::StreamSocket(raw),
+        WaitTest::Pty => WaitTarget::Pty(raw),
+        WaitTest::Handle(_) => WaitTarget::PollOnly,
+    }
+}
+
+/// `SYS_WAIT_MULTIPLE` — block until any one of several kernel objects is ready.
+///
+/// `arg0` item array, `arg1` count, `arg2` timeout in nanoseconds (`0` polls
+/// once, `u64::MAX` waits indefinitely). Returns the number of items with a
+/// non-zero `revents`, or 0 on timeout.
+///
+/// See [`SYS_WAIT_MULTIPLE`](crate::syscall::number::SYS_WAIT_MULTIPLE) for the
+/// item layout and [`crate::ipc::multiwait`] for the parking machinery. This
+/// function owns only the translation: wire `kind` to readiness test, and
+/// authorisation.
+pub fn sys_wait_multiple(args: &SyscallArgs) -> SyscallResult {
+    use super::linux::poll_bits;
+
+    // The same sanity bound `poll` applies to `nfds`. Anything past it is a
+    // programming error, not a workload.
+    const MAX_ITEMS: usize = 1 << 20;
+
+    let count = args.arg1;
+    if count > MAX_ITEMS as u64 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let count_usize = count as usize;
+    if count_usize > 0 && args.arg0 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    let mut items: alloc::vec::Vec<WaitItem> =
+        match crate::mm::user::read_user_items(args.arg0, count_usize, MAX_ITEMS) {
+            Ok(v) => v,
+            Err(e) => return SyscallResult::err(e),
+        };
+
+    // Resolve every item once, before waiting. An item that cannot be resolved
+    // keeps POLLNVAL for the whole call: it is non-zero, so the first scan
+    // returns immediately rather than parking — which is what `poll(2)` does
+    // with a bad fd, and is why one bad entry cannot deny the caller readiness
+    // for the other ninety-nine.
+    let mut resolved: alloc::vec::Vec<ResolvedWait> = alloc::vec::Vec::new();
+    for (index, item) in items.iter_mut().enumerate() {
+        item.revents = 0;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let kind_raw = item.kind as u16;
+        let Some(kind) = ResourceType::from_raw(kind_raw) else {
+            item.revents = u32::from(poll_bits::POLLNVAL);
+            continue;
+        };
+        let Some(test) = wait_test_for(kind) else {
+            item.revents = u32::from(poll_bits::POLLNVAL);
+            continue;
+        };
+
+        // Authorise exactly as this kind's own read/write syscalls do. Only the
+        // pty handle space is enumerable — `(tty_id << 1) | end` — so it is the
+        // only one whose value is not self-authorising; see `owned_pty_handle`.
+        // Waiting must not confer authority that operating would not: without
+        // this, `kind = Pty, handle = 2` would be a readiness oracle over every
+        // pty on the machine *and* would splice the caller's task into a
+        // stranger's waiter set.
+        if matches!(test, WaitTest::Pty) && owned_pty_handle(item.handle).is_err() {
+            item.revents = u32::from(poll_bits::POLLNVAL);
+            continue;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let events = item.events as u16;
+        resolved.push(ResolvedWait {
+            index,
+            test,
+            raw: item.handle,
+            events,
+        });
+    }
+
+    let targets: alloc::vec::Vec<crate::ipc::multiwait::WaitTarget> = resolved
+        .iter()
+        .map(|r| wait_target_for(r.test, r.raw))
+        .collect();
+
+    // Items that failed to resolve already carry their POLLNVAL and are counted
+    // here once; the scan below only recomputes the ones that resolved.
+    let preset = items.iter().filter(|i| i.revents != 0).count();
+
+    let timeout = match args.arg2 {
+        u64::MAX => None,
+        ns => Some(ns),
+    };
+
+    let scan_items = &mut items;
+    let outcome = crate::ipc::multiwait::wait_multiple(&targets, timeout, || {
+        let mut ready = preset;
+        for r in &resolved {
+            let bits = wait_revents(r.test, r.raw, r.events, pid);
+            if let Some(slot) = scan_items.get_mut(r.index) {
+                slot.revents = u32::from(bits);
+            }
+            if bits != 0 {
+                ready = ready.saturating_add(1);
+            }
+        }
+        ready
+    });
+
+    let ready = match outcome {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Written back once, at the end, on both the ready and the timed-out path —
+    // a caller that got 0 still needs its `revents` cleared.
+    if count_usize > 0 {
+        if let Err(e) = crate::mm::user::write_user_items(args.arg0, &items) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(ready as i64)
+}

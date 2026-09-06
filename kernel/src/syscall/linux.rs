@@ -30148,7 +30148,12 @@ fn sys_mq_getsetattr(args: &SyscallArgs) -> SyscallResult {
 
 /// Linux poll(2) event-bit constants.  Reproduced here so they don't
 /// have to be looked up at every call site.
-mod poll_bits {
+///
+/// `pub(crate)` because `SYS_WAIT_MULTIPLE` reports readiness in these same
+/// bits: its callers are all implementing `poll`/`select`/`epoll_wait` on top
+/// of it, so a second, private bit layout would only add a translation step at
+/// the boundary — and a chance to get it wrong.
+pub(crate) mod poll_bits {
     /// Data may be read without blocking.
     pub const POLLIN: u16 = 0x0001;
     /// High-priority / out-of-band data (not modelled here).
@@ -30245,13 +30250,43 @@ fn poll_revents_from_entry(
     events: u16,
     owner_pid: Option<u64>,
 ) -> u16 {
-    use crate::proc::linux_fd::HandleKind;
     // POLLERR / POLLHUP / POLLNVAL are always returned, regardless of
     // the caller's `events` mask, per the Linux poll(2) man page.
     let always = poll_bits::POLLERR | poll_bits::POLLHUP | poll_bits::POLLNVAL;
-    let mask = events | always;
+    revents_for_handle(entry.kind, entry.raw_handle, entry.status_flags, owner_pid)
+        & (events | always)
+}
 
-    let raw = match entry.kind {
+/// The readiness test itself, keyed by handle kind rather than by fd.
+///
+/// Split out of [`poll_revents_from_entry`] because readiness and *fds* are
+/// separable, and `SYS_WAIT_MULTIPLE` needs the first without the second: it
+/// takes native kernel handles, so it has a [`HandleKind`] and a raw value but
+/// no [`FdEntry`](crate::proc::linux_fd::FdEntry) and no fd table. Keeping one
+/// copy of the fifteen arms is the whole point — a second one would drift, and
+/// the failure mode of drift here is a poller that sleeps through a ready
+/// object, which is invisible until it hangs.
+///
+/// Returns the raw readiness bits, **unmasked**: applying the caller's `events`
+/// (plus the always-reported POLLERR/POLLHUP/POLLNVAL) is the caller's job,
+/// because the two callers mask differently.
+///
+/// `status_flags` is only consulted for [`HandleKind::Console`], whose
+/// readability depends on the fd's access mode; callers that have no fd pass 0.
+///
+/// `owner_pid` is the process whose tables resolve process-relative readiness —
+/// `signalfd` (pending signals) and `epoll` (member fds). `None` in kernel or
+/// self-test context, where those two honestly report "not ready" rather than
+/// consulting an unrelated process.
+pub(crate) fn revents_for_handle(
+    kind: crate::proc::linux_fd::HandleKind,
+    raw_handle: u64,
+    status_flags: u32,
+    owner_pid: Option<u64>,
+) -> u16 {
+    use crate::proc::linux_fd::HandleKind;
+
+    match kind {
         HandleKind::File => {
             // Regular files are always readable (EOF reports as POLLIN
             // with subsequent read returning 0) and always writable
@@ -30261,7 +30296,7 @@ fn poll_revents_from_entry(
         HandleKind::Console => {
             // O_RDONLY=0, O_WRONLY=1, O_RDWR=2.  stdin (RDONLY) has no
             // input source today; stdout/stderr always writable.
-            let access = entry.status_flags & 0x3;
+            let access = status_flags & 0x3;
             let mut r = 0u16;
             if access == 1 || access == 2 {
                 r |= poll_bits::POLLOUT | poll_bits::POLLWRNORM;
@@ -30275,9 +30310,8 @@ fn poll_revents_from_entry(
         HandleKind::Pipe => {
             // pipe::poll_status uses the same bit values as Linux:
             // POLLIN(0x01), POLLOUT(0x04), POLLERR(0x08), POLLHUP(0x10).
-            let status = crate::ipc::pipe::poll_status(crate::ipc::pipe::PipeHandle::from_raw(
-                entry.raw_handle,
-            ));
+            let status =
+                crate::ipc::pipe::poll_status(crate::ipc::pipe::PipeHandle::from_raw(raw_handle));
             let mut r = status;
             if status & poll_bits::POLLIN != 0 {
                 r |= poll_bits::POLLRDNORM;
@@ -30293,7 +30327,7 @@ fn poll_revents_from_entry(
             // counter > 0, POLLOUT means counter < MAX, POLLHUP means
             // closed.
             let status = crate::ipc::eventfd::poll_status(
-                crate::ipc::eventfd::EventFdHandle::from_raw(entry.raw_handle),
+                crate::ipc::eventfd::EventFdHandle::from_raw(raw_handle),
             );
             let mut r = status;
             if status & poll_bits::POLLIN != 0 {
@@ -30311,7 +30345,7 @@ fn poll_revents_from_entry(
             // the PCB name table — a None result means the entry has
             // been reaped (or never existed).  Until per-pid exit
             // tracking lands, this is the readiness signal we have.
-            let target: crate::proc::pcb::ProcessId = entry.raw_handle;
+            let target: crate::proc::pcb::ProcessId = raw_handle;
             if crate::proc::pcb::name(target).is_none() {
                 poll_bits::POLLIN
             } else {
@@ -30324,7 +30358,7 @@ fn poll_revents_from_entry(
             // handle has already been closed (the caller will see EBADF on
             // a subsequent op).
             let status = crate::ipc::memfd::poll_status(crate::ipc::memfd::MemFdHandle::from_raw(
-                entry.raw_handle,
+                raw_handle,
             ));
             let mut r = status;
             if status & poll_bits::POLLIN != 0 {
@@ -30349,7 +30383,7 @@ fn poll_revents_from_entry(
                 Some(pid) => {
                     if epoll_instance_ready(
                         pid,
-                        crate::ipc::epoll::EpollHandle::from_raw(entry.raw_handle),
+                        crate::ipc::epoll::EpollHandle::from_raw(raw_handle),
                         1,
                     ) {
                         poll_bits::POLLIN | poll_bits::POLLRDNORM
@@ -30371,7 +30405,7 @@ fn poll_revents_from_entry(
             match owner_pid {
                 Some(pid) => {
                     let fd_mask = crate::ipc::signalfd::mask(
-                        crate::ipc::signalfd::SignalFdHandle::from_raw(entry.raw_handle),
+                        crate::ipc::signalfd::SignalFdHandle::from_raw(raw_handle),
                     )
                     .unwrap_or(0);
                     if crate::proc::signal::has_pending_in_mask(pid, fd_mask) {
@@ -30390,7 +30424,7 @@ fn poll_revents_from_entry(
             // (unlike signalfd) it needs no owner pid: the readiness check
             // is identical in the real poll/epoll path and in self-tests.
             if crate::ipc::timerfd::is_readable(crate::ipc::timerfd::TimerFdHandle::from_raw(
-                entry.raw_handle,
+                raw_handle,
             )) {
                 poll_bits::POLLIN | poll_bits::POLLRDNORM
             } else {
@@ -30404,7 +30438,7 @@ fn poll_revents_from_entry(
             // needs no owner pid — the check is identical in the real
             // poll/epoll path and in self-tests.
             if crate::ipc::inotify::is_readable(crate::ipc::inotify::InotifyHandle::from_raw(
-                entry.raw_handle,
+                raw_handle,
             )) {
                 poll_bits::POLLIN | poll_bits::POLLRDNORM
             } else {
@@ -30416,7 +30450,7 @@ fn poll_revents_from_entry(
             // ring has room for at least one frame; a capture substream is
             // readable (POLLIN) whenever it is configured, since the
             // output-only mixer synthesises silence on demand.
-            let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+            let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(raw_handle);
             let mut bits = 0u16;
             if crate::ipc::alsa_pcm::writable(h) {
                 bits |= poll_bits::POLLOUT | poll_bits::POLLWRNORM;
@@ -30438,7 +30472,7 @@ fn poll_revents_from_entry(
             // a completed page-flip's flip-complete event delivered via
             // read(2).  It is never POLLOUT (ioctl-only; write(2) is EINVAL).
             if crate::drm::card_fd::has_events(crate::drm::card_fd::DrmCardHandle::from_raw(
-                entry.raw_handle,
+                raw_handle,
             )) {
                 poll_bits::POLLIN | poll_bits::POLLRDNORM
             } else {
@@ -30451,7 +30485,7 @@ fn poll_revents_from_entry(
             // POLLOUT: write(2) is EINVAL (no force-feedback), so a client
             // that polled for writability would spin on a readiness it can
             // never use.
-            let h = crate::evdev_fd::EvdevHandle::from_raw(entry.raw_handle);
+            let h = crate::evdev_fd::EvdevHandle::from_raw(raw_handle);
             if crate::evdev_fd::is_revoked(h) {
                 // A revoked fd will never produce another event.  Reporting it
                 // as merely not-ready would hang the client's event loop
@@ -30475,7 +30509,7 @@ fn poll_revents_from_entry(
             // — the daemon drains the NIC once and answers — so it is safe to run
             // per poll slice.)
             match crate::net::socket::poll_ready(crate::net::socket::SocketHandle::from_raw(
-                entry.raw_handle,
+                raw_handle,
             )) {
                 Ok((readable, writable, error)) => {
                     let mut r = 0u16;
@@ -30496,9 +30530,7 @@ fn poll_revents_from_entry(
                 Err(_) => poll_bits::POLLNVAL,
             }
         }
-    };
-
-    raw & mask
+    }
 }
 
 /// Compute revents for a (pid, fd, events) triple, doing the fd-table

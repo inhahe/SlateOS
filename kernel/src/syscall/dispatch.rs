@@ -97,7 +97,7 @@ use super::number::{
     SYS_TTY_ACQUIRE_CTTY, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
     SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE,
     SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_RECV,
-    SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_YIELD,
+    SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE, SYS_YIELD,
 };
 use crate::drm::syscall as drm_handlers;
 
@@ -365,6 +365,17 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_CP_TRY_WAIT as usize] = Some(handlers::sys_cp_try_wait);
     handlers[SYS_CP_CLOSE as usize] = Some(handlers::sys_cp_close);
     handlers[SYS_CP_NOTIFY as usize] = Some(handlers::sys_cp_notify);
+
+    // Multi-object waiting (1066). Listed beside the completion-port family it
+    // complements, though numbered at the high-water mark: the gaps in the 200s
+    // are each block's room to grow, and a number is ABI, so nothing is ever
+    // moved to keep a family contiguous (see `SYS_PTY_MASTER_TRY_WRITE`). The
+    // name says where it belongs; the number only says when it was added.
+    //
+    // Unlike `SYS_CP_WAIT`, it needs no registration step — it takes the
+    // objects by native handle, so a caller already holding a pipe and a
+    // timerfd waits on both without first building a port.
+    handlers[SYS_WAIT_MULTIPLE as usize] = Some(handlers::sys_wait_multiple);
 
     // io_ring (260–269).
     handlers[SYS_IO_RING_SETUP as usize] = Some(handlers::sys_io_ring_setup);

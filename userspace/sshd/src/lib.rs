@@ -2327,10 +2327,6 @@ struct AuthorizedKey {
 }
 
 /// Parse an `authorized_keys` file.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
 fn parse_authorized_keys(content: &str) -> Vec<AuthorizedKey> {
     let mut keys = Vec::new();
     for line in content.lines() {
@@ -2339,41 +2335,46 @@ fn parse_authorized_keys(content: &str) -> Vec<AuthorizedKey> {
             continue;
         }
 
+        // `splitn(3, ' ')` yields one, two or three pieces, and a slice pattern
+        // names all three cases. What it replaces was a `parts.len() >= 2` test
+        // standing next to three unchecked indices, one of them guarded by a
+        // *second* length test further down: correct, but correct by a proof
+        // the reader had to redo. Here the compiler holds it, and the "no
+        // comment" case is the missing field rather than an empty string
+        // substituted for one.
         let parts: Vec<&str> = line.splitn(3, ' ').collect();
-        if parts.len() >= 2 {
-            let key_type = parts[0].to_string();
-            // Validate key type.
-            if !matches!(
-                key_type.as_str(),
-                "ssh-rsa"
-                    | "ssh-ed25519"
-                    | "ecdsa-sha2-nistp256"
-                    | "ecdsa-sha2-nistp384"
-                    | "ecdsa-sha2-nistp521"
-                    | "ssh-dss"
-            ) {
-                continue;
-            }
-            // A line whose base64 is malformed grants nothing, so it is
-            // skipped rather than stored. The decoder this replaces stopped at
-            // the first bad character and returned the prefix, which entered
-            // the table as a *shorter* key -- safe only by accident, since a
-            // truncated blob happens never to match one a client offers.
-            // Skipping says what was actually meant: this line is not a key.
-            let Ok(key_data) = base64_decode(parts[1].as_bytes()) else {
-                continue;
-            };
-            let comment = if parts.len() >= 3 {
-                parts[2].to_string()
-            } else {
-                String::new()
-            };
-            keys.push(AuthorizedKey {
-                key_type,
-                key_data,
-                comment,
-            });
+        let (key_type, blob, comment) = match parts.as_slice() {
+            [key_type, blob] => (*key_type, *blob, ""),
+            [key_type, blob, comment] => (*key_type, *blob, *comment),
+            _ => continue,
+        };
+
+        // Validate key type.
+        if !matches!(
+            key_type,
+            "ssh-rsa"
+                | "ssh-ed25519"
+                | "ecdsa-sha2-nistp256"
+                | "ecdsa-sha2-nistp384"
+                | "ecdsa-sha2-nistp521"
+                | "ssh-dss"
+        ) {
+            continue;
         }
+        // A line whose base64 is malformed grants nothing, so it is skipped
+        // rather than stored. The decoder this replaces stopped at the first
+        // bad character and returned the prefix, which entered the table as a
+        // *shorter* key -- safe only by accident, since a truncated blob
+        // happens never to match one a client offers. Skipping says what was
+        // actually meant: this line is not a key.
+        let Ok(key_data) = base64_decode(blob.as_bytes()) else {
+            continue;
+        };
+        keys.push(AuthorizedKey {
+            key_type: key_type.to_string(),
+            key_data,
+            comment: comment.to_string(),
+        });
     }
     keys
 }
@@ -2457,10 +2458,6 @@ const DEFAULT_LOGIN_SHELL: &str = "/bin/sh";
 ///
 /// Malformed lines are skipped rather than failing the whole file: one bad
 /// line in `/etc/passwd` must not lock every account out of the machine.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
 fn parse_passwd(content: &str) -> Vec<PasswdEntry> {
     let mut entries = Vec::new();
     for line in content.lines() {
@@ -2468,25 +2465,32 @@ fn parse_passwd(content: &str) -> Vec<PasswdEntry> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        // name:passwd:uid:gid:gecos:home:shell -- exactly seven fields, named
+        // by a slice pattern rather than counted and then indexed. The count is
+        // now *exactly* seven where it was "at least seven": a line with an
+        // eighth field is not a `passwd` line, and reading its first seven
+        // means guessing which of the two colons was the stray one. Guessing
+        // wrong here assigns an account a home directory or a login shell that
+        // is not its own, so the line is skipped instead -- the same call the
+        // rest of this function already makes for an unparseable uid.
         let fields: Vec<&str> = line.split(':').collect();
-        // name:passwd:uid:gid:gecos:home:shell -- seven fields.
-        if fields.len() < 7 {
-            continue;
-        }
-        let (Ok(uid), Ok(gid)) = (fields[2].parse::<u32>(), fields[3].parse::<u32>()) else {
+        let [username, _passwd, uid, gid, _gecos, home, shell] = fields.as_slice() else {
             continue;
         };
-        let shell = if fields[6].is_empty() {
-            DEFAULT_LOGIN_SHELL.to_string()
+        let (Ok(uid), Ok(gid)) = (uid.parse::<u32>(), gid.parse::<u32>()) else {
+            continue;
+        };
+        let shell = if shell.is_empty() {
+            DEFAULT_LOGIN_SHELL
         } else {
-            fields[6].to_string()
+            shell
         };
         entries.push(PasswdEntry {
-            username: fields[0].to_string(),
+            username: (*username).to_string(),
             uid,
             gid,
-            home: fields[5].to_string(),
-            shell,
+            home: (*home).to_string(),
+            shell: shell.to_string(),
         });
     }
     entries
@@ -4651,16 +4655,18 @@ fn handle_channels(conn: &mut ConnectionState) -> Result<(), SshdError> {
 }
 
 /// Act on one channel-layer message.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
+///
+/// An empty payload is not a message — SSH's transport layer guarantees at
+/// least the type byte — so it is dropped rather than answered with
+/// `UNIMPLEMENTED`, which would need a type to name.
 fn dispatch_channel_message(conn: &mut ConnectionState, payload: &[u8]) -> Result<Flow, SshdError> {
-    if payload.is_empty() {
+    // `first()` rather than an emptiness test followed by `payload[0]`: the two
+    // spellings do the same thing, but only one of them still does it if a
+    // later edit moves the guard. The bound is held by the type, not by the
+    // reader remembering that four lines up there was an `is_empty`.
+    let Some(&msg_type) = payload.first() else {
         return Ok(Flow::Continue);
-    }
-
-    let msg_type = payload[0];
+    };
 
     match msg_type {
         msg::SSH_MSG_CHANNEL_OPEN => {
@@ -7480,6 +7486,30 @@ DenyGroups nogroup
         assert_eq!(entries[0].username, "good");
         assert_eq!(entries[0].uid, 7);
         assert_eq!(entries[0].gid, 8);
+    }
+
+    /// An eighth field is a stray colon somewhere, and there is no way to tell
+    /// where — so the line is refused rather than read as its first seven.
+    ///
+    /// This is the case the old `>= 7` length check accepted. Reading
+    /// `odd:x:1:1:g:/home:/bin:sh` as its first seven fields hands the account
+    /// the shell `/bin`, and reading `odd:x:1:1:g:/ho:me:/bin/sh` hands it the
+    /// home directory `/ho` — two different wrong answers from the same rule,
+    /// because the rule is a guess about which colon does not belong. A skipped
+    /// line locks out one account; a mis-split one gives an account a home or a
+    /// login shell that is not its own.
+    #[test]
+    fn test_parse_passwd_refuses_a_line_with_an_extra_field() {
+        let entries = parse_passwd(
+            "odd:x:1:1:gecos:/home/odd:/bin/sh:extra\n\
+             good:x:7:8:x:/home/good:/bin/sh\n",
+        );
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the well-formed line may survive: {entries:?}"
+        );
+        assert_eq!(entries[0].username, "good");
     }
 
     /// A `gecos` field containing colons must not shift the later fields:

@@ -67,7 +67,6 @@ userspace/cemu-cli/src/main.rs:argv-as-string
 userspace/cgroup/src/main.rs:argv-as-string
 userspace/chattr/src/main.rs:argv-as-string
 userspace/chown/src/main.rs:argv-as-string
-userspace/chpasswd/src/main.rs:argv-as-string
 userspace/chroot-cli/src/main.rs:argv-as-string
 userspace/chroot/src/main.rs:argv-as-string
 userspace/claws-mail-cli/src/main.rs:argv-as-string
@@ -153,7 +152,6 @@ userspace/geary-cli/src/main.rs:argv-as-string
 userspace/getent/src/main.rs:argv-as-string
 userspace/getopt/src/main.rs:argv-as-string
 userspace/getopt/src/main.rs:env-as-string
-userspace/getty/src/main.rs:argv-as-string
 userspace/gnome-bluetooth-cli/src/main.rs:argv-as-string
 userspace/gnome-boxes-cli/src/main.rs:argv-as-string
 userspace/gnome-calendar-cli/src/main.rs:argv-as-string

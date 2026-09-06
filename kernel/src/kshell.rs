@@ -23218,6 +23218,83 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         env_remove("ZZ_TC_PRE");
     }
 
+    serial_println!(
+        "  kshell::self_test 122: an operand that is the empty name is refused as \
+         a missing file, and the operands around it are still processed"
+    );
+    {
+        // Rung 122 -- TD-A-AN-ABSENT-OPERAND-AND-AN-EMPTY-ONE-ARE-THE-SAME-STRING-IN-KSHELL,
+        // step 1.
+        //
+        // `split_words` keeps an explicitly quoted empty word, so `fold ''`
+        // reaches the command as a one-element file list holding "". That
+        // string then meant two different things: "no operand was given" to
+        // `resolve_path`, which maps it to the cwd on purpose for its ~257
+        // bare-argument callers, and "an operand was given and it is empty"
+        // here. The result was a refusal that named `/` -- a path the user
+        // never typed -- instead of the name they did.
+        //
+        // Driven through `capture_command` rather than by calling `fold_run`
+        // directly, because the bug was in what the *user* sees: an assertion
+        // against the run function would still pass if `dispatch` stopped
+        // routing the empty word to it at all.
+        let out = capture_command("fold ''");
+        assert_eq!(
+            out, b"fold: '': No such file or directory\n",
+            "the refusal must name the empty operand, not the cwd it resolves to"
+        );
+        assert_eq!(last_exit(), 1, "a refused operand is a failure");
+
+        // The reason the guard is in the run loop and not in `parse_fold_args`.
+        // GNU attempts every operand and reports the worst status, so the
+        // operands on *either side* of the bad one must still be processed. A
+        // parser that rejected the list would abort before `a` was ever
+        // printed, which is a different -- and wrong -- behaviour that a test
+        // only of `fold ''` would not distinguish.
+        const EO: &str = "/tmp/zz_empty_operand.txt";
+        assert!(
+            crate::fs::Vfs::write_file(EO, b"a\n").is_ok(),
+            "the rung-122 fixture could not be created"
+        );
+        let out = capture_command("fold /tmp/zz_empty_operand.txt '' /tmp/zz_empty_operand.txt");
+        assert_eq!(
+            out, b"a\nfold: '': No such file or directory\na\n",
+            "the operands before and after the empty one must still be read, in order"
+        );
+        assert_eq!(last_exit(), 1, "one bad operand fails the command");
+
+        // A *good* run after a bad one still reports success: `worst` is
+        // per-invocation, so a leaked 1 would make every later `fold` look
+        // failed.
+        let out = capture_command("fold /tmp/zz_empty_operand.txt");
+        assert_eq!(out, b"a\n");
+        assert_eq!(last_exit(), 0, "the failure did not leak into the next run");
+
+        // The same guard in the other two commands the entry names. `cut` has
+        // the identical loop; `base64` takes at most one FILE and so refuses
+        // terminally rather than continuing.
+        let out = capture_command("cut -d, -f1 ''");
+        assert_eq!(out, b"cut: '': No such file or directory\n");
+        assert_eq!(last_exit(), 1);
+
+        let out = capture_command("base64 ''");
+        assert_eq!(out, b"base64: '': No such file or directory\n");
+        assert_eq!(last_exit(), 1);
+
+        // `base64 ''` must not be confused with `base64` alone, which reads
+        // stdin -- the two arms are adjacent and the empty one is matched
+        // first, so an arm written in the wrong order would swallow it.
+        // Asserted via `$(…)`, which supplies the stdin a bare `base64` needs.
+        let out = capture_command("echo -n abc | base64");
+        assert_eq!(out, b"YWJj\n", "a bare operand still means stdin");
+
+        assert!(
+            crate::fs::Vfs::remove(EO).is_ok(),
+            "the rung-122 fixture outlived the rung"
+        );
+        set_exit(0);
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -125241,6 +125318,16 @@ fn cut_run(spec: &CutSpec, stdin: Option<&[u8]>) {
             }
             continue;
         }
+        // See the identical guard in `fold_run`: `''` is an operand naming a
+        // file that cannot exist, not the absence of an operand, and
+        // `resolve_path("")` is the cwd by design. In the run loop rather than
+        // `parse_cut_args` so that the operands before and after it are still
+        // processed, which is what "worst status wins" above means.
+        if path.is_empty() {
+            shell_println!("cut: '': No such file or directory");
+            worst = worst.max(1);
+            continue;
+        }
         let resolved = resolve_path(path);
         match crate::fs::Vfs::read_file(&resolved) {
             // Straight from the VFS, undecoded.
@@ -126681,6 +126768,21 @@ fn fold_run(spec: &FoldSpec, stdin: Option<&[u8]>) {
                     worst = worst.max(1);
                 }
             }
+            continue;
+        }
+        // An operand that is the empty name is not the same as no operand, and
+        // there is never a file called `''`. Refused here rather than in
+        // `resolve_path`, which maps the empty string to the cwd deliberately
+        // for its ~257 bare-argument callers (`ls`, `du`, `df`), so `fold ''`
+        // would otherwise read the current directory and report a path the
+        // user never typed. Refused here rather than in `parse_fold_args` for
+        // a second reason: GNU attempts every operand and reports the worst
+        // status, so `fold a '' b` must print a, report '', print b, exit 1 --
+        // a parser that rejected the list would never print a at all.
+        // See TD-A-AN-ABSENT-OPERAND-AND-AN-EMPTY-ONE-ARE-THE-SAME-STRING-IN-KSHELL.
+        if path.is_empty() {
+            shell_println!("fold: '': No such file or directory");
+            worst = worst.max(1);
             continue;
         }
         let resolved = resolve_path(path);
@@ -138954,6 +139056,19 @@ fn base64_run(spec: &Base64Spec, stdin: Option<&[u8]>) {
                 return;
             }
         },
+        // Before the general arm, and separate from the `None`/`-` arm above:
+        // `base64` with no operand reads stdin, but `base64 ''` named a file,
+        // and no file is called `''`. Without this the empty name reaches
+        // `resolve_path`, which maps it to the cwd on purpose for its
+        // bare-argument callers, and the refusal would name a directory the
+        // user never typed. `base64` takes at most one FILE, so unlike
+        // `cut`/`fold` there is no loop to continue -- this is terminal.
+        // See TD-A-AN-ABSENT-OPERAND-AND-AN-EMPTY-ONE-ARE-THE-SAME-STRING-IN-KSHELL.
+        Some("") => {
+            shell_println!("base64: '': No such file or directory");
+            set_exit(1);
+            return;
+        }
         Some(path) => {
             let resolved = resolve_path(path);
             match crate::fs::Vfs::read_file(&resolved) {

@@ -73195,7 +73195,7 @@ fn cmd_hwsim(args: &str) {
                 // Two characters rather than a boolean pair because the
                 // interesting question at a glance is which of the two the
                 // handshake has got to, not whether either exists.
-                let mut keys = [b'-', b'-'];
+                let mut keys = *b"--";
                 if r.pairwise_installed {
                     keys[0] = b'P';
                 }

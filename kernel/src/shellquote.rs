@@ -176,6 +176,14 @@ impl QuoteScan<'_> {
 /// Bytes that a backslash escapes *inside double quotes*. Anywhere else in a
 /// double-quoted region the backslash is an ordinary character — this is what
 /// keeps `"C:\dir"` intact.
+///
+/// Kept as five byte literals rather than the `*b"\"\\$`\n"` clippy asks for.
+/// This constant's entire job is to let a reader check the set against the
+/// POSIX rule it encodes, and the byte-string spelling hides three of the five
+/// members behind escapes — two of which (`\"` and `\\`) are escapes *of the
+/// literal syntax* rather than members, so the reader has to decode before they
+/// can compare. The lint is a readability lint and here it costs readability.
+#[allow(clippy::byte_char_slices)]
 const DQ_ESCAPABLE: [u8; 5] = [b'"', b'\\', b'$', b'`', b'\n'];
 
 impl Iterator for QuoteScan<'_> {

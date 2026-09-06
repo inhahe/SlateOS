@@ -2410,6 +2410,11 @@ dependencies = [
 [[package]]
 name = "chage"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+ "scratchdir",
+ "userdb",
+]
 
 [[package]]
 name = "chamber-cli"
@@ -2528,7 +2533,9 @@ name = "chown"
 version = "0.1.0"
 dependencies = [
  "modechange",
+ "pwdb",
  "quoting",
+ "scratchdir",
  "userdb",
 ]
 
@@ -2579,7 +2586,9 @@ dependencies = [
 name = "chroot"
 version = "0.1.0"
 dependencies = [
+ "pwdb",
  "quoting",
+ "scratchdir",
  "userdb",
 ]
 
@@ -4153,6 +4162,7 @@ dependencies = [
  "posix",
  "quoting",
  "scratchdir",
+ "userdb",
 ]
 
 [[package]]
@@ -5857,6 +5867,7 @@ dependencies = [
  "authlib",
  "posix",
  "scratchdir",
+ "userdb",
 ]
 
 [[package]]
@@ -7915,6 +7926,7 @@ name = "ircclient"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -9432,6 +9444,8 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "posix",
+ "scratchdir",
+ "userdb",
 ]
 
 [[package]]
@@ -9449,6 +9463,7 @@ dependencies = [
  "libservicebus",
  "posix",
  "scratchdir",
+ "userdb",
 ]
 
 [[package]]
@@ -12867,6 +12882,8 @@ dependencies = [
  "authlib",
  "posix",
  "quoting",
+ "scratchdir",
+ "userdb",
 ]
 
 [[package]]
@@ -14378,6 +14395,7 @@ name = "radio"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -16792,6 +16810,7 @@ dependencies = [
  "scratchdir",
  "sha2",
  "sshwire",
+ "userdb",
 ]
 
 [[package]]
@@ -18680,6 +18699,7 @@ name = "useradd"
 version = "0.1.0"
 dependencies = [
  "scratchdir",
+ "userdb",
 ]
 
 [[package]]
@@ -18702,6 +18722,7 @@ name = "userdb"
 version = "0.1.0"
 dependencies = [
  "posix",
+ "pwdb",
  "scratchdir",
 ]
 

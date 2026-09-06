@@ -37,11 +37,10 @@
 use quoting::quoteaf_os;
 use std::env;
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use userdb::UserDb;
+use pwdb::Db;
 
 // ============================================================================
 // Syscall numbers (fs zone: 600-799)
@@ -222,91 +221,53 @@ fn kernel_error_to_string(code: i64) -> String {
 // User/group database (reads /etc/users.yaml)
 // ============================================================================
 
-/// A resolved group with a numeric GID.
+/// Read `/etc/passwd` and `/etc/group`.
 ///
-/// Slate OS assigns GIDs by order of appearance in the groups collected across
-/// all user entries. Group 0 = "root", group 1 = "admin", etc. The exact
-/// mapping is built at runtime from `/etc/users.yaml`.
-struct GroupEntry {
-    gid: u32,
-    name: String,
-}
-
-/// Read the user database, treating an absent or unreadable file as empty.
+/// An unreadable or absent file is an empty table, which is `pwdb`'s rule and
+/// glibc's: names then cannot be resolved, so `chown alice f` fails with
+/// "unknown user" rather than silently doing something else. That is the right
+/// failure -- `chown`'s whole job is to name an owner, and guessing one would
+/// change the file to an owner nobody asked for.
 ///
-/// An empty database means names cannot be resolved, so `chown alice f` fails
-/// with "invalid user" rather than silently doing something else — which is the
-/// right failure: chown's whole job is to name an owner, and guessing one would
-/// change the file to an owner the user did not ask for.
-fn read_users() -> UserDb {
-    match UserDb::load(userdb::DEFAULT_PATH) {
-        Ok(db) => db,
-        Err(e) => {
-            if e.kind() != io::ErrorKind::NotFound {
-                eprintln!("chown: cannot read {}: {e}", userdb::DEFAULT_PATH);
-            }
-            UserDb::new()
-        }
-    }
-}
-
-/// Build the group table by collecting every unique group name from all users
-/// and assigning GIDs in order. Well-known groups get fixed IDs:
-///   root=0, admin=1, users=100.
-fn build_group_table(users: &UserDb) -> Vec<GroupEntry> {
-    let mut groups = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    // Well-known groups first.
-    for (name, gid) in [("root", 0u32), ("admin", 1), ("users", 100)] {
-        groups.push(GroupEntry {
-            gid,
-            name: name.to_string(),
-        });
-        seen.insert(name.to_string());
-    }
-
-    let mut next_gid: u32 = 101;
-    for user in users.records() {
-        // An administrator is a member of `wheel` whether or not the field
-        // lists it: the database records administrator-ness as a flag, and a
-        // `chgrp wheel` that failed with "invalid group" on a machine that
-        // plainly has administrators would be inexplicable.
-        let mut names = user.groups();
-        if user.is_admin() {
-            names.push("wheel".to_string());
-        }
-        for g in names {
-            if !seen.contains(&g) {
-                groups.push(GroupEntry {
-                    gid: next_gid,
-                    name: g.clone(),
-                });
-                seen.insert(g);
-                next_gid = next_gid.saturating_add(1);
-            }
-        }
-    }
-
-    groups
+/// This used to read `/etc/users.yaml`, and to *invent* the group table:
+/// `root`, `admin` and `users` were given fixed ids and every other group name
+/// mentioned by any account was numbered from 101 in order of appearance. Those
+/// numbers were not the system's. A `chgrp audio` would set a file's group to
+/// whatever position `audio` happened to occupy, which no other program agreed
+/// with and which changed when an account was added. `/etc/group` has the real
+/// numbers, and since §353 it is generated from the same database, so there is
+/// no longer a second answer to disagree with.
+fn read_db() -> Db {
+    Db::load()
 }
 
 /// Resolve a username to a UID.
-fn resolve_uid(name: &str, users: &UserDb) -> Option<u32> {
+fn resolve_uid(name: &str, db: &Db) -> Option<u32> {
     // Try numeric first.
     if let Ok(n) = name.parse::<u32>() {
         return Some(n);
     }
-    users.find(name).and_then(userdb::Record::uid)
+    db.user_by_name(name.as_bytes()).map(|u| u.uid)
 }
 
 /// Resolve a group name to a GID.
-fn resolve_gid(name: &str, groups: &[GroupEntry]) -> Option<u32> {
+fn resolve_gid(name: &str, db: &Db) -> Option<u32> {
     // Try numeric first.
     if let Ok(n) = name.parse::<u32>() {
         return Some(n);
     }
-    groups.iter().find(|g| g.name == name).map(|g| g.gid)
+    db.group_by_name(name.as_bytes()).map(|g| g.gid)
+}
+
+/// The group an account's files belong to.
+///
+/// `/etc/passwd`'s fourth column, which is what "the user's group" means to
+/// every other program that reads the file. A record with no `gid` in the
+/// database is generated into that column with its uid, so the
+/// user-private-group convention is already applied by the time it is read
+/// here and needs no second implementation.
+fn primary_gid(uid: u32, db: &Db) -> Option<u32> {
+    db.user_by_uid(uid).map(|u| u.gid)
 }
 
 // ============================================================================
@@ -671,15 +632,11 @@ struct OwnerSpec {
 }
 
 /// Parse an ownership string like `root`, `root:admin`, `:users`, `1000:100`.
-fn parse_owner_spec(
-    spec: &str,
-    users: &UserDb,
-    groups: &[GroupEntry],
-) -> Result<OwnerSpec, String> {
+fn parse_owner_spec(spec: &str, db: &Db) -> Result<OwnerSpec, String> {
     if let Some(group_name) = spec.strip_prefix(':') {
         // `:GROUP` -- change group only
-        let gid = resolve_gid(group_name, groups)
-            .ok_or_else(|| format!("unknown group: '{group_name}'"))?;
+        let gid =
+            resolve_gid(group_name, db).ok_or_else(|| format!("unknown group: '{group_name}'"))?;
         return Ok(OwnerSpec {
             uid: None,
             gid: Some(gid),
@@ -692,16 +649,26 @@ fn parse_owner_spec(
         let group_str = &spec[colon_pos + 1..];
 
         let uid =
-            resolve_uid(owner_str, users).ok_or_else(|| format!("unknown user: '{owner_str}'"))?;
+            resolve_uid(owner_str, db).ok_or_else(|| format!("unknown user: '{owner_str}'"))?;
 
         let gid = if group_str.is_empty() {
-            // `OWNER:` -- set group to the owner's primary group
-            users
-                .find_uid(uid)
-                .and_then(|u| u.groups().first().and_then(|g| resolve_gid(g, groups)))
+            // `OWNER:` -- set group to the owner's *primary* group, which is
+            // the record's `gid`, or its uid when it has none: that is the
+            // user-private-group convention, and it is what the generated
+            // `/etc/passwd` puts in the gid column for such a record, so the
+            // two cannot disagree.
+            //
+            // This used to be the first entry of the record's `groups` list,
+            // which is the *supplementary* list. On an account `useradd` put
+            // in `audio` and `video`, `chown alice:` would have set the group
+            // to `audio` -- a group alice is merely a member of, not the one
+            // her files belong to. It went unnoticed because nothing wrote
+            // that list for accounts made by `useradd`; now that `useradd`
+            // maintains it, the wrong answer would be the usual one.
+            primary_gid(uid, db)
         } else {
             Some(
-                resolve_gid(group_str, groups)
+                resolve_gid(group_str, db)
                     .ok_or_else(|| format!("unknown group: '{group_str}'"))?,
             )
         };
@@ -713,7 +680,7 @@ fn parse_owner_spec(
     }
 
     // Plain `OWNER` -- change owner only
-    let uid = resolve_uid(spec, users).ok_or_else(|| format!("unknown user: '{spec}'"))?;
+    let uid = resolve_uid(spec, db).ok_or_else(|| format!("unknown user: '{spec}'"))?;
     Ok(OwnerSpec {
         uid: Some(uid),
         gid: None,
@@ -722,11 +689,7 @@ fn parse_owner_spec(
 
 /// Parse a `--from=CURRENT_OWNER:CURRENT_GROUP` filter. Either side may be
 /// empty to mean "don't check".
-fn parse_from_filter(
-    spec: &str,
-    users: &UserDb,
-    groups: &[GroupEntry],
-) -> Result<(Option<u32>, Option<u32>), String> {
+fn parse_from_filter(spec: &str, db: &Db) -> Result<(Option<u32>, Option<u32>), String> {
     if let Some(colon_pos) = spec.find(':') {
         let owner_str = &spec[..colon_pos];
         let group_str = &spec[colon_pos + 1..];
@@ -735,7 +698,7 @@ fn parse_from_filter(
             None
         } else {
             Some(
-                resolve_uid(owner_str, users)
+                resolve_uid(owner_str, db)
                     .ok_or_else(|| format!("unknown user in --from: '{owner_str}'"))?,
             )
         };
@@ -744,7 +707,7 @@ fn parse_from_filter(
             None
         } else {
             Some(
-                resolve_gid(group_str, groups)
+                resolve_gid(group_str, db)
                     .ok_or_else(|| format!("unknown group in --from: '{group_str}'"))?,
             )
         };
@@ -753,7 +716,7 @@ fn parse_from_filter(
     } else {
         // Just an owner, no group filter.
         let uid =
-            resolve_uid(spec, users).ok_or_else(|| format!("unknown user in --from: '{spec}'"))?;
+            resolve_uid(spec, db).ok_or_else(|| format!("unknown user in --from: '{spec}'"))?;
         Ok((Some(uid), None))
     }
 }
@@ -865,7 +828,7 @@ fn detect_mode(argv0: &str) -> Mode {
     }
 }
 
-fn parse_args(args: &[String], users: &UserDb, groups: &[GroupEntry]) -> Result<Options, String> {
+fn parse_args(args: &[String], db: &Db) -> Result<Options, String> {
     if args.is_empty() {
         return Err("no arguments provided".to_string());
     }
@@ -944,7 +907,7 @@ fn parse_args(args: &[String], users: &UserDb, groups: &[GroupEntry]) -> Result<
             if mode != Mode::Chown {
                 return Err("--from is only valid in chown mode".to_string());
             }
-            let (fuid, fgid) = parse_from_filter(from_val, users, groups)?;
+            let (fuid, fgid) = parse_from_filter(from_val, db)?;
             opts.from_uid = fuid;
             opts.from_gid = fgid;
             i += 1;
@@ -1087,7 +1050,7 @@ fn format_owner(uid: Option<u32>, gid: Option<u32>) -> String {
 }
 
 /// Execute chown for all target files.
-fn run_chown(opts: &Options, users: &UserDb, groups: &[GroupEntry]) -> bool {
+fn run_chown(opts: &Options, db: &Db) -> bool {
     let spec = if let Some(ref refpath) = opts.reference {
         // --reference: copy owner/group from the reference file's metadata.
         match read_metadata(refpath) {
@@ -1103,7 +1066,7 @@ fn run_chown(opts: &Options, users: &UserDb, groups: &[GroupEntry]) -> bool {
             }
         }
     } else {
-        match parse_owner_spec(&opts.spec, users, groups) {
+        match parse_owner_spec(&opts.spec, db) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("chown: {e}");
@@ -1331,7 +1294,7 @@ fn print_chown_help() {
     println!("  --json                   JSON output");
     println!("  --help                   Show this help");
     println!();
-    println!("OWNER and GROUP may be names (from /etc/users.yaml) or numeric IDs.");
+    println!("OWNER and GROUP may be names (from /etc/passwd and /etc/group) or numeric IDs.");
     println!();
     println!("EXAMPLES:");
     println!("  chown root:admin /etc/config.yaml");
@@ -1382,10 +1345,9 @@ fn main() {
 
     // Load the user database for name resolution (chown needs this; chmod
     // does not, but loading is cheap and keeps the code path simple).
-    let users = read_users();
-    let groups = build_group_table(&users);
+    let db = read_db();
 
-    let opts = match parse_args(&args, &users, &groups) {
+    let opts = match parse_args(&args, &db) {
         Ok(o) => o,
         Err(msg) => {
             if msg.is_empty() {
@@ -1407,7 +1369,7 @@ fn main() {
     };
 
     let success = match opts.mode {
-        Mode::Chown => run_chown(&opts, &users, &groups),
+        Mode::Chown => run_chown(&opts, &db),
         Mode::Chmod => run_chmod(&opts),
     };
 
@@ -1424,21 +1386,23 @@ fn main() {
 mod tests {
     use super::*;
 
-    /// A database in the form `useradm` writes it.
+    /// The two files a POSIX system turns a name into a number with.
     ///
-    /// Written as text rather than built from setters so that the parser this
-    /// crate now shares is exercised on the same bytes the writer produces —
-    /// the hand-rolled parser it replaces read `groups:` correctly but was
-    /// never fed a file that any writer had actually emitted.
-    fn sample_users() -> UserDb {
-        UserDb::parse(
-            "users:\n\
-             \x20 - uid: 0\n\
-             \x20   username: \"root\"\n\
-             \x20   groups: [\"root\", \"admin\"]\n\
-             \x20 - uid: 1000\n\
-             \x20   username: \"alice\"\n\
-             \x20   groups: [\"users\", \"staff\"]\n",
+    /// Written as text because that is what they are: `pwdb` reads bytes, and
+    /// since `design-decisions.md` §353 these files are *generated* from
+    /// `/etc/users.yaml` by `userdb::UserDb::save`, so a fixture written by
+    /// hand and one written by the generator have the same shape. The gids are
+    /// the system's, not this crate's: it used to number groups itself, from
+    /// 101, in the order it happened to meet them.
+    fn sample_db() -> Db {
+        Db::from_bytes(
+            b"root:x:0:0:root:/root:/bin/sh\n\
+              alice:x:1000:100:Alice:/home/alice:/bin/sh\n",
+            b"root:x:0:\n\
+              admin:x:1:\n\
+              users:x:100:alice\n\
+              staff:x:101:alice\n\
+              wheel:x:10:alice\n",
         )
     }
 
@@ -1671,150 +1635,171 @@ mod tests {
 
     #[test]
     fn owner_spec_user_only() {
-        let users = sample_users();
-        let groups = build_group_table(&users);
-        let spec = parse_owner_spec("alice", &users, &groups).unwrap();
+        let db = sample_db();
+        let spec = parse_owner_spec("alice", &db).unwrap();
         assert_eq!(spec.uid, Some(1000));
         assert_eq!(spec.gid, None);
     }
 
     #[test]
     fn owner_spec_user_and_group() {
-        let users = sample_users();
-        let groups = build_group_table(&users);
-        let spec = parse_owner_spec("root:admin", &users, &groups).unwrap();
+        let db = sample_db();
+        let spec = parse_owner_spec("root:admin", &db).unwrap();
         assert_eq!(spec.uid, Some(0));
         assert_eq!(spec.gid, Some(1)); // admin = gid 1
     }
 
     #[test]
     fn owner_spec_group_only() {
-        let users = sample_users();
-        let groups = build_group_table(&users);
-        let spec = parse_owner_spec(":users", &users, &groups).unwrap();
+        let db = sample_db();
+        let spec = parse_owner_spec(":users", &db).unwrap();
         assert_eq!(spec.uid, None);
         assert_eq!(spec.gid, Some(100)); // users = gid 100
     }
 
     #[test]
     fn owner_spec_numeric() {
-        let users = sample_users();
-        let groups = build_group_table(&users);
-        let spec = parse_owner_spec("4242:99", &users, &groups).unwrap();
+        let db = sample_db();
+        let spec = parse_owner_spec("4242:99", &db).unwrap();
         assert_eq!(spec.uid, Some(4242));
         assert_eq!(spec.gid, Some(99));
     }
 
     #[test]
     fn owner_spec_trailing_colon_uses_primary_group() {
-        let users = sample_users();
-        let groups = build_group_table(&users);
-        // alice's primary (first) group is "users" = gid 100.
-        let spec = parse_owner_spec("alice:", &users, &groups).unwrap();
+        let db = sample_db();
+        // alice's primary group is her `gid`, 100 -- not the first entry of
+        // her supplementary list, which happens to have the same name here and
+        // would not on an account whose own group is its private one.
+        let spec = parse_owner_spec("alice:", &db).unwrap();
         assert_eq!(spec.uid, Some(1000));
         assert_eq!(spec.gid, Some(100));
     }
 
+    /// `chown alice:` follows the primary group, not the first supplementary
+    /// one. An account in `audio` and `video` whose own group is its private
+    /// one used to have its files handed to `audio`.
+    #[test]
+    fn owner_spec_trailing_colon_ignores_the_supplementary_groups() {
+        let db = Db::from_bytes(
+            b"alice:x:1000:1000:Alice:/home/alice:/bin/sh\n",
+            b"audio:x:29:alice\nvideo:x:44:alice\nalice:x:1000:\n",
+        );
+        let spec = parse_owner_spec("alice:", &db).unwrap();
+        assert_eq!(spec.gid, Some(1000));
+    }
+
+    /// A record with no `gid` in the database is generated into `/etc/passwd`
+    /// with its uid in the gid column -- the user-private-group convention --
+    /// so by the time it is read here the fallback has already been applied,
+    /// and this crate does not apply a second one of its own.
+    #[test]
+    fn an_account_generated_with_no_gid_of_its_own_is_in_the_group_named_by_its_uid() {
+        let db = Db::from_bytes(
+            b"alice:x:1000:1000:Alice:/home/alice:/bin/sh\n",
+            b"audio:x:29:alice\n",
+        );
+        let spec = parse_owner_spec("alice:", &db).unwrap();
+        assert_eq!(spec.gid, Some(1000));
+    }
+
     #[test]
     fn owner_spec_unknown_user_errors() {
-        let users = sample_users();
-        let groups = build_group_table(&users);
-        assert!(parse_owner_spec("nobody", &users, &groups).is_err());
+        let db = sample_db();
+        assert!(parse_owner_spec("nobody", &db).is_err());
     }
 
     #[test]
     fn owner_spec_unknown_group_errors() {
-        let users = sample_users();
-        let groups = build_group_table(&users);
-        assert!(parse_owner_spec(":nogroup", &users, &groups).is_err());
+        let db = sample_db();
+        assert!(parse_owner_spec(":nogroup", &db).is_err());
     }
 
     // ---- group table / resolution -----------------------------------------
 
+    /// A group's id is the one `/etc/group` gives it, not a position.
+    ///
+    /// This crate used to build its own table: `root`, `admin` and `users` got
+    /// fixed ids and everything else was numbered from 101 in order of first
+    /// appearance. `staff` was 101 here because it was the first such group
+    /// mentioned -- not because anything on the system said so, and adding an
+    /// account could change it. `chgrp staff` therefore set a gid no other
+    /// program agreed with.
     #[test]
-    fn group_table_well_known_ids() {
-        let users = sample_users();
-        let groups = build_group_table(&users);
-        assert_eq!(resolve_gid("root", &groups), Some(0));
-        assert_eq!(resolve_gid("admin", &groups), Some(1));
-        assert_eq!(resolve_gid("users", &groups), Some(100));
+    fn a_group_resolves_to_the_id_the_group_file_gives_it() {
+        let db = sample_db();
+        assert_eq!(resolve_gid("root", &db), Some(0));
+        assert_eq!(resolve_gid("admin", &db), Some(1));
+        assert_eq!(resolve_gid("users", &db), Some(100));
+        assert_eq!(resolve_gid("staff", &db), Some(101));
+        assert_eq!(resolve_gid("wheel", &db), Some(10));
+        assert_eq!(resolve_gid("nosuchgroup", &db), None);
     }
 
+    /// A numeric argument is taken as the id itself, for a group that is not
+    /// in the file at all -- a file may be owned by a gid no name maps to.
     #[test]
-    fn group_table_assigns_new_ids_from_101() {
-        let users = sample_users();
-        let groups = build_group_table(&users);
-        // "staff" is the only non-well-known group; gets first free id 101.
-        assert_eq!(resolve_gid("staff", &groups), Some(101));
+    fn a_numeric_group_needs_no_entry() {
+        let db = sample_db();
+        assert_eq!(resolve_gid("4242", &db), Some(4242));
     }
 
     #[test]
     fn resolve_uid_numeric_and_name() {
-        let users = sample_users();
-        assert_eq!(resolve_uid("alice", &users), Some(1000));
-        assert_eq!(resolve_uid("0", &users), Some(0));
-        assert_eq!(resolve_uid("7777", &users), Some(7777));
-        assert_eq!(resolve_uid("ghost", &users), None);
+        let db = sample_db();
+        assert_eq!(resolve_uid("alice", &db), Some(1000));
+        assert_eq!(resolve_uid("0", &db), Some(0));
+        assert_eq!(resolve_uid("7777", &db), Some(7777));
+        assert_eq!(resolve_uid("ghost", &db), None);
     }
 
+    /// Names resolve through the file the writer produced.
+    ///
+    /// The point the `useradm`-round-trip test used to make, made one step
+    /// further along: `userdb::UserDb::save` *generates* `/etc/passwd` and
+    /// `/etc/group`'s companion, and this crate reads the generated bytes. A
+    /// reader and a writer that disagree can only be seen to disagree at the
+    /// step where one consumes the other's output.
     #[test]
-    fn an_administrator_is_a_member_of_wheel() {
-        // The database records administrator-ness as `is_admin: true` rather
-        // than as a group, so `chgrp wheel` would otherwise fail with "unknown
-        // group" on a machine that plainly has administrators.
-        let users = UserDb::parse(
-            "users:\n\
-             \x20 - uid: 1000\n\
-             \x20   username: \"alice\"\n\
-             \x20   is_admin: true\n",
-        );
-        let groups = build_group_table(&users);
-        assert!(resolve_gid("wheel", &groups).is_some());
-    }
-
-    #[test]
-    fn names_resolve_through_a_database_the_writer_produced() {
-        // The migration's whole point: this crate reads what `useradm` writes.
-        // Serialising and re-parsing is the only step at which a reader and a
-        // writer that disagree can be seen to disagree.
-        let mut db = UserDb::new();
+    fn names_resolve_through_a_passwd_file_the_generator_produced() {
+        let scratch = scratchdir::ScratchDir::new("chown-generated");
+        let path = scratch.path("users.yaml");
+        let mut db = userdb::UserDb::new();
         let mut alice = userdb::Record::new();
         alice.set_uid(1000);
+        alice.set_gid(100);
         alice.set(userdb::field::USERNAME, "alice");
-        alice.set_groups(&["users".to_string(), "staff".to_string()]);
         db.push(alice);
+        db.save(&path).expect("save");
 
-        let reparsed = UserDb::parse(&db.to_text());
-        assert_eq!(resolve_uid("alice", &reparsed), Some(1000));
-        let groups = build_group_table(&reparsed);
-        assert_eq!(resolve_gid("staff", &groups), Some(101));
+        let passwd = std::fs::read(scratch.path(userdb::PASSWD_NAME)).expect("generated passwd");
+        let read = Db::from_bytes(&passwd, b"users:x:100:\n");
+        assert_eq!(resolve_uid("alice", &read), Some(1000));
+        assert_eq!(primary_gid(1000, &read), Some(100));
     }
 
     // ---- --from filter parsing ---------------------------------------------
 
     #[test]
     fn from_filter_owner_and_group() {
-        let users = sample_users();
-        let groups = build_group_table(&users);
-        let (u, g) = parse_from_filter("root:admin", &users, &groups).unwrap();
+        let db = sample_db();
+        let (u, g) = parse_from_filter("root:admin", &db).unwrap();
         assert_eq!(u, Some(0));
         assert_eq!(g, Some(1));
     }
 
     #[test]
     fn from_filter_owner_only() {
-        let users = sample_users();
-        let groups = build_group_table(&users);
-        let (u, g) = parse_from_filter("alice", &users, &groups).unwrap();
+        let db = sample_db();
+        let (u, g) = parse_from_filter("alice", &db).unwrap();
         assert_eq!(u, Some(1000));
         assert_eq!(g, None);
     }
 
     #[test]
     fn from_filter_group_only() {
-        let users = sample_users();
-        let groups = build_group_table(&users);
-        let (u, g) = parse_from_filter(":users", &users, &groups).unwrap();
+        let db = sample_db();
+        let (u, g) = parse_from_filter(":users", &db).unwrap();
         assert_eq!(u, None);
         assert_eq!(g, Some(100));
     }

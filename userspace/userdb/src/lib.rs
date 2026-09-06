@@ -54,11 +54,47 @@
 //! refused rather than migrated, because the two writers disagreed about what
 //! the bytes meant, so there is no single thing they can be said to be. See
 //! [`Auth::Unusable`].
+//!
+//! # The flat files are generated from this one
+//!
+//! `design-decisions.md` §353 settles which of the machine's two account
+//! stores is the real one: this file is, and `/etc/passwd` and `/etc/shadow`
+//! are *generated* from it, for the benefit of ported software that reads the
+//! flat files directly. So [`UserDb::save`] writes three files, not one — the
+//! database and both of its renderings, staged to temporaries and renamed
+//! together — and there is no way to write the database without regenerating
+//! them, because a caller that could forget is a caller that eventually does.
+//!
+//! What that buys is the end of the defect §353 was decided to end: a user
+//! created with `useradd` who could log in over SSH and did not exist to the
+//! graphical login screen, or the reverse. What it costs is that a hand-edit
+//! of `/etc/passwd` survives only until the next account change. The generated
+//! header comment naming this file is the only warning anyone gets, which is
+//! why it says what happens rather than merely that the file is generated.
+//!
+//! A record that cannot be written as a colon-separated line fails the whole
+//! save ([`GenerateError`]) rather than being skipped. Skipping would put a
+//! user in one file and not the other, which is the thing being fixed.
+//!
+//! Because the generated file is the only `/etc/shadow` there is, everything
+//! that file can say has to be sayable here — so the database carries the
+//! password-aging policy too ([`Aging`]), and not as a convenience. `passwd`
+//! and `chage` are largely *about* those six numbers; had they been left out,
+//! moving those two tools onto this crate would have silently erased every
+//! expiry policy on the machine at the first save.
 
 use std::fmt::Write as _;
 
 /// Where the database lives.
 pub const DEFAULT_PATH: &str = "/etc/users.yaml";
+
+/// The generated POSIX account file, named relative to the database's own
+/// directory. See [`UserDb::to_passwd_text`].
+pub const PASSWD_NAME: &str = "passwd";
+
+/// The generated POSIX password file, named relative to the database's own
+/// directory. See [`UserDb::to_shadow_text`].
+pub const SHADOW_NAME: &str = "shadow";
 
 /// The method new passwords are hashed with.
 const PASSWORD_METHOD: posix::crypt::Method = posix::crypt::Method::Sha512;
@@ -67,6 +103,10 @@ const PASSWORD_METHOD: posix::crypt::Method = posix::crypt::Method::Sha512;
 pub mod field {
     /// Numeric user id. Also the key the record's `- ` line carries.
     pub const UID: &str = "uid";
+    /// Numeric primary group id. Optional: a record without one is generated
+    /// into `/etc/passwd` with its uid as its gid, the user-private-group
+    /// convention. See [`crate::Record::gid`].
+    pub const GID: &str = "gid";
     /// Login name.
     pub const USERNAME: &str = "username";
     /// Name shown on the login screen.
@@ -98,10 +138,180 @@ pub mod field {
     /// Count of successful logins.
     pub const LOGIN_COUNT: &str = "login_count";
 
+    // ---- Password aging: `/etc/shadow` fields 3 through 8 ----
+    //
+    // Six numbers that together are one policy, so they are read and written
+    // together through [`crate::Aging`]. Each is *optional*, and absent is
+    // not zero: the shadow file spells "no policy for this" as an empty
+    // field, and a zero in `MIN_DAYS` means "may be changed again at once"
+    // while an empty one means the question was never asked. A record that
+    // has never carried aging generates the same eight empty fields it
+    // always did.
+
+    /// Days since the Unix epoch on which the password was last changed.
+    /// Maintained by [`crate::Record::set_password`]; see there for why a
+    /// password whose age is unknown is one no policy can act on.
+    pub const PASSWORD_CHANGED: &str = "password_changed";
+    /// Days that must pass before the password may be changed again.
+    pub const PASSWORD_MIN_DAYS: &str = "password_min_days";
+    /// Days a password stays valid before it must be changed.
+    pub const PASSWORD_MAX_DAYS: &str = "password_max_days";
+    /// Days before expiry that the user starts being warned.
+    pub const PASSWORD_WARN_DAYS: &str = "password_warn_days";
+    /// Days after expiry before the account stops accepting the password.
+    pub const PASSWORD_INACTIVE_DAYS: &str = "password_inactive_days";
+    /// Days since the Unix epoch on which the account itself expires.
+    pub const ACCOUNT_EXPIRES: &str = "account_expires";
+
     /// The salt fields the two old writers used. Read to recognise a legacy
     /// entry; never written, because a `crypt(3)` entry carries its own salt
     /// and a salt stored beside it is a second copy that can disagree.
     pub const LEGACY_SALT: [&str; 2] = ["password_salt", "salt"];
+}
+
+/// A record's password-aging policy: `/etc/shadow` fields 3 through 8.
+///
+/// Every member is optional, and `None` means the field is *empty* in the
+/// generated file — the shadow format's spelling of "no policy", which is not
+/// the same as zero. In particular `None` is how "never expires" is spelled
+/// here; `-1` is **not**, even though `chage(1)` and `passwd(1)` accept `-1`
+/// on their command lines to mean it. Those two translate at their own edge,
+/// because a `-1` that reached the file would be read back by glibc as a date
+/// one day before the epoch rather than as "never".
+///
+/// [`Record::aging`] reads the whole policy and [`Record::set_aging`] writes
+/// it, so a caller changing one member cannot drop the other five.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Aging {
+    /// Days since the Unix epoch on which the password was last changed.
+    pub changed: Option<i64>,
+    /// Days that must pass before the password may be changed again.
+    pub min_days: Option<i64>,
+    /// Days a password stays valid before it must be changed.
+    pub max_days: Option<i64>,
+    /// Days before expiry that the user starts being warned.
+    pub warn_days: Option<i64>,
+    /// Days after expiry before the account stops accepting the password.
+    pub inactive_days: Option<i64>,
+    /// Days since the Unix epoch on which the account itself expires.
+    pub expires: Option<i64>,
+}
+
+/// Today, as days since the Unix epoch, or `None` if the clock is before it.
+///
+/// The clock going backwards is not fatal here: the one caller stamps a
+/// password change, and a stamp it cannot compute is left absent — which
+/// reads as "the age of this password is unknown", the truthful answer.
+#[must_use]
+pub fn today() -> Option<i64> {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    i64::try_from(since.as_secs() / 86_400).ok()
+}
+
+// ---- Dates, because four of the aging fields are day numbers ----
+//
+// `/etc/shadow` counts days since 1970-01-01 in its `lastchg`, `inactive` and
+// `expire` columns, while every tool that sets one of them takes a
+// `YYYY-MM-DD` from a person and every tool that shows one prints a date. The
+// conversion therefore happens at the edge of `chage`, `passwd` and `useradd`
+// alike -- and did, in three private copies of the leap-year rule and two
+// different date printers that disagreed about what a negative day number
+// means. It lives here instead, beside the fields whose meaning it is.
+//
+// Hinnant's `days_from_civil`/`civil_from_days`, which are exact over the
+// whole `i64` range and need no table and no loop. The loop-over-years form
+// the printers used is fine for today's date and is not fine for a date a
+// person chose, since nothing stops that being the year 300000.
+
+/// The day number of a `YYYY-MM-DD` date, or `None` if it is not one.
+///
+/// Strict about what it accepts: three fields, all numeric, a month in 1..=12,
+/// and a day that exists in that month of that year. A caller storing the
+/// result puts it in a column that some later reader will believe, so a date
+/// that is not a date has to be refused rather than mapped to a nearby one.
+#[must_use]
+pub fn days_from_date(text: &str) -> Option<i64> {
+    let mut parts = text.trim().split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
+        return None;
+    }
+    Some(days_from_civil(year, month, day))
+}
+
+/// A day number as `YYYY-MM-DD`.
+///
+/// Converts exactly, including before the epoch: day -1 is `1969-12-31`. What
+/// an out-of-range or absent value should *say* -- "never", or nothing at all
+/// -- is the caller's policy and not this function's, because the three
+/// callers spell it three different ways and each is right for its own output.
+#[must_use]
+pub fn date_from_days(days: i64) -> String {
+    let (year, month, day) = civil_from_days(days);
+    let mut out = String::new();
+    let _ = write!(out, "{year:04}-{month:02}-{day:02}");
+    out
+}
+
+/// Length of a month, in days. Zero for a month that does not exist, so that
+/// [`days_from_date`]'s range check rejects it.
+#[must_use]
+pub fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// The proleptic Gregorian leap-year rule.
+#[must_use]
+pub fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// Days from 1970-01-01 to `y-m-d`, proleptic Gregorian.
+//
+// The arithmetic is Hinnant's and its intermediate ranges are the commented
+// ones; it cannot overflow for any year that `days_from_date` can parse into
+// an `i64`, and a year large enough to overflow cannot be spelled in four
+// digits. Written as plain arithmetic rather than `checked_*` because the
+// algorithm's correctness is in the exact expressions, and a chain of
+// `checked_add` would obscure that to guard against a case the parser above
+// has already excluded.
+#[allow(clippy::arithmetic_side_effects)]
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = (m + 9) % 12; // March = 0
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
+/// The inverse of [`days_from_civil`]: `(year, month, day)`.
+#[allow(clippy::arithmetic_side_effects)]
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// One line of a record, kept as close to as-written as it can be.
@@ -282,6 +492,29 @@ impl Record {
         self.set_bare(field::UID, &buf);
     }
 
+    /// The numeric primary group id, or `None` if the record does not name
+    /// one.
+    ///
+    /// `None` rather than a baked-in default, for the same reason
+    /// [`Record::shell`] gives: the sensible fallback belongs where it can be
+    /// seen. The one place that needs it today is the generated
+    /// `/etc/passwd`, which uses the uid — the user-private-group convention,
+    /// and the only choice that cannot collide with another account's private
+    /// group, because uids do not collide either.
+    #[must_use]
+    pub fn gid(&self) -> Option<u32> {
+        self.get(field::GID)?.trim().parse().ok()
+    }
+
+    /// Set the numeric primary group id.
+    pub fn set_gid(&mut self, gid: u32) {
+        let mut buf = String::new();
+        // `write!` to a `String` is infallible; the result is discarded
+        // rather than unwrapped so that no formatting path can panic.
+        let _ = write!(buf, "{gid}");
+        self.set_bare(field::GID, &buf);
+    }
+
     /// The login name.
     #[must_use]
     pub fn username(&self) -> Option<String> {
@@ -367,6 +600,66 @@ impl Record {
         }
     }
 
+    /// The password-aging policy, as one value.
+    ///
+    /// The six numbers are read together rather than one at a time because
+    /// they *are* one policy — `chage -l` prints all six, `passwd -S` prints
+    /// four of them, and a caller changing one has to write back the other
+    /// five unchanged or silently drop them. See [`Aging`].
+    #[must_use]
+    pub fn aging(&self) -> Aging {
+        Aging {
+            changed: self.day(field::PASSWORD_CHANGED),
+            min_days: self.day(field::PASSWORD_MIN_DAYS),
+            max_days: self.day(field::PASSWORD_MAX_DAYS),
+            warn_days: self.day(field::PASSWORD_WARN_DAYS),
+            inactive_days: self.day(field::PASSWORD_INACTIVE_DAYS),
+            expires: self.day(field::ACCOUNT_EXPIRES),
+        }
+    }
+
+    /// Replace the password-aging policy.
+    ///
+    /// A `None` **removes** the field rather than writing a zero, because the
+    /// shadow file distinguishes the two and so does every tool that reads
+    /// it: an empty `max` field is "this password does not expire", a `0` is
+    /// "it expired the day it was set".
+    pub fn set_aging(&mut self, aging: &Aging) {
+        self.set_day(field::PASSWORD_CHANGED, aging.changed);
+        self.set_day(field::PASSWORD_MIN_DAYS, aging.min_days);
+        self.set_day(field::PASSWORD_MAX_DAYS, aging.max_days);
+        self.set_day(field::PASSWORD_WARN_DAYS, aging.warn_days);
+        self.set_day(field::PASSWORD_INACTIVE_DAYS, aging.inactive_days);
+        self.set_day(field::ACCOUNT_EXPIRES, aging.expires);
+    }
+
+    /// One aging field, or `None` if it is absent, empty or not a number.
+    ///
+    /// A value that will not parse reads as absent rather than as an error,
+    /// because the alternative is that one typo in a hand-edited file makes
+    /// every later save of the whole database fail. Absent is also the state
+    /// the field was in before anyone set a policy, so the degradation is to
+    /// the status quo and not to a surprise.
+    fn day(&self, key: &str) -> Option<i64> {
+        self.get(key)?.trim().parse().ok()
+    }
+
+    /// Write one aging field, removing it when `value` is `None`.
+    fn set_day(&mut self, key: &str, value: Option<i64>) {
+        match value {
+            Some(days) => {
+                let mut buf = String::new();
+                // `write!` to a `String` is infallible; the result is
+                // discarded rather than unwrapped so no path can panic.
+                let _ = write!(buf, "{days}");
+                self.set_bare(key, &buf);
+            }
+            None => {
+                self.remove(key);
+            }
+        }
+    }
+
     /// Whether the account is barred from logging in.
     ///
     /// Two things can say so: an explicit `locked: true`, or a password entry
@@ -383,8 +676,28 @@ impl Record {
     }
 
     /// Set the locked flag.
+    ///
+    /// Unlocking also strips a leading `!` from the stored entry, because
+    /// [`Record::is_locked`] honours both spellings and clearing only one of
+    /// them would leave the account locked by an unlocking call — the flag
+    /// would say `false` and the account would still refuse every password.
+    /// The `!` is a *prefix* on an otherwise intact entry, so removing it
+    /// restores exactly the password that was in force before the lock.
+    ///
+    /// A leading `*` is **not** stripped, and unlocking such a record leaves
+    /// [`Record::is_locked`] true. `*` is not a lock over a password; it is
+    /// the absence of one, so there is nothing underneath to restore, and
+    /// removing it would leave an empty entry — which is the spelling of "logs
+    /// in without being asked for anything". Turning "this account has never
+    /// had a password" into "this account needs no password" is not an unlock.
     pub fn set_locked(&mut self, locked: bool) {
         self.set_bare(field::LOCKED, if locked { "true" } else { "false" });
+        if !locked && let Some(entry) = self.get(field::PASSWORD_HASH) {
+            if let Some(bare) = entry.strip_prefix('!') {
+                let bare = bare.to_string();
+                self.set(field::PASSWORD_HASH, &bare);
+            }
+        }
     }
 
     /// Group memberships, parsed from the flow sequence `[a, b]`.
@@ -520,6 +833,17 @@ impl Record {
         // old format broke, so the legacy fields go rather than linger.
         for key in field::LEGACY_SALT {
             self.remove(key);
+        }
+        // Stamp the change here rather than leaving it to the caller. A
+        // password whose age is unknown is one that no aging policy can act
+        // on: `max_days` measures from this field, so a writer that forgot it
+        // would not merely lose a date, it would quietly exempt that one
+        // account from expiry for good. Every writer wanting that is a worse
+        // bet than every writer remembering. If the clock cannot say what day
+        // it is the field is left as it was, since a wrong date is worse than
+        // a stale one.
+        if let Some(day) = today() {
+            self.set_day(field::PASSWORD_CHANGED, Some(day));
         }
         Ok(())
     }
@@ -745,32 +1069,169 @@ impl UserDb {
         }
     }
 
-    /// Write the database to `path`, atomically.
+    /// Write the database to `path`, and regenerate the two POSIX flat files
+    /// beside it, atomically.
     ///
-    /// The text goes to a sibling temporary file which is then renamed over
-    /// the target, so a crash or a full disk leaves the previous database
-    /// intact. Writing in place would give a window in which `/etc/users.yaml`
-    /// is truncated, and a machine that loses power in that window has no
-    /// accounts and no way to log in and fix it.
+    /// Each of the three texts goes to a sibling temporary file, and only when
+    /// all three are on disk are they renamed into place. A crash or a full
+    /// disk therefore leaves the previous three intact, and the window in
+    /// which they can disagree with each other is three renames wide rather
+    /// than three writes wide. Writing in place would give a window in which
+    /// `/etc/users.yaml` is truncated, and a machine that loses power in that
+    /// window has no accounts and no way to log in and fix it.
+    ///
+    /// The flat files are `passwd` and `shadow` in `path`'s own directory —
+    /// derived rather than passed, so that generation cannot be forgotten by a
+    /// caller and a test saving into a scratch directory cannot write over the
+    /// real `/etc/passwd`. See [`UserDb::to_passwd_text`] for what §353 asks
+    /// of them.
     ///
     /// # Errors
     ///
-    /// Any I/O error from creating, writing or renaming the temporary file.
+    /// [`std::io::ErrorKind::InvalidData`] wrapping a [`GenerateError`] if a
+    /// record cannot be written to `/etc/passwd` — checked *before* anything
+    /// is written, so such a database fails the save with all three files
+    /// untouched rather than after the YAML has already moved. Otherwise any
+    /// I/O error from creating, writing or renaming a temporary file.
     pub fn save(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
         let path = path.as_ref();
-        let mut temp = path.as_os_str().to_os_string();
-        temp.push(".tmp");
-        let temp = std::path::PathBuf::from(temp);
-        std::fs::write(&temp, self.to_text())?;
-        match std::fs::rename(&temp, path) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                // Leaving the temporary file behind would make the next save
-                // look like it had already half-succeeded.
-                let _ = std::fs::remove_file(&temp);
-                Err(e)
+        let passwd = self.to_passwd_text(path).map_err(unrepresentable)?;
+        let shadow = self.to_shadow_text(path).map_err(unrepresentable)?;
+        let dir = path.parent().unwrap_or_else(|| std::path::Path::new(""));
+
+        let plan = [
+            // Owner-only. The database holds every account's password hash,
+            // which is the exact thing the `/etc/passwd`/`/etc/shadow` split
+            // was invented to keep out of a world-readable file -- and until
+            // `chown` and `chroot` moved onto `pwdb`, this file *was* that
+            // world-readable copy, sitting beside a `/etc/shadow` it made
+            // pointless. Nothing unprivileged reads it now: a program that
+            // wants a name-to-uid mapping reads the generated `/etc/passwd`,
+            // which carries exactly those fields and no secret.
+            (path.to_path_buf(), self.to_text(), Access::Private),
+            (dir.join(PASSWD_NAME), passwd, Access::Shared),
+            (dir.join(SHADOW_NAME), shadow, Access::Private),
+        ];
+
+        let mut staged: Vec<Staged> = Vec::with_capacity(plan.len());
+        for (target, text, access) in plan {
+            match Staged::write(&target, &text, access) {
+                Ok(one) => staged.push(one),
+                Err(e) => {
+                    for done in staged {
+                        done.abandon();
+                    }
+                    return Err(e);
+                }
             }
         }
+
+        // The database is renamed first, so that a rename that fails partway
+        // leaves the truth behind its derived files rather than ahead of them:
+        // a stale `/etc/passwd` is an account that has not appeared yet, while
+        // a stale `/etc/users.yaml` would be an account that appears in
+        // `/etc/passwd` and does not exist.
+        //
+        // Every rename is attempted even after one fails, because stopping
+        // would leave the rest stale as well, and the *first* error is
+        // reported rather than the last: it is the one that says which file
+        // the divergence starts at.
+        let mut first_error = None;
+        for one in staged {
+            if let Err(e) = one.commit()
+                && first_error.is_none()
+            {
+                first_error = Some(e);
+            }
+        }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Render `/etc/passwd` from the database, naming `source` in its header.
+    ///
+    /// `design-decisions.md` §353 makes this file *generated*: the YAML is the
+    /// truth and this is a copy of it kept for ported software that reads the
+    /// flat file directly. It is read-only in intent and not in permission, so
+    /// the header comment naming the source is the only warning a person
+    /// hand-editing it will get.
+    ///
+    /// A record with no `gid` is written with its uid as its gid — see
+    /// [`Record::gid`].
+    ///
+    /// # Errors
+    ///
+    /// [`GenerateError`] if any record cannot be represented as a
+    /// colon-separated line. This is a hard failure and not a skipped record
+    /// on purpose: the entire point of §353 is that the two files agree, and a
+    /// user quietly present in one and absent from the other is the exact
+    /// defect it was decided to end.
+    pub fn to_passwd_text(&self, source: &std::path::Path) -> Result<String, GenerateError> {
+        let mut out = generated_header(source);
+        for (index, record) in self.records.iter().enumerate() {
+            let username = login_name(record, index)?;
+            let uid = record.uid().ok_or(GenerateError::NoUid {
+                username: username.clone(),
+            })?;
+            let gid = record.gid().unwrap_or(uid);
+            // `display_name`'s username fallback is deliberately not used: an
+            // absent display name means the record has none, and the GECOS
+            // field's own spelling of that is empty, not a second copy of the
+            // login name.
+            let gecos = writable(
+                record.get(field::DISPLAY_NAME).unwrap_or_default(),
+                &username,
+                field::DISPLAY_NAME,
+            )?;
+            let home = writable(record.home().unwrap_or_default(), &username, field::HOME)?;
+            let shell = writable(record.shell().unwrap_or_default(), &username, field::SHELL)?;
+            // The password field is always `x`: the hash lives in `shadow`,
+            // which is what the two-file split is for. `writeln!` to a
+            // `String` is infallible; the result is discarded rather than
+            // unwrapped so that no formatting path can panic.
+            let _ = writeln!(out, "{username}:x:{uid}:{gid}:{gecos}:{home}:{shell}");
+        }
+        Ok(out)
+    }
+
+    /// Render `/etc/shadow` from the database, naming `source` in its header.
+    ///
+    /// See [`UserDb::to_passwd_text`]; this is the other half of the same
+    /// generation, and carries the password entries the account file does not.
+    ///
+    /// # Errors
+    ///
+    /// [`GenerateError`], on the same terms as [`UserDb::to_passwd_text`].
+    pub fn to_shadow_text(&self, source: &std::path::Path) -> Result<String, GenerateError> {
+        let mut out = generated_header(source);
+        for (index, record) in self.records.iter().enumerate() {
+            let username = login_name(record, index)?;
+            let entry = writable(shadow_entry(record), &username, field::PASSWORD_HASH)?;
+            let a = record.aging();
+            // `login:password:lastchg:min:max:warn:inactive:expire:reserved`.
+            // A field the record does not carry is written empty, which is
+            // `/etc/shadow`'s own spelling of "no policy for this" — not
+            // filled in with a plausible default. `0:0:99999:7` is the one
+            // `useradd` writes, and writing it here would present an
+            // invention as a fact, hiding the fact that nothing has set a
+            // policy for this account. The trailing field is reserved and has
+            // been empty in every implementation since the format was
+            // defined. `writeln!` to a `String` is infallible; the result is
+            // discarded rather than unwrapped so no path can panic.
+            let _ = writeln!(
+                out,
+                "{username}:{entry}:{}:{}:{}:{}:{}:{}:",
+                day(a.changed),
+                day(a.min_days),
+                day(a.max_days),
+                day(a.warn_days),
+                day(a.inactive_days),
+                day(a.expires),
+            );
+        }
+        Ok(out)
     }
 
     /// The records, in file order.
@@ -816,6 +1277,277 @@ impl UserDb {
         self.records
             .retain(|r| r.username().as_deref() != Some(username));
         self.records.len() != before
+    }
+}
+
+// ============================================================================
+// Generating the POSIX flat files (`design-decisions.md` §353)
+// ============================================================================
+
+/// Why the flat files could not be generated from the database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenerateError {
+    /// The record at this position — counting from one, in file order — has
+    /// no `username`, so there is nothing to put in the first field of either
+    /// file.
+    Nameless {
+        /// The record's position in the file, counting from one.
+        index: usize,
+    },
+    /// The record at this position has a `username` holding a byte the
+    /// colon-separated format cannot carry.
+    ///
+    /// Reported by position rather than by name, unlike every other variant,
+    /// because a name that cannot be written to `/etc/passwd` is a name whose
+    /// bytes should not be written to a terminal either: a control character
+    /// in it is an escape sequence in the error message.
+    UnwritableName {
+        /// The record's position in the file, counting from one.
+        index: usize,
+    },
+    /// The record has no `uid`, or one that is not a number in range.
+    NoUid {
+        /// The account the record names.
+        username: String,
+    },
+    /// A field holds a byte the colon-separated format cannot carry.
+    Unwritable {
+        /// The account the record names.
+        username: String,
+        /// The database field, by its canonical name.
+        field: &'static str,
+    },
+}
+
+impl core::fmt::Display for GenerateError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Nameless { index } => write!(
+                f,
+                "record {index} of the user database has no `username', so it cannot be \
+                 written to `/etc/passwd'"
+            ),
+            Self::UnwritableName { index } => write!(
+                f,
+                "record {index} of the user database has a `username' holding a colon or a \
+                 control character, which `/etc/passwd' cannot carry"
+            ),
+            Self::NoUid { username } => write!(
+                f,
+                "user `{username}' has no numeric `uid', so it cannot be written to \
+                 `/etc/passwd'"
+            ),
+            Self::Unwritable { username, field } => write!(
+                f,
+                "user `{username}' has a `{field}' holding a colon or a control character, \
+                 which `/etc/passwd' cannot carry"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GenerateError {}
+
+/// Render one aging field: the number, or nothing at all when unset.
+fn day(value: Option<i64>) -> String {
+    let mut buf = String::new();
+    if let Some(days) = value {
+        // `write!` to a `String` is infallible; the result is discarded
+        // rather than unwrapped so that no formatting path can panic.
+        let _ = write!(buf, "{days}");
+    }
+    buf
+}
+
+/// Wrap a [`GenerateError`] as the I/O error [`UserDb::save`] reports.
+///
+/// `InvalidData` and not `Other`: the failure is a property of the bytes being
+/// written, and a caller that distinguishes kinds should be able to tell it
+/// from a full disk.
+fn unrepresentable(e: GenerateError) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+}
+
+/// Whether `value` can be one field of a colon-separated line.
+///
+/// A colon would shift every field after it — a display name of `a:b` moves
+/// the home directory into the shell — and a newline would end the line early,
+/// making the rest of the record a second, forged one. Every other control
+/// character is refused with them because the file is read by programs that
+/// print what they find, and a terminal escape in a login name is a login name
+/// that can rewrite the screen it is printed on. Bytes at or above `0x80` are
+/// fine: a display name is allowed to be in a language.
+fn writable(value: String, username: &str, field: &'static str) -> Result<String, GenerateError> {
+    if value.bytes().any(|b| b == b':' || b < 0x20 || b == 0x7f) {
+        return Err(GenerateError::Unwritable {
+            username: username.to_string(),
+            field,
+        });
+    }
+    Ok(value)
+}
+
+/// The login name a record contributes to both files, or why it cannot.
+fn login_name(record: &Record, index: usize) -> Result<String, GenerateError> {
+    // Counting from one: the error is read by a person looking at a file, and
+    // the first record in a file is the first one, not the zeroth.
+    let position = index.saturating_add(1);
+    let name = record.username().unwrap_or_default();
+    if name.is_empty() {
+        return Err(GenerateError::Nameless { index: position });
+    }
+    match writable(name, "", field::USERNAME) {
+        Ok(name) => Ok(name),
+        Err(_) => Err(GenerateError::UnwritableName { index: position }),
+    }
+}
+
+/// The header both generated files open with.
+///
+/// §353 item 4 is explicit that this comment is the whole mitigation for the
+/// one genuinely surprising thing about the decision — that these files look
+/// writable and are not — so it says what happens to an edit, not merely that
+/// the file is generated.
+fn generated_header(source: &std::path::Path) -> String {
+    let shown = source.display().to_string();
+    // A path holding a control character would end the comment line and turn
+    // the rest of it into a forged `passwd` record. Such a path is not
+    // repaired, for the reason a repaired name is worse than an absent one:
+    // it looks real.
+    let named = if shown.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        "the user database".to_string()
+    } else {
+        format!("`{shown}'")
+    };
+    format!(
+        "# Generated from {named} -- do not edit.\n\
+         # Every change to an account rewrites this file from that one, so an edit\n\
+         # made here survives only until the next one and is then silently undone.\n"
+    )
+}
+
+/// The `/etc/shadow` password entry a record generates.
+///
+/// Three translations happen here, and each is a place the two files could
+/// otherwise come to disagree:
+///
+/// * **A lock recorded only in the YAML grows a marker.** `locked: true` is
+///   this database's spelling; a `!` before the entry is `/etc/shadow`'s. A
+///   record locked by the former alone would generate an unlocked shadow line,
+///   and a lock that only one of two files records is not a lock.
+/// * **An existing marker is preserved exactly.** `!` and `*` are not
+///   synonyms — `!` is a lock an administrator applied and can lift, `*` is an
+///   account that never had a password — and normalising them would erase
+///   which of the two an account is.
+/// * **A pre-`crypt(3)` entry becomes `*`.** Those entries (§329) have no
+///   `$id$` prefix, so writing one out verbatim would have `crypt` read it as
+///   a DES *setting* and compare candidate passwords against a hash of their
+///   first eight characters — turning "no password can be checked against
+///   this" into "some password can". `*` is the flat file's own spelling of
+///   the former, and it does not put a legacy secret-derived value into a
+///   second file on the way.
+fn shadow_entry(record: &Record) -> String {
+    let stored = record.get(field::PASSWORD_HASH).unwrap_or_default();
+    let bare = stored.trim_start_matches(['!', '*']);
+    let marker_len = stored.len().saturating_sub(bare.len());
+    let mut marker = stored.get(..marker_len).unwrap_or_default().to_string();
+    if marker.is_empty() && record.is_locked() {
+        marker.push('!');
+    }
+
+    if bare.is_empty() {
+        // No password at all. An empty entry is `/etc/shadow`'s spelling of
+        // exactly that; what it is then permitted to do is §346's policy, not
+        // this function's.
+        return marker;
+    }
+    if posix::crypt::stored_method(bare.as_bytes()).is_none() {
+        return "*".to_string();
+    }
+    let mut out = marker;
+    out.push_str(bare);
+    out
+}
+
+/// Who may read a file this crate writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// Whatever the process umask says. `/etc/passwd` is read by every program
+    /// that turns a uid into a name, most of them unprivileged.
+    Shared,
+    /// The owner only. `/etc/shadow` exists precisely so that the password
+    /// hashes are *not* in the world-readable account file, and generating it
+    /// with the default permissions would put them back where the split was
+    /// invented to remove them from.
+    Private,
+}
+
+/// Make `path` readable only by its owner.
+#[cfg(unix)]
+fn restrict(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+/// On a platform with no Unix permission bits there is nothing to restrict.
+/// Present so that the development host runs the same code path the target
+/// does, up to this one call.
+#[cfg(not(unix))]
+// The signature is fixed by the Unix arm above, which genuinely can fail; this
+// arm has to match it or every caller would need a `cfg` of its own.
+#[allow(clippy::unnecessary_wraps)]
+fn restrict(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// A file written to its temporary sibling and waiting to be renamed into
+/// place.
+///
+/// The type exists so that a multi-file write can stage everything before
+/// committing anything: with three files to keep in step, a failure partway
+/// through the *writes* must not leave a rename already done.
+struct Staged {
+    temp: std::path::PathBuf,
+    target: std::path::PathBuf,
+}
+
+impl Staged {
+    /// Write `text` to `target`'s temporary sibling.
+    fn write(target: &std::path::Path, text: &str, access: Access) -> std::io::Result<Self> {
+        let mut temp = target.as_os_str().to_os_string();
+        temp.push(".tmp");
+        let temp = std::path::PathBuf::from(temp);
+        std::fs::write(&temp, text)?;
+        if access == Access::Private {
+            // Restricted before the rename, so the file is never visible at
+            // its real name with the wrong permissions -- a window in which
+            // `/etc/shadow` is world-readable is all an attacker needs.
+            if let Err(e) = restrict(&temp) {
+                let _ = std::fs::remove_file(&temp);
+                return Err(e);
+            }
+        }
+        Ok(Self {
+            temp,
+            target: target.to_path_buf(),
+        })
+    }
+
+    /// Rename the temporary over its target.
+    fn commit(self) -> std::io::Result<()> {
+        match std::fs::rename(&self.temp, &self.target) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.abandon();
+                Err(e)
+            }
+        }
+    }
+
+    /// Remove the temporary without committing it. Leaving one behind would
+    /// make the next save look like it had already half-succeeded.
+    fn abandon(self) {
+        let _ = std::fs::remove_file(&self.temp);
     }
 }
 
@@ -1261,6 +1993,459 @@ users:
         assert!(!std::path::Path::new(&temp).exists());
     }
 
+    // ---- The generated flat files (§353) ----
+
+    /// A database with one ordinary account, ready to be generated from.
+    fn one_account() -> UserDb {
+        let mut db = UserDb::new();
+        let mut record = Record::new();
+        record.set_uid(1000);
+        record.set(field::USERNAME, "dave");
+        record.set(field::DISPLAY_NAME, "Dave Lister");
+        record.set(field::HOME, "/home/dave");
+        record.set(field::SHELL, "/bin/nush");
+        record
+            .set_password_with_salt("hunter2", "abcdefgh")
+            .expect("hash");
+        db.push(record);
+        db
+    }
+
+    /// The one `/etc/passwd` record `text` holds, read back with the crate the
+    /// rest of the system reads that file with.
+    fn only_passwd_record(text: &str) -> pwdb::User {
+        let mut users = pwdb::users(text.as_bytes());
+        assert_eq!(users.len(), 1, "expected exactly one record in {text:?}");
+        users.remove(0)
+    }
+
+    #[test]
+    fn a_generated_passwd_line_reads_back_through_the_reader_the_system_uses() {
+        let db = one_account();
+        let text = db
+            .to_passwd_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
+        let user = only_passwd_record(&text);
+
+        assert_eq!(user.name, b"dave");
+        assert_eq!(user.uid, 1000);
+        assert_eq!(user.gecos, b"Dave Lister");
+        assert_eq!(user.dir, b"/home/dave");
+        assert_eq!(user.shell, b"/bin/nush");
+        // The hash belongs in `shadow`, and `x` is how the account file says
+        // so. A generated `passwd` carrying the hash itself would undo the
+        // entire point of the two-file split.
+        assert_eq!(user.passwd, b"x");
+    }
+
+    #[test]
+    fn an_account_with_no_gid_is_generated_into_its_own_private_group() {
+        let db = one_account();
+        let text = db
+            .to_passwd_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
+        assert_eq!(only_passwd_record(&text).gid, 1000);
+    }
+
+    #[test]
+    fn an_explicit_gid_is_used_in_preference_to_the_uid() {
+        let mut db = one_account();
+        db.find_mut("dave").expect("record").set_gid(50);
+        let text = db
+            .to_passwd_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
+        let user = only_passwd_record(&text);
+        assert_eq!((user.uid, user.gid), (1000, 50));
+    }
+
+    #[test]
+    fn the_generated_header_names_the_file_it_was_generated_from() {
+        let db = one_account();
+        for text in [
+            db.to_passwd_text(std::path::Path::new(DEFAULT_PATH))
+                .expect("passwd"),
+            db.to_shadow_text(std::path::Path::new(DEFAULT_PATH))
+                .expect("shadow"),
+        ] {
+            let first = text.lines().next().unwrap_or_default();
+            assert!(first.starts_with('#'), "{first:?}");
+            assert!(first.contains(DEFAULT_PATH), "{first:?}");
+            // §353 item 4: the comment is the whole mitigation for the file
+            // looking writable, so it must say what an edit costs.
+            assert!(text.contains("silently undone"), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn the_header_is_a_comment_the_systems_own_reader_skips() {
+        // A header that the reader took for a record would add a phantom
+        // account to every machine, which is a worse failure than having no
+        // header at all -- so this is checked against `pwdb` rather than
+        // assumed from the leading `#`.
+        let text = UserDb::new()
+            .to_passwd_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
+        assert!(text.starts_with('#'));
+        assert!(pwdb::users(text.as_bytes()).is_empty(), "{text:?}");
+    }
+
+    #[test]
+    fn a_generated_shadow_line_has_the_nine_fields_the_format_defines() {
+        let db = one_account();
+        let text = db
+            .to_shadow_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
+        let line = text
+            .lines()
+            .find(|l| !l.starts_with('#'))
+            .expect("one record");
+        let fields: Vec<&str> = line.split(':').collect();
+        assert_eq!(fields.len(), 9, "{line:?}");
+        assert_eq!(fields.first(), Some(&"dave"));
+        // The entry is the `crypt(3)` one the database holds, verbatim: the
+        // whole reason this crate stores a full setting is that nothing has to
+        // take it apart.
+        let stored = db
+            .find("dave")
+            .and_then(|r| r.get(field::PASSWORD_HASH))
+            .expect("hash");
+        assert_eq!(fields.get(1), Some(&stored.as_str()));
+        // Field 3 is stamped, because a password was set. The remaining six
+        // are empty: nothing has set a policy for this account, and an empty
+        // field is this format's way of saying so.
+        assert_eq!(fields.get(2).map(|f| f.parse().ok()), Some(today()));
+        assert!(
+            fields
+                .get(3..)
+                .is_some_and(|rest| rest.iter().all(|f| f.is_empty())),
+            "{line:?}"
+        );
+    }
+
+    #[test]
+    fn unlocking_an_account_locked_by_a_bang_actually_unlocks_it() {
+        // The two spellings of a lock are both honoured on the way in, so
+        // clearing only the flag would leave `locked: false` beside an entry
+        // that still refuses every password -- an unlock that reports success
+        // and does nothing, which is the worst of the three outcomes.
+        let mut db = one_account();
+        let record = db.find_mut("dave").expect("record");
+        let intact = record.get(field::PASSWORD_HASH).expect("hash");
+        record.set_locked(true);
+        record.set(field::PASSWORD_HASH, &format!("!{intact}"));
+        assert!(record.is_locked());
+
+        record.set_locked(false);
+        assert!(!record.is_locked());
+        // ...and the password in force before the lock is the one restored,
+        // not some other one: the `!` was only ever a prefix on it.
+        assert_eq!(record.get(field::PASSWORD_HASH), Some(intact));
+        assert_eq!(record.check_password("hunter2"), Auth::Accepted);
+    }
+
+    #[test]
+    fn unlocking_a_starred_account_does_not_make_it_passwordless() {
+        // `*` is the absence of a password, not a lock over one, so there is
+        // nothing underneath to restore. Stripping it would leave an empty
+        // entry, which is this format's spelling of "logs in without being
+        // asked for anything" -- an unlock that hands out the account.
+        let mut db = one_account();
+        let record = db.find_mut("dave").expect("record");
+        record.set(field::PASSWORD_HASH, "*");
+        record.set_locked(false);
+        assert_eq!(record.get(field::PASSWORD_HASH), Some("*".to_string()));
+        assert!(record.is_locked());
+    }
+
+    #[test]
+    fn setting_a_password_records_the_day_it_was_set() {
+        // Without this, `max_days` has nothing to measure from, and an account
+        // whose password was set by a writer that forgot the stamp is exempt
+        // from expiry for good rather than merely late.
+        let db = one_account();
+        assert_eq!(
+            db.find("dave").map(|r| r.aging().changed),
+            Some(today()),
+            "a set password should stamp its own date"
+        );
+    }
+
+    #[test]
+    fn an_aging_policy_reaches_the_generated_shadow_in_the_order_the_format_defines() {
+        let mut db = one_account();
+        db.find_mut("dave").expect("record").set_aging(&Aging {
+            changed: Some(19_000),
+            min_days: Some(1),
+            max_days: Some(90),
+            warn_days: Some(7),
+            inactive_days: Some(14),
+            expires: Some(20_000),
+        });
+        let text = db
+            .to_shadow_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
+        // The order is the whole point: a policy written in the wrong columns
+        // is not a wrong policy, it is a different one -- 90 in the `warn`
+        // column warns for longer than the password lasts.
+        assert!(text.contains(":19000:1:90:7:14:20000:"), "{text:?}");
+    }
+
+    #[test]
+    fn an_unset_aging_field_is_generated_empty_rather_than_zero() {
+        // Zero and empty are different answers in this format: an empty `max`
+        // is "this password does not expire", a `0` is "it expired the day it
+        // was set". A generator that filled unset fields with zeroes would
+        // expire every account on the machine at once.
+        let mut db = one_account();
+        let record = db.find_mut("dave").expect("record");
+        record.set_aging(&Aging {
+            max_days: Some(90),
+            ..Aging::default()
+        });
+        assert_eq!(record.aging().min_days, None);
+        let text = db
+            .to_shadow_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
+        assert!(text.contains("::90::::"), "{text:?}");
+    }
+
+    #[test]
+    fn clearing_one_aging_field_leaves_the_rest_standing() {
+        let mut db = one_account();
+        let record = db.find_mut("dave").expect("record");
+        record.set_aging(&Aging {
+            min_days: Some(1),
+            max_days: Some(90),
+            ..Aging::default()
+        });
+        // The read-modify-write a caller like `passwd -x` performs. Reading
+        // the policy whole is what stops it dropping the five it did not name.
+        let mut aging = record.aging();
+        aging.max_days = None;
+        record.set_aging(&aging);
+        assert_eq!(record.aging().min_days, Some(1));
+        assert_eq!(record.aging().max_days, None);
+        // ...and the field is gone from the file, not left holding its old
+        // value under a key nothing writes any more.
+        assert!(!db.to_text().contains(field::PASSWORD_MAX_DAYS));
+    }
+
+    #[test]
+    fn an_aging_field_that_is_not_a_number_reads_as_no_policy() {
+        // A hand-edited typo must not make every later save of the whole
+        // database fail; absent is where the field was before anyone set it.
+        let mut db = one_account();
+        db.find_mut("dave")
+            .expect("record")
+            .set(field::PASSWORD_MAX_DAYS, "soon");
+        assert_eq!(db.find("dave").map(|r| r.aging().max_days), Some(None));
+        db.to_shadow_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
+    }
+
+    #[test]
+    fn a_lock_recorded_only_in_the_database_reaches_the_generated_shadow() {
+        let mut db = one_account();
+        let record = db.find_mut("dave").expect("record");
+        record.set_locked(true);
+        let stored = record.get(field::PASSWORD_HASH).expect("hash");
+        let text = db
+            .to_shadow_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
+
+        // `locked: true` carries no `!` in the YAML, so a generator that
+        // copied the entry across would produce an unlocked shadow line and
+        // the account would still be usable from every flat-file reader.
+        assert!(text.contains(&format!("dave:!{stored}:")), "{text:?}");
+    }
+
+    #[test]
+    fn a_star_entry_is_not_normalised_into_a_bang() {
+        // `*` is "never had a password" and `!` is "an administrator locked
+        // this"; both deny login, and only one of them can be lifted by
+        // removing a character. A generator that treated them as synonyms
+        // would erase which of the two an account is.
+        let mut db = one_account();
+        db.find_mut("dave")
+            .expect("record")
+            .set(field::PASSWORD_HASH, "*");
+        let text = db
+            .to_shadow_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
+        assert!(text.contains("dave:*:"), "{text:?}");
+    }
+
+    #[test]
+    fn an_account_with_no_password_generates_an_empty_shadow_entry() {
+        let mut db = one_account();
+        db.find_mut("dave")
+            .expect("record")
+            .set(field::PASSWORD_HASH, "");
+        let text = db
+            .to_shadow_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
+        let line = text
+            .lines()
+            .find(|l| !l.starts_with('#'))
+            .expect("one record");
+        let fields: Vec<&str> = line.split(':').collect();
+        assert_eq!(fields.first(), Some(&"dave"));
+        // Empty, not `*` or `!`: this account logs in without being asked for
+        // anything, which is a state the format has a spelling for and which
+        // is not the same as either kind of denial.
+        assert_eq!(fields.get(1), Some(&""));
+    }
+
+    #[test]
+    fn a_pre_crypt_entry_becomes_a_star_rather_than_a_des_setting() {
+        // The legacy entries (§329) are bare hex with no `$id$`. Written out
+        // verbatim, `crypt` reads such a string as a DES *setting* and
+        // compares candidates against a hash of their first eight characters
+        // -- so "no password can be checked against this" would silently
+        // become "some password can".
+        let db = UserDb::parse(LOGIN_MANAGER_DIALECT);
+        assert_eq!(db.find("root").map(Record::has_legacy_password), Some(true));
+        let text = db
+            .to_shadow_text(std::path::Path::new(DEFAULT_PATH))
+            .expect("generate");
+        assert!(text.contains("root:*:"), "{text:?}");
+        assert!(!text.contains("deadbeef"), "{text:?}");
+    }
+
+    #[test]
+    fn a_field_holding_a_colon_fails_the_generation_rather_than_shifting_the_line() {
+        for (field, expected) in [
+            (field::DISPLAY_NAME, field::DISPLAY_NAME),
+            (field::HOME, field::HOME),
+            (field::SHELL, field::SHELL),
+        ] {
+            let mut db = one_account();
+            db.find_mut("dave").expect("record").set(field, "a:/bin/sh");
+            assert_eq!(
+                db.to_passwd_text(std::path::Path::new(DEFAULT_PATH)),
+                Err(GenerateError::Unwritable {
+                    username: "dave".to_string(),
+                    field: expected,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn a_newline_in_a_field_cannot_forge_a_second_account() {
+        let mut db = one_account();
+        db.find_mut("dave")
+            .expect("record")
+            .set(field::DISPLAY_NAME, "Dave\nroot2:x:0:0::/root:/bin/sh");
+        assert!(matches!(
+            db.to_passwd_text(std::path::Path::new(DEFAULT_PATH)),
+            Err(GenerateError::Unwritable { .. })
+        ));
+    }
+
+    #[test]
+    fn an_unwritable_username_is_reported_by_position_and_not_by_its_bytes() {
+        // A name that cannot go into `/etc/passwd` holds a control character,
+        // and a control character in an error message is an escape sequence
+        // aimed at whoever reads it.
+        let mut db = one_account();
+        db.find_mut("dave")
+            .expect("record")
+            .set(field::USERNAME, "da\u{1b}[2Jve");
+        assert_eq!(
+            db.to_passwd_text(std::path::Path::new(DEFAULT_PATH)),
+            Err(GenerateError::UnwritableName { index: 1 })
+        );
+        assert!(!format!("{}", GenerateError::UnwritableName { index: 1 }).contains('\u{1b}'));
+    }
+
+    #[test]
+    fn a_record_with_no_name_or_no_uid_fails_the_generation() {
+        let mut nameless = UserDb::new();
+        let mut record = Record::new();
+        record.set_uid(7);
+        nameless.push(record);
+        assert_eq!(
+            nameless.to_passwd_text(std::path::Path::new(DEFAULT_PATH)),
+            Err(GenerateError::Nameless { index: 1 })
+        );
+
+        let mut uidless = UserDb::new();
+        let mut record = Record::new();
+        record.set(field::USERNAME, "dave");
+        uidless.push(record);
+        assert_eq!(
+            uidless.to_passwd_text(std::path::Path::new(DEFAULT_PATH)),
+            Err(GenerateError::NoUid {
+                username: "dave".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_save_writes_all_three_files_and_they_agree() {
+        let scratch = ScratchDir::new("userdb-generate-test");
+        let path = scratch.path("users.yaml");
+        one_account().save(&path).expect("save");
+
+        let reloaded = UserDb::load(&path).expect("load");
+        let passwd = std::fs::read(scratch.path(PASSWD_NAME)).expect("generated passwd");
+        let shadow = std::fs::read_to_string(scratch.path(SHADOW_NAME)).expect("generated shadow");
+
+        let user = only_passwd_record(&String::from_utf8(passwd).expect("utf-8"));
+        assert_eq!(
+            user.uid,
+            reloaded.find("dave").and_then(Record::uid).unwrap_or(0)
+        );
+        assert_eq!(user.dir, b"/home/dave");
+        let stored = reloaded
+            .find("dave")
+            .and_then(|r| r.get(field::PASSWORD_HASH))
+            .expect("hash");
+        assert!(shadow.contains(&format!("dave:{stored}:")), "{shadow:?}");
+    }
+
+    #[test]
+    fn a_save_that_cannot_generate_leaves_every_file_untouched() {
+        let scratch = ScratchDir::new("userdb-generate-refuse-test");
+        let path = scratch.path("users.yaml");
+        one_account().save(&path).expect("first save");
+        let before = std::fs::read_to_string(&path).expect("read back");
+
+        let mut db = UserDb::load(&path).expect("load");
+        db.find_mut("dave")
+            .expect("record")
+            .set(field::SHELL, "/bin/sh:extra");
+        let err = db.save(&path).expect_err("must refuse");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        // The database still says what it said: a save that cannot produce the
+        // flat files must not move the truth ahead of them.
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), before);
+        let mut temp = path.as_os_str().to_os_string();
+        temp.push(".tmp");
+        assert!(!std::path::Path::new(&temp).exists());
+    }
+
+    #[test]
+    fn a_removed_account_disappears_from_the_generated_files_too() {
+        // The failure §353 exists to end is an account present in one store
+        // and absent from the other, and deletion is the direction that leaves
+        // a usable login behind rather than merely a missing one.
+        let scratch = ScratchDir::new("userdb-generate-remove-test");
+        let path = scratch.path("users.yaml");
+        one_account().save(&path).expect("save");
+
+        let mut db = UserDb::load(&path).expect("load");
+        assert!(db.remove("dave"));
+        db.save(&path).expect("save again");
+
+        let passwd = std::fs::read(scratch.path(PASSWD_NAME)).expect("generated passwd");
+        assert!(pwdb::users(&passwd).is_empty());
+        let shadow = std::fs::read_to_string(scratch.path(SHADOW_NAME)).expect("generated shadow");
+        assert!(!shadow.contains("dave"), "{shadow:?}");
+    }
+
     #[test]
     fn records_can_be_added_and_removed() {
         let mut db = UserDb::new();
@@ -1299,5 +2484,94 @@ users:
         let db = UserDb::parse("");
         assert!(db.records().is_empty());
         assert_eq!(db.to_text(), "");
+    }
+
+    // ---- Dates ----
+    //
+    // Three crates used to convert these day numbers themselves, so the
+    // known-answer values below are deliberately the ones their own tests
+    // used: if this implementation disagreed with any of the three it
+    // replaced, one of these would say so.
+
+    #[test]
+    fn a_date_converts_to_the_day_number_the_shadow_file_holds() {
+        assert_eq!(days_from_date("1970-01-01"), Some(0));
+        assert_eq!(days_from_date("2024-01-01"), Some(19723));
+        assert_eq!(days_from_date("2000-03-01"), Some(11017));
+        assert_eq!(days_from_date("2024-02-29"), Some(19782));
+        assert_eq!(days_from_date("2000-02-29"), Some(11016));
+    }
+
+    #[test]
+    fn a_day_number_converts_back_to_the_date_it_came_from() {
+        for date in [
+            "1970-01-01",
+            "2024-01-01",
+            "2000-03-01",
+            "2024-02-29",
+            "2000-02-29",
+            "1900-01-01",
+            "2262-04-11",
+        ] {
+            let days = days_from_date(date).expect(date);
+            assert_eq!(date_from_days(days), date);
+        }
+    }
+
+    /// Before the epoch converts rather than clamping. `passwd`'s own printer
+    /// used to answer `1970-01-01` for every negative day number, which turns
+    /// a hand-edited field into a date the file does not contain.
+    #[test]
+    fn a_day_number_before_the_epoch_is_a_date_before_the_epoch() {
+        assert_eq!(date_from_days(-1), "1969-12-31");
+        assert_eq!(date_from_days(-5), "1969-12-27");
+        assert_eq!(days_from_date("1969-12-31"), Some(-1));
+    }
+
+    /// The leap-year rule at the three dates that distinguish its clauses:
+    /// divisible by 4, by 100, and by 400.
+    #[test]
+    fn the_leap_day_exists_in_the_years_it_exists_in() {
+        assert!(is_leap_year(2024));
+        assert!(!is_leap_year(1900));
+        assert!(is_leap_year(2000));
+        assert_eq!(days_in_month(2024, 2), 29);
+        assert_eq!(days_in_month(1900, 2), 28);
+        assert_eq!(days_in_month(2000, 2), 29);
+        assert!(days_from_date("1900-02-29").is_none());
+    }
+
+    /// A string that is not a date is refused rather than mapped to a nearby
+    /// one. Every caller stores the result in a column a later reader will
+    /// believe.
+    #[test]
+    fn a_date_that_is_not_a_date_is_refused() {
+        for bad in [
+            "",
+            "2024",
+            "2024-01",
+            "2024-01-01-01",
+            "2024-13-01",
+            "2024-00-10",
+            "2024-01-00",
+            "2024-02-30",
+            "2024-04-31",
+            "next tuesday",
+            "20x4-01-01",
+            "2024-1x-01",
+        ] {
+            assert!(days_from_date(bad).is_none(), "accepted {bad:?}");
+        }
+    }
+
+    /// Every day of a four-century span round-trips. The two functions are
+    /// each other's inverse or neither is trustworthy, and 400 years is the
+    /// whole period of the Gregorian rule, so this covers every case there is.
+    #[test]
+    fn every_day_of_a_gregorian_cycle_round_trips() {
+        for days in -146_097..146_097 {
+            let text = date_from_days(days);
+            assert_eq!(days_from_date(&text), Some(days), "{text}");
+        }
     }
 }

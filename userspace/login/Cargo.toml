@@ -18,3 +18,16 @@ description = "SlateOS login - user login program"
 [dependencies]
 authlib = { path = "../authlib" }
 posix = { path = "../../posix" }
+# The account store. `design-decisions.md` §353 settles that `/etc/users.yaml`
+# is the truth and `/etc/passwd` and `/etc/shadow` are *generated* from it, so
+# a program that authenticated out of those two files was authenticating out of
+# a copy. It also removes a whole class of state this file used to handle: an
+# account cannot be in one file and missing from the other when there is one
+# file.
+userdb = { path = "../userdb" }
+
+[dev-dependencies]
+# The account lookup is exercised against a real database in a scratch
+# directory rather than against a parser, because what changed is *which file
+# answers*, and a parser test cannot see that.
+scratchdir = { path = "../scratchdir" }

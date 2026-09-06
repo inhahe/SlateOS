@@ -55437,3 +55437,134 @@ directly here, or -- better, since `login`, `sshd` and `getty` all want the
 same thing -- add a small helper next to `posix`'s process spawn that takes
 (program, argv0, args) and use it from all four. Do this when one of the other
 three needs it, so the helper is shaped by more than one caller.
+
+## ircclient: no transport, and no clock a message can be stamped with
+
+`apps/ircclient` parses IRC and renders it, and has no socket. Two consequences
+are visible in the code and both are deliberate:
+
+* **Slash commands are applied locally and logged, not sent.** `parse_command`
+  builds the wire line; `run_command` applies the effect of the ones that have
+  a local meaning (`/join`, `/part`, `/nick`, `/me`, `/msg`) and pushes
+  `-> <line>` into the server buffer for the rest, so what would have gone out
+  is visible rather than dropped. When there is a TCP socket, `run_command`
+  sends the line instead and `handle_message` picks the server's echo back up
+  -- which is already written and already tested.
+* **`IrcClientApp::timestamp` reuses the stamp of the previous message.** This
+  tree has no wall clock a userspace program can read, and inventing a time
+  would be wrong in a way nobody could see. Replace it with the real clock when
+  one exists; every `ChatMessage` already carries a `timestamp` string.
+
+`tick_interval` returns `None` for the same reason: nothing arrives on a timer.
+It becomes `Some(...)` -- or better, a wakeup on the socket -- when there is a
+connection to read from.
+
+## radio: two player states with no way into them
+
+`apps/radio` has no network, so `PlayState::Buffering` and `PlayState::Error`
+are never constructed -- nothing can be waiting for a stream to fill, and
+nothing can fail to connect, until something connects. Both are kept with a
+`#[allow(dead_code)]` and a reason rather than deleted, because the player bar
+already knows how to draw them: `PlayState::label` covers all four, and the
+states become reachable the moment there is a socket. Same for `Codec::Wma`,
+which is part of the vocabulary for describing a stream rather than a list of
+what the built-in presets happen to use.
+
+`Station::url` is now displayed in the now-playing bar, which is the honest
+thing to show for a station that cannot be fetched: what would be played.
+
+## /etc/group and /etc/gshadow are still hand-written, not generated (lane B, 2026-09-06)
+
+`design-decisions.md` §353 made `/etc/passwd` and `/etc/shadow` generated from
+`/etc/users.yaml`. It said nothing about the two *group* files, and they are
+still parsed and written by hand -- by `userspace/useradd` (which is also
+groupadd/groupdel/groupmod), and read by `pwdb`, `chown`, `chroot` and `id`.
+
+Two consequences, both live today:
+
+1. **Group membership is stored twice.** `/etc/group` has a member list per
+   group; the account record has a `groups` list per user. `Database` in
+   `userspace/useradd/src/main.rs` now changes both together through
+   `add_to_group`, `remove_user_from_groups`, `rename_group_everywhere` and
+   `forget_group`, so nothing in *this* binary can update one and forget the
+   other. Nothing enforces that for a future writer.
+
+2. **A save is not atomic across the two stores.** `userdb::UserDb::save`
+   stages its three files and renames them together; the group files are a
+   write-temp-and-rename each, done first, so a failure between them leaves a
+   group nobody is in (inert) rather than an account whose primary group does
+   not exist. The window is small and the failure direction is the safe one,
+   but it is a window.
+
+The proper fix is the same one §353 chose for users: a `/etc/groups.yaml` that
+is the truth, with `/etc/group` and `/etc/gshadow` generated from it by the
+same staged save, and the per-user `groups` list dropped in favour of the
+group's own member list (or the reverse -- but one of them has to go). That is
+a decision §353 did not take, so it needs the operator: see
+`open-questions.md`.
+
+Trigger: do it when something other than `useradd` needs to *write* a group,
+or when the duplicated membership is observed to have drifted.
+
+## login cannot make a user change an expired password (lane B, 2026-09-06)
+
+`/etc/shadow`'s aging fields describe two different endings for a password that
+has reached its maximum age:
+
+* **Expired** -- it must be changed at the next login, and until it is, the
+  session does not start. This is what `PASS_MAX_DAYS` is *for*.
+* **Inactive, then dead** -- once the `inactive` field's further grace period
+  has also passed, the account stops accepting the password at all.
+
+`userspace/login/src/main.rs` now enforces the second (`check_account_expired`)
+and the account's own expiry date, and warns about the first
+(`expiry_warning`), but it cannot enforce the first: making the user change the
+password means running `passwd` as that user before exec'ing the shell, and
+`login` has no way to exec anything yet -- its success path ends in an
+`eprintln!` saying what it *would* exec.
+
+So today an expired password logs in with a warning. That is shadow-utils'
+behaviour when `PASS_MAX_DAYS` has passed but the inactive period has not,
+which is the common case; what is missing is the refusal when there is no
+inactive period at all, where shadow-utils forces the change instead.
+
+Do this when `login` can exec: the same change that replaces the `would exec
+shell` line. The order matters -- `passwd` must run *before* the shell, with
+the user's own uid, and the shell must not start if it fails.
+
+## credmanager: what a credential manager still cannot do
+
+Adding a credential and copying a field are wired up as of this change. The
+rest of the vault's API is still reachable from nothing, and each dead item now
+carries a `#[allow(dead_code, reason = ...)]` saying which control is missing
+rather than a blanket `#![allow(dead_code)]` over the file -- that blanket is
+what hid the Add button doing nothing.
+
+In rough order of how much a user would miss it:
+
+* **Edit** — `Vault::update_entry` and `get_entry_mut`. The detail view shows a
+  credential and cannot change one, so a password that has been rotated cannot
+  be recorded.
+* **Delete** — `Vault::remove_entry`.
+* **Export and backup** — `export_csv`, `escape_csv`, `serialize_backup`, all
+  advertised in the module doc. There is no filesystem to write to; the
+  clipboard is the sink these can have today, which is what `/copy` already
+  uses.
+* **Favourites** — `Vault::toggle_star`. The sidebar filters by favourites and
+  nothing can set one, so that filter is always empty. Same shape for
+  **tags** (`add_tag`/`remove_tag`, and the sidebar's tag list) and
+  **folders** (`Folder`, `add_folder`/`remove_folder`/`rename_folder`/
+  `set_folder`).
+* **Generator length** — `PasswordGenerator::set_length`. The panel shows the
+  length and offers no way to change it.
+* **Jump from an audit issue to its entry** — `AuditIssue::entry_id` is carried
+  and never read.
+* **Breach flagging** — `Vault::set_compromised`, which needs a feed to learn
+  from as well as a control.
+* **Persistence** — `Vault::from_stored` is the door a loader would come in
+  through. Every launch opens an empty vault, as the module doc says.
+
+One duplicate to resolve rather than build: `Vault::search_entries` is a second
+full-text search beside the toolbar's, which filters through
+`AppState::refresh_filter`. One of the two should go once it is clear which
+shape the UI wants.

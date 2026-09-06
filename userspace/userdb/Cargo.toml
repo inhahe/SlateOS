@@ -18,5 +18,10 @@ posix = { path = "../../posix" }
 [lints]
 workspace = true
 
+# `pwdb` is the crate the rest of the system *reads* `/etc/passwd` with, so the
+# generation tests parse what they generate with it rather than with a second
+# parser written here. §330 records why: a reader and a writer that disagree
+# can only be seen to disagree at the step where one consumes the other.
 [dev-dependencies]
+pwdb = { path = "../pwdb" }
 scratchdir = { path = "../scratchdir" }

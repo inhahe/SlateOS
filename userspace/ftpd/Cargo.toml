@@ -21,6 +21,12 @@ posix = { path = "../../posix" }
 # `/etc/shadow` stand-in and one read back the other's line. See known-issues.md
 # `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE`.
 scratchdir = { path = "../scratchdir" }
+# And `userdb` to build the account database the fixture authenticates
+# against. `design-decisions.md` §353 item 3 removed `authlib`'s `/etc/shadow`
+# branch, so a fixture that wrote a shadow file was writing to a store nothing
+# reads; it writes a `users.yaml` now. A dev-dependency and not a dependency:
+# this crate does not read accounts itself, it asks `authlib`.
+userdb = { path = "../userdb" }
 
 # Inherit the workspace lint configuration. This crate carried only a bare
 # `#![deny(clippy::all)]` in `main.rs`, so it had neither `pedantic` nor the four

@@ -3,9 +3,27 @@
 //! Multi-personality binary providing POSIX-compatible user/group management:
 //! useradd, userdel, usermod, groupadd, groupdel, groupmod, newgrp.
 //!
-//! Manages the traditional `/etc/passwd`, `/etc/shadow`, `/etc/group`, and
-//! `/etc/gshadow` files with atomic writes (write-to-temp then rename) and
-//! backup file creation.
+//! # Where an account lives, and where a group lives
+//!
+//! Not in the same place, and the split is deliberate. `design-decisions.md`
+//! §353 makes `/etc/users.yaml` the single truth about user accounts, with
+//! `/etc/passwd` and `/etc/shadow` *generated* from it on every change for the
+//! benefit of ported software that reads the flat files directly. So the three
+//! user commands here go through `userdb` and never write those two files.
+//!
+//! They used to write them by hand, and that was the most damaging of the
+//! defects §353 was decided to end: an account `useradd` created existed only
+//! in `/etc/passwd`, so the next account change from *any* other tool
+//! regenerated that file from a database the account was not in, and the
+//! account silently ceased to exist.
+//!
+//! Groups are **not** part of §353. `/etc/group` and `/etc/gshadow` are still
+//! parsed and written here directly, with atomic writes (write-to-temp then
+//! rename) and a backup copy. Group *membership* is therefore recorded twice
+//! -- in the group's member list and in each account's own `groups` list --
+//! so no command below touches either list directly: the `Database` methods
+//! that change membership change both. See `todo.txt` and `open-questions.md`
+//! for the question of whether the group files should be generated too.
 //!
 //! # Personality Detection
 //!
@@ -35,10 +53,19 @@ use std::process;
 // Constants
 // ============================================================================
 
-const PASSWD_PATH: &str = "/etc/passwd";
-const SHADOW_PATH: &str = "/etc/shadow";
-const GROUP_PATH: &str = "/etc/group";
-const GSHADOW_PATH: &str = "/etc/gshadow";
+/// Where the account database and the group files live.
+///
+/// A directory rather than four absolute paths, because every file involved is
+/// found relative to it -- including the two `userdb` generates, which it
+/// derives from the database's own directory precisely so that a test cannot
+/// write over the real `/etc/passwd`.
+const ETC_DIR: &str = "/etc";
+
+/// The account database, `§353`'s single truth. Named relative to [`ETC_DIR`];
+/// `userdb::DEFAULT_PATH` is the same file spelled absolutely.
+const USERS_NAME: &str = "users.yaml";
+const GROUP_NAME: &str = "group";
+const GSHADOW_NAME: &str = "gshadow";
 
 const SKEL_DIR: &str = "/etc/skel";
 const DEFAULT_SHELL: &str = "/bin/sh";
@@ -56,105 +83,17 @@ const REG_ID_MAX: u32 = 60000;
 // Data structures
 // ============================================================================
 
-/// An entry from `/etc/passwd`.
-#[derive(Clone, Debug, PartialEq)]
-struct PasswdEntry {
-    username: String,
-    password: String, // typically "x" (shadow)
-    uid: u32,
-    gid: u32,
-    gecos: String,
-    home: String,
-    shell: String,
-}
-
-impl PasswdEntry {
-    fn serialize(&self) -> String {
-        format!(
-            "{}:{}:{}:{}:{}:{}:{}",
-            self.username, self.password, self.uid, self.gid, self.gecos, self.home, self.shell
-        )
-    }
-
-    fn parse(line: &str) -> Option<Self> {
-        let parts: Vec<&str> = line.split(':').collect();
-        if parts.len() < 7 {
-            return None;
-        }
-        Some(PasswdEntry {
-            username: parts[0].to_string(),
-            password: parts[1].to_string(),
-            uid: parts[2].parse().ok()?,
-            gid: parts[3].parse().ok()?,
-            gecos: parts[4].to_string(),
-            home: parts[5].to_string(),
-            shell: parts[6].to_string(),
-        })
-    }
-}
-
-/// An entry from `/etc/shadow`.
-#[derive(Clone, Debug, PartialEq)]
-struct ShadowEntry {
-    username: String,
-    hash: String,
-    last_changed: String,
-    min_days: String,
-    max_days: String,
-    warn_days: String,
-    inactive: String,
-    expire: String,
-    reserved: String,
-}
-
-impl ShadowEntry {
-    fn serialize(&self) -> String {
-        format!(
-            "{}:{}:{}:{}:{}:{}:{}:{}:{}",
-            self.username,
-            self.hash,
-            self.last_changed,
-            self.min_days,
-            self.max_days,
-            self.warn_days,
-            self.inactive,
-            self.expire,
-            self.reserved
-        )
-    }
-
-    fn parse(line: &str) -> Option<Self> {
-        let parts: Vec<&str> = line.split(':').collect();
-        if parts.len() < 9 {
-            return None;
-        }
-        Some(ShadowEntry {
-            username: parts[0].to_string(),
-            hash: parts[1].to_string(),
-            last_changed: parts[2].to_string(),
-            min_days: parts[3].to_string(),
-            max_days: parts[4].to_string(),
-            warn_days: parts[5].to_string(),
-            inactive: parts[6].to_string(),
-            expire: parts[7].to_string(),
-            reserved: parts[8].to_string(),
-        })
-    }
-
-    fn new_locked(username: &str) -> Self {
-        ShadowEntry {
-            username: username.to_string(),
-            hash: "!".to_string(),
-            last_changed: "0".to_string(),
-            min_days: "0".to_string(),
-            max_days: "99999".to_string(),
-            warn_days: "7".to_string(),
-            inactive: String::new(),
-            expire: String::new(),
-            reserved: String::new(),
-        }
-    }
-}
+// The `PasswdEntry` and `ShadowEntry` structs stood here, with their
+// `parse`/`serialize` pairs and `ShadowEntry::new_locked`. They are gone:
+// `design-decisions.md` §353 makes `/etc/passwd` and `/etc/shadow` *generated*
+// output, so a struct that parsed one was parsing a rendering rather than the
+// thing itself, and a struct that serialised one was writing a line the next
+// account change would overwrite.
+//
+// The account a user *is* now lives in `/etc/users.yaml` as a `userdb::Record`,
+// and the two flat files are produced from it by `userdb::UserDb::save`. The
+// group half of this binary is unaffected: `/etc/group` and `/etc/gshadow` are
+// outside §353 and are still parsed and written below.
 
 /// An entry from `/etc/group`.
 #[derive(Clone, Debug, PartialEq)]
@@ -235,28 +174,48 @@ impl GshadowEntry {
 }
 
 // ============================================================================
-// Database: reads and writes all four files
+// Database: the account database, plus the two group files
 // ============================================================================
 
+/// Everything these commands read and write, and the `/etc` it came from.
+///
+/// Two stores, not one, and the split is §353's: user accounts live in
+/// `/etc/users.yaml` and are written through `userdb`, which regenerates
+/// `/etc/passwd` and `/etc/shadow` from them; groups live in `/etc/group` and
+/// `/etc/gshadow`, which §353 says nothing about and which are still written
+/// here directly.
+///
+/// The directory is a field rather than a set of constants so that the tests
+/// can run the real commands against a real `/etc` in a scratch directory.
+/// `userdb::UserDb::save` derives the two generated files from the database's
+/// own directory for the same reason, and the two must agree about which
+/// directory that is -- so there is one.
 struct Database {
-    passwd: Vec<PasswdEntry>,
-    shadow: Vec<ShadowEntry>,
+    users: userdb::UserDb,
     groups: Vec<GroupEntry>,
     gshadow: Vec<GshadowEntry>,
+    etc: std::path::PathBuf,
 }
 
 impl Database {
-    /// Load all four files. Missing files produce empty vectors.
+    /// Load the system's account database, from `/etc`.
     fn load() -> Self {
+        Self::load_in(Path::new(ETC_DIR))
+    }
+
+    /// Load from `etc`. A missing file is an empty one -- which is right for
+    /// the group files, and is `userdb::UserDb::load`'s own rule for a
+    /// database that is not there yet.
+    fn load_in(etc: &Path) -> Self {
         Database {
-            passwd: Self::load_file(PASSWD_PATH, PasswdEntry::parse),
-            shadow: Self::load_file(SHADOW_PATH, ShadowEntry::parse),
-            groups: Self::load_file(GROUP_PATH, GroupEntry::parse),
-            gshadow: Self::load_file(GSHADOW_PATH, GshadowEntry::parse),
+            users: userdb::UserDb::load(etc.join(USERS_NAME)).unwrap_or_default(),
+            groups: Self::load_file(&etc.join(GROUP_NAME), GroupEntry::parse),
+            gshadow: Self::load_file(&etc.join(GSHADOW_NAME), GshadowEntry::parse),
+            etc: etc.to_path_buf(),
         }
     }
 
-    fn load_file<T, F>(path: &str, parser: F) -> Vec<T>
+    fn load_file<T, F>(path: &Path, parser: F) -> Vec<T>
     where
         F: Fn(&str) -> Option<T>,
     {
@@ -267,21 +226,44 @@ impl Database {
         content.lines().filter_map(parser).collect()
     }
 
-    /// Write all four files atomically: write temp, create backup, rename.
+    /// Write everything back.
+    ///
+    /// The group files are written first, and the account database last,
+    /// because the reference between the two runs one way: a user record names
+    /// a primary gid, and no group names a user's uid. A failure between the
+    /// two therefore leaves a group nobody is in -- which is inert -- rather
+    /// than an account whose primary group does not exist.
+    ///
+    /// It is not one atomic operation across both stores. `userdb`'s own save
+    /// stages its three files and renames them together; these two are a
+    /// write-temp-and-rename each, as they have always been. Making the group
+    /// files atomic with the accounts means generating them from a database
+    /// too, which is a larger decision than §353 took -- see `todo.txt`.
     fn save(&self) -> Result<(), String> {
-        Self::atomic_write(PASSWD_PATH, &self.passwd, PasswdEntry::serialize)?;
-        Self::atomic_write(SHADOW_PATH, &self.shadow, ShadowEntry::serialize)?;
-        Self::atomic_write(GROUP_PATH, &self.groups, GroupEntry::serialize)?;
-        Self::atomic_write(GSHADOW_PATH, &self.gshadow, GshadowEntry::serialize)?;
-        Ok(())
+        Self::atomic_write(
+            &self.etc.join(GROUP_NAME),
+            &self.groups,
+            GroupEntry::serialize,
+        )?;
+        Self::atomic_write(
+            &self.etc.join(GSHADOW_NAME),
+            &self.gshadow,
+            GshadowEntry::serialize,
+        )?;
+        self.users
+            .save(self.etc.join(USERS_NAME))
+            .map_err(|e| format!("failed to write the account database: {e}"))
     }
 
-    fn atomic_write<T, F>(path: &str, entries: &[T], serializer: F) -> Result<(), String>
+    fn atomic_write<T, F>(path: &Path, entries: &[T], serializer: F) -> Result<(), String>
     where
         F: Fn(&T) -> String,
     {
-        let tmp_path = format!("{}.tmp", path);
-        let backup_path = format!("{}-", path);
+        let tmp_path = path.with_extension("tmp");
+        let backup_path = path.with_file_name(format!(
+            "{}-",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
 
         let mut content = String::new();
         for entry in entries {
@@ -291,28 +273,34 @@ impl Database {
 
         // Write to temporary file.
         fs::write(&tmp_path, &content)
-            .map_err(|e| format!("failed to write {}: {}", tmp_path, e))?;
+            .map_err(|e| format!("failed to write {}: {}", tmp_path.display(), e))?;
 
         // Create backup of existing file (ignore errors if original doesn't exist).
-        if Path::new(path).exists() {
+        if path.exists() {
             let _ = fs::copy(path, &backup_path);
         }
 
         // Atomic rename.
-        fs::rename(&tmp_path, path)
-            .map_err(|e| format!("failed to rename {} to {}: {}", tmp_path, path, e))?;
+        fs::rename(&tmp_path, path).map_err(|e| {
+            format!(
+                "failed to rename {} to {}: {}",
+                tmp_path.display(),
+                path.display(),
+                e
+            )
+        })?;
 
         Ok(())
     }
 
     // ---- lookup helpers ----
 
-    fn find_user(&self, name: &str) -> Option<&PasswdEntry> {
-        self.passwd.iter().find(|u| u.username == name)
+    fn find_user(&self, name: &str) -> Option<&userdb::Record> {
+        self.users.find(name)
     }
 
-    fn find_user_by_uid(&self, uid: u32) -> Option<&PasswdEntry> {
-        self.passwd.iter().find(|u| u.uid == uid)
+    fn find_user_by_uid(&self, uid: u32) -> Option<&userdb::Record> {
+        self.users.find_uid(uid)
     }
 
     fn find_group(&self, name: &str) -> Option<&GroupEntry> {
@@ -323,14 +311,14 @@ impl Database {
         self.groups.iter().find(|g| g.gid == gid)
     }
 
-    #[allow(dead_code)] // Used in tests; useful API for future callers.
-    fn find_shadow(&self, name: &str) -> Option<&ShadowEntry> {
-        self.shadow.iter().find(|s| s.username == name)
-    }
-
     /// Next free UID in the given range.
     fn next_uid(&self, min: u32, max: u32) -> Option<u32> {
-        let used: Vec<u32> = self.passwd.iter().map(|p| p.uid).collect();
+        let used: Vec<u32> = self
+            .users
+            .records()
+            .iter()
+            .filter_map(userdb::Record::uid)
+            .collect();
         (min..=max).find(|id| !used.contains(id))
     }
 
@@ -340,7 +328,37 @@ impl Database {
         (min..=max).find(|id| !used.contains(id))
     }
 
-    /// Remove a user from all group member lists.
+    // ---- Group membership, which is recorded in two places ----
+    //
+    // `/etc/group` has a member list per group, and the account record has a
+    // `groups` list per user. They are the same fact written twice, which is
+    // the shape of every defect §330 and §353 were decided to end -- so no
+    // command below touches either list directly. Every change goes through
+    // one of these, which change both, and a caller therefore cannot update
+    // one store and forget the other.
+
+    /// Add `username` to `group`, in both places membership is recorded.
+    fn add_to_group(&mut self, username: &str, group: &str) {
+        if let Some(ge) = self.groups.iter_mut().find(|g| g.name == group)
+            && !ge.members.iter().any(|m| m == username)
+        {
+            ge.members.push(username.to_string());
+        }
+        if let Some(gs) = self.gshadow.iter_mut().find(|g| g.name == group)
+            && !gs.members.iter().any(|m| m == username)
+        {
+            gs.members.push(username.to_string());
+        }
+        if let Some(record) = self.users.find_mut(username) {
+            let mut names = record.groups();
+            if !names.iter().any(|g| g == group) {
+                names.push(group.to_string());
+                record.set_groups(&names);
+            }
+        }
+    }
+
+    /// Remove a user from every group, in both places.
     fn remove_user_from_groups(&mut self, username: &str) {
         for group in &mut self.groups {
             group.members.retain(|m| m != username);
@@ -348,9 +366,16 @@ impl Database {
         for gs in &mut self.gshadow {
             gs.members.retain(|m| m != username);
         }
+        if let Some(record) = self.users.find_mut(username) {
+            record.set_groups(&[]);
+        }
     }
 
-    /// Rename a user in all group member lists.
+    /// Rename a user wherever it is recorded as a member.
+    ///
+    /// The account record's own `groups` list needs no rename -- it holds
+    /// group names, not the user's -- but the group files hold the user's name
+    /// in every group it belongs to.
     fn rename_user_in_groups(&mut self, old_name: &str, new_name: &str) {
         for group in &mut self.groups {
             for m in &mut group.members {
@@ -367,6 +392,84 @@ impl Database {
             }
         }
     }
+
+    /// Rename a group wherever it is recorded, including in every account that
+    /// belongs to it. A rename that missed the accounts would leave them
+    /// naming a group that no longer exists.
+    fn rename_group_everywhere(&mut self, old_name: &str, new_name: &str) {
+        if let Some(gs) = self.gshadow.iter_mut().find(|g| g.name == old_name) {
+            gs.name = new_name.to_string();
+        }
+        for record in self.users.records_mut() {
+            let mut names = record.groups();
+            if names.iter().any(|g| g == old_name) {
+                for name in &mut names {
+                    if name == old_name {
+                        *name = new_name.to_string();
+                    }
+                }
+                record.set_groups(&names);
+            }
+        }
+    }
+
+    /// Forget a group everywhere it is recorded as a membership.
+    fn forget_group(&mut self, group: &str) {
+        self.groups.retain(|g| g.name != group);
+        self.gshadow.retain(|g| g.name != group);
+        for record in self.users.records_mut() {
+            let names = record.groups();
+            if names.iter().any(|g| g == group) {
+                let kept: Vec<String> = names.into_iter().filter(|g| g != group).collect();
+                record.set_groups(&kept);
+            }
+        }
+    }
+}
+
+/// The group a record counts as being in primarily.
+///
+/// A record with no `gid` is generated into `/etc/passwd` with its uid in the
+/// gid column -- the user-private-group convention -- so that is the group it
+/// is in, and a question about primary groups has to ask it the same way the
+/// generated file answers it. Asking `Record::gid` alone would let `groupdel`
+/// delete a group that is somebody's primary one.
+fn primary_gid(record: &userdb::Record) -> Option<u32> {
+    record.gid().or_else(|| record.uid())
+}
+
+// ============================================================================
+// Account expiry dates
+// ============================================================================
+
+/// Parse a `-e` argument into days since the Unix epoch.
+///
+/// `/etc/shadow`'s eighth field is a *number* of days. The old code copied the
+/// `-e` argument into it verbatim, so `useradd -e 2027-01-01` wrote the text
+/// `2027-01-01` where a number belongs: glibc reads that as no expiry at all,
+/// and the account the administrator meant to time-limit never expired. Both
+/// spellings shadow-utils accepts are taken here and both are converted.
+///
+/// An empty argument clears the field, which is how `usermod -e ""` spells
+/// "never expires". So does a negative number, for the reason the aging
+/// commands take `-1`: a literal `-1` left in the file is read as a date one
+/// day *before* the epoch, which is the opposite of never.
+///
+/// # Errors
+///
+/// A string that is neither a number nor a valid `YYYY-MM-DD` date, since the
+/// alternative is storing something that will be read as a date nobody chose.
+fn parse_expire_date(text: &str) -> Result<Option<i64>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(days) = text.parse::<i64>() {
+        return Ok(if days < 0 { None } else { Some(days) });
+    }
+    userdb::days_from_date(text)
+        .map(Some)
+        .ok_or_else(|| format!("invalid date `{text}': expected YYYY-MM-DD or a number of days"))
 }
 
 // ============================================================================
@@ -666,6 +769,17 @@ fn cmd_useradd(argv: &[String]) -> i32 {
         return 1;
     }
 
+    // Parsed before anything is built, so a malformed date fails the command
+    // rather than half of it.
+    let expires = match opts.expire_date.as_deref().map(parse_expire_date) {
+        Some(Ok(days)) => days,
+        Some(Err(e)) => {
+            write_stderr(&format!("useradd: {}", e));
+            return 1;
+        }
+        None => None,
+    };
+
     let mut db = Database::load();
 
     // Check for duplicates.
@@ -750,47 +864,65 @@ fn cmd_useradd(argv: &[String]) -> i32 {
     let shell = opts.shell.unwrap_or_else(|| DEFAULT_SHELL.to_string());
     let gecos = opts.comment.unwrap_or_default();
 
-    // Add passwd entry.
-    db.passwd.push(PasswdEntry {
-        username: username.clone(),
-        password: "x".to_string(),
-        uid,
-        gid,
-        gecos,
-        home: home.clone(),
-        shell,
-    });
+    // Build the account record.
+    let mut record = userdb::Record::new();
+    record.set(userdb::field::USERNAME, &username);
+    record.set_uid(uid);
+    record.set_gid(gid);
+    // Only when there is one: an empty `display_name` and an absent one both
+    // generate an empty GECOS column, so writing the field would be a line in
+    // the file that says nothing.
+    if !gecos.is_empty() {
+        record.set(userdb::field::DISPLAY_NAME, &gecos);
+    }
+    record.set_home(&home);
+    record.set(userdb::field::SHELL, &shell);
 
-    // Add shadow entry.
-    let mut shadow = ShadowEntry::new_locked(&username);
-    if let Some(ref pw) = opts.password {
-        shadow.hash = pw.clone();
+    match &opts.password {
+        // `-p` takes an already-encrypted entry, so it is stored as given --
+        // this is the one path that must *not* hash, because hashing a hash
+        // produces an account whose password is a string nobody typed. The
+        // change is dated today for the reason `userdb::Record::set_password`
+        // dates its own: a password whose age is unknown is one no aging
+        // policy can ever act on.
+        Some(pw) => {
+            record.set(userdb::field::PASSWORD_HASH, pw);
+            let aging = userdb::Aging {
+                changed: userdb::today(),
+                ..userdb::Aging::default()
+            };
+            record.set_aging(&aging);
+        }
+        // No password given: the account is locked until someone sets one,
+        // which is what `useradd` has always done and what stops a new
+        // account being one that logs in without being asked for anything.
+        None => record.set_locked(true),
     }
-    if let Some(ref exp) = opts.expire_date {
-        shadow.expire = exp.clone();
+
+    // No aging policy is written beyond that. The `0:99999:7` the old code
+    // wrote here was shadow-utils' `/etc/login.defs` defaults, which this
+    // system does not have -- and they mean exactly what leaving the fields
+    // empty means: no minimum age, no expiry, and a warning period that only
+    // matters if there were an expiry. Writing them would present an
+    // invention as a policy an administrator had chosen.
+
+    if let Some(days) = expires {
+        let aging = userdb::Aging {
+            expires: Some(days),
+            ..record.aging()
+        };
+        record.set_aging(&aging);
     }
-    db.shadow.push(shadow);
+
+    db.users.push(record);
 
     // Add user to supplementary groups.
     for gname in &opts.supp_groups {
-        let found = db.groups.iter_mut().find(|g| g.name == *gname);
-        match found {
-            Some(ge) => {
-                if !ge.members.contains(&username) {
-                    ge.members.push(username.clone());
-                }
-            }
-            None => {
-                write_stderr(&format!("useradd: group '{}' does not exist", gname));
-                return 1;
-            }
+        if db.find_group(gname).is_none() {
+            write_stderr(&format!("useradd: group '{}' does not exist", gname));
+            return 1;
         }
-        let found_gs = db.gshadow.iter_mut().find(|g| g.name == *gname);
-        if let Some(gs) = found_gs
-            && !gs.members.contains(&username)
-        {
-            gs.members.push(username.clone());
-        }
+        db.add_to_group(&username, gname);
     }
 
     // Save database.
@@ -859,8 +991,11 @@ fn cmd_userdel(argv: &[String]) -> i32 {
 
     let mut db = Database::load();
 
-    let user = match db.find_user(&username) {
-        Some(u) => u.clone(),
+    // The home directory is read before the record goes, because removing it
+    // is the last thing this command does and by then there is nothing left to
+    // ask.
+    let home = match db.find_user(&username) {
+        Some(record) => record.home().unwrap_or_default(),
         None => {
             if opts.force {
                 return 0;
@@ -870,14 +1005,10 @@ fn cmd_userdel(argv: &[String]) -> i32 {
         }
     };
 
-    // Remove from passwd.
-    db.passwd.retain(|p| p.username != username);
-
-    // Remove from shadow.
-    db.shadow.retain(|s| s.username != username);
-
-    // Remove from all group member lists.
+    // Remove from every group first, while the record is still there to have
+    // its own membership list cleared, and only then remove the account.
     db.remove_user_from_groups(&username);
+    db.users.remove(&username);
 
     // Remove the user's private group if it exists and has no other members.
     let private_group_empty = db
@@ -887,8 +1018,7 @@ fn cmd_userdel(argv: &[String]) -> i32 {
         .map(|g| g.members.is_empty())
         .unwrap_or(false);
     if private_group_empty {
-        db.groups.retain(|g| g.name != username);
-        db.gshadow.retain(|g| g.name != username);
+        db.forget_group(&username);
     }
 
     if let Err(e) = db.save() {
@@ -898,7 +1028,8 @@ fn cmd_userdel(argv: &[String]) -> i32 {
 
     // Remove home directory if requested.
     if opts.remove_home
-        && let Err(e) = remove_home_dir(&user.home)
+        && !home.is_empty()
+        && let Err(e) = remove_home_dir(&home)
     {
         write_stderr(&format!("userdel: warning: {}", e));
         // Not fatal, user was already deleted.
@@ -1027,16 +1158,31 @@ fn cmd_usermod(argv: &[String]) -> i32 {
         }
     };
 
+    // Asking for both is a contradiction, and doing the last one asked would
+    // be picking a winner the caller did not name. shadow-utils refuses it too.
+    if opts.lock && opts.unlock {
+        write_stderr("usermod: -L and -U cannot be given together");
+        return 1;
+    }
+
+    // Parsed before anything is changed, so a malformed date fails the command
+    // rather than half of it.
+    let expires = match opts.expire_date.as_deref().map(parse_expire_date) {
+        Some(Ok(days)) => Some(days),
+        Some(Err(e)) => {
+            write_stderr(&format!("usermod: {}", e));
+            return 1;
+        }
+        None => None,
+    };
+
     let mut db = Database::load();
 
     // Find the user.
-    let user_idx = match db.passwd.iter().position(|p| p.username == username) {
-        Some(i) => i,
-        None => {
-            write_stderr(&format!("usermod: user '{}' does not exist", username));
-            return 1;
-        }
-    };
+    if db.find_user(&username).is_none() {
+        write_stderr(&format!("usermod: user '{}' does not exist", username));
+        return 1;
+    }
 
     // Validate new login name if provided.
     if let Some(ref new_name) = opts.new_login {
@@ -1050,125 +1196,111 @@ fn cmd_usermod(argv: &[String]) -> i32 {
         }
     }
 
-    let old_home = db.passwd[user_idx].home.clone();
-
-    // Apply changes to passwd entry.
-    if let Some(ref new_name) = opts.new_login {
-        let old_name = db.passwd[user_idx].username.clone();
-        db.passwd[user_idx].username = new_name.clone();
-        // Update shadow.
-        if let Some(se) = db.shadow.iter_mut().find(|s| s.username == old_name) {
-            se.username = new_name.clone();
-        }
-        // Update group membership references.
-        db.rename_user_in_groups(&old_name, new_name);
-    }
-
-    if let Some(ref home) = opts.home_dir {
-        db.passwd[user_idx].home = home.clone();
-    }
-
-    if let Some(ref shell) = opts.shell {
-        db.passwd[user_idx].shell = shell.clone();
-    }
-
-    if let Some(ref comment) = opts.comment {
-        db.passwd[user_idx].gecos = comment.clone();
-    }
-
-    // Primary group.
-    if let Some(ref g) = opts.primary_group {
-        let gid = match g.parse::<u32>() {
+    // Resolve the new primary group before any change is applied, for the same
+    // reason the date is parsed early: a `-g` naming a group that does not
+    // exist must leave the account exactly as it was, not renamed and then
+    // refused.
+    let new_gid = match &opts.primary_group {
+        Some(g) => match g.parse::<u32>() {
             Ok(id) => {
                 if db.find_group_by_gid(id).is_none() {
                     write_stderr(&format!("usermod: group GID {} does not exist", id));
                     return 1;
                 }
-                id
+                Some(id)
             }
             Err(_) => match db.find_group(g) {
-                Some(ge) => ge.gid,
+                Some(ge) => Some(ge.gid),
                 None => {
                     write_stderr(&format!("usermod: group '{}' does not exist", g));
                     return 1;
                 }
             },
-        };
-        db.passwd[user_idx].gid = gid;
-    }
+        },
+        None => None,
+    };
 
-    // Supplementary groups.
-    let effective_username = opts.new_login.as_deref().unwrap_or(&username).to_string();
-
+    // Every supplementary group must exist before any of them is joined.
     if opts.supp_groups_set {
-        // Verify all groups exist.
         for gname in &opts.supp_groups {
             if db.find_group(gname).is_none() {
                 write_stderr(&format!("usermod: group '{}' does not exist", gname));
                 return 1;
             }
         }
+    }
 
-        if opts.append_groups {
-            // Append mode: add to listed groups without removing from existing.
-            for gname in &opts.supp_groups {
-                if let Some(ge) = db.groups.iter_mut().find(|g| g.name == *gname)
-                    && !ge.members.contains(&effective_username)
-                {
-                    ge.members.push(effective_username.clone());
-                }
-                if let Some(gs) = db.gshadow.iter_mut().find(|g| g.name == *gname)
-                    && !gs.members.contains(&effective_username)
-                {
-                    gs.members.push(effective_username.clone());
-                }
-            }
-        } else {
-            // Replace mode: remove from all groups, add to listed groups.
+    let old_home = db
+        .find_user(&username)
+        .and_then(userdb::Record::home)
+        .unwrap_or_default();
+
+    // Renaming touches the group files as well as the record, so it is done
+    // through the pair that changes both.
+    if let Some(ref new_name) = opts.new_login {
+        db.rename_user_in_groups(&username, new_name);
+    }
+
+    let Some(record) = db.users.find_mut(&username) else {
+        write_stderr(&format!("usermod: user '{}' does not exist", username));
+        return 1;
+    };
+
+    if let Some(ref new_name) = opts.new_login {
+        record.set(userdb::field::USERNAME, new_name);
+    }
+    if let Some(ref home) = opts.home_dir {
+        record.set_home(home);
+    }
+    if let Some(ref shell) = opts.shell {
+        record.set(userdb::field::SHELL, shell);
+    }
+    if let Some(ref comment) = opts.comment {
+        record.set(userdb::field::DISPLAY_NAME, comment);
+    }
+    if let Some(gid) = new_gid {
+        record.set_gid(gid);
+    }
+
+    // Supplementary groups.
+    let effective_username = opts.new_login.as_deref().unwrap_or(&username).to_string();
+
+    if opts.supp_groups_set {
+        // Replace mode empties the memberships first; append mode keeps them.
+        // Both then join the listed groups, which were checked to exist above.
+        if !opts.append_groups {
             db.remove_user_from_groups(&effective_username);
-            for gname in &opts.supp_groups {
-                if let Some(ge) = db.groups.iter_mut().find(|g| g.name == *gname)
-                    && !ge.members.contains(&effective_username)
-                {
-                    ge.members.push(effective_username.clone());
-                }
-                if let Some(gs) = db.gshadow.iter_mut().find(|g| g.name == *gname)
-                    && !gs.members.contains(&effective_username)
-                {
-                    gs.members.push(effective_username.clone());
-                }
-            }
+        }
+        for gname in &opts.supp_groups {
+            db.add_to_group(&effective_username, gname);
         }
     }
 
-    // Lock/unlock.
-    if opts.lock
-        && let Some(se) = db
-            .shadow
-            .iter_mut()
-            .find(|s| s.username == effective_username)
-        && !se.hash.starts_with('!')
-    {
-        se.hash = format!("!{}", se.hash);
+    let Some(record) = db.users.find_mut(&effective_username) else {
+        write_stderr(&format!(
+            "usermod: user '{}' does not exist",
+            effective_username
+        ));
+        return 1;
+    };
+
+    // Lock and unlock. `-L` and `-U` are `set_locked`'s two arguments, which
+    // is also what makes `-U` on an account with no password underneath leave
+    // it locked rather than passwordless -- see `userdb::Record::set_locked`.
+    if opts.lock {
+        record.set_locked(true);
     }
-    if opts.unlock
-        && let Some(se) = db
-            .shadow
-            .iter_mut()
-            .find(|s| s.username == effective_username)
-        && se.hash.starts_with('!')
-    {
-        se.hash = se.hash[1..].to_string();
+    if opts.unlock {
+        record.set_locked(false);
     }
 
-    // Expire date.
-    if let Some(ref exp) = opts.expire_date
-        && let Some(se) = db
-            .shadow
-            .iter_mut()
-            .find(|s| s.username == effective_username)
-    {
-        se.expire = exp.clone();
+    // Expire date. `Some(None)` is `-e ""`, which clears it.
+    if let Some(days) = expires {
+        let aging = userdb::Aging {
+            expires: days,
+            ..record.aging()
+        };
+        record.set_aging(&aging);
     }
 
     if let Err(e) = db.save() {
@@ -1352,10 +1484,11 @@ fn cmd_groupdel(argv: &[String]) -> i32 {
 
     // Cannot remove a group that is the primary group of any user.
     let primary_users: Vec<String> = db
-        .passwd
+        .users
+        .records()
         .iter()
-        .filter(|p| p.gid == group.gid)
-        .map(|p| p.username.clone())
+        .filter(|r| primary_gid(r) == Some(group.gid))
+        .filter_map(userdb::Record::username)
         .collect();
 
     if !primary_users.is_empty() {
@@ -1367,8 +1500,7 @@ fn cmd_groupdel(argv: &[String]) -> i32 {
         return 1;
     }
 
-    db.groups.retain(|g| g.name != groupname);
-    db.gshadow.retain(|g| g.name != groupname);
+    db.forget_group(&groupname);
 
     if let Err(e) = db.save() {
         write_stderr(&format!("groupdel: {}", e));
@@ -1474,22 +1606,23 @@ fn cmd_groupmod(argv: &[String]) -> i32 {
     // Apply GID change.
     if let Some(new_gid) = opts.new_gid {
         db.groups[group_idx].gid = new_gid;
-        // Update all users whose primary GID matches.
-        for p in &mut db.passwd {
-            if p.gid == old_gid {
-                p.gid = new_gid;
+        // Update all users whose primary GID matches. A record with no `gid`
+        // of its own is in the group numbered after its uid, so it is caught
+        // here too and gains an explicit one -- the alternative is a user
+        // whose primary group silently stops being the group it was in.
+        for record in db.users.records_mut() {
+            if primary_gid(record) == Some(old_gid) {
+                record.set_gid(new_gid);
             }
         }
     }
 
-    // Apply name change.
+    // Apply name change, in the group files and in every account that names
+    // the group.
     if let Some(ref new_name) = opts.new_name {
         let old_name = db.groups[group_idx].name.clone();
         db.groups[group_idx].name = new_name.clone();
-        // Update gshadow.
-        if let Some(gs) = db.gshadow.iter_mut().find(|g| g.name == old_name) {
-            gs.name = new_name.clone();
-        }
+        db.rename_group_everywhere(&old_name, new_name);
     }
 
     if let Err(e) = db.save() {
@@ -1640,101 +1773,86 @@ mod tests {
         }
     }
 
-    // ---- PasswdEntry tests ----
+    // ---- The account record these commands build ----
+    //
+    // The `PasswdEntry` and `ShadowEntry` parse/serialize tests stood here.
+    // They tested two parsers for two files that are now *generated*, so what
+    // they asserted is asserted by `userdb`'s own tests, next to the code that
+    // produces those files. What is still this crate's to keep is the record
+    // it builds -- and, below, the one option whose argument it must convert
+    // rather than copy.
 
-    #[test]
-    fn test_passwd_parse_valid() {
-        let line = "john:x:1000:1000:John Doe:/home/john:/bin/bash";
-        let entry = PasswdEntry::parse(line).expect("should parse");
-        assert_eq!(entry.username, "john");
-        assert_eq!(entry.uid, 1000);
-        assert_eq!(entry.gid, 1000);
-        assert_eq!(entry.gecos, "John Doe");
-        assert_eq!(entry.home, "/home/john");
-        assert_eq!(entry.shell, "/bin/bash");
+    /// A record shaped like the ones these commands make.
+    fn record(name: &str, uid: u32, gid: u32) -> userdb::Record {
+        let mut record = userdb::Record::new();
+        record.set(userdb::field::USERNAME, name);
+        record.set_uid(uid);
+        record.set_gid(gid);
+        record
     }
 
+    // ---- `-e`: the one argument that is converted rather than stored ----
+
+    /// `/etc/shadow`'s expiry column is a number of days. `useradd -e` takes a
+    /// date, and the old code copied the text of it straight into that column,
+    /// so the account never expired at all -- glibc reads `2027-01-01` as no
+    /// expiry. The two dates checked against known day numbers are the same
+    /// ones `passwd`'s date *printer* is tested with, so the two directions
+    /// are pinned to the same answers.
     #[test]
-    fn test_passwd_parse_root() {
-        let line = "root:x:0:0:root:/root:/bin/sh";
-        let entry = PasswdEntry::parse(line).expect("should parse");
-        assert_eq!(entry.uid, 0);
-        assert_eq!(entry.gid, 0);
+    fn an_expiry_date_is_converted_to_days_rather_than_copied() {
+        assert_eq!(parse_expire_date("1970-01-01"), Ok(Some(0)));
+        assert_eq!(parse_expire_date("2024-01-01"), Ok(Some(19723)));
+        assert_eq!(parse_expire_date("2000-03-01"), Ok(Some(11017)));
     }
 
+    /// A bare number is already what the column holds, and shadow-utils
+    /// accepts it, so it is taken as given.
     #[test]
-    fn test_passwd_parse_invalid_short() {
-        assert!(PasswdEntry::parse("too:few:fields").is_none());
+    fn a_bare_number_of_days_is_taken_as_it_stands() {
+        assert_eq!(parse_expire_date("20000"), Ok(Some(20000)));
+        assert_eq!(parse_expire_date("  20000  "), Ok(Some(20000)));
     }
 
+    /// Both spellings of "never": an empty argument, which is how
+    /// `usermod -e ""` clears the field, and a negative number, which must not
+    /// reach the file -- a literal `-1` there is read as a date one day
+    /// *before* the epoch, i.e. expired, the opposite of what was asked.
     #[test]
-    fn test_passwd_parse_invalid_uid() {
-        assert!(PasswdEntry::parse("u:x:abc:0::/:").is_none());
+    fn never_expires_is_an_absent_field_and_never_a_negative_number() {
+        assert_eq!(parse_expire_date(""), Ok(None));
+        assert_eq!(parse_expire_date("   "), Ok(None));
+        assert_eq!(parse_expire_date("-1"), Ok(None));
+        assert_eq!(parse_expire_date("-99999"), Ok(None));
     }
 
+    /// A date that is not a date is refused rather than stored. Storing it
+    /// would put a value in the column that some later reader takes for a day
+    /// number nobody chose.
     #[test]
-    fn test_passwd_serialize_roundtrip() {
-        let entry = PasswdEntry {
-            username: "alice".to_string(),
-            password: "x".to_string(),
-            uid: 1001,
-            gid: 1001,
-            gecos: "Alice".to_string(),
-            home: "/home/alice".to_string(),
-            shell: "/bin/zsh".to_string(),
-        };
-        let serialized = entry.serialize();
-        let parsed = PasswdEntry::parse(&serialized).expect("roundtrip");
-        assert_eq!(parsed, entry);
+    fn a_date_that_is_not_a_date_is_refused() {
+        for bad in [
+            "2024-13-01",
+            "2024-00-10",
+            "2024-02-30",
+            "2023-02-29",
+            "2024-01-00",
+            "2024-01",
+            "2024-01-01-01",
+            "next tuesday",
+            "20x4-01-01",
+        ] {
+            assert!(parse_expire_date(bad).is_err(), "accepted {bad:?}");
+        }
     }
 
+    /// The leap-year rule, at the three dates that distinguish the three
+    /// clauses of it.
     #[test]
-    fn test_passwd_empty_gecos() {
-        let line = "svc:x:500:500::/var/svc:/bin/false";
-        let entry = PasswdEntry::parse(line).expect("should parse");
-        assert_eq!(entry.gecos, "");
-    }
-
-    // ---- ShadowEntry tests ----
-
-    #[test]
-    fn test_shadow_parse_valid() {
-        let line = "john:$6$salt$hash:19000:0:99999:7:::";
-        let entry = ShadowEntry::parse(line).expect("should parse");
-        assert_eq!(entry.username, "john");
-        assert_eq!(entry.hash, "$6$salt$hash");
-        assert_eq!(entry.last_changed, "19000");
-        assert_eq!(entry.max_days, "99999");
-    }
-
-    #[test]
-    fn test_shadow_parse_locked() {
-        let line = "locked:!:19000:0:99999:7:::";
-        let entry = ShadowEntry::parse(line).expect("should parse");
-        assert_eq!(entry.hash, "!");
-    }
-
-    #[test]
-    fn test_shadow_parse_invalid() {
-        assert!(ShadowEntry::parse("too:few").is_none());
-    }
-
-    #[test]
-    fn test_shadow_serialize_roundtrip() {
-        let entry = ShadowEntry::new_locked("testuser");
-        let serialized = entry.serialize();
-        let parsed = ShadowEntry::parse(&serialized).expect("roundtrip");
-        assert_eq!(parsed, entry);
-    }
-
-    #[test]
-    fn test_shadow_new_locked_defaults() {
-        let s = ShadowEntry::new_locked("bob");
-        assert_eq!(s.username, "bob");
-        assert_eq!(s.hash, "!");
-        assert_eq!(s.min_days, "0");
-        assert_eq!(s.max_days, "99999");
-        assert_eq!(s.warn_days, "7");
+    fn the_leap_day_exists_in_the_years_it_exists_in() {
+        assert_eq!(parse_expire_date("2024-02-29"), Ok(Some(19782)));
+        assert_eq!(parse_expire_date("2000-02-29"), Ok(Some(11016)));
+        assert!(parse_expire_date("1900-02-29").is_err());
     }
 
     // ---- GroupEntry tests ----
@@ -1932,249 +2050,126 @@ mod tests {
 
     // ---- Database tests ----
 
-    #[test]
-    fn test_database_next_uid_empty() {
-        let db = Database {
-            passwd: Vec::new(),
-            shadow: Vec::new(),
+    /// An empty database. Its directory is `/etc` and nothing here saves; the
+    /// tests that do save go through `TestEnv` and a scratch directory.
+    fn empty_db() -> Database {
+        Database {
+            users: userdb::UserDb::new(),
             groups: Vec::new(),
             gshadow: Vec::new(),
-        };
-        assert_eq!(db.next_uid(1000, 60000), Some(1000));
+            etc: std::path::PathBuf::from(ETC_DIR),
+        }
+    }
+
+    /// A database holding one account and its user-private group, as
+    /// `useradd` with no `-g` would have left it.
+    fn db_with_user(name: &str, uid: u32) -> Database {
+        let mut db = empty_db();
+        let mut user = record(name, uid, uid);
+        user.set_home(&format!("/home/{name}"));
+        user.set(userdb::field::SHELL, "/bin/sh");
+        user.set_locked(true);
+        db.users.push(user);
+        db.groups.push(group(name, uid));
+        db.gshadow.push(GshadowEntry {
+            name: name.to_string(),
+            password: "!".to_string(),
+            admins: String::new(),
+            members: Vec::new(),
+        });
+        db
+    }
+
+    fn group(name: &str, gid: u32) -> GroupEntry {
+        GroupEntry {
+            name: name.to_string(),
+            password: "x".to_string(),
+            gid,
+            members: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_database_next_uid_empty() {
+        assert_eq!(empty_db().next_uid(1000, 60000), Some(1000));
     }
 
     #[test]
     fn test_database_next_uid_with_existing() {
-        let db = Database {
-            passwd: vec![PasswdEntry {
-                username: "u1".to_string(),
-                password: "x".to_string(),
-                uid: 1000,
-                gid: 1000,
-                gecos: String::new(),
-                home: "/home/u1".to_string(),
-                shell: "/bin/sh".to_string(),
-            }],
-            shadow: Vec::new(),
-            groups: Vec::new(),
-            gshadow: Vec::new(),
-        };
+        let mut db = empty_db();
+        db.users.push(record("u1", 1000, 1000));
         assert_eq!(db.next_uid(1000, 60000), Some(1001));
     }
 
     #[test]
     fn test_database_next_uid_exhausted() {
-        let db = Database {
-            passwd: vec![
-                PasswdEntry {
-                    username: "u1".to_string(),
-                    password: "x".to_string(),
-                    uid: 100,
-                    gid: 100,
-                    gecos: String::new(),
-                    home: String::new(),
-                    shell: String::new(),
-                },
-                PasswdEntry {
-                    username: "u2".to_string(),
-                    password: "x".to_string(),
-                    uid: 101,
-                    gid: 101,
-                    gecos: String::new(),
-                    home: String::new(),
-                    shell: String::new(),
-                },
-            ],
-            shadow: Vec::new(),
-            groups: Vec::new(),
-            gshadow: Vec::new(),
-        };
+        let mut db = empty_db();
+        db.users.push(record("u1", 100, 100));
+        db.users.push(record("u2", 101, 101));
         assert_eq!(db.next_uid(100, 101), None);
     }
 
     #[test]
     fn test_database_next_gid_empty() {
-        let db = Database {
-            passwd: Vec::new(),
-            shadow: Vec::new(),
-            groups: Vec::new(),
-            gshadow: Vec::new(),
-        };
-        assert_eq!(db.next_gid(100, 999), Some(100));
+        assert_eq!(empty_db().next_gid(1000, 60000), Some(1000));
     }
 
     #[test]
     fn test_database_next_gid_skips_used() {
-        let db = Database {
-            passwd: Vec::new(),
-            shadow: Vec::new(),
-            groups: vec![
-                GroupEntry {
-                    name: "g1".to_string(),
-                    password: "x".to_string(),
-                    gid: 1000,
-                    members: Vec::new(),
-                },
-                GroupEntry {
-                    name: "g2".to_string(),
-                    password: "x".to_string(),
-                    gid: 1001,
-                    members: Vec::new(),
-                },
-            ],
-            gshadow: Vec::new(),
-        };
-        assert_eq!(db.next_gid(1000, 60000), Some(1002));
+        let mut db = empty_db();
+        db.groups.push(group("g1", 1000));
+        assert_eq!(db.next_gid(1000, 60000), Some(1001));
     }
 
     #[test]
     fn test_database_find_user() {
-        let db = Database {
-            passwd: vec![PasswdEntry {
-                username: "alice".to_string(),
-                password: "x".to_string(),
-                uid: 1000,
-                gid: 1000,
-                gecos: String::new(),
-                home: "/home/alice".to_string(),
-                shell: "/bin/sh".to_string(),
-            }],
-            shadow: Vec::new(),
-            groups: Vec::new(),
-            gshadow: Vec::new(),
-        };
+        let db = db_with_user("alice", 1000);
         assert!(db.find_user("alice").is_some());
         assert!(db.find_user("bob").is_none());
     }
 
     #[test]
     fn test_database_find_user_by_uid() {
-        let db = Database {
-            passwd: vec![PasswdEntry {
-                username: "alice".to_string(),
-                password: "x".to_string(),
-                uid: 1000,
-                gid: 1000,
-                gecos: String::new(),
-                home: String::new(),
-                shell: String::new(),
-            }],
-            shadow: Vec::new(),
-            groups: Vec::new(),
-            gshadow: Vec::new(),
-        };
-        assert!(db.find_user_by_uid(1000).is_some());
-        assert!(db.find_user_by_uid(9999).is_none());
+        let db = db_with_user("alice", 1000);
+        assert_eq!(
+            db.find_user_by_uid(1000).and_then(userdb::Record::username),
+            Some("alice".to_string())
+        );
+        assert!(db.find_user_by_uid(1234).is_none());
     }
 
     #[test]
     fn test_database_find_group() {
-        let db = Database {
-            passwd: Vec::new(),
-            shadow: Vec::new(),
-            groups: vec![GroupEntry {
-                name: "staff".to_string(),
-                password: "x".to_string(),
-                gid: 100,
-                members: Vec::new(),
-            }],
-            gshadow: Vec::new(),
-        };
-        assert!(db.find_group("staff").is_some());
-        assert!(db.find_group("nope").is_none());
+        let mut db = empty_db();
+        db.groups.push(group("devs", 2000));
+        assert_eq!(db.find_group("devs").map(|g| g.gid), Some(2000));
+        assert!(db.find_group("nobody").is_none());
     }
 
     #[test]
     fn test_database_find_group_by_gid() {
-        let db = Database {
-            passwd: Vec::new(),
-            shadow: Vec::new(),
-            groups: vec![GroupEntry {
-                name: "staff".to_string(),
-                password: "x".to_string(),
-                gid: 100,
-                members: Vec::new(),
-            }],
-            gshadow: Vec::new(),
-        };
-        assert!(db.find_group_by_gid(100).is_some());
-        assert!(db.find_group_by_gid(999).is_none());
+        let mut db = empty_db();
+        db.groups.push(group("devs", 2000));
+        assert_eq!(
+            db.find_group_by_gid(2000).map(|g| g.name.clone()),
+            Some("devs".to_string())
+        );
+        assert!(db.find_group_by_gid(1).is_none());
     }
 
+    /// A record with no `gid` of its own is in the group numbered after its
+    /// uid, because that is the group the generated `/etc/passwd` puts it in.
+    /// Asking `Record::gid` alone would let `groupdel` remove a group that is
+    /// somebody's primary one.
     #[test]
-    fn test_database_find_shadow() {
-        let db = Database {
-            passwd: Vec::new(),
-            shadow: vec![ShadowEntry::new_locked("alice")],
-            groups: Vec::new(),
-            gshadow: Vec::new(),
-        };
-        assert!(db.find_shadow("alice").is_some());
-        assert!(db.find_shadow("bob").is_none());
-    }
+    fn a_record_with_no_gid_is_in_the_group_numbered_after_its_uid() {
+        let mut bare = userdb::Record::new();
+        bare.set(userdb::field::USERNAME, "alice");
+        bare.set_uid(1000);
+        assert_eq!(bare.gid(), None);
+        assert_eq!(primary_gid(&bare), Some(1000));
 
-    #[test]
-    fn test_database_remove_user_from_groups() {
-        let mut db = Database {
-            passwd: Vec::new(),
-            shadow: Vec::new(),
-            groups: vec![
-                GroupEntry {
-                    name: "g1".to_string(),
-                    password: "x".to_string(),
-                    gid: 100,
-                    members: vec!["alice".to_string(), "bob".to_string()],
-                },
-                GroupEntry {
-                    name: "g2".to_string(),
-                    password: "x".to_string(),
-                    gid: 101,
-                    members: vec!["alice".to_string()],
-                },
-            ],
-            gshadow: vec![
-                GshadowEntry {
-                    name: "g1".to_string(),
-                    password: "!".to_string(),
-                    admins: String::new(),
-                    members: vec!["alice".to_string(), "bob".to_string()],
-                },
-                GshadowEntry {
-                    name: "g2".to_string(),
-                    password: "!".to_string(),
-                    admins: String::new(),
-                    members: vec!["alice".to_string()],
-                },
-            ],
-        };
-        db.remove_user_from_groups("alice");
-        assert_eq!(db.groups[0].members, vec!["bob"]);
-        assert!(db.groups[1].members.is_empty());
-        assert_eq!(db.gshadow[0].members, vec!["bob"]);
-        assert!(db.gshadow[1].members.is_empty());
-    }
-
-    #[test]
-    fn test_database_rename_user_in_groups() {
-        let mut db = Database {
-            passwd: Vec::new(),
-            shadow: Vec::new(),
-            groups: vec![GroupEntry {
-                name: "devs".to_string(),
-                password: "x".to_string(),
-                gid: 100,
-                members: vec!["oldname".to_string(), "other".to_string()],
-            }],
-            gshadow: vec![GshadowEntry {
-                name: "devs".to_string(),
-                password: "!".to_string(),
-                admins: String::new(),
-                members: vec!["oldname".to_string(), "other".to_string()],
-            }],
-        };
-        db.rename_user_in_groups("oldname", "newname");
-        assert_eq!(db.groups[0].members, vec!["newname", "other"]);
-        assert_eq!(db.gshadow[0].members, vec!["newname", "other"]);
+        assert_eq!(primary_gid(&record("bob", 1001, 50)), Some(50));
     }
 
     // ---- Atomic write tests ----
@@ -2182,41 +2177,23 @@ mod tests {
     #[test]
     fn test_atomic_write_creates_file() {
         let env = TestEnv::new();
-        let path = env.path("test_file");
-        let entries = vec![PasswdEntry {
-            username: "alice".to_string(),
-            password: "x".to_string(),
-            uid: 1000,
-            gid: 1000,
-            gecos: String::new(),
-            home: "/home/alice".to_string(),
-            shell: "/bin/sh".to_string(),
-        }];
-        Database::atomic_write(&path, &entries, PasswdEntry::serialize)
+        let path = env.dir.path("group");
+        Database::atomic_write(&path, &[group("staff", 100)], GroupEntry::serialize)
             .expect("write should succeed");
         let content = fs::read_to_string(&path).expect("read");
-        assert!(content.contains("alice:x:1000:1000::/home/alice:/bin/sh"));
+        assert!(content.contains("staff:x:100:"), "{content}");
     }
 
     #[test]
     fn test_atomic_write_creates_backup() {
         let env = TestEnv::new();
-        let path = env.path("passwd");
-        let backup = format!("{}-", path);
+        let path = env.dir.path("group");
+        let backup = env.dir.path("group-");
 
         // Write initial content.
         fs::write(&path, "original\n").expect("write original");
 
-        let entries = vec![PasswdEntry {
-            username: "new".to_string(),
-            password: "x".to_string(),
-            uid: 1,
-            gid: 1,
-            gecos: String::new(),
-            home: String::new(),
-            shell: String::new(),
-        }];
-        Database::atomic_write(&path, &entries, PasswdEntry::serialize).expect("write");
+        Database::atomic_write(&path, &[group("new", 1)], GroupEntry::serialize).expect("write");
 
         let backup_content = fs::read_to_string(&backup).expect("read backup");
         assert_eq!(backup_content, "original\n");
@@ -2225,7 +2202,7 @@ mod tests {
     #[test]
     fn test_atomic_write_multiple_entries() {
         let env = TestEnv::new();
-        let path = env.path("groups");
+        let path = env.dir.path("group");
         let entries = vec![
             GroupEntry {
                 name: "g1".to_string(),
@@ -2233,12 +2210,7 @@ mod tests {
                 gid: 100,
                 members: vec!["a".to_string()],
             },
-            GroupEntry {
-                name: "g2".to_string(),
-                password: "x".to_string(),
-                gid: 200,
-                members: Vec::new(),
-            },
+            group("g2", 200),
         ];
         Database::atomic_write(&path, &entries, GroupEntry::serialize).expect("write");
         let content = fs::read_to_string(&path).expect("read");
@@ -2458,62 +2430,19 @@ mod tests {
         assert_eq!(opts.groupname.as_deref(), Some("mygroup"));
     }
 
-    // ---- Integration-style tests using in-memory Database ----
-
-    fn empty_db() -> Database {
-        Database {
-            passwd: Vec::new(),
-            shadow: Vec::new(),
-            groups: Vec::new(),
-            gshadow: Vec::new(),
-        }
-    }
-
-    fn db_with_user(name: &str, uid: u32) -> Database {
-        let mut db = empty_db();
-        db.passwd.push(PasswdEntry {
-            username: name.to_string(),
-            password: "x".to_string(),
-            uid,
-            gid: uid,
-            gecos: String::new(),
-            home: format!("/home/{}", name),
-            shell: "/bin/sh".to_string(),
-        });
-        db.shadow.push(ShadowEntry::new_locked(name));
-        db.groups.push(GroupEntry {
-            name: name.to_string(),
-            password: "x".to_string(),
-            gid: uid,
-            members: Vec::new(),
-        });
-        db.gshadow.push(GshadowEntry {
-            name: name.to_string(),
-            password: "!".to_string(),
-            admins: String::new(),
-            members: Vec::new(),
-        });
-        db
-    }
+    // ---- Integration-style tests using an in-memory Database ----
 
     #[test]
     fn test_db_add_and_find_user() {
         let mut db = empty_db();
         assert!(db.find_user("alice").is_none());
 
-        db.passwd.push(PasswdEntry {
-            username: "alice".to_string(),
-            password: "x".to_string(),
-            uid: 1000,
-            gid: 1000,
-            gecos: "Alice".to_string(),
-            home: "/home/alice".to_string(),
-            shell: "/bin/bash".to_string(),
-        });
+        db.users.push(record("alice", 1000, 1000));
 
-        let found = db.find_user("alice");
-        assert!(found.is_some());
-        assert_eq!(found.map(|u| u.uid), Some(1000));
+        assert_eq!(
+            db.find_user("alice").and_then(userdb::Record::uid),
+            Some(1000)
+        );
     }
 
     #[test]
@@ -2532,9 +2461,7 @@ mod tests {
             gid: 2000,
             members: vec!["alice".to_string()],
         });
-        let found = db.find_group("devs");
-        assert!(found.is_some());
-        assert_eq!(found.map(|g| g.gid), Some(2000));
+        assert_eq!(db.find_group("devs").map(|g| g.gid), Some(2000));
     }
 
     #[test]
@@ -2542,133 +2469,158 @@ mod tests {
         let mut db = db_with_user("bob", 1001);
         assert!(db.find_user("bob").is_some());
 
-        db.passwd.retain(|p| p.username != "bob");
-        db.shadow.retain(|s| s.username != "bob");
+        assert!(db.users.remove("bob"));
 
         assert!(db.find_user("bob").is_none());
-        assert!(db.find_shadow("bob").is_none());
     }
 
     #[test]
     fn test_db_delete_group() {
         let mut db = empty_db();
-        db.groups.push(GroupEntry {
-            name: "temp".to_string(),
-            password: "x".to_string(),
-            gid: 5000,
-            members: Vec::new(),
-        });
+        db.groups.push(group("temp", 5000));
         assert!(db.find_group("temp").is_some());
 
-        db.groups.retain(|g| g.name != "temp");
+        db.forget_group("temp");
         assert!(db.find_group("temp").is_none());
     }
 
     #[test]
     fn test_uid_auto_assignment_system_range() {
-        let db = empty_db();
-        let uid = db.next_uid(SYS_ID_MIN, SYS_ID_MAX);
-        assert_eq!(uid, Some(SYS_ID_MIN));
+        assert_eq!(
+            empty_db().next_uid(SYS_ID_MIN, SYS_ID_MAX),
+            Some(SYS_ID_MIN)
+        );
     }
 
     #[test]
     fn test_uid_auto_assignment_regular_range() {
-        let db = empty_db();
-        let uid = db.next_uid(REG_ID_MIN, REG_ID_MAX);
-        assert_eq!(uid, Some(REG_ID_MIN));
+        assert_eq!(
+            empty_db().next_uid(REG_ID_MIN, REG_ID_MAX),
+            Some(REG_ID_MIN)
+        );
     }
 
     #[test]
     fn test_gid_auto_assignment_gaps() {
         let mut db = empty_db();
         // Create groups at 1000 and 1002, leaving 1001 free.
-        db.groups.push(GroupEntry {
-            name: "g1".to_string(),
-            password: "x".to_string(),
-            gid: 1000,
-            members: Vec::new(),
-        });
-        db.groups.push(GroupEntry {
-            name: "g2".to_string(),
-            password: "x".to_string(),
-            gid: 1002,
-            members: Vec::new(),
-        });
+        db.groups.push(group("g1", 1000));
+        db.groups.push(group("g2", 1002));
         assert_eq!(db.next_gid(1000, 60000), Some(1001));
     }
 
+    /// `usermod -L` then `-U` gives back the password the lock was laid over.
+    ///
+    /// This used to be a test of string surgery on a `!` prefix, performed by
+    /// the test itself rather than by the code under test -- so it asserted
+    /// that the *test* could prepend and strip a character. It now runs the
+    /// operation the commands run, which is the one place the rule lives.
     #[test]
-    fn test_shadow_lock_unlock_logic() {
-        let mut shadow = ShadowEntry::new_locked("test");
-        // Initially locked with "!".
-        assert!(shadow.hash.starts_with('!'));
+    fn locking_and_unlocking_an_account_restores_the_password_underneath() {
+        let mut user = record("test", 1000, 1000);
+        user.set(userdb::field::PASSWORD_HASH, "$6$salt$realhash");
+        assert!(!user.is_locked());
 
-        // Unlock: strip the "!".
-        if shadow.hash.starts_with('!') {
-            shadow.hash = shadow.hash[1..].to_string();
-        }
-        assert!(!shadow.hash.starts_with('!'));
+        user.set_locked(true);
+        assert!(user.is_locked());
+        assert_eq!(
+            user.check_password("anything"),
+            userdb::Auth::Locked,
+            "a locked account accepts nothing"
+        );
 
-        // Set a real hash.
-        shadow.hash = "$6$salt$realhash".to_string();
-
-        // Lock: prepend "!".
-        shadow.hash = format!("!{}", shadow.hash);
-        assert_eq!(shadow.hash, "!$6$salt$realhash");
-
-        // Unlock again.
-        if shadow.hash.starts_with('!') {
-            shadow.hash = shadow.hash[1..].to_string();
-        }
-        assert_eq!(shadow.hash, "$6$salt$realhash");
+        user.set_locked(false);
+        assert!(!user.is_locked());
+        assert_eq!(
+            user.get(userdb::field::PASSWORD_HASH),
+            Some("$6$salt$realhash".to_string())
+        );
     }
 
+    /// A membership change reaches both places membership is recorded. The
+    /// account's own `groups` list and `/etc/group`'s member list are the same
+    /// fact written twice, and a change that reached only one of them is the
+    /// disagreement `design-decisions.md` §330 and §353 exist to end.
     #[test]
     fn test_supplementary_group_management() {
-        let mut db = empty_db();
-        db.groups.push(GroupEntry {
-            name: "audio".to_string(),
-            password: "x".to_string(),
-            gid: 100,
-            members: Vec::new(),
-        });
-        db.groups.push(GroupEntry {
-            name: "video".to_string(),
-            password: "x".to_string(),
-            gid: 101,
-            members: Vec::new(),
-        });
+        let mut db = db_with_user("alice", 1000);
+        db.groups.push(group("audio", 100));
+        db.groups.push(group("video", 101));
 
-        // Add user to groups.
-        for g in &mut db.groups {
-            if g.name == "audio" || g.name == "video" {
-                g.members.push("alice".to_string());
-            }
-        }
-        assert_eq!(db.groups[0].members, vec!["alice"]);
-        assert_eq!(db.groups[1].members, vec!["alice"]);
+        db.add_to_group("alice", "audio");
+        db.add_to_group("alice", "video");
 
-        // Remove user from all groups.
+        assert_eq!(db.find_group("audio").map(|g| g.members.len()), Some(1));
+        assert_eq!(db.find_group("video").map(|g| g.members.len()), Some(1));
+        assert_eq!(
+            db.find_user("alice").map(userdb::Record::groups),
+            Some(vec!["audio".to_string(), "video".to_string()]),
+            "the account has to know its own memberships too"
+        );
+
         db.remove_user_from_groups("alice");
-        assert!(db.groups[0].members.is_empty());
-        assert!(db.groups[1].members.is_empty());
+        assert!(db.find_group("audio").is_some_and(|g| g.members.is_empty()));
+        assert!(db.find_group("video").is_some_and(|g| g.members.is_empty()));
+        assert_eq!(
+            db.find_user("alice").map(userdb::Record::groups),
+            Some(Vec::new())
+        );
+    }
+
+    /// Renaming a group renames it in the accounts that belong to it, not only
+    /// in the group files -- otherwise those accounts name a group that no
+    /// longer exists.
+    #[test]
+    fn renaming_a_group_renames_it_in_the_accounts_that_are_in_it() {
+        let mut db = db_with_user("alice", 1000);
+        db.groups.push(group("audio", 100));
+        db.add_to_group("alice", "audio");
+
+        db.rename_group_everywhere("audio", "sound");
+
+        assert_eq!(
+            db.find_user("alice").map(userdb::Record::groups),
+            Some(vec!["sound".to_string()])
+        );
+    }
+
+    /// Deleting a group removes it from the accounts that were in it.
+    #[test]
+    fn deleting_a_group_removes_it_from_the_accounts_that_were_in_it() {
+        let mut db = db_with_user("alice", 1000);
+        db.groups.push(group("audio", 100));
+        db.add_to_group("alice", "audio");
+
+        db.forget_group("audio");
+
+        assert!(db.find_group("audio").is_none());
+        assert_eq!(
+            db.find_user("alice").map(userdb::Record::groups),
+            Some(Vec::new())
+        );
     }
 
     #[test]
     fn test_groupmod_gid_change_updates_users() {
         let mut db = db_with_user("alice", 1000);
-        // Alice's primary GID is 1000.
-        assert_eq!(db.passwd[0].gid, 1000);
+        assert_eq!(
+            primary_gid(db.find_user("alice").expect("alice")),
+            Some(1000)
+        );
 
-        // Change group GID from 1000 to 2000.
+        // Change group GID from 1000 to 2000, as `groupmod -g` does.
         let old_gid = db.groups[0].gid;
         db.groups[0].gid = 2000;
-        for p in &mut db.passwd {
-            if p.gid == old_gid {
-                p.gid = 2000;
+        for user in db.users.records_mut() {
+            if primary_gid(user) == Some(old_gid) {
+                user.set_gid(2000);
             }
         }
-        assert_eq!(db.passwd[0].gid, 2000);
+
+        assert_eq!(
+            primary_gid(db.find_user("alice").expect("alice")),
+            Some(2000)
+        );
         assert_eq!(db.groups[0].gid, 2000);
     }
 
@@ -2677,20 +2629,15 @@ mod tests {
         let mut db = db_with_user("bob", 1001);
         // bob has a private group "bob" with no other members.
         let private_empty = db
-            .groups
-            .iter()
-            .find(|g| g.name == "bob")
+            .find_group("bob")
             .map(|g| g.members.is_empty())
             .unwrap_or(false);
         assert!(private_empty);
 
-        // Delete user.
-        db.passwd.retain(|p| p.username != "bob");
-        db.shadow.retain(|s| s.username != "bob");
-        // Clean up private group.
+        db.remove_user_from_groups("bob");
+        db.users.remove("bob");
         if private_empty {
-            db.groups.retain(|g| g.name != "bob");
-            db.gshadow.retain(|g| g.name != "bob");
+            db.forget_group("bob");
         }
         assert!(db.find_group("bob").is_none());
     }
@@ -2699,23 +2646,16 @@ mod tests {
     fn test_private_group_preserved_if_has_members() {
         let mut db = db_with_user("carol", 1002);
         // Add another member to carol's group.
-        if let Some(g) = db.groups.iter_mut().find(|g| g.name == "carol") {
-            g.members.push("dave".to_string());
-        }
+        db.add_to_group("dave", "carol");
 
-        let has_members = db
-            .groups
-            .iter()
-            .find(|g| g.name == "carol")
-            .map(|g| !g.members.is_empty())
-            .unwrap_or(false);
-        assert!(has_members);
+        assert!(
+            db.find_group("carol")
+                .is_some_and(|g| !g.members.is_empty())
+        );
 
-        // Delete user carol but keep the group since it has members.
-        db.passwd.retain(|p| p.username != "carol");
+        // Delete user carol but keep the group, since dave is still in it.
         db.remove_user_from_groups("carol");
-        // Group should still exist (dave is still a member... well, was before
-        // remove_user_from_groups which only removes "carol").
+        db.users.remove("carol");
         assert!(db.find_group("carol").is_some());
     }
 
@@ -2744,74 +2684,89 @@ mod tests {
 
     // ---- File-based roundtrip tests ----
 
+    /// The whole point of the move: an account this binary saves is in the
+    /// database *and* in the two files generated from it.
+    ///
+    /// Before this, `useradd` wrote `/etc/passwd` and `/etc/shadow` and never
+    /// touched the database -- so the next save from any other tool
+    /// regenerated both files from a database the account was not in, and the
+    /// account silently ceased to exist.
     #[test]
-    fn test_file_roundtrip_passwd() {
+    fn an_account_saved_here_reaches_the_database_and_both_generated_files() {
         let env = TestEnv::new();
-        let path = env.path("passwd");
-        let entries = vec![
-            PasswdEntry {
-                username: "root".to_string(),
-                password: "x".to_string(),
-                uid: 0,
-                gid: 0,
-                gecos: "root".to_string(),
-                home: "/root".to_string(),
-                shell: "/bin/sh".to_string(),
-            },
-            PasswdEntry {
-                username: "alice".to_string(),
-                password: "x".to_string(),
-                uid: 1000,
-                gid: 1000,
-                gecos: "Alice Smith".to_string(),
-                home: "/home/alice".to_string(),
-                shell: "/bin/bash".to_string(),
-            },
-        ];
-        Database::atomic_write(&path, &entries, PasswdEntry::serialize).expect("write");
-        let loaded: Vec<PasswdEntry> = Database::load_file(&path, PasswdEntry::parse);
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].username, "root");
-        assert_eq!(loaded[1].username, "alice");
-        assert_eq!(loaded[1].gecos, "Alice Smith");
+        let mut db = Database::load_in(env.dir.dir());
+        db.groups.push(group("staff", 100));
+        let mut user = record("alice", 1000, 100);
+        user.set_home("/home/alice");
+        user.set(userdb::field::SHELL, "/bin/sh");
+        // A real entry, not a plausible-looking string: `userdb` generates a
+        // stored entry it cannot recompute as `*`, so a fake one would be
+        // written as `*` and the test would be checking nothing.
+        user.set_password_with_salt("correct horse", "abcdef0123456789")
+            .expect("the pinned salt is one crypt can carry");
+        db.users.push(user);
+        db.save().expect("save");
+
+        // The database itself.
+        let reloaded = Database::load_in(env.dir.dir());
+        assert_eq!(
+            reloaded.find_user("alice").and_then(userdb::Record::uid),
+            Some(1000)
+        );
+        assert!(reloaded.find_group("staff").is_some());
+
+        // ...and the two files generated beside it.
+        let passwd = env.read_file("passwd");
+        assert!(
+            passwd.lines().any(|l| l.starts_with("alice:x:1000:100:")),
+            "{passwd}"
+        );
+        let shadow = env.read_file("shadow");
+        assert!(
+            shadow
+                .lines()
+                .any(|l| l.starts_with("alice:$6$abcdef0123456789$")),
+            "{shadow}"
+        );
     }
 
+    /// Saving writes the group files as well, and a reload sees both stores.
     #[test]
-    fn test_file_roundtrip_shadow() {
+    fn a_saved_database_reloads_with_both_stores_intact() {
         let env = TestEnv::new();
-        let path = env.path("shadow");
-        let entries = vec![
-            ShadowEntry {
-                username: "root".to_string(),
-                hash: "$6$abc$xyz".to_string(),
-                last_changed: "19000".to_string(),
-                min_days: "0".to_string(),
-                max_days: "99999".to_string(),
-                warn_days: "7".to_string(),
-                inactive: String::new(),
-                expire: String::new(),
-                reserved: String::new(),
-            },
-            ShadowEntry::new_locked("svc"),
-        ];
-        Database::atomic_write(&path, &entries, ShadowEntry::serialize).expect("write");
-        let loaded: Vec<ShadowEntry> = Database::load_file(&path, ShadowEntry::parse);
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].hash, "$6$abc$xyz");
-        assert_eq!(loaded[1].hash, "!");
+        let mut db = Database::load_in(env.dir.dir());
+        db.groups.push(group("wheel", 10));
+        db.gshadow.push(GshadowEntry {
+            name: "wheel".to_string(),
+            password: "!".to_string(),
+            admins: "root".to_string(),
+            members: Vec::new(),
+        });
+        db.users.push(record("root", 0, 0));
+        db.add_to_group("root", "wheel");
+        db.save().expect("save");
+
+        let reloaded = Database::load_in(env.dir.dir());
+        assert_eq!(
+            reloaded.find_group("wheel").map(|g| g.members.clone()),
+            Some(vec!["root".to_string()])
+        );
+        assert_eq!(
+            reloaded.gshadow.first().map(|g| g.admins.clone()),
+            Some("root".to_string())
+        );
+        assert_eq!(
+            reloaded.find_user("root").map(userdb::Record::groups),
+            Some(vec!["wheel".to_string()])
+        );
     }
 
     #[test]
     fn test_file_roundtrip_group() {
         let env = TestEnv::new();
-        let path = env.path("group");
+        let path = env.dir.path("group");
         let entries = vec![
-            GroupEntry {
-                name: "root".to_string(),
-                password: "x".to_string(),
-                gid: 0,
-                members: Vec::new(),
-            },
+            group("root", 0),
             GroupEntry {
                 name: "staff".to_string(),
                 password: "x".to_string(),
@@ -2829,7 +2784,7 @@ mod tests {
     #[test]
     fn test_file_roundtrip_gshadow() {
         let env = TestEnv::new();
-        let path = env.path("gshadow");
+        let path = env.dir.path("gshadow");
         let entries = vec![GshadowEntry {
             name: "wheel".to_string(),
             password: "!".to_string(),
@@ -2844,20 +2799,27 @@ mod tests {
 
     #[test]
     fn test_load_missing_file_returns_empty() {
-        let entries: Vec<PasswdEntry> =
-            Database::load_file("/nonexistent/path/file", PasswdEntry::parse);
+        let entries: Vec<GroupEntry> =
+            Database::load_file(Path::new("/nonexistent/path/file"), GroupEntry::parse);
         assert!(entries.is_empty());
     }
 
     // ---- Edge case tests ----
 
+    /// A display name holding a colon is refused at generation rather than
+    /// written, because a colon there shifts every later field -- it would
+    /// move the home directory into the shell column. The old test asserted
+    /// the opposite property, that a *parser* split such a line correctly,
+    /// which is the wrong end: nothing should be producing the line.
     #[test]
-    fn test_passwd_entry_with_colons_in_gecos() {
-        // GECOS field traditionally doesn't contain colons, but the parser
-        // should handle the standard 7-field split correctly.
-        let line = "user:x:1000:1000:Normal GECOS:/home/user:/bin/sh";
-        let entry = PasswdEntry::parse(line).expect("parse");
-        assert_eq!(entry.gecos, "Normal GECOS");
+    fn a_display_name_that_cannot_be_written_fails_the_save_rather_than_shifting_fields() {
+        let env = TestEnv::new();
+        let mut db = Database::load_in(env.dir.dir());
+        let mut user = record("alice", 1000, 1000);
+        user.set(userdb::field::DISPLAY_NAME, "Alice:Smith");
+        db.users.push(user);
+
+        assert!(db.save().is_err());
     }
 
     #[test]
@@ -2883,15 +2845,7 @@ mod tests {
     fn test_next_uid_contiguous_fill() {
         let mut db = empty_db();
         for i in 100..110u32 {
-            db.passwd.push(PasswdEntry {
-                username: format!("u{}", i),
-                password: "x".to_string(),
-                uid: i,
-                gid: i,
-                gecos: String::new(),
-                home: String::new(),
-                shell: String::new(),
-            });
+            db.users.push(record(&format!("u{i}"), i, i));
         }
         assert_eq!(db.next_uid(100, 999), Some(110));
     }
@@ -2900,12 +2854,7 @@ mod tests {
     fn test_next_gid_contiguous_fill() {
         let mut db = empty_db();
         for i in 1000..1005u32 {
-            db.groups.push(GroupEntry {
-                name: format!("g{}", i),
-                password: "x".to_string(),
-                gid: i,
-                members: Vec::new(),
-            });
+            db.groups.push(group(&format!("g{i}"), i));
         }
         assert_eq!(db.next_gid(1000, 60000), Some(1005));
     }
@@ -2949,13 +2898,6 @@ mod tests {
     }
 
     #[test]
-    fn test_shadow_parse_exactly_nine_fields() {
-        let line = "user:hash:1:2:3:4:5:6:7";
-        let entry = ShadowEntry::parse(line).expect("should parse 9 fields");
-        assert_eq!(entry.reserved, "7");
-    }
-
-    #[test]
     fn test_gshadow_parse_with_admins() {
         let line = "wheel:!:root,admin:user1,user2";
         let entry = GshadowEntry::parse(line).expect("parse");
@@ -2993,18 +2935,8 @@ mod tests {
     }
 
     #[test]
-    fn test_passwd_parse_empty_string() {
-        assert!(PasswdEntry::parse("").is_none());
-    }
-
-    #[test]
     fn test_group_parse_empty_string() {
         assert!(GroupEntry::parse("").is_none());
-    }
-
-    #[test]
-    fn test_shadow_parse_empty_string() {
-        assert!(ShadowEntry::parse("").is_none());
     }
 
     #[test]

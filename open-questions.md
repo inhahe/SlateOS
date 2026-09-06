@@ -2680,6 +2680,52 @@ answered question left in the body is pure cost — and, being older, it sorts
 *first*, right where it is most in the way. (Why this is not append-only:
 `design-decisions.md` §437.)
 
+## Which group is a user in? Two files answer, and nothing keeps them agreeing. (lane B, 2026-09-06)
+
+**In short:** "Alice is in the `audio` group" is written down in two separate
+places on this machine: once in `/etc/group`, which lists the members of each
+group, and once in Alice's own account record in `/etc/users.yaml`, which lists
+the groups she is in. Nothing makes the two agree — they are simply two copies
+of the same sentence, and copies drift. We already fixed exactly this problem
+for *user accounts* (`design-decisions.md` §353: one file is the truth, the
+others are generated from it). The question is whether to do the same for
+groups, and if so which of the two copies survives.
+
+**How it bites today:** a program that asks "what groups is Alice in?" gets a
+different answer depending on which file it happens to read. `id` and `chown`
+read one, the graphical settings app reads the other. If they disagree, a file
+Alice should be able to open looks closed to one tool and open to another. This
+is the same class of defect that had `sudo` and `doas` disagreeing about who
+was an administrator, which is what §353 was decided to end.
+
+**What has been done so far (2026-09-06):** `useradd`/`usermod`/`groupadd`/
+`groupmod`/`groupdel` are one binary, and it now updates *both* copies through
+a single set of methods, so it cannot change one and forget the other. That
+closes the hole for the only tool that currently writes groups. It does not
+close the hole — the next writer has nothing stopping it, and a hand-edit of
+either file makes them disagree immediately.
+
+### The options
+
+| Option | *What changes:* | |
+|---|---|---|
+| **A. `/etc/groups.yaml` is the truth; `/etc/group` and `/etc/gshadow` are generated from it** (recommended) | Nothing visible day to day. Editing `/etc/group` by hand stops sticking — the next account change overwrites it — exactly as editing `/etc/passwd` already stops sticking. | The same answer §353 gave for users, for the same reasons, and it reuses the machinery that already exists. It is also the most work: a new file, a new parser, and the group half of `useradd` rewritten. |
+| **B. Keep two files but make the account record's `groups` list the only writable one, and generate `/etc/group` from the accounts** | Also nothing visible. No new file: the group's member list becomes a view of who claims membership. | Cheaper than A. But a group has facts of its own — its gid, its password, its administrators (`/etc/gshadow`) — that no account record has anywhere to put, so those would still need a home. That is how §353's rejected option B failed. |
+| **C. Drop the `groups` list from account records; `/etc/group` is the only answer** | The graphical settings app has to read `/etc/group` instead of the account file it reads now. | The smallest change, and it puts the fact in the file the POSIX world expects. It contradicts `design.txt`'s "configuration files will be yaml" for one of the two most security-sensitive files, which is the objection that sank the same option for users. |
+| **D. Leave it. Keep both copies and keep them in step by hand.** | Nothing. | Free today. The cost arrives with the second writer, and it arrives as a security bug rather than a visible breakage. |
+
+### If it is never answered
+
+Nothing gets worse on its own, and nothing is blocked: `useradd` keeps both
+copies in step, and it is the only tool that writes groups. The risk is a
+future one — the *next* program that writes a group membership starts the drift,
+and it will be found the way the `sudo`/`doas` split was found, by reading the
+code rather than by anything failing.
+
+The full context, including the non-atomicity of a save across the two stores,
+is in `todo.txt` under "`/etc/group` and `/etc/gshadow` are still hand-written,
+not generated".
+
 ## Resolved — lane A
 
 - Q45 Convert the whole shell to bytes, or only the expanded word? — resolved

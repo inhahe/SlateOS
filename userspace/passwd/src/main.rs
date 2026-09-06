@@ -1,7 +1,27 @@
 //! Slate OS Password Management Utility
 //!
-//! Manages user passwords and password aging policies via the `/etc/shadow`
-//! file. Validates users against `/etc/passwd`.
+//! Manages user passwords and password aging policies in the account
+//! database, `/etc/users.yaml`.
+//!
+//! # Why not `/etc/shadow`
+//!
+//! It used to edit `/etc/shadow` directly, and parse `/etc/passwd` to check
+//! that the account existed. `design-decisions.md` §353 settles that neither
+//! of those files is the truth: both are *generated* from `/etc/users.yaml`
+//! on every account change, for the benefit of ported software that reads the
+//! flat files. A `passwd` that wrote to `/etc/shadow` would therefore have its
+//! work silently undone the next time any other tool touched an account — and
+//! in the meantime the password it set would be invisible to the graphical
+//! login screen, which reads the database. So every read and every write here
+//! goes through `userdb`, and the flat files are regenerated as a consequence
+//! of saving rather than written by this program at all.
+//!
+//! Two duplications went with that change. The hashing — a private
+//! `hash_password`/`generate_salt` pair — is now `userdb`'s
+//! [`userdb::Record::set_password`], which does the same thing (SHA-512-crypt,
+//! a `/dev/urandom` salt, and no fallback to a guessable one) in the one place
+//! that also stores the result. And the aging fields, which this program used
+//! to define its own `ShadowEntry` for, are [`userdb::Aging`].
 //!
 //! # Usage
 //!
@@ -19,222 +39,151 @@
 //! passwd -i <days> <username>  Inactive days after expiry before lock
 //! ```
 //!
-//! # File Formats
+//! # Locking is a fact of its own here
 //!
-//! `/etc/passwd` — colon-separated:
-//! `username:x:uid:gid:gecos:home:shell`
+//! In `/etc/shadow` a lock is a `!` written in front of the password, so
+//! shadow-utils' `passwd` unlocks an account as a side effect of writing a new
+//! hash over that column. The database keeps the two apart, so the behaviour is
+//! chosen rather than inherited: **setting a password does not unlock**, and
+//! says so on the run that hits it, while **`-d` does** clear the lock, because
+//! a lock over a password that no longer exists is a state nobody asks for. See
+//! `design-decisions.md` §1003.
 //!
-//! `/etc/shadow` — colon-separated:
-//! `username:hash:lastchanged:min:max:warn:inactive:expire:`
+//! # Where the values live
+//!
+//! One record per account in `/etc/users.yaml`. The password entry is
+//! `password_hash` — a full `crypt(3)` string, salt included — and the six
+//! aging numbers are the fields [`userdb::Aging`] names. `/etc/shadow`'s
+//! `login:password:lastchg:min:max:warn:inactive:expire:` line is a rendering
+//! of exactly those, produced by [`userdb::UserDb::save`].
 
 use quoting::quoteaf_os;
 use std::env;
-use std::fs;
 use std::io::{self, BufRead, Write};
 use std::process;
+use userdb::{Aging, Record, UserDb};
 
 // ============================================================================
 // Constants
 // ============================================================================
 
-const PASSWD_PATH: &str = "/etc/passwd";
-const SHADOW_PATH: &str = "/etc/shadow";
 const MIN_PASSWORD_LEN: usize = 8;
 
-/// Number of seconds in a day.
-const SECONDS_PER_DAY: u64 = 86400;
-
 // ============================================================================
-// Shadow entry model
+// The account database
 // ============================================================================
+//
+// The `ShadowEntry` and `PasswdEntry` structs that stood here, with their
+// `read_shadow`/`write_shadow`/`read_passwd`/`find_user` helpers, are gone.
+// They were a second parser and a second writer for two files that
+// `design-decisions.md` §353 makes *generated* output -- so every line they
+// wrote was a line the next account change would overwrite, and every line
+// they read was a rendering rather than the thing itself.
+//
+// `find_or_create_shadow` is gone with them, and its disappearance is the
+// point rather than a side effect: it existed because a user could be in
+// `/etc/passwd` with no `/etc/shadow` line, which is precisely the
+// one-file-and-not-the-other state a single database cannot be in. An account
+// either has a record here or does not exist.
 
-/// Represents one line from `/etc/shadow`.
-#[derive(Clone, Debug, PartialEq)]
-struct ShadowEntry {
-    username: String,
-    /// Hashed password. `!` prefix means locked, empty means passwordless.
-    hash: String,
-    /// Days since epoch when password was last changed.
-    last_changed: i64,
-    /// Minimum days between password changes (0 = no restriction).
-    min_days: i64,
-    /// Maximum days a password is valid (-1 = no expiry).
-    max_days: i64,
-    /// Days before expiry to warn the user.
-    warn_days: i64,
-    /// Days after expiry before the account is disabled (-1 = never).
-    inactive_days: i64,
-    /// Days since epoch when account expires (-1 = never).
-    expire_date: i64,
+/// The account database, together with where it came from.
+///
+/// The path travels with the database rather than being a constant each
+/// command reaches for, so that a command is a function of the file it is
+/// given. That is what makes the round-trip a *test* rather than an argument:
+/// the tests below run the real commands against a real database in a scratch
+/// directory, and a program whose save target is a constant can only be tested
+/// by trusting the parts around it.
+struct Accounts {
+    db: UserDb,
+    path: std::path::PathBuf,
 }
 
-impl ShadowEntry {
-    fn new(username: &str) -> Self {
-        ShadowEntry {
-            username: username.to_string(),
-            hash: String::from("!"),
-            last_changed: current_day(),
-            min_days: 0,
-            max_days: 99999,
-            warn_days: 7,
-            inactive_days: -1,
-            expire_date: -1,
-        }
-    }
-
-    /// Parse a single shadow line.
-    fn parse(line: &str) -> Option<Self> {
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() < 8 {
-            return None;
-        }
-
-        Some(ShadowEntry {
-            username: fields[0].to_string(),
-            hash: fields[1].to_string(),
-            last_changed: fields[2].parse().unwrap_or(0),
-            min_days: fields[3].parse().unwrap_or(0),
-            max_days: fields[4].parse().unwrap_or(99999),
-            warn_days: fields[5].parse().unwrap_or(7),
-            inactive_days: fields[6].parse().unwrap_or(-1),
-            expire_date: if fields.len() > 7 {
-                fields[7].parse().unwrap_or(-1)
-            } else {
-                -1
-            },
+impl Accounts {
+    /// Read the account database, or explain why it could not be read.
+    ///
+    /// A database that cannot be read is not an empty one: treating it as
+    /// empty would make `passwd alice` report "user does not exist" for every
+    /// account on the machine, and -- worse -- a subsequent save would write
+    /// that empty database out over the real one.
+    fn load(path: &std::path::Path) -> Result<Self, String> {
+        let db =
+            UserDb::load(path).map_err(|e| format!("cannot read `{}': {e}", path.display()))?;
+        Ok(Self {
+            db,
+            path: path.to_path_buf(),
         })
     }
 
-    /// Serialize back to shadow file format.
-    fn to_line(&self) -> String {
-        let inactive = if self.inactive_days < 0 {
-            String::new()
-        } else {
-            self.inactive_days.to_string()
-        };
-        let expire = if self.expire_date < 0 {
-            String::new()
-        } else {
-            self.expire_date.to_string()
-        };
-
-        format!(
-            "{}:{}:{}:{}:{}:{}:{}:{}:",
-            self.username,
-            self.hash,
-            self.last_changed,
-            self.min_days,
-            self.max_days,
-            self.warn_days,
-            inactive,
-            expire,
-        )
+    /// Write the database back, regenerating `/etc/passwd` and `/etc/shadow`.
+    fn store(&self) -> Result<(), String> {
+        self.db
+            .save(&self.path)
+            .map_err(|e| format!("cannot write `{}': {e}", self.path.display()))
     }
 
-    /// Whether the account is locked (hash starts with `!`).
-    fn is_locked(&self) -> bool {
-        self.hash.starts_with('!')
+    /// The record for `username`, if the account exists.
+    fn find(&self, username: &str) -> Option<&Record> {
+        self.db.find(username)
     }
 
-    /// Whether the password is empty (passwordless login).
-    fn is_passwordless(&self) -> bool {
-        self.hash.is_empty()
-    }
-
-    /// Status character for `-S` display.
-    fn status_char(&self) -> &'static str {
-        if self.is_locked() {
-            "L"
-        } else if self.is_passwordless() {
-            "NP"
-        } else {
-            "P"
+    /// The record for `username`, which `main` has already established exists.
+    ///
+    /// Every command runs against a database `main` loaded and searched, so a
+    /// missing record here is not a user error and must not be reported as
+    /// one: it would mean the record vanished between the two lookups, which
+    /// cannot happen within one process. Reporting it as an internal error
+    /// keeps "user does not exist" saying only what it says.
+    fn record(&mut self, username: &str) -> Result<&mut Record, i32> {
+        match self.db.find_mut(username) {
+            Some(record) => Ok(record),
+            None => Err(vanished(username)),
         }
     }
 }
 
-// ============================================================================
-// Passwd entry (read-only, for user validation)
-// ============================================================================
-
-/// Minimal `/etc/passwd` entry — we only need the username for validation,
-/// but uid is retained for privilege checks.
-#[derive(Clone, Debug)]
-struct PasswdEntry {
-    username: String,
-    #[allow(dead_code)]
-    uid: u32,
+/// Report the impossible lookup, and give the caller its exit code.
+///
+/// A separate function only so that the read-only command reports it in the
+/// same words as the writing ones; a second wording would be a second thing to
+/// recognise in a bug report.
+fn vanished(username: &str) -> i32 {
+    eprintln!(
+        "passwd: internal error: user {} was present a moment ago and is not now",
+        quoteaf_os(username)
+    );
+    1
 }
 
-impl PasswdEntry {
-    fn parse(line: &str) -> Option<Self> {
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() < 3 {
-            return None;
-        }
-        let uid = fields[2].parse().ok()?;
-        Some(PasswdEntry {
-            username: fields[0].to_string(),
-            uid,
-        })
-    }
-}
-
-// ============================================================================
-// File I/O helpers
-// ============================================================================
-
-/// Read and parse all shadow entries.
-fn read_shadow() -> Vec<ShadowEntry> {
-    let content = match fs::read_to_string(SHADOW_PATH) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    content
-        .lines()
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter_map(ShadowEntry::parse)
-        .collect()
-}
-
-/// Write shadow entries back to the file.
-fn write_shadow(entries: &[ShadowEntry]) -> Result<(), String> {
-    let mut content = String::new();
-    for entry in entries {
-        content.push_str(&entry.to_line());
-        content.push('\n');
-    }
-    fs::write(SHADOW_PATH, content).map_err(|e| format!("cannot write {SHADOW_PATH}: {e}"))
-}
-
-/// Read and parse all passwd entries.
-fn read_passwd() -> Vec<PasswdEntry> {
-    let content = match fs::read_to_string(PASSWD_PATH) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    content
-        .lines()
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter_map(PasswdEntry::parse)
-        .collect()
-}
-
-/// Find a user in `/etc/passwd` by name.
-fn find_user(username: &str) -> Option<PasswdEntry> {
-    read_passwd().into_iter().find(|u| u.username == username)
-}
-
-/// Find or create a shadow entry for the given username.
-fn find_or_create_shadow(entries: &mut Vec<ShadowEntry>, username: &str) -> usize {
-    if let Some(idx) = entries.iter().position(|e| e.username == username) {
-        idx
+/// The one-or-two-letter status `-S` prints for an account.
+///
+/// The vocabulary is the shadow suite's -- `P` for a usable password, `NP`
+/// for none at all, `L` for an account that accepts nothing -- and the mapping
+/// is deliberately the same one [`userdb::UserDb::save`] uses when it renders
+/// the entry, so that what this prints and what `/etc/shadow` says cannot
+/// disagree. That is why a pre-`crypt(3)` legacy entry (§329) reports `L`: it
+/// is generated as `*`, no password can be checked against it, and reporting
+/// `P` would tell an administrator the account has a working password when
+/// nothing on the system can verify one.
+fn status_char(record: &Record) -> &'static str {
+    if record.is_locked() || record.has_legacy_password() {
+        "L"
+    } else if has_password(record) {
+        "P"
     } else {
-        entries.push(ShadowEntry::new(username));
-        entries.len() - 1
+        "NP"
     }
+}
+
+/// Whether the record carries a password entry at all.
+///
+/// A missing field and an empty one are the same account: one that logs in
+/// without being asked for anything. Keeping them one question here is what
+/// stops `-S` printing `P` for a record `-d` emptied.
+fn has_password(record: &Record) -> bool {
+    record
+        .get(userdb::field::PASSWORD_HASH)
+        .is_some_and(|h| !h.is_empty())
 }
 
 // ============================================================================
@@ -261,71 +210,21 @@ fn find_or_create_shadow(entries: &mut Vec<ShadowEntry>, username: &str) -> usiz
 // `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
 
 // ============================================================================
-// Password hashing and salt generation
+// Password hashing and salt generation -- deleted too
 // ============================================================================
-
-/// The method `passwd` selects for a new password.
-///
-/// SHA-512 because that is what the shadow suite defaults to, and because
-/// the three tools that share `/etc/shadow` must agree: an entry written
-/// here is read by `login` and rewritten by `chpasswd`, and the cheapest
-/// way to keep them consistent is for all of them to name the same default.
-const NEW_PASSWORD_METHOD: posix::crypt::Method = posix::crypt::Method::Sha512;
-
-/// Hash `password` under a fresh setting built from `salt`.
-///
-/// Returns `None` for a salt `crypt` cannot carry verbatim — one that is
-/// empty, too long for the method, or contains a character outside the
-/// crypt base-64 alphabet.  [`generate_salt`] cannot produce such a salt,
-/// so in practice this is `None` only if a caller invents one; it is a
-/// `Result`-shaped answer rather than a silent truncation because a
-/// truncated salt would mean the entry stored is not the entry asked for.
-fn hash_password(password: &str, salt: &str) -> Option<String> {
-    let mut setting_buf = posix::crypt::buf();
-    let setting =
-        posix::crypt::setting_into(NEW_PASSWORD_METHOD, salt.as_bytes(), &mut setting_buf)?;
-    let mut hash_buf = posix::crypt::buf();
-    Some(
-        posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hash_buf)?
-            .to_string(),
-    )
-}
-
-/// Encode random bytes as a salt in the crypt base-64 alphabet.
-///
-/// `& 0x3f` is an unbiased reduction here and not the usual modulo mistake:
-/// 256 is exactly four times 64, so every alphabet character is the image
-/// of exactly four byte values.
-fn encode_salt(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    bytes
-        .iter()
-        .map(|b| char::from(ALPHABET[usize::from(*b & 0x3f)]))
-        .collect()
-}
-
-/// Generate a random salt for a new password, or `None` if the system has no
-/// randomness to draw it from.
-///
-/// The output is characters of the crypt base-64 alphabet, not hex, and is
-/// exactly [`posix::crypt::Method::salt_max`] of them.  Both details matter:
-/// SHA-crypt truncates a longer salt when hashing but stores what it was
-/// given, so a 32-character hex salt — which is what this function used to
-/// return — produces an entry that can never verify against itself.
-///
-/// **There is deliberately no fallback.**  An earlier version fell back to a
-/// day-number generator, which is a salt in shape only: the day is public, so
-/// the whole salt follows from it, every account given a password on the same
-/// day shares it, and one precomputed table covers them all — the exact
-/// property a salt exists to deny.  A password file that cannot be attacked
-/// is worth more than a `passwd` that always succeeds, so this refuses and
-/// says why, as `chpasswd` already did.  Tests pass their own salt to
-/// [`hash_password`] rather than being served by a weakened production path.
-fn generate_salt() -> Option<String> {
-    let len = NEW_PASSWORD_METHOD.salt_max();
-    let data = fs::read("/dev/urandom").ok()?;
-    Some(encode_salt(data.get(..len)?))
-}
+//
+// `NEW_PASSWORD_METHOD`, `hash_password`, `encode_salt` and `generate_salt`
+// stood here. All four were correct, and all four were a second copy of what
+// `userdb::Record::set_password` already does -- the same SHA-512-crypt, the
+// same crypt base-64 salt at the method's own maximum length, the same
+// refusal to fall back to a guessable salt when `/dev/urandom` cannot be
+// read.
+//
+// A second correct copy is still a place for the two to drift apart, and this
+// program is the one that proved it: the reason it has a `posix::crypt`
+// dependency at all is that it once implemented the hash itself and disagreed
+// with `login` about the result. Hashing now happens where the result is
+// stored, which is the only arrangement in which the two cannot disagree.
 
 // `verify_password` no longer stands here.  It was a wrapper over
 // `posix::crypt::verify` — the comparison was right, but it was a second
@@ -506,13 +405,12 @@ fn read_password_no_echo(prompt: &str) -> Result<String, String> {
 // System helpers
 // ============================================================================
 
-/// Get the current day number since Unix epoch.
-fn current_day() -> i64 {
-    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(dur) => (dur.as_secs() / SECONDS_PER_DAY) as i64,
-        Err(_) => 0,
-    }
-}
+// `current_day` stood here, dividing the clock by 86 400.  It is
+// `userdb::today` now — the same arithmetic, but next to the fields it dates,
+// and returning `Option` rather than falling back to `0` on a clock before the
+// epoch.  That fallback was the dangerous half: day 0 is how `/etc/shadow`
+// spells "this password is expired", so a machine with a confused clock would
+// have had `passwd` silently expire every password it touched.
 
 /// Determine the current user's UID. Reads the `UID` environment variable
 /// (set by the login/init process) or defaults to 0 (root) if unset.
@@ -681,64 +579,79 @@ fn print_usage() {
 // Command implementations
 // ============================================================================
 
+/// Whether the account's own minimum-age policy forbids a change today.
+///
+/// Absent is not zero. A record with no `min_days` has no minimum-age policy,
+/// so nothing here delays it; the old code read that same absence as a `0` it
+/// had invented and compared against, which happened to permit the change but
+/// only by accident of the number chosen. A record whose `password_changed` is
+/// absent likewise has no age to measure, and a clock that cannot say what day
+/// it is cannot measure one either — in both cases the change is allowed,
+/// because refusing would mean locking a user out of their own password over a
+/// fact the system does not have.
+fn too_soon_to_change(record: &Record) -> Option<i64> {
+    let aging = record.aging();
+    let min = aging.min_days?;
+    if min <= 0 {
+        return None;
+    }
+    let changed = aging.changed?;
+    let remaining = min.checked_sub(userdb::today()?.checked_sub(changed)?)?;
+    if remaining > 0 { Some(remaining) } else { None }
+}
+
 /// Change password for the target user.
-fn cmd_change_password(target: &str, caller_uid: u32) -> i32 {
+fn cmd_change_password(accounts: &mut Accounts, target: &str, caller_uid: u32) -> i32 {
     // Non-root users must verify their current password.
     if caller_uid != 0 {
-        let entries = read_shadow();
-        if let Some(entry) = entries.iter().find(|e| e.username == target) {
-            if entry.is_locked() {
-                eprintln!("passwd: account is locked");
-                return 1;
-            }
-            // Check minimum password age.
-            if entry.min_days > 0 {
-                let days_since = current_day() - entry.last_changed;
-                if days_since < entry.min_days {
+        let Some(record) = accounts.find(target) else {
+            return vanished(target);
+        };
+        if record.is_locked() {
+            eprintln!("passwd: account is locked");
+            return 1;
+        }
+        if let Some(remaining) = too_soon_to_change(record) {
+            eprintln!("passwd: password may not be changed yet ({remaining} day(s) remaining)");
+            return 1;
+        }
+        // No `&& !record.is_locked()` here: a locked account was already
+        // refused above, so the conjunct could never be false, and keeping
+        // it read as though a locked account reached this prompt and was
+        // waved past it -- the opposite of what happens.  Locking is
+        // decided in exactly one place, and this is not it.
+        let stored = record.get(userdb::field::PASSWORD_HASH).unwrap_or_default();
+        if !stored.is_empty() {
+            let old_pw = match read_password_no_echo("Current password: ") {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("passwd: {e}");
+                    return 1;
+                }
+            };
+            let mut auth = authlib::Authenticator::new();
+            let outcome = authlib::check_stored(old_pw.as_bytes(), stored.as_bytes());
+            match judge_old_password(&mut auth, target, outcome) {
+                OldPasswordVerdict::Proceed => {}
+                OldPasswordVerdict::Unverifiable => {
+                    // An entry in a format nothing can recompute is not a
+                    // wrong password, and telling the user "authentication
+                    // failure" would send them away retyping a password
+                    // that was never going to work.  The remedy is root
+                    // setting a new one, so say so.  Only the account's own
+                    // owner reaches this branch — root skips the
+                    // old-password check entirely — so it discloses
+                    // nothing.
                     eprintln!(
-                        "passwd: password may not be changed yet ({} day(s) remaining)",
-                        entry.min_days - days_since
+                        "passwd: the stored password for `{target}' is not in a format \
+                         this system can verify, so it cannot be confirmed; ask an \
+                         administrator to run `passwd {target}' as root"
                     );
                     return 1;
                 }
-            }
-            // No `&& !entry.is_locked()` here: a locked account was already
-            // refused above, so the conjunct could never be false, and keeping
-            // it read as though a locked account reached this prompt and was
-            // waved past it -- the opposite of what happens.  Locking is
-            // decided in exactly one place, and this is not it.
-            if !entry.hash.is_empty() {
-                let old_pw = match read_password_no_echo("Current password: ") {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!("passwd: {e}");
-                        return 1;
-                    }
-                };
-                let mut auth = authlib::Authenticator::new();
-                let outcome = authlib::check_stored(old_pw.as_bytes(), entry.hash.as_bytes());
-                match judge_old_password(&mut auth, target, outcome) {
-                    OldPasswordVerdict::Proceed => {}
-                    OldPasswordVerdict::Unverifiable => {
-                        // An entry in a format nothing can recompute is not a
-                        // wrong password, and telling the user "authentication
-                        // failure" would send them away retyping a password
-                        // that was never going to work.  The remedy is root
-                        // setting a new one, so say so.  Only the account's own
-                        // owner reaches this branch — root skips the
-                        // old-password check entirely — so it discloses
-                        // nothing.
-                        eprintln!(
-                            "passwd: the stored password for `{target}' is not in a format \
-                             this system can verify, so it cannot be confirmed; ask an \
-                             administrator to run `passwd {target}' as root"
-                        );
-                        return 1;
-                    }
-                    OldPasswordVerdict::Refuse => {
-                        eprintln!("passwd: authentication failure");
-                        return 1;
-                    }
+                OldPasswordVerdict::Refuse => {
+                    eprintln!("passwd: authentication failure");
+                    return 1;
                 }
             }
         }
@@ -779,52 +692,52 @@ fn cmd_change_password(target: &str, caller_uid: u32) -> i32 {
         return 1;
     }
 
-    // Hash and store.  A salt this build cannot carry verbatim would mean
-    // writing an entry that is not the one asked for, so it aborts rather
-    // than storing a truncated one — and since `generate_salt` draws from a
-    // fixed alphabet at the method's own maximum length, reaching this is a
-    // bug here, not bad input.
-    let Some(salt) = generate_salt() else {
-        eprintln!(
-            "passwd: cannot read `/dev/urandom', so there is no random salt to \
-             store this password with; refusing to write a password without one"
-        );
-        return 1;
+    // Hashing, salting and dating the change all happen inside `set_password`
+    // — see the module note on the copy of them that used to stand here.
+    let record = match accounts.record(target) {
+        Ok(record) => record,
+        Err(code) => return code,
     };
-    let Some(hashed) = hash_password(&new_pw, &salt) else {
-        eprintln!(
-            "passwd: internal error: generated salt is not usable with {NEW_PASSWORD_METHOD:?}"
-        );
+    if let Err(e) = record.set_password(&new_pw) {
+        eprintln!("passwd: {e}");
         return 1;
-    };
+    }
+    let still_locked = record.is_locked();
 
-    let mut entries = read_shadow();
-    let idx = find_or_create_shadow(&mut entries, target);
-    entries[idx].hash = hashed;
-    entries[idx].last_changed = current_day();
-
-    if let Err(e) = write_shadow(&entries) {
+    if let Err(e) = accounts.store() {
         eprintln!("passwd: {e}");
         return 1;
     }
 
     eprintln!("passwd: password updated successfully");
+    if still_locked {
+        // Setting a password does not unlock (`design-decisions.md` §1003), and
+        // an administrator who is not told that would walk away believing the
+        // account works.
+        eprintln!(
+            "passwd: note: {} is still locked and will refuse this password; \
+             run `passwd -u' to unlock it",
+            quoteaf_os(target)
+        );
+    }
     0
 }
 
-/// Lock an account by prepending `!` to the hash.
-fn cmd_lock(target: &str) -> i32 {
-    let mut entries = read_shadow();
-    let idx = find_or_create_shadow(&mut entries, target);
+/// Lock an account.
+fn cmd_lock(accounts: &mut Accounts, target: &str) -> i32 {
+    let record = match accounts.record(target) {
+        Ok(record) => record,
+        Err(code) => return code,
+    };
 
-    if entries[idx].is_locked() {
+    if record.is_locked() {
         eprintln!("passwd: account already locked");
         return 0;
     }
 
-    entries[idx].hash = format!("!{}", entries[idx].hash);
+    record.set_locked(true);
 
-    if let Err(e) = write_shadow(&entries) {
+    if let Err(e) = accounts.store() {
         eprintln!("passwd: {e}");
         return 1;
     }
@@ -833,26 +746,34 @@ fn cmd_lock(target: &str) -> i32 {
     0
 }
 
-/// Unlock an account by removing the leading `!` from the hash.
-fn cmd_unlock(target: &str) -> i32 {
-    let mut entries = read_shadow();
-    let idx = find_or_create_shadow(&mut entries, target);
+/// Unlock an account.
+fn cmd_unlock(accounts: &mut Accounts, target: &str) -> i32 {
+    let record = match accounts.record(target) {
+        Ok(record) => record,
+        Err(code) => return code,
+    };
 
-    if !entries[idx].is_locked() {
+    if !record.is_locked() {
         eprintln!("passwd: account is not locked");
         return 1;
     }
 
-    let hash = &entries[idx].hash;
-    if hash == "!" || hash == "!!" {
+    record.set_locked(false);
+
+    // `set_locked(false)` restores the password the lock was laid over, but
+    // there may not have been one: an account whose entry is `*`, or `!` with
+    // nothing after it, has no password underneath to come back. Unlocking it
+    // would mean either leaving it unusable while reporting success, or
+    // emptying the entry — and an empty entry is the spelling of "logs in
+    // without being asked for anything", which is not what anyone means by
+    // "unlock". So the refusal stands, and names the two things that do work.
+    if record.is_locked() || !has_password(record) {
         eprintln!("passwd: cannot unlock — account has no password set");
         eprintln!("passwd: use passwd -d to remove password or set a new password");
         return 1;
     }
 
-    entries[idx].hash = entries[idx].hash.trim_start_matches('!').to_string();
-
-    if let Err(e) = write_shadow(&entries) {
+    if let Err(e) = accounts.store() {
         eprintln!("passwd: {e}");
         return 1;
     }
@@ -862,14 +783,23 @@ fn cmd_unlock(target: &str) -> i32 {
 }
 
 /// Delete the password (allow passwordless login).
-fn cmd_delete_password(target: &str) -> i32 {
-    let mut entries = read_shadow();
-    let idx = find_or_create_shadow(&mut entries, target);
+fn cmd_delete_password(accounts: &mut Accounts, target: &str) -> i32 {
+    let record = match accounts.record(target) {
+        Ok(record) => record,
+        Err(code) => return code,
+    };
 
-    entries[idx].hash = String::new();
-    entries[idx].last_changed = current_day();
+    // The lock goes with the password. Under the old `!`-prefix spelling this
+    // was automatic — emptying the entry took the `!` with it — and losing it
+    // silently would leave `passwd -d` reporting that the account needs no
+    // password while the account still refused every login.
+    record.set_locked(false);
+    record.set(userdb::field::PASSWORD_HASH, "");
+    let mut aging = record.aging();
+    aging.changed = userdb::today();
+    record.set_aging(&aging);
 
-    if let Err(e) = write_shadow(&entries) {
+    if let Err(e) = accounts.store() {
         eprintln!("passwd: {e}");
         return 1;
     }
@@ -879,48 +809,49 @@ fn cmd_delete_password(target: &str) -> i32 {
 }
 
 /// Display password status information.
-fn cmd_show_status(target: &str) -> i32 {
-    let entries = read_shadow();
-    let entry = match entries.iter().find(|e| e.username == target) {
-        Some(e) => e,
-        None => {
-            // No shadow entry means no password info.
-            println!("{target} NP 1970-01-01 0 99999 7 -1");
-            return 0;
-        }
+///
+/// The seven fields are shadow-utils': name, status, date of last change, then
+/// minimum, maximum, warning and inactive days. An unset policy prints `-1`,
+/// which is the same vocabulary `chage -l` and `passwd -S` use for an empty
+/// shadow field — and, unlike the `0 99999 7` this used to print, does not
+/// present an invented policy as one the administrator set.
+fn cmd_show_status(accounts: &Accounts, target: &str) -> i32 {
+    let Some(record) = accounts.find(target) else {
+        return vanished(target);
     };
 
-    // Compute the date of last change as YYYY-MM-DD.
-    let date_str = days_to_date_string(entry.last_changed);
-
-    let inactive_str = if entry.inactive_days < 0 {
-        "-1".to_string()
-    } else {
-        entry.inactive_days.to_string()
-    };
-
+    let aging = record.aging();
     println!(
         "{} {} {} {} {} {} {}",
         target,
-        entry.status_char(),
-        date_str,
-        entry.min_days,
-        entry.max_days,
-        entry.warn_days,
-        inactive_str,
+        status_char(record),
+        userdb::date_from_days(aging.changed.unwrap_or(0)),
+        policy(aging.min_days),
+        policy(aging.max_days),
+        policy(aging.warn_days),
+        policy(aging.inactive_days),
     );
 
     0
 }
 
-/// Expire password — force a change at next login by setting last_changed to 0.
-fn cmd_expire(target: &str) -> i32 {
-    let mut entries = read_shadow();
-    let idx = find_or_create_shadow(&mut entries, target);
+/// One aging number as `-S` prints it: the value, or `-1` for no policy.
+fn policy(value: Option<i64>) -> i64 {
+    value.unwrap_or(-1)
+}
 
-    entries[idx].last_changed = 0;
+/// Expire password — force a change at next login by dating it to the epoch.
+fn cmd_expire(accounts: &mut Accounts, target: &str) -> i32 {
+    let record = match accounts.record(target) {
+        Ok(record) => record,
+        Err(code) => return code,
+    };
 
-    if let Err(e) = write_shadow(&entries) {
+    let mut aging = record.aging();
+    aging.changed = Some(0);
+    record.set_aging(&aging);
+
+    if let Err(e) = accounts.store() {
         eprintln!("passwd: {e}");
         return 1;
     }
@@ -929,132 +860,60 @@ fn cmd_expire(target: &str) -> i32 {
     0
 }
 
-/// Set the minimum days between password changes.
-fn cmd_set_min_days(target: &str, days: i64) -> i32 {
-    let mut entries = read_shadow();
-    let idx = find_or_create_shadow(&mut entries, target);
-
-    entries[idx].min_days = days;
-
-    if let Err(e) = write_shadow(&entries) {
-        eprintln!("passwd: {e}");
-        return 1;
-    }
-
-    eprintln!(
-        "passwd: minimum password age for {} set to {} day(s)",
-        quoteaf_os(target),
-        days
-    );
-    0
-}
-
-/// Set the maximum days a password is valid.
-fn cmd_set_max_days(target: &str, days: i64) -> i32 {
-    let mut entries = read_shadow();
-    let idx = find_or_create_shadow(&mut entries, target);
-
-    entries[idx].max_days = days;
-
-    if let Err(e) = write_shadow(&entries) {
-        eprintln!("passwd: {e}");
-        return 1;
-    }
-
-    eprintln!(
-        "passwd: maximum password age for {} set to {} day(s)",
-        quoteaf_os(target),
-        days
-    );
-    0
-}
-
-/// Set the warning days before expiry.
-fn cmd_set_warn_days(target: &str, days: i64) -> i32 {
-    let mut entries = read_shadow();
-    let idx = find_or_create_shadow(&mut entries, target);
-
-    entries[idx].warn_days = days;
-
-    if let Err(e) = write_shadow(&entries) {
-        eprintln!("passwd: {e}");
-        return 1;
-    }
-
-    eprintln!(
-        "passwd: warning days for {} set to {}",
-        quoteaf_os(target),
-        days
-    );
-    0
-}
-
-/// Set the inactive days after expiry before account lock.
-fn cmd_set_inactive_days(target: &str, days: i64) -> i32 {
-    let mut entries = read_shadow();
-    let idx = find_or_create_shadow(&mut entries, target);
-
-    entries[idx].inactive_days = days;
-
-    if let Err(e) = write_shadow(&entries) {
-        eprintln!("passwd: {e}");
-        return 1;
-    }
-
-    eprintln!(
-        "passwd: inactive days for {} set to {}",
-        quoteaf_os(target),
-        days
-    );
-    0
-}
-
-// ============================================================================
-// Date helper
-// ============================================================================
-
-/// Convert days since epoch to a YYYY-MM-DD string.
-fn days_to_date_string(days: i64) -> String {
-    if days <= 0 {
-        return "1970-01-01".to_string();
-    }
-
-    // Simple Gregorian calendar conversion.
-    let mut remaining = days as u64;
-    let mut year: u64 = 1970;
-
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if remaining < days_in_year {
-            break;
-        }
-        remaining -= days_in_year;
-        year += 1;
-    }
-
-    let days_in_months: [u64; 12] = if is_leap_year(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+/// Set one aging field, and report it in the caller's own words.
+///
+/// The four `-n -x -w -i` commands differ only in which field they write and
+/// what they say afterwards, so they share this rather than repeating the
+/// load-modify-save four times — four copies being four places for one of them
+/// to forget the save.
+///
+/// `days` is stored as given, including a negative one: `chage(1)` and
+/// `passwd(1)` both spell "no policy" as `-1` on the command line, and a caller
+/// who asks for that means to clear the field, not to set it to minus one day.
+fn set_aging_field(
+    accounts: &mut Accounts,
+    target: &str,
+    days: i64,
+    field: fn(&mut Aging) -> &mut Option<i64>,
+    announce: &str,
+) -> i32 {
+    let record = match accounts.record(target) {
+        Ok(record) => record,
+        Err(code) => return code,
     };
 
-    let mut month: u64 = 1;
-    for &dm in &days_in_months {
-        if remaining < dm {
-            break;
-        }
-        remaining -= dm;
-        month += 1;
+    let mut aging = record.aging();
+    *field(&mut aging) = if days < 0 { None } else { Some(days) };
+    record.set_aging(&aging);
+
+    if let Err(e) = accounts.store() {
+        eprintln!("passwd: {e}");
+        return 1;
     }
 
-    let day = remaining + 1;
-    format!("{year:04}-{month:02}-{day:02}")
+    if days < 0 {
+        eprintln!("passwd: {announce} for {} cleared", quoteaf_os(target));
+    } else {
+        eprintln!(
+            "passwd: {announce} for {} set to {} day(s)",
+            quoteaf_os(target),
+            days
+        );
+    }
+    0
 }
 
-/// Check if a year is a leap year.
-fn is_leap_year(year: u64) -> bool {
-    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
-}
+// ============================================================================
+// Date helper -- deleted
+// ============================================================================
+//
+// `days_to_date_string` and its `is_leap_year` stood here, walking a year at a
+// time from 1970. They are `userdb::date_from_days` now, next to the fields
+// that are day numbers, and shared with `chage` and `useradd` -- which had
+// their own copies, disagreeing about what a day number before the epoch
+// means. This one clamped such a date to `1970-01-01`; the shared one converts
+// it, so `-S` on a record hand-edited to a negative date now prints the date
+// it says rather than one it does not.
 
 // ============================================================================
 // Main entry point
@@ -1086,8 +945,19 @@ fn main() {
         },
     };
 
-    // Validate the target user exists in /etc/passwd.
-    if find_user(&target).is_none() {
+    // The database is read once, here, and handed to whichever command runs.
+    // Reading it inside each command would mean a `-S` that reports one file
+    // and a `-x` that writes another, and — worse — the read-modify-write
+    // sequence that made `find_or_create_shadow` necessary.
+    let mut accounts = match Accounts::load(std::path::Path::new(userdb::DEFAULT_PATH)) {
+        Ok(accounts) => accounts,
+        Err(e) => {
+            eprintln!("passwd: {e}");
+            process::exit(1);
+        }
+    };
+
+    if accounts.find(&target).is_none() {
         eprintln!("passwd: user {} does not exist", quoteaf_os(&target));
         process::exit(1);
     }
@@ -1109,16 +979,40 @@ fn main() {
     }
 
     let exit_code = match parsed.action {
-        Action::ChangePassword => cmd_change_password(&target, caller_uid),
-        Action::Lock => cmd_lock(&target),
-        Action::Unlock => cmd_unlock(&target),
-        Action::DeletePassword => cmd_delete_password(&target),
-        Action::ShowStatus => cmd_show_status(&target),
-        Action::Expire => cmd_expire(&target),
-        Action::SetMinDays(d) => cmd_set_min_days(&target, d),
-        Action::SetMaxDays(d) => cmd_set_max_days(&target, d),
-        Action::SetWarnDays(d) => cmd_set_warn_days(&target, d),
-        Action::SetInactiveDays(d) => cmd_set_inactive_days(&target, d),
+        Action::ChangePassword => cmd_change_password(&mut accounts, &target, caller_uid),
+        Action::Lock => cmd_lock(&mut accounts, &target),
+        Action::Unlock => cmd_unlock(&mut accounts, &target),
+        Action::DeletePassword => cmd_delete_password(&mut accounts, &target),
+        Action::ShowStatus => cmd_show_status(&accounts, &target),
+        Action::Expire => cmd_expire(&mut accounts, &target),
+        Action::SetMinDays(d) => set_aging_field(
+            &mut accounts,
+            &target,
+            d,
+            |a| &mut a.min_days,
+            "minimum password age",
+        ),
+        Action::SetMaxDays(d) => set_aging_field(
+            &mut accounts,
+            &target,
+            d,
+            |a| &mut a.max_days,
+            "maximum password age",
+        ),
+        Action::SetWarnDays(d) => set_aging_field(
+            &mut accounts,
+            &target,
+            d,
+            |a| &mut a.warn_days,
+            "warning days",
+        ),
+        Action::SetInactiveDays(d) => set_aging_field(
+            &mut accounts,
+            &target,
+            d,
+            |a| &mut a.inactive_days,
+            "inactive days",
+        ),
     };
 
     process::exit(exit_code);
@@ -1132,169 +1026,147 @@ fn main() {
 mod tests {
     use super::*;
 
-    // ---- Password hashing tests ----
+    // ---- What this program writes, read back with what the system reads ----
     //
-    // The SHA-256 known-answer tests that stood here went with the SHA-256
-    // implementation they checked. Their vectors were correct and they
-    // passed; what they could not tell anyone was that the correct digest
-    // was being put into an invented format, under no key-stretching, in a
-    // file two other programs also wrote. The tests below check that
-    // instead, because that is where this file was actually wrong.
+    // The SHA-256 known-answer tests that once stood here went with the
+    // SHA-256 implementation they checked; the `hash_password` tests that
+    // replaced them have now gone with `hash_password` itself, which is
+    // `userdb::Record::set_password` and is tested next to its own definition.
+    //
+    // What remains this crate's to keep is the property both sets existed for,
+    // and it is not a property of a function: that a password *this program
+    // stores* is one the system's verifier accepts when it reads it back out
+    // of the file. That is the bug
+    // `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md` was filed
+    // for, and it is checked below end to end — through a real save into a
+    // scratch directory and the `/etc/shadow` that save generates — because
+    // every previous version of it was checked through a function call, and a
+    // function call is exactly what could not see the disagreement.
 
-    /// A salt `crypt` can carry verbatim, in the alphabet `generate_salt`
-    /// draws from.
+    /// A salt `crypt` can carry verbatim, in the alphabet `userdb` draws from.
+    ///
+    /// Pinned rather than generated: a hash function asked to supply its own
+    /// randomness can only be tested against itself, which is the test that let
+    /// all three of the constructions this crate replaced pass while wrong.
     const SALT: &str = "abcdef0123456789";
 
-    /// The entry written must be one a standard reader recognises: the
-    /// `$6$` identifier, the salt as given, and an 86-character SHA-512
-    /// crypt hash. The old format, `$sha256$<salt>$<64 hex>`, satisfied
-    /// none of that, which is why `login` could not read it.
-    #[test]
-    fn hash_password_writes_a_standard_crypt_entry() {
-        let hashed = hash_password("test123", SALT).expect("hash");
-        assert!(hashed.starts_with("$6$abcdef0123456789$"), "{hashed}");
-        assert_eq!(
-            posix::crypt::stored_method(hashed.as_bytes()),
-            Some(posix::crypt::Method::Sha512),
-            "{hashed}"
-        );
-        assert!(!hashed.contains("$sha256$"), "{hashed}");
+    /// A database holding one account with `password` set.
+    fn db_with(username: &str, password: &str) -> UserDb {
+        let mut record = Record::new();
+        record.set(userdb::field::USERNAME, username);
+        record.set_uid(1000);
+        record
+            .set_password_with_salt(password, SALT)
+            .expect("the pinned salt is one crypt can carry");
+        let mut db = UserDb::new();
+        db.push(record);
+        db
     }
 
-    #[test]
-    fn hash_password_deterministic() {
-        let h1 = hash_password("mypassword", SALT).expect("hash");
-        let h2 = hash_password("mypassword", SALT).expect("hash");
-        assert_eq!(h1, h2);
+    /// The stored entry `password` produces, as this program would store it.
+    fn stored_entry(password: &str) -> String {
+        db_with("alice", password)
+            .find("alice")
+            .and_then(|r| r.get(userdb::field::PASSWORD_HASH))
+            .expect("the record was just given a password")
     }
 
-    #[test]
-    fn hash_password_different_salts() {
-        let h1 = hash_password("mypassword", "salt1").expect("hash");
-        let h2 = hash_password("mypassword", "salt2").expect("hash");
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
-    fn hash_password_different_passwords() {
-        let h1 = hash_password("password1", "samesalt").expect("hash");
-        let h2 = hash_password("password2", "samesalt").expect("hash");
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
-    fn hash_password_empty_password() {
-        let hashed = hash_password("", "salt").expect("hash");
-        assert!(hashed.starts_with("$6$salt$"), "{hashed}");
-        assert!(verify_password("", &hashed));
-        assert!(!verify_password("x", &hashed));
-    }
-
-    /// A salt the format cannot carry is refused rather than truncated or
-    /// silently reinterpreted: `$` would end the salt early, so the entry
-    /// stored would not be the entry asked for.
-    #[test]
-    fn hash_password_refuses_a_salt_it_cannot_store() {
-        assert_eq!(hash_password("pw", ""), None);
-        assert_eq!(hash_password("pw", "has$dollar"), None);
-        assert_eq!(hash_password("pw", "has space"), None);
-        // 17 characters, one past SHA-crypt's maximum.
-        assert_eq!(hash_password("pw", "abcdefghijklmnopq"), None);
-    }
-
-    /// The salt must be usable as-is by the method `passwd` writes with.
-    /// It used to be 32 hex characters — twice SHA-crypt's maximum — which
-    /// hashing truncates while storing what it was given, producing an entry
-    /// that cannot verify against itself.
+    /// Field `index` of `username`'s line in a generated `/etc/shadow`,
+    /// counting from zero — so 1 is the password entry and 2 is the date it
+    /// was last changed.
     ///
-    /// Driven through [`encode_salt`] rather than through [`generate_salt`],
-    /// because the development host has no `/dev/urandom` and, more to the
-    /// point, a randomness source cannot be asked to produce its own worst
-    /// case.  Every one of the 256 byte values is covered here; the hashing
-    /// round-trip below needs only one salt, since the property that could
-    /// break is the *encoding*, not the hash.
-    #[test]
-    fn every_byte_encodes_to_a_character_crypt_can_carry() {
-        let len = NEW_PASSWORD_METHOD.salt_max();
-        for start in 0..=u8::MAX {
-            let bytes: Vec<u8> = (0..len).map(|i| start.wrapping_add(i as u8)).collect();
-            let salt = encode_salt(&bytes);
-            assert_eq!(salt.len(), len, "{salt}");
-            assert!(
-                salt.bytes()
-                    .all(|b| b == b'.' || b == b'/' || b.is_ascii_alphanumeric()),
-                "{salt}"
-            );
-        }
-    }
-
-    /// An encoded salt of the length `passwd` generates is stored verbatim and
-    /// verifies against itself — the property the old 32-hex-character salt
-    /// broke.
-    #[test]
-    fn an_encoded_salt_round_trips_through_the_stored_entry() {
-        let len = NEW_PASSWORD_METHOD.salt_max();
-        let salt = encode_salt(&(0..len).map(|i| i as u8).collect::<Vec<_>>());
-        let hashed = hash_password("correct horse", &salt).expect("hash");
-        assert!(hashed.starts_with(&format!("$6${salt}$")), "{hashed}");
-        assert!(verify_password("correct horse", &hashed));
-    }
-
-    /// `passwd` refuses rather than substituting a predictable salt when the
-    /// system has no randomness.  On a host with `/dev/urandom` this checks
-    /// the salt it produced; on one without — which includes the development
-    /// host — it checks that the answer is `None` and not a weak salt.
-    #[test]
-    fn generate_salt_either_draws_from_urandom_or_refuses() {
-        match generate_salt() {
-            Some(salt) => {
-                assert_eq!(salt.len(), NEW_PASSWORD_METHOD.salt_max(), "{salt}");
-                assert!(hash_password("pw", &salt).is_some(), "{salt}");
+    /// The generated file is read rather than the database, because it is the
+    /// file the rest of the system authenticates against: a test that read the
+    /// YAML back would be checking that this program can read its own writing,
+    /// which was never the thing in doubt.
+    fn shadow_field(dir: &std::path::Path, username: &str, index: usize) -> String {
+        let text = std::fs::read_to_string(dir.join(userdb::SHADOW_NAME))
+            .expect("saving generates a shadow file beside the database");
+        for line in text.lines() {
+            let mut fields = line.split(':');
+            if fields.next() == Some(username) {
+                // `index - 1` because the name has already been taken off.
+                return fields.nth(index - 1).unwrap_or_default().to_string();
             }
-            None => assert!(
-                fs::read("/dev/urandom")
-                    .map(|d| d.len() < NEW_PASSWORD_METHOD.salt_max())
-                    .unwrap_or(true),
-                "refused a salt despite /dev/urandom being readable"
-            ),
         }
+        panic!("no line for `{username}' in the generated shadow:\n{text}");
     }
 
-    // ---- Verify password tests ----
-
-    #[test]
-    fn verify_correct_password() {
-        let hashed = hash_password("correct_horse", SALT).expect("hash");
-        assert!(verify_password("correct_horse", &hashed));
+    /// The password field of `username`'s line in a generated `/etc/shadow`.
+    fn generated_shadow_entry(dir: &std::path::Path, username: &str) -> String {
+        shadow_field(dir, username, 1)
     }
 
+    /// The whole of what this program is for: a password it saves is one the
+    /// system's own verifier accepts, read back from the file the rest of the
+    /// system actually authenticates against.
     #[test]
-    fn verify_wrong_password() {
-        let hashed = hash_password("correct_horse", SALT).expect("hash");
-        assert!(!verify_password("wrong_horse", &hashed));
+    fn a_password_this_program_saves_is_one_the_verifier_accepts() {
+        let scratch = scratchdir::ScratchDir::new("passwd-round-trip");
+        let db = db_with("dave", "correct horse");
+        db.save(scratch.path("users.yaml")).expect("save");
+
+        let stored = generated_shadow_entry(scratch.dir(), "dave");
+        assert!(verify_password("correct horse", &stored), "{stored}");
+        assert!(!verify_password("wrong horse", &stored), "{stored}");
     }
 
+    /// The entry reaching `/etc/shadow` is a standard one: the `$6$`
+    /// identifier and the salt as given. The format this file used to invent,
+    /// `$sha256$<salt>$<64 hex>`, satisfied neither, which is why `login`
+    /// could not read what `passwd` wrote.
     #[test]
-    fn verify_empty_hash() {
-        assert!(!verify_password("anything", ""));
-        assert!(!verify_password("", ""));
+    fn the_generated_entry_is_in_the_format_a_standard_reader_expects() {
+        let scratch = scratchdir::ScratchDir::new("passwd-format");
+        db_with("dave", "correct horse")
+            .save(scratch.path("users.yaml"))
+            .expect("save");
+
+        let stored = generated_shadow_entry(scratch.dir(), "dave");
+        assert!(stored.starts_with(&format!("$6${SALT}$")), "{stored}");
+        assert_eq!(
+            posix::crypt::stored_method(stored.as_bytes()),
+            Some(posix::crypt::Method::Sha512),
+            "{stored}"
+        );
+        assert!(!stored.contains("$sha256$"), "{stored}");
     }
 
+    /// A locked account's generated entry verifies against nothing — **not
+    /// even the correct password**.
+    ///
+    /// `cmd_change_password` refuses locked accounts in one place, up front.
+    /// The old-password gate below it used to carry a second `!is_locked()`
+    /// check that was already unreachable — and that duplicate failed *open*:
+    /// had the up-front refusal ever been removed, the gate would have been
+    /// skipped entirely and a locked account's password changed without the
+    /// old one. With the duplicate gone, that path instead ends here, at a
+    /// stored entry whose `!` prefix leaves it with no recomputable method.
+    /// This test is what makes removing the duplicate safe, so it asserts the
+    /// property directly rather than trusting the prefix to look wrong.
     #[test]
-    fn verify_malformed_hash() {
-        assert!(!verify_password("test", "$sha256$noseparator"));
-        assert!(!verify_password("test", "$6$noseparator"));
-        assert!(!verify_password("test", "not a hash at all"));
-        // No cleartext path: an entry that is not a hash matches nothing,
-        // including itself.
-        assert!(!verify_password("secret", "secret"));
+    fn a_locked_account_verifies_against_nothing_not_even_the_right_password() {
+        let scratch = scratchdir::ScratchDir::new("passwd-locked");
+        let mut db = db_with("dave", "correct horse");
+        db.find_mut("dave").expect("the account").set_locked(true);
+        db.save(scratch.path("users.yaml")).expect("save");
+
+        let stored = generated_shadow_entry(scratch.dir(), "dave");
+        assert!(stored.starts_with('!'), "{stored}");
+        assert_eq!(
+            posix::crypt::stored_method(stored.as_bytes()),
+            None,
+            "{stored}"
+        );
+        assert!(!verify_password("correct horse", &stored), "{stored}");
+        assert!(!verify_password("", &stored), "{stored}");
     }
 
-    /// A published SHA-crypt vector, checked through the function that
-    /// verifies `/etc/shadow`. This is the test the old code could not
-    /// have: its format had no specification and so no known answer.
+    /// A published SHA-crypt vector, checked through the verifier the rest of
+    /// the system uses. This is the test the old hand-rolled code could not
+    /// have had: its format had no specification and so no known answer.
     #[test]
-    fn verify_accepts_a_published_vector() {
+    fn the_verifier_accepts_a_published_vector() {
         const VECTOR: &str = "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1";
         assert!(verify_password("Hello world!", VECTOR));
         assert!(!verify_password("Hello world", VECTOR));
@@ -1314,37 +1186,6 @@ mod tests {
                 "{stored}"
             );
             assert!(!verify_password("correct horse", &stored), "{stored}");
-        }
-    }
-
-    /// A locked entry is unverifiable **even with the correct password**.
-    ///
-    /// `cmd_change_password` refuses locked accounts in one place, up front.
-    /// The old-password gate below it used to carry a second `!is_locked()`
-    /// check that was already unreachable — and that duplicate failed *open*:
-    /// had the up-front refusal ever been removed, the gate would have been
-    /// skipped entirely and a locked account's password changed without the
-    /// old one. With the duplicate gone, that path instead ends here, at a
-    /// stored entry whose `!` prefix leaves it with no recomputable method.
-    /// This test is what makes removing the duplicate safe, so it asserts the
-    /// property directly rather than trusting the prefix to look wrong.
-    #[test]
-    fn a_locked_entry_verifies_against_nothing_not_even_the_right_password() {
-        let hashed = hash_password("correct horse", SALT).expect("hash");
-        assert!(verify_password("correct horse", &hashed));
-
-        for locked in [
-            format!("!{hashed}"),
-            format!("!!{hashed}"),
-            format!("*{hashed}"),
-        ] {
-            assert_eq!(
-                posix::crypt::stored_method(locked.as_bytes()),
-                None,
-                "{locked}"
-            );
-            assert!(!verify_password("correct horse", &locked), "{locked}");
-            assert!(!verify_password("", &locked), "{locked}");
         }
     }
 
@@ -1420,154 +1261,125 @@ mod tests {
         assert!(result.reasons.iter().any(|r| r.contains("too short")));
     }
 
-    // ---- Shadow entry tests ----
+    // ---- What `-S` reports about a record ----
+    //
+    // The `ShadowEntry` and `PasswdEntry` parse/round-trip tests that stood
+    // here tested two parsers this program no longer has. What they were
+    // really asserting — that the program agrees with the rest of the system
+    // about what a stored entry *means* — is asserted below against the
+    // record itself, which is now the only place that meaning is written down.
 
-    #[test]
-    fn shadow_parse_full_line() {
-        let entry = ShadowEntry::parse("alice:$sha256$salt$hash:19500:0:99999:7:30:20000:")
-            .expect("should parse");
-        assert_eq!(entry.username, "alice");
-        assert_eq!(entry.hash, "$sha256$salt$hash");
-        assert_eq!(entry.last_changed, 19500);
-        assert_eq!(entry.min_days, 0);
-        assert_eq!(entry.max_days, 99999);
-        assert_eq!(entry.warn_days, 7);
-        assert_eq!(entry.inactive_days, 30);
-        assert_eq!(entry.expire_date, 20000);
+    /// A record with `entry` as its stored password and no aging policy.
+    fn record_with_entry(entry: &str) -> Record {
+        let mut record = Record::new();
+        record.set(userdb::field::USERNAME, "alice");
+        record.set_uid(1000);
+        record.set(userdb::field::PASSWORD_HASH, entry);
+        record
     }
 
     #[test]
-    fn shadow_parse_minimal() {
-        let entry = ShadowEntry::parse("bob:!:19000:0:99999:7:::");
-        assert!(entry.is_some());
-        let entry = entry.unwrap();
-        assert_eq!(entry.username, "bob");
-        assert!(entry.is_locked());
+    fn a_usable_password_reports_p() {
+        let record = record_with_entry(&stored_entry("correct horse"));
+        assert!(has_password(&record));
+        assert_eq!(status_char(&record), "P");
     }
 
+    /// A missing field and an empty one are one account — the one that logs in
+    /// without being asked for anything — so they must report the same thing.
     #[test]
-    fn shadow_parse_too_short() {
-        assert!(ShadowEntry::parse("user:hash:123").is_none());
+    fn no_password_at_all_reports_np_however_it_is_spelled() {
+        let empty = record_with_entry("");
+        assert!(!has_password(&empty));
+        assert_eq!(status_char(&empty), "NP");
+
+        let mut absent = Record::new();
+        absent.set(userdb::field::USERNAME, "alice");
+        assert!(!has_password(&absent));
+        assert_eq!(status_char(&absent), "NP");
     }
 
+    /// Every spelling of a lock reports `L`. `!` and `*` are the two the flat
+    /// file has, and `locked: true` is the database's own; a lock only one of
+    /// the three can see is not a lock.
     #[test]
-    fn shadow_round_trip() {
-        let original = ShadowEntry {
-            username: "testuser".to_string(),
-            hash: "$sha256$salt$abcdef".to_string(),
-            last_changed: 19500,
-            min_days: 1,
-            max_days: 90,
-            warn_days: 14,
-            inactive_days: 30,
-            expire_date: 20000,
+    fn a_locked_account_reports_l_however_it_was_locked() {
+        let hashed = stored_entry("correct horse");
+        assert_eq!(status_char(&record_with_entry(&format!("!{hashed}"))), "L");
+        assert_eq!(status_char(&record_with_entry(&format!("*{hashed}"))), "L");
+
+        let mut flagged = record_with_entry(&hashed);
+        flagged.set_locked(true);
+        assert_eq!(status_char(&flagged), "L");
+    }
+
+    /// A pre-`crypt(3)` entry (§329) reports `L`, not `P`. `P` would tell an
+    /// administrator the account has a working password when nothing on the
+    /// system can check one against it — and the `/etc/shadow` the account is
+    /// read through spells that same entry `*`, which shadow-utils also
+    /// reports as `L`. The two must not disagree.
+    #[test]
+    fn an_entry_nothing_can_recompute_reports_l_rather_than_p() {
+        let legacy = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let record = record_with_entry(legacy);
+        assert!(record.has_legacy_password());
+        assert_eq!(status_char(&record), "L");
+    }
+
+    /// `-S` prints `-1` for a policy nobody set, rather than the `0 99999 7`
+    /// this used to invent. The distinction is the whole reason the aging
+    /// fields are optional: a `0` in the maximum-days column is not "no expiry
+    /// policy", it is "expired the day it was set".
+    #[test]
+    fn an_unset_aging_field_prints_minus_one_rather_than_an_invented_default() {
+        assert_eq!(policy(None), -1);
+        assert_eq!(policy(Some(0)), 0);
+        assert_eq!(policy(Some(90)), 90);
+    }
+
+    // ---- The minimum-age gate ----
+
+    /// A record whose password was set `age` days ago, under a minimum age of
+    /// `min` days. `None` for either is that field absent from the record.
+    fn record_aged(min: Option<i64>, age: Option<i64>) -> Record {
+        let mut record = record_with_entry(&stored_entry("correct horse"));
+        let aging = Aging {
+            min_days: min,
+            changed: age.and_then(|days| userdb::today().map(|now| now - days)),
+            ..Aging::default()
         };
-        let line = original.to_line();
-        let parsed = ShadowEntry::parse(&line).expect("should parse round-trip");
-        assert_eq!(parsed.username, original.username);
-        assert_eq!(parsed.hash, original.hash);
-        assert_eq!(parsed.last_changed, original.last_changed);
-        assert_eq!(parsed.min_days, original.min_days);
-        assert_eq!(parsed.max_days, original.max_days);
-        assert_eq!(parsed.warn_days, original.warn_days);
-        assert_eq!(parsed.inactive_days, original.inactive_days);
-        assert_eq!(parsed.expire_date, original.expire_date);
+        record.set_aging(&aging);
+        record
     }
 
     #[test]
-    fn shadow_to_line_negative_inactive() {
-        let entry = ShadowEntry {
-            username: "user".to_string(),
-            hash: "hash".to_string(),
-            last_changed: 100,
-            min_days: 0,
-            max_days: 99999,
-            warn_days: 7,
-            inactive_days: -1,
-            expire_date: -1,
-        };
-        let line = entry.to_line();
-        // Negative values should be serialized as empty fields.
-        assert!(line.contains("::"));
+    fn a_password_changed_inside_the_minimum_age_may_not_be_changed_again() {
+        assert_eq!(too_soon_to_change(&record_aged(Some(7), Some(2))), Some(5));
+        assert_eq!(too_soon_to_change(&record_aged(Some(7), Some(0))), Some(7));
     }
 
     #[test]
-    fn shadow_is_locked() {
-        let mut entry = ShadowEntry::new("test");
-        entry.hash = "!$sha256$salt$hash".to_string();
-        assert!(entry.is_locked());
+    fn a_password_past_the_minimum_age_may_be_changed() {
+        assert_eq!(too_soon_to_change(&record_aged(Some(7), Some(7))), None);
+        assert_eq!(too_soon_to_change(&record_aged(Some(7), Some(400))), None);
     }
 
+    /// No minimum-age policy delays nothing. The old code read that absence as
+    /// a `0` it had invented and compared against — which permitted the change,
+    /// but by accident of the number chosen rather than because the record said
+    /// so. A different invented default would have refused it.
     #[test]
-    fn shadow_not_locked() {
-        let mut entry = ShadowEntry::new("test");
-        entry.hash = "$sha256$salt$hash".to_string();
-        assert!(!entry.is_locked());
+    fn an_absent_minimum_age_delays_nothing() {
+        assert_eq!(too_soon_to_change(&record_aged(None, Some(0))), None);
+        assert_eq!(too_soon_to_change(&record_aged(Some(0), Some(0))), None);
     }
 
+    /// A minimum age with no date to measure from cannot refuse anyone.
+    /// Refusing would lock a user out of changing their own password over a
+    /// fact the database does not hold.
     #[test]
-    fn shadow_is_passwordless() {
-        let mut entry = ShadowEntry::new("test");
-        entry.hash = String::new();
-        assert!(entry.is_passwordless());
-    }
-
-    #[test]
-    fn shadow_not_passwordless() {
-        let mut entry = ShadowEntry::new("test");
-        entry.hash = "$sha256$salt$hash".to_string();
-        assert!(!entry.is_passwordless());
-    }
-
-    #[test]
-    fn shadow_status_char_locked() {
-        let mut entry = ShadowEntry::new("test");
-        entry.hash = "!something".to_string();
-        assert_eq!(entry.status_char(), "L");
-    }
-
-    #[test]
-    fn shadow_status_char_no_password() {
-        let mut entry = ShadowEntry::new("test");
-        entry.hash = String::new();
-        assert_eq!(entry.status_char(), "NP");
-    }
-
-    #[test]
-    fn shadow_status_char_has_password() {
-        let mut entry = ShadowEntry::new("test");
-        entry.hash = "$sha256$salt$hash".to_string();
-        assert_eq!(entry.status_char(), "P");
-    }
-
-    // ---- Passwd entry tests ----
-
-    #[test]
-    fn passwd_parse_valid() {
-        let entry = PasswdEntry::parse("alice:x:1000:1000:Alice:/home/alice:/bin/sh");
-        assert!(entry.is_some());
-        let entry = entry.unwrap();
-        assert_eq!(entry.username, "alice");
-        assert_eq!(entry.uid, 1000);
-    }
-
-    #[test]
-    fn passwd_parse_root() {
-        let entry = PasswdEntry::parse("root:x:0:0:root:/root:/bin/sh");
-        assert!(entry.is_some());
-        let entry = entry.unwrap();
-        assert_eq!(entry.username, "root");
-        assert_eq!(entry.uid, 0);
-    }
-
-    #[test]
-    fn passwd_parse_too_short() {
-        assert!(PasswdEntry::parse("user:x").is_none());
-    }
-
-    #[test]
-    fn passwd_parse_bad_uid() {
-        assert!(PasswdEntry::parse("user:x:notanumber:0::/home:/bin/sh").is_none());
+    fn a_minimum_age_with_no_change_date_delays_nothing() {
+        assert_eq!(too_soon_to_change(&record_aged(Some(7), None)), None);
     }
 
     // ---- Argument parsing tests ----
@@ -1696,101 +1508,209 @@ mod tests {
         assert!(parse_args(&args).is_err());
     }
 
-    // ---- Date conversion tests ----
+    // ---- Date conversion ----
+    //
+    // The conversion itself is `userdb`'s and is tested there. What is checked
+    // here is that `-S` prints the field it means to: the four dates below are
+    // the ones this file's own printer was tested with, kept so that removing
+    // that printer cannot have changed the output.
 
     #[test]
-    fn days_to_date_epoch() {
-        assert_eq!(days_to_date_string(0), "1970-01-01");
+    fn the_status_line_prints_the_date_of_the_last_change() {
+        assert_eq!(userdb::date_from_days(0), "1970-01-01");
+        assert_eq!(userdb::date_from_days(19723), "2024-01-01");
+        assert_eq!(userdb::date_from_days(11017), "2000-03-01");
+        // A date before the epoch converts rather than clamping to it, which
+        // is the one thing that changed when the three copies became one.
+        assert_eq!(userdb::date_from_days(-5), "1969-12-27");
+    }
+
+    // ---- The commands, run against a real database in a scratch directory ----
+    //
+    // `find_or_create_shadow` had two tests here, and they are gone with it:
+    // it existed only because a user could be in `/etc/passwd` with no
+    // `/etc/shadow` line, and one database cannot be in that state. What the
+    // commands do is now checked by running them — each one saves, and the
+    // file it saved is reread and inspected, because "the field was set in
+    // memory" is exactly what a command that forgot to save would also pass.
+
+    /// One saved account with `password` set, and the `Accounts` a command
+    /// would be handed for it.
+    fn accounts_with(scratch: &scratchdir::ScratchDir, password: &str) -> Accounts {
+        let path = scratch.path("users.yaml");
+        db_with("dave", password).save(&path).expect("save");
+        Accounts::load(&path).expect("load")
+    }
+
+    /// Reread the database from disk, as the next program to run would.
+    fn reread(accounts: &Accounts) -> Accounts {
+        Accounts::load(&accounts.path).expect("reload")
     }
 
     #[test]
-    fn days_to_date_known() {
-        // 2024-01-01 is day 19723 since epoch.
-        assert_eq!(days_to_date_string(19723), "2024-01-01");
+    fn locking_makes_the_generated_shadow_refuse_the_right_password() {
+        let scratch = scratchdir::ScratchDir::new("passwd-lock");
+        let mut accounts = accounts_with(&scratch, "correct horse");
+
+        assert_eq!(cmd_lock(&mut accounts, "dave"), 0);
+
+        let reloaded = reread(&accounts);
+        assert_eq!(status_char(reloaded.find("dave").expect("account")), "L");
+        let stored = generated_shadow_entry(scratch.dir(), "dave");
+        assert!(!verify_password("correct horse", &stored), "{stored}");
     }
 
+    /// Unlocking gives back the password the lock was laid over — the property
+    /// that makes `-l` reversible, and the one `userdb::Record::set_locked`
+    /// exists to keep. An unlock that only cleared a flag would leave the
+    /// account reporting unlocked and refusing every password.
     #[test]
-    fn days_to_date_negative() {
-        assert_eq!(days_to_date_string(-5), "1970-01-01");
+    fn unlocking_restores_the_password_the_lock_was_laid_over() {
+        let scratch = scratchdir::ScratchDir::new("passwd-unlock");
+        let mut accounts = accounts_with(&scratch, "correct horse");
+
+        assert_eq!(cmd_lock(&mut accounts, "dave"), 0);
+        assert_eq!(cmd_unlock(&mut accounts, "dave"), 0);
+
+        let reloaded = reread(&accounts);
+        assert_eq!(status_char(reloaded.find("dave").expect("account")), "P");
+        let stored = generated_shadow_entry(scratch.dir(), "dave");
+        assert!(verify_password("correct horse", &stored), "{stored}");
     }
 
+    /// An account with nothing underneath the lock is not unlocked into a
+    /// passwordless one. `*` is the absence of a password, not a lock over
+    /// one, so there is nothing to restore and an empty entry would mean "logs
+    /// in without being asked for anything".
     #[test]
-    fn days_to_date_leap_year() {
-        // 2000-03-01 is day 11017 since epoch.
-        assert_eq!(days_to_date_string(11017), "2000-03-01");
+    fn unlocking_an_account_with_no_password_underneath_is_refused() {
+        let scratch = scratchdir::ScratchDir::new("passwd-unlock-starred");
+        let path = scratch.path("users.yaml");
+        let mut db = UserDb::new();
+        let mut record = Record::new();
+        record.set(userdb::field::USERNAME, "dave");
+        record.set_uid(1000);
+        record.set(userdb::field::PASSWORD_HASH, "*");
+        db.push(record);
+        db.save(&path).expect("save");
+        let mut accounts = Accounts::load(&path).expect("load");
+
+        assert_eq!(cmd_unlock(&mut accounts, "dave"), 1);
+
+        // And nothing was written: a refused command must leave the file as it
+        // found it, not half-applied.
+        let reloaded = Accounts::load(&path).expect("reload");
+        let record = reloaded.find("dave").expect("account");
+        assert!(record.is_locked());
+        assert_eq!(status_char(record), "L");
+        assert_eq!(generated_shadow_entry(scratch.dir(), "dave"), "*");
     }
 
-    // ---- Leap year tests ----
-
+    /// `-d` lifts the lock along with the password.
+    ///
+    /// Under the old `!`-prefix spelling this was automatic — emptying the
+    /// entry took the `!` with it — so losing it silently was the likely bug
+    /// in this move: `passwd -d` would report the account needs no password
+    /// while the account went on refusing every login.
     #[test]
-    fn leap_year_2000() {
-        assert!(is_leap_year(2000));
+    fn deleting_a_password_also_lifts_the_lock_that_was_over_it() {
+        let scratch = scratchdir::ScratchDir::new("passwd-delete");
+        let mut accounts = accounts_with(&scratch, "correct horse");
+
+        assert_eq!(cmd_lock(&mut accounts, "dave"), 0);
+        assert_eq!(cmd_delete_password(&mut accounts, "dave"), 0);
+
+        let reloaded = reread(&accounts);
+        let record = reloaded.find("dave").expect("account");
+        assert!(
+            !record.is_locked(),
+            "-d must not leave an account that reports no password and refuses every login"
+        );
+        assert_eq!(status_char(record), "NP");
+        assert_eq!(generated_shadow_entry(scratch.dir(), "dave"), "");
     }
 
+    /// `-e` dates the password to the epoch, which is how `/etc/shadow` spells
+    /// "must be changed at the next login".
     #[test]
-    fn leap_year_2024() {
-        assert!(is_leap_year(2024));
+    fn expiring_a_password_dates_it_to_the_epoch() {
+        let scratch = scratchdir::ScratchDir::new("passwd-expire");
+        let mut accounts = accounts_with(&scratch, "correct horse");
+
+        assert_eq!(cmd_expire(&mut accounts, "dave"), 0);
+
+        let reloaded = reread(&accounts);
+        assert_eq!(
+            reloaded.find("dave").expect("account").aging().changed,
+            Some(0)
+        );
+        assert_eq!(shadow_field(scratch.dir(), "dave", 2), "0");
     }
 
+    /// Setting one aging field leaves the other five as they were — the
+    /// property `userdb::Aging` is read and written whole for. A command that
+    /// wrote six fields from a struct it had partly filled in would silently
+    /// clear the five it was not asked about.
     #[test]
-    fn not_leap_year_1900() {
-        assert!(!is_leap_year(1900));
+    fn setting_one_aging_field_leaves_the_others_alone() {
+        let scratch = scratchdir::ScratchDir::new("passwd-maxdays");
+        let mut accounts = accounts_with(&scratch, "correct horse");
+
+        assert_eq!(
+            set_aging_field(
+                &mut accounts,
+                "dave",
+                90,
+                |a| &mut a.max_days,
+                "maximum password age"
+            ),
+            0
+        );
+
+        let reloaded = reread(&accounts);
+        let aging = reloaded.find("dave").expect("account").aging();
+        assert_eq!(aging.max_days, Some(90));
+        assert_eq!(aging.min_days, None);
+        assert_eq!(aging.warn_days, None);
+        assert_eq!(aging.inactive_days, None);
+        assert_eq!(aging.expires, None);
+        // The password was set, so its date is the one field that is not empty.
+        assert_eq!(aging.changed, userdb::today());
+
+        // ...and it lands in the column the format defines, leaving the
+        // untouched ones empty rather than zero.
+        assert_eq!(shadow_field(scratch.dir(), "dave", 4), "90");
+        assert_eq!(shadow_field(scratch.dir(), "dave", 3), "");
+        assert_eq!(shadow_field(scratch.dir(), "dave", 5), "");
     }
 
+    /// `-1` clears a policy rather than storing minus one day.
+    ///
+    /// `chage(1)` and `passwd(1)` both spell "no policy" as `-1` on the
+    /// command line, but glibc reads a literal `-1` *in the file* as a date one
+    /// day before the epoch. Writing it through would turn "no maximum age"
+    /// into "expired since 1969" for every account it was applied to.
     #[test]
-    fn not_leap_year_2023() {
-        assert!(!is_leap_year(2023));
-    }
+    fn a_negative_day_count_clears_the_policy_rather_than_storing_it() {
+        let scratch = scratchdir::ScratchDir::new("passwd-clear-maxdays");
+        let mut accounts = accounts_with(&scratch, "correct horse");
+        let max_days: fn(&mut Aging) -> &mut Option<i64> = |a| &mut a.max_days;
 
-    // ---- Shadow new() defaults test ----
+        assert_eq!(
+            set_aging_field(&mut accounts, "dave", 90, max_days, "maximum password age"),
+            0
+        );
+        assert_eq!(
+            set_aging_field(&mut accounts, "dave", -1, max_days, "maximum password age"),
+            0
+        );
 
-    #[test]
-    fn shadow_new_defaults() {
-        let entry = ShadowEntry::new("newuser");
-        assert_eq!(entry.username, "newuser");
-        assert_eq!(entry.hash, "!");
-        assert_eq!(entry.min_days, 0);
-        assert_eq!(entry.max_days, 99999);
-        assert_eq!(entry.warn_days, 7);
-        assert_eq!(entry.inactive_days, -1);
-        assert_eq!(entry.expire_date, -1);
-    }
-
-    // ---- find_or_create_shadow tests ----
-
-    #[test]
-    fn find_or_create_existing() {
-        let mut entries = vec![ShadowEntry::new("alice"), ShadowEntry::new("bob")];
-        let idx = find_or_create_shadow(&mut entries, "alice");
-        assert_eq!(idx, 0);
-        assert_eq!(entries.len(), 2);
-    }
-
-    #[test]
-    fn find_or_create_new() {
-        let mut entries = vec![ShadowEntry::new("alice")];
-        let idx = find_or_create_shadow(&mut entries, "charlie");
-        assert_eq!(idx, 1);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[1].username, "charlie");
-    }
-
-    // (The salt's shape is checked by
-    // `generated_salt_is_usable_with_the_method_passwd_writes` above, which
-    // asserts the property that matters — that the salt can be stored
-    // verbatim by the method in use — rather than a length and an alphabet
-    // chosen independently of it. The old test asserted 32 hex characters,
-    // which was internally consistent and twice what SHA-crypt can carry.)
-
-    // ---- Integration: hash + verify round-trip ----
-
-    #[test]
-    fn hash_verify_round_trip() {
-        let password = "S3cur3!Pass";
-        let salt = "0123456789abcdef";
-        let hashed = hash_password(password, salt).expect("hash");
-        assert!(verify_password(password, &hashed));
-        assert!(!verify_password("wrong", &hashed));
+        let reloaded = reread(&accounts);
+        assert_eq!(
+            reloaded.find("dave").expect("account").aging().max_days,
+            None
+        );
+        assert_eq!(shadow_field(scratch.dir(), "dave", 4), "");
     }
 
     // ---- The shared failed-attempt tally (§354) ----
@@ -1811,7 +1731,7 @@ mod tests {
     /// machine. `with_stores` attaches no faillock file; `new()` would.
     fn scratch_authenticator() -> authlib::Authenticator {
         let missing = std::path::Path::new("/nonexistent/passwd-tests");
-        authlib::Authenticator::with_stores(missing, missing)
+        authlib::Authenticator::with_stores(missing)
     }
 
     /// A wrong current password is charged to the shared tally, so that
@@ -1819,7 +1739,7 @@ mod tests {
     #[test]
     fn a_wrong_current_password_is_charged_to_the_shared_tally() {
         let mut auth = scratch_authenticator();
-        let stored = hash_password("correct horse", "0123456789abcdef").expect("hash");
+        let stored = stored_entry("correct horse");
 
         for expected in 1..=3_u32 {
             let outcome = authlib::check_stored(b"wrong", stored.as_bytes());
@@ -1838,7 +1758,7 @@ mod tests {
     #[test]
     fn passwd_is_never_delayed_by_the_tally_it_contributes_to() {
         let mut auth = scratch_authenticator();
-        let stored = hash_password("correct horse", "0123456789abcdef").expect("hash");
+        let stored = stored_entry("correct horse");
 
         // Well past `FREE_ATTEMPTS`: every other prompt would refuse outright.
         for _ in 0..(authlib::FREE_ATTEMPTS + 5) {
@@ -1882,7 +1802,7 @@ mod tests {
     /// the rest of the system authenticates against.
     #[test]
     fn verification_agrees_with_authlib_for_every_shape_of_entry() {
-        let good = hash_password("correct horse", "0123456789abcdef").expect("hash");
+        let good = stored_entry("correct horse");
         let locked = format!("!{good}");
         let cases: [(&str, &str); 7] = [
             ("correct horse", &good),

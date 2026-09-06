@@ -19,10 +19,9 @@
 use quoting::quoteaf_os;
 use std::env;
 use std::fs;
-use std::io;
 use std::process;
 
-use userdb::UserDb;
+use pwdb::Db;
 
 // ============================================================================
 // Constants
@@ -36,9 +35,18 @@ const DEFAULT_SHELL: &str = "/bin/sh";
 // ============================================================================
 //
 // The Slate OS kernel does **not** currently expose syscalls for changing the
-// process root directory, working directory, real/effective UID/GID, or
-// supplementary group set. There is no SYS_CHROOT, SYS_CHDIR, SYS_SETUID,
-// SYS_SETGID, or SYS_SETGROUPS in the kernel's syscall table.
+// process root directory, working directory, or supplementary group set.
+// There is no SYS_CHROOT, SYS_CHDIR or SYS_SETGROUPS in the syscall table.
+//
+// It *does* expose SYS_PROCESS_SET_CREDENTIALS (530), which sets uid and gid,
+// and `posix::unistd::setuid`/`setgid` are live on it -- so two of the five
+// operations this block used to list as missing are not. This tool still
+// refuses all five, and that is the point rather than an oversight: dropping
+// privileges without changing the root would leave the caller believing they
+// were sandboxed when they were not, which is a worse failure than refusing.
+// The privilege drop goes in after the root change, not before, and not
+// alone. Asked for in
+// `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
 //
 // An earlier version of this file hardcoded fake syscall numbers
 // (SYS_CHROOT=61, SYS_CHDIR=49, SYS_SETUID=105, SYS_SETGID=106,
@@ -53,6 +61,7 @@ const DEFAULT_SHELL: &str = "/bin/sh";
 //   * SYS_SETUID=105 / SYS_SETGID=106 / SYS_SETGROUPS=116 were unassigned
 //     (only 100..103 in that range are wired up), so those calls hit the
 //     kernel's unknown-syscall path -- benign but undetectable from here.
+//     The first two have a real home now (530, above); the third does not.
 //
 // The safe and correct interim behavior is for `chroot` to fail with a
 // clear "not implemented" error rather than execute any syscall. The
@@ -117,84 +126,40 @@ fn do_setgroups(_gids: &[u32]) -> Result<(), String> {
 // User/group database reading
 // ============================================================================
 
-/// A resolved group with a numeric GID.
-struct GroupEntry {
-    gid: u32,
-    name: String,
-}
-
-/// Read the user database, treating an absent or unreadable file as empty.
+/// Read `/etc/passwd` and `/etc/group`.
 ///
-/// An empty database means `--userspec alice` fails with "unknown user" rather
-/// than resolving to something else. That is the right failure for a program
-/// whose next act is to drop privilege: guessing an id here would drop into an
-/// identity the caller did not name.
-fn read_users() -> UserDb {
-    match UserDb::load(userdb::DEFAULT_PATH) {
-        Ok(db) => db,
-        Err(e) => {
-            if e.kind() != io::ErrorKind::NotFound {
-                eprintln!("chroot: cannot read {}: {e}", userdb::DEFAULT_PATH);
-            }
-            UserDb::new()
-        }
-    }
+/// An unreadable or absent file is an empty table, which is `pwdb`'s rule and
+/// glibc's: names then cannot be resolved, so `--userspec alice:users` fails
+/// with "invalid user" rather than silently running as somebody else.
+///
+/// This used to read `/etc/users.yaml`, and to *invent* the group table:
+/// `root`, `admin` and `users` were given fixed ids and every other group name
+/// mentioned by any account was numbered from 101 in order of appearance.
+/// Those numbers were not the system's, so `--groups audio` dropped into the
+/// sandbox with a gid no other program agreed with -- and one that changed
+/// when an account was added. `/etc/group` has the real numbers, and since
+/// §353 it is generated from the same database, so there is no longer a second
+/// answer for it to disagree with.
+fn read_db() -> Db {
+    Db::load()
 }
 
-/// Build the group table by collecting every unique group name from all users
-/// and assigning GIDs in order. Well-known groups get fixed IDs.
-fn build_group_table(users: &UserDb) -> Vec<GroupEntry> {
-    let mut groups = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    // Well-known groups first.
-    for (name, gid) in [("root", 0u32), ("admin", 1), ("users", 100)] {
-        groups.push(GroupEntry {
-            gid,
-            name: name.to_string(),
-        });
-        seen.insert(name.to_string());
-    }
-
-    let mut next_gid: u32 = 101;
-    for user in users.records() {
-        // An administrator is a member of `wheel` whether or not the field
-        // lists it: the database records administrator-ness as a flag, and
-        // `--userspec root:wheel` failing with "unknown group" on a machine
-        // that has administrators would be inexplicable.
-        let mut names = user.groups();
-        if user.is_admin() {
-            names.push("wheel".to_string());
-        }
-        for g in names {
-            if !seen.contains(&g) {
-                groups.push(GroupEntry {
-                    gid: next_gid,
-                    name: g.clone(),
-                });
-                seen.insert(g);
-                next_gid = next_gid.saturating_add(1);
-            }
-        }
-    }
-
-    groups
-}
-
-/// Resolve a username or numeric UID string to a UID.
-fn resolve_uid(name: &str, users: &UserDb) -> Option<u32> {
+/// Resolve a username to a UID.
+fn resolve_uid(name: &str, db: &Db) -> Option<u32> {
+    // Try numeric first.
     if let Ok(n) = name.parse::<u32>() {
         return Some(n);
     }
-    users.find(name).and_then(userdb::Record::uid)
+    db.user_by_name(name.as_bytes()).map(|u| u.uid)
 }
 
-/// Resolve a group name or numeric GID string to a GID.
-fn resolve_gid(name: &str, groups: &[GroupEntry]) -> Option<u32> {
+/// Resolve a group name to a GID.
+fn resolve_gid(name: &str, db: &Db) -> Option<u32> {
+    // Try numeric first.
     if let Ok(n) = name.parse::<u32>() {
         return Some(n);
     }
-    groups.iter().find(|g| g.name == name).map(|g| g.gid)
+    db.group_by_name(name.as_bytes()).map(|g| g.gid)
 }
 
 // ============================================================================
@@ -205,7 +170,7 @@ fn resolve_gid(name: &str, groups: &[GroupEntry]) -> Option<u32> {
 ///
 /// Tries /proc/self/status first, then falls back to the USER env var
 /// matched against the user database, then defaults to u32::MAX (nobody).
-fn get_caller_uid(users: &UserDb) -> u32 {
+fn get_caller_uid(db: &Db) -> u32 {
     // Try /proc/self/status for the real UID.
     if let Ok(content) = fs::read_to_string("/proc/self/status") {
         for line in content.lines() {
@@ -220,10 +185,9 @@ fn get_caller_uid(users: &UserDb) -> u32 {
 
     // Fallback: resolve USER env var against the database.
     if let Ok(name) = env::var("USER")
-        && let Some(user) = users.find(&name)
-        && let Some(uid) = user.uid()
+        && let Some(user) = db.user_by_name(name.as_bytes())
     {
-        return uid;
+        return user.uid;
     }
 
     // Unknown caller.
@@ -259,11 +223,7 @@ struct Options {
 /// - `USER:GROUP` -> (Some(uid), Some(gid))
 /// - `:GROUP` -> (None, Some(gid))
 /// - `USER:` -> (Some(uid), None)
-fn parse_userspec(
-    spec: &str,
-    users: &UserDb,
-    groups: &[GroupEntry],
-) -> Result<(Option<u32>, Option<u32>), String> {
+fn parse_userspec(spec: &str, db: &Db) -> Result<(Option<u32>, Option<u32>), String> {
     if let Some(colon_pos) = spec.find(':') {
         let user_part = &spec[..colon_pos];
         let group_part = &spec[colon_pos + 1..];
@@ -271,17 +231,14 @@ fn parse_userspec(
         let uid = if user_part.is_empty() {
             None
         } else {
-            Some(
-                resolve_uid(user_part, users)
-                    .ok_or_else(|| format!("invalid user: '{user_part}'"))?,
-            )
+            Some(resolve_uid(user_part, db).ok_or_else(|| format!("invalid user: '{user_part}'"))?)
         };
 
         let gid = if group_part.is_empty() {
             None
         } else {
             Some(
-                resolve_gid(group_part, groups)
+                resolve_gid(group_part, db)
                     .ok_or_else(|| format!("invalid group: '{group_part}'"))?,
             )
         };
@@ -289,27 +246,27 @@ fn parse_userspec(
         Ok((uid, gid))
     } else {
         // No colon -- just a user.
-        let uid = resolve_uid(spec, users).ok_or_else(|| format!("invalid user: '{spec}'"))?;
+        let uid = resolve_uid(spec, db).ok_or_else(|| format!("invalid user: '{spec}'"))?;
         Ok((Some(uid), None))
     }
 }
 
 /// Parse a comma-separated list of group names or numeric GIDs.
-fn parse_group_list(list: &str, groups: &[GroupEntry]) -> Result<Vec<u32>, String> {
+fn parse_group_list(list: &str, db: &Db) -> Result<Vec<u32>, String> {
     let mut gids = Vec::new();
     for item in list.split(',') {
         let item = item.trim();
         if item.is_empty() {
             continue;
         }
-        let gid = resolve_gid(item, groups).ok_or_else(|| format!("invalid group: '{item}'"))?;
+        let gid = resolve_gid(item, db).ok_or_else(|| format!("invalid group: '{item}'"))?;
         gids.push(gid);
     }
     Ok(gids)
 }
 
 /// Parse command-line arguments into an `Options` struct.
-fn parse_args(args: &[String], users: &UserDb, groups: &[GroupEntry]) -> Result<Options, String> {
+fn parse_args(args: &[String], db: &Db) -> Result<Options, String> {
     let mut opts = Options {
         newroot: String::new(),
         command: DEFAULT_SHELL.to_string(),
@@ -342,7 +299,7 @@ fn parse_args(args: &[String], users: &UserDb, groups: &[GroupEntry]) -> Result<
         }
 
         if let Some(val) = arg.strip_prefix("--userspec=") {
-            let (uid, gid) = parse_userspec(val, users, groups)?;
+            let (uid, gid) = parse_userspec(val, db)?;
             opts.userspec_uid = uid;
             opts.userspec_gid = gid;
             i += 1;
@@ -350,7 +307,7 @@ fn parse_args(args: &[String], users: &UserDb, groups: &[GroupEntry]) -> Result<
         }
 
         if let Some(val) = arg.strip_prefix("--groups=") {
-            opts.supplementary_gids = parse_group_list(val, groups)?;
+            opts.supplementary_gids = parse_group_list(val, db)?;
             i += 1;
             continue;
         }
@@ -499,10 +456,9 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     // Load the user/group database for name resolution.
-    let users = read_users();
-    let groups_table = build_group_table(&users);
+    let db = read_db();
 
-    let opts = match parse_args(&args, &users, &groups_table) {
+    let opts = match parse_args(&args, &db) {
         Ok(o) => o,
         Err(msg) => {
             if msg.is_empty() {
@@ -520,7 +476,7 @@ fn main() {
     };
 
     // Root privilege check: only uid 0 may use chroot.
-    let caller_uid = get_caller_uid(&users);
+    let caller_uid = get_caller_uid(&db);
     if caller_uid != 0 {
         eprintln!("chroot: only root can use chroot (current uid: {caller_uid})");
         process::exit(125);
@@ -627,41 +583,37 @@ mod tests {
 
     /// A database in the form `useradm` writes it.
     ///
-    /// Written as text rather than built from struct literals so that the
-    /// parser this crate now shares is exercised on the bytes the writer
-    /// produces. The hand-rolled parser it replaces was only ever tested
-    /// against fixtures built in memory, which is why nothing noticed that it
-    /// read no field the writer had renamed.
-    fn test_users() -> UserDb {
-        UserDb::parse(
-            "users:\n\
-             \x20 - uid: 0\n\
-             \x20   username: \"root\"\n\
-             \x20   groups: [\"root\", \"admin\", \"wheel\"]\n\
-             \x20 - uid: 1000\n\
-             \x20   username: \"alice\"\n\
-             \x20   groups: [\"users\", \"audio\"]\n\
-             \x20 - uid: 1001\n\
-             \x20   username: \"bob\"\n\
-             \x20   groups: [\"users\"]\n\
-             \x20 - uid: 65534\n\
-             \x20   username: \"nobody\"\n\
-             \x20   groups: [\"nogroup\"]\n",
+    /// The two files a POSIX system turns a name into a number with.
+    ///
+    /// Written as text because that is what they are, and because since
+    /// `design-decisions.md` §353 they are *generated* from `/etc/users.yaml`
+    /// -- so a fixture written by hand has the same shape as one the generator
+    /// produces, and one test below checks exactly that.
+    ///
+    /// The gids are the system's. This crate used to number groups itself,
+    /// from 101, in the order it happened to meet them across the accounts.
+    fn test_db() -> Db {
+        Db::from_bytes(
+            b"root:x:0:0:root:/root:/bin/sh\n\
+              alice:x:1000:100:Alice:/home/alice:/bin/sh\n\
+              bob:x:1001:100:Bob:/home/bob:/bin/sh\n\
+              nobody:x:65534:65534:Nobody:/:/sbin/nologin\n",
+            b"root:x:0:\n\
+              admin:x:1:\n\
+              wheel:x:10:root\n\
+              audio:x:29:alice\n\
+              users:x:100:alice,bob\n\
+              nogroup:x:65534:nobody\n",
         )
-    }
-
-    fn test_groups() -> Vec<GroupEntry> {
-        build_group_table(&test_users())
     }
 
     // ---- Argument parsing: basic cases ----
 
     #[test]
     fn test_parse_args_newroot_only() {
-        let users = test_users();
-        let groups = test_groups();
+        let db = test_db();
         let args = vec!["chroot".to_string(), "/mnt".to_string()];
-        let opts = parse_args(&args, &users, &groups).unwrap();
+        let opts = parse_args(&args, &db).unwrap();
         assert_eq!(opts.newroot, "/mnt");
         assert_eq!(opts.command, DEFAULT_SHELL);
         assert!(opts.command_args.is_empty());
@@ -673,14 +625,13 @@ mod tests {
 
     #[test]
     fn test_parse_args_newroot_and_command() {
-        let users = test_users();
-        let groups = test_groups();
+        let db = test_db();
         let args = vec![
             "chroot".to_string(),
             "/jail".to_string(),
             "/bin/bash".to_string(),
         ];
-        let opts = parse_args(&args, &users, &groups).unwrap();
+        let opts = parse_args(&args, &db).unwrap();
         assert_eq!(opts.newroot, "/jail");
         assert_eq!(opts.command, "/bin/bash");
         assert!(opts.command_args.is_empty());
@@ -688,8 +639,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_command_with_arguments() {
-        let users = test_users();
-        let groups = test_groups();
+        let db = test_db();
         let args = vec![
             "chroot".to_string(),
             "/root".to_string(),
@@ -697,7 +647,7 @@ mod tests {
             "-la".to_string(),
             "/tmp".to_string(),
         ];
-        let opts = parse_args(&args, &users, &groups).unwrap();
+        let opts = parse_args(&args, &db).unwrap();
         assert_eq!(opts.newroot, "/root");
         assert_eq!(opts.command, "ls");
         assert_eq!(opts.command_args, vec!["-la", "/tmp"]);
@@ -705,10 +655,9 @@ mod tests {
 
     #[test]
     fn test_parse_args_missing_newroot() {
-        let users = test_users();
-        let groups = test_groups();
+        let db = test_db();
         let args = vec!["chroot".to_string()];
-        let err = parse_args(&args, &users, &groups).unwrap_err();
+        let err = parse_args(&args, &db).unwrap_err();
         assert!(err.contains("missing operand"), "got: {err}");
     }
 
@@ -716,46 +665,42 @@ mod tests {
 
     #[test]
     fn test_parse_args_skip_chdir() {
-        let users = test_users();
-        let groups = test_groups();
+        let db = test_db();
         let args = vec![
             "chroot".to_string(),
             "--skip-chdir".to_string(),
             "/mnt".to_string(),
         ];
-        let opts = parse_args(&args, &users, &groups).unwrap();
+        let opts = parse_args(&args, &db).unwrap();
         assert!(opts.skip_chdir);
         assert_eq!(opts.newroot, "/mnt");
     }
 
     #[test]
     fn test_parse_args_help_returns_empty_error() {
-        let users = test_users();
-        let groups = test_groups();
+        let db = test_db();
         let args = vec!["chroot".to_string(), "--help".to_string()];
-        let err = parse_args(&args, &users, &groups).unwrap_err();
+        let err = parse_args(&args, &db).unwrap_err();
         assert!(err.is_empty());
     }
 
     #[test]
     fn test_parse_args_version_returns_marker() {
-        let users = test_users();
-        let groups = test_groups();
+        let db = test_db();
         let args = vec!["chroot".to_string(), "--version".to_string()];
-        let err = parse_args(&args, &users, &groups).unwrap_err();
+        let err = parse_args(&args, &db).unwrap_err();
         assert_eq!(err, "\x00VERSION");
     }
 
     #[test]
     fn test_parse_args_unknown_option() {
-        let users = test_users();
-        let groups = test_groups();
+        let db = test_db();
         let args = vec![
             "chroot".to_string(),
             "--bogus".to_string(),
             "/mnt".to_string(),
         ];
-        let err = parse_args(&args, &users, &groups).unwrap_err();
+        let err = parse_args(&args, &db).unwrap_err();
         assert!(err.contains("unrecognized option"), "got: {err}");
     }
 
@@ -763,75 +708,67 @@ mod tests {
 
     #[test]
     fn test_parse_userspec_user_and_group_by_name() {
-        let users = test_users();
-        let groups = test_groups();
-        let (uid, gid) = parse_userspec("alice:users", &users, &groups).unwrap();
+        let db = test_db();
+        let (uid, gid) = parse_userspec("alice:users", &db).unwrap();
         assert_eq!(uid, Some(1000));
         assert_eq!(gid, Some(100)); // "users" is well-known gid=100
     }
 
     #[test]
     fn test_parse_userspec_numeric() {
-        let users = test_users();
-        let groups = test_groups();
-        let (uid, gid) = parse_userspec("500:600", &users, &groups).unwrap();
+        let db = test_db();
+        let (uid, gid) = parse_userspec("500:600", &db).unwrap();
         assert_eq!(uid, Some(500));
         assert_eq!(gid, Some(600));
     }
 
     #[test]
     fn test_parse_userspec_user_only() {
-        let users = test_users();
-        let groups = test_groups();
-        let (uid, gid) = parse_userspec("root", &users, &groups).unwrap();
+        let db = test_db();
+        let (uid, gid) = parse_userspec("root", &db).unwrap();
         assert_eq!(uid, Some(0));
         assert_eq!(gid, None);
     }
 
     #[test]
     fn test_parse_userspec_group_only() {
-        let users = test_users();
-        let groups = test_groups();
-        let (uid, gid) = parse_userspec(":admin", &users, &groups).unwrap();
+        let db = test_db();
+        let (uid, gid) = parse_userspec(":admin", &db).unwrap();
         assert_eq!(uid, None);
         assert_eq!(gid, Some(1)); // "admin" is well-known gid=1
     }
 
     #[test]
     fn test_parse_userspec_user_colon_empty() {
-        let users = test_users();
-        let groups = test_groups();
-        let (uid, gid) = parse_userspec("bob:", &users, &groups).unwrap();
+        let db = test_db();
+        let (uid, gid) = parse_userspec("bob:", &db).unwrap();
         assert_eq!(uid, Some(1001));
         assert_eq!(gid, None);
     }
 
     #[test]
     fn test_parse_userspec_invalid_user() {
-        let users = test_users();
-        let groups = test_groups();
-        let err = parse_userspec("nonexistent:users", &users, &groups).unwrap_err();
+        let db = test_db();
+        let err = parse_userspec("nonexistent:users", &db).unwrap_err();
         assert!(err.contains("invalid user"), "got: {err}");
     }
 
     #[test]
     fn test_parse_userspec_invalid_group() {
-        let users = test_users();
-        let groups = test_groups();
-        let err = parse_userspec("root:nonexistent", &users, &groups).unwrap_err();
+        let db = test_db();
+        let err = parse_userspec("root:nonexistent", &db).unwrap_err();
         assert!(err.contains("invalid group"), "got: {err}");
     }
 
     #[test]
     fn test_parse_args_userspec_integration() {
-        let users = test_users();
-        let groups = test_groups();
+        let db = test_db();
         let args = vec![
             "chroot".to_string(),
             "--userspec=nobody:nogroup".to_string(),
             "/jail".to_string(),
         ];
-        let opts = parse_args(&args, &users, &groups).unwrap();
+        let opts = parse_args(&args, &db).unwrap();
         assert_eq!(opts.userspec_uid, Some(65534));
         // "nogroup" comes from nobody's groups, so it gets assigned
         // dynamically. Verify it resolved to something.
@@ -843,56 +780,55 @@ mod tests {
 
     #[test]
     fn test_parse_group_list_by_name() {
-        let groups = test_groups();
-        let gids = parse_group_list("root,admin", &groups).unwrap();
+        let db = test_db();
+        let gids = parse_group_list("root,admin", &db).unwrap();
         assert_eq!(gids, vec![0, 1]);
     }
 
     #[test]
     fn test_parse_group_list_numeric() {
-        let groups = test_groups();
-        let gids = parse_group_list("10,20,30", &groups).unwrap();
+        let db = test_db();
+        let gids = parse_group_list("10,20,30", &db).unwrap();
         assert_eq!(gids, vec![10, 20, 30]);
     }
 
     #[test]
     fn test_parse_group_list_mixed() {
-        let groups = test_groups();
-        let gids = parse_group_list("root,42,admin", &groups).unwrap();
+        let db = test_db();
+        let gids = parse_group_list("root,42,admin", &db).unwrap();
         assert_eq!(gids, vec![0, 42, 1]);
     }
 
     #[test]
     fn test_parse_group_list_single() {
-        let groups = test_groups();
-        let gids = parse_group_list("users", &groups).unwrap();
+        let db = test_db();
+        let gids = parse_group_list("users", &db).unwrap();
         assert_eq!(gids, vec![100]);
     }
 
     #[test]
     fn test_parse_group_list_invalid() {
-        let groups = test_groups();
-        let err = parse_group_list("root,bogus", &groups).unwrap_err();
+        let db = test_db();
+        let err = parse_group_list("root,bogus", &db).unwrap_err();
         assert!(err.contains("invalid group"), "got: {err}");
     }
 
     #[test]
     fn test_parse_group_list_empty_items_skipped() {
-        let groups = test_groups();
-        let gids = parse_group_list("root,,admin,", &groups).unwrap();
+        let db = test_db();
+        let gids = parse_group_list("root,,admin,", &db).unwrap();
         assert_eq!(gids, vec![0, 1]);
     }
 
     #[test]
     fn test_parse_args_groups_integration() {
-        let users = test_users();
-        let groups = test_groups();
+        let db = test_db();
         let args = vec![
             "chroot".to_string(),
             "--groups=root,admin,users".to_string(),
             "/mnt".to_string(),
         ];
-        let opts = parse_args(&args, &users, &groups).unwrap();
+        let opts = parse_args(&args, &db).unwrap();
         assert_eq!(opts.supplementary_gids, vec![0, 1, 100]);
     }
 
@@ -919,123 +855,123 @@ mod tests {
 
     #[test]
     fn test_resolve_uid_by_name() {
-        let users = test_users();
-        assert_eq!(resolve_uid("root", &users), Some(0));
-        assert_eq!(resolve_uid("alice", &users), Some(1000));
-        assert_eq!(resolve_uid("nobody", &users), Some(65534));
+        let db = test_db();
+        assert_eq!(resolve_uid("root", &db), Some(0));
+        assert_eq!(resolve_uid("alice", &db), Some(1000));
+        assert_eq!(resolve_uid("nobody", &db), Some(65534));
     }
 
     #[test]
     fn test_resolve_uid_numeric() {
-        let users = test_users();
-        assert_eq!(resolve_uid("0", &users), Some(0));
-        assert_eq!(resolve_uid("9999", &users), Some(9999));
+        let db = test_db();
+        assert_eq!(resolve_uid("0", &db), Some(0));
+        assert_eq!(resolve_uid("9999", &db), Some(9999));
     }
 
     #[test]
     fn test_resolve_uid_nonexistent() {
-        let users = test_users();
-        assert_eq!(resolve_uid("ghost", &users), None);
+        let db = test_db();
+        assert_eq!(resolve_uid("ghost", &db), None);
     }
 
+    /// `wheel` is a group because `/etc/group` says so.
+    ///
+    /// This crate used to add `wheel` to its invented table for any account
+    /// with `is_admin: true`, because administrator-ness is a flag in the
+    /// database rather than a group. That was a reasonable patch over an
+    /// invented table and it is the wrong answer now: a gid a process can
+    /// actually be given has to be one `/etc/group` names, and if `wheel` is
+    /// not in that file then nothing on the system is in it.
     #[test]
-    fn an_administrator_is_a_member_of_wheel() {
-        // The database records administrator-ness as `is_admin: true` rather
-        // than as a group, so `--userspec alice:wheel` would otherwise fail
-        // with "unknown group" on a machine that plainly has administrators.
-        let users = UserDb::parse(
-            "users:\n\
-             \x20 - uid: 1000\n\
-             \x20   username: \"alice\"\n\
-             \x20   is_admin: true\n",
-        );
-        let groups = build_group_table(&users);
-        assert!(resolve_gid("wheel", &groups).is_some());
+    fn a_group_that_is_not_in_the_group_file_does_not_resolve() {
+        let db = test_db();
+        assert_eq!(resolve_gid("wheel", &db), Some(10));
+
+        let without = Db::from_bytes(b"alice:x:1000:1000::/home/alice:/bin/sh\n", b"");
+        assert_eq!(resolve_gid("wheel", &without), None);
     }
 
+    /// A userspec resolves through the file the generator produced.
+    ///
+    /// The point the round-trip test used to make, one step further along:
+    /// `userdb::UserDb::save` *generates* `/etc/passwd`, and this crate reads
+    /// the generated bytes. A reader and a writer that disagree can only be
+    /// seen to disagree at the step where one consumes the other's output.
     #[test]
-    fn a_userspec_resolves_through_a_database_the_writer_produced() {
-        // Serialise and re-parse: the only step at which a reader and a writer
-        // that disagree about the format can be seen to disagree.
-        let mut db = UserDb::new();
+    fn a_userspec_resolves_through_a_passwd_file_the_generator_produced() {
+        let scratch = scratchdir::ScratchDir::new("chroot-generated");
+        let path = scratch.path("users.yaml");
+        let mut db = userdb::UserDb::new();
         let mut alice = userdb::Record::new();
         alice.set_uid(1000);
+        alice.set_gid(100);
         alice.set(userdb::field::USERNAME, "alice");
-        alice.set_groups(&["users".to_string(), "audio".to_string()]);
         db.push(alice);
+        db.save(&path).expect("save");
 
-        let reparsed = UserDb::parse(&db.to_text());
-        let groups = build_group_table(&reparsed);
+        let passwd = std::fs::read(scratch.path(userdb::PASSWD_NAME)).expect("generated passwd");
+        let read = Db::from_bytes(&passwd, b"users:x:100:alice\n");
         assert_eq!(
-            parse_userspec("alice:audio", &reparsed, &groups),
-            // `users` is well-known at 100; `audio` is the first name the
-            // database contributes, so it takes the first free gid.
-            Ok((Some(1000), Some(101)))
+            parse_userspec("alice:users", &read),
+            Ok((Some(1000), Some(100)))
         );
     }
 
     #[test]
     fn test_resolve_gid_by_name() {
-        let groups = test_groups();
-        assert_eq!(resolve_gid("root", &groups), Some(0));
-        assert_eq!(resolve_gid("admin", &groups), Some(1));
-        assert_eq!(resolve_gid("users", &groups), Some(100));
+        let db = test_db();
+        assert_eq!(resolve_gid("root", &db), Some(0));
+        assert_eq!(resolve_gid("admin", &db), Some(1));
+        assert_eq!(resolve_gid("users", &db), Some(100));
     }
 
     #[test]
     fn test_resolve_gid_numeric() {
-        let groups = test_groups();
-        assert_eq!(resolve_gid("42", &groups), Some(42));
+        let db = test_db();
+        assert_eq!(resolve_gid("42", &db), Some(42));
     }
 
     #[test]
     fn test_resolve_gid_nonexistent() {
-        let groups = test_groups();
-        assert_eq!(resolve_gid("phantom", &groups), None);
+        let db = test_db();
+        assert_eq!(resolve_gid("phantom", &db), None);
     }
 
     // ---- Group table construction ----
 
+    /// Every group in the file resolves to the id the file gives it. There is
+    /// no table to build any more, and so no "well-known" ids and no
+    /// dynamically-assigned ones -- the three tests that stood here were about
+    /// a numbering this crate invented.
     #[test]
-    fn test_build_group_table_well_known() {
-        let groups = test_groups();
-        // Well-known groups should be present with fixed GIDs.
-        let root = groups.iter().find(|g| g.name == "root").unwrap();
-        assert_eq!(root.gid, 0);
-        let admin = groups.iter().find(|g| g.name == "admin").unwrap();
-        assert_eq!(admin.gid, 1);
-        let users_grp = groups.iter().find(|g| g.name == "users").unwrap();
-        assert_eq!(users_grp.gid, 100);
+    fn every_group_in_the_file_resolves_to_its_own_id() {
+        let db = test_db();
+        for (name, gid) in [
+            ("root", 0),
+            ("admin", 1),
+            ("wheel", 10),
+            ("audio", 29),
+            ("users", 100),
+            ("nogroup", 65534),
+        ] {
+            assert_eq!(resolve_gid(name, &db), Some(gid), "{name}");
+        }
     }
 
+    /// A name that is in neither file resolves to nothing, rather than to a
+    /// number that happened to be free.
     #[test]
-    fn test_build_group_table_dynamic_groups() {
-        let groups = test_groups();
-        // "wheel", "audio", "nogroup" should be dynamically assigned.
-        let wheel = groups.iter().find(|g| g.name == "wheel");
-        assert!(wheel.is_some());
-        let audio = groups.iter().find(|g| g.name == "audio");
-        assert!(audio.is_some());
-        let nogroup = groups.iter().find(|g| g.name == "nogroup");
-        assert!(nogroup.is_some());
-    }
-
-    #[test]
-    fn test_build_group_table_no_duplicates() {
-        let groups = test_groups();
-        let mut names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
-        let original_len = names.len();
-        names.sort();
-        names.dedup();
-        assert_eq!(names.len(), original_len, "duplicate group names found");
+    fn a_name_that_is_in_neither_file_resolves_to_nothing() {
+        let db = test_db();
+        assert_eq!(resolve_gid("phantom", &db), None);
+        assert_eq!(resolve_uid("phantom", &db), None);
     }
 
     // ---- Combined option parsing ----
 
     #[test]
     fn test_parse_args_all_options() {
-        let users = test_users();
-        let groups = test_groups();
+        let db = test_db();
         let args = vec![
             "chroot".to_string(),
             "--userspec=alice:users".to_string(),
@@ -1046,7 +982,7 @@ mod tests {
             "--flag".to_string(),
             "value".to_string(),
         ];
-        let opts = parse_args(&args, &users, &groups).unwrap();
+        let opts = parse_args(&args, &db).unwrap();
         assert_eq!(opts.newroot, "/sandbox");
         assert_eq!(opts.command, "/usr/bin/app");
         assert_eq!(opts.command_args, vec!["--flag", "value"]);
@@ -1058,15 +994,14 @@ mod tests {
 
     #[test]
     fn test_parse_args_options_before_newroot() {
-        let users = test_users();
-        let groups = test_groups();
+        let db = test_db();
         let args = vec![
             "chroot".to_string(),
             "--skip-chdir".to_string(),
             "--userspec=0:0".to_string(),
             "/chroot-dir".to_string(),
         ];
-        let opts = parse_args(&args, &users, &groups).unwrap();
+        let opts = parse_args(&args, &db).unwrap();
         assert!(opts.skip_chdir);
         assert_eq!(opts.userspec_uid, Some(0));
         assert_eq!(opts.userspec_gid, Some(0));
@@ -1123,10 +1058,9 @@ mod tests {
 
     #[test]
     fn test_parse_args_default_command() {
-        let users = test_users();
-        let groups = test_groups();
+        let db = test_db();
         let args = vec!["chroot".to_string(), "/newroot".to_string()];
-        let opts = parse_args(&args, &users, &groups).unwrap();
+        let opts = parse_args(&args, &db).unwrap();
         assert_eq!(opts.command, "/bin/sh");
     }
 

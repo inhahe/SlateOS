@@ -20,8 +20,8 @@
 //! `login`, `su`/`sudo`, and — the case that prompted it — a desktop lock
 //! screen, which must be able to ask without being able to *read* the answer
 //! (`requests/c-b-the-lock-screen-has-no-way-to-check-a-real-password.md`).
-//! An unprivileged GUI process cannot open `/etc/shadow` and must not be handed
-//! a password hash, so it asks a privileged verifier instead. This is that
+//! An unprivileged GUI process cannot open the account database and must not
+//! be handed a password hash, so it asks a privileged verifier instead. This is that
 //! verifier's implementation; the daemon that exposes it over IPC is
 //! `userspace/logind`.
 //!
@@ -61,8 +61,13 @@ use faillock::Tally;
 /// The native user database (`design.txt`'s YAML rule).
 pub const DEFAULT_USERS_YAML: &str = "/etc/users.yaml";
 
-/// The `shadow(5)` password file.
-pub const DEFAULT_SHADOW: &str = "/etc/shadow";
+// `DEFAULT_SHADOW` stood here, with a `shadow` module that parsed the file.
+// Both are gone: `design-decisions.md` §353 makes `/etc/shadow` *generated*
+// from `/etc/users.yaml`, so an authenticator that read it was authenticating
+// against a copy -- and §353 item 3 is explicit that the branch must be
+// deleted rather than kept as a fallback, because a fallback that fires means
+// the generation broke, and silently admitting someone on the strength of a
+// stale account file is worse than failing.
 
 /// The shared failure tally.
 ///
@@ -241,102 +246,6 @@ pub fn burn(password: &[u8]) {
 }
 
 // ---------------------------------------------------------------------------
-// shadow(5)
-// ---------------------------------------------------------------------------
-
-/// Reading `/etc/shadow`.
-///
-/// Here rather than in `login` because `login` was not the only reader — it was
-/// merely the only one that parsed it correctly.
-pub mod shadow {
-    use std::path::Path;
-
-    /// One `shadow(5)` line.
-    ///
-    /// The aging fields are `i64` with `-1` for "unset", which is what the file
-    /// means by an empty field.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct Entry {
-        /// Account name.
-        pub username: String,
-        /// The password field: a `crypt(3)` entry, a lock marker, or empty.
-        pub password_hash: String,
-        /// Days since the epoch when the password was last changed.
-        pub last_changed: i64,
-        /// Days that must pass before it may be changed again.
-        pub min_days: i64,
-        /// Days after which it must be changed.
-        pub max_days: i64,
-        /// Days of warning before that.
-        pub warn_days: i64,
-        /// Days after expiry before the account is disabled.
-        pub inactive_days: i64,
-        /// Days since the epoch when the account expires.
-        pub expire_date: i64,
-    }
-
-    fn field(fields: &[&str], n: usize) -> i64 {
-        fields.get(n).and_then(|f| f.parse().ok()).unwrap_or(-1)
-    }
-
-    /// Parse one line.
-    ///
-    /// Two fields are enough — a name and a password — and the rest default to
-    /// "unset". The parser this replaces required all nine, which meant a
-    /// hand-written `alice:$6$…:` line was not merely un-aged but *invisible*:
-    /// `login` read it as "no such user" and refused a correct password. Aging
-    /// is a policy on top of an account, so a missing policy is not a missing
-    /// account.
-    #[must_use]
-    pub fn parse_line(line: &str) -> Option<Entry> {
-        let fields: Vec<&str> = line.split(':').collect();
-        let username = (*fields.first()?).to_string();
-        if username.is_empty() {
-            return None;
-        }
-        let password_hash = (*fields.get(1)?).to_string();
-        Some(Entry {
-            username,
-            password_hash,
-            last_changed: field(&fields, 2),
-            min_days: field(&fields, 3),
-            max_days: field(&fields, 4),
-            warn_days: field(&fields, 5),
-            inactive_days: field(&fields, 6),
-            expire_date: field(&fields, 7),
-        })
-    }
-
-    /// Find `username` in the text of a shadow file.
-    #[must_use]
-    pub fn lookup_in(text: &str, username: &str) -> Option<Entry> {
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some(entry) = parse_line(line)
-                && entry.username == username
-            {
-                return Some(entry);
-            }
-        }
-        None
-    }
-
-    /// Find `username` in the shadow file at `path`.
-    ///
-    /// An unreadable file is indistinguishable from an absent user, on purpose:
-    /// the caller must not treat "I could not open `/etc/shadow`" as a reason to
-    /// admit anyone.
-    #[must_use]
-    pub fn lookup(path: &Path, username: &str) -> Option<Entry> {
-        let text = std::fs::read_to_string(path).ok()?;
-        lookup_in(&text, username)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // The verifier
 // ---------------------------------------------------------------------------
 
@@ -441,12 +350,18 @@ fn wall_clock_secs() -> u64 {
 ///
 /// # Which store answers
 ///
-/// `/etc/users.yaml` first, `/etc/shadow` second, and only for a user the first
-/// does not have. **B-Q4 has not been answered** — the system still has two
-/// account lists and nothing copies between them — so this order is the one
-/// place that guess lives, rather than a guess each caller makes. Whichever way
-/// B-Q4 lands, one of the two branches becomes dead code here and no caller
-/// changes.
+/// `/etc/users.yaml`, and nothing else. There used to be a second store and an
+/// order between them — the YAML first, `/etc/shadow` for a user it did not
+/// have — because the system had two account lists and nothing copied between
+/// them. B-Q4 settled that as `design-decisions.md` §353: the YAML is the
+/// truth and the flat files are generated from it. The fallback went with the
+/// answer, exactly as the note that used to stand here predicted, and no
+/// caller changed.
+///
+/// It is deleted rather than kept, and that is item 3 of §353 rather than
+/// tidiness: a fallback that fires would mean the generation had broken, and
+/// admitting someone on the strength of a stale account file is a worse
+/// failure than refusing them.
 /// # Where the failure tally lives
 ///
 /// In memory *and*, for a verifier built by [`Authenticator::new`], in a file
@@ -461,7 +376,6 @@ fn wall_clock_secs() -> u64 {
 #[derive(Debug, Clone)]
 pub struct Authenticator {
     users_yaml: PathBuf,
-    shadow: PathBuf,
     now: fn() -> u64,
     tally: BTreeMap<String, Tally>,
     /// `None` for a verifier that counts only in memory — the historical
@@ -480,11 +394,11 @@ impl Authenticator {
     /// A verifier over the system's real stores, sharing the system's tally.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_stores(Path::new(DEFAULT_USERS_YAML), Path::new(DEFAULT_SHADOW))
-            .with_faillock(Path::new(DEFAULT_FAILLOCK))
+        Self::with_stores(Path::new(DEFAULT_USERS_YAML)).with_faillock(Path::new(DEFAULT_FAILLOCK))
     }
 
-    /// A verifier over stores at given paths — for tests, and for a chroot.
+    /// A verifier over the account database at a given path — for tests, and
+    /// for a chroot.
     ///
     /// Counts failures **in memory only**. A caller that wants the tally shared
     /// with the rest of the system adds [`Authenticator::with_faillock`]; this
@@ -492,10 +406,9 @@ impl Authenticator {
     /// user by running, and a chroot cannot be used to run up a tally outside
     /// it.
     #[must_use]
-    pub fn with_stores(users_yaml: &Path, shadow: &Path) -> Self {
+    pub fn with_stores(users_yaml: &Path) -> Self {
         Self {
             users_yaml: users_yaml.to_path_buf(),
-            shadow: shadow.to_path_buf(),
             now: wall_clock_secs,
             tally: BTreeMap::new(),
             faillock: None,
@@ -692,19 +605,23 @@ impl Authenticator {
     }
 
     /// Which stored entry answers for `username`.
+    ///
+    /// A database that cannot be read answers for nobody, which is the same
+    /// answer as a user who is not in it. That is deliberate: "I could not
+    /// open the accounts" must not be a reason to admit anyone, and the caller
+    /// must not be able to tell the two apart, since a difference in the reply
+    /// would report whether an account exists.
     fn resolve(&self, username: &str) -> Resolved {
-        if let Ok(db) = userdb::UserDb::load(&self.users_yaml)
-            && let Some(record) = db.find(username)
-        {
-            if record.is_locked() {
-                return Resolved::Locked;
-            }
-            return Resolved::Entry(record.get(userdb::field::PASSWORD_HASH).unwrap_or_default());
+        let Ok(db) = userdb::UserDb::load(&self.users_yaml) else {
+            return Resolved::Unknown;
+        };
+        let Some(record) = db.find(username) else {
+            return Resolved::Unknown;
+        };
+        if record.is_locked() {
+            return Resolved::Locked;
         }
-        match shadow::lookup(&self.shadow, username) {
-            Some(entry) => Resolved::Entry(entry.password_hash),
-            None => Resolved::Unknown,
-        }
+        Resolved::Entry(record.get(userdb::field::PASSWORD_HASH).unwrap_or_default())
     }
 }
 
@@ -714,7 +631,7 @@ mod tests {
 
     use super::{
         Authenticator, FREE_ATTEMPTS, MAX_DELAY_SECS, Outcome, Tally, check_stored, combine,
-        delay_for, shadow,
+        delay_for,
     };
     use std::path::PathBuf;
 
@@ -866,60 +783,28 @@ mod tests {
         );
     }
 
-    // ---- shadow ----
-
-    #[test]
-    fn a_shadow_line_needs_a_name_and_a_password_and_nothing_else() {
-        let full = shadow::parse_line("alice:$6$a$b:19000:0:99999:7:::").expect("full line");
-        assert_eq!(full.username, "alice");
-        assert_eq!(full.password_hash, "$6$a$b");
-        assert_eq!(full.last_changed, 19000);
-        assert_eq!(full.max_days, 99_999);
-        assert_eq!(full.inactive_days, -1, "an empty aging field is unset");
-
-        // The case the old nine-field parser dropped on the floor.
-        let short = shadow::parse_line("bob:$6$a$b").expect("two fields is an account");
-        assert_eq!(short.username, "bob");
-        assert_eq!(short.password_hash, "$6$a$b");
-        assert_eq!(short.last_changed, -1);
-
-        assert!(shadow::parse_line("nopassword").is_none());
-        assert!(shadow::parse_line(":$6$a$b").is_none(), "no name, no entry");
-    }
-
-    #[test]
-    fn a_lookup_skips_comments_and_blank_lines() {
-        let text = "# comment\n\nalice:$6$a$b:1:2:3:4:5:6:\nbob:!:::::::\n";
-        assert_eq!(
-            shadow::lookup_in(text, "alice")
-                .expect("alice")
-                .password_hash,
-            "$6$a$b"
-        );
-        assert_eq!(
-            shadow::lookup_in(text, "bob").expect("bob").password_hash,
-            "!"
-        );
-        assert!(shadow::lookup_in(text, "carol").is_none());
-        assert!(
-            shadow::lookup_in(text, "# comment").is_none(),
-            "a comment is not an account named `#`"
-        );
-    }
-
     // ---- Authenticator ----
 
-    fn authenticator_over_shadow(text: &str) -> (Authenticator, PathBuf) {
-        let path = tmp("shadow");
-        std::fs::write(&path, text).expect("write shadow");
-        let auth = Authenticator::with_stores(&tmp("absent.yaml"), &path);
-        (auth, path)
+    /// An authenticator over a database in which `alice` has `stored` as her
+    /// password entry.
+    fn authenticator_over(stored: &str, tag: &str) -> (Authenticator, PathBuf) {
+        let path = tmp(tag);
+        let mut db = userdb::UserDb::new();
+        let mut record = userdb::Record::new();
+        // The uid is not decoration: since `design-decisions.md` §353, a save
+        // also generates `/etc/passwd`, and a record with no uid has no line
+        // to generate. An account without one was never a real account.
+        record.set_uid(1000);
+        record.set("username", "alice");
+        record.set(userdb::field::PASSWORD_HASH, stored);
+        db.push(record);
+        db.save(&path).expect("save yaml");
+        (Authenticator::with_stores(&path), path)
     }
 
     #[test]
-    fn the_shadow_store_answers_when_the_native_one_has_no_such_user() {
-        let stored = entry_for("correct horse");
-        let (mut auth, path) = authenticator_over_shadow(&format!("alice:{stored}:1:2:3:4:5:6:\n"));
+    fn the_database_answers_for_the_accounts_it_holds() {
+        let (mut auth, path) = authenticator_over(&entry_for("correct horse"), "answers.yaml");
         assert_eq!(
             auth.authenticate("alice", b"correct horse"),
             Outcome::Accepted
@@ -929,33 +814,40 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// A `/etc/shadow` beside the database is *generated* from it, and is not
+    /// consulted. It used to be a fallback for a user the database did not
+    /// have; §353 item 3 deletes the branch, because a fallback that fires
+    /// means the generation broke and a stale account file must not admit
+    /// anyone.
     #[test]
-    fn the_native_store_wins_when_it_has_the_user() {
-        let yaml_path = tmp("users.yaml");
-        let mut db = userdb::UserDb::new();
-        let mut record = userdb::Record::new();
-        record.set("username", "alice");
-        record
-            .set_password_with_salt("native", "nativesalt")
-            .expect("set password");
-        db.push(record);
-        db.save(&yaml_path).expect("save yaml");
-
-        let shadow_path = tmp("shadow");
+    fn a_generated_shadow_file_is_not_a_second_place_to_look() {
+        let (mut auth, path) = authenticator_over(&entry_for("native"), "not-a-fallback.yaml");
+        // The save generated a `shadow` beside the database. Overwrite it with
+        // an entry for an account the database does not have, and for a
+        // different password for one it does.
+        let shadow_path = path.with_file_name("shadow");
         std::fs::write(
             &shadow_path,
-            format!("alice:{}:1:2:3:4:5:6:\n", entry_for("shadowy")),
+            format!(
+                "alice:{}:1:2:3:4:5:6:\nmallory:{}:1:2:3:4:5:6:\n",
+                entry_for("shadowy"),
+                entry_for("shadowy")
+            ),
         )
         .expect("write shadow");
 
-        let mut auth = Authenticator::with_stores(&yaml_path, &shadow_path);
         assert_eq!(auth.authenticate("alice", b"native"), Outcome::Accepted);
         assert_eq!(
             auth.authenticate("alice", b"shadowy"),
             Outcome::Rejected,
-            "the shadow entry must not be consulted for a user the native store has"
+            "the generated file is a copy, not a second opinion"
         );
-        let _ = std::fs::remove_file(yaml_path);
+        assert_eq!(
+            auth.authenticate("mallory", b"shadowy"),
+            Outcome::Rejected,
+            "an account only the generated file names does not exist"
+        );
+        let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(shadow_path);
     }
 
@@ -964,6 +856,9 @@ mod tests {
         let yaml_path = tmp("locked.yaml");
         let mut db = userdb::UserDb::new();
         let mut record = userdb::Record::new();
+        // See `the_native_store_wins_when_it_has_the_user`: a save generates
+        // `/etc/passwd` too, and that needs a uid.
+        record.set_uid(1000);
         record.set("username", "alice");
         record
             .set_password_with_salt("correct horse", "nativesalt")
@@ -972,7 +867,7 @@ mod tests {
         db.push(record);
         db.save(&yaml_path).expect("save yaml");
 
-        let mut auth = Authenticator::with_stores(&yaml_path, &tmp("absent-shadow"));
+        let mut auth = Authenticator::with_stores(&yaml_path);
         assert_eq!(
             auth.authenticate("alice", b"correct horse"),
             Outcome::Locked
@@ -982,7 +877,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_store_admits_nobody() {
-        let mut auth = Authenticator::with_stores(&tmp("absent.yaml"), &tmp("absent-shadow"));
+        let mut auth = Authenticator::with_stores(&tmp("absent.yaml"));
         assert_eq!(auth.authenticate("alice", b""), Outcome::Rejected);
         assert_eq!(auth.authenticate("root", b"toor"), Outcome::Rejected);
     }
@@ -1026,13 +921,33 @@ mod tests {
         FAKE_NOW_TWO_USERS.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// A database at `tag` in which each of `usernames` has `password`.
+    ///
+    /// These fixtures wrote a `/etc/shadow` until `design-decisions.md` §353
+    /// item 3 removed the store that read it. What they are about -- the
+    /// growing delay, and the tally being shared between processes -- never
+    /// depended on which file the entry came out of.
+    fn database_with(tag: &str, usernames: &[&str], password: &str) -> PathBuf {
+        let stored = entry_for(password);
+        let path = tmp(tag);
+        let mut db = userdb::UserDb::new();
+        for (i, username) in usernames.iter().enumerate() {
+            let mut record = userdb::Record::new();
+            // A record with no uid has no `/etc/passwd` line to generate, and
+            // a save that cannot generate one fails.
+            record.set_uid(1000_u32.saturating_add(u32::try_from(i).unwrap_or(0)));
+            record.set("username", username);
+            record.set(userdb::field::PASSWORD_HASH, &stored);
+            db.push(record);
+        }
+        db.save(&path).expect("write the test database");
+        path
+    }
+
     #[test]
     fn a_user_over_budget_is_refused_without_being_counted_further() {
-        let stored = entry_for("correct horse");
-        let path = tmp("ratelimit-shadow");
-        std::fs::write(&path, format!("alice:{stored}:1:2:3:4:5:6:\n")).expect("write");
-        let mut auth =
-            Authenticator::with_stores(&tmp("absent.yaml"), &path).with_clock(fake_now_budget);
+        let path = database_with("ratelimit.yaml", &["alice"], "correct horse");
+        let mut auth = Authenticator::with_stores(&path).with_clock(fake_now_budget);
 
         FAKE_NOW_BUDGET.store(1000, std::sync::atomic::Ordering::Relaxed);
         for n in 1..=FREE_ATTEMPTS {
@@ -1082,15 +997,8 @@ mod tests {
 
     #[test]
     fn one_users_failures_do_not_delay_another() {
-        let stored = entry_for("correct horse");
-        let path = tmp("two-user-shadow");
-        std::fs::write(
-            &path,
-            format!("alice:{stored}:1:2:3:4:5:6:\nbob:{stored}:1:2:3:4:5:6:\n"),
-        )
-        .expect("write");
-        let mut auth =
-            Authenticator::with_stores(&tmp("absent.yaml"), &path).with_clock(fake_now_two_users);
+        let path = database_with("two-user.yaml", &["alice", "bob"], "correct horse");
+        let mut auth = Authenticator::with_stores(&path).with_clock(fake_now_two_users);
         FAKE_NOW_TWO_USERS.store(5000, std::sync::atomic::Ordering::Relaxed);
         for _ in 0..=FREE_ATTEMPTS {
             let _ = auth.authenticate("alice", b"wrong");
@@ -1138,12 +1046,10 @@ mod tests {
     /// A shadow file holding `alice` with the password `correct horse`, plus a
     /// scratch path for the shared tally. Both are the caller's to delete.
     fn shared_fixture(tag: &str) -> (PathBuf, PathBuf) {
-        let stored = entry_for("correct horse");
-        let shadow = tmp(&format!("{tag}-shadow"));
-        std::fs::write(&shadow, format!("alice:{stored}:1:2:3:4:5:6:\n")).expect("write shadow");
+        let path = database_with(&format!("{tag}-users.yaml"), &["alice"], "correct horse");
         let lock = tmp(&format!("{tag}-tally"));
         let _ = std::fs::remove_file(&lock);
-        (shadow, lock)
+        (path, lock)
     }
 
     /// The whole point of the shared tally: a program that runs once and exits
@@ -1152,13 +1058,13 @@ mod tests {
     /// at the prompt was free.
     #[test]
     fn a_program_that_runs_once_inherits_the_previous_run_s_failures() {
-        let (shadow, lock) = shared_fixture("inherit");
+        let (users, lock) = shared_fixture("inherit");
         FAKE_NOW_SHARED.store(7000, std::sync::atomic::Ordering::Relaxed);
 
         // Each `Authenticator` here stands for one short-lived process: it is
         // built, it asks once, and it is dropped with its memory.
         for _ in 0..=FREE_ATTEMPTS {
-            let mut once = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+            let mut once = Authenticator::with_stores(&users)
                 .with_faillock(&lock)
                 .with_clock(fake_now_shared);
             assert_eq!(once.authenticate("alice", b"wrong"), Outcome::Rejected);
@@ -1166,7 +1072,7 @@ mod tests {
 
         // A brand-new process, with nothing in memory, is refused outright —
         // and refused even though the password it presents is the right one.
-        let mut fresh = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+        let mut fresh = Authenticator::with_stores(&users)
             .with_faillock(&lock)
             .with_clock(fake_now_shared);
         assert!(
@@ -1178,7 +1084,7 @@ mod tests {
         );
         assert_eq!(fresh.failures("alice"), FREE_ATTEMPTS + 1);
 
-        let _ = std::fs::remove_file(shadow);
+        let _ = std::fs::remove_file(users);
         let _ = std::fs::remove_file(lock);
     }
 
@@ -1187,17 +1093,17 @@ mod tests {
     /// everywhere else.
     #[test]
     fn a_success_in_one_program_clears_the_tally_for_the_next() {
-        let (shadow, lock) = shared_fixture("clear");
+        let (users, lock) = shared_fixture("clear");
         FAKE_NOW_SHARED_CLEAR.store(9000, std::sync::atomic::Ordering::Relaxed);
 
         for _ in 0..FREE_ATTEMPTS {
-            let mut once = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+            let mut once = Authenticator::with_stores(&users)
                 .with_faillock(&lock)
                 .with_clock(fake_now_shared_clear);
             assert_eq!(once.authenticate("alice", b"wrong"), Outcome::Rejected);
         }
 
-        let mut good = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+        let mut good = Authenticator::with_stores(&users)
             .with_faillock(&lock)
             .with_clock(fake_now_shared_clear);
         assert_eq!(
@@ -1205,12 +1111,12 @@ mod tests {
             Outcome::Accepted
         );
 
-        let next = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+        let next = Authenticator::with_stores(&users)
             .with_faillock(&lock)
             .with_clock(fake_now_shared_clear);
         assert_eq!(next.failures("alice"), 0, "the success must clear the file");
 
-        let _ = std::fs::remove_file(shadow);
+        let _ = std::fs::remove_file(users);
         let _ = std::fs::remove_file(lock);
     }
 
@@ -1219,11 +1125,10 @@ mod tests {
     /// bug than the one the shared tally fixes.
     #[test]
     fn a_memory_only_verifier_writes_no_shared_file() {
-        let (shadow, lock) = shared_fixture("isolated");
+        let (users, lock) = shared_fixture("isolated");
         FAKE_NOW_ISOLATED.store(11_000, std::sync::atomic::Ordering::Relaxed);
 
-        let mut auth =
-            Authenticator::with_stores(&tmp("absent.yaml"), &shadow).with_clock(fake_now_isolated);
+        let mut auth = Authenticator::with_stores(&users).with_clock(fake_now_isolated);
         for _ in 0..=FREE_ATTEMPTS {
             let _ = auth.authenticate("alice", b"wrong");
         }
@@ -1235,7 +1140,7 @@ mod tests {
         ));
         assert!(!lock.exists(), "a memory-only verifier wrote a tally file");
 
-        let _ = std::fs::remove_file(shadow);
+        let _ = std::fs::remove_file(users);
     }
 
     /// §354: a caller that owns its own verdict — `login`, because of the
@@ -1244,17 +1149,17 @@ mod tests {
     /// `authenticate`, and failures `authenticate` records must delay it.
     #[test]
     fn a_caller_that_owns_its_verdict_shares_the_one_tally_both_ways() {
-        let (shadow, lock) = shared_fixture("pair");
+        let (users, lock) = shared_fixture("pair");
         FAKE_NOW_PAIR.store(13_000, std::sync::atomic::Ordering::Relaxed);
 
         // Direction 1: note_failure delays authenticate.
         for _ in 0..=FREE_ATTEMPTS {
-            let mut once = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+            let mut once = Authenticator::with_stores(&users)
                 .with_faillock(&lock)
                 .with_clock(fake_now_pair);
             once.note_failure("alice");
         }
-        let mut victim = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+        let mut victim = Authenticator::with_stores(&users)
             .with_faillock(&lock)
             .with_clock(fake_now_pair);
         assert!(
@@ -1267,19 +1172,19 @@ mod tests {
 
         // The reset half clears it for both.
         victim.reset("alice");
-        let fresh = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+        let fresh = Authenticator::with_stores(&users)
             .with_faillock(&lock)
             .with_clock(fake_now_pair);
         assert_eq!(fresh.rate_limited("alice"), None);
 
         // Direction 2: authenticate delays rate_limited.
         for _ in 0..=FREE_ATTEMPTS {
-            let mut once = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+            let mut once = Authenticator::with_stores(&users)
                 .with_faillock(&lock)
                 .with_clock(fake_now_pair);
             assert_eq!(once.authenticate("alice", b"wrong"), Outcome::Rejected);
         }
-        let owner = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+        let owner = Authenticator::with_stores(&users)
             .with_faillock(&lock)
             .with_clock(fake_now_pair);
         let wait = owner
@@ -1290,13 +1195,13 @@ mod tests {
         // Waiting it out clears the refusal without clearing the count — the
         // next failure must escalate from where it left off, not from one.
         FAKE_NOW_PAIR.store(13_000 + wait, std::sync::atomic::Ordering::Relaxed);
-        let after = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+        let after = Authenticator::with_stores(&users)
             .with_faillock(&lock)
             .with_clock(fake_now_pair);
         assert_eq!(after.rate_limited("alice"), None);
         assert_eq!(after.failures("alice"), FREE_ATTEMPTS + 1);
 
-        let _ = std::fs::remove_file(shadow);
+        let _ = std::fs::remove_file(users);
         let _ = std::fs::remove_file(lock);
     }
 
@@ -1306,10 +1211,10 @@ mod tests {
     /// bug `authenticate` avoids by not counting a rate-limited attempt.
     #[test]
     fn asking_whether_a_user_is_delayed_does_not_count_against_them() {
-        let (shadow, lock) = shared_fixture("askfree");
+        let (users, lock) = shared_fixture("askfree");
         FAKE_NOW_PAIR.store(13_000, std::sync::atomic::Ordering::Relaxed);
 
-        let mut auth = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+        let mut auth = Authenticator::with_stores(&users)
             .with_faillock(&lock)
             .with_clock(fake_now_pair);
         auth.note_failure("alice");
@@ -1319,7 +1224,7 @@ mod tests {
         }
         assert_eq!(auth.failures("alice"), before, "asking counted a failure");
 
-        let _ = std::fs::remove_file(shadow);
+        let _ = std::fs::remove_file(users);
         let _ = std::fs::remove_file(lock);
     }
 

@@ -262,6 +262,8 @@ walking the real string and therefore only ever returns offsets into it:
 
 | App | Site |
 |---|---|
+| `radio` | stations, genres, favourites, sleep timer, recording, spectrum | a caller. **The compiler already knew**: with `main` never calling the private `render`, dead-code analysis reported the whole UI -- every palette colour, `PlayState::Playing`, three of four `Screen`s, every `SleepTimer` duration -- and `#![allow(dead_code)]` at the top of the file said not to mention it | `FRAME_TICK` while playing or a sleep timer runs |
+| `ircclient` | IRC parsing, channels, users, slash commands | anything to type with. `input_text` was drawn by the renderer and written by nobody, and `input_history`/`input_history_idx` beside it were written once in `new` and never touched | `None` -- messages come from a server, not a timer |
 | `whiteboard` | drawing tools, layers, pages, undo, sticky notes | events. `on_canvas_press`/`move`/`release`/`scroll` and `start_pan` were all written and none was called, and `Tool::shortcut` named a letter per tool that nothing dispatched on | `None` -- nothing on a board moves on its own |
 | `photomanager` | albums, EXIF, ratings, tags, smart albums, duplicates | any input at all, and a scroll offset: the grid cut itself off at the window edge with no offset to move, so a library of four hundred photos showed the first screenful and hid the rest for good | `SLIDESHOW_TICK` while a slideshow runs |
 | `videoplayer` | playback, playlist, chapters, subtitles, equalizer | any input at all -- and it drew a **Keyboard Shortcuts** tab listing thirty-two keys, none of which were bound to anything, because the file did not import `guitk::event` | `FRAME_TICK` while playing or a message is expiring |
@@ -57424,7 +57426,7 @@ and that is exactly the shape that survives a reading.
 screenful of information that is a constant compiled into the program. The
 drawing is real, the filtering and sorting and searching are real, the parsing
 is real — and there is no source. This entry names the pattern, because it has
-now been found fourteen times and writing it up fourteen times separately would train
+now been found sixteen times and writing it up sixteen times separately would train
 the reader to skim it.
 
 **`email` is the sharpest case and the least fixable today.** The client is
@@ -121582,6 +121584,85 @@ non-UTF-8); and `is_safe_filename` refuses `""`, `.`, `..`, `../etc/passwd`,
 `a/b` and an embedded NUL, which guards the `/tmp/.users/<username>` marker
 this program writes and deletes as root.
 
+## B-USERS-YAML-IS-WORLD-READABLE-AND-HOLDS-EVERY-PASSWORD-HASH (lane B, 2026-09-06) — FIXED 2026-09-06
+
+**In short:** `/etc/users.yaml` holds every account's password hash and is
+created with ordinary permissions, so any local user can read it and grind the
+hashes offline at their leisure. That is the exact attack the `/etc/passwd` /
+`/etc/shadow` split was invented to prevent, and this file reintroduces it.
+
+**Where.** `userspace/userdb/src/lib.rs` → `UserDb::save`. The YAML is staged
+with `Access::Shared`, i.e. `std::fs::write`'s default — `0666 & ~umask`, which
+is `0644` on any normal system. The generated `/etc/shadow` written beside it
+*is* restricted (`Access::Private`, `0600`), so as of §353 step 2 the machine
+has the hashes in one protected file and the same hashes in an unprotected one.
+
+**Why it is not simply fixed to `0600` in the same change.** Two unprivileged
+programs read the YAML directly today for name-to-uid lookups:
+
+| Program | What it wants | Runs as |
+|---|---|---|
+| `userspace/chown` | name → uid/gid | whoever typed `chown alice f` |
+| `userspace/chroot` | name → uid/gid/home | ditto (`--userspec`) |
+
+Restricting the file today makes `chown alice f` fail for everyone but root.
+The other consumers — `authlib`, `doas`, `su` — are already privileged and
+would not notice.
+
+**The fix, now that it is reachable.** §353 step 2 generates `/etc/passwd`,
+which carries exactly the fields those two want and is world-readable by
+design. Move `chown` and `chroot` onto `pwdb` reading `/etc/passwd` (the crate
+`id`, `ls`, `tar` and `getent` already use), then change the YAML's staging in
+`UserDb::save` from `Access::Shared` to `Access::Private`. Both halves are
+small; they are separate only because the second is unsafe to do before the
+first.
+
+**Until then.** The hashes are SHA-512-crypt at 5000 rounds (§329), so this is
+an offline-grinding exposure rather than an immediate compromise — but it is a
+real one, and it is strictly worse than the system's own `/etc/shadow`, which
+is `0600`. It has been true since `userdb` was written; §353 step 2 is what
+makes it *fixable*, not what introduces it.
+
+**FIXED (2026-09-06),** in the order the entry prescribes. `chown` and `chroot`
+read `/etc/passwd` and `/etc/group` through `pwdb` now, and `UserDb::save`
+stages the YAML `Access::Private`. The move fixed a second defect on the way:
+both crates were *inventing* the group table — `root`, `admin` and `users` had
+fixed ids and every other group name mentioned by any account was numbered from
+101 in order of appearance — so `chgrp audio` set a gid that depended on which
+accounts existed and that no other program on the system agreed with.
+
+The only remaining unprivileged reader would be a new one, and there is now a
+reason in `UserDb::save` for the next person who considers adding it.
+
+## B-TOOLING-PIPING-CARGO-TEST-INTO-TAIL-HIDES-THE-FAILURE (lane B, 2026-09-06)
+
+**In short:** running `cargo test ... 2>&1 | tail -30` reports success even
+when the test run failed, because the shell reports the exit status of `tail`,
+which always succeeds. An agent reading only "exit code 0" concludes the suite
+is green when it is not. This bit on 2026-09-06: a `rustdoc` failure in
+`userdb`'s doctest pass was reported as exit code 0 and was only noticed by
+reading the text of the output.
+
+**Where.** Not in the tree — it is a habit in how the test commands are
+invoked. It applies equally to `| head`, `| grep` and `| tee`.
+
+**The fix.** Put `set -o pipefail` at the front of any command that pipes a
+build or test into a filter, or drop the filter and read the output file. Note
+that `scripts/run-timeout.py` is unaffected when it is the *outermost* command
+— it exits with the child's own status — but piping *its* output into `tail`
+loses that status again just the same.
+
+**Adjacent, unexplained.** The `rustdoc` failure that exposed this was itself
+strange: ~98 errors of the form "cannot find type `String` in this scope"
+across the whole of `userspace/userdb/src/lib.rs`, i.e. the crate compiling
+with no `std` prelude, together with an `E0462` (found staticlib where an rlib
+was expected). Re-running the identical command immediately afterwards passed
+with 47/47 and clean doctests, so it is a stale-artifact race rather than a
+source defect — most likely two `cargo` invocations against the same
+`target/` directory, which happens here whenever a lint run and a test run
+overlap. If it recurs and is *not* transient, the thing to check first is
+whether a `.rlib` in `target/x86_64-pc-windows-gnu/debug/deps/` was written
+for a different target.
 ## TD-A-DF-IS-THE-SEVENTH-COPY-OF-THE-FATAL-FAULT-GUARD (lane A)
 
 **Found 2026-09-05** while extending `begin_fatal_kernel_fault` to `#TS`/`#NP`/

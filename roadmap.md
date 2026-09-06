@@ -953,6 +953,135 @@ Roadmap:
   shared by two *processes*, and `^C` has to reach the foreground group when it
   is typed rather than when somebody next calls `read`. Neither is expressible
   in libc — see design-decisions.md §345 for the alternative and why it fails.
+- `[x]` `[B]` **`/etc/users.yaml` is the truth; `/etc/passwd` and `/etc/shadow`
+  are generated from it — design-decisions.md §353. Complete 2026-09-06.**
+  An operator decision of 2026-08-21 that had no roadmap entry and was found
+  entirely unimplemented on 2026-09-06: a user created with `useradd` could log in over SSH and did not
+  exist to the graphical login screen, which is the defect §353 was decided to
+  end. Four build items, tracked here:
+  - `[x]` **2. Generate on change** (2026-09-06). `UserDb::save` now writes
+    three files — the database and both renderings — each staged to a
+    temporary and all renamed together, so the window in which they can
+    disagree is three renames wide. The flat files' paths are *derived* from
+    the database's own directory, so generation cannot be forgotten by a
+    caller and a test cannot write over the real `/etc/passwd`. A record that
+    cannot be written as a colon-separated line fails the whole save
+    (`GenerateError`) rather than being skipped, because a skipped record is
+    exactly the one-file-and-not-the-other failure being fixed. Includes item
+    **4**'s generated header. `useradm` is live on it today; `useradd` is not,
+    which is item 1.
+  - `[x]` **1. Redirect the two writers** (2026-09-06). `useradd` and `passwd`
+    wrote `/etc/passwd`, `/etc/shadow`, `/etc/group` and `/etc/gshadow` by hand
+    and had never heard of `userdb`, so the generated files were stale the
+    moment `useradd` ran. **Was blocked on a prerequisite found while
+    scoping it (2026-09-06): `userdb` has no password-aging fields, and
+    `passwd` is largely *about* them** — `-n -x -w -i -e -S` all read and
+    write shadow fields 3–8 (last-changed, min, max, warn, inactive, expire),
+    which `to_shadow_text` then emitted as eight empty fields. Redirecting
+    `passwd` first would therefore have *lost* every aging policy on the
+    machine on the next save. So item 1 split:
+    - `[x]` **1a. Give `userdb` the six aging fields** (2026-09-06). Read and
+      written together as one `Aging` value, because they are one policy and a
+      caller changing one must not silently drop the other five. `None` is the
+      file's *empty* field — "no policy", which is not zero — and deliberately
+      not `-1`, which `chage(1)` and `passwd(1)` accept on their command lines
+      for "never" and must translate at their own edge. `set_password` stamps
+      the change date itself, since a writer that forgot it would exempt that
+      account from expiry for good rather than merely be late.
+    - `[x]` **1b. `passwd` (2026-09-06).** Every read and write goes through
+      `userdb`; the `ShadowEntry`/`PasswdEntry` parsers, the `read_shadow`/
+      `write_shadow`/`find_user` helpers and the duplicate
+      `hash_password`/`generate_salt` pair are all deleted. `find_or_create_shadow`
+      went with them, and its disappearance is the point: it existed because a
+      user could be in `/etc/passwd` with no `/etc/shadow` line, which one
+      database cannot be. Three behaviour fixes fell out — `-S` prints `-1` for
+      a policy nobody set instead of inventing `0 99999 7`; a `-1` day count
+      *clears* a field rather than storing a date one day before the epoch;
+      and `-d` clears the lock, which the `!`-prefix spelling used to do for
+      free. Setting a password no longer unlocks (`design-decisions.md` §1003).
+      The database path is a field of the new `Accounts` type rather than a
+      constant, which is what lets the tests run the real commands against a
+      real database in a scratch directory: 58 tests, including the end-to-end
+      one that a password `passwd` saves is one `authlib` accepts when read
+      back out of the *generated* `/etc/shadow`.
+    - `[x]` **1c. `useradd`/`userdel`/`usermod` (2026-09-06).** The user half
+      of the seven-personality binary now reads and writes `/etc/users.yaml`
+      through `userdb`; `PasswdEntry`, `ShadowEntry` and their parse/serialize
+      pairs are deleted. This was the worst of the three gaps: an account
+      `useradd` created existed only in `/etc/passwd`, so the next save from
+      *any* other tool regenerated that file from a database the account was
+      not in and the account silently ceased to exist. The gid allocator was
+      already there (`next_gid` over `/etc/group`) — groups are outside §353
+      and `/etc/group`/`/etc/gshadow` are still written here directly, so
+      `Database` now holds both stores and saves the group files first, the
+      account database last, the direction that leaves a group nobody is in
+      rather than an account whose group does not exist. Membership is the one
+      fact both stores hold, so no command touches either list directly: five
+      `Database` methods change both, and `groupmod --new-name`/`groupdel` now
+      reach into the accounts too, which they never did. Two behaviour fixes:
+      `-e` converts its date to a day number instead of copying `2027-01-01`
+      into a numeric column where glibc reads it as *no* expiry, and a new
+      account gets no invented `0:99999:7` aging policy (which meant exactly
+      what empty means). Fallout fixed in the same push: `chown alice:` took
+      the first *supplementary* group as the primary one, which was invisible
+      while nothing wrote that list and would have become the usual answer.
+    - `[x]` **1d. `chage` (2026-09-06).** Rewritten onto `userdb::Aging`. The
+      migration was not the main finding: **it never wrote anything.** Every
+      option was parsed, the entry was changed in memory, `chage: updated
+      aging for <user>` was printed, the resulting `/etc/shadow` line was
+      printed to *stdout*, and nothing on disk changed — so a policy an
+      administrator set was gone when the process exited. (One of the
+      2,288 commands in the `open-questions.md` "report success for work they
+      never did" entry, found by moving it rather than by the audit.) A third
+      defect fell out of reading a file that may not exist: when `/etc/shadow`
+      could not be read it **invented three accounts** — `root`, `user`,
+      `nobody`, with made-up hashes and made-up policies — and reported them as
+      fact, so `chage -l root` on a machine with no shadow file printed a
+      policy nobody had set. Now: writes the database (which regenerates
+      `/etc/shadow`), reports an unreadable database instead of inventing one,
+      prints `never`/`-1` for a policy nobody set rather than `0 99999 7`,
+      computes "password expires" only when *both* the change date and the
+      maximum age are known instead of supplying `99999` and `0` for the
+      missing halves, converts `-E`'s date to the day number the column holds,
+      treats `-1` as *clear the field*, implements the interactive form
+      `chage USER` is supposed to show, and requires root to change a policy or
+      to read another account's — it had no permission check at all.
+  - `[x]` **4. The generated files are read-only in intent** — landed with
+    item 2; `generated_header` names the source file in both of them, and says
+    what happens to an edit rather than merely that the file is generated.
+  - **Fallout, done in the same sweep (2026-09-06):** `login` authenticated out
+    of the two generated files, and its account-expiry check only treated the
+    single value `expire_date == 1` as expired — so every account with a real
+    expiry date in the past logged in. It reads the database now and compares
+    against today. And `/etc/users.yaml` could finally become mode 0600
+    (`known-issues.md` →
+    `B-USERS-YAML-IS-WORLD-READABLE-AND-HOLDS-EVERY-PASSWORD-HASH`): the two
+    unprivileged readers, `chown` and `chroot`, moved onto `pwdb` reading the
+    generated `/etc/passwd`, which also stopped both of them *inventing* the
+    group table — numbering groups from 101 in order of appearance, so `chgrp
+    audio` set a gid nothing else on the system agreed with.
+  - `[x]` **3. Collapse `authlib`'s guess (2026-09-06).** `Authenticator` has
+    one store. `DEFAULT_SHADOW`, the whole `authlib::shadow` module, and
+    `with_stores`'s second argument are deleted rather than left as a fallback,
+    for §353's own reason: a fallback that fires means the generation broke,
+    and admitting someone on the strength of a stale account file is worse than
+    refusing. The note that used to stand on `resolve` predicted exactly this
+    ("one of the two branches becomes dead code here and no caller changes"),
+    and no caller did. `login` moved first, since it was the only *production*
+    reader of `authlib::shadow`: it now reads the account from the database,
+    which also removed the "in `/etc/passwd` but not `/etc/shadow`" case it
+    needed a branch for. Four test fixtures (`doas`, `ftpd`, `sshd`, `logind`)
+    wrote a shadow file to authenticate against and now write a database.
+    **Found on the way:** `login`'s account-expiry check only treated the
+    single value `expire_date == 1` as expired -- with a comment saying it
+    "would check against current time" -- so every account with a real expiry
+    date in the past logged in, and the test that covered it passed by using
+    the sentinel.
+  - Adjacent, and newly *reachable* because of item 2: `known-issues.md` →
+    `B-USERS-YAML-IS-WORLD-READABLE-AND-HOLDS-EVERY-PASSWORD-HASH`.
+    `/etc/group`/`/etc/gshadow` are **not** in §353's scope and remain a
+    separate gap (eleven readers, one writer, and no gid allocator in
+    `userdb`).
 - `[B]` Translate POSIX calls to native syscalls (line ~1738)
 - `[B]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5343)
 - `[B]` Rust toolchain, CPython, fastpy compiler self-hosting (lines ~5344–5346)

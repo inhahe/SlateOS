@@ -6,7 +6,22 @@ description = "SlateOS SSH key generation and management"
 # `sha2` for key fingerprints and signature digests. This crate carried its own
 # SHA-256, which in a key tool is a private copy of a public agreement: the
 # fingerprint it prints is compared by hand against one printed by somebody
-# else. SHA-512 stays local -- Ed25519 needs it and `sha2` does not provide it.
+# else.
+#
+# `posix` for `posix::ed25519`, and this is the most serious of the four. This
+# crate implemented Ed25519 itself -- field arithmetic mod 2^255 - 19, twisted
+# Edwards points, a scalar multiply, a private SHA-512, about 560 lines -- and
+# it derived the WRONG PUBLIC KEY. Given RFC 8032 section 7.1's first test
+# vector it returned e000725923fbbc... where the RFC says d75a980182b10a...,
+# which means the public half of every key this tool ever wrote did not
+# correspond to its private half: an authorized_keys line copied from its output
+# refuses its own owner, and a host key it generates makes every client report a
+# bad signature. Its suite was green because its tests checked its derivation
+# against its derivation. `posix::ed25519` is the copy `sshd` already verifies
+# signatures with, and it is checked against all four RFC 8032 vectors for
+# derivation, signing and verification. Nothing found this in eleven earlier
+# readings of these files; the cross-crate interop test found it on its first
+# run, by having `sshd` derive the public half and disagree.
 #
 # `randrange` for the key seed and the OpenSSH-format `checkint`. This crate
 # hand-wrote its own `getrandom` extern and length check, which was the third
@@ -15,9 +30,40 @@ description = "SlateOS SSH key generation and management"
 # Rust API instead, which is stubbed to `-ENOSYS` in a program build. One copy,
 # in one crate, is what stops the next tool from picking the wrong one. See
 # known-issues.md `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`.
+#
+# `sshwire` for base64 and for the `openssh-key-v1` private key container, and
+# this one was a live bug rather than a duplication waiting to become one. This
+# tool wrote `-----BEGIN ED25519 PRIVATE KEY-----` around a bare
+# `seed || public || comment` blob, which is a format nothing else in the tree
+# -- or anywhere else -- can read. So the documented way to set the daemon up,
+#
+#     ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key
+#     sshd
+#
+# ended with sshd refusing to start on the key its own key tool had just
+# written. Both crates' test suites were green: each tested its own encoder
+# against its own decoder, which is exactly the arrangement that cannot notice
+# a disagreement. See known-issues.md
+# `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.
 [dependencies]
 sha2 = { path = "../../sha2" }
 randrange = { path = "../../randrange" }
+sshwire = { path = "../sshwire" }
+posix = { path = "../../posix" }
+
+# A library with a three-line binary on top, for the same reason `sshd` is one:
+# a binary crate produces no rlib, so while this tool was a single `main.rs` no
+# test in any other crate could link it. That is not a theoretical loss. The bug
+# this split was made for -- a private key format `sshd` could not read -- is
+# visible only to a test that holds both programs at once, and while neither
+# was linkable the tree accumulated seven of them.
+[lib]
+name = "ssh_keygen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ssh-keygen"
+path = "src/main.rs"
 
 [lints]
 workspace = true

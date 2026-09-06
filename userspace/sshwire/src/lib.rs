@@ -39,6 +39,8 @@
 //! different" is how the last drift started.
 
 use sha2::sha256;
+use std::collections::VecDeque;
+use std::sync::{Arc, Condvar, Mutex};
 
 // ============================================================================
 // Identification string (RFC 4253 §4.2)
@@ -426,6 +428,356 @@ pub fn read_mpint(data: &[u8], offset: usize) -> Result<(&[u8], usize), WireErro
 }
 
 // ============================================================================
+// The byte stream underneath the protocol
+// ============================================================================
+
+/// What the byte stream underneath SSH can fail to do.
+///
+/// Deliberately not a variant of [`WireError`]. `WireError` means "the peer's
+/// bytes do not describe what they claim to" — a protocol fault. These mean the
+/// bytes did not arrive at all, which is a different thing to report and, for
+/// [`Closed`](Self::Closed), not a fault at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportError {
+    /// A write failed, or accepted nothing while bytes were still owed.
+    Send,
+    /// A read failed.
+    Recv,
+    /// The peer closed the connection.
+    ///
+    /// A *variant*, because both ends need to tell an orderly hang-up from a
+    /// failure and one of them was doing it by searching an error message for
+    /// the substring `"connection closed"` — in two places, in the server's
+    /// session loop, deciding whether to return `Ok` or propagate. That works
+    /// until someone rewords a message, and nothing would have failed when they
+    /// did: the server would simply have started reporting normal client
+    /// disconnections as protocol errors.
+    Closed,
+}
+
+impl core::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Send => write!(f, "send failed"),
+            Self::Recv => write!(f, "receive failed"),
+            Self::Closed => write!(f, "connection closed"),
+        }
+    }
+}
+
+/// A bidirectional byte stream: the whole of what the SSH transport layer needs
+/// from the thing underneath it.
+///
+/// SSH is defined over "a reliable byte-oriented stream" (RFC 4253 §1) and
+/// never over TCP specifically, but both binaries were written against a raw
+/// kernel handle, which is why neither can be exercised without a kernel. That
+/// is not a small inconvenience: it is the reason the one test this stack most
+/// needs — run the client against the server and see whether they agree — has
+/// never existed, and every wire-layer bug found so far was found by reading.
+///
+/// Implementations live in the binaries, next to the syscalls they wrap, so
+/// this crate stays free of any notion of a kernel.
+pub trait Transport {
+    /// Write some of `data`, returning how many bytes were accepted.
+    ///
+    /// # Errors
+    ///
+    /// [`TransportError::Send`] if the write failed.
+    fn send(&mut self, data: &[u8]) -> Result<usize, TransportError>;
+
+    /// Read into `buf`, returning the prefix actually filled.
+    ///
+    /// An empty slice is the peer's orderly close. Handing back the slice
+    /// rather than a count is deliberate: the count is turned into a range in
+    /// exactly one place, the implementation, where a length that does not fit
+    /// the buffer is rejected rather than travelling into a caller's `buf[..n]`
+    /// to panic there. The server's copy of this did index, under a suppressed
+    /// lint; the client's did not.
+    ///
+    /// # Errors
+    ///
+    /// [`TransportError::Recv`] if the read failed.
+    fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<&'b [u8], TransportError>;
+
+    /// Whether a [`recv`](Self::recv) would return without blocking.
+    ///
+    /// The server's session loop needs this: it interleaves "has the client
+    /// sent anything" with "has the shell printed anything", and an
+    /// unconditional read would stall the second until the user typed.
+    fn readable(&self) -> bool;
+
+    /// Release the connection. Idempotent; failures are not reportable, since
+    /// the stream is unusable either way.
+    fn close(&mut self);
+
+    /// Write all of `data`.
+    ///
+    /// # Errors
+    ///
+    /// [`TransportError::Send`] if any write fails or stalls at zero bytes.
+    fn send_all(&mut self, data: &[u8]) -> Result<(), TransportError> {
+        // Walking a shrinking `rest` rather than an offset keeps "how much is
+        // left" and "where that starts" from being two facts that can disagree.
+        let mut rest = data;
+        while !rest.is_empty() {
+            let sent = self.send(rest)?;
+            if sent == 0 {
+                return Err(TransportError::Send);
+            }
+            rest = rest.get(sent..).ok_or(TransportError::Send)?;
+        }
+        Ok(())
+    }
+}
+
+/// One end of an in-memory byte stream, for driving the protocol without a
+/// kernel.
+///
+/// This exists because of a specific gap: neither binary's syscalls work on a
+/// host build (they return `-ENOSYS`), so no `cargo test` in this tree has ever
+/// been able to open a socket, so the one test the SSH stack most needs — run
+/// the client against the server and see whether they agree — could not be
+/// written. Every wire-layer disagreement found so far was found by reading two
+/// files side by side. A transport that is just two queues removes the excuse.
+///
+/// It **blocks**, like the socket it stands in for: a read with nothing to read
+/// waits until the peer writes or hangs up. A non-blocking stand-in would have
+/// forced both ends to be restructured around polling in order to be testable,
+/// which is the tail wagging the dog — and worse, it would have meant the code
+/// under test was not the code that ships.
+///
+/// It is deliberately not `cfg(test)`: the point is for it to be reachable from
+/// the *binaries'* tests and from a separate interop crate, neither of which
+/// can see a `cfg(test)` item in this one.
+#[derive(Debug)]
+pub struct MemoryTransport {
+    /// Bytes written by the peer, waiting to be read here.
+    inbound: Arc<Duct>,
+    /// Bytes written here, waiting to be read by the peer.
+    outbound: Arc<Duct>,
+}
+
+/// One direction of a [`MemoryTransport`] pair: a queue and the wait for it.
+#[derive(Debug, Default)]
+struct Duct {
+    pipe: Mutex<Pipe>,
+    /// Signalled whenever `pipe` gains bytes or loses its writer.
+    arrived: Condvar,
+}
+
+/// The queued bytes of one direction.
+#[derive(Debug, Default)]
+struct Pipe {
+    bytes: VecDeque<u8>,
+    /// Set when the writing end goes away, so a reader sees a close rather than
+    /// waiting for bytes that will never come.
+    writer_gone: bool,
+}
+
+/// A connected pair of in-memory transports: what one writes, the other reads.
+#[must_use]
+pub fn memory_pair() -> (MemoryTransport, MemoryTransport) {
+    let a_to_b = Arc::new(Duct::default());
+    let b_to_a = Arc::new(Duct::default());
+    (
+        MemoryTransport {
+            inbound: Arc::clone(&b_to_a),
+            outbound: Arc::clone(&a_to_b),
+        },
+        MemoryTransport {
+            inbound: a_to_b,
+            outbound: b_to_a,
+        },
+    )
+}
+
+impl Transport for MemoryTransport {
+    fn send(&mut self, data: &[u8]) -> Result<usize, TransportError> {
+        let mut pipe = self
+            .outbound
+            .pipe
+            .lock()
+            .map_err(|_| TransportError::Send)?;
+        if pipe.writer_gone {
+            return Err(TransportError::Send);
+        }
+        pipe.bytes.extend(data.iter().copied());
+        drop(pipe);
+        self.outbound.arrived.notify_all();
+        Ok(data.len())
+    }
+
+    fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<&'b [u8], TransportError> {
+        let mut pipe = self.inbound.pipe.lock().map_err(|_| TransportError::Recv)?;
+        while pipe.bytes.is_empty() && !pipe.writer_gone {
+            pipe = self
+                .inbound
+                .arrived
+                .wait(pipe)
+                .map_err(|_| TransportError::Recv)?;
+        }
+        let mut taken = 0usize;
+        for slot in buf.iter_mut() {
+            let Some(byte) = pipe.bytes.pop_front() else {
+                break;
+            };
+            *slot = byte;
+            taken = taken.saturating_add(1);
+        }
+        // `taken == 0` here means the loop above exited on `writer_gone`, which
+        // is exactly the empty slice the trait defines as the peer's close.
+        buf.get(..taken).ok_or(TransportError::Recv)
+    }
+
+    fn readable(&self) -> bool {
+        self.inbound
+            .pipe
+            .lock()
+            .map_or(true, |pipe| !pipe.bytes.is_empty() || pipe.writer_gone)
+    }
+
+    fn close(&mut self) {
+        if let Ok(mut pipe) = self.outbound.pipe.lock() {
+            pipe.writer_gone = true;
+        }
+        // Wake the peer even if the lock was poisoned: a reader blocked in
+        // `recv` has no other way out, and a test that deadlocks reports far
+        // less than one that fails.
+        self.outbound.arrived.notify_all();
+    }
+}
+
+impl Drop for MemoryTransport {
+    /// Hanging up on drop is what makes a peer's `recv` return instead of
+    /// blocking for ever when the other end's thread finishes.
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+// ============================================================================
+// The randomness underneath the protocol
+// ============================================================================
+
+/// Where a session's unpredictable bytes come from.
+///
+/// This is the second half of the argument [`Transport`] makes. `Transport`
+/// exists because both binaries were written against a raw kernel handle, so
+/// neither could be exercised without a kernel; this exists because both were
+/// written against `randrange::fill_secret` directly, so neither can be
+/// exercised without kernel *randomness* — and on the Windows host the test
+/// suite runs on, `randrange` refuses on purpose (`open-questions.md`, "The
+/// test machine cannot produce random numbers, on purpose…"). A handshake
+/// needs a Diffie-Hellman exponent. With no exponent there is no handshake,
+/// and the one test this stack most needs — run the client against the server
+/// and see whether they agree — cannot be written at all.
+///
+/// Making it a parameter buys two things beyond that. What is under test stops
+/// depending on which platform it was compiled for, which is the same mistake
+/// `randrange` made one layer down. And a test can supply a *deterministic*
+/// source, which turns "both ends derived the same session identifier" into
+/// "both ends derived exactly this session identifier" — an assertion that
+/// fails when either end drifts, rather than only when they drift apart.
+///
+/// It is deliberately a plain `fn` pointer rather than a trait object: a
+/// source with no state cannot accidentally acquire any, and both binaries can
+/// store one in a `Copy` field without a lifetime or an allocation.
+///
+/// # What this is not
+///
+/// It is **not** a way for a caller to choose weak randomness. Both binaries
+/// default to [`KERNEL_SECRETS`] and neither exposes a way to change it from
+/// the command line, a config file, or the network; the only writers are their
+/// own tests, in-crate. A source that could be selected by configuration would
+/// be a downgrade attack with a spelling.
+pub type SecretSource = fn(&mut [u8]) -> Result<(), randrange::EntropyError>;
+
+/// The real source: the kernel CSPRNG, which fails rather than substituting
+/// anything when it cannot answer.
+///
+/// This is what both binaries use unless a test says otherwise.
+pub const KERNEL_SECRETS: SecretSource = randrange::fill_secret;
+
+/// How much one [`StreamBuffer::fill_once`] will take at most.
+const STREAM_READ_SIZE: usize = 8192;
+
+/// How far `pos` may run ahead before the consumed prefix is reclaimed.
+const STREAM_COMPACT_THRESHOLD: usize = 4096;
+
+/// Accumulates stream bytes until a whole packet is present.
+///
+/// A stream has no packet boundaries, so something has to hold the partial one.
+/// Both binaries held it in a private `StreamBuffer` with the same two fields
+/// and the same four methods, and — as with everything else in this crate — the
+/// two were not equal: the server's `fill_once` ended `&tmp[..n]`, indexing a
+/// length the kernel reported, under the crate-wide panic-lint suppression.
+#[derive(Debug, Default)]
+pub struct StreamBuffer {
+    data: Vec<u8>,
+    pos: usize,
+}
+
+impl StreamBuffer {
+    /// An empty buffer, sized for one read.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            data: Vec::with_capacity(STREAM_READ_SIZE),
+            pos: 0,
+        }
+    }
+
+    /// The unconsumed bytes.
+    ///
+    /// The whole of what the packet layer needs: [`PacketCodec::decode`]
+    /// decides for itself whether a whole packet is present, so there is no
+    /// `available() >= n` guard for a caller to get wrong.
+    #[must_use]
+    pub fn unread(&self) -> &[u8] {
+        self.data.get(self.pos..).unwrap_or_default()
+    }
+
+    /// Read once from `transport` and append whatever arrived.
+    ///
+    /// One read, not a loop: the caller decides what to do when the buffer is
+    /// still short, and a session loop's answer is "go and check whether the
+    /// shell has printed anything" rather than "block until the client types".
+    ///
+    /// # Errors
+    ///
+    /// [`TransportError::Closed`] when the peer has hung up — every caller is
+    /// in the middle of wanting more bytes, so a zero-length read is an error
+    /// here even though it is not a fault. Otherwise as [`Transport::recv`].
+    pub fn fill_once(&mut self, transport: &mut dyn Transport) -> Result<(), TransportError> {
+        // Reclaim the consumed prefix before growing. Doing this only past a
+        // threshold keeps a long session from memmoving the tail on every
+        // packet, while still bounding the buffer for one that runs for hours.
+        if self.pos > STREAM_COMPACT_THRESHOLD {
+            self.data.drain(..self.pos);
+            self.pos = 0;
+        }
+        let mut tmp = [0u8; STREAM_READ_SIZE];
+        let received = transport.recv(&mut tmp)?;
+        if received.is_empty() {
+            return Err(TransportError::Closed);
+        }
+        self.data.extend_from_slice(received);
+        Ok(())
+    }
+
+    /// Drop the first `n` unread bytes.
+    ///
+    /// `n` is always a length [`PacketCodec::decode`] has just reported for a
+    /// packet it took out of [`unread`](Self::unread), never a number this side
+    /// chose. `saturating_add` past the end would leave the buffer empty rather
+    /// than panicking, but the `min` keeps `pos` a position in `data` rather
+    /// than a number that merely behaves like one.
+    pub fn advance(&mut self, n: usize) {
+        self.pos = self.pos.saturating_add(n).min(self.data.len());
+    }
+}
+
+// ============================================================================
 // Key exchange (RFC 4253 §7.2, §8)
 // ============================================================================
 
@@ -674,12 +1026,23 @@ fn aes128_key_expand(key: &[u8; 16]) -> [[u8; 16]; 11] {
         }
 
         let mut next = [0u8; 16];
-        for (prev_col, next_col) in prev.chunks_exact(4).zip(next.chunks_exact_mut(4)) {
+        // `as_chunks::<4>` rather than `chunks_exact(4)` because it hands back
+        // `[u8; 4]` rather than a slice that happens to be four long. That is
+        // not a style preference: the column feeds the next iteration as a
+        // `word`, and with a slice that assignment needed a fallible
+        // `<[u8; 4]>::try_from(...)` whose failure arm had to invent a value.
+        // The arm was unreachable, but "unreachable" is a claim about the
+        // chunk size that the reader has to check; with an array the type
+        // system makes it, and a round key can no longer be silently zeroed by
+        // a conversion that was never supposed to fail.
+        let (prev_cols, _) = prev.as_chunks::<4>();
+        let (next_cols, _) = next.as_chunks_mut::<4>();
+        for (prev_col, next_col) in prev_cols.iter().zip(next_cols) {
             for ((dst, &p), &w) in next_col.iter_mut().zip(prev_col).zip(word.iter()) {
                 *dst = p ^ w;
             }
             // The column just written feeds the next one.
-            word = <[u8; 4]>::try_from(&*next_col).unwrap_or([0; 4]);
+            word = *next_col;
         }
 
         *slot = next;
@@ -760,12 +1123,19 @@ fn shift_rows(state: &mut [u8; 16]) {
 }
 
 fn mix_columns(state: &mut [u8; 16]) {
-    // `chunks_exact_mut(4)` hands out the four columns directly, so the
+    // `as_chunks_mut::<4>` hands out the four columns directly, so the
     // `col * 4` base and its four `off + k` offsets -- five chances to write
     // one column while reading another -- are gone. A 16-byte state is four
     // whole columns, so the remainder is always empty.
-    for col in state.chunks_exact_mut(4) {
-        let [a0, a1, a2, a3] = *col else { continue };
+    //
+    // The column arrives as `[u8; 4]` rather than a slice, which is what makes
+    // the destructuring below irrefutable: `chunks_exact_mut` needed a
+    // `let ... else { continue }` whose `continue` arm silently left a column
+    // un-mixed if it were ever reached. It could not be, but only the reader
+    // knew that; here the compiler does.
+    let (columns, _) = state.as_chunks_mut::<4>();
+    for col in columns {
+        let [a0, a1, a2, a3] = *col;
         col.copy_from_slice(&[
             gf_mul2(a0) ^ gf_mul3(a1) ^ a2 ^ a3,
             a0 ^ gf_mul2(a1) ^ gf_mul3(a2) ^ a3,
@@ -873,6 +1243,79 @@ fn increment_counter(counter: &mut [u8; 16]) {
 }
 
 // ============================================================================
+// Message type codes (RFC 4253 §12, RFC 4252 §6, RFC 4254 §9)
+// ============================================================================
+
+/// The number that begins every payload, naming what the payload is.
+///
+/// These are the most obviously two-sided values in the protocol: the sender
+/// writes one and the receiver switches on it, so a table that differs by a
+/// single entry produces a client and a server that cannot talk — while each
+/// one's tests, which send and receive using the same table, pass.
+///
+/// This table was written twice, once in `ssh` and once in `sshd`, and the two
+/// copies did agree; that is luck rather than a property of the arrangement,
+/// and it is the same luck the exchange hash did not have. See
+/// `known-issues.md`
+/// `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.
+///
+/// The table is the union of what the two binaries used, so a constant here may
+/// have no caller in one of them — that is the point. A number one end has not
+/// needed yet still has exactly one correct value, and the next end to need it
+/// should find it rather than transcribe it from the RFC a second time.
+///
+/// The `KEX_DH` names keep this project's spelling; RFC 4253 §8 writes them
+/// `SSH_MSG_KEXDH_INIT` and `SSH_MSG_KEXDH_REPLY`.
+pub mod msg {
+    // RFC 4253 §12 — transport layer, generic.
+    pub const SSH_MSG_DISCONNECT: u8 = 1;
+    pub const SSH_MSG_IGNORE: u8 = 2;
+    pub const SSH_MSG_UNIMPLEMENTED: u8 = 3;
+    pub const SSH_MSG_DEBUG: u8 = 4;
+    pub const SSH_MSG_SERVICE_REQUEST: u8 = 5;
+    pub const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
+
+    // RFC 4253 §12 — algorithm negotiation.
+    pub const SSH_MSG_KEXINIT: u8 = 20;
+    pub const SSH_MSG_NEWKEYS: u8 = 21;
+
+    // RFC 4253 §8 — Diffie-Hellman key exchange. 30..=49 are reserved for the
+    // *negotiated* method, so these two numbers mean something else entirely
+    // under a different kex algorithm.
+    pub const SSH_MSG_KEX_DH_INIT: u8 = 30;
+    pub const SSH_MSG_KEX_DH_REPLY: u8 = 31;
+
+    // RFC 4252 §6 — user authentication, generic.
+    pub const SSH_MSG_USERAUTH_REQUEST: u8 = 50;
+    pub const SSH_MSG_USERAUTH_FAILURE: u8 = 51;
+    pub const SSH_MSG_USERAUTH_SUCCESS: u8 = 52;
+    pub const SSH_MSG_USERAUTH_BANNER: u8 = 53;
+
+    /// RFC 4252 §7 — method-specific, and 60..=79 are reserved for whichever
+    /// method is in progress, so this number is `publickey`'s only while a
+    /// `publickey` request is outstanding.
+    pub const SSH_MSG_USERAUTH_PK_OK: u8 = 60;
+
+    // RFC 4254 §9 — connection layer, global requests.
+    pub const SSH_MSG_GLOBAL_REQUEST: u8 = 80;
+    pub const SSH_MSG_REQUEST_SUCCESS: u8 = 81;
+    pub const SSH_MSG_REQUEST_FAILURE: u8 = 82;
+
+    // RFC 4254 §9 — connection layer, channels.
+    pub const SSH_MSG_CHANNEL_OPEN: u8 = 90;
+    pub const SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
+    pub const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
+    pub const SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93;
+    pub const SSH_MSG_CHANNEL_DATA: u8 = 94;
+    pub const SSH_MSG_CHANNEL_EXTENDED_DATA: u8 = 95;
+    pub const SSH_MSG_CHANNEL_EOF: u8 = 96;
+    pub const SSH_MSG_CHANNEL_CLOSE: u8 = 97;
+    pub const SSH_MSG_CHANNEL_REQUEST: u8 = 98;
+    pub const SSH_MSG_CHANNEL_SUCCESS: u8 = 99;
+    pub const SSH_MSG_CHANNEL_FAILURE: u8 = 100;
+}
+
+// ============================================================================
 // The binary packet protocol (RFC 4253 §6)
 // ============================================================================
 
@@ -952,6 +1395,19 @@ pub struct PacketCodec {
     mac_len: usize,
     seq_out: u32,
     seq_in: u32,
+    /// Bytes put on the wire under the *current* keys, in each direction.
+    ///
+    /// Unlike the sequence numbers beside them these reset at every
+    /// [`activate`](Self::activate), because what they exist to answer is "how
+    /// much has this key done?" — RFC 4253 §9's recommendation to rekey after a
+    /// gigabyte. A counter that ran for the life of the connection would fire
+    /// once and then be permanently over the threshold.
+    ///
+    /// Counted here rather than by the caller because this is the only place
+    /// that knows the true figure: the caller hands over a payload and gets back
+    /// a framed, padded, MAC'd packet, and it is the packet the key protected.
+    bytes_out: u64,
+    bytes_in: u64,
 }
 
 impl core::fmt::Debug for PacketCodec {
@@ -988,6 +1444,8 @@ impl PacketCodec {
             mac_len: 0,
             seq_out: 0,
             seq_in: 0,
+            bytes_out: 0,
+            bytes_in: 0,
         }
     }
 
@@ -1002,7 +1460,10 @@ impl PacketCodec {
     ///
     /// The sequence numbers deliberately survive this call. §6.4 runs them for
     /// the life of the connection, not the life of a key, and resetting them at
-    /// a rekey would break the MAC on the very next packet.
+    /// a rekey would break the MAC on the very next packet. The traffic counters
+    /// behind [`bytes_under_current_keys`](Self::bytes_under_current_keys) do
+    /// the opposite and reset, for the reason given on the fields: they measure
+    /// a key's use, and this call is where a key's use begins.
     ///
     /// # Errors
     ///
@@ -1053,6 +1514,8 @@ impl PacketCodec {
         self.mac_key_in = derive(mac_in, 32);
         self.block_size = 16;
         self.mac_len = 32;
+        self.bytes_out = 0;
+        self.bytes_in = 0;
         Ok(())
     }
 
@@ -1060,6 +1523,21 @@ impl PacketCodec {
     #[must_use]
     pub fn is_encrypted(&self) -> bool {
         self.cipher_out.is_some()
+    }
+
+    /// How much traffic the keys installed by the last
+    /// [`activate`](Self::activate) have protected, in bytes.
+    ///
+    /// This is the larger of the two directions rather than their sum. The
+    /// threshold it feeds — RFC 4253 §9's "after each gigabyte of transmitted
+    /// data" — is a limit on how much one key may do, and the two directions
+    /// have different keys (§7.2 derives six values, three per direction). A sum
+    /// would rekey a bulk download at half the transferred volume, and, worse,
+    /// would let a session that is busy in one direction only run to twice the
+    /// intended amount on the key actually doing the work.
+    #[must_use]
+    pub fn bytes_under_current_keys(&self) -> u64 {
+        self.bytes_out.max(self.bytes_in)
     }
 
     /// The alignment a received packet's first block is read in.
@@ -1163,6 +1641,9 @@ impl PacketCodec {
         }
 
         self.seq_out = self.seq_out.wrapping_add(1);
+        self.bytes_out = self
+            .bytes_out
+            .saturating_add(pkt.len().try_into().unwrap_or(u64::MAX));
         Ok(pkt)
     }
 
@@ -1276,6 +1757,9 @@ impl PacketCodec {
             .to_vec();
 
         self.seq_in = self.seq_in.wrapping_add(1);
+        self.bytes_in = self
+            .bytes_in
+            .saturating_add(total.try_into().unwrap_or(u64::MAX));
         Ok(Some((payload, total)))
     }
 }
@@ -1768,22 +2252,700 @@ pub fn dh_group14_prime() -> BigUint {
 /// `BigUint`.
 #[must_use]
 pub fn dh_group14_prime_bytes() -> Vec<u8> {
-    // `chunks_exact` *is* the "pairs of digits" rule, so there is no stride
-    // arithmetic and no `i + 1 < len` guard to get wrong. The string is a
-    // literal in this file with an even length, so no pair can fail to parse;
-    // a byte that somehow did would read as zero rather than panic, and the
-    // length assertion below would still hold, so the test that checks the
-    // first and last bytes is what actually guards the transcription.
-    DH_GROUP14_P_HEX
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let hi = char::from(pair.first().copied().unwrap_or(b'0'));
-            let lo = char::from(pair.get(1).copied().unwrap_or(b'0'));
-            let nibble = |c: char| u8::try_from(c.to_digit(16).unwrap_or(0)).unwrap_or(0);
+    // `as_chunks::<2>` *is* the "pairs of digits" rule, so there is no stride
+    // arithmetic and no `i + 1 < len` guard to get wrong -- and because it
+    // yields `[u8; 2]` rather than a two-long slice, the pair destructures
+    // directly and there is no `first()`/`get(1)` pair with an invented `b'0'`
+    // default standing in for a case the chunk size already rules out. A digit
+    // that somehow failed to parse would still read as zero rather than panic;
+    // the length assertion below would hold, so the test that checks the first
+    // and last bytes is what actually guards the transcription.
+    let (pairs, _) = DH_GROUP14_P_HEX.as_bytes().as_chunks::<2>();
+    pairs
+        .iter()
+        .map(|&[hi, lo]| {
+            let nibble = |b: u8| u8::try_from(char::from(b).to_digit(16).unwrap_or(0)).unwrap_or(0);
             (nibble(hi) << 4) | nibble(lo)
         })
         .collect()
+}
+
+// ============================================================================
+// Base64 (RFC 4648 §4)
+// ============================================================================
+
+/// The standard (non-URL-safe) alphabet. RFC 4648 §4 Table 1.
+const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Why a base64 string could not be decoded.
+///
+/// One variant, deliberately. Which character was bad, and where, is the sort
+/// of detail that reads as helpful and is not: every caller here is decoding a
+/// key, and a key file is either well-formed or is not to be used. Reporting
+/// the offset of the first bad byte in a private key is a way of describing
+/// its contents to whoever provoked the error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Base64Error {
+    /// The input contains a character outside the alphabet, or its length is
+    /// not one a base64 encoder can produce.
+    ///
+    /// A quartet encodes 1, 2 or 3 bytes, so a group of exactly one character
+    /// encodes nothing and cannot have been produced by an encoder. That case
+    /// is this variant rather than a silent stop.
+    Invalid,
+}
+
+impl std::fmt::Display for Base64Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::Invalid => f.write_str("not valid base64"),
+        }
+    }
+}
+
+impl std::error::Error for Base64Error {}
+
+/// Encode `data` as base64 **without** `=` padding.
+///
+/// This is the form SSH uses everywhere it puts base64 in a line of text that
+/// something else parses by whitespace: `SHA256:` fingerprints, and the middle
+/// field of an `authorized_keys` or `known_hosts` line.
+#[must_use]
+pub fn base64_encode(data: &[u8]) -> String {
+    encode_inner(data, false)
+}
+
+/// Encode `data` as base64 **with** `=` padding to a multiple of four.
+///
+/// This is the form for anything stored as a standalone blob rather than a
+/// field in a line: the body of a PEM-style private key file.
+///
+/// # Why both spellings exist as separate names
+///
+/// They existed already, in different binaries, under *one* name. `ssh`'s
+/// `base64_encode` emitted no padding and `sshd`'s emitted padding, and the
+/// two programs exchange the strings each produces. Nothing detected it,
+/// because each crate tested its own function against its own expectation.
+/// Naming the padding in the function makes choosing wrong a thing you can see
+/// at the call site.
+#[must_use]
+pub fn base64_encode_padded(data: &[u8]) -> String {
+    encode_inner(data, true)
+}
+
+/// The encoder both public spellings share; `pad` picks which one.
+fn encode_inner(data: &[u8], pad: bool) -> String {
+    /// One base64 digit from the low six bits of `sextet`.
+    ///
+    /// Masking to `0x3f` before the lookup makes the index provably in range
+    /// for a 64-entry table, so the fallback cannot be reached.
+    fn digit(sextet: u32) -> char {
+        B64_ALPHABET
+            .get((sextet & 0x3f) as usize)
+            .map_or('A', |&b| char::from(b))
+    }
+
+    // `chunks(3)` states base64's own grouping rule once. The bit layout is
+    // identical for a full and a partial group -- only the number of digits
+    // emitted differs, and that number is the chunk's own length, so there is
+    // no separate tail case to keep in agreement with the loop head.
+    let mut out = String::with_capacity(data.len().div_ceil(3).saturating_mul(4));
+    for chunk in data.chunks(3) {
+        let [b0, b1, b2] = match *chunk {
+            [b0, b1, b2] => [b0, b1, b2],
+            [b0, b1] => [b0, b1, 0],
+            [b0] => [b0, 0, 0],
+            // `chunks(3)` yields neither an empty nor an over-long slice; this
+            // arm exists only because the compiler cannot know that.
+            _ => continue,
+        };
+        let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        out.push(digit(n >> 18));
+        out.push(digit(n >> 12));
+        if chunk.len() >= 2 {
+            out.push(digit(n >> 6));
+        } else if pad {
+            out.push('=');
+        }
+        if chunk.len() >= 3 {
+            out.push(digit(n));
+        } else if pad {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Decode base64, accepting either padding form and ignoring ASCII whitespace.
+///
+/// # Errors
+///
+/// [`Base64Error::Invalid`] if the input holds a character outside the
+/// alphabet, or ends in a group of one character, which no encoder emits.
+///
+/// # Why this refuses rather than truncates
+///
+/// The decoder this replaces in `sshd` stopped at the first character it did
+/// not recognise and returned the bytes it had decoded so far. A host key file
+/// with a corrupted character in the middle therefore did not fail to load: it
+/// loaded as a *shorter* key, and the daemon then either rejected it for its
+/// length or — for a corruption past the 64-byte mark — started normally with
+/// a key whose comment had been silently eaten. A decoder that answers `Ok`
+/// for input no encoder produced is not a decoder; it is a guess.
+pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64Error> {
+    /// Not a base64 character. Distinct from every sextet, which are `0..=63`.
+    const INVALID: u8 = 0xFF;
+
+    /// Reverse lookup, built at compile time.
+    ///
+    /// The indexing here is const-evaluated: an out-of-range index fails the
+    /// build rather than panicking at run time, so this suppression cannot
+    /// hide a reachable panic. It is scoped to the table alone, leaving the
+    /// decode loop -- the part that reads bytes someone else wrote -- under
+    /// the lint.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "const-evaluated: an out-of-range index is a compile error, not a panic"
+    )]
+    const DECODE: [u8; 256] = {
+        let mut table = [INVALID; 256];
+        let mut i = 0usize;
+        while i < 64 {
+            table[B64_ALPHABET[i] as usize] = i as u8;
+            i += 1;
+        }
+        table
+    };
+
+    let sextet = |&b: &u8| DECODE.get(b as usize).copied().unwrap_or(INVALID);
+
+    // Padding and layout whitespace come off first, so the quartet loop below
+    // sees only data. Whitespace is stripped rather than rejected because
+    // every producer of these strings wraps them across lines; `=` because
+    // both padded and unpadded input must decode to the same bytes, which is
+    // what lets this one function replace three that disagreed about padding.
+    let body: Vec<u8> = input
+        .iter()
+        .copied()
+        .filter(|b| *b != b'=' && !b.is_ascii_whitespace())
+        .collect();
+
+    let mut out = Vec::with_capacity((body.len() / 4).saturating_mul(3));
+    for quad in body.chunks(4) {
+        // A group of one encodes no bytes at all, so it cannot have come from
+        // an encoder. The decoder this replaces treated it as end-of-input.
+        let (Some(a), Some(b)) = (quad.first().map(sextet), quad.get(1).map(sextet)) else {
+            return Err(Base64Error::Invalid);
+        };
+        if a == INVALID || b == INVALID {
+            return Err(Base64Error::Invalid);
+        }
+        // The shifts discard high bits by design: that is how six-bit sextets
+        // repack into eight-bit bytes. Rust panics only on a shift whose
+        // *amount* reaches the width, and every amount here is a constant
+        // below 8.
+        out.push((a << 2) | (b >> 4));
+
+        if let Some(c) = quad.get(2).map(sextet) {
+            if c == INVALID {
+                return Err(Base64Error::Invalid);
+            }
+            out.push((b << 4) | (c >> 2));
+            if let Some(d) = quad.get(3).map(sextet) {
+                if d == INVALID {
+                    return Err(Base64Error::Invalid);
+                }
+                out.push((c << 6) | d);
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ============================================================================
+// The unencrypted OpenSSH private key container (`PROTOCOL.key`)
+// ============================================================================
+
+/// The magic that opens the container, NUL included.
+const OPENSSH_KEY_MAGIC: &[u8] = b"openssh-key-v1\0";
+
+/// The PEM band around the base64 body.
+const OPENSSH_KEY_HEADER: &str = "-----BEGIN OPENSSH PRIVATE KEY-----";
+/// The closing band; see [`OPENSSH_KEY_HEADER`].
+const OPENSSH_KEY_FOOTER: &str = "-----END OPENSSH PRIVATE KEY-----";
+
+/// The key type this module handles. The only one SlateOS implements.
+pub const OPENSSH_KEY_TYPE_ED25519: &[u8] = b"ssh-ed25519";
+
+/// What an unencrypted Ed25519 private key file holds.
+///
+/// # Why the public key comes back rather than being checked here
+///
+/// The file stores the public key beside the seed, so the two can disagree —
+/// through corruption, or through a file assembled by hand. Verifying that
+/// they agree means deriving a public key from the seed, which is Ed25519
+/// arithmetic, which lives in `posix`. This crate deliberately does not depend
+/// on `posix`: an rlib copy of `posix` linked into a SlateOS program is a
+/// second libc whose every syscall answers `-ENOSYS` (known-issues.md
+/// `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`), so
+/// pulling it in here to check one equality would put that hazard into both
+/// binaries.
+///
+/// So the container codec returns both halves and each caller checks. That is
+/// a real obligation and not a formality — `sshd` already does it, and a
+/// caller that skips it accepts a key whose halves disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpensshPrivateKey {
+    /// The 32-byte Ed25519 seed: the actual secret.
+    pub seed: [u8; 32],
+    /// The public key **as stored in the file**, which the caller must check
+    /// against one derived from `seed`.
+    pub public: [u8; 32],
+    /// The trailing comment. Not authenticated by anything; treat as a label.
+    pub comment: String,
+}
+
+/// Why a private key file could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrivateKeyError {
+    /// The PEM band is missing, or the footer precedes the header.
+    NotPem,
+    /// The body is not valid base64.
+    Base64(Base64Error),
+    /// The decoded bytes do not begin with `openssh-key-v1\0`.
+    NotOpensshKey,
+    /// A length-prefixed field ran off the end of the container.
+    ///
+    /// `what` names the field, so a truncated file says which part is missing
+    /// rather than only that something is.
+    Truncated {
+        /// The field that could not be read.
+        what: &'static str,
+    },
+    /// The key is encrypted, and nothing here can decrypt it.
+    ///
+    /// Carries the cipher name so the message can say what to re-create the
+    /// key without. Refusing is the honest answer: `sshd` is started by init
+    /// with no terminal to prompt on, and there is no `bcrypt_pbkdf` here to
+    /// derive a key with even if there were.
+    Encrypted {
+        /// The `ciphername` field, as written in the file.
+        cipher: String,
+    },
+    /// The container holds a number of keys other than one.
+    KeyCount {
+        /// The count the file declares.
+        count: u32,
+    },
+    /// The two `checkint` words differ.
+    ///
+    /// In OpenSSH this is how a wrong passphrase is detected. Here, where
+    /// nothing is ever encrypted, it is a free integrity check on the private
+    /// section.
+    CheckintMismatch,
+    /// The key is of a type this does not implement.
+    UnsupportedKeyType {
+        /// The type named in the file.
+        keytype: String,
+    },
+    /// The `ssh-ed25519` secret field is not the 64 bytes the format requires.
+    SecretLength {
+        /// The length found.
+        len: usize,
+    },
+    /// The stored public key is not 32 bytes.
+    PublicLength {
+        /// The length found.
+        len: usize,
+    },
+}
+
+impl std::fmt::Display for PrivateKeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::NotPem => write!(f, "not a PEM-wrapped key: no {OPENSSH_KEY_HEADER} band"),
+            Self::Base64(e) => write!(f, "key body is not valid base64: {e}"),
+            Self::NotOpensshKey => f.write_str("not an openssh-key-v1 container"),
+            Self::Truncated { what } => write!(f, "truncated {what}"),
+            Self::Encrypted { ref cipher } => write!(
+                f,
+                "key is encrypted with {cipher}; there is no passphrase prompt here, \
+                 re-create it with an empty passphrase"
+            ),
+            Self::KeyCount { count } => {
+                write!(f, "expected exactly one key in the file, found {count}")
+            }
+            Self::CheckintMismatch => {
+                f.write_str("private section checkints differ (corrupt or encrypted key)")
+            }
+            Self::UnsupportedKeyType { ref keytype } => write!(
+                f,
+                "unsupported key type {keytype}; only ssh-ed25519 is implemented"
+            ),
+            Self::SecretLength { len } => {
+                write!(f, "ssh-ed25519 secret should be 64 bytes, found {len}")
+            }
+            Self::PublicLength { len } => {
+                write!(f, "ssh-ed25519 public key should be 32 bytes, found {len}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PrivateKeyError {}
+
+impl From<Base64Error> for PrivateKeyError {
+    fn from(e: Base64Error) -> Self {
+        Self::Base64(e)
+    }
+}
+
+/// The public-key blob for an Ed25519 key: `string("ssh-ed25519") ||
+/// string(public)`.
+///
+/// This is the blob that appears base64-encoded in the middle field of an
+/// `authorized_keys` or `known_hosts` line, inside the private key container's
+/// `publickey` field, and on the wire in `SSH_MSG_KEXDH_REPLY`. One function
+/// so those four spellings cannot drift apart.
+#[must_use]
+pub fn ed25519_public_blob(public: &[u8; 32]) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(51);
+    blob.extend_from_slice(&ssh_string(OPENSSH_KEY_TYPE_ED25519));
+    blob.extend_from_slice(&ssh_string(public));
+    blob
+}
+
+/// The `publickey` `SSH_MSG_USERAUTH_REQUEST` up to but not including the
+/// signature (RFC 4252 §7).
+///
+/// ```text
+/// byte      SSH_MSG_USERAUTH_REQUEST
+/// string    user name
+/// string    service name
+/// string    "publickey"
+/// boolean   TRUE
+/// string    public key algorithm name
+/// string    public key blob
+/// ```
+///
+/// # Why this is separate from [`pubkey_signed_blob`]
+///
+/// RFC 4252 §7 defines the signature as covering *these same fields* with the
+/// session identifier prepended — the client sends this, then appends a
+/// signature over `string(session_id) || this`. So the bytes on the wire and
+/// the bytes under the signature are, by the specification, one sequence
+/// written down once.
+///
+/// Writing them out twice — once to send and once to sign — is available and is
+/// what a straightforward implementation does. It is also exactly the shape of
+/// mistake this crate exists to make impossible: two writers of one byte
+/// sequence, where a divergence produces no decode error at either end, only a
+/// signature that fails to verify. `pubkey_signed_blob` is therefore *defined*
+/// as a prefix plus this function's result, so the client's wire request and
+/// both ends' signature input cannot disagree about a field without a compiler
+/// error.
+///
+/// A caller that only verifies (the server) never needs this on its own; a
+/// caller that authenticates (the client) needs both, which is why both exist.
+#[must_use]
+pub fn pubkey_request_fields(
+    user_bytes: &[u8],
+    service_bytes: &[u8],
+    algorithm: &[u8],
+    key_blob: &[u8],
+) -> Vec<u8> {
+    let mut fields = Vec::new();
+    fields.push(msg::SSH_MSG_USERAUTH_REQUEST);
+    fields.extend_from_slice(&ssh_string(user_bytes));
+    fields.extend_from_slice(&ssh_string(service_bytes));
+    // Not a parameter: §7 fixes this field to the method name of the request
+    // being signed, and the only method whose request carries a signature is
+    // `publickey`. A caller able to vary it could only produce a blob no
+    // verifier builds.
+    fields.extend_from_slice(&ssh_string(b"publickey"));
+    // The boolean is TRUE by definition: a request with FALSE here carries no
+    // signature, so there is nothing to sign over. `read_bool` is what turns
+    // the received byte back into a bool; this is the encoding side of it.
+    //
+    // A client may also send the FALSE form — a *query*, asking whether the key
+    // would be accepted before paying for a signature. That request is not this
+    // one and is not signed, so it is built at the call site rather than here:
+    // a flag on this function would offer a "signed blob" over a request that
+    // carries no signature, which is not a thing RFC 4252 defines.
+    fields.push(1);
+    fields.extend_from_slice(&ssh_string(algorithm));
+    fields.extend_from_slice(&ssh_string(key_blob));
+    fields
+}
+
+/// The exact byte sequence a `publickey` signature covers (RFC 4252 §7).
+///
+/// ```text
+/// string    session identifier
+/// byte      SSH_MSG_USERAUTH_REQUEST
+/// string    user name
+/// string    service name
+/// string    "publickey"
+/// boolean   TRUE
+/// string    public key algorithm name
+/// string    public key blob
+/// ```
+///
+/// Everything from the message code down is [`pubkey_request_fields`] — the
+/// same bytes the client puts on the wire — and this function is that plus the
+/// session identifier in front. See that function for why the relationship is
+/// expressed in code rather than written out twice.
+///
+/// The client builds this and signs it; the server builds it again and verifies
+/// against it. Nothing on the wire carries the blob itself — that is the whole
+/// design, since a signature over bytes the *sender* chose would prove nothing
+/// — so the two constructions must agree byte for byte with no opportunity to
+/// discover that they do not. A trailing field the client includes and the
+/// server omits does not produce a diagnosable error; it produces a signature
+/// that simply fails to verify, indistinguishable from a wrong key or a
+/// forgery.
+///
+/// That is why this is here rather than in `sshd`, where it was written first
+/// and where it was still the only copy. The client does not yet do publickey
+/// authentication; when it does, it needs these bytes, and the point of moving
+/// the function now is that there is no moment at which a second copy exists to
+/// drift from this one.
+///
+/// # What is bound, and what each binding stops
+///
+/// - **The session identifier** ties the signature to one connection, so one
+///   captured from a session with a hostile server cannot be replayed to a
+///   different one. It is the exchange hash of the *first* key exchange, which
+///   the peer cannot choose alone.
+/// - **The user name and service name** tie it to one account, so a signature
+///   offered for `alice` cannot be presented as `root`.
+/// - **The algorithm name and key blob** tie it to one key, so a signature made
+///   under a weak algorithm cannot be re-labelled as one made under a strong
+///   one.
+///
+/// `key_blob` is the wire form of the public key — [`ed25519_public_blob`] for
+/// an Ed25519 key — and not the bare 32-byte point; it is the same blob that
+/// appeared in the request being signed.
+#[must_use]
+pub fn pubkey_signed_blob(
+    session_id: &[u8; 32],
+    user_bytes: &[u8],
+    service_bytes: &[u8],
+    algorithm: &[u8],
+    key_blob: &[u8],
+) -> Vec<u8> {
+    let mut signed = ssh_string(session_id);
+    signed.extend_from_slice(&pubkey_request_fields(
+        user_bytes,
+        service_bytes,
+        algorithm,
+        key_blob,
+    ));
+    signed
+}
+
+/// Write an unencrypted Ed25519 private key in the OpenSSH container format.
+///
+/// The layout, from `PROTOCOL.key` in the OpenSSH distribution:
+///
+/// ```text
+/// "openssh-key-v1\0"
+/// string  ciphername   ("none")
+/// string  kdfname      ("none")
+/// string  kdfoptions   ("")
+/// uint32  number of keys N   (1)
+/// string  publickey[0]
+/// string  encrypted-private-section
+/// ```
+///
+/// and the private section, which for `ciphername = none` is not encrypted at
+/// all:
+///
+/// ```text
+/// uint32  checkint
+/// uint32  checkint   (the same value again)
+/// string  keytype
+/// string  public key
+/// string  private key   (seed || public, 64 bytes)
+/// string  comment
+/// byte[]  padding 1, 2, 3, ...  to a multiple of 8
+/// ```
+///
+/// # The `checkint` is a parameter, not drawn here
+///
+/// OpenSSH compares the two copies on read to detect a wrong passphrase. Since
+/// nothing here encrypts, any value works provided both copies match — but
+/// writing a *constant* would make every key file this project produces share
+/// a recognisable byte pattern, so the caller draws one from its own CSPRNG.
+/// Passing it in rather than reaching for `randrange` here is also what lets a
+/// test pin an exact file: a codec that draws its own entropy cannot be
+/// checked against a fixture.
+#[must_use]
+pub fn encode_openssh_private_key(
+    seed: &[u8; 32],
+    public: &[u8; 32],
+    comment: &str,
+    checkint: u32,
+) -> String {
+    let mut secret = Vec::with_capacity(64);
+    secret.extend_from_slice(seed);
+    secret.extend_from_slice(public);
+
+    let mut private = Vec::new();
+    private.extend_from_slice(&ssh_u32(checkint));
+    private.extend_from_slice(&ssh_u32(checkint));
+    private.extend_from_slice(&ssh_string(OPENSSH_KEY_TYPE_ED25519));
+    private.extend_from_slice(&ssh_string(public));
+    private.extend_from_slice(&ssh_string(&secret));
+    private.extend_from_slice(&ssh_string(comment.as_bytes()));
+    // Pad to a multiple of 8 -- the block size "none" nominally has -- with the
+    // bytes 1, 2, 3, ... as PROTOCOL.key specifies. `pad` cannot reach 8, so
+    // the counter cannot wrap.
+    let mut pad: u8 = 1;
+    while !private.len().is_multiple_of(8) {
+        private.push(pad);
+        pad = pad.wrapping_add(1);
+    }
+
+    let mut raw = Vec::new();
+    raw.extend_from_slice(OPENSSH_KEY_MAGIC);
+    raw.extend_from_slice(&ssh_string(b"none")); // ciphername
+    raw.extend_from_slice(&ssh_string(b"none")); // kdfname
+    raw.extend_from_slice(&ssh_string(b"")); // kdfoptions
+    raw.extend_from_slice(&ssh_u32(1)); // exactly one key
+    raw.extend_from_slice(&ssh_string(&ed25519_public_blob(public)));
+    raw.extend_from_slice(&ssh_string(&private));
+
+    // 70 columns is what OpenSSH writes. The width is cosmetic -- the decoder
+    // strips whitespace -- but matching it keeps a diff against a file written
+    // by the real ssh-keygen down to the key material.
+    let mut text = String::from(OPENSSH_KEY_HEADER);
+    text.push('\n');
+    for chunk in base64_encode_padded(&raw).as_bytes().chunks(70) {
+        text.push_str(&String::from_utf8_lossy(chunk));
+        text.push('\n');
+    }
+    text.push_str(OPENSSH_KEY_FOOTER);
+    text.push('\n');
+    text
+}
+
+/// Read an unencrypted Ed25519 private key from the OpenSSH container format.
+///
+/// The inverse of [`encode_openssh_private_key`]; the layout is documented
+/// there.
+///
+/// # Errors
+///
+/// A [`PrivateKeyError`] naming which part of the container was wrong. Every
+/// failure is a refusal: this never falls back to inventing a key from a file
+/// it could not parse. `sshd` once did — it hashed the first line and used
+/// that as a seed — so `sshd -h /etc/ssh/ssh_host_rsa_key` started
+/// successfully with a host key unrelated to the file named, and the only
+/// symptom was every client reporting a changed host key.
+///
+/// The returned `public` is the one *stored in the file*. See
+/// [`OpensshPrivateKey`] for why checking it against the seed is the caller's
+/// job and not this function's.
+pub fn decode_openssh_private_key(text: &str) -> Result<OpensshPrivateKey, PrivateKeyError> {
+    // The band is required, not merely tolerated: a bare base64 body would
+    // also decode, and accepting one means accepting a file that no tool
+    // produces and that a user pasted incompletely.
+    let start = text
+        .find(OPENSSH_KEY_HEADER)
+        .ok_or(PrivateKeyError::NotPem)?;
+    let after_header = start.saturating_add(OPENSSH_KEY_HEADER.len());
+    let body_end = text
+        .get(after_header..)
+        .and_then(|rest| rest.find(OPENSSH_KEY_FOOTER))
+        .ok_or(PrivateKeyError::NotPem)?;
+    let body = text
+        .get(after_header..after_header.saturating_add(body_end))
+        .ok_or(PrivateKeyError::NotPem)?;
+
+    let raw = base64_decode(body.as_bytes())?;
+
+    if raw.get(..OPENSSH_KEY_MAGIC.len()) != Some(OPENSSH_KEY_MAGIC) {
+        return Err(PrivateKeyError::NotOpensshKey);
+    }
+    let mut off = OPENSSH_KEY_MAGIC.len();
+
+    let (ciphername, next) = read_ssh_string(&raw, off)
+        .map_err(|_| PrivateKeyError::Truncated { what: "ciphername" })?;
+    off = next;
+    if ciphername != b"none" {
+        return Err(PrivateKeyError::Encrypted {
+            cipher: String::from_utf8_lossy(ciphername).into_owned(),
+        });
+    }
+    let (_kdfname, next) =
+        read_ssh_string(&raw, off).map_err(|_| PrivateKeyError::Truncated { what: "kdfname" })?;
+    off = next;
+    let (_kdfopts, next) = read_ssh_string(&raw, off)
+        .map_err(|_| PrivateKeyError::Truncated { what: "kdfoptions" })?;
+    off = next;
+
+    let (count, next) =
+        read_u32(&raw, off).map_err(|_| PrivateKeyError::Truncated { what: "key count" })?;
+    off = next;
+    if count != 1 {
+        return Err(PrivateKeyError::KeyCount { count });
+    }
+
+    let (_pubkey, next) = read_ssh_string(&raw, off)
+        .map_err(|_| PrivateKeyError::Truncated { what: "public key" })?;
+    off = next;
+    let (private, _) = read_ssh_string(&raw, off).map_err(|_| PrivateKeyError::Truncated {
+        what: "private section",
+    })?;
+
+    let (check1, poff) =
+        read_u32(private, 0).map_err(|_| PrivateKeyError::Truncated { what: "checkint" })?;
+    let (check2, poff) = read_u32(private, poff).map_err(|_| PrivateKeyError::Truncated {
+        what: "second checkint",
+    })?;
+    if check1 != check2 {
+        return Err(PrivateKeyError::CheckintMismatch);
+    }
+
+    let (keytype, poff) = read_ssh_string(private, poff)
+        .map_err(|_| PrivateKeyError::Truncated { what: "key type" })?;
+    if keytype != OPENSSH_KEY_TYPE_ED25519 {
+        return Err(PrivateKeyError::UnsupportedKeyType {
+            keytype: String::from_utf8_lossy(keytype).into_owned(),
+        });
+    }
+    let (stored_public, poff) =
+        read_ssh_string(private, poff).map_err(|_| PrivateKeyError::Truncated {
+            what: "stored public key",
+        })?;
+    let (secret, poff) = read_ssh_string(private, poff)
+        .map_err(|_| PrivateKeyError::Truncated { what: "secret" })?;
+    // The comment is the last field before the padding. A file whose comment
+    // is missing entirely is truncated, not comment-less: the encoder always
+    // writes the field, even when empty.
+    let (comment, _) = read_ssh_string(private, poff)
+        .map_err(|_| PrivateKeyError::Truncated { what: "comment" })?;
+
+    let public: [u8; 32] = stored_public
+        .try_into()
+        .map_err(|_| PrivateKeyError::PublicLength {
+            len: stored_public.len(),
+        })?;
+    // §"private key" for ssh-ed25519 is seed || public, 64 bytes. We keep the
+    // seed and hand back the stored public separately rather than trusting the
+    // copy inside the secret, so the two can be compared.
+    let seed: [u8; 32] = secret
+        .get(..32)
+        .and_then(|s| <[u8; 32]>::try_from(s).ok())
+        .filter(|_| secret.len() == 64)
+        .ok_or(PrivateKeyError::SecretLength { len: secret.len() })?;
+
+    Ok(OpensshPrivateKey {
+        seed,
+        public,
+        comment: String::from_utf8_lossy(comment).into_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -2612,6 +3774,118 @@ mod tests {
         assert!(!shown.contains("cd"));
     }
 
+    // ---- Message type codes ----
+
+    /// Every entry in [`msg`], as `(name, value)`.
+    ///
+    /// Written out once so the two tests below can walk the table. Keeping it
+    /// beside them rather than deriving it from the module is deliberate: a
+    /// macro that generated both the constants and this list would make the
+    /// list agree with the constants by construction, which is the shape of
+    /// self-agreement this whole crate exists to avoid.
+    const ALL_MESSAGE_CODES: &[(&str, u8)] = &[
+        ("SSH_MSG_DISCONNECT", msg::SSH_MSG_DISCONNECT),
+        ("SSH_MSG_IGNORE", msg::SSH_MSG_IGNORE),
+        ("SSH_MSG_UNIMPLEMENTED", msg::SSH_MSG_UNIMPLEMENTED),
+        ("SSH_MSG_DEBUG", msg::SSH_MSG_DEBUG),
+        ("SSH_MSG_SERVICE_REQUEST", msg::SSH_MSG_SERVICE_REQUEST),
+        ("SSH_MSG_SERVICE_ACCEPT", msg::SSH_MSG_SERVICE_ACCEPT),
+        ("SSH_MSG_KEXINIT", msg::SSH_MSG_KEXINIT),
+        ("SSH_MSG_NEWKEYS", msg::SSH_MSG_NEWKEYS),
+        ("SSH_MSG_KEX_DH_INIT", msg::SSH_MSG_KEX_DH_INIT),
+        ("SSH_MSG_KEX_DH_REPLY", msg::SSH_MSG_KEX_DH_REPLY),
+        ("SSH_MSG_USERAUTH_REQUEST", msg::SSH_MSG_USERAUTH_REQUEST),
+        ("SSH_MSG_USERAUTH_FAILURE", msg::SSH_MSG_USERAUTH_FAILURE),
+        ("SSH_MSG_USERAUTH_SUCCESS", msg::SSH_MSG_USERAUTH_SUCCESS),
+        ("SSH_MSG_USERAUTH_BANNER", msg::SSH_MSG_USERAUTH_BANNER),
+        ("SSH_MSG_USERAUTH_PK_OK", msg::SSH_MSG_USERAUTH_PK_OK),
+        ("SSH_MSG_GLOBAL_REQUEST", msg::SSH_MSG_GLOBAL_REQUEST),
+        ("SSH_MSG_REQUEST_SUCCESS", msg::SSH_MSG_REQUEST_SUCCESS),
+        ("SSH_MSG_REQUEST_FAILURE", msg::SSH_MSG_REQUEST_FAILURE),
+        ("SSH_MSG_CHANNEL_OPEN", msg::SSH_MSG_CHANNEL_OPEN),
+        (
+            "SSH_MSG_CHANNEL_OPEN_CONFIRMATION",
+            msg::SSH_MSG_CHANNEL_OPEN_CONFIRMATION,
+        ),
+        (
+            "SSH_MSG_CHANNEL_OPEN_FAILURE",
+            msg::SSH_MSG_CHANNEL_OPEN_FAILURE,
+        ),
+        (
+            "SSH_MSG_CHANNEL_WINDOW_ADJUST",
+            msg::SSH_MSG_CHANNEL_WINDOW_ADJUST,
+        ),
+        ("SSH_MSG_CHANNEL_DATA", msg::SSH_MSG_CHANNEL_DATA),
+        (
+            "SSH_MSG_CHANNEL_EXTENDED_DATA",
+            msg::SSH_MSG_CHANNEL_EXTENDED_DATA,
+        ),
+        ("SSH_MSG_CHANNEL_EOF", msg::SSH_MSG_CHANNEL_EOF),
+        ("SSH_MSG_CHANNEL_CLOSE", msg::SSH_MSG_CHANNEL_CLOSE),
+        ("SSH_MSG_CHANNEL_REQUEST", msg::SSH_MSG_CHANNEL_REQUEST),
+        ("SSH_MSG_CHANNEL_SUCCESS", msg::SSH_MSG_CHANNEL_SUCCESS),
+        ("SSH_MSG_CHANNEL_FAILURE", msg::SSH_MSG_CHANNEL_FAILURE),
+    ];
+
+    /// No two message codes share a number.
+    ///
+    /// The failure this catches is a copy-paste: a constant added by duplicating
+    /// its neighbour and renaming it without changing the value. Nothing else
+    /// would notice. Both constants would compile, both would be dispatched on,
+    /// and the receiver would route one message type to the other's handler —
+    /// which looks, from either end, like a peer that sends the wrong thing.
+    #[test]
+    fn no_two_message_codes_collide() {
+        for (i, &(name_a, value_a)) in ALL_MESSAGE_CODES.iter().enumerate() {
+            for &(name_b, value_b) in ALL_MESSAGE_CODES.iter().skip(i + 1) {
+                assert_ne!(
+                    value_a, value_b,
+                    "{name_a} and {name_b} are both {value_a}; \
+                     one message number cannot mean two things"
+                );
+            }
+        }
+    }
+
+    /// Every code sits in the range its RFC reserves for that layer.
+    ///
+    /// RFC 4250 §4.1.2 partitions the byte, and the partition is what makes the
+    /// numbers extensible: 30..=49 belong to whichever key exchange method was
+    /// negotiated, and 60..=79 to whichever authentication method is in
+    /// progress, so the *same* byte means different things at different points
+    /// in one connection. A constant in the wrong band is therefore not a
+    /// cosmetic mistake — it claims a number that some other feature owns.
+    ///
+    /// This is the check that consults something outside the table. Asserting
+    /// `SSH_MSG_CHANNEL_DATA == 94` beside `SSH_MSG_CHANNEL_DATA: u8 = 94`
+    /// would only restate the definition; the bands come from the registry.
+    #[test]
+    fn every_message_code_is_in_the_band_rfc_4250_reserves_for_it() {
+        for &(name, value) in ALL_MESSAGE_CODES {
+            let band = match name {
+                n if n.starts_with("SSH_MSG_KEX_DH_") => (30, 49),
+                n if n.starts_with("SSH_MSG_USERAUTH_PK") => (60, 79),
+                n if n.starts_with("SSH_MSG_USERAUTH_") => (50, 59),
+                n if n.starts_with("SSH_MSG_CHANNEL_")
+                    || n.starts_with("SSH_MSG_GLOBAL_")
+                    || n.starts_with("SSH_MSG_REQUEST_") =>
+                {
+                    (80, 127)
+                }
+                // Everything else is transport: 1..=19 generic, 20..=29
+                // negotiation. One band, since both are the transport layer's.
+                _ => (1, 29),
+            };
+            assert!(
+                value >= band.0 && value <= band.1,
+                "{name} is {value}, outside the {}..={} band RFC 4250 §4.1.2 \
+                 reserves for its layer",
+                band.0,
+                band.1
+            );
+        }
+    }
+
     // ---- The binary packet protocol (RFC 4253 §6) ----
 
     /// A client and a server codec keyed from one handshake.
@@ -2716,6 +3990,65 @@ mod tests {
             assert_eq!(got, payload);
             assert_eq!(consumed, wire.len());
         }
+    }
+
+    /// The traffic counter measures whole packets on the wire, both ways, and a
+    /// rekey puts it back to zero.
+    ///
+    /// It exists to answer RFC 4253 §9's "after each gigabyte" question, so
+    /// what it must count is what the *key* protected — the framed, padded,
+    /// MAC'd packet — not the payload the caller handed in. Counting payloads
+    /// would undercount by the padding and the 36 bytes of frame and MAC on
+    /// every packet, which for an interactive session (a packet per keystroke)
+    /// is most of the traffic.
+    #[test]
+    fn the_traffic_counter_measures_whole_packets_and_resets_at_a_rekey() {
+        let (mut client, mut server) = a_keyed_pair();
+        assert_eq!(
+            client.bytes_under_current_keys(),
+            0,
+            "a freshly keyed codec has carried nothing"
+        );
+
+        let wire = encode(&mut client, b"outbound");
+        assert_eq!(
+            client.bytes_under_current_keys(),
+            u64::try_from(wire.len()).expect("a packet fits in u64"),
+            "the sender counted something other than the packet it produced"
+        );
+
+        let (_, consumed) = server
+            .decode(&wire)
+            .expect("a whole packet")
+            .expect("a whole packet");
+        assert_eq!(
+            server.bytes_under_current_keys(),
+            u64::try_from(consumed).expect("a packet fits in u64"),
+            "the receiver counted something other than the packet it consumed"
+        );
+
+        // The larger direction, not the sum: the two directions have separate
+        // keys, so a byte sent and a byte received are one byte of use each.
+        let back = encode(&mut server, b"and inbound");
+        assert_eq!(
+            server.bytes_under_current_keys(),
+            u64::try_from(wire.len().max(back.len())).expect("a packet fits in u64"),
+            "the two directions were added together"
+        );
+
+        // A rekey is where a key's life begins, so this is where its use
+        // restarts. A counter that survived would be over any threshold it had
+        // just crossed, and the connection would rekey on every packet from
+        // then on.
+        let secret = encode_mpint(&[0x11u8; 32]);
+        server
+            .activate(Role::Server, &secret, &[0x22u8; 32], &[0x77u8; 32])
+            .expect("32-byte inputs derive");
+        assert_eq!(
+            server.bytes_under_current_keys(),
+            0,
+            "the traffic counter survived a rekey"
+        );
     }
 
     /// Two ends that used the same letters for both directions would still pass
@@ -3420,5 +4753,841 @@ mod tests {
             .div_rem(&BigUint::from_bytes_be(&[2]));
         assert!(rem.is_zero(), "p - 1 must be even");
         assert_eq!(to_hex(&g.mod_pow(&q, &p).to_bytes_be()), "01");
+    }
+
+    // ========================================================================
+    // The transport, and the buffer under the packet layer
+    // ========================================================================
+    //
+    // The framing itself is `PacketCodec`'s and is tested above. What is tested
+    // here is the plumbing around it, which both binaries used to carry
+    // privately and separately: `StreamBuffer` must hand the codec every unread
+    // byte, and must drop exactly the bytes the codec reports having used.
+    // Getting either wrong desynchronises the stream permanently -- and neither
+    // copy was ever compared against the other's.
+
+    /// A transport that accepts at most `chunk` bytes per `send`.
+    ///
+    /// A real socket does this whenever its send buffer is nearly full, and a
+    /// caller that ignored the short count would truncate a packet. That is
+    /// what [`Transport::send_all`] exists to prevent, so it needs a transport
+    /// that actually short-writes; `MemoryTransport` never does.
+    struct Trickle {
+        chunk: usize,
+        written: Vec<u8>,
+    }
+
+    impl Transport for Trickle {
+        fn send(&mut self, data: &[u8]) -> Result<usize, TransportError> {
+            let n = data.len().min(self.chunk);
+            self.written
+                .extend_from_slice(data.get(..n).unwrap_or_default());
+            Ok(n)
+        }
+
+        fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<&'b [u8], TransportError> {
+            buf.get(..0).ok_or(TransportError::Recv)
+        }
+
+        fn readable(&self) -> bool {
+            true
+        }
+
+        fn close(&mut self) {}
+    }
+
+    #[test]
+    fn what_one_end_writes_the_other_reads() {
+        let (mut a, mut b) = memory_pair();
+        a.send_all(b"one").expect("the far end is alive");
+        b.send_all(b"two").expect("the far end is alive");
+        let mut buf = [0u8; 8];
+        assert_eq!(b.recv(&mut buf).expect("bytes are waiting"), b"one");
+        assert_eq!(a.recv(&mut buf).expect("bytes are waiting"), b"two");
+    }
+
+    #[test]
+    fn a_read_takes_only_what_fits_and_leaves_the_rest() {
+        // A stream has no message boundaries, so a buffer shorter than what
+        // arrived must not lose the tail: that tail is the front of the next
+        // packet.
+        let (mut a, mut b) = memory_pair();
+        a.send_all(b"abcdef").expect("the far end is alive");
+        let mut small = [0u8; 4];
+        assert_eq!(b.recv(&mut small).expect("bytes are waiting"), b"abcd");
+        assert_eq!(b.recv(&mut small).expect("bytes are waiting"), b"ef");
+    }
+
+    #[test]
+    fn a_hung_up_peer_reads_as_a_close_rather_than_a_wait() {
+        // The property that makes this transport usable as a stand-in at all:
+        // a read with no writer left must return. Without it, every test that
+        // forgot to close an end would hang rather than fail, and a hang
+        // reports nothing.
+        let (mut near, far) = memory_pair();
+        drop(far);
+        let mut buf = [0u8; 8];
+        assert_eq!(near.recv(&mut buf), Ok(&[][..]));
+        let mut stream = StreamBuffer::new();
+        assert_eq!(stream.fill_once(&mut near), Err(TransportError::Closed));
+    }
+
+    #[test]
+    fn bytes_written_before_a_hangup_are_still_delivered() {
+        // Closing does not discard what was already sent. A server that writes
+        // SSH_MSG_DISCONNECT and immediately hangs up must still be heard, or
+        // the client would report a dropped connection instead of the reason.
+        let (mut near, mut far) = memory_pair();
+        far.send_all(b"goodbye").expect("the near end is alive");
+        drop(far);
+        let mut buf = [0u8; 16];
+        assert_eq!(near.recv(&mut buf).expect("queued bytes"), b"goodbye");
+        assert_eq!(near.recv(&mut buf), Ok(&[][..]));
+    }
+
+    #[test]
+    fn readable_is_false_only_while_a_live_peer_has_sent_nothing() {
+        // The session pump reads only when this says yes, so a wrong `true`
+        // blocks the shell's output behind the user's next keystroke, and a
+        // wrong `false` after a hangup spins instead of ending the session.
+        let (near, mut far) = memory_pair();
+        assert!(!near.readable(), "nothing has been sent yet");
+        far.send_all(b"x").expect("the near end is alive");
+        assert!(near.readable(), "a byte is waiting");
+        drop(far);
+        assert!(near.readable(), "a hangup is something to read");
+    }
+
+    #[test]
+    fn send_all_keeps_going_until_every_byte_is_gone() {
+        let mut trickle = Trickle {
+            chunk: 3,
+            written: Vec::new(),
+        };
+        trickle
+            .send_all(b"0123456789")
+            .expect("every call makes progress");
+        assert_eq!(trickle.written, b"0123456789");
+    }
+
+    #[test]
+    fn send_all_gives_up_rather_than_spinning_on_a_transport_that_takes_nothing() {
+        let mut trickle = Trickle {
+            chunk: 0,
+            written: Vec::new(),
+        };
+        assert_eq!(trickle.send_all(b"x"), Err(TransportError::Send));
+    }
+
+    /// Feed a buffer one byte at a time; report when a packet first appears.
+    ///
+    /// This is the session pump's exact shape -- decode what is buffered, read
+    /// once, try again -- with each read carrying a single byte. That is a
+    /// stream's worst case, and the one a buffer that guessed at lengths rather
+    /// than asking the codec would get wrong.
+    fn feed_byte_at_a_time(wire: &[u8]) -> (usize, Vec<u8>) {
+        let mut codec = PacketCodec::new();
+        let mut buf = StreamBuffer::new();
+        let (mut near, mut far) = memory_pair();
+        for (i, byte) in wire.iter().enumerate() {
+            far.send_all(&[*byte]).expect("the near end is alive");
+            buf.fill_once(&mut near).expect("a byte is waiting");
+            match codec.decode(buf.unread()) {
+                Ok(Some((payload, consumed))) => {
+                    buf.advance(consumed);
+                    return (i.saturating_add(1), payload);
+                }
+                Ok(None) => {}
+                Err(e) => panic!("framing error at byte {i}: {e}"),
+            }
+        }
+        panic!("packet never completed after {} bytes", wire.len());
+    }
+
+    #[test]
+    fn a_packet_is_produced_exactly_when_its_last_byte_lands() {
+        let mut codec = PacketCodec::new();
+        let payload = b"hello ssh".to_vec();
+        let wire = encode(&mut codec, &payload);
+
+        let (consumed, parsed) = feed_byte_at_a_time(&wire);
+        assert_eq!(parsed, payload);
+        // Neither early (which would mean parsing a partial packet) nor late.
+        assert_eq!(consumed, wire.len());
+    }
+
+    #[test]
+    fn an_empty_buffer_asks_for_more_rather_than_failing() {
+        let mut codec = PacketCodec::new();
+        let buf = StreamBuffer::new();
+        assert!(matches!(codec.decode(buf.unread()), Ok(None)));
+    }
+
+    #[test]
+    fn a_declined_partial_packet_is_still_in_the_buffer() {
+        // The bytes a `None` declined are the start of the packet the next call
+        // will parse. Advancing past them would desynchronise the stream.
+        let mut sender = PacketCodec::new();
+        let wire = encode(&mut sender, b"payload");
+        let (head, tail) = wire.split_at(wire.len().saturating_sub(1));
+        let (mut near, mut far) = memory_pair();
+        let mut buf = StreamBuffer::new();
+        far.send_all(head).expect("the near end is alive");
+        buf.fill_once(&mut near).expect("bytes are waiting");
+
+        let mut reader = PacketCodec::new();
+        assert!(matches!(reader.decode(buf.unread()), Ok(None)));
+        assert_eq!(buf.unread().len(), head.len());
+
+        far.send_all(tail).expect("the near end is alive");
+        buf.fill_once(&mut near).expect("the last byte is waiting");
+        let (payload, consumed) = reader
+            .decode(buf.unread())
+            .expect("framing")
+            .expect("packet");
+        buf.advance(consumed);
+        assert_eq!(payload, b"payload");
+        assert!(buf.unread().is_empty(), "the packet was not consumed");
+    }
+
+    #[test]
+    fn several_packets_from_one_read_are_drained_one_at_a_time() {
+        // A single read can carry several SSH packets. The session pump drains
+        // them all before sleeping, so the buffer must give up each in turn
+        // rather than asking for more bytes after the first.
+        let mut sender = PacketCodec::new();
+        let mut reader = PacketCodec::new();
+        let mut wire = encode(&mut sender, b"first");
+        wire.extend_from_slice(&encode(&mut sender, b"second"));
+        let (mut near, mut far) = memory_pair();
+        let mut buf = StreamBuffer::new();
+        far.send_all(&wire).expect("the near end is alive");
+        buf.fill_once(&mut near).expect("bytes are waiting");
+
+        let mut drained = Vec::new();
+        while let Some((payload, consumed)) = reader.decode(buf.unread()).expect("framing") {
+            buf.advance(consumed);
+            drained.push(payload);
+        }
+        assert_eq!(drained, vec![b"first".to_vec(), b"second".to_vec()]);
+        assert!(buf.unread().is_empty());
+    }
+
+    #[test]
+    fn a_long_session_does_not_grow_the_buffer_without_bound() {
+        // `pos` only moves forward, so without the reclaim in `fill_once` a
+        // session that ran for hours would still be holding every byte it had
+        // ever read. The threshold is what keeps that reclaim from being a
+        // memmove per packet, so what is checked here is that `data` stops
+        // growing -- not that it never grows.
+        let (mut near, mut far) = memory_pair();
+        let mut buf = StreamBuffer::new();
+        let chunk = vec![0xa5u8; 1024];
+        for _ in 0..16 {
+            far.send_all(&chunk).expect("the near end is alive");
+            buf.fill_once(&mut near).expect("bytes are waiting");
+            buf.advance(chunk.len());
+            assert!(buf.unread().is_empty());
+        }
+        assert!(
+            buf.data.len() <= STREAM_COMPACT_THRESHOLD + chunk.len(),
+            "consumed bytes were never reclaimed: {} still held",
+            buf.data.len()
+        );
+    }
+
+    #[test]
+    fn the_reclaim_keeps_the_unread_bytes_it_has_not_been_told_to_drop() {
+        // The reclaim moves `pos` as well as the bytes. Draining without
+        // resetting it would silently skip the front of the next packet, which
+        // is the same desynchronisation as advancing too far -- and would show
+        // up only after a session had run long enough to cross the threshold.
+        let (mut near, mut far) = memory_pair();
+        let mut buf = StreamBuffer::new();
+        let filler = vec![0x11u8; STREAM_COMPACT_THRESHOLD + 1];
+        far.send_all(&filler).expect("the near end is alive");
+        buf.fill_once(&mut near).expect("bytes are waiting");
+        buf.advance(filler.len());
+
+        far.send_all(b"kept").expect("the near end is alive");
+        // This fill is the one that crosses the threshold and reclaims.
+        buf.fill_once(&mut near).expect("bytes are waiting");
+        assert_eq!(buf.unread(), b"kept");
+    }
+
+    #[test]
+    fn advancing_past_the_end_empties_the_buffer_rather_than_panicking() {
+        // `advance` is only ever given a length the codec just reported, so a
+        // correct caller cannot reach this -- but the buffer is exactly where a
+        // framing bug would otherwise surface as a panic in a server's session
+        // loop, which is a denial of service rather than a dropped connection.
+        let mut buf = StreamBuffer::new();
+        buf.advance(9999);
+        assert!(buf.unread().is_empty());
+    }
+
+    // ---- The randomness underneath the protocol ----
+
+    #[test]
+    fn the_default_secret_source_is_the_kernel_and_not_a_stand_in() {
+        // Asserting the *pointer*, not the behaviour, is the point: the risk
+        // this guards is a binary that ships with a test source wired in, which
+        // no test of "the bytes look random" would ever catch.
+        let expected: SecretSource = randrange::fill_secret;
+        assert!(
+            core::ptr::fn_addr_eq(KERNEL_SECRETS, expected),
+            "the default source must be randrange::fill_secret itself"
+        );
+    }
+
+    #[test]
+    fn the_kernel_source_answers_for_no_bytes_on_every_platform() {
+        // Asking for nothing needs no entropy, so this holds on the target and
+        // on a host that refuses -- which makes it the one assertion about the
+        // real source that is not really an assertion about the machine.
+        assert!(KERNEL_SECRETS(&mut []).is_ok());
+    }
+
+    /// A source that refuses, the way the kernel does when it cannot answer.
+    fn refuses(_out: &mut [u8]) -> Result<(), randrange::EntropyError> {
+        Err(randrange::EntropyError::Unavailable)
+    }
+
+    /// A source that answers, predictably, so a handshake is reproducible.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the Result is the SecretSource signature, not this function's choice"
+    )]
+    fn counts_up(out: &mut [u8]) -> Result<(), randrange::EntropyError> {
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::try_from(i % 251).unwrap_or(0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_substituted_source_is_the_one_that_gets_asked() {
+        // The whole value of the seam is that a caller holding a `SecretSource`
+        // reaches the substitute and not the kernel. If this ever stopped being
+        // true, every deterministic handshake test would silently start
+        // depending on the host's entropy again.
+        let mut buf = [0xFFu8; 4];
+        let source: SecretSource = counts_up;
+        source(&mut buf).expect("the stand-in answers");
+        assert_eq!(buf, [0, 1, 2, 3]);
+
+        let refusing: SecretSource = refuses;
+        assert_eq!(
+            refusing(&mut buf),
+            Err(randrange::EntropyError::Unavailable)
+        );
+        // A refusal must leave the caller's buffer alone rather than
+        // half-filling it: a partly-written secret that a caller ignored the
+        // error on is worse than an untouched one, because it looks plausible.
+        assert_eq!(buf, [0, 1, 2, 3]);
+    }
+
+    // ---- base64 (RFC 4648 §4) ----
+
+    #[test]
+    fn the_rfc_4648_test_vectors_encode_as_the_rfc_says() {
+        // §10. Pinning the published vectors rather than only round-tripping
+        // is the point: a round-trip passes for any self-consistent alphabet,
+        // including a wrong one, and these strings are read by OpenSSH.
+        for (plain, padded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64_encode_padded(plain.as_bytes()), padded, "{plain:?}");
+            assert_eq!(
+                base64_encode(plain.as_bytes()),
+                padded.trim_end_matches('='),
+                "{plain:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_one_of_the_sixty_four_digits_is_the_one_rfc_4648_names() {
+        // The vectors above are the published ones, and they are not enough on
+        // their own: "Zg==", "Zm8=" … "Zm9vYmFy" between them use ten distinct
+        // digits, so fifty-four of the sixty-four table entries are unpinned by
+        // them. A single wrong entry at an uncovered index is invisible to every
+        // other test in this tree -- the encoder and the decoder share one
+        // `B64_ALPHABET` (the decoder builds its lookup table *from* it), and
+        // `sshd` and `ssh-keygen` both call these functions rather than carrying
+        // their own, so a corrupt table round-trips perfectly and agrees with
+        // itself everywhere. It was verified that swapping 'A' and 'B' in the
+        // constant leaves all 350 tests of `sshwire`, `ssh-keygen` and `sshd`
+        // green, and the `ssh-interop` suite too: both ends of a comparison are
+        // ours, so neither can notice. What such a table breaks is the only
+        // thing no test here can speak for -- reading a key file that OpenSSH
+        // wrote, or writing one it can read.
+        //
+        // So this pins the table itself, digit by digit, against RFC 4648 §4
+        // Table 1. The expected string below is transcribed from the RFC and is
+        // deliberately a *second* statement of the alphabet: a test that read
+        // `B64_ALPHABET` would agree with any value it happened to hold.
+        const RFC_4648_TABLE_1: &str =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+        for (sextet, expected) in RFC_4648_TABLE_1.chars().enumerate() {
+            // Three bytes encode as four digits, and the first digit is the top
+            // six bits of the first byte. So `sextet << 2` puts this sextet in
+            // the leading position, and the rest of the group is zero.
+            let leading = u8::try_from(sextet << 2).expect("a sextet shifted twice is a byte");
+            let encoded = base64_encode(&[leading, 0, 0]);
+            assert_eq!(
+                encoded.chars().next(),
+                Some(expected),
+                "sextet {sextet} encoded as {encoded:?}, so B64_ALPHABET[{sextet}] is wrong"
+            );
+
+            // And the decoder's table, which is built from the same constant in
+            // a loop that could itself be wrong, agrees in the other direction.
+            let decoded = base64_decode(encoded.as_bytes()).expect("our own output decodes");
+            assert_eq!(
+                decoded,
+                vec![leading, 0, 0],
+                "digit {expected:?} did not decode back to sextet {sextet}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_encoders_differ_only_in_padding() {
+        // This is the property that was false while `ssh` and `sshd` each had
+        // a function named `base64_encode` and only one of them padded. Now
+        // the difference is named, and it is exactly this.
+        for len in 0..40usize {
+            let data: Vec<u8> = (0..len)
+                .map(|i| u8::try_from(i % 251).unwrap_or(0))
+                .collect();
+            let unpadded = base64_encode(&data);
+            let padded = base64_encode_padded(&data);
+            assert_eq!(padded.trim_end_matches('='), unpadded, "len {len}");
+            assert!(padded.len().is_multiple_of(4), "len {len}: {padded}");
+        }
+    }
+
+    #[test]
+    fn both_padding_forms_decode_to_the_same_bytes() {
+        for len in 0..40usize {
+            let data: Vec<u8> = (0..len)
+                .map(|i| u8::try_from(i % 251).unwrap_or(0))
+                .collect();
+            assert_eq!(
+                base64_decode(base64_encode(&data).as_bytes()),
+                Ok(data.clone()),
+                "unpadded, len {len}"
+            );
+            assert_eq!(
+                base64_decode(base64_encode_padded(&data).as_bytes()),
+                Ok(data),
+                "padded, len {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn line_wrapping_survives_a_round_trip() {
+        // Every producer of these strings wraps them: PEM bodies at 70 columns,
+        // `known_hosts` not at all, and a hand-edited file however the editor
+        // felt. A decoder that choked on the newline would reject the files
+        // this crate exists to let two programs exchange.
+        let data: Vec<u8> = (0..96u8).collect();
+        let mut wrapped = String::new();
+        for line in base64_encode_padded(&data).as_bytes().chunks(20) {
+            wrapped.push_str(&String::from_utf8_lossy(line));
+            wrapped.push_str("\r\n");
+        }
+        assert_eq!(base64_decode(wrapped.as_bytes()), Ok(data));
+    }
+
+    #[test]
+    fn a_corrupt_character_is_an_error_and_not_a_shorter_key() {
+        // The bug this replaces, stated as a test. `sshd`'s decoder stopped at
+        // the first unrecognised character and returned what it had, so a host
+        // key file with one bad byte loaded as a *valid key of the wrong
+        // length* rather than failing. Truncation that reports success is
+        // indistinguishable from a legitimate shorter input.
+        let good = base64_encode_padded(&[0u8; 64]);
+        let mut bad = good.clone();
+        bad.replace_range(30..31, "!");
+
+        assert_eq!(base64_decode(good.as_bytes()).map(|v| v.len()), Ok(64));
+        assert_eq!(base64_decode(bad.as_bytes()), Err(Base64Error::Invalid));
+    }
+
+    #[test]
+    fn a_trailing_group_of_one_character_is_refused() {
+        // No encoder emits it: a quartet encodes 1, 2 or 3 bytes, so a group of
+        // one encodes nothing. Accepting it would mean two different strings
+        // decoding to the same bytes, which for a key file is a second valid
+        // spelling of the same secret.
+        assert_eq!(base64_decode(b"Zm9vYmFyZ"), Err(Base64Error::Invalid));
+        assert_eq!(base64_decode(b"Zm9vYmFy"), Ok(b"foobar".to_vec()));
+    }
+
+    #[test]
+    fn the_url_safe_alphabet_is_not_quietly_accepted() {
+        // RFC 4648 §5 swaps `+/` for `-_`. SSH uses §4, and a decoder that took
+        // both would accept key files no OpenSSH tool wrote.
+        assert_eq!(base64_decode(b"-_-_"), Err(Base64Error::Invalid));
+        assert!(base64_decode(b"+/+/").is_ok());
+    }
+
+    // ---- the publickey signed blob (RFC 4252 §7) ----
+
+    /// The request fields are the exact byte sequence RFC 4252 §7 lays out.
+    ///
+    /// Written out here a second time as literals for the same reason as the
+    /// signed-blob test below, and *separately* from it rather than derived
+    /// from it. `pubkey_signed_blob` is defined as a prefix plus this
+    /// function's result, so a test that compared the two would hold however
+    /// wrong both were; the only thing that pins either is an expectation
+    /// written from the RFC.
+    ///
+    /// These bytes go on the wire, so unlike the signed blob a fault in them
+    /// *is* visible to the far end — but only as a rejected request, and the
+    /// client cannot tell a request the server could not parse from a key the
+    /// server would not accept.
+    #[test]
+    fn the_request_fields_are_the_byte_sequence_rfc_4252_lays_out() {
+        let got = pubkey_request_fields(b"alice", b"ssh-connection", b"ssh-ed25519", b"KEY");
+
+        let mut want: Vec<u8> = Vec::new();
+        want.push(50); // byte SSH_MSG_USERAUTH_REQUEST
+        want.extend_from_slice(&[0, 0, 0, 5]); // string user name
+        want.extend_from_slice(b"alice");
+        want.extend_from_slice(&[0, 0, 0, 14]); // string service name
+        want.extend_from_slice(b"ssh-connection");
+        want.extend_from_slice(&[0, 0, 0, 9]); // string "publickey"
+        want.extend_from_slice(b"publickey");
+        want.push(1); // boolean TRUE
+        want.extend_from_slice(&[0, 0, 0, 11]); // string algorithm name
+        want.extend_from_slice(b"ssh-ed25519");
+        want.extend_from_slice(&[0, 0, 0, 3]); // string public key blob
+        want.extend_from_slice(b"KEY");
+
+        assert_eq!(got, want);
+    }
+
+    /// The signed blob is the exact byte sequence RFC 4252 §7 lays out.
+    ///
+    /// Built here a second time *without* [`ssh_string`], writing the length
+    /// prefixes as literals. That is the point of the test: a round-trip
+    /// through our own readers would confirm that our decoder undoes our
+    /// encoder, which it does whatever order the fields are in. Only a
+    /// separately-written expectation notices a swapped pair of strings — and
+    /// a swap is exactly the defect that survives every internal check, since
+    /// both fields are strings and both ends of a round trip would agree.
+    ///
+    /// Nothing on the wire carries this blob, so a fault in it does not
+    /// surface as a decode error anywhere. It surfaces as a signature that
+    /// does not verify, which is indistinguishable from a wrong key.
+    #[test]
+    fn the_signed_blob_is_the_byte_sequence_rfc_4252_lays_out() {
+        let session_id = [0xAA_u8; 32];
+        let got = pubkey_signed_blob(
+            &session_id,
+            b"alice",
+            b"ssh-connection",
+            b"ssh-ed25519",
+            b"KEY",
+        );
+
+        let mut want: Vec<u8> = Vec::new();
+        want.extend_from_slice(&[0, 0, 0, 32]); // string session identifier
+        want.extend_from_slice(&session_id);
+        want.push(50); // byte SSH_MSG_USERAUTH_REQUEST
+        want.extend_from_slice(&[0, 0, 0, 5]); // string user name
+        want.extend_from_slice(b"alice");
+        want.extend_from_slice(&[0, 0, 0, 14]); // string service name
+        want.extend_from_slice(b"ssh-connection");
+        want.extend_from_slice(&[0, 0, 0, 9]); // string "publickey"
+        want.extend_from_slice(b"publickey");
+        want.push(1); // boolean TRUE
+        want.extend_from_slice(&[0, 0, 0, 11]); // string algorithm name
+        want.extend_from_slice(b"ssh-ed25519");
+        want.extend_from_slice(&[0, 0, 0, 3]); // string public key blob
+        want.extend_from_slice(b"KEY");
+
+        assert_eq!(got, want);
+    }
+
+    /// Every field the blob binds actually changes it.
+    ///
+    /// The bindings are the entire security argument for the construction: the
+    /// session identifier is what stops a captured signature being replayed on
+    /// another connection, and the user name is what stops one offered for
+    /// `alice` being presented as `root`. A field that was written into the
+    /// blob but not *varied* by its input — a placeholder, a fixed string, an
+    /// argument shadowed by a constant — would leave the signature valid
+    /// across the boundary it is supposed to bind, and every round-trip test
+    /// would still pass. This is the same defect class as the server hashing a
+    /// fixed `"SSH-2.0-client"` into the exchange hash.
+    #[test]
+    fn changing_any_bound_field_changes_the_blob() {
+        let base = pubkey_signed_blob(&[0; 32], b"alice", b"ssh-connection", b"ssh-ed25519", b"K");
+        let variants = [
+            (
+                "session id",
+                pubkey_signed_blob(&[1; 32], b"alice", b"ssh-connection", b"ssh-ed25519", b"K"),
+            ),
+            (
+                "user name",
+                pubkey_signed_blob(&[0; 32], b"root", b"ssh-connection", b"ssh-ed25519", b"K"),
+            ),
+            (
+                "service name",
+                pubkey_signed_blob(&[0; 32], b"alice", b"ssh-userauth", b"ssh-ed25519", b"K"),
+            ),
+            (
+                "algorithm",
+                pubkey_signed_blob(&[0; 32], b"alice", b"ssh-connection", b"ssh-rsa", b"K"),
+            ),
+            (
+                "key blob",
+                pubkey_signed_blob(&[0; 32], b"alice", b"ssh-connection", b"ssh-ed25519", b"J"),
+            ),
+        ];
+        for (field, blob) in variants {
+            assert_ne!(
+                base, blob,
+                "changing the {field} left the signed blob identical, so a \
+                 signature would carry across a boundary it is meant to bind"
+            );
+        }
+    }
+
+    /// A string field cannot be smuggled across a boundary by its neighbour.
+    ///
+    /// Length-prefixed framing is what makes this true, and this test is what
+    /// says so out loud: `alice` + service `x` and `alicex` + service `` are
+    /// the same bytes under concatenation, and differ only because each string
+    /// carries its own length. An encoder that ever dropped a prefix — for a
+    /// field it thought was fixed-width, say — would let a signature for one
+    /// account verify for another.
+    #[test]
+    fn a_field_cannot_borrow_bytes_from_the_next_one() {
+        let a = pubkey_signed_blob(&[0; 32], b"alice", b"x", b"ssh-ed25519", b"K");
+        let b = pubkey_signed_blob(&[0; 32], b"alicex", b"", b"ssh-ed25519", b"K");
+        assert_ne!(a, b);
+    }
+
+    // ---- the OpenSSH private key container (PROTOCOL.key) ----
+
+    /// RFC 8032 §7.1 test vector 1: a seed and the public key it derives.
+    ///
+    /// A published pair rather than an arbitrary one, so a reader can check
+    /// the halves belong together without running any of our code.
+    const TEST_SEED: [u8; 32] = [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c,
+        0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
+        0x7f, 0x60,
+    ];
+    const TEST_PUBLIC: [u8; 32] = [
+        0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07,
+        0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07,
+        0x51, 0x1a,
+    ];
+
+    #[test]
+    fn a_key_written_here_is_a_key_read_here() {
+        let text =
+            encode_openssh_private_key(&TEST_SEED, &TEST_PUBLIC, "host@slateos", 0x1234_5678);
+        assert_eq!(
+            decode_openssh_private_key(&text),
+            Ok(OpensshPrivateKey {
+                seed: TEST_SEED,
+                public: TEST_PUBLIC,
+                comment: "host@slateos".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn the_file_is_the_shape_openssh_writes() {
+        // The band and the 70-column body are what make the file loadable by
+        // the real `ssh-keygen -lf`, which is the only external check this
+        // project has on the container. A test that only round-trips through
+        // our own codec would pass for any self-consistent format -- which is
+        // exactly how `ssh-keygen` came to write a container of its own
+        // invention that our own `sshd` could not read.
+        let text = encode_openssh_private_key(&TEST_SEED, &TEST_PUBLIC, "c", 1);
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("-----BEGIN OPENSSH PRIVATE KEY-----"));
+        let body: Vec<&str> = lines
+            .clone()
+            .take_while(|l| !l.starts_with("-----"))
+            .collect();
+        assert!(!body.is_empty(), "no body between the bands");
+        for line in &body {
+            assert!(line.len() <= 70, "body line longer than 70 columns: {line}");
+        }
+        assert_eq!(
+            text.lines().last(),
+            Some("-----END OPENSSH PRIVATE KEY-----")
+        );
+        assert!(text.ends_with('\n'), "the footer must end with a newline");
+
+        // The magic is the first thing in the decoded body, so a file that
+        // decodes at all is one another implementation will recognise.
+        let raw = base64_decode(body.concat().as_bytes()).expect("body is base64");
+        assert!(raw.starts_with(b"openssh-key-v1\0"));
+    }
+
+    #[test]
+    fn the_stored_public_key_comes_back_rather_than_being_checked() {
+        // The codec must *not* silently correct a file whose halves disagree:
+        // returning the stored public key is what lets the caller notice. If
+        // this ever started re-deriving it, a corrupted file would load as a
+        // working key with a different identity, which is the failure mode
+        // that makes clients report a changed host key.
+        let mut wrong = TEST_PUBLIC;
+        wrong[0] ^= 0xFF;
+        let text = encode_openssh_private_key(&TEST_SEED, &wrong, "c", 1);
+        let parsed = decode_openssh_private_key(&text).expect("still well-formed");
+        assert_eq!(parsed.seed, TEST_SEED);
+        assert_eq!(
+            parsed.public, wrong,
+            "the file's own public key, unmodified"
+        );
+    }
+
+    #[test]
+    fn an_encrypted_key_is_refused_by_name() {
+        // Hand-built, because the encoder here cannot produce one. The message
+        // has to name the cipher: "re-create it with an empty passphrase" is
+        // only actionable if the operator can see what it was encrypted with.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"openssh-key-v1\0");
+        raw.extend_from_slice(&ssh_string(b"aes256-ctr"));
+        raw.extend_from_slice(&ssh_string(b"bcrypt"));
+        raw.extend_from_slice(&ssh_string(b""));
+        let text = format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+            base64_encode_padded(&raw)
+        );
+        assert_eq!(
+            decode_openssh_private_key(&text),
+            Err(PrivateKeyError::Encrypted {
+                cipher: "aes256-ctr".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_this_format_is_refused_rather_than_guessed() {
+        // Each of these once had a path through some parser in this tree that
+        // produced a key anyway. `sshd`'s old loader hashed the first line and
+        // used the digest as a seed, so a wrong `-h` argument started the
+        // daemon with a host key unrelated to the file named.
+        for (name, text) in [
+            ("empty", String::new()),
+            ("a public key line", "ssh-ed25519 AAAAC3Nz c\n".to_string()),
+            (
+                "ssh-keygen's homebrew band",
+                "-----BEGIN ED25519 PRIVATE KEY-----\nAAAA\n-----END ED25519 PRIVATE KEY-----\n"
+                    .to_string(),
+            ),
+            (
+                "the right band around the wrong bytes",
+                format!(
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+                    base64_encode_padded(b"not a key at all")
+                ),
+            ),
+        ] {
+            assert!(
+                decode_openssh_private_key(&text).is_err(),
+                "{name} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_corrupt_body_fails_instead_of_loading_a_shorter_key() {
+        // This is the pair of bugs that motivated the shared copy, as one
+        // test: the old decoder truncated at the first bad character, and the
+        // container parser then read whatever that left. Either the base64 or
+        // the structure must object -- what must not happen is a successful
+        // load of a *different* key.
+        let good = encode_openssh_private_key(&TEST_SEED, &TEST_PUBLIC, "c", 1);
+        for pos in [40usize, 80, 120] {
+            let mut bad = good.clone();
+            let body_start = bad.find('\n').expect("has a band") + 1;
+            let at = body_start + pos;
+            if at >= bad.len() {
+                continue;
+            }
+            bad.replace_range(at..=at, "!");
+            match decode_openssh_private_key(&bad) {
+                Err(_) => {}
+                Ok(k) => panic!("corruption at {pos} loaded as a key: {k:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_checkints_must_agree() {
+        // The one integrity check the container gives us for free. Build it by
+        // hand, since the encoder always writes them equal.
+        let mut private = Vec::new();
+        private.extend_from_slice(&ssh_u32(1));
+        private.extend_from_slice(&ssh_u32(2));
+        private.extend_from_slice(&ssh_string(b"ssh-ed25519"));
+        private.extend_from_slice(&ssh_string(&TEST_PUBLIC));
+        let mut secret = TEST_SEED.to_vec();
+        secret.extend_from_slice(&TEST_PUBLIC);
+        private.extend_from_slice(&ssh_string(&secret));
+        private.extend_from_slice(&ssh_string(b"c"));
+
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"openssh-key-v1\0");
+        raw.extend_from_slice(&ssh_string(b"none"));
+        raw.extend_from_slice(&ssh_string(b"none"));
+        raw.extend_from_slice(&ssh_string(b""));
+        raw.extend_from_slice(&ssh_u32(1));
+        raw.extend_from_slice(&ssh_string(&ed25519_public_blob(&TEST_PUBLIC)));
+        raw.extend_from_slice(&ssh_string(&private));
+
+        let text = format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+            base64_encode_padded(&raw)
+        );
+        assert_eq!(
+            decode_openssh_private_key(&text),
+            Err(PrivateKeyError::CheckintMismatch)
+        );
+    }
+
+    #[test]
+    fn an_empty_comment_survives_the_round_trip() {
+        // `ssh-keygen -C ""` is legal, and the field is always written even
+        // when empty -- so a missing comment is a truncated file, not an
+        // absent label, and the two must not read the same.
+        let text = encode_openssh_private_key(&TEST_SEED, &TEST_PUBLIC, "", 7);
+        let parsed = decode_openssh_private_key(&text).expect("round trips");
+        assert_eq!(parsed.comment, "");
+    }
+
+    #[test]
+    fn the_public_blob_is_the_one_that_goes_on_a_known_hosts_line() {
+        // The same bytes appear in four places (the container, authorized_keys,
+        // known_hosts, and KEXDH_REPLY). This pins the encoding so those four
+        // cannot drift.
+        let blob = ed25519_public_blob(&TEST_PUBLIC);
+        let (keytype, off) = read_ssh_string(&blob, 0).expect("type");
+        assert_eq!(keytype, b"ssh-ed25519");
+        let (key, off) = read_ssh_string(&blob, off).expect("key");
+        assert_eq!(key, TEST_PUBLIC);
+        assert_eq!(off, blob.len(), "nothing trails the two strings");
     }
 }

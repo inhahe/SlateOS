@@ -37,9 +37,15 @@
 #![allow(clippy::doc_markdown)]
 
 use guitk::Color;
+use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, App, Response};
+use oswindow::{Event, RenderTree};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use std::collections::HashMap;
 
@@ -78,6 +84,76 @@ const ITEM_HEIGHT: f32 = 28.0;
 const CORNER_RADIUS: f32 = 4.0;
 const SLIDESHOW_DEFAULT_INTERVAL_MS: u64 = 3000;
 const MAX_STARS: u8 = 5;
+/// How often the slideshow clock ticks.
+const SLIDESHOW_TICK: Duration = Duration::from_millis(100);
+/// A window narrower than the sidebar plus a column of thumbnails, or shorter
+/// than the toolbar plus a row of them, has no layout left to follow.
+const MIN_WINDOW_WIDTH: f32 = 640.0;
+const MIN_WINDOW_HEIGHT: f32 = 400.0;
+const WINDOW_WIDTH: f32 = 1400.0;
+const WINDOW_HEIGHT: f32 = 900.0;
+
+/// A rectangle on screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Rect {
+    fn contains(self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+}
+
+/// One row of the sidebar, as it is laid out down the column.
+///
+/// The sidebar was drawn by walking a `cy` down through four blocks with
+/// different gaps between them, so the only record of where a row was, was
+/// the pixels already drawn. Both the renderer and the hit test now walk this.
+#[derive(Clone, Debug)]
+enum SidebarRow {
+    /// A section heading: LIBRARY, ALBUMS, SMART ALBUMS.
+    Header(&'static str),
+    /// Air between sections.
+    Gap(f32),
+    /// A row that goes somewhere.
+    Item {
+        label: String,
+        target: SidebarItem,
+        /// How far in the label sits: albums are indented under their heading.
+        indent: f32,
+        /// The colour the label takes when it is the selected row.
+        accent: Color,
+    },
+}
+
+impl SidebarRow {
+    const HEADER_H: f32 = 20.0;
+
+    fn height(&self) -> f32 {
+        match self {
+            Self::Header(_) => Self::HEADER_H,
+            Self::Gap(h) => *h,
+            Self::Item { .. } => ITEM_HEIGHT,
+        }
+    }
+}
+
+/// A control in the toolbar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolbarControl {
+    /// Switch to a view.
+    View(ViewMode),
+    /// Step the sort order along.
+    Sort,
+    /// Step the thumbnail size along.
+    ThumbSize,
+    /// Start or stop the slideshow.
+    Slideshow,
+}
 
 // ============================================================================
 // Unique IDs
@@ -1369,7 +1445,8 @@ impl SlideshowState {
 
     pub fn advance(&mut self) {
         if !self.photo_ids.is_empty() {
-            self.current_index = self.current_index
+            self.current_index = self
+                .current_index
                 .saturating_add(1)
                 .checked_rem(self.photo_ids.len())
                 .unwrap_or(0);
@@ -1456,7 +1533,7 @@ pub enum ActivePanel {
 // Sidebar selection
 // ============================================================================
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarItem {
     AllPhotos,
     Favorites,
@@ -1484,6 +1561,12 @@ pub struct PhotoApp {
     pub search_query: String,
     pub active_panel: ActivePanel,
     pub thumb_size_idx: usize,
+    /// First row of thumbnails drawn in the grid.
+    ///
+    /// A row index rather than a pixel offset: the grid draws whole rows, so a
+    /// pixel offset could only express positions the renderer then rounds
+    /// away.
+    pub grid_scroll: usize,
     pub show_info_panel: bool,
     pub slideshow: Option<SlideshowState>,
     pub export_options: ExportOptions,
@@ -1516,6 +1599,7 @@ impl PhotoApp {
             search_query: String::new(),
             active_panel: ActivePanel::PhotoGrid,
             thumb_size_idx: 1,
+            grid_scroll: 0,
             show_info_panel: true,
             slideshow: None,
             export_options: ExportOptions::default(),
@@ -1916,7 +2000,8 @@ impl PhotoApp {
 
     /// Cycle thumbnail size.
     pub fn cycle_thumb_size(&mut self) {
-        self.thumb_size_idx = self.thumb_size_idx
+        self.thumb_size_idx = self
+            .thumb_size_idx
             .saturating_add(1)
             .checked_rem(THUMB_SIZES.len())
             .unwrap_or(0);
@@ -2025,8 +2110,531 @@ impl PhotoApp {
     // Rendering
     // -----------------------------------------------------------------------
 
+    // ------------------------------------------------------------------
+    // Layout the renderer draws and the pointer reads
+    // ------------------------------------------------------------------
+
+    /// Adopt a new window size. Returns whether it changed.
+    pub fn set_window_size(&mut self, width: f32, height: f32) -> bool {
+        let width = width.max(MIN_WINDOW_WIDTH);
+        let height = height.max(MIN_WINDOW_HEIGHT);
+        if (self.window_width - width).abs() < f32::EPSILON
+            && (self.window_height - height).abs() < f32::EPSILON
+        {
+            return false;
+        }
+        self.window_width = width;
+        self.window_height = height;
+        true
+    }
+
+    /// The rectangle the main content is drawn in: everything left over once
+    /// the toolbar, the status bar, the sidebar and the info panel have taken
+    /// their share.
+    pub fn content_rect(&self) -> Rect {
+        let info_w = if self.show_info_panel {
+            INFO_PANEL_WIDTH
+        } else {
+            0.0
+        };
+        Rect {
+            x: SIDEBAR_WIDTH,
+            y: TOOLBAR_HEIGHT,
+            width: (self.window_width - SIDEBAR_WIDTH - info_w).max(1.0),
+            height: (self.window_height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT).max(1.0),
+        }
+    }
+
+    /// The sidebar, row by row, in the order they are drawn.
+    fn sidebar_rows(&self) -> Vec<SidebarRow> {
+        let item = |label: &str, target, indent, accent| SidebarRow::Item {
+            label: label.to_owned(),
+            target,
+            indent,
+            accent,
+        };
+        let mut rows = vec![
+            SidebarRow::Gap(8.0),
+            SidebarRow::Header("LIBRARY"),
+            item("All Photos", SidebarItem::AllPhotos, 16.0, BLUE),
+            item("Favorites", SidebarItem::Favorites, 16.0, BLUE),
+            item("Recent", SidebarItem::RecentImports, 16.0, BLUE),
+            SidebarRow::Gap(12.0),
+            SidebarRow::Header("ALBUMS"),
+        ];
+        for album in &self.albums {
+            rows.push(SidebarRow::Item {
+                label: format!("{} ({})", album.name, album.photo_count()),
+                target: SidebarItem::Album(album.id),
+                indent: 20.0,
+                accent: BLUE,
+            });
+        }
+        rows.push(SidebarRow::Gap(12.0));
+        if !self.smart_albums.is_empty() {
+            rows.push(SidebarRow::Header("SMART ALBUMS"));
+            for album in &self.smart_albums {
+                rows.push(SidebarRow::Item {
+                    label: album.name.clone(),
+                    target: SidebarItem::SmartAlbum(album.id),
+                    indent: 20.0,
+                    accent: MAUVE,
+                });
+            }
+        }
+        rows.push(SidebarRow::Gap(16.0));
+        rows.push(SidebarRow::Item {
+            label: format!("Trash ({})", self.trash.len()),
+            target: SidebarItem::Trash,
+            indent: 16.0,
+            accent: RED,
+        });
+        rows
+    }
+
+    /// Which sidebar row a point is on, if any.
+    pub fn sidebar_item_at(&self, x: f32, y: f32) -> Option<SidebarItem> {
+        if x < 0.0 || x >= SIDEBAR_WIDTH {
+            return None;
+        }
+        // No guard against a point above the list: the walk starts at the
+        // first row's own y and the list opens with a gap, so anything higher
+        // lands in that gap and answers `None` on its own.
+        let mut row_y = TOOLBAR_HEIGHT;
+        for row in self.sidebar_rows() {
+            let next = row_y + row.height();
+            if y < next {
+                return match row {
+                    SidebarRow::Item { target, .. } => Some(target),
+                    // A heading or the air around it is not a control.
+                    SidebarRow::Header(_) | SidebarRow::Gap(_) => None,
+                };
+            }
+            row_y = next;
+        }
+        None
+    }
+
+    /// Every toolbar control, with the rectangle it is drawn in.
+    ///
+    /// The widths are measured from the labels, so the renderer could not have
+    /// hard-coded them and the hit test could not have guessed them.
+    pub fn toolbar_controls(&self) -> Vec<(ToolbarControl, Rect)> {
+        let mut out = Vec::new();
+        let mut vx = 160.0;
+        for (label, mode) in [
+            ("Grid", ViewMode::Grid),
+            ("Single", ViewMode::Single),
+            ("Timeline", ViewMode::Timeline),
+        ] {
+            let w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
+            out.push((
+                ToolbarControl::View(mode),
+                Rect {
+                    x: vx,
+                    y: 8.0,
+                    width: w,
+                    height: 24.0,
+                },
+            ));
+            vx += w + 4.0;
+        }
+        let sort_x = vx + 12.0;
+        out.push((
+            ToolbarControl::Sort,
+            Rect {
+                x: sort_x,
+                y: 8.0,
+                width: 112.0,
+                height: 24.0,
+            },
+        ));
+        let search_x = sort_x + 124.0;
+        let search_w = 200.0;
+        out.push((
+            ToolbarControl::ThumbSize,
+            Rect {
+                x: search_x + search_w + 16.0,
+                y: 8.0,
+                width: 48.0,
+                height: 24.0,
+            },
+        ));
+        out.push((
+            ToolbarControl::Slideshow,
+            Rect {
+                x: self.window_width - 100.0,
+                y: 8.0,
+                width: 88.0,
+                height: 24.0,
+            },
+        ));
+        out
+    }
+
+    /// Which toolbar control a point is on, if any.
+    pub fn toolbar_control_at(&self, x: f32, y: f32) -> Option<ToolbarControl> {
+        self.toolbar_controls()
+            .into_iter()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(control, _)| control)
+    }
+
+    /// How many thumbnails fit across the content area.
+    pub fn grid_columns(&self) -> usize {
+        let cell = self.current_thumb_size() + THUMB_PADDING;
+        let width = self.content_rect().width;
+        #[allow(clippy::cast_sign_loss)]
+        let cols = (width / cell).floor() as usize;
+        cols.max(1)
+    }
+
+    /// The rows of thumbnails on screen.
+    ///
+    /// The grid used to `break` when a row fell below the window, with no
+    /// offset at all: everything past the first screenful was cut by the
+    /// window edge rather than by a scroll position, so a library of a
+    /// thousand photos showed the first twenty and hid the rest for good.
+    pub fn grid_window(&self) -> scroll_window::Rows {
+        let content = self.content_rect();
+        let cell = self.current_thumb_size() + THUMB_PADDING;
+        let total = self.visible_photos().len();
+        let rows = total.div_ceil(self.grid_columns());
+        scroll_window::visible(rows, cell, content.height - THUMB_PADDING, self.grid_scroll)
+    }
+
+    /// Where the thumbnail at `index` among the visible photos is drawn, or
+    /// `None` if the grid has scrolled past it.
+    pub fn thumb_rect(&self, index: usize) -> Option<Rect> {
+        let cols = self.grid_columns();
+        let row = index.checked_div(cols)?;
+        let window = self.grid_window();
+        if row < window.start || row >= window.end() {
+            return None;
+        }
+        let content = self.content_rect();
+        let thumb = self.current_thumb_size();
+        let cell = thumb + THUMB_PADDING;
+        let col = index.checked_rem(cols)?;
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a row or column index is bounded by what fits on a screen"
+        )]
+        let (col, drawn) = (col as f32, row.saturating_sub(window.start) as f32);
+        Some(Rect {
+            x: content.x + THUMB_PADDING + col * cell,
+            y: content.y + THUMB_PADDING + drawn * cell,
+            width: thumb,
+            height: thumb,
+        })
+    }
+
+    /// Which photo a point in the grid is on, if any.
+    pub fn photo_at(&self, x: f32, y: f32) -> Option<PhotoId> {
+        let visible = self.visible_photos();
+        visible.iter().enumerate().find_map(|(index, &pid)| {
+            self.thumb_rect(index)
+                .filter(|rect| rect.contains(x, y))
+                .map(|_| pid)
+        })
+    }
+
+    /// Scroll so that the row holding `index` is one of the drawn ones.
+    fn scroll_selection_into_view(&mut self, index: usize) {
+        let cols = self.grid_columns();
+        let row = index.checked_div(cols).unwrap_or(0);
+        let window = self.grid_window();
+        if row < window.start {
+            self.grid_scroll = row;
+        } else if row >= window.end() {
+            self.grid_scroll = row.saturating_add(1).saturating_sub(window.count.max(1));
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Input
+    // ------------------------------------------------------------------
+
+    /// Handle one input event. Returns whether anything changed.
+    pub fn handle_event(&mut self, event: &Event) -> bool {
+        match event {
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Tick { elapsed_ms } => self.advance_slideshow(*elapsed_ms),
+            _ => false,
+        }
+    }
+
+    /// Advance the slideshow clock. Returns whether the picture changed.
+    ///
+    /// `SlideshowState` has carried an `interval_ms` and an `elapsed_ms` since
+    /// it was written and nothing ever read either: the slides only moved when
+    /// the user pressed Next, which is not a slideshow. This is lesson 47 --
+    /// an app that keeps time but never receives the clock.
+    pub fn advance_slideshow(&mut self, elapsed_ms: u64) -> bool {
+        let Some(ss) = &mut self.slideshow else {
+            return false;
+        };
+        if ss.paused {
+            return false;
+        }
+        ss.elapsed_ms = ss.elapsed_ms.saturating_add(elapsed_ms);
+        if ss.elapsed_ms < ss.interval_ms {
+            return false;
+        }
+        ss.elapsed_ms = 0;
+        ss.advance();
+        true
+    }
+
+    /// Is there anything a tick would move?
+    pub fn has_work(&self) -> bool {
+        self.slideshow.as_ref().is_some_and(|ss| !ss.paused)
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
+            return false;
+        }
+        if let Some(control) = self.toolbar_control_at(event.x, event.y) {
+            self.press_toolbar(control);
+            return true;
+        }
+        if let Some(target) = self.sidebar_item_at(event.x, event.y) {
+            self.select_sidebar(target);
+            return true;
+        }
+        if self.view_mode == ViewMode::Grid
+            && let Some(pid) = self.photo_at(event.x, event.y)
+        {
+            self.selected_photo = Some(pid);
+            return true;
+        }
+        false
+    }
+
+    /// Carry out a toolbar control.
+    pub fn press_toolbar(&mut self, control: ToolbarControl) {
+        match control {
+            ToolbarControl::View(mode) => {
+                // Leaving the slideshow by choosing another view has to stop
+                // it, or its clock keeps running behind the grid.
+                if self.slideshow.is_some() {
+                    self.stop_slideshow();
+                }
+                self.view_mode = mode;
+            }
+            ToolbarControl::Sort => {
+                self.cycle_sort();
+                self.grid_scroll = 0;
+            }
+            ToolbarControl::ThumbSize => {
+                self.cycle_thumb_size();
+                self.grid_scroll = 0;
+            }
+            ToolbarControl::Slideshow => {
+                if self.slideshow.is_some() {
+                    self.stop_slideshow();
+                    self.view_mode = ViewMode::Grid;
+                } else {
+                    self.start_slideshow();
+                }
+            }
+        }
+    }
+
+    /// Go where a sidebar row points.
+    pub fn select_sidebar(&mut self, target: SidebarItem) {
+        self.sidebar_selection = target;
+        // A grid scrolled forty rows into one album shows nothing at all of a
+        // shorter one, and a selection from the old album is not in the new.
+        self.grid_scroll = 0;
+        self.selected_photo = None;
+        self.selected_photos.clear();
+    }
+
+    fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        if self.view_mode == ViewMode::Slideshow {
+            return self.handle_slideshow_key(event);
+        }
+        match event.key {
+            Key::Left => self.move_selection(-1),
+            Key::Right => self.move_selection(1),
+            Key::Up => {
+                let cols = self.row_step();
+                self.move_selection(cols.checked_neg().unwrap_or(-1))
+            }
+            Key::Down => {
+                let cols = self.row_step();
+                self.move_selection(cols)
+            }
+            Key::Home => self.select_index(0),
+            Key::End => {
+                let last = self.visible_photos().len().saturating_sub(1);
+                self.select_index(last)
+            }
+            Key::Enter => {
+                if self.selected_photo.is_some() && self.view_mode != ViewMode::Single {
+                    self.view_mode = ViewMode::Single;
+                    true
+                } else {
+                    false
+                }
+            }
+            Key::Escape => {
+                if self.view_mode == ViewMode::Single {
+                    self.view_mode = ViewMode::Grid;
+                    true
+                } else {
+                    false
+                }
+            }
+            Key::Delete => self.trash_selection(),
+            Key::Space => {
+                self.start_slideshow();
+                self.slideshow.is_some()
+            }
+            _ => self.handle_typed(event),
+        }
+    }
+
+    fn handle_typed(&mut self, event: &KeyEvent) -> bool {
+        let Some(ch) = event.typed().next() else {
+            return false;
+        };
+        match ch {
+            // The arm already bounds this to 0..=5, which is 0..=MAX_STARS;
+            // capping it again here would be a second statement of the range.
+            '0'..='5' => {
+                let stars = u8::try_from(u32::from(ch).saturating_sub(u32::from('0'))).unwrap_or(0);
+                self.selected_photo
+                    .is_some_and(|pid| self.rate_photo(pid, stars))
+            }
+            'f' | 'F' => self.selected_photo.is_some_and(|pid| self.toggle_flag(pid)),
+            'i' | 'I' => {
+                self.show_info_panel = !self.show_info_panel;
+                // The content area just changed width, so a column count and
+                // therefore a row count changed with it.
+                self.grid_scroll = 0;
+                true
+            }
+            's' | 'S' => {
+                self.press_toolbar(ToolbarControl::Sort);
+                true
+            }
+            '+' | '=' | '-' => {
+                self.press_toolbar(ToolbarControl::ThumbSize);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_slideshow_key(&mut self, event: &KeyEvent) -> bool {
+        match event.key {
+            Key::Escape => {
+                self.stop_slideshow();
+                self.view_mode = ViewMode::Grid;
+                true
+            }
+            Key::Space => {
+                if let Some(ss) = &mut self.slideshow {
+                    ss.toggle_pause();
+                }
+                true
+            }
+            Key::Right => {
+                self.slideshow_next();
+                self.reset_slide_clock();
+                true
+            }
+            Key::Left => {
+                self.slideshow_prev();
+                self.reset_slide_clock();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A slide moved to by hand gets its full time on screen.
+    fn reset_slide_clock(&mut self) {
+        if let Some(ss) = &mut self.slideshow {
+            ss.elapsed_ms = 0;
+        }
+    }
+
+    /// One row's worth of movement, as a signed step.
+    fn row_step(&self) -> isize {
+        isize::try_from(self.grid_columns()).unwrap_or(1)
+    }
+
+    /// Where the selection is among the photos on screen.
+    pub fn selected_index(&self) -> Option<usize> {
+        let wanted = self.selected_photo?;
+        self.visible_photos().iter().position(|&pid| pid == wanted)
+    }
+
+    /// Move the selection by `delta`, stopping at the ends.
+    ///
+    /// Stopping rather than wrapping: holding Right to the end of a library
+    /// and silently arriving back at the first photo is a worse answer than
+    /// stopping, because the grid looks much the same either way.
+    fn move_selection(&mut self, delta: isize) -> bool {
+        let total = self.visible_photos().len();
+        if total == 0 {
+            return false;
+        }
+        let next = match self.selected_index() {
+            None => 0,
+            Some(index) => {
+                let moved = index
+                    .saturating_add_signed(delta)
+                    .min(total.saturating_sub(1));
+                if moved == index {
+                    return false;
+                }
+                moved
+            }
+        };
+        self.select_index(next)
+    }
+
+    /// Select the photo at `index` among the visible ones.
+    fn select_index(&mut self, index: usize) -> bool {
+        let Some(&pid) = self.visible_photos().get(index) else {
+            return false;
+        };
+        if self.selected_photo == Some(pid) {
+            return false;
+        }
+        self.selected_photo = Some(pid);
+        self.scroll_selection_into_view(index);
+        true
+    }
+
+    /// Move the selected photo to the trash, and put the selection on
+    /// whatever takes its place.
+    fn trash_selection(&mut self) -> bool {
+        let Some(pid) = self.selected_photo else {
+            return false;
+        };
+        let index = self.selected_index();
+        if !self.trash_photo(pid) {
+            return false;
+        }
+        // Selection by position, not by id: the id is gone. Landing on the
+        // photo that moved up into the gap is what a user expects after
+        // deleting one of a run.
+        let remaining = self.visible_photos();
+        self.selected_photo = index
+            .and_then(|i| remaining.get(i.min(remaining.len().saturating_sub(1))))
+            .copied();
+        true
+    }
+
     /// Render the full application frame.
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background
@@ -2093,42 +2701,50 @@ impl PhotoApp {
         });
 
         // View mode buttons
-        let view_modes = ["Grid", "Single", "Timeline"];
-        let mut vx = 160.0;
-        for (i, label) in view_modes.iter().enumerate() {
-            let is_active = match i {
-                0 => self.view_mode == ViewMode::Grid,
-                1 => self.view_mode == ViewMode::Single,
-                2 => self.view_mode == ViewMode::Timeline,
-                _ => false,
-            };
-            let btn_w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
+        let controls = self.toolbar_controls();
+        let rect_of = |wanted: ToolbarControl| {
+            controls.iter().find(|(c, _)| *c == wanted).map_or(
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                },
+                |(_, r)| *r,
+            )
+        };
+        for (label, mode) in [
+            ("Grid", ViewMode::Grid),
+            ("Single", ViewMode::Single),
+            ("Timeline", ViewMode::Timeline),
+        ] {
+            let is_active = self.view_mode == mode;
+            let rect = rect_of(ToolbarControl::View(mode));
             let bg = if is_active { SURFACE1 } else { SURFACE0 };
             let fg = if is_active { BLUE } else { SUBTEXT0 };
             cmds.push(RenderCommand::FillRect {
-                x: vx,
-                y: 8.0,
-                width: btn_w,
-                height: 24.0,
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
                 color: bg,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
             cmds.push(RenderCommand::Text {
-                x: vx + 8.0,
+                x: rect.x + 8.0,
                 y: 14.0,
-                text: (*label).to_owned(),
+                text: label.to_owned(),
                 color: fg,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(btn_w - 12.0),
+                max_width: Some((rect.width - 12.0).max(1.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-            vx += btn_w + 4.0;
         }
 
         // Sort button
         let sort_label = format!("Sort: {}", self.sort_order.label());
-        let sort_x = vx + 12.0;
+        let sort_x = rect_of(ToolbarControl::Sort).x;
         cmds.push(RenderCommand::FillRect {
             x: sort_x,
             y: 8.0,
@@ -2311,169 +2927,63 @@ impl PhotoApp {
             width: 1.0,
         });
 
-        let mut cy = y + 8.0;
-
-        // Library section header
-        cmds.push(RenderCommand::Text {
-            x: 12.0,
-            y: cy,
-            text: "LIBRARY".to_owned(),
-            color: OVERLAY0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(SIDEBAR_WIDTH - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 20.0;
-
-        // Built-in sections
-        let sections = [
-            ("All Photos", SidebarItem::AllPhotos),
-            ("Favorites", SidebarItem::Favorites),
-            ("Recent", SidebarItem::RecentImports),
-        ];
-
-        for (label, item) in &sections {
-            let is_selected = self.sidebar_selection == *item;
-            if is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: 4.0,
+        let mut cy = y;
+        for row in self.sidebar_rows() {
+            match &row {
+                SidebarRow::Gap(_) => {}
+                SidebarRow::Header(text) => cmds.push(RenderCommand::Text {
+                    x: 12.0,
                     y: cy,
-                    width: SIDEBAR_WIDTH - 8.0,
-                    height: ITEM_HEIGHT,
-                    color: SURFACE0,
-                    corner_radii: CornerRadii::all(CORNER_RADIUS),
-                });
-            }
-            let color = if is_selected { BLUE } else { TEXT };
-            cmds.push(RenderCommand::Text {
-                x: 16.0,
-                y: cy + 8.0,
-                text: (*label).to_owned(),
-                color,
-                font_size: 12.0,
-                font_weight: if is_selected {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(SIDEBAR_WIDTH - 32.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cy += ITEM_HEIGHT;
-        }
-
-        cy += 12.0;
-
-        // Albums section
-        cmds.push(RenderCommand::Text {
-            x: 12.0,
-            y: cy,
-            text: "ALBUMS".to_owned(),
-            color: OVERLAY0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(SIDEBAR_WIDTH - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 20.0;
-
-        for album in &self.albums {
-            let is_selected = self.sidebar_selection == SidebarItem::Album(album.id);
-            if is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: 4.0,
-                    y: cy,
-                    width: SIDEBAR_WIDTH - 8.0,
-                    height: ITEM_HEIGHT,
-                    color: SURFACE0,
-                    corner_radii: CornerRadii::all(CORNER_RADIUS),
-                });
-            }
-            let color = if is_selected { BLUE } else { TEXT };
-            let label = format!("{} ({})", album.name, album.photo_count());
-            cmds.push(RenderCommand::Text {
-                x: 20.0,
-                y: cy + 8.0,
-                text: label,
-                color,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(SIDEBAR_WIDTH - 36.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cy += ITEM_HEIGHT;
-        }
-
-        cy += 12.0;
-
-        // Smart albums
-        if !self.smart_albums.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: 12.0,
-                y: cy,
-                text: "SMART ALBUMS".to_owned(),
-                color: OVERLAY0,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(SIDEBAR_WIDTH - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cy += 20.0;
-
-            for album in &self.smart_albums {
-                let is_selected = self.sidebar_selection == SidebarItem::SmartAlbum(album.id);
-                if is_selected {
-                    cmds.push(RenderCommand::FillRect {
-                        x: 4.0,
-                        y: cy,
-                        width: SIDEBAR_WIDTH - 8.0,
-                        height: ITEM_HEIGHT,
-                        color: SURFACE0,
-                        corner_radii: CornerRadii::all(CORNER_RADIUS),
+                    text: (*text).to_owned(),
+                    color: OVERLAY0,
+                    font_size: 10.0,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: Some(SIDEBAR_WIDTH - 24.0),
+                    overflow: TextOverflow::Ellipsis,
+                }),
+                SidebarRow::Item {
+                    label,
+                    target,
+                    indent,
+                    accent,
+                } => {
+                    let is_selected = self.sidebar_selection == *target;
+                    if is_selected {
+                        cmds.push(RenderCommand::FillRect {
+                            x: 4.0,
+                            y: cy,
+                            width: SIDEBAR_WIDTH - 8.0,
+                            height: ITEM_HEIGHT,
+                            color: SURFACE0,
+                            corner_radii: CornerRadii::all(CORNER_RADIUS),
+                        });
+                    }
+                    let color = if is_selected {
+                        *accent
+                    } else if *target == SidebarItem::Trash {
+                        SUBTEXT0
+                    } else {
+                        TEXT
+                    };
+                    cmds.push(RenderCommand::Text {
+                        x: *indent,
+                        y: cy + 8.0,
+                        text: label.clone(),
+                        color,
+                        font_size: 12.0,
+                        font_weight: if is_selected {
+                            FontWeightHint::Bold
+                        } else {
+                            FontWeightHint::Regular
+                        },
+                        max_width: Some(SIDEBAR_WIDTH - indent - 16.0),
+                        overflow: TextOverflow::Ellipsis,
                     });
                 }
-                let color = if is_selected { MAUVE } else { TEXT };
-                cmds.push(RenderCommand::Text {
-                    x: 20.0,
-                    y: cy + 8.0,
-                    text: album.name.clone(),
-                    color,
-                    font_size: 12.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(SIDEBAR_WIDTH - 36.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cy += ITEM_HEIGHT;
             }
+            cy += row.height();
         }
-
-        // Trash at bottom
-        cy += 16.0;
-        let is_trash = self.sidebar_selection == SidebarItem::Trash;
-        if is_trash {
-            cmds.push(RenderCommand::FillRect {
-                x: 4.0,
-                y: cy,
-                width: SIDEBAR_WIDTH - 8.0,
-                height: ITEM_HEIGHT,
-                color: SURFACE0,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
-        }
-        let trash_label = format!("Trash ({})", self.trash.len());
-        cmds.push(RenderCommand::Text {
-            x: 16.0,
-            y: cy + 8.0,
-            text: trash_label,
-            color: if is_trash { RED } else { SUBTEXT0 },
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(SIDEBAR_WIDTH - 32.0),
-            overflow: TextOverflow::Ellipsis,
-        });
     }
-
     fn render_info_panel(
         &self,
         cmds: &mut Vec<RenderCommand>,
@@ -2762,8 +3272,6 @@ impl PhotoApp {
     ) {
         let visible = self.visible_photos();
         let thumb = self.current_thumb_size();
-        let cell_size = thumb + THUMB_PADDING;
-        let cols = ((width / cell_size).floor() as usize).max(1);
 
         if visible.is_empty() {
             cmds.push(RenderCommand::Text {
@@ -2780,15 +3288,13 @@ impl PhotoApp {
         }
 
         for (idx, &pid) in visible.iter().enumerate() {
-            let col = idx.checked_rem(cols).unwrap_or(0);
-            let row = idx.checked_div(cols).unwrap_or(0);
-            let cx = x + THUMB_PADDING + (col as f32) * cell_size;
-            let cy = y + THUMB_PADDING + (row as f32) * cell_size;
-
-            // Stop if below visible area
-            if cy > y + height {
-                break;
-            }
+            // `thumb_rect` is the same law the click reads, and it answers
+            // `None` for a row the grid has scrolled past -- which is what
+            // stops a thumbnail being drawn over the status bar.
+            let Some(cell) = self.thumb_rect(idx) else {
+                continue;
+            };
+            let (cx, cy) = (cell.x, cell.y);
 
             let is_selected =
                 self.selected_photo == Some(pid) || self.selected_photos.contains(&pid);
@@ -3143,12 +3649,92 @@ pub struct LibraryStats<'a> {
 // Main entry point
 // ============================================================================
 
-fn main() {
-    let mut app = PhotoApp::new();
+impl App for PhotoApp {
+    fn title(&self) -> String {
+        // What is being looked at, because that is what the window is: a
+        // library behind three other windows is found again by its title.
+        let count = self.visible_photos().len();
+        let where_ = match self.sidebar_selection {
+            SidebarItem::AllPhotos => "All Photos".to_owned(),
+            SidebarItem::Favorites => "Favorites".to_owned(),
+            SidebarItem::RecentImports => "Recent".to_owned(),
+            SidebarItem::Trash => "Trash".to_owned(),
+            SidebarItem::Album(id) => self
+                .albums
+                .iter()
+                .find(|a| a.id == id)
+                .map_or_else(|| "Album".to_owned(), |a| a.name.clone()),
+            SidebarItem::SmartAlbum(id) => self
+                .smart_albums
+                .iter()
+                .find(|a| a.id == id)
+                .map_or_else(|| "Smart Album".to_owned(), |a| a.name.clone()),
+        };
+        format!("{where_} ({count}) - Photos")
+    }
 
-    // Create some sample data
-    let _album1 = app.create_album("Vacation 2025");
-    let _album2 = app.create_album("Family");
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        }
+    }
+
+    /// A clock only while a slideshow is running.
+    ///
+    /// A library sitting still has nothing to advance, and waking the machine
+    /// ten times a second to discover that is `known-issues.md` lesson 47 --
+    /// which is also the defect being fixed here, from the other side.
+    fn tick_interval(&self) -> Option<Duration> {
+        self.has_work().then_some(SLIDESHOW_TICK)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        match event {
+            Event::CloseRequested => Response::Exit,
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension in pixels is exact in f32"
+                )]
+                let (w, h) = (*width as f32, *height as f32);
+                if self.set_window_size(w, h) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            other => {
+                if self.handle_event(other) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The handed size wins over the recorded one: the first frame is drawn
+        // before any `Event::Resize` arrives, so a window opened at another
+        // size would be laid out for the size that was asked for, and every
+        // hit box in it would name the wrong rectangle.
+        self.set_window_size(width, height);
+        RenderTree {
+            commands: self.render_commands(width, height),
+        }
+    }
+}
+
+/// A library with something in it, so the first window is not an empty grid.
+fn seeded_library() -> PhotoApp {
+    let mut app = PhotoApp::new();
+    let _album = app.create_album("Vacation 2025");
+    app.create_album("Family");
 
     let p1 = app.import_photo_with_exif(
         "/photos/IMG_0001.jpg",
@@ -3176,17 +3762,15 @@ fn main() {
     app.add_tag(p1, "beach");
     app.toggle_flag(p1);
 
-    // Create a smart album
     let smart_id = app.create_smart_album("Best Photos", true);
     app.add_smart_rule(smart_id, SmartRule::MinRating(4));
-
-    let cmds = app.render(1400.0, 900.0);
-    let _ = cmds.len(); // Use the result
+    app
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
+fn main() -> ExitCode {
+    let mut app = seeded_library();
+    app::launch("photomanager", &mut app)
+}
 
 #[cfg(test)]
 #[allow(
@@ -3283,7 +3867,10 @@ mod tests {
 
     #[test]
     fn test_adjustments_not_default() {
-        let adj = ImageAdjustments { brightness: 0.5, ..ImageAdjustments::default() };
+        let adj = ImageAdjustments {
+            brightness: 0.5,
+            ..ImageAdjustments::default()
+        };
         assert!(!adj.is_default());
     }
 
@@ -3823,7 +4410,7 @@ mod tests {
         let name = "Sommerferien_Österreich_2026_Abend_am_See.jpg";
         let mut app = PhotoApp::new();
         app.import_photo(&format!("/photos/{name}"), name, ImageFormat::Jpeg, 1000);
-        let cmds = app.render(1400.0, 900.0);
+        let cmds = app.render_commands(1400.0, 900.0);
         let label = cmds
             .iter()
             .find_map(|cmd| match cmd {
@@ -3843,7 +4430,7 @@ mod tests {
     fn test_render_produces_commands() {
         let mut app = PhotoApp::new();
         app.import_photo("/test.jpg", "test.jpg", ImageFormat::Jpeg, 1000);
-        let cmds = app.render(1400.0, 900.0);
+        let cmds = app.render_commands(1400.0, 900.0);
         assert!(!cmds.is_empty());
     }
 
@@ -3853,7 +4440,7 @@ mod tests {
         let pid = app.import_photo("/test.jpg", "test.jpg", ImageFormat::Jpeg, 1000);
         app.selected_photo = Some(pid);
         app.view_mode = ViewMode::Single;
-        let cmds = app.render(1400.0, 900.0);
+        let cmds = app.render_commands(1400.0, 900.0);
         assert!(!cmds.is_empty());
     }
 
@@ -3863,7 +4450,7 @@ mod tests {
         app.import_photo("/a", "a", ImageFormat::Jpeg, 100);
         app.import_photo("/b", "b", ImageFormat::Png, 200);
         app.start_slideshow();
-        let cmds = app.render(1400.0, 900.0);
+        let cmds = app.render_commands(1400.0, 900.0);
         assert!(!cmds.is_empty());
     }
 
@@ -3872,7 +4459,7 @@ mod tests {
         let mut app = PhotoApp::new();
         app.import_photo("/a", "a", ImageFormat::Jpeg, 100);
         app.view_mode = ViewMode::Timeline;
-        let cmds = app.render(1400.0, 900.0);
+        let cmds = app.render_commands(1400.0, 900.0);
         assert!(!cmds.is_empty());
     }
 
@@ -3917,5 +4504,719 @@ mod tests {
     fn test_smart_rule_label() {
         assert_eq!(SmartRule::MinRating(4).label(), "Rating >= 4");
         assert_eq!(SmartRule::IsFlagged.label(), "Flagged");
+    }
+
+    // ======================================================================
+    // Window, input and the slideshow clock
+    // ======================================================================
+
+    use guitk::event::Modifiers;
+
+    fn key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn typed(k: Key, ch: char) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: ch.to_string(),
+        })
+    }
+
+    fn click(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// A library of `n` photos, all visible.
+    fn library(n: usize) -> PhotoApp {
+        let mut app = PhotoApp::new();
+        app.set_window_size(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for i in 0..n {
+            app.import_photo(
+                &format!("/photos/p{i:04}.jpg"),
+                &format!("p{i:04}.jpg"),
+                ImageFormat::Jpeg,
+                1_000_000,
+            );
+        }
+        app
+    }
+
+    // --- the sidebar ---
+
+    #[test]
+    fn clicking_a_sidebar_row_goes_where_it_points() {
+        let mut app = library(4);
+        let album = app.create_album("Trip");
+        // Find where the album row was drawn by walking the same rows.
+        let mut y = TOOLBAR_HEIGHT;
+        let mut target_y = None;
+        for row in app.sidebar_rows() {
+            if let SidebarRow::Item {
+                target: SidebarItem::Album(id),
+                ..
+            } = row
+                && id == album
+            {
+                target_y = Some(y + ITEM_HEIGHT / 2.0);
+            }
+            y += row.height();
+        }
+        let y = target_y.expect("the album has a row");
+        assert_eq!(
+            app.sidebar_item_at(20.0, y),
+            Some(SidebarItem::Album(album))
+        );
+        assert!(app.handle_event(&click(20.0, y)));
+        assert_eq!(app.sidebar_selection, SidebarItem::Album(album));
+    }
+
+    #[test]
+    fn a_sidebar_heading_is_not_a_button() {
+        let app = library(2);
+        let mut y = TOOLBAR_HEIGHT;
+        let mut checked = 0;
+        for row in app.sidebar_rows() {
+            if matches!(row, SidebarRow::Header(_) | SidebarRow::Gap(_)) {
+                assert_eq!(
+                    app.sidebar_item_at(20.0, y + 1.0),
+                    None,
+                    "LIBRARY is a label, not a place to go"
+                );
+                checked += 1;
+            }
+            y += row.height();
+        }
+        assert!(checked > 0);
+    }
+
+    #[test]
+    fn every_sidebar_row_is_reachable_where_it_is_drawn() {
+        let mut app = library(3);
+        app.create_album("A");
+        app.create_album("B");
+        let smart = app.create_smart_album("Best", true);
+        app.add_smart_rule(smart, SmartRule::MinRating(4));
+        let mut y = TOOLBAR_HEIGHT;
+        let mut items = 0;
+        for row in app.sidebar_rows() {
+            if let SidebarRow::Item { target, .. } = &row {
+                assert_eq!(
+                    app.sidebar_item_at(20.0, y + ITEM_HEIGHT / 2.0),
+                    Some(*target),
+                    "{target:?} is drawn at y={y} and must be clickable there"
+                );
+                items += 1;
+            }
+            y += row.height();
+        }
+        assert!(items >= 6, "the fixture should have six rows or more");
+    }
+
+    #[test]
+    fn a_click_right_of_the_sidebar_is_not_a_sidebar_click() {
+        let app = library(2);
+        assert_eq!(
+            app.sidebar_item_at(SIDEBAR_WIDTH + 4.0, TOOLBAR_HEIGHT + 40.0),
+            None
+        );
+    }
+
+    #[test]
+    fn choosing_an_album_starts_at_the_top_of_it() {
+        let mut app = library(200);
+        app.grid_scroll = 12;
+        app.selected_photo = app.visible_photos().last().copied();
+        let album = app.create_album("Trip");
+        app.select_sidebar(SidebarItem::Album(album));
+        assert_eq!(app.grid_scroll, 0);
+        assert_eq!(
+            app.selected_photo, None,
+            "a photo selected in one album is not in another"
+        );
+    }
+
+    // --- the toolbar ---
+
+    #[test]
+    fn clicking_a_view_button_switches_view() {
+        let mut app = library(3);
+        let controls = app.toolbar_controls();
+        let (_, rect) = controls
+            .iter()
+            .find(|(c, _)| *c == ToolbarControl::View(ViewMode::Timeline))
+            .expect("a Timeline button");
+        assert!(app.handle_event(&click(
+            rect.x + rect.width / 2.0,
+            rect.y + rect.height / 2.0
+        )));
+        assert_eq!(app.view_mode, ViewMode::Timeline);
+    }
+
+    #[test]
+    fn every_toolbar_control_is_reachable_where_it_is_drawn() {
+        let app = library(3);
+        for (control, rect) in app.toolbar_controls() {
+            assert_eq!(
+                app.toolbar_control_at(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+                Some(control),
+                "{control:?} is drawn at {rect:?} and must be clickable there"
+            );
+        }
+    }
+
+    #[test]
+    fn the_slideshow_button_starts_and_stops_it() {
+        let mut app = library(3);
+        let controls = app.toolbar_controls();
+        let (_, rect) = controls
+            .iter()
+            .find(|(c, _)| *c == ToolbarControl::Slideshow)
+            .expect("a Slideshow button");
+        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        app.handle_event(&click(x, y));
+        assert!(app.slideshow.is_some());
+        assert_eq!(app.view_mode, ViewMode::Slideshow);
+        app.handle_event(&click(x, y));
+        assert!(app.slideshow.is_none());
+        assert_eq!(app.view_mode, ViewMode::Grid);
+    }
+
+    #[test]
+    fn the_slideshow_button_follows_the_window_edge() {
+        let mut app = library(3);
+        let narrow = app.toolbar_controls();
+        app.set_window_size(1920.0, 1080.0);
+        let wide = app.toolbar_controls();
+        let x_of = |cs: &Vec<(ToolbarControl, Rect)>| {
+            cs.iter()
+                .find(|(c, _)| *c == ToolbarControl::Slideshow)
+                .map_or(0.0, |(_, r)| r.x)
+        };
+        assert!(
+            x_of(&wide) > x_of(&narrow),
+            "it is pinned to the right-hand edge, so it moves with it"
+        );
+    }
+
+    #[test]
+    fn leaving_the_slideshow_by_a_view_button_stops_its_clock() {
+        let mut app = library(3);
+        app.start_slideshow();
+        app.press_toolbar(ToolbarControl::View(ViewMode::Grid));
+        assert!(
+            app.slideshow.is_none(),
+            "a slideshow left running behind the grid keeps asking for frames"
+        );
+        assert_eq!(app.tick_interval(), None);
+    }
+
+    // --- the grid ---
+
+    #[test]
+    fn the_grid_scrolls_instead_of_hiding_everything_past_the_first_screen() {
+        let mut app = library(400);
+        let window = app.grid_window();
+        assert!(
+            window.count < 400_usize.div_ceil(app.grid_columns()),
+            "the fixture must overflow the window"
+        );
+        assert!(app.thumb_rect(0).is_some());
+        let past = window.count.saturating_mul(app.grid_columns());
+        assert_eq!(
+            app.thumb_rect(past),
+            None,
+            "a row below the fold is not drawn"
+        );
+        app.grid_scroll = window.count;
+        assert!(
+            app.thumb_rect(past).is_some(),
+            "and scrolling is what brings it into view -- there was no offset \
+             at all before, so a library of four hundred photos showed the \
+             first screenful and hid the rest for good"
+        );
+    }
+
+    #[test]
+    fn clicking_a_thumbnail_selects_that_photo() {
+        let mut app = library(20);
+        let visible = app.visible_photos();
+        let rect = app.thumb_rect(5).expect("a sixth thumbnail");
+        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        assert_eq!(app.photo_at(x, y), Some(visible[5]));
+        assert!(app.handle_event(&click(x, y)));
+        assert_eq!(app.selected_photo, Some(visible[5]));
+    }
+
+    #[test]
+    fn clicking_a_scrolled_grid_selects_the_photo_that_is_there() {
+        let mut app = library(400);
+        app.grid_scroll = 5;
+        let cols = app.grid_columns();
+        let visible = app.visible_photos();
+        let index = cols.saturating_mul(5);
+        let rect = app.thumb_rect(index).expect("the first drawn row");
+        assert_eq!(
+            app.photo_at(rect.x + 4.0, rect.y + 4.0),
+            Some(visible[index]),
+            "the top row of a grid scrolled by five is the sixth row of photos"
+        );
+    }
+
+    #[test]
+    fn clicking_the_gap_between_thumbnails_selects_nothing() {
+        let mut app = library(20);
+        let rect = app.thumb_rect(0).expect("a thumbnail");
+        assert_eq!(
+            app.photo_at(rect.x - 2.0, rect.y - 2.0),
+            None,
+            "the padding around a thumbnail is not the thumbnail"
+        );
+        assert!(!app.handle_event(&click(rect.x - 2.0, rect.y - 2.0)));
+    }
+
+    #[test]
+    fn a_wider_window_fits_more_columns() {
+        let mut app = library(50);
+        app.set_window_size(800.0, 900.0);
+        let narrow = app.grid_columns();
+        app.set_window_size(1800.0, 900.0);
+        assert!(
+            app.grid_columns() > narrow,
+            "a window a thousand pixels wider must fit more than {narrow} \
+             columns"
+        );
+    }
+
+    #[test]
+    fn opening_the_info_panel_narrows_the_grid() {
+        let mut app = library(50);
+        app.show_info_panel = false;
+        let wide = app.content_rect().width;
+        app.show_info_panel = true;
+        assert_eq!(app.content_rect().width, wide - INFO_PANEL_WIDTH);
+    }
+
+    // --- the keyboard ---
+
+    #[test]
+    fn the_arrows_move_the_selection_and_stop_at_the_ends() {
+        let mut app = library(10);
+        let visible = app.visible_photos();
+        assert!(app.handle_event(&key(Key::Right)));
+        assert_eq!(app.selected_photo, Some(visible[0]));
+        app.handle_event(&key(Key::Right));
+        assert_eq!(app.selected_photo, Some(visible[1]));
+        assert!(app.handle_event(&key(Key::Left)));
+        assert_eq!(app.selected_photo, Some(visible[0]));
+        assert!(
+            !app.handle_event(&key(Key::Left)),
+            "Left at the first photo must stop, not wrap to the last"
+        );
+        app.handle_event(&key(Key::End));
+        assert_eq!(app.selected_photo, visible.last().copied());
+        assert!(!app.handle_event(&key(Key::Right)));
+    }
+
+    #[test]
+    fn down_moves_a_whole_row() {
+        let mut app = library(60);
+        let cols = app.grid_columns();
+        let visible = app.visible_photos();
+        app.handle_event(&key(Key::Right));
+        app.handle_event(&key(Key::Down));
+        assert_eq!(app.selected_photo, Some(visible[cols]));
+        app.handle_event(&key(Key::Up));
+        assert_eq!(app.selected_photo, Some(visible[0]));
+    }
+
+    #[test]
+    fn moving_the_selection_scrolls_it_into_view() {
+        let mut app = library(400);
+        for _ in 0..40 {
+            app.handle_event(&key(Key::Down));
+        }
+        let index = app.selected_index().expect("a selection");
+        let row = index / app.grid_columns();
+        let window = app.grid_window();
+        assert!(
+            row >= window.start && row < window.end(),
+            "row {row} is selected but the grid is showing {}..{}",
+            window.start,
+            window.end()
+        );
+    }
+
+    #[test]
+    fn moving_back_up_scrolls_the_grid_back_with_it() {
+        let mut app = library(400);
+        for _ in 0..40 {
+            app.handle_event(&key(Key::Down));
+        }
+        assert!(app.grid_scroll > 0);
+        for _ in 0..40 {
+            app.handle_event(&key(Key::Up));
+        }
+        let index = app.selected_index().expect("a selection");
+        let row = index / app.grid_columns();
+        let window = app.grid_window();
+        assert!(row >= window.start && row < window.end());
+    }
+
+    #[test]
+    fn enter_opens_a_photo_and_escape_comes_back() {
+        let mut app = library(5);
+        app.handle_event(&key(Key::Right));
+        assert!(app.handle_event(&key(Key::Enter)));
+        assert_eq!(app.view_mode, ViewMode::Single);
+        assert!(app.handle_event(&key(Key::Escape)));
+        assert_eq!(app.view_mode, ViewMode::Grid);
+        assert!(!app.handle_event(&key(Key::Escape)));
+    }
+
+    #[test]
+    fn a_digit_rates_the_selected_photo() {
+        let mut app = library(5);
+        app.handle_event(&key(Key::Right));
+        let pid = app.selected_photo.expect("a selection");
+        assert!(app.handle_event(&typed(Key::Num4, '4')));
+        assert_eq!(app.find_photo(pid).map(|p| p.rating), Some(4));
+        assert!(app.handle_event(&typed(Key::Num0, '0')));
+        assert_eq!(app.find_photo(pid).map(|p| p.rating), Some(0));
+    }
+
+    #[test]
+    fn f_flags_the_selected_photo_and_i_toggles_the_info_panel() {
+        let mut app = library(5);
+        app.handle_event(&key(Key::Right));
+        let pid = app.selected_photo.expect("a selection");
+        assert!(app.handle_event(&typed(Key::F, 'f')));
+        assert_eq!(app.find_photo(pid).map(|p| p.flagged), Some(true));
+
+        let before = app.show_info_panel;
+        assert!(app.handle_event(&typed(Key::I, 'i')));
+        assert_ne!(app.show_info_panel, before);
+    }
+
+    #[test]
+    fn delete_trashes_the_selection_and_lands_on_its_neighbour() {
+        let mut app = library(5);
+        let visible = app.visible_photos();
+        app.selected_photo = Some(visible[2]);
+        assert!(app.handle_event(&key(Key::Delete)));
+        assert_eq!(app.trash.len(), 1);
+        assert_eq!(
+            app.selected_photo,
+            Some(visible[3]),
+            "the photo that moved up into the gap is the one a user expects \
+             to be on after deleting one of a run"
+        );
+    }
+
+    #[test]
+    fn delete_at_the_end_of_the_library_lands_on_the_new_last_photo() {
+        let mut app = library(3);
+        let visible = app.visible_photos();
+        app.selected_photo = visible.last().copied();
+        app.handle_event(&key(Key::Delete));
+        assert_eq!(app.selected_photo, Some(visible[1]));
+    }
+
+    #[test]
+    fn an_unbound_key_asks_for_no_frame() {
+        let mut app = library(5);
+        assert_eq!(app.on_event(&key(Key::F9)), Response::Idle);
+        assert_eq!(app.on_event(&typed(Key::Z, 'z')), Response::Idle);
+    }
+
+    // --- the slideshow keeps time ---
+
+    #[test]
+    fn a_slideshow_advances_on_its_own() {
+        let mut app = library(5);
+        app.start_slideshow();
+        let interval = app.slideshow.as_ref().expect("a slideshow").interval_ms;
+        assert_eq!(app.slideshow.as_ref().map(|ss| ss.current_index), Some(0));
+        app.advance_slideshow(interval / 2);
+        assert_eq!(
+            app.slideshow.as_ref().map(|ss| ss.current_index),
+            Some(0),
+            "it has not been long enough yet"
+        );
+        app.advance_slideshow(interval);
+        assert_eq!(
+            app.slideshow.as_ref().map(|ss| ss.current_index),
+            Some(1),
+            "interval_ms and elapsed_ms had no reader at all: the slides only \
+             moved when the user pressed Next, which is not a slideshow"
+        );
+    }
+
+    #[test]
+    fn a_paused_slideshow_does_not_advance() {
+        let mut app = library(5);
+        app.start_slideshow();
+        let interval = app.slideshow.as_ref().expect("a slideshow").interval_ms;
+        assert!(app.handle_event(&key(Key::Space)), "space pauses it");
+        assert!(app.slideshow.as_ref().is_some_and(|ss| ss.paused));
+        assert!(!app.advance_slideshow(interval * 4));
+        assert_eq!(app.slideshow.as_ref().map(|ss| ss.current_index), Some(0));
+        assert_eq!(app.tick_interval(), None, "and it asks for no frames");
+    }
+
+    #[test]
+    fn stepping_a_slide_by_hand_gives_it_its_full_time() {
+        let mut app = library(5);
+        app.start_slideshow();
+        let interval = app.slideshow.as_ref().expect("a slideshow").interval_ms;
+        app.advance_slideshow(interval - 1);
+        app.handle_event(&key(Key::Right));
+        assert_eq!(app.slideshow.as_ref().map(|ss| ss.current_index), Some(1));
+        app.advance_slideshow(2);
+        assert_eq!(
+            app.slideshow.as_ref().map(|ss| ss.current_index),
+            Some(1),
+            "a slide stepped to by hand must not vanish a millisecond later"
+        );
+    }
+
+    #[test]
+    fn escape_leaves_the_slideshow() {
+        let mut app = library(5);
+        app.start_slideshow();
+        assert!(app.handle_event(&key(Key::Escape)));
+        assert!(app.slideshow.is_none());
+        assert_eq!(app.view_mode, ViewMode::Grid);
+    }
+
+    #[test]
+    fn the_slideshow_wraps_round_at_the_end() {
+        let mut app = library(3);
+        app.start_slideshow();
+        let interval = app.slideshow.as_ref().expect("a slideshow").interval_ms;
+        for _ in 0..3 {
+            app.advance_slideshow(interval);
+        }
+        assert_eq!(
+            app.slideshow.as_ref().map(|ss| ss.current_index),
+            Some(0),
+            "a slideshow that stops at the last photo is a slide, not a show"
+        );
+    }
+
+    // --- the strap ---
+
+    #[test]
+    fn the_title_says_where_you_are_and_how_much_is_there() {
+        let mut app = library(7);
+        assert_eq!(app.title(), "All Photos (7) - Photos");
+        let album = app.create_album("Trip");
+        app.select_sidebar(SidebarItem::Album(album));
+        assert_eq!(app.title(), "Trip (0) - Photos");
+        app.select_sidebar(SidebarItem::Trash);
+        assert_eq!(app.title(), "Trash (0) - Photos");
+    }
+
+    #[test]
+    fn the_clock_runs_only_while_a_slideshow_does() {
+        let mut app = library(4);
+        assert_eq!(app.tick_interval(), None);
+        app.start_slideshow();
+        assert_eq!(app.tick_interval(), Some(SLIDESHOW_TICK));
+        app.stop_slideshow();
+        assert_eq!(app.tick_interval(), None);
+    }
+
+    #[test]
+    fn a_tick_with_nothing_to_do_asks_for_no_frame() {
+        let mut app = library(4);
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 100 }),
+            Response::Idle
+        );
+    }
+
+    #[test]
+    fn a_tick_that_turns_a_slide_asks_for_one() {
+        let mut app = library(4);
+        app.start_slideshow();
+        let interval = app.slideshow.as_ref().expect("a slideshow").interval_ms;
+        assert_eq!(
+            app.on_event(&Event::Tick {
+                elapsed_ms: interval
+            }),
+            Response::Redraw
+        );
+    }
+
+    #[test]
+    fn a_resize_relays_out_and_a_repeat_of_it_does_not() {
+        let mut app = library(4);
+        let resize = Event::Resize {
+            width: 1000,
+            height: 700,
+        };
+        assert_eq!(app.on_event(&resize), Response::Redraw);
+        assert_eq!(app.window_width, 1000.0);
+        assert_eq!(app.on_event(&resize), Response::Idle);
+    }
+
+    #[test]
+    fn a_window_dragged_tiny_keeps_a_grid() {
+        let mut app = library(4);
+        app.set_window_size(1.0, 1.0);
+        assert!(app.window_width >= MIN_WINDOW_WIDTH);
+        assert!(app.window_height >= MIN_WINDOW_HEIGHT);
+        assert!(app.grid_columns() >= 1);
+        assert!(app.content_rect().width >= 1.0);
+    }
+
+    #[test]
+    fn the_first_frame_uses_the_size_the_compositor_gave() {
+        let mut app = library(4);
+        let tree = app.render(1000.0, 800.0);
+        assert_eq!(app.window_width, 1000.0);
+        assert_eq!(app.window_height, 800.0);
+        assert!(!tree.commands.is_empty());
+    }
+
+    #[test]
+    fn the_close_button_exits() {
+        let mut app = library(4);
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn the_seeded_library_opens_on_something_to_look_at() {
+        let app = seeded_library();
+        assert!(!app.photos.is_empty());
+        assert!(!app.albums.is_empty());
+        assert!(!app.smart_albums.is_empty());
+    }
+
+    #[test]
+    fn a_click_on_a_sidebar_row_boundary_belongs_to_the_lower_row() {
+        let app = library(2);
+        let rows = app.sidebar_rows();
+        let mut y = TOOLBAR_HEIGHT;
+        let mut checked = 0;
+        for (i, row) in rows.iter().enumerate() {
+            let boundary = y + row.height();
+            if let Some(SidebarRow::Item { target, .. }) = rows.get(i + 1) {
+                assert_eq!(
+                    app.sidebar_item_at(20.0, boundary),
+                    Some(*target),
+                    "the pixel a row ends on belongs to the next row, not to \
+                     both"
+                );
+                checked += 1;
+            }
+            y = boundary;
+        }
+        assert!(checked > 0);
+    }
+
+    #[test]
+    fn a_scrolled_grid_draws_its_first_row_at_the_top() {
+        let mut app = library(400);
+        let content = app.content_rect();
+        let cols = app.grid_columns();
+        app.grid_scroll = 5;
+        let rect = app
+            .thumb_rect(cols.saturating_mul(5))
+            .expect("the first drawn row");
+        assert!(
+            (rect.y - (content.y + THUMB_PADDING)).abs() < 0.01,
+            "a grid scrolled five rows must draw row five at the top of the \
+             content area, not five rows below it: y={}",
+            rect.y
+        );
+    }
+
+    #[test]
+    fn a_grid_too_narrow_for_one_thumbnail_still_has_a_column() {
+        let mut app = library(20);
+        app.set_window_size(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+        app.show_info_panel = true;
+        while app.current_thumb_size() < 200.0 {
+            app.cycle_thumb_size();
+        }
+        assert!(
+            app.content_rect().width < app.current_thumb_size(),
+            "the fixture must be narrower than one thumbnail"
+        );
+        assert!(
+            app.grid_columns() >= 1,
+            "zero columns divides by zero when the row count is worked out"
+        );
+        let _ = app.grid_window();
+        let _ = app.thumb_rect(0);
+    }
+
+    #[test]
+    fn the_content_area_starts_where_the_sidebar_ends() {
+        let app = library(4);
+        let content = app.content_rect();
+        assert!(
+            (content.x - SIDEBAR_WIDTH).abs() < f32::EPSILON,
+            "content drawn from x={} would be underneath the sidebar",
+            content.x
+        );
+        assert!((content.y - TOOLBAR_HEIGHT).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn opening_the_info_panel_re_anchors_the_grid() {
+        let mut app = library(400);
+        app.grid_scroll = 20;
+        app.handle_event(&typed(Key::I, 'i'));
+        assert_eq!(
+            app.grid_scroll, 0,
+            "the content just changed width, so the row a position named is \
+             not the row it names now"
+        );
+    }
+
+    #[test]
+    fn a_slide_gets_its_full_time_after_an_automatic_turn() {
+        let mut app = library(5);
+        app.start_slideshow();
+        let interval = app.slideshow.as_ref().expect("a slideshow").interval_ms;
+        app.advance_slideshow(interval);
+        assert_eq!(app.slideshow.as_ref().map(|ss| ss.current_index), Some(1));
+        app.advance_slideshow(interval / 2);
+        assert_eq!(
+            app.slideshow.as_ref().map(|ss| ss.current_index),
+            Some(1),
+            "without resetting the clock every tick after the first would \
+             turn another slide"
+        );
+    }
+
+    #[test]
+    fn releasing_the_mouse_is_not_a_click() {
+        let mut app = library(20);
+        let rect = app.thumb_rect(3).expect("a thumbnail");
+        let release = Event::Mouse(MouseEvent {
+            x: rect.x + 4.0,
+            y: rect.y + 4.0,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        });
+        assert!(
+            !app.handle_event(&release),
+            "acting on both halves of a click runs every button twice"
+        );
+        assert_eq!(app.selected_photo, None);
     }
 }

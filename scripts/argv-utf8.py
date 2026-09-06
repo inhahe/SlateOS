@@ -46,19 +46,53 @@ finding, because a bin that still has the defect is still found.
 A genuine false positive belongs in `IGNORE` below, which records *why*, rather
 than in the baseline, which records only *that*.
 
-# Scope, stated rather than assumed
+# Scope: a declaration, not a guess
 
-The gate covers `userspace/coreutils/`: the 84 shipped, on-`PATH` utilities
-where the panic destroys work a user cannot see coming -- one oddly-named file
-in a directory is enough to make `rm -r` abort part-way, and a cleanup script
-that dies half-done is worse than one that refuses to start.
+The gate covers **every crate under `userspace/` that does not declare itself
+unimplemented**, and a crate declares that by depending on `userspace/notimpl`,
+this tree's own marker for "not written yet". 474 of the 2760 crates there are
+in scope, measured 2026-09-05.
 
-It does **not** gate the ~2750 single-file crates under `userspace/*/` that
-print canned output. They are stubs; a panic there is a stub being a stub, and
-a 2750-line baseline is a baseline nobody reads. But they are *counted and
-reported* rather than passed over silently, for the same reason the whole tool
-exists: a checker that quietly narrows its own scope reports a clean tree, and a
-clean report is the one outcome that must never be produced by accident.
+It used to cover `userspace/coreutils/` and nothing else, on the argument that
+those are the 84 shipped, on-`PATH` utilities and everything else under
+`userspace/` is a stub. Both halves were true when written and the conclusion
+had stopped being true, because "everything else" had since grown real
+programs. `sshd` acquired this defect in 2026-09 by exactly the route a narrow
+gate leaves open: a real daemon, reading `-f` as `String`, that was never in
+scope -- so `sshd -f /etc/ssh/conf\xff` died before its own first statement,
+and nothing complained. It is not alone: `sudo`, `su`, `login`, `doas`,
+`passwd`, `useradd`, `chpasswd`, `getty`, `ftpd`, `ftp`, `sftp`, `scp`, `ssh`,
+`ssh-keygen`, `syslogd`, `crond`, `logind`, `inetd`, `telnet`, `ntpd`,
+`dhcpcd`, `dnsmasq`, `chroot`, `firejail`, `unshare`, `nsenter`, `capsh`,
+`newgrp` and `chage` all read argv or the environment as `String` today. 464
+findings in 450 crates, against the 4 the old scope could see. A gate whose
+scope is a directory name is a gate you leave by writing your program
+somewhere else.
+
+Depending on `notimpl` is the exemption because it is something a crate *says*,
+not something this script infers about it. Inference was tried first and does
+not work: `userspace/abiword-cli` prints canned text and declares no
+dependencies at all, so "has real dependencies" calls it a program; `getty`,
+`telnet` and `dnsmasq` declare none either and are programs. There is no
+property of a manifest that separates the two. A declaration has no such
+problem, and it is self-maintaining in the direction that matters -- a stub
+becomes a program by deleting that dependency, which is the same edit that puts
+it in scope.
+
+So a crate that prints canned output and never said so is gated, and sits in
+the baseline alongside the real programs. A good few of the 450 are that: of
+the gated crates, roughly half import nothing that could touch a file, a
+socket or a subprocess, so whatever they print they cannot have observed.
+That is the rule declining to guess rather than a misclassification, and it
+costs nothing today -- the fix for any of them, new or old, is the same one
+line as its 2286 siblings, `notimpl::guard(env!("CARGO_PKG_NAME"))` and the
+dependency that comes with it, which also happens to fix the panic: the guard
+runs before `env::args()` is ever called.
+
+Crates that do declare themselves are still *counted and reported* rather than
+passed over silently, for the same reason the whole tool exists: a checker that
+quietly narrows its own scope reports a clean tree, and a clean report is the
+one outcome that must never be produced by accident.
 
 That count is printed by a bare run and by `--write-baseline`, and not by
 `--check` -- see the comment in `main`. It is there to be read by a person
@@ -102,11 +136,15 @@ BASELINE = Path(__file__).resolve().parent / "argv-utf8-baseline.txt"
 # `--write-baseline` writes to the disk, always, because that is the file the
 # author will commit. Only the *reading* moved onto the tree.
 BASELINE_REL = "scripts/argv-utf8-baseline.txt"
-# The gated tree: the real, shipped utilities.
-GATED_REL = "userspace/coreutils"
-# Reported-but-not-gated, so the excluded scope is a number rather than a
-# silence. See the module docstring.
-SURVEYED_REL = "userspace"
+# Every crate directly below here is judged, unless it declares itself
+# unimplemented. See the module docstring for why the exemption is a
+# declaration rather than something inferred from the manifest.
+USERSPACE_REL = "userspace"
+# The dependency that constitutes that declaration: `userspace/notimpl` is the
+# crate a stub calls to say "this program is not written yet", and 2286 of them
+# do. The name is a constant rather than a literal in `declares_stub` only so
+# that the docstring, the messages and the predicate cannot drift apart.
+STUB_DEP = "notimpl"
 
 # `strip_comments_and_strings` is imported rather than copied. It is forty lines
 # of Rust lexing that already earned its keep once -- `raced-globals.py` spent a
@@ -195,8 +233,90 @@ def _relpath(p: Path) -> str:
         return p.as_posix()
 
 
-def rust_files(tree: gittree.Tree, prefix: str) -> list[str]:
-    """Every `.rs` file below `prefix`, skipping build output.
+# A section header and a key, for reading just enough of a manifest to answer
+# one yes/no question. Deliberately not a TOML parser: the standard library's
+# `tomllib` would reject a manifest with a syntax error outright, and a crate
+# whose `Cargo.toml` does not parse must still be *gated* -- failing toward
+# "not a stub" is failing loud, and failing toward "stub" would let a program
+# leave the gate by mistyping a bracket.
+_SECTION = re.compile(r"^\s*\[\s*([^\]]*?)\s*\]")
+_KEY = re.compile(r"^\s*([A-Za-z0-9_.\"-]+)\s*=")
+
+
+def declares_stub(cargo_toml: str) -> bool:
+    """Whether this manifest says its crate is not implemented yet.
+
+    The declaration is a dependency on [`STUB_DEP`] in `[dependencies]`, in any
+    of TOML's three spellings of one -- `notimpl = { … }`, `notimpl.path = …`,
+    and a `[dependencies.notimpl]` table. All 2286 in this tree use the first;
+    the other two are accepted because they mean the same thing and a crate
+    that spells it the second way is not asking to be treated differently.
+
+    `[dev-dependencies]` does not count, and that is the whole reason this
+    reads sections at all rather than grepping for the name. A test-only
+    dependency on the stub crate says nothing about whether the program is
+    written; a rule that could not tell them apart would let any crate leave
+    the gate by adding four characters to a table nobody looks at.
+
+    A commented-out dependency does not count either, for the reason rule 3 of
+    the self-test exists: prose about a thing is not the thing, and a crate
+    being *fleshed out* is the single most likely place for a commented `#
+    notimpl = …` to sit.
+    """
+    section = ""
+    for line in cargo_toml.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        header = _SECTION.match(line)
+        if header:
+            section = header.group(1).replace('"', "").replace(" ", "")
+            if section == f"dependencies.{STUB_DEP}":
+                return True
+            continue
+        if section != "dependencies":
+            continue
+        key = _KEY.match(line)
+        if key and key.group(1).replace('"', "").split(".", 1)[0] == STUB_DEP:
+            return True
+    return False
+
+
+def stub_crates(tree: gittree.Tree) -> set[str]:
+    """The `userspace/<name>` crates that declare themselves unimplemented.
+
+    A manifest that cannot be read is not a declaration: the crate is gated.
+    That is the safe direction -- see `declares_stub` on why every uncertainty
+    here resolves toward being judged rather than toward being skipped.
+    """
+    manifests = [f"{rel}/Cargo.toml" for rel, is_dir in tree.entries(USERSPACE_REL)
+                 if is_dir]
+    # One bulk read rather than 2,760 single ones. A read costs ~20 ms of
+    # waiting on this machine whichever side of the seam it comes from, so
+    # serially this one question is a minute before the gate has looked at any
+    # source at all. See `gittree.Tree.read_many`.
+    return {
+        rel.rsplit("/", 1)[0]
+        for rel, text in tree.read_many_text(manifests).items()
+        if text is not None and declares_stub(text)
+    }
+
+
+def _crate_of(rel: str) -> str | None:
+    """`userspace/<crate>` for a path inside one, else `None`.
+
+    Every `.rs` file under `userspace/` lives in a crate directory exactly one
+    level down -- 2759 manifests, none deeper, checked 2026-09-05. A file that
+    somehow sits outside one answers `None`, which is not in the stub set and
+    is therefore gated: the same fail-loud direction as everywhere else here.
+    """
+    parts = rel.split("/", 2)
+    if len(parts) < 3 or parts[0] != USERSPACE_REL:
+        return None
+    return f"{parts[0]}/{parts[1]}"
+
+
+def rust_files(tree: gittree.Tree) -> tuple[list[str], list[str]]:
+    """`(gated, exempt)` `.rs` files under `userspace/`, each sorted.
 
     Build output is skipped by the seam, which prunes `target/`, `.git` and the
     `target-*` family while walking rather than filtering the results: that
@@ -207,13 +327,29 @@ def rust_files(tree: gittree.Tree, prefix: str) -> list[str]:
     is gone rather than kept, because two spellings of one rule is one rule that
     drifts -- and this one had already drifted the other way: the seam was
     missing `target-*` until it was added for this conversion.
+
+    One walk of `userspace/` splits both ways, rather than a `files_under` per
+    gated crate. With 474 of them that would be 474 walks -- and on a revision
+    `RevTree.files_under` scans its whole 13,821-path index per call, so the
+    per-crate shape costs 6.5M string comparisons in the push hook to answer a
+    question one pass already answers.
     """
-    return [rel for rel in tree.files_under(prefix)
-            if rel.rsplit("/", 1)[-1].endswith(".rs")]
+    stubs = stub_crates(tree)
+    gated: list[str] = []
+    exempt: list[str] = []
+    for rel in sorted(tree.files_under(USERSPACE_REL)):
+        if not rel.rsplit("/", 1)[-1].endswith(".rs"):
+            continue
+        (exempt if _crate_of(rel) in stubs else gated).append(rel)
+    return gated, exempt
 
 
 def analyse(tree: gittree.Tree, rel: str) -> list[tuple[str, int, str]]:
-    """Findings in one file, read from whichever tree is being judged."""
+    """Findings in one file, read from whichever tree is being judged.
+
+    Kept for callers with a single file to ask about; `findings` reads its
+    whole set at once instead, for the reason in `gittree.Tree.read_many`.
+    """
     raw = tree.read_text(rel)
     if raw is None:
         return []
@@ -251,11 +387,20 @@ def analyse_text(raw: str) -> list[tuple[str, int, str]]:
     return out
 
 
-def findings(tree: gittree.Tree, prefix: str) -> dict[str, tuple[int, str]]:
-    """`{"<path>:<rule>": (line, text)}` for everything below `prefix`."""
+def findings(tree: gittree.Tree, files: list[str]) -> dict[str, tuple[int, str]]:
+    """`{"<path>:<rule>": (line, text)}` for the given files.
+
+    Read in one go, then lexed. Reading is the larger half of this gate's cost
+    and is pure waiting -- ~20 ms a file that is not this process's CPU -- so
+    a read-then-lex loop spends most of a run doing nothing. Handing the whole
+    list to the seam took the gated set from 50 s of reading to 3.4 s. See
+    `gittree.Tree.read_many`.
+    """
     out: dict[str, tuple[int, str]] = {}
-    for rel in sorted(rust_files(tree, prefix)):
-        for rule, line, text in analyse(tree, rel):
+    for rel, raw in tree.read_many_text(files).items():
+        if raw is None:
+            continue
+        for rule, line, text in analyse_text(raw):
             key = f"{rel}:{rule}"
             if key in IGNORE:
                 continue
@@ -299,16 +444,25 @@ def stale_entries(known: set[str], gated: set[str]) -> list[str]:
     return sorted(known - gated)
 
 
-def _inputs_missing(tree: gittree.Tree, needs_baseline: bool) -> str | None:
+def _inputs_missing(
+    tree: gittree.Tree, gated: list[str], needs_baseline: bool
+) -> str | None:
     """Why this tree cannot be judged at all, or `None` if it can.
 
     Every rule in `--selftest` proves the detector classifies a *given* file
-    correctly. None of them would notice if `GATED_REL` named a directory that
-    had been renamed away, or if `rust_files` pruned too eagerly: the listing
-    would come back empty, `--check` would find nothing new, and the gate would
-    pass forever while looking at nothing. That is the precise shape of failure
-    this tool exists to prevent -- a clean report produced by accident -- so it
-    is worth one explicit question.
+    correctly. None of them would notice if `USERSPACE_REL` named a directory
+    that had been renamed away, or if `rust_files` pruned too eagerly: the
+    listing would come back empty, `--check` would find nothing new, and the
+    gate would pass forever while looking at nothing. That is the precise shape
+    of failure this tool exists to prevent -- a clean report produced by
+    accident -- so it is worth one explicit question.
+
+    Since 2026-09-05 the scope is a subtraction rather than a directory name,
+    which adds a second way to reach the same nothing: `declares_stub` going
+    wrong in the permissive direction exempts every crate in the tree and the
+    gate goes green over 2760 of them. An empty gated list cannot tell those
+    two apart and does not need to -- both are the gate having lost its
+    subject, and both are exit 2.
 
     The baseline is the second input, and until 2026-09-03 it had no such
     question. It fails the other way, loudly: unreadable through the seam it
@@ -334,10 +488,11 @@ def _inputs_missing(tree: gittree.Tree, needs_baseline: bool) -> str | None:
     the baseline half was added; see `known-issues.md` ->
     `TD-B-GATE-4-CANNOT-TELL-AN-EMPTY-BACKLOG-FROM-A-MISSING-ONE`.
     """
-    if not rust_files(tree, GATED_REL):
-        return (f"no .rs files under {GATED_REL} -- the gate has nothing to "
-                f"judge, which is not the same as a clean tree. Has the "
-                f"directory moved?")
+    if not gated:
+        return (f"no gated .rs file under {USERSPACE_REL}/ -- either the "
+                f"directory moved, or every crate in it now reads as declaring "
+                f"itself unimplemented. Both leave the gate with nothing to "
+                f"judge, which is not the same as a clean tree.")
     if needs_baseline and tree.read_text(BASELINE_REL, errors="strict") is None:
         return (f"cannot read {BASELINE_REL} -- without the backlog every "
                 f"baselined bin reads as a new finding, so this would refuse "
@@ -514,20 +669,125 @@ fn main() {
         ["a.rs:x", "m.rs:x", "z.rs:x"],
     )
 
-    # Nothing here touches a tree, deliberately. "The corpus is really there"
-    # is the other thing that has to be true before a clean report means
-    # anything, and it used to be an eighth rule asking the working tree
-    # whether `userspace/coreutils` held more than fifty `.rs` files. That was
-    # wrong twice over. It asked the *disk* about a run that may be judging a
-    # revision -- a commit that renames the gated directory disarms the gate
-    # for that commit while a disk-side self-test says all is well -- and a
-    # threshold of fifty is a fact about this checkout, so the checker could not
-    # be self-tested anywhere else, which is exactly what its own end-to-end
-    # cases do. It now lives in `main`, asked of whichever tree is being
-    # judged, where both of those stop being true. See `_inputs_missing`, which
-    # since 2026-09-03 asks the same of the *baseline* -- the input this comment
-    # did not think to mention, and the one whose absence is loud rather than
-    # silent.
+    # 8. What is in scope. This decides which files the rules above ever run
+    #    on, so it fails toward silence more completely than any of them: a
+    #    predicate that said yes to everything would exempt all 2760 crates
+    #    and the gate would pass while reading nothing. `_inputs_missing` is
+    #    the backstop for exactly that, but a backstop is not a reason to
+    #    leave the rule itself untested -- and this rule's whole point is that
+    #    the exemption is something a crate *says*, so the cases are about
+    #    telling a declaration from a resemblance to one.
+    rule("stub-declaration")
+    expect(
+        "stub/inline-table",
+        declares_stub(
+            '[package]\nname = "ab-cli"\n\n'
+            '[dependencies]\nnotimpl = { path = "../notimpl" }\n'
+        ),
+        True,
+    )
+    # The other two TOML spellings of the same dependency. Nothing in the tree
+    # uses them today, which is why they are here: an author who reaches for
+    # one is not asking to be treated differently.
+    expect(
+        "stub/dotted-key",
+        declares_stub('[dependencies]\nnotimpl.path = "../notimpl"\n'),
+        True,
+    )
+    expect(
+        "stub/own-table",
+        declares_stub('[package]\nname = "x"\n\n'
+                      '[dependencies.notimpl]\npath = "../notimpl"\n'),
+        True,
+    )
+    # A crate that declares nothing is not a stub. This is the case that killed
+    # the first design: `userspace/abiword-cli` prints canned output and has no
+    # `[dependencies]` at all, so "has real dependencies" would have called it
+    # a program -- and `getty` and `dnsmasq`, which are programs, declare none
+    # either. Nothing in a manifest separates those two, so nothing tries to.
+    expect(
+        "stub/silence-is-not-a-declaration",
+        declares_stub('[package]\nname = "abiword-cli"\nversion = "0.1.0"\n'),
+        False,
+    )
+    # The marker in the wrong table says nothing about whether the program is
+    # written, and this is the case that makes the section parsing worth its
+    # lines: a grep for the name would let any crate leave the gate by adding
+    # a test-only dependency nobody reads.
+    expect(
+        "stub/dev-dependency-is-not-a-declaration",
+        declares_stub(
+            '[dependencies]\nposix = { path = "../../posix" }\n\n'
+            '[dev-dependencies]\nnotimpl = { path = "../notimpl" }\n'
+        ),
+        False,
+    )
+    # Prose about the declaration is not the declaration -- rule 3 one file
+    # over. A crate being fleshed out is the likeliest place for a
+    # commented-out `notimpl` line to sit, and it is precisely the crate that
+    # must now be judged.
+    expect(
+        "stub/commented-out",
+        declares_stub('[dependencies]\n'
+                      '# notimpl = { path = "../notimpl" }\n'
+                      'posix = { path = "../../posix" }\n'),
+        False,
+    )
+    # The marker crate itself names `notimpl` and does not depend on it.
+    expect(
+        "stub/the-marker-crate-itself",
+        declares_stub('[package]\nname = "notimpl"\nversion = "0.1.0"\n'),
+        False,
+    )
+    # A real program, in the shape `sshd`'s manifest actually has.
+    expect(
+        "stub/real-program",
+        declares_stub(
+            '[dependencies]\nposix = { path = "../../posix" }\n'
+            'quoting = { path = "../quoting" }\n'
+        ),
+        False,
+    )
+    # A manifest that does not parse is gated, not exempted. `tomllib` would
+    # raise here; this must answer False, so the crate is judged.
+    expect(
+        "stub/unparseable-manifest-is-gated",
+        declares_stub("[dependencies\nnotimpl = { path = "),
+        False,
+    )
+
+    # 9. The path-to-crate split the scope rests on. `_crate_of` is what turns
+    #    a file into the crate whose declaration governs it; off by one
+    #    component it would map every file to the wrong crate, and since the
+    #    stub set is a set of names the result would be *everything gated* --
+    #    loud, but for an invented reason, which is the other thing a gate
+    #    must not do.
+    rule("crate-of")
+    expect("crate/source-file",
+           _crate_of("userspace/sshd/src/lib.rs"), "userspace/sshd")
+    expect("crate/nested",
+           _crate_of("userspace/coreutils/src/bin/ls.rs"), "userspace/coreutils")
+    # A path with no crate directory under it belongs to no crate, and `None`
+    # is not in the stub set -- so it is gated, the safe direction.
+    expect("crate/no-crate-dir", _crate_of("userspace/README.md"), None)
+    expect("crate/elsewhere", _crate_of("posix/src/lib.rs"), None)
+
+    # Nothing here touches a tree, deliberately -- rules 8 and 9 included,
+    # which is why `declares_stub` takes manifest *text* and `_crate_of` takes
+    # a path string rather than either of them taking a `Tree`. "The corpus is
+    # really there" is the other thing that has to be true before a clean
+    # report means anything, and it used to be a further rule asking the
+    # working tree whether `userspace/coreutils` held more than fifty `.rs`
+    # files. That was wrong twice over. It asked the *disk* about a run that may
+    # be judging a revision -- a commit that renames the gated directory
+    # disarms the gate for that commit while a disk-side self-test says all is
+    # well -- and a threshold of fifty is a fact about this checkout, so the
+    # checker could not be self-tested anywhere else, which is exactly what its
+    # own end-to-end cases do. It now lives in `main`, asked of whichever tree
+    # is being judged, where both of those stop being true. See
+    # `_inputs_missing`, which since 2026-09-03 asks the same of the *baseline*
+    # -- the input this comment did not think to mention, and the one whose
+    # absence is loud rather than silent.
     for f in failures:
         print(f"selftest FAIL {f}")
     print(f"selftest: {len(rules) - len({f.split(':')[0] for f in failures})}"
@@ -563,30 +823,33 @@ def main() -> int:
         # finding about anybody's code, and printing gate 4's refusal over it
         # would tell the author their utility panics on a legal filename when
         # what actually happened is that the gate lost its subject.
-        why = _inputs_missing(tree, needs_baseline=not write)
+        gated_files, exempt_files = rust_files(tree)
+        why = _inputs_missing(tree, gated_files, needs_baseline=not write)
         if why is not None:
             where = f"in {args.head}" if args.head else "in the working tree"
             print(f"argv-utf8: {where}, {why}", file=sys.stderr)
             return 2
 
-        gated = findings(tree, GATED_REL)
+        gated = findings(tree, gated_files)
 
-        # Everything under `userspace/` that the gate does not cover. Counted
-        # so the excluded scope is a visible number that can be argued with,
-        # rather than an absence nobody notices.
+        # The crates that declared themselves unimplemented. Counted so the
+        # excluded scope is a visible number that can be argued with, rather
+        # than an absence nobody notices.
         #
-        # Not under `--check`. The survey walks ~2900 files and lexing them
-        # takes ~17s against ~0.5s for the gated tree alone; that cost buys
-        # four lines of context for a *human* reading the report, and in a push
-        # hook there is no such human -- only a wait, before output nobody acts
-        # on. A gate slow enough to be resented is a gate that gets bypassed,
-        # which is this tool's own failure mode by a longer route. So the
-        # number is computed where it is read: `--write-baseline` and a bare
-        # run print it, `--check` does not.
+        # Not under `--check`. Lexing those ~2280 extra files is the dominant
+        # cost of a run and buys four lines of context for a *human* reading
+        # the report; in a push hook there is no such human -- only a wait,
+        # before output nobody acts on. A gate slow enough to be resented is a
+        # gate that gets bypassed, which is this tool's own failure mode by a
+        # longer route. So the number is computed where it is read:
+        # `--write-baseline` and a bare run print it, `--check` does not.
+        #
+        # No `k not in gated` filter any more: the two file lists are disjoint
+        # by construction, where they used to be a directory and a superset of
+        # it.
         ungated: dict[str, tuple[int, str]] = {}
         if not check:
-            ungated = {k: v for k, v in findings(tree, SURVEYED_REL).items()
-                       if k not in gated}
+            ungated = findings(tree, exempt_files)
 
         known = load_baseline(tree)
 
@@ -598,11 +861,17 @@ def main() -> int:
             "# Generated by scripts/argv-utf8.py --write-baseline.",
             "#",
             "# This file is a ratchet and only ever shrinks. Do NOT add a line to",
-            "# turn a red --check green: a new entry is a new utility that dies",
+            "# turn a red --check green: a new entry is a new program that dies",
             "# rather than running. Fix it -- env::args_os() carried through as",
             "# OsString/&[u8], which for a filename means all the way to the",
             "# syscall. coreutils::getopt is byte-based and is the reason the",
-            "# already-clean bins are clean.",
+            "# already-clean bins are clean; quoting::os_from_bytes is how a",
+            "# program outside coreutils turns bytes back into a name.",
+            "#",
+            "# Most of these lines are crates that print canned output and never",
+            "# said so. A stub says so by depending on userspace/notimpl, which",
+            "# is also how it leaves this file -- see the script's docstring on",
+            "# why the exemption is a declaration and not a guess.",
             "#",
             "# A genuine false positive belongs in the IGNORE table in the script,",
             "# which records *why*, not here, which records only *that*.",
@@ -617,12 +886,13 @@ def main() -> int:
         files = len({k.rsplit(":", 1)[0] for k in ungated})
         print(
             f"--- {len(ungated)} finding(s) in {files} file(s) under "
-            f"{SURVEYED_REL}, outside the gate ---"
+            f"{USERSPACE_REL}, outside the gate ---"
         )
         print(
-            "    Stub programs that print canned output, not shipped utilities.\n"
-            "    Reported so the gate's scope is a number rather than a silence;\n"
-            "    not counted below and not gated. See the module docstring."
+            f"    Crates that declare themselves unimplemented by depending on\n"
+            f"    `{STUB_DEP}`. Reported so the gate's scope is a number rather\n"
+            f"    than a silence; not counted below and not gated. See the\n"
+            f"    module docstring."
         )
         print()
 

@@ -47,9 +47,6 @@ const SYS_TCP_CONNECT: u64 = 800;
 const SYS_TCP_SEND: u64 = 801;
 const SYS_TCP_RECV: u64 = 802;
 const SYS_TCP_CLOSE: u64 = 803;
-// Native Slate OS monotonic clock (kernel syscall/number.rs); no-arg, returns
-// boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
-const SYS_CLOCK_MONOTONIC: u64 = 10;
 
 // ============================================================================
 // Syscall interface
@@ -251,13 +248,6 @@ fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<&[u8], DigError> {
 fn tcp_close(handle: u64) {
     // SAFETY: Valid handle. Ignoring the return: handle becomes invalid regardless.
     let _ = unsafe { syscall1(SYS_TCP_CLOSE, handle) };
-}
-
-/// Read the monotonic clock in microseconds.
-fn clock_monotonic_us() -> u64 {
-    // SAFETY: SYS_CLOCK_MONOTONIC returns the time; no pointer arguments needed.
-    let ret = unsafe { syscall3(SYS_CLOCK_MONOTONIC, 0, 0, 0) };
-    if ret < 0 { 0 } else { ret as u64 }
 }
 
 // ============================================================================
@@ -508,15 +498,46 @@ fn encode_domain_name(name: &str, buf: &mut Vec<u8>) {
     buf.push(0);
 }
 
-/// Simple non-cryptographic hash for generating transaction IDs.
-fn make_txn_id() -> u16 {
-    // Use the monotonic clock as a source of entropy.
-    let t = clock_monotonic_us();
-    let mut h: u32 = 5381;
-    for b in t.to_le_bytes() {
-        h = h.wrapping_mul(33).wrapping_add(u32::from(b));
-    }
-    (h & 0xFFFF) as u16
+/// Draw a DNS transaction ID from the kernel CSPRNG.
+///
+/// # Why this is not a counter, a hash, or a clock reading
+///
+/// DNS over UDP has no handshake and no authentication. Together with the
+/// ephemeral source port, this 16-bit field is the *entire* means by which a
+/// resolver tells the server's answer from an answer any host on the path — or
+/// any host that can guess — chose to send instead. An off-path attacker who
+/// can predict the pair can race the real server and win, because a forged
+/// packet that arrives first is accepted and the genuine one is then discarded
+/// as a duplicate. RFC 5452 §9 states the requirement plainly: the ID must be
+/// unpredictable, drawn from a cryptographically secure source.
+///
+/// This function derived the ID by djb2-hashing a monotonic clock reading. A
+/// hash is not encryption: its input was the time the query was sent, which the
+/// attacker being defended against is by definition in a position to observe to
+/// within a round trip, and djb2 over eight bytes is trivially invertible by
+/// search. The check at the end of `perform_query` that compares the response's
+/// ID against this one was therefore a check the attacker could pass. It is
+/// worth saying that `dig` is the tool a person reaches for *because* they
+/// suspect DNS is lying to them, so a `dig` that can itself be lied to fails in
+/// exactly its own use case.
+///
+/// # Errors
+///
+/// [`DigError::Network`] if the kernel CSPRNG cannot be reached. There is no
+/// fallback: `randrange`'s documentation is explicit that a caller must never
+/// substitute a guessable value for a secret, and a predictable transaction ID
+/// is precisely that. Refusing to send the query is the honest outcome —
+/// sending one whose answer cannot be distinguished from a forgery would report
+/// a result while silently withdrawing the guarantee that made it meaningful.
+fn make_txn_id() -> Result<u16, DigError> {
+    let mut bytes = [0u8; 2];
+    randrange::fill_secret(&mut bytes).map_err(|e| {
+        DigError::Network(format!(
+            "cannot draw an unpredictable DNS transaction ID: {e}. \
+             Refusing to send a query whose answer could not be told from a forgery."
+        ))
+    })?;
+    Ok(u16::from_be_bytes(bytes))
 }
 
 /// Builds a DNS query packet.
@@ -1077,7 +1098,7 @@ fn perform_query(
     qtype: u16,
     opts: &DigOptions,
 ) -> Result<(DnsResponse, u64), DigError> {
-    let txn_id = make_txn_id();
+    let txn_id = make_txn_id()?;
     let query_pkt = build_query(name, qtype, opts.recursion, txn_id);
 
     let start = Instant::now();
@@ -2282,6 +2303,66 @@ mod tests {
     fn default_server_returns_something() {
         let server = default_dns_server();
         assert!(!server.is_empty());
+    }
+
+    // --- Transaction IDs ---
+
+    /// A transaction ID exists if and only if entropy did.
+    ///
+    /// This is the property the old implementation broke, and it is broken in
+    /// the direction that does not announce itself: djb2-hashing a clock
+    /// reading *always* succeeded, so the query always went out and the
+    /// response check always ran — while the value it checked was a function of
+    /// a quantity the attacker being defended against can observe. Failing
+    /// closed is the whole guarantee; producing a number is not.
+    ///
+    /// The two arms are both real, because whether entropy is reachable is a
+    /// property of the build. On a SlateOS target `getrandom` resolves through
+    /// the linked libc to the kernel CSPRNG; on this Windows host `randrange`
+    /// declines by design (see its `fill_from_kernel`), precisely so that
+    /// "fails closed" is something a test can observe. Deciding which arm to
+    /// assert by *probing* rather than by `cfg` keeps the test honest on both.
+    ///
+    /// Where entropy is available the test also checks the IDs vary. Sixteen
+    /// bits is a small space, so a few of 32 draws may legitimately collide;
+    /// the bound is loose enough for that and far too tight for a source stuck
+    /// on one value or walking by one.
+    #[test]
+    fn a_transaction_id_is_drawn_or_refused_and_never_guessed() {
+        let mut probe = [0u8; 2];
+        let entropy = randrange::fill_secret(&mut probe).is_ok();
+
+        match make_txn_id() {
+            Err(e) => {
+                assert!(
+                    !entropy,
+                    "the CSPRNG answered the probe but the transaction ID was refused: {e}"
+                );
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("unpredictable"),
+                    "the refusal must say what could not be guaranteed, not just that \
+                     something failed; got: {msg}"
+                );
+            }
+            Ok(_) => {
+                assert!(
+                    entropy,
+                    "a transaction ID was produced with no entropy source available, \
+                     so it came from somewhere guessable"
+                );
+
+                let mut seen = std::collections::BTreeSet::new();
+                for _ in 0..32 {
+                    seen.insert(make_txn_id().expect("entropy was available a moment ago"));
+                }
+                assert!(
+                    seen.len() > 24,
+                    "32 draws produced only {} distinct transaction IDs: {seen:?}",
+                    seen.len()
+                );
+            }
+        }
     }
 
     // --- Error display ---

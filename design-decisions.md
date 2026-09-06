@@ -50,9 +50,10 @@ than silently believing there are no bands.
 | §400–§499 | **lane C** | closed — full at §498 | after B's first band |
 | §500–§599 | **lane C** | closed early at §579 — 20 numbers unused | interleaved with A's §600s |
 | §600–§699 | **lane A** | closed early at §679 — 20 numbers unused | interleaved with C's §500s |
-| §700–§799 | **lane B** | **open** | the tail — B alone still appends at EOF |
+| §700–§799 | **lane B** | closed early at §779 — 20 numbers unused | interleaved before C's §800s |
 | §800–§899 | **lane C** | **open** | immediately after §579; C's own run ascends |
 | §900–§999 | **lane A** | **open** | immediately after §679; A's own run ascends |
+| §1000–§1099 | **lane B** | **open** | the tail — B alone still appends at EOF |
 
 Bands 200–499 are closed but **not free**: every number in them is spent, and
 spent numbers are never reissued (see §217–§220 and §626 below). A new entry
@@ -172,6 +173,43 @@ was **not** run: regenerating from the whole file would additionally grandfather
 lane B's live §700s, and a grandfathered heading is exempt from the `**Lane:**`
 check. Every one of the 49 already declares `**Lane:** A`, verified before
 baselining, so the exemption they gain is one they do not use.
+
+**Lane B closed §700–§799 early, at §779, and opened §1000–§1099 (2026-09-05),**
+the third lane to do so and the first to do it with no argument left to make:
+lane C set the precedent, lane A followed it the same day without re-litigating,
+and this is the pattern working as intended — the gate warned at 80%, the warning
+was obeyed, 20 numbers went unspent. Nothing here is lane-specific either.
+
+**§1000 goes at end of file, and that is not an exception to the
+"keep-your-region-contiguous" rule that put §800 after §579 and §900 after
+§679 — it is that rule.** Lane B's §700s already end at EOF, because B is the
+only lane still appending there. Following B's own band's tail therefore lands
+in the same place it always has. Lanes A and C: your insertion points do not
+move, and no number you might reach for is taken — §1000–§1099 was unclaimed by
+anyone, so this needs no request, only the notice in
+`requests/b-ac-lane-b-closed-700-799-at-779-and-opened-1000-1099.md`.
+
+Four digits are new. The gate parses `§lo–§hi` with `\d+` and compares numbers,
+so it neither knows nor cares; the one thing to watch is that a heading written
+`## 1000.` sorts correctly by number and not as text, which it does, because
+nothing in this file sorts headings as text.
+
+Grandfathering is what closing a band means, so the same commit adds §701–§779
+to `scripts/design-decisions-baseline.json` — the 79 lane-B entries that closing
+the band would otherwise turn into "new heading in a closed band" errors. As
+lanes C and A did, `--update-baseline` was **not** run: regenerating from the
+whole file would additionally grandfather lane C's live §800s and lane A's live
+§900s, and a grandfathered heading is exempt from the `**Lane:**` check.
+
+That exemption is one none of the 79 uses, verified before baselining — but the
+check found one entry that would have quietly taken it. **§741 declared
+`**Lane:** B` fifteen lines below its heading**, past the gate's twelve-line
+window, because a ten-line `⛔ SUPERSEDED` banner had been inserted between the
+two. The field was never missing; it had been pushed out of the window by a
+later edit that had no reason to think about it. Its metadata block now sits
+*above* the banner, which is where the rule wants it and where a reader
+resolving a band question would look. Worth knowing if you add a banner to an
+entry of your own: the window is measured from the heading, not from the prose.
 
 **The gate landed 2026-08-29: `scripts/check-design-decisions-bands.py`,** run
 by `scripts/boot-test.sh` before it builds anything. It requires each *new*
@@ -60439,6 +60477,10 @@ that would then have to agree with each other forever.
 
 ## 741. `mv`'s cross-device copy uses `io::copy` and gives up telling a read failure from a write failure, rather than a hand-written loop that would give up sparse files
 
+**Date:** 2026-09-01
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
 > **⛔ SUPERSEDED 2026-09-01, the same day, by §745.** The choice below is
 > real but the *menu* was wrong: it treats "the kernel's copy" and "knowing
 > which end failed" as two options you must pick between, and they are not.
@@ -60449,10 +60491,6 @@ that would then have to agree with each other forever.
 > reasoning about *which* loss is silent and which is loud is still correct and
 > is what makes the third sentence the right resolution rather than a
 > compromise.
-
-**Date:** 2026-09-01
-**Decided by:** Claude (autonomous)
-**Lane:** B
 
 **In short:** When `mv` cannot rename a file — because the two names are on
 different disks — it has to copy the bytes and delete the original. There are
@@ -67171,3 +67209,731 @@ SHA-256 and AES pass the same packet already takes, this does not register; at
 OpenSSH avoids even that with a userspace CSPRNG reseeded from the kernel, which
 is the optimisation to reach for if this ever shows up in a profile — not a
 reason to skip the draw.
+
+## 774. The SSH client and daemon take their randomness as a parameter, so a handshake can be reproduced without weakening one
+
+**Date:** 2026-09-05
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** The SSH client and the SSH server each need unpredictable bytes in
+three places — the padding on every packet, the sixteen-byte "cookie" in the
+first handshake message, and the secret exponent that makes the session key
+secret. Both used to call the kernel's random-number generator directly, which
+means neither can be run at all on a machine where that generator is
+unavailable — and the machine our tests run on is exactly such a machine, on
+purpose. They now take the source as a parameter, defaulting to the kernel and
+changeable only from inside each crate's own tests. That makes the one test this
+stack most needs — run the real client against the real server and see whether
+they agree — possible to write, and makes it *stronger* than it could otherwise
+have been, because a handshake driven by a known source produces the same bytes
+every time.
+
+**Where:** `sshwire::SecretSource` and `sshwire::KERNEL_SECRETS`;
+`SshSession::secrets` / `with_secret_source` in `userspace/ssh/src/main.rs`;
+`ConnectionState::secrets` / `with_secret_source` in `userspace/sshd/src/main.rs`.
+
+### The problem this solves, and the one it does not
+
+`randrange::fill_from_kernel` refuses on any non-unix host by design, so that
+"fails closed when there is no entropy" is a property something can assert. The
+consequence for this stack is total: no exponent, so no Diffie-Hellman, so no
+handshake, so no interop test — and four permanently-red tests in
+`userspace/ssh` besides.
+
+There are two ways out and they are not alternatives; they answer different
+questions.
+
+- Giving the *host* entropy (parked on `lane-b-randrange-entropy`, queued for
+  the operator in `open-questions.md`) would let this stack use the real source
+  in tests. It is not this lane's call to make, because about eighteen tests in
+  `apps/` and `gui/` depend on the host having none.
+- Making the *source* a parameter, which is this entry, is lane-local and is
+  the better answer for a different reason: it removes the dependency on the
+  platform altogether rather than changing which platform is depended on.
+
+Even with a real host CSPRNG, the second is what an interop test wants. This is
+the same mistake `randrange` made one layer down — using a property of the build
+platform as a test fixture — and fixing it in `randrange` while repeating it
+here would be fixing the instance and keeping the pattern.
+
+### Why it is not a way to weaken the client
+
+The obvious objection: a security-critical program that lets its entropy source
+be replaced has grown a downgrade attack. The seam is built so that it cannot
+be reached from anywhere an attacker or an unwary operator could stand:
+
+- `with_secret_source` is **private and `#[cfg(test)]`** in each binary crate.
+  Not `pub`, not reachable from the command line, the ssh config file,
+  `sshd_config`, an environment variable, or the network — and not *present* in
+  the shipped binary at all, because it is not compiled into it. That last part
+  is the one that matters: it turns "the only callers are tests" from a
+  statement about today's code into one the compiler enforces about every
+  future edit. (When the interop test moves into a crate of its own it will
+  need to reach this, and the gate should widen to a Cargo feature that only a
+  `dev-dependency` enables. A feature is still absent from a release build; a
+  bare `pub` would not be.)
+- The *only* constructors, `SshSession::new` and `ConnectionState::new`, set
+  `sshwire::KERNEL_SECRETS` unconditionally. There is no `Default` and no
+  builder that leaves it unset, so "forgot to set the source" is not a
+  reachable state.
+- Both crates assert the default by **pointer identity**
+  (`core::ptr::fn_addr_eq(s.secrets, sshwire::KERNEL_SECRETS)`), not by
+  behaviour. The risk worth guarding is a binary that ships with a test source
+  wired in, and no test of "the bytes look random" would ever catch that —
+  every such test passes against a counter.
+
+A `fn` pointer rather than a `dyn` trait object, because a source with no state
+cannot accidentally acquire any, and both structs can hold one in a `Copy` field
+with no lifetime and no allocation.
+
+### Why the type lives in `sshwire` rather than twice
+
+`sshwire` exists because every function in it is a contract between two
+programs. A secret source is not a wire format, so the fit is not exact — but
+the interop test has to hand *one* source to both ends, and two independently
+declared `fn(&mut [u8]) -> Result<(), EntropyError>` aliases would be a third
+copy of something this stack has already been bitten by copying nine times.
+`sshwire` gains a `randrange` dependency for the error type, which is the
+alternative to inventing a second spelling of "the CSPRNG said no".
+
+### What it buys the interop test, beyond making it possible
+
+A deterministic source turns *"both ends derived the same session identifier"*
+into *"both ends derived exactly this session identifier."* The weaker
+assertion only fails when the two ends drift **apart**; the stronger one fails
+when **either** end drifts at all. Given that the entire tracked problem here is
+two copies of one protocol that agree with nobody, an assertion that pins the
+value is worth more than one that pins the agreement.
+
+### The case against
+
+**"Test-only code in the shipping path."** The field is read on every packet
+send, so it is not `cfg(test)`-gated. The cost is one indirect call per packet
+against the SHA-256 and AES the same packet already pays for, which does not
+register; and gating it would mean the tested configuration is not the shipped
+one, which is the more expensive kind of saving.
+
+**"It makes the two most security-critical values in the protocol
+substitutable."** True, and the mitigations above are the answer — privacy, an
+unconditional default, and a test that asserts the default by identity. Against
+it: the values were *already* substitutable in the sense that mattered, because
+one of them, sshd's KEXINIT cookie, was a compile-time constant and no test
+noticed. A seam a test can reach is what caught that.
+
+## 775. A clock the SSH daemon cannot read refuses the connection rather than granting unlimited login time
+
+**Date:** 2026-09-05
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** the SSH server gives someone who has not logged in yet a limited
+number of seconds to finish logging in. It measures that by reading the clock
+twice and subtracting. If the clock cannot be read, there is no elapsed time to
+compute, and the server has to decide what to do. It now **hangs up**. The
+alternative was to carry on as though no time had passed, which would have
+quietly switched the limit off — and switched it off specifically for people who
+have not proved who they are, who are the only people it applies to.
+
+**What forced the choice.** The clock reader reported the number `0` when the
+read failed, which is the same thing it reports for "the machine booted this
+instant". Subtracting a real start time from that underflows: a crash in a debug
+build, and in a release build a huge elapsed time that disconnects every client
+on arrival. Both are reachable by anyone who can open a socket. Fixing the
+underflow meant making the failure representable — `Option<u64>` instead of a
+magic `0` — and once the failure is representable, something has to decide what
+it means. See `known-issues.md`
+`TD-B-SSHD-UNDERFLOWED-THE-LOGIN-GRACE-TIMER-WHEN-THE-CLOCK-FAILED`.
+
+| Option | *What changes:* | Why not |
+|---|---|---|
+| **Fail closed** (chosen) | A peer that connects while the clock syscall is failing is disconnected with "monotonic clock unavailable" instead of being let in. | A transient clock failure refuses logins that would otherwise have succeeded. |
+| Fail open — treat an unreadable clock as "no time elapsed" | Nothing visible, until the clock breaks; then unauthenticated peers may hold connections open indefinitely. | Disables the bound for exactly the population it exists to bound. A limit that stops applying when a subsystem fails is not a limit, and nothing would report that it had stopped. |
+| Fall back to a wall-clock reading | The timer keeps working off a clock that can be stepped. | A wall clock can jump backwards, which reintroduces the underflow this entry exists to remove, and can be moved by anyone who can set the time. |
+
+**Why fail-closed is consistent here rather than merely cautious.** The daemon
+already makes this exact call one level up: when the host key file exists but
+cannot be parsed, it stops instead of generating a substitute, because serving
+under a substitute identity is indistinguishable — from the client's side — from
+the attack that host-key checking exists to detect. A grace timer that silently
+stops bounding unauthenticated connections is the same kind of failure: the
+security property is gone and the logs look normal.
+
+**Against it, honestly:** availability. A kernel whose `SYS_CLOCK_MONOTONIC` is
+briefly failing now refuses SSH logins, which is the worst moment to lose
+remote access to a machine. That is a real cost and it is why this is written
+down rather than assumed. It is accepted because the failure is loud — the peer
+is told "monotonic clock unavailable", so the cause is in front of whoever is
+diagnosing it — whereas fail-open is silent by construction. A loud refusal can
+be investigated; a limit that quietly stopped applying cannot be noticed at all.
+
+**Revisit if** the monotonic clock turns out to fail transiently in normal
+operation rather than only when something is badly wrong. That would make the
+availability cost real rather than theoretical, and the answer would then be to
+make the timer tolerate gaps (e.g. remember the last good reading) rather than
+to fail open.
+
+
+## 776. The SSH interop test lives in a crate of its own, and pins the handshake transcript rather than only checking the two ends agree
+
+**Date:** 2026-09-05
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** the SSH client and the SSH server are two programs that have to
+agree, byte for byte, about a long list of things. Nothing ever checked that
+they did — each was tested against its own idea of what the other would do, and
+both passed while six real disagreements shipped. There is now a test that runs
+the two against each other for real. Two choices in it had arguments on both
+sides: it lives in a **third crate** that ships nothing rather than inside
+either program, and it asserts the handshake produces **one specific recorded
+value** rather than merely that the two ends produced the same value as each
+other.
+
+### The first choice: a third crate
+
+A test that drives both ends needs both ends in one process, so something has to
+depend on both — and a crate cannot depend on itself. `userspace/ssh-interop`
+exists for that and nothing else: it has no `[dependencies]` at all, its library
+is a page of documentation, and both peers arrive as `dev-dependencies`.
+
+*Against it:* a crate whose entire purpose is a test is an odd artifact. It adds
+a workspace member, a `Cargo.toml`, and a place where someone might later put
+non-test code because it is a library and libraries hold code. It also forced
+`ssh` and `sshd` to be split into `lib.rs` plus a three-line `main.rs` each,
+since a bin-only crate produces no rlib — three files changed to enable a test.
+
+*For it:* there is no alternative that reaches both ends. The only other route
+is a boot test under QEMU, which proves more (it exercises the real sockets)
+but costs minutes per run, cannot be run by `cargo test`, and would have been
+blocked on the same entropy problem. The `lib.rs` split is independently good —
+`run_cli() -> i32` with the `process::exit` in the binary is the shape that
+makes any part of a program callable — and the dev-dependency direction is what
+lets `deterministic-secrets` be a feature that a release build does not compile
+at all.
+
+### The second choice: pin the transcript
+
+The obvious assertion is `client_id == server_id`: both ends derive the RFC 4253
+§7.2 session identifier independently from the same eight inputs, so a
+disagreement about any of them shows up as two different values. The test
+asserts that. It *also* asserts the value equals a recorded constant.
+
+*Against the constant:* it is an observation, not a value derived from the RFC
+by hand — it records what the code did on the day it was written, so if the code
+was subtly wrong that day, the constant enshrines the wrongness. Every
+deliberate protocol change now has to update it, which is a maintenance cost
+paid on every legitimate change. And it makes the test depend on the whole
+handshake being byte-reproducible, which is a real constraint on the harness
+(see the thread-local counter below).
+
+*For the constant:* agreement alone cannot see a change that both ends make
+*together*, and "both ends changed together and stayed wrong" is not a
+hypothetical here — it is exactly
+`TD-B-SSHD-SIGNS-AN-EXCHANGE-HASH-OVER-A-CLIENT-VERSION-THE-CLIENT-NEVER-SENT`,
+where the server hashed a placeholder client version and the server's own tests,
+recomputing the hash the same wrong way, agreed with it perfectly. A shared
+`sshwire` makes that class *more* likely, not less: the two ends now call one
+function, so a change to it moves both at once. The maintenance cost is the
+feature — updating the constant is the moment someone has to look at a protocol
+change from both sides at once, which is the thing that was never happening.
+
+### What reproducibility cost
+
+The secret source counts up, and its counter is **thread-local**, with both
+peers on spawned threads and neither on the harness's. A process-wide counter
+was written first and was wrong: the two peer threads draw from it
+concurrently, so which bytes each one receives depends on how they interleave —
+deterministic in the sense that it uses no entropy, and nondeterministic in the
+only sense that matters. A peer left on the harness's own thread would likewise
+inherit whatever that thread had already drawn. Verified by three separate
+process runs producing the same identifier.
+
+**Revisit if** the test grows past the handshake into authentication and channel
+traffic. Once a data round-trip is covered, much of what the recorded constant
+protects is covered more directly by "the client read back what the server
+wrote", and the constant's maintenance cost may stop earning itself.
+
+## 777. A shared key-file codec returns the public key the file stores, and takes the format's `checkint` as a parameter
+
+**Date:** 2026-09-05
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** SSH private key files store the private key *and* a copy of the
+public key that goes with it. Those two ought to agree, and the whole reason
+this came up is that once they did not — `ssh-keygen` wrote files whose two
+halves disagreed, because its arithmetic was wrong. So when the reading and
+writing of those files moved into one shared library, two questions came up
+with genuine arguments on both sides: should that library check the two halves
+agree, and should it invent the file's random integrity field itself.
+
+The answer to both is **no** — it hands back what the file says and lets the
+caller decide, and it takes the random field as an argument. Both answers cost
+something real, which is why this is written down.
+
+### The first choice: the codec returns the stored public key, it does not derive one
+
+`sshwire::decode_openssh_private_key` returns the seed *and* the public key
+exactly as the file records them, without checking that the second follows from
+the first. Verifying that is the caller's job, and `sshd::HostKey` does it.
+
+**For deriving it inside the codec:** it is the more obviously safe interface. A
+caller that forgets the check accepts a file whose two halves disagree, and gets
+a key that cannot sign anything anyone will accept — which is precisely the bug
+that motivated all of this. Making the check impossible to skip is worth a lot.
+
+**Against, and decisive:** deriving the public key means computing on a curve,
+and `sshwire` cannot. The only Ed25519 in this tree is `posix::ed25519`, and
+`posix` compiled as an rlib is a second libc whose every syscall is stubbed to
+`-ENOSYS` in a program build (see
+`TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`). Making
+`sshwire` — the crate both peers link *for wire encoding* — drag that in would
+put a stubbed libc into two programs in order to save one line at one call site.
+
+The alternative to accepting that cost was worse in a subtler way: `sshwire`
+could grow *its own* Ed25519. That is exactly the arrangement this entire
+sequence of work exists to dismantle, and it would have been the third copy of
+the curve in the tree — one of which had already been found deriving the wrong
+answer.
+
+*What this costs:* every reader of a private key file must verify the two halves
+itself. Today there is one such reader, `sshd::HostKey::from_openssh_text`, and
+it does. If a second appears, this obligation is a thing to be forgotten. The
+mitigation is that the obligation is stated in the codec's doc comment as an
+obligation, not merely implied by its absence.
+
+### The second choice: `checkint` is a parameter, not generated inside
+
+The `openssh-key-v1` format puts the same random 32-bit word twice at the head
+of its private section. Decrypting with the wrong passphrase makes the two
+copies disagree, which is how the format tells "wrong passphrase" from "corrupt
+file". `sshwire::encode_openssh_private_key` takes that word as an argument
+rather than drawing it.
+
+**For generating it inside:** it is a random number that the format requires,
+and a caller has no reason to care what it is. Every caller passing one is
+boilerplate, and a caller that passes a constant weakens the field.
+
+**Against, and decisive — the same reasoning as the packet padding in §773.**
+Entropy is a syscall and it can fail. A shared encoder has no business deciding
+what a program should do when it cannot get any: refuse to write the file, write
+zeros, panic. Each program answers that where it can also report it. `ssh-keygen`
+draws four bytes from `randrange` and propagates the failure as a `KeygenError`,
+which is the answer for a tool whose entire job is producing a key file.
+
+The second argument is testability, and it turned out to matter more than
+expected. The interop test that found the wrong-public-key bug had to produce a
+byte-identical key file on every run, on a host where `randrange` refuses every
+request on purpose. With `checkint` generated internally that test could not
+have been written at all — and it is the test that found the most serious bug in
+this stack.
+
+*What this costs:* a caller can pass a constant, and one does. The test passes
+`0x1234_5678` deliberately. Nothing prevents production code doing the same, and
+the field's value only matters for encrypted keys, which this tree does not yet
+write — so the day it does, this is a thing to check.
+
+**Revisit if** `sshwire` ever gains a legitimate reason to depend on a curve
+implementation — for instance if signature verification moves there, which would
+be a defensible place for it — because at that point deriving the public key
+inside the decoder costs nothing and the first choice above should flip.
+
+## 778. A private key the user *named* and cannot be used stops the client; a missing default one does not
+
+**Date:** 2026-09-05
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `ssh` can log in with a password you type, or with a *key file* —
+a file on your disk that proves who you are without a password. You can point at
+one with `ssh -i mykey host`, or `ssh` can quietly look in the usual place
+(`~/.ssh/id_ed25519`) without being asked. The question is what should happen
+when that file is missing or damaged. OpenSSH prints a warning and asks for a
+password instead. This client instead **refuses to continue when you named the
+file yourself**, and only stays quiet when it was guessing.
+
+**The three cases and what each does now:**
+
+| | file is not there | file is there but unusable |
+|---|---|---|
+| you wrote `-i` / `IdentityFile=` | error, naming the file | error, naming the file and the fault |
+| you wrote neither | nothing at all | warning on stderr, then password |
+
+**Why not just warn, as OpenSSH does.** Because the warning is not the last
+thing that happens — the password prompt is. A user who typed `-i deploy_key`
+and then sees `alice@host's password:` has, in the ordinary case, simply typed
+their password and got in. The connection worked, so nothing ever told them the
+key was not used; the same invocation in a script, where nobody is watching,
+either hangs on a prompt or falls through to an interactive method that also
+fails. "Why does it keep asking for my password" is a well-worn OpenSSH support
+question, and this is one of its sources.
+
+Refusing costs a retry with the path fixed, and buys an accurate answer the
+first time. `-i` is an unambiguous statement of intent: the user knows the file
+exists and knows which one they mean. Silently doing something else with their
+credentials is not a service.
+
+**Why the default path is the opposite.** Most invocations of this client have
+no key at all. A message about `~/.ssh/id_ed25519` on every one of those is
+noise that trains the reader to skim, and it names a file the user never
+mentioned. So an absent default is passed over in silence.
+
+But a default that *exists and cannot be read* is a third thing, not a second
+one: something put a file there meaning it to be a key. That gets a warning —
+the user should know their key is broken — without becoming a refusal to
+connect, since they never asked for that file by name.
+
+**Alternatives considered:**
+
+- *Warn in all four cells (OpenSSH's behaviour).* **What changes:** `ssh -i
+  typo host` prompts for a password and logs you in, saying only `Warning:` a
+  few lines earlier. Rejected above.
+- *Error in all four cells.* **What changes:** `ssh host` on a machine with no
+  key at all fails instead of prompting. Wrong: password-only is a supported
+  configuration, and the client guessed the path.
+- *Error on an unusable default too, warn only on an absent one.* **What
+  changes:** a stale or truncated `~/.ssh/id_ed25519` makes every `ssh` on the
+  machine fail until it is deleted. Tempting, because a broken key is a real
+  fault the user should fix — but it converts one bad file into a total loss of
+  the tool, for a file the user did not point at. The warning says the same
+  thing without that.
+
+**What this does not cover:** a key file that is *encrypted with a passphrase*.
+No tool in this tree can read one, so today it lands in the "unusable" column —
+though with an accurate message, since the decoder recognises an encrypted
+container and says so rather than calling the file damaged. Erroring is the
+right answer only while there is no passphrase prompt to offer; once there is,
+an encrypted file must prompt rather than fail, and this rule needs revisiting
+alongside it. See known-issues.md
+`TD-B-NO-SSH-TOOL-CAN-READ-A-PASSPHRASE-PROTECTED-PRIVATE-KEY`.
+
+**Where it lives:** `userspace/ssh/src/lib.rs`, `load_identity` and
+`load_identity_from`. The pair is split so the *default*-path policy is testable
+without reading the developer's own `~/.ssh`.
+
+---
+
+## 779. Userspace file access goes through `std::fs`, never a hand-rolled syscall
+
+**Date:** 2026-09-05
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `sshd` opened, read and wrote every file by executing a raw CPU
+`syscall` instruction with a SlateOS call number, instead of calling the ordinary
+Rust file functions. On a real SlateOS machine that works. On the developer's own
+Windows or Linux machine there is no SlateOS kernel to answer, so the code was
+built to return "not implemented" for every file operation — which meant that on
+every machine anyone actually tests on, `sshd` could not read *any* file at all.
+That is not a small gap: the host key, the account database, the login banner,
+the config file and `authorized_keys` are all files, so the entire server side of
+public-key login was untestable. It is written down here because the choice
+recurs: every userspace program has to decide how it reaches the filesystem, and
+one of the two answers quietly costs all of its tests.
+
+**The decision.** Programs in `userspace/**` reach the filesystem through
+`std::fs`. A hand-rolled `syscall` for file I/O is a defect to be fixed on sight,
+not a style. Raw syscalls remain correct for SlateOS calls that libc genuinely
+does not export — `sshd` still issues them for the TCP handles and the monotonic
+clock — but the moment `std` offers the operation, `std` is the route.
+
+**Why this is not obvious.** The raw-syscall version was not sloppiness; it has a
+real argument behind it. SlateOS is our kernel, its ABI is written down in
+`kernel/src/syscall/number.rs`, and calling it directly means a userspace program
+depends on nothing but that table. Going through `std::fs` inserts the libc port
+and `std`'s platform layer between the program and the kernel, so a bug in either
+becomes a bug in every program. For a *kernel* that reasoning is decisive. For a
+userspace daemon it is not, and here is what it costs:
+
+| | Raw syscall | `std::fs` |
+|---|---|---|
+| Depends on | the kernel ABI table only | the libc port and `std`'s unix layer as well |
+| On a dev host | cannot work — the number means something else to Windows or Linux, so the only safe host arm is a stub that fails | works, against the host's own filesystem |
+| Testable off SlateOS | no | yes |
+| Shared with other programs | no — each crate writes its own wrappers | yes — one implementation, already exercised by everything else |
+| Errors | an `i64` the caller must interpret | `io::Error` with a kind and a message |
+
+The decisive column is the third. A file layer that fails on every development
+machine does not merely go untested itself; it takes every code path *behind* it
+with it. `sshd`'s public-key authentication was written, reviewed and shipped
+with no test that a genuine client signature satisfies it, because the first
+statement on that path was a file read that could not succeed where the tests
+run.
+
+**And the dependency objection does not survive contact with the target spec.**
+`toolchain/x86_64-slateos.json` declares `os = "linux"`, `env = "musl"` and
+`target-family = ["unix"]`, because `build-std` compiles a real `std` and `std`
+picks its platform layer by `target_os` (see §619). So a SlateOS program already
+links a real libc and already carries `std`'s unix layer, whether or not it calls
+into them. Hand-rolling the syscall does not remove that dependency; it adds a
+second, disagreeing copy of it beside it — which is the same shape as every other
+bug in this stack, and it has already produced one: `posix` linked as an rlib is
+a second libc with every syscall stubbed out (known-issues.md
+`TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`).
+
+**Alternatives considered.**
+
+1. **Keep the syscalls; give the daemon a test seam** — an injectable "file
+   reader" that tests replace with an in-memory map.
+   *What changes:* the tests pass without touching a disk, and the code they
+   exercise is not the code that runs on SlateOS.
+   Rejected. The seam tests everything except the part that was broken. It also
+   spreads: `HostKey::load_from_file`, `/etc/passwd`, the banner and the config
+   file would each need one, and each would be a place where the tested path and
+   the shipped path can drift.
+
+2. **Keep the syscalls; make the host arm call `std::fs`** — i.e. the raw call
+   under `cfg(target_vendor = "slateos")`, `std::fs` elsewhere.
+   *What changes:* nothing observable; the tests pass and exercise a different
+   implementation from the one that ships.
+   Rejected for the same reason, and worse: the two arms are separately
+   maintained implementations of one function, which is precisely the arrangement
+   that produced eight live divergences in this stack already. Whatever the tests
+   prove would be a fact about the host arm only.
+
+3. **`std::fs` everywhere, including where libc exports nothing** — chase the
+   remaining TCP and clock calls out too.
+   *What changes:* nothing yet; there is no `std` API for the SlateOS TCP handle
+   syscalls, so this is a proposal to invent one.
+   Deferred, not rejected. When the libc port exports sockets, those wrappers
+   should go the same way for the same reason. Until then a raw call is the only
+   thing there is.
+
+**A consequence worth stating separately: the cap.** `fs_read_file` previously
+read into a fixed 64 KiB buffer and kept whatever fit. Moving to `std::fs` makes
+an unbounded read available, and taking it would be wrong — `authorized_keys`
+lives in the home directory of the account being logged into and is read *before*
+that account has authenticated, so its size is chosen by an unprivileged local
+user on behalf of an anonymous peer. The reader therefore keeps a limit (1 MiB)
+but **refuses** an oversized file instead of truncating it. Silent truncation was
+the worse half of the old behaviour: an `authorized_keys` one byte over the
+buffer lost its last key with nothing reported anywhere, and a cut landing
+mid-line left a partial base64 blob that read as a malformed entry rather than as
+the key it was.
+
+**Where it lives:** `userspace/sshd/src/lib.rs`, the `File access` section —
+`fs_read_file`, `fs_write_private_file`, `fs_set_mode`. Commit `e0014a9b8`.
+
+
+## 1000. Monotonic-clock units live in a shared newtype, but the syscall stays in each program
+
+**Date:** 2026-09-05
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** two programs broke on the same day because a number of nanoseconds
+was stored in a variable called "milliseconds" and then treated as milliseconds.
+`sshd` locked every user out; `inetd`'s flood limiter stopped limiting. The
+obvious repair — rename the variables — fixes today's two and leaves the next one
+available, because a name is not checked by anything. So the unit was moved into
+the type system: a new crate, `monoclock`, where a clock reading (`Instant`) and
+a length of time (`Elapsed`) are different types and mixing them is a compile
+error. The decision recorded here is the *second* half, which had a genuine
+tradeoff: the new crate deliberately does **not** read the clock. Each program
+still makes its own syscall and hands the raw number over in one place. See
+`known-issues.md`
+`B-EVERY-PROGRAM-HAD-ITS-OWN-MONOTONIC-CLOCK-AND-HALF-GOT-THE-UNIT-WRONG`.
+
+**Jargon, once:** a *newtype* is a wrapper around a plain number that the
+compiler treats as a distinct type, so the number cannot be used where a
+different kind of number is expected. `no_std` means a crate that does not use
+the standard library, which is what lets bare-metal code — code that runs with no
+operating system underneath it — use it. An *rlib* is a compiled Rust library
+linked into a program.
+
+| Option | *What changes:* | Why not |
+|---|---|---|
+| **Types only; each program keeps its own syscall** (chosen) | Every program keeps its existing four-line clock reader, and adds one line naming the unit: `Instant::from_nanos_since_boot(raw)`. | The syscall shim itself is still written out per program — five copies of four lines. |
+| One `monoclock::now()` that makes the syscall | Programs delete their clock shim entirely and call one function. | Cannot be linked off-target, so the host tests — the only tests that exist for the daemons — could not use it; and it would have to pick one failure behaviour for callers that correctly disagree. |
+| Put the types in `posix` | No new workspace member. | Depending on the `posix` rlib links a second libc whose syscalls all answer `-ENOSYS`; that trap is already documented as `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`. |
+
+**Why not `now()`, in more detail.** The callers are not alike and their
+disagreement is not sloppiness:
+
+- `sshd` and `inetd` are ordinary `std` programs whose test suites run on the
+  development machine, where the SlateOS syscall does not exist. `init` and
+  `ticker` are bare-metal binaries with no standard library and hand-written
+  assembly shims for their entire syscall surface. A crate containing that
+  assembly is unusable by the first pair; a crate without it is usable by all
+  four.
+- They want opposite things when the clock cannot be read. `sshd` refuses the
+  connection (§775 above): a login timeout it cannot measure must not be treated
+  as satisfied. `inetd` substitutes boot, because its consumer is a sliding
+  window, and a window containing everything over-counts — which errs towards
+  rejecting a flood rather than admitting one. A shared `now()` must choose one
+  of those and would be wrong for the other caller.
+
+**Against it, honestly:** this is not full deduplication, and someone reading
+five near-identical `clock_monotonic` functions will reasonably ask why. The
+answer is that the duplication that was *hurting* is not the syscall — five
+copies of `unsafe { syscall0(SYS_CLOCK_MONOTONIC) }` have never produced a bug —
+it is the arithmetic downstream of it, which produced two severe ones in a day.
+The boundary is drawn at what the number *means* rather than where it came from,
+because that is where the defects were.
+
+**Revisit if** the bare-metal services grow a shared syscall crate for their own
+reasons. At that point the shim has a natural home that the `std` daemons do not
+need to link, and `monoclock` can stay exactly as it is while the four-line
+functions collapse into it.
+
+
+## 1001. The SSH daemon rekeys on its own thresholds, and an unreadable clock disables only half of them
+
+**Date:** 2026-09-05
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** an SSH connection is supposed to throw away its encryption keys
+and negotiate fresh ones periodically — after about an hour, or after about a
+gigabyte of traffic, whichever comes first. Ours never did, and it also ignored
+the client when the client asked, which did not merely skip the refresh: it
+**froze the session**, because a peer that has asked for new keys stops sending
+anything else until it gets them. The daemon now asks on its own schedule, and
+the client answers. Two smaller choices inside that are written down here: what
+to do when the clock cannot be read, and how much of the user's typing to hold
+in memory while a rekey is in flight.
+
+**Jargon, once.** *Rekey* — renegotiating the session's encryption keys without
+dropping the connection. *KEXINIT* — the message that starts that negotiation;
+either end may send it. *Session identifier* — a fingerprint of the *first*
+negotiation, fixed for the life of the connection and used as the thing a
+public-key login signs over; it must not move when the keys do.
+
+### Who decides when to rekey
+
+| Option | *What changes:* | Why not |
+|---|---|---|
+| **The daemon has its own thresholds** (chosen) | A session that runs an hour, or moves a gibibyte, renegotiates without anyone asking. | Costs a round trip on a timer, and needs code at both ends rather than one. |
+| Only answer the client's requests | Nothing, against a client that asks; against one that never does, one set of keys protects an unbounded amount of traffic forever. | Makes the security of *our* server a property of whoever connected to it. A client we did not write, or one deliberately built not to ask, sets our key lifetime. |
+
+Answering the client is not optional either — that half is the actual bug
+(`known-issues.md`
+`TD-B-SSHD-DOES-NOT-REKEY-SO-A-LONG-SESSION-HANGS`), and it shipped first. The
+decision recorded here is the second half.
+
+### An unreadable clock, and why this is the *opposite* call from §775
+
+The age threshold needs the monotonic clock, which can fail to read. §775 chose
+to **fail closed** in that situation — hang up. This one fails **open**: if the
+clock cannot be read, the age threshold simply does not fire, and the byte
+counter, which is not a clock, goes on working.
+
+| Option | *What changes:* | Why not |
+|---|---|---|
+| **Fail open — no clock, no age threshold** (chosen) | A session whose clock reads are failing keeps running, protected by the gibibyte limit alone. | The hour-based refresh silently stops happening, and nothing reports it. |
+| Fail closed — drop the session | A transient clock failure disconnects users in the middle of their work. | Spends something real (the user's session, and whatever it was transferring) to enforce something the RFC calls a recommendation. |
+
+The two entries look inconsistent and are not. §775's timer bounds a peer who
+**has not proved who they are**: the whole point of it is to stop an
+unauthenticated stranger holding a connection, so a version of it that quietly
+stops applying is worthless, and refusing is the conservative direction. This
+threshold bounds a session that is **already authenticated and doing the user's
+work**. There the conservative direction is the other way round: the greater
+harm is dropping legitimate work, not deferring a key refresh. The rule is not
+"fail closed" or "fail open" but *fail towards whichever outcome is recoverable*,
+and which one that is depends on who is on the other end.
+
+**Against it, honestly:** a machine whose clock is permanently broken now runs
+SSH sessions that never rekey on time and never say so. That is accepted because
+the byte threshold — the one that actually bounds how much ciphertext a key
+protects — needs no clock, so the property that matters most survives intact.
+
+### How much in-flight data to hold during a rekey
+
+Once we send `KEXINIT`, the client is still entitled to keep sending ordinary
+channel data until *its* own `KEXINIT` goes out — roughly one network round trip
+of the user's keystrokes and the shell's input. That traffic is neither part of
+the exchange nor discardable, so it is buffered and dispatched afterwards. The
+buffer is bounded at 64 packets, and a client that exceeds it is disconnected.
+
+| Option | *What changes:* | Why not |
+|---|---|---|
+| **Bounded buffer, disconnect on overflow** (chosen) | A client that floods instead of answering gets "sent N packets instead of answering our KEXINIT" and is dropped. | A pathological but honest client on a very fast link could in principle be dropped. Sixty-four maximum-size packets in one round trip is not a shell session. |
+| Unbounded buffer | Nothing, until a peer decides otherwise — at which point it is memory the peer chooses the size of. | A peer-controlled allocation in a daemon reachable before authentication is the shape of a denial of service. |
+| Discard the deferred packets | The rekey always succeeds and never allocates. | Silently corrupts whatever the user was transferring while continuing to look like a working session — the worst available failure, because nothing reports it. |
+
+**Revisit if** a legitimate high-throughput use (a large `scp`, a port forward
+saturating a fast link) turns out to exceed 64 packets in a round trip in
+practice. The fix would be to raise the bound or to count bytes rather than
+packets, not to remove it.
+
+
+## 1002. An SSH channel is freed when both ends have closed it, and its number is never handed out twice
+
+**Date:** 2026-09-05
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** an SSH connection carries several independent "channels" — one per
+shell, per remote command, per file transfer — and each has a number the two
+ends use to say which one they mean. Ours were created and never destroyed: a
+channel the client finished with stayed in the daemon's table, holding up to two
+megabytes of buffered keystrokes, until the whole connection dropped. A client
+that kept one channel open and cycled others could make the daemon's memory grow
+without limit, and the `MaxSessions` setting did not stop it because that setting
+counted only the channels still *running*. The decisions here are when to free a
+channel, what `MaxSessions` should count, and whether a freed number may be
+issued again.
+
+**Jargon, once.** *Channel*: one stream inside an SSH connection; a session with
+two shells open has two. *Channel number*: the small integer each end uses to
+address a channel; the two ends number them independently. *Close*: each end
+sends a `CHANNEL_CLOSE` message once, and the channel is over when both have
+been sent — so there is a window in which one end has closed and the other has
+not. *Half-closed*: a channel in that window.
+
+### Decision 1: free the channel on the second close, not the first, and not at hang-up
+
+| Option | *What changes:* |
+|---|---|
+| Free at hang-up (what it did) | Memory a client finished with is held until it disconnects; a long-lived connection grows without bound. |
+| Free when *we* close | The number could be reissued while the client still believes it owns it, so a message still in flight for the old channel lands on a new one. |
+| **Free when both have closed (chosen)** | Memory is returned one round trip after the client is done, and no message can arrive for a channel that no longer exists. |
+
+The second close is what the protocol itself names as the point a channel number
+becomes free (RFC 4254 §5.3), and it is the earliest point at which no message
+for that channel can still be in flight. Freeing earlier is a correctness bug,
+not merely an aggressive optimisation.
+
+**Against it, honestly:** it requires tracking the two closes separately rather
+than one "closed" flag, and the two flags are asked different questions in
+different places, which is a thing a reader has to hold. The alternative — one
+flag — cannot express "we are done but the peer has not said so", which is
+precisely the state that has to be represented.
+
+### Decision 2: `MaxSessions` counts every channel in the table, including half-closed ones
+
+| Option | *What changes:* |
+|---|---|
+| Count only running channels (what it did) | A client that never answers a close can open sessions without end; the limit bounds concurrency but not memory. |
+| **Count the whole table (chosen)** | The limit bounds memory too. A client cycling sessions very fast may briefly be told "max sessions exceeded" while a close is in flight. |
+
+The limit exists to bound what one connection can make the daemon hold. A count
+that excludes exactly the entries a hostile peer can accumulate does not do that.
+
+**Against it, honestly:** a well-behaved client that opens and closes sessions
+back-to-back now has each slot occupied for one extra round trip, so at the
+default of ten sessions a client churning faster than the link's latency can see
+a refusal it would not have seen before. That refusal is retryable and names its
+reason, and the alternative is a limit that a peer can ignore entirely.
+
+### Decision 3: channel numbers are issued once and never reused
+
+| Option | *What changes:* |
+|---|---|
+| Reuse freed numbers | The supply never runs out. A channel number in a log names several different sessions, and a straggling message for a closed channel is delivered to a live one. |
+| **Issue once, refuse when exhausted (chosen)** | A number in a log names one session for the life of the connection. After four billion channels on a single connection, further opens are refused with "channel numbers exhausted". |
+
+The old code did neither: it incremented an unchecked counter, which panics in a
+debug build and wraps in a release build — and a wrap is the reuse option with
+none of its care, since it would hand a new channel the number of a live one.
+
+**Against it, honestly:** the exhaustion path is unreachable in practice, and
+code that cannot be reached in production is code that is only ever exercised by
+its test. That is the reason it is a plain refusal reusing the same reply the
+`MaxSessions` limit already sends, rather than anything with its own machinery:
+the unreachable branch should be the *least* novel code in the function.
+
+**If it is never revisited:** nothing degrades. All three are strictly safer than
+what they replaced.

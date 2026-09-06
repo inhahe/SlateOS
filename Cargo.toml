@@ -55,6 +55,17 @@ members = [
     # Same member-not-exclude rationale as `yamldoc`; like `textfind` it needs no
     # `alloc`, since everything returns a scalar or shuffles the caller's slice.
     "randrange",
+    # Shared no_std monotonic-clock instants and spans. Three of the four
+    # programs that read `SYS_CLOCK_MONOTONIC` had independently named their
+    # wrapper after a unit the syscall does not return: `sshd` and `inetd` both
+    # called nanoseconds milliseconds, which expired `LoginGraceTime` 120 µs into
+    # a 120-second grace (no client could log in at all) and made `inetd`'s
+    # 60-second rate window 60 µs (the limiter never fired once). A unit carried
+    # only in an identifier is a comment the compiler does not read, so this
+    # crate carries it in the type instead. Same member-not-exclude rationale as
+    # `yamldoc`; needs no `alloc` and issues no syscall, which is what lets the
+    # bare-metal `no_main` services share it with the `std` daemons.
+    "monoclock",
     # Shared no_std SHA-256. Twenty-six files in this tree had grown their own
     # copy — the same round constants, the same eight initial words, the same
     # message schedule, pasted twenty-six times across all three lanes. Every

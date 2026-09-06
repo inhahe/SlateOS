@@ -1,0 +1,86 @@
+[package]
+name = "ssh-interop"
+version = "0.1.0"
+edition = "2024"
+description = "Runs the real SSH client against the real SSH server, in one process"
+
+# This crate ships nothing. Its library is a page of documentation and its only
+# code is tests, which is the point: it exists so that `userspace/ssh` and
+# `userspace/sshd` can be compiled into *one* process and made to talk to each
+# other, and neither of them can host that test itself. A crate's own tests can
+# only reach one side of a two-party protocol; both ends passing their own
+# suites is exactly the state this project has been in for every one of the
+# following bugs.
+#
+# Fourteen duplications of the wire layer have been found here. Every one of the
+# first thirteen was found by a human reading two files side by side -- never by
+# a test. Seven of those were live divergences: the exchange hash hashed a
+# placeholder client version on the server, so no client could verify a host key
+# signature; the KEXINIT cookie was a constant on the server; ssh-keygen wrote a
+# private key container nothing else could read; and so on. Both suites were
+# green throughout.
+#
+# The fourteenth is why this crate earns its keep. The first test written here
+# against `ssh-keygen` found, on its first run, that the tool derived the WRONG
+# ED25519 PUBLIC KEY -- disagreeing with RFC 8032's own vector, so the public
+# half of every key it ever wrote did not match its private half. Reading could
+# not have found that one: the arithmetic looks right, and checking it by eye
+# means reimplementing the curve in your head. See known-issues.md
+# `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.
+#
+# `sshwire` is what stopped the *encodings* diverging, by giving both ends one
+# copy. This crate is the other half: it checks that the two programs built on
+# it actually agree, which no amount of shared code can guarantee on its own --
+# the two ends still choose independently what to send, in what order, and what
+# to feed the hash.
+[dependencies]
+
+# Both peers are dev-dependencies, and `deterministic-secrets` is why the
+# distinction matters rather than being bookkeeping. That feature exposes the
+# seam that lets a test replace the Diffie-Hellman exponent, the KEXINIT cookie
+# and the packet padding with a reproducible source. A release build compiles
+# no dev-dependencies, so it does not contain that seam at all -- a stronger
+# statement than "nothing calls it".
+#
+# The seam is also not a convenience. The Windows host this suite runs on has
+# no kernel CSPRNG that `randrange` will draw from -- it refuses on purpose,
+# see open-questions.md -- and a handshake with no exponent is not a handshake.
+# Without the seam this test could not be written at all, on this machine.
+#
+# `randrange` only for its `EntropyError`, which is the error half of
+# `sshwire::SecretSource`'s signature: a substitute source has to be able to
+# return the same failure the kernel one can, because "the CSPRNG refused" is a
+# case both peers must handle and a test source that cannot express it could
+# never exercise those paths.
+#
+# `scratchdir` because the client writes a `known_hosts` entry for a host it
+# has not seen before, and a test that writes into `$HOME/.ssh/known_hosts`
+# would be editing the developer's real trust store.
+#
+# `ssh-keygen` is the third program in this stack and the one whose divergence
+# was user-visible rather than merely latent. It wrapped
+# `-----BEGIN ED25519 PRIVATE KEY-----` around a bare `seed || public ||
+# comment` blob, so the two documented commands
+#
+#     ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key
+#     sshd
+#
+# ended with the daemon refusing to start on the key its own key tool had just
+# written. Both crates' suites were green: each tested its encoder against its
+# own decoder, which is the one arrangement that cannot notice a disagreement.
+# The test that catches it needs the generator and the daemon in one process,
+# so it can only live here.
+[dev-dependencies]
+ssh = { path = "../ssh", features = ["deterministic-secrets"] }
+sshd = { path = "../sshd", features = ["deterministic-secrets"] }
+ssh-keygen = { path = "../ssh-keygen" }
+sshwire = { path = "../sshwire" }
+randrange = { path = "../../randrange" }
+scratchdir = { path = "../scratchdir" }
+
+[lib]
+name = "ssh_interop"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

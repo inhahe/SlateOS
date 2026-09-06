@@ -1,0 +1,4054 @@
+//! Slate OS SSH-2 Client
+//!
+//! A simplified SSH-2 protocol client for SlateOS. Supports public key and
+//! password authentication, interactive shell sessions, and remote command
+//! execution.
+//!
+//! # Why this is a library with a three-line binary on top
+//!
+//! The client and the daemon implement the two halves of one protocol, and
+//! every bug this pair has produced — six of them now — has been a place where
+//! the halves disagreed while each half's own tests passed. The only test that
+//! could have caught any of them is one that runs the real client against the
+//! real server, and that test cannot exist while both are `main.rs` files:
+//! a binary crate has no library to link against, so no third crate can call
+//! into it.
+//!
+//! So the client is a library, `main.rs` is a shim over [`run_cli`], and the
+//! public surface below is deliberately the smallest one an interop test can
+//! be written against — a [`Config`], an [`SshSession`], the two handshake
+//! phases and the [session id](SshSession::session_id) both ends must derive
+//! identically. Everything else stays private. See `known-issues.md`
+//! `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.
+//!
+//! # Usage
+//!
+//! ```text
+//! ssh user@hostname                  Connect with interactive shell
+//! ssh -p 2222 user@hostname          Connect on custom port
+//! ssh user@hostname ls -la           Execute remote command
+//! ssh -v user@hostname               Verbose protocol debugging
+//! ssh -i ~/.ssh/id_ed25519 user@host Authenticate with a named private key
+//! ssh -o ConnectTimeout=10 user@host Set connection timeout
+//! ssh -o StrictHostKeyChecking=no user@host  Skip host key check
+//! ```
+//!
+//! # Protocol
+//!
+//! Implements a subset of SSH-2 (RFC 4253, 4252, 4254):
+//! - Version exchange (SSH-2.0-SlateOS_1.0)
+//! - Key exchange: diffie-hellman-group14-sha256
+//! - Host key: ssh-ed25519 (RFC 8032, via `posix::ed25519`)
+//! - Encryption: AES-128-CTR
+//! - MAC: HMAC-SHA256
+//! - User auth: publickey (ssh-ed25519), falling back to password
+//! - Channel: session with PTY and shell/exec
+//!
+//! # What the host key check actually proves
+//!
+//! Two separate things have to be true before the connection is trustworthy,
+//! and they are checked in this order:
+//!
+//! 1. **The server holds the private half of the key it presented.** It proves
+//!    this by signing the exchange hash H, which covers both version strings,
+//!    both KEXINIT payloads, the host key itself and both Diffie-Hellman public
+//!    values. `verify_host_key_signature` checks that signature.
+//! 2. **That key is the one we expect for this host.** `verify_host_key`
+//!    compares it against `~/.ssh/known_hosts`.
+//!
+//! Step 2 without step 1 is worthless: a host key is *public*, so anyone who
+//! can intercept the connection can replay it, and known_hosts would then
+//! happily confirm the attacker's copy as the right key. This client used to
+//! do exactly that — it discarded the signature blob unread — which meant the
+//! entire known_hosts mechanism, fingerprint prompt included, was decorative.
+//!
+//! # Exit status
+//!
+//! Follows `ssh(1)`: the client exits with **the remote command's** exit
+//! status, so `ssh host cmd && next` behaves as if `cmd` had run locally. A
+//! failure of the client or the connection — a bad argument, an unresolvable
+//! host, a refused connection, a protocol error — exits **255**, which is
+//! reserved for exactly that purpose so a caller can tell "the command failed"
+//! from "the command never ran". A command killed by a signal has no exit
+//! status of its own; that is reported on stderr and also exits 255.
+//!
+//! If the server sends no `exit-status` at all, the client exits 0. That is
+//! unavoidable — it is what an interactive session looks like — and it is
+//! precisely why a *server* must always send one.
+//!
+//! The remote command's stderr arrives on the extended-data stream
+//! (RFC 4254 §5.2) and is written to *this* process's stderr, so
+//! `ssh host cmd > file` puts output in the file and diagnostics on the
+//! terminal, as it would locally.
+
+// Lints come from `[lints] workspace = true` in Cargo.toml. The crate-local
+// `#![deny(clippy::all)]` that used to stand here on its own said strictly
+// less, and hid the fact that nothing else was switched on.
+#![allow(clippy::manual_range_contains)]
+#![allow(clippy::module_name_repetitions)]
+
+use quoting::quoteaf_os;
+// Everything the server has to agree with byte for byte. Not re-implemented
+// here: see that crate's module docs for why one definition shared by both ends
+// is the point, and `ssh/Cargo.toml` for what a second copy cost the last time.
+use sshwire::{
+    BigUint, DH_GROUP14_G, ExchangeHashInput, PacketCodec, Role, SecretSource, StreamBuffer,
+    Transport, TransportError, base64_decode, base64_encode, base64_encode_padded,
+    compute_exchange_hash, dh_group14_prime_bytes, encode_mpint, read_byte, read_mpint,
+    read_ssh_string, read_u32, ssh_string,
+};
+use std::env;
+use std::fmt;
+use std::io::{self, Read, Write};
+
+// ============================================================================
+// Syscall numbers (from kernel/src/syscall/number.rs)
+// ============================================================================
+
+const SYS_TCP_CONNECT: u64 = 800;
+const SYS_TCP_SEND: u64 = 801;
+const SYS_TCP_RECV: u64 = 802;
+const SYS_TCP_CLOSE: u64 = 803;
+const SYS_DNS_RESOLVE: u64 = 820;
+
+// ============================================================================
+// Syscall interface
+// ============================================================================
+
+/// Issue a 1-argument syscall.
+///
+/// # Safety
+///
+/// The caller must ensure `nr` is a valid syscall number and `a1` is valid
+/// for the specific syscall.
+#[cfg(target_vendor = "slateos")]
+unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: Caller guarantees arguments are valid. The `syscall` instruction
+    // clobbers rcx and r11 per the x86_64 ABI.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => ret,
+            in("rdi") a1,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Host stub for `syscall1` — see the gated definition above.
+///
+/// On a development host there is no SlateOS kernel to talk to, and a raw
+/// `syscall` instruction does not fail cleanly: it enters whatever kernel is
+/// actually running, with this crate's SlateOS call number in RAX. Those
+/// numbers mean unrelated things elsewhere, so the call is not a no-op — it
+/// is someone else's syscall. Returning `ENOSYS` keeps `cargo test`, `cargo
+/// run` and `clippy` on the host honest instead of dangerous.
+///
+/// See known-issues.md
+/// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
+#[cfg(not(target_vendor = "slateos"))]
+unsafe fn syscall1(_nr: u64, _a1: u64) -> i64 {
+    -38 // ENOSYS
+}
+
+/// Issue a 3-argument syscall.
+///
+/// # Safety
+///
+/// The caller must ensure `nr` is a valid syscall number and all arguments
+/// are valid for the specific syscall.
+#[cfg(target_vendor = "slateos")]
+unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: Caller guarantees arguments are valid. The `syscall` instruction
+    // clobbers rcx and r11 per the x86_64 ABI.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Host stub for `syscall3` — see the gated definition above.
+///
+/// On a development host there is no SlateOS kernel to talk to, and a raw
+/// `syscall` instruction does not fail cleanly: it enters whatever kernel is
+/// actually running, with this crate's SlateOS call number in RAX. Those
+/// numbers mean unrelated things elsewhere, so the call is not a no-op — it
+/// is someone else's syscall. Returning `ENOSYS` keeps `cargo test`, `cargo
+/// run` and `clippy` on the host honest instead of dangerous.
+///
+/// See known-issues.md
+/// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
+#[cfg(not(target_vendor = "slateos"))]
+unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
+    -38 // ENOSYS
+}
+
+// ============================================================================
+// Syscall wrappers
+// ============================================================================
+
+/// Resolve a hostname to an IPv4 address via the kernel DNS resolver.
+/// Returns the IP as a `u32` in network byte order on success.
+fn dns_resolve(hostname: &str) -> Result<u32, SshError> {
+    let mut result_ip: u32 = 0;
+    // SAFETY: We pass a valid pointer to the hostname bytes and their length,
+    // plus a valid mutable pointer for the kernel to write the resolved IP into.
+    // The kernel reads exactly `hostname.len()` bytes and writes exactly 4 bytes.
+    let ret = unsafe {
+        syscall3(
+            SYS_DNS_RESOLVE,
+            hostname.as_ptr() as u64,
+            hostname.len() as u64,
+            &mut result_ip as *mut u32 as u64,
+        )
+    };
+    if ret < 0 {
+        return Err(SshError::DnsFailure(hostname.to_string()));
+    }
+    Ok(result_ip)
+}
+
+/// A TCP connection, as [`sshwire::Transport`] sees it.
+///
+/// This — and its counterpart in `sshd` — is the only place in either program
+/// that knows the protocol runs over TCP. Everything above it takes a
+/// `&mut dyn Transport`, which is what makes the two ends drivable against each
+/// other in a test rather than only against a kernel.
+struct TcpTransport {
+    handle: u64,
+}
+
+impl TcpTransport {
+    /// Open a connection to the given IP (network byte order) and port.
+    fn connect(ip: u32, port: u16) -> Result<Self, SshError> {
+        // SAFETY: We pass a valid IP and port. The kernel returns a handle
+        // (>= 0) or a negative error code. No pointers are involved.
+        let ret = unsafe { syscall3(SYS_TCP_CONNECT, u64::from(ip), u64::from(port), 0) };
+        if ret < 0 {
+            return Err(SshError::ConnectionFailed(format!(
+                "tcp_connect returned {ret}"
+            )));
+        }
+        Ok(Self { handle: ret as u64 })
+    }
+}
+
+impl Transport for TcpTransport {
+    fn send(&mut self, data: &[u8]) -> Result<usize, TransportError> {
+        // SAFETY: We pass a valid handle and a pointer to a byte buffer with
+        // its correct length. The kernel reads up to `data.len()` bytes from it.
+        let ret = unsafe {
+            syscall3(
+                SYS_TCP_SEND,
+                self.handle,
+                data.as_ptr() as u64,
+                data.len() as u64,
+            )
+        };
+        if ret < 0 {
+            return Err(TransportError::Send);
+        }
+        usize::try_from(ret).map_err(|_| TransportError::Send)
+    }
+
+    fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<&'b [u8], TransportError> {
+        // SAFETY: We pass a valid handle and a mutable buffer pointer with its
+        // correct length. The kernel writes at most `buf.len()` bytes into it.
+        let ret = unsafe {
+            syscall3(
+                SYS_TCP_RECV,
+                self.handle,
+                buf.as_mut_ptr() as u64,
+                buf.len() as u64,
+            )
+        };
+        if ret < 0 {
+            return Err(TransportError::Recv);
+        }
+        // The kernel's number becomes a range in exactly one place: here, where
+        // a count that does not fit the buffer we handed over is refused rather
+        // than travelling into a caller's `buf[..n]` to panic there.
+        let received = usize::try_from(ret).map_err(|_| TransportError::Recv)?;
+        buf.get(..received).ok_or(TransportError::Recv)
+    }
+
+    fn readable(&self) -> bool {
+        // The client never polls: every read it does is one it is waiting for.
+        true
+    }
+
+    fn close(&mut self) {
+        // SAFETY: We pass a valid handle. The kernel deallocates internal
+        // state. Ignoring the return value is safe: the handle becomes invalid
+        // regardless.
+        let _ = unsafe { syscall1(SYS_TCP_CLOSE, self.handle) };
+    }
+}
+
+// ============================================================================
+// Error type
+// ============================================================================
+
+/// Everything that can stop this client, from a name that will not resolve to
+/// a server whose host key is not the one we trusted.
+#[derive(Debug)]
+pub enum SshError {
+    DnsFailure(String),
+    ConnectionFailed(String),
+    SendFailed,
+    RecvFailed,
+    ProtocolError(String),
+    AuthFailed(String),
+    HostKeyMismatch(String),
+    IoError(io::Error),
+    #[allow(dead_code)]
+    Timeout,
+}
+
+impl fmt::Display for SshError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DnsFailure(host) => write!(f, "could not resolve hostname '{host}'"),
+            Self::ConnectionFailed(msg) => write!(f, "connection failed: {msg}"),
+            Self::SendFailed => write!(f, "failed to send data"),
+            Self::RecvFailed => write!(f, "failed to receive data"),
+            Self::ProtocolError(msg) => write!(f, "protocol error: {msg}"),
+            Self::AuthFailed(msg) => write!(f, "authentication failed: {msg}"),
+            Self::HostKeyMismatch(msg) => write!(f, "host key verification failed: {msg}"),
+            Self::IoError(e) => write!(f, "I/O error: {e}"),
+            Self::Timeout => write!(f, "connection timed out"),
+        }
+    }
+}
+
+impl From<io::Error> for SshError {
+    fn from(e: io::Error) -> Self {
+        Self::IoError(e)
+    }
+}
+
+/// A malformed packet is a protocol error like any other, so `?` on a shared
+/// reader reports the same way a local check did.
+///
+/// This impl is the whole reason the readers could move to `sshwire`: a shared
+/// decoder cannot return `SshError`, and until there was a shared error to
+/// convert *from*, every call site's `?` pinned the decoders to this crate —
+/// which is exactly why the server kept an unhardened copy of them long after
+/// the client's was fixed.
+impl From<sshwire::WireError> for SshError {
+    fn from(e: sshwire::WireError) -> Self {
+        Self::ProtocolError(e.to_string())
+    }
+}
+
+/// The same for the byte stream underneath: a shared `StreamBuffer` cannot
+/// return `SshError` either.
+///
+/// `Closed` becomes a protocol error here because every client read is one it
+/// is waiting for, so a hang-up mid-exchange really is a failure. The server
+/// maps it differently — its session loop has reads it merely hopes will
+/// return — which is exactly why the shared type reports the fact and each end
+/// decides what it means.
+impl From<TransportError> for SshError {
+    fn from(e: TransportError) -> Self {
+        match e {
+            TransportError::Send => Self::SendFailed,
+            TransportError::Recv => Self::RecvFailed,
+            TransportError::Closed => Self::ProtocolError("connection closed".into()),
+        }
+    }
+}
+
+// ============================================================================
+// SSH-2 constants
+// ============================================================================
+
+/// Our version identification string.
+const SSH_VERSION_STRING: &str = "SSH-2.0-SlateOS_1.0";
+
+/// How much of one pre-key-exchange greeting line we will hold in memory.
+///
+/// This is *not* the RFC 4253 §4.2 limit on the identification string — that is
+/// [`sshwire::MAX_IDENTIFICATION_LINE`], and `sshwire::decode_identification`
+/// enforces it, because it governs a value both ends have to hash identically.
+/// This bound covers the banner lines a server may send *before* it, which §4.2
+/// does not bound at all. Without one, a peer that never sends a newline grows
+/// this buffer until the client dies — before it has authenticated anything.
+const MAX_GREETING_LINE: usize = 1024;
+
+/// SSH message type codes, from `sshwire`.
+///
+/// This module used to define all twenty-five of them itself, alongside an
+/// identical twenty-five in `sshd`. The two copies agreed, but nothing made
+/// them agree: a number this end writes is a number the other end switches on,
+/// so a table that drifts by one entry produces a client and a server that
+/// cannot talk while both suites — each sending and receiving through its own
+/// copy — stay green. `sshwire::msg` is the single table; the alias keeps the
+/// `msg::` spelling every call site here already uses.
+use sshwire::msg;
+
+// ============================================================================
+// SSH-2 packet framing
+// ============================================================================
+
+// The framing itself -- `[u32 packet_length][u8 padding_length][payload]
+// [padding]`, the MAC over it, and both sequence numbers -- lives in
+// `sshwire::PacketCodec`. It was the last function in this file that the daemon
+// also had a copy of, and the two copies had already drifted: this one had been
+// hardened to `checked_*`/`saturating_*` arithmetic and given the `packet_length
+// < 5` floor check that stops a peer's zero-length packet being indexed at
+// offset 4, and the server's had neither, because there was no mechanism by
+// which either fix could reach it.
+//
+// The sequence numbers moved with it. §6.4 makes the sequence number an input
+// to the MAC, so advancing it is part of framing a packet rather than
+// bookkeeping the caller keeps beside it -- and kept beside it, it was already
+// once forgotten on a send path, which authenticated every packet after the
+// first under a number the peer had moved past.
+
+/// Largest `SSH_MSG_CHANNEL_DATA` payload we will send in one packet.
+///
+/// This is the same 32 KiB that `channel_open` advertises to the server as our
+/// maximum packet size; it was written out as a bare `32768` in both places,
+/// which is two independent copies of one promise. RFC 4254 s5.1 makes the
+/// advertised figure binding, so a change to one that missed the other would
+/// have us overrun a limit we had just announced.
+const MAX_CHANNEL_CHUNK: usize = 32768;
+
+// The stream buffer that used to be here is `sshwire::StreamBuffer`. Both
+// programs had one, with the same two fields and the same four methods, and
+// again they were not equal -- the server's `fill_once` indexed the length
+// the kernel reported, under its blanket panic-lint suppression.
+
+// ============================================================================
+// SSH data encoding helpers
+// ============================================================================
+
+/// What one line of the server's pre-key-exchange greeting turned out to be.
+enum VersionLine {
+    /// The identification string, i.e. `V_S`.
+    Version(String),
+    /// A line before it, rendered safe for a terminal.
+    Banner(String),
+}
+
+/// Decide what a line read during the version exchange is (RFC 4253 §4.2).
+///
+/// `line` is everything up to but not including the LF. A server — and only a
+/// server — may send any number of lines before its identification string; the
+/// identification string is the first beginning `SSH-`.
+///
+/// What that line *is*, once found, is `sshwire`'s to say: it is `V_S`, the
+/// second input to the exchange hash, so the terminator stripping, the length
+/// limit and the strict decode are shared with the server rather than restated
+/// here. Two of the three exchange-hash bugs found in this stack were the two
+/// ends disagreeing about that derivation while agreeing about everything after
+/// it.
+///
+/// Banner lines are not hashed and are not held to any of it: they are free text
+/// from a peer that has authenticated nothing, on its way to a terminal, so they
+/// are escaped rather than decoded. Refusing a connection over a greeting would
+/// be wrong, and printing one raw would let that peer emit control sequences.
+fn classify_version_line(line: &[u8]) -> Result<VersionLine, SshError> {
+    if sshwire::is_identification_line(line) {
+        let version = sshwire::decode_identification(line).map_err(|e| {
+            SshError::ProtocolError(format!("server identification line rejected: {e}"))
+        })?;
+        return Ok(VersionLine::Version(version.to_owned()));
+    }
+    Ok(VersionLine::Banner(quoting::escape_unprintable(
+        sshwire::strip_line_terminator(line),
+    )))
+}
+
+// The wire codec -- `ssh_string`, `encode_mpint`, `strip_leading_zeros`, and the
+// `read_*` readers below -- lives in `sshwire`, not here. Each function is one
+// half of a contract with whatever is at the other end of the socket, and a
+// private copy of one half is a copy that can drift without any test in this
+// crate noticing. They are imported at the top of this file with the rest.
+
+// The big-integer arithmetic for Diffie-Hellman is `sshwire`'s, not this
+// file's. It lived here, and `sshd` had a second copy that was still the
+// big-endian-bytes, one-bit-at-a-time version this one was rewritten away from
+// -- so the server was spending, before authenticating anybody, the eighty
+// seconds of CPU per handshake that rewrite removed from the client. There was
+// no route by which the fix could reach it while the type was private to a
+// binary. `sshwire::BigUint` is that route.
+
+// ============================================================================
+// SHA-256
+// ============================================================================
+
+/// Compute SHA-256 of `data`.
+///
+/// A thin name over `sha2::sha256`. The round constants, initial words and
+/// compression function used to be written out here -- one of ten copies under
+/// `userspace/`. In an SSH client the copy is worse than redundant: the same
+/// digest has to agree with the *other* end of the connection, so a private
+/// implementation is a private protocol.
+fn sha256(data: &[u8]) -> [u8; 32] {
+    sha2::sha256(data)
+}
+
+// HMAC-SHA256, the packet MAC, constant-time comparison and AES-128-CTR all
+// live in `sshwire` now. The cipher in particular had to: its counter is state
+// that RFC 4344 §4 says advances once per block for the life of the key, this
+// crate restarted it at every packet -- reusing one keystream for the whole
+// session -- and the server had invented a third rule. A shared stateful type
+// is what makes all three unwriteable. See that crate's `Aes128Ctr`.
+
+// The transport's cipher, MAC and both sequence numbers live in one
+// `sshwire::PacketCodec` on `SshSession`, not in a local `EncryptionState`
+// beside a pair of loose `seq_*` fields. Every part of that grouping had
+// already gone wrong once while the pieces were held apart: the key and IV as
+// separate `Vec`s let a fresh counter be rebuilt per packet, so one keystream
+// covered a whole session; an `encrypted: bool` beside an uninstalled cipher
+// described a plaintext packet as protected; and a sequence number the caller
+// advanced by hand was, on one send path, not advanced at all.
+
+// ============================================================================
+// Diffie-Hellman group 14 (2048-bit MODP group, RFC 3526)
+//
+// The prime and the generator are `sshwire`'s. They were transcribed
+// separately into this file and into `sshd` -- 512 hex digits, twice -- and
+// the two copies agreeing was luck, not a checked property. See
+// `sshwire::DH_GROUP14_P_HEX`.
+// ============================================================================
+
+/// Format bytes as a hex string.
+fn bytes_to_hex(data: &[u8]) -> String {
+    let mut s = String::with_capacity(data.len().saturating_mul(2));
+    for &b in data {
+        s.push(hex_char(b >> 4));
+        s.push(hex_char(b & 0x0f));
+    }
+    s
+}
+
+/// The lowercase hex character for a nibble. Values above 15 cannot occur --
+/// every caller masks first -- and would read as `'0'`.
+fn hex_char(nibble: u8) -> char {
+    char::from_digit(u32::from(nibble), 16).unwrap_or('0')
+}
+
+/// Generate the Diffie-Hellman private exponent `x`.
+///
+/// # What this replaces
+///
+/// The previous version hashed two hard-coded 64-bit constants and called the
+/// result entropy. It was not merely weak — it was *constant*: every
+/// connection made by every copy of this binary used the same `x`, so the
+/// shared secret, and therefore the session keys, were recoverable by anyone
+/// who had the binary. The comment said "sufficient to demonstrate the
+/// protocol flow", and the flow it demonstrated was an encrypted channel that
+/// decrypts to a passive observer.
+///
+/// The bytes now come from `secrets`, which is [`sshwire::KERNEL_SECRETS`]
+/// — `randrange::fill_secret`, reaching the kernel CSPRNG through the linked
+/// libc and *failing* rather than substituting anything when it cannot — for
+/// every connection the client makes. They came from `posix::random` until it
+/// turned out that a program's rlib copy of `posix` has every syscall stubbed
+/// out, so the draw silently reached a hardware-RDRAND fallback that the guest
+/// CPU does not have and returned `EIO` while blaming a kernel it had never
+/// asked.
+///
+/// The source is a parameter so that a test can drive a reproducible handshake;
+/// see [`sshwire::SecretSource`] for why that is worth a seam and why the seam
+/// is not reachable from the command line.
+///
+/// # Errors
+///
+/// Returns an error if `secrets` cannot supply random bytes. There is no
+/// fallback on purpose: a caller handed an error can refuse to connect, a
+/// caller handed predictable bytes cannot know to.
+fn generate_dh_private(secrets: SecretSource) -> Result<BigUint, SshError> {
+    // 256 bits, matching the ~128-bit security the group14 prime provides.
+    let mut bytes = [0u8; 32];
+    secrets(&mut bytes).map_err(|e| {
+        SshError::ProtocolError(format!("cannot generate a Diffie-Hellman private key: {e}"))
+    })?;
+    // Top bit set so the exponent is a full 256 bits rather than however many
+    // the leading zero bytes leave; bottom bit set so it is odd. This is what
+    // OpenSSH's BN_rand(..., BN_RAND_TOP_ONE, BN_RAND_BOTTOM_ODD) produces.
+    bytes[0] |= 0x80;
+    bytes[31] |= 1;
+    Ok(BigUint::from_bytes_be(&bytes))
+}
+
+// The exchange hash and RFC 4253 §7.2 key derivation are `sshwire`'s. They were
+// this file's, and the server's copy of the same construction is what drifted
+// into hashing a fabricated client version; the client verifying the server's
+// signature is only meaningful if both sides compute the value from one
+// definition. See `sshwire`'s module docs.
+
+// ============================================================================
+// Host key signature verification
+// ============================================================================
+
+/// Check the server's signature over the exchange hash (RFC 4253 section 8).
+///
+/// # What this is for
+///
+/// The exchange hash `H` covers both version strings, both KEXINIT payloads,
+/// the host key blob and both Diffie-Hellman public values. A signature over
+/// it is the server's statement that it holds the private half of the key it
+/// advertised *and* that it saw the same handshake we did. Without this check
+/// the Diffie-Hellman exchange is unauthenticated, which means it is secure
+/// against a passive eavesdropper and useless against anyone who can sit in
+/// the path — and someone in the path is the threat the whole exchange exists
+/// to address.
+///
+/// `known_hosts` cannot substitute for it. `known_hosts` says "the key is the
+/// one I saw last time"; only the signature says "the party I am talking to
+/// actually holds it". An unverified key blob can be copied from the real
+/// server by anyone who has ever connected to it.
+///
+/// # Errors
+///
+/// [`SshError::ProtocolError`] if either blob is truncated or its length
+/// prefixes do not describe it; [`SshError::HostKeyMismatch`] if the algorithm
+/// is one we cannot check, if the key and signature disagree about which
+/// algorithm that is, or if the signature does not verify.
+fn verify_host_key_signature(
+    key_blob: &[u8],
+    exchange_hash: &[u8; 32],
+    sig_blob: &[u8],
+) -> Result<(), SshError> {
+    let (key_algorithm, key_off) = read_ssh_string(key_blob, 0)?;
+    let (sig_algorithm, sig_off) = read_ssh_string(sig_blob, 0)?;
+
+    // The two must agree, or a server could advertise an Ed25519 key and sign
+    // with something else -- an algorithm-confusion attack whose whole premise
+    // is that one side picks the label and the other picks the verifier.
+    if key_algorithm != sig_algorithm {
+        return Err(SshError::HostKeyMismatch(format!(
+            "server signed with {} but advertised a {} key",
+            String::from_utf8_lossy(sig_algorithm),
+            String::from_utf8_lossy(key_algorithm),
+        )));
+    }
+
+    if key_algorithm != b"ssh-ed25519" {
+        // Refusing is the only safe answer. Continuing would mean accepting a
+        // signature we did not check, which is the bug this function fixes.
+        return Err(SshError::HostKeyMismatch(format!(
+            "cannot verify a {} host key; only ssh-ed25519 is implemented",
+            String::from_utf8_lossy(key_algorithm),
+        )));
+    }
+
+    let (public, _) = read_ssh_string(key_blob, key_off)?;
+    let (signature, _) = read_ssh_string(sig_blob, sig_off)?;
+
+    if posix::ed25519::verify_slices(public, exchange_hash, signature) {
+        Ok(())
+    } else {
+        Err(SshError::HostKeyMismatch(
+            "the server's signature over the exchange hash did not verify".into(),
+        ))
+    }
+}
+
+// ============================================================================
+// Host key fingerprint and known_hosts
+// ============================================================================
+
+/// Compute the SHA-256 fingerprint of a host key blob, formatted as
+/// `SHA256:base64_encoded_hash` (like OpenSSH).
+fn host_key_fingerprint(key_blob: &[u8]) -> String {
+    let hash = sha256(key_blob);
+    let b64 = base64_encode(&hash);
+    format!("SHA256:{b64}")
+}
+
+/// The name a host is filed under in `known_hosts`: bare for the default port,
+/// bracketed otherwise, as OpenSSH writes it.
+///
+/// One function so the reader and the writer cannot disagree about the form --
+/// `check_known_hosts` and `add_known_host` each built this string themselves,
+/// and a host filed under a spelling the lookup does not produce is a host that
+/// is silently re-asked about on every connection.
+fn known_hosts_pattern(hostname: &str, port: u16) -> String {
+    if port == 22 {
+        hostname.to_string()
+    } else {
+        format!("[{hostname}]:{port}")
+    }
+}
+
+/// What `known_hosts` has to say about a host.
+#[derive(Debug, PartialEq, Eq)]
+enum KnownHostsVerdict {
+    /// No line names this host.
+    Unknown,
+    /// A line names this host and carries exactly this key.
+    Match,
+    /// A line names this host and carries a *different* key.
+    Mismatch,
+    /// A line names this host but its key field is not valid base64, so there
+    /// is no key to compare against.
+    ///
+    /// This case only became expressible when the decoder moved to `sshwire`.
+    /// The private one this crate used to carry dropped characters it did not
+    /// recognise and returned whatever bytes were left, so a mangled entry
+    /// decoded to a short blob, compared unequal, and was reported as
+    /// `Mismatch` -- which prints "someone could be eavesdropping on you" and
+    /// tells the user to remove the old entry to accept the new key. Both
+    /// halves of that are wrong for a corrupt line, and the second is a trap:
+    /// the first line naming a host is the one that decides, so accepting the
+    /// key appends a line that will never be consulted and the same warning
+    /// comes back on every subsequent connection.
+    Corrupt,
+}
+
+/// Search already-read `known_hosts` text for `host_pattern`.
+///
+/// Split out from `check_known_hosts` so that the part which decides whether a
+/// key is trusted can be tested without a filesystem or a `$HOME`. This is the
+/// function that says "this is the same server you connected to last time";
+/// leaving it welded to a file read meant the man-in-the-middle check was the
+/// one piece of this client that no test could reach.
+fn known_hosts_lookup(content: &str, host_pattern: &str, key_blob: &[u8]) -> KnownHostsVerdict {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Taking the three fields straight off the iterator makes "there are
+        // three of them" and "here they are" the same step: the `len() < 3`
+        // check and the three indexes that followed it were two statements of
+        // one fact, and only the first of them was enforced. The key type is
+        // deliberately unread -- the blob carries its own algorithm name, and
+        // that is what `verify_host_key` checks against.
+        let mut fields = line.splitn(3, ' ');
+        let (Some(hosts), Some(_), Some(rest)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let key_b64 = rest.split_whitespace().next().unwrap_or("");
+
+        // Check if our host matches any of the comma-separated host patterns.
+        if !hosts.split(',').any(|h| h.trim() == host_pattern) {
+            continue;
+        }
+
+        // Decode the stored key and compare. The first line naming this host
+        // decides: a later line cannot rehabilitate a key the earlier one
+        // contradicts.
+        let Ok(stored) = base64_decode(key_b64.as_bytes()) else {
+            return KnownHostsVerdict::Corrupt;
+        };
+        return if stored == key_blob {
+            KnownHostsVerdict::Match
+        } else {
+            KnownHostsVerdict::Mismatch
+        };
+    }
+
+    KnownHostsVerdict::Unknown
+}
+
+/// Where the trusted host keys are recorded.
+///
+/// `-o UserKnownHostsFile=` overrides it, as in OpenSSH. That option is not
+/// decoration: `$HOME/.ssh/known_hosts` is the user's real trust store, so
+/// without a way to name a different file, *any* automated exercise of this
+/// client — an interoperability test above all — either has to skip host-key
+/// verification entirely or write into the operator's own trust store. The
+/// first tests the wrong program and the second is a side effect no test is
+/// entitled to have.
+fn known_hosts_path(known_hosts_file: Option<&str>) -> String {
+    if let Some(path) = known_hosts_file {
+        return path.to_string();
+    }
+    let home = env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    format!("{home}/.ssh/known_hosts")
+}
+
+/// Check the known_hosts file for a matching host key.
+/// Returns Ok(true) if found and matches, Ok(false) if not found,
+/// Err if found but mismatched.
+fn check_known_hosts(
+    known_hosts_file: Option<&str>,
+    hostname: &str,
+    port: u16,
+    key_blob: &[u8],
+) -> Result<bool, SshError> {
+    let path = known_hosts_path(known_hosts_file);
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Ok(false), // File does not exist — host is unknown.
+    };
+
+    let host_pattern = known_hosts_pattern(hostname, port);
+
+    match known_hosts_lookup(&content, &host_pattern, key_blob) {
+        KnownHostsVerdict::Match => Ok(true),
+        KnownHostsVerdict::Unknown => Ok(false),
+        KnownHostsVerdict::Mismatch => Err(SshError::HostKeyMismatch(format!(
+            "host key for {host_pattern} has changed!\n\
+             Someone could be eavesdropping on you (man-in-the-middle attack).\n\
+             The fingerprint for the new key is:\n  {}\n\
+             Remove the old entry from {path} to accept the new key.",
+            host_key_fingerprint(key_blob),
+        ))),
+        // Refusing rather than treating the host as unknown: an unreadable
+        // entry is not an absent one. Prompting to accept the key would append
+        // a line below the corrupt one, which the lookup never reaches, so the
+        // user would be asked the same question forever. Naming the actual
+        // problem is what lets them fix it in one step.
+        KnownHostsVerdict::Corrupt => Err(SshError::HostKeyMismatch(format!(
+            "the entry for {host_pattern} in {path} is damaged: its key is not \
+             valid base64, so it cannot be compared against the key this server \
+             offered.\n\
+             The fingerprint of the offered key is:\n  {}\n\
+             Repair or remove that line to continue.",
+            host_key_fingerprint(key_blob),
+        ))),
+    }
+}
+
+/// Add a host key to the known_hosts file.
+fn add_known_host(
+    known_hosts_file: Option<&str>,
+    hostname: &str,
+    port: u16,
+    key_type: &str,
+    key_blob: &[u8],
+) {
+    let path = known_hosts_path(known_hosts_file);
+
+    // Ensure the directory exists. `rsplit_once` rather than a `Path` parent so
+    // an explicit `UserKnownHostsFile` in the current directory -- no separator
+    // at all -- creates nothing rather than trying to create "".
+    if let Some((dir, _)) = path.rsplit_once('/') {
+        let _ = std::fs::create_dir_all(dir);
+    }
+
+    let host_pattern = known_hosts_pattern(hostname, port);
+    let key_b64 = base64_encode_padded(key_blob);
+    let entry = format!("{host_pattern} {key_type} {key_b64}\n");
+
+    let mut f = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Warning: could not write to {path}: {e}");
+            return;
+        }
+    };
+    let _ = f.write_all(entry.as_bytes());
+}
+
+// ============================================================================
+// Public key authentication (RFC 4252 §7)
+// ============================================================================
+
+/// A private key this client can authenticate with.
+///
+/// The public half here is the one **derived from the seed**, never the one the
+/// file claimed. See [`Identity::from_openssh_text`].
+///
+/// # Why this is public
+///
+/// So that something outside this crate can drive a real `publickey` request
+/// into the real server. `sshd`'s side of RFC 4252 §7 and this side of it are
+/// two writers of one byte sequence, and a suite that only ever talks to itself
+/// cannot notice that it is wrong in a way it is *consistently* wrong — see
+/// known-issues.md
+/// `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`
+/// for the tally of what that has cost so far.
+///
+/// The type is public; its two fields are not, because a seed a caller supplied
+/// field-by-field is not a key that any file produced.
+pub struct Identity {
+    seed: [u8; 32],
+    public: [u8; 32],
+}
+
+/// Written by hand rather than derived, because a derived one prints `seed`.
+///
+/// That is not a hypothetical leak. `Debug` is what `expect`, `unwrap`,
+/// `assert_eq!` and every `{:?}` in a diagnostic reach for, so a derived impl
+/// puts the user's private key into a panic message, a verbose log line, or a
+/// test failure — places whose whole purpose is to be copied into a bug report.
+/// The public half is printed in full because it is public.
+impl fmt::Debug for Identity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Identity")
+            .field("seed", &"<redacted>")
+            .field(
+                "public",
+                &host_key_fingerprint(&sshwire::ed25519_public_blob(&self.public)),
+            )
+            .finish()
+    }
+}
+
+/// Where the private key lives.
+///
+/// `-i` and `-o IdentityFile=` override it, as in OpenSSH. Only `id_ed25519` is
+/// looked for because Ed25519 is the only key type this stack implements —
+/// there is no `id_rsa` to fall back to, and offering one that could never be
+/// loaded would turn "you have no key" into "your key is broken".
+fn identity_path(identity_file: Option<&str>) -> String {
+    if let Some(path) = identity_file {
+        return path.to_string();
+    }
+    let home = env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    format!("{home}/.ssh/id_ed25519")
+}
+
+impl Identity {
+    /// Read a private key out of the text of an `openssh-key-v1` file.
+    ///
+    /// Takes the file's *text* rather than its path, so the decision this
+    /// function makes is reachable from a test without a filesystem. That split
+    /// is the same one `sshd::HostKey::from_openssh_text` and
+    /// `sshd::decide_publickey_request` have, and for the same reason — and it
+    /// is spelled the same way as the first of those deliberately, so that the
+    /// two ends of this protocol load a key by the same name.
+    ///
+    /// # The check that is not the codec's job
+    ///
+    /// `sshwire` hands back the public key **the file holds**, because deriving
+    /// one from the seed is Ed25519 arithmetic and that lives in `posix`, which
+    /// `sshwire` deliberately does not depend on. So this function derives it
+    /// and compares, and returns the derived value rather than the stored one.
+    ///
+    /// That check is not theoretical bookkeeping. `ssh-keygen` in this tree
+    /// derived the wrong public key for every key it ever wrote — it disagreed
+    /// with RFC 8032's own test vector — so the two halves of those files do not
+    /// match. A client that trusted the stored half would send a key blob the
+    /// server sees, sign with a seed that does not correspond to it, and get
+    /// back a bare `SSH_MSG_USERAUTH_FAILURE` with nothing to point at. Deriving
+    /// and comparing turns that into a sentence naming the file.
+    ///
+    /// # Errors
+    ///
+    /// A description of what is wrong with the container, or that its two halves
+    /// disagree, suitable for printing after the file's name.
+    pub fn from_openssh_text(text: &str) -> Result<Self, String> {
+        let key = sshwire::decode_openssh_private_key(text).map_err(|e| e.to_string())?;
+        let derived = posix::ed25519::public_key(&key.seed);
+        if derived != key.public {
+            return Err(
+                "the public key stored in the file does not match its private seed, so the \
+                 file is damaged or was written by a tool that derived it wrongly"
+                    .to_string(),
+            );
+        }
+        Ok(Self {
+            seed: key.seed,
+            public: derived,
+        })
+    }
+}
+
+/// Load the key to authenticate with, if there is one to load.
+///
+/// # Why a missing file is two different things
+///
+/// `Ok(None)` means "authenticate some other way"; `Err` means "stop". Which
+/// one an unusable file produces depends on whether the user named it:
+///
+/// | | file absent | file present but unusable |
+/// |---|---|---|
+/// | `-i` given | error | error |
+/// | no `-i` | silent | warning, then continue |
+///
+/// An explicit `-i` is a statement of intent. Falling back to a password prompt
+/// after failing to load it means the user types their password into a session
+/// they believed was using a key — and gets in, so nothing ever tells them the
+/// key was not used. OpenSSH only warns here; that leniency is a well-worn
+/// source of "why does it keep asking for my password". Naming the problem and
+/// stopping costs a retry and buys an accurate answer.
+///
+/// The default path is the opposite case: most invocations of this client have
+/// no key at all, and a message about a file the user never mentioned is noise
+/// on every single one. But a default path that *exists* and cannot be read is
+/// not the same as one that is absent — something meant it to be a key — so it
+/// warns and carries on rather than passing over it in silence.
+///
+/// See design-decisions.md §778.
+///
+/// # Errors
+///
+/// [`SshError::AuthFailed`] naming the file and what was wrong with it, when
+/// the user named the file themselves.
+fn load_identity(identity_file: Option<&str>) -> Result<Option<Identity>, SshError> {
+    load_identity_from(&identity_path(identity_file), identity_file.is_some())
+}
+
+/// [`load_identity`], with the path already chosen and the policy stated
+/// outright.
+///
+/// Split out because the interesting half of `load_identity` is the *`None`*
+/// case — the default path — and that case reads `$HOME/.ssh/id_ed25519`. A
+/// test of it that went through `load_identity` would either pass or fail
+/// depending on whether the operator running it happens to own a key, which is
+/// not a test of anything. With the two decisions separated, `explicit` can be
+/// set to `false` over a scratch file and the default-path policy is checked
+/// without a single reference to the developer's home directory.
+///
+/// # Errors
+///
+/// As [`load_identity`].
+fn load_identity_from(path: &str, explicit: bool) -> Result<Option<Identity>, SshError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) => {
+            if explicit {
+                return Err(SshError::AuthFailed(format!("cannot read {path}: {e}")));
+            }
+            return Ok(None);
+        }
+    };
+
+    match Identity::from_openssh_text(&text) {
+        Ok(identity) => Ok(Some(identity)),
+        Err(why) if explicit => Err(SshError::AuthFailed(format!("cannot use {path}: {why}"))),
+        Err(why) => {
+            eprintln!("Warning: ignoring {path}: {why}");
+            Ok(None)
+        }
+    }
+}
+
+impl Identity {
+    /// Build the signed `publickey` `SSH_MSG_USERAUTH_REQUEST` for this key.
+    ///
+    /// The bytes that go on the wire and the bytes the signature covers are one
+    /// sequence written down once, in [`sshwire::pubkey_request_fields`]; this
+    /// function is where that sequence is signed and the signature appended. The
+    /// server reconstructs the signed form with `sshwire::pubkey_signed_blob`,
+    /// which is defined in terms of the same function — so the two ends cannot
+    /// disagree about a field, which is the one failure mode a `publickey`
+    /// exchange reports as nothing more informative than "no".
+    ///
+    /// The result is a complete request, from the `SSH_MSG_USERAUTH_REQUEST`
+    /// byte onward — not a tail from some offset — because that is what the
+    /// server is handed and what `sshd::decide_publickey_request` takes. An
+    /// offset agreed by convention between two crates is one more thing the two
+    /// can disagree about silently, and it was not worth having.
+    #[must_use]
+    pub fn auth_request(
+        &self,
+        user_bytes: &[u8],
+        service_bytes: &[u8],
+        session_id: &[u8; 32],
+    ) -> Vec<u8> {
+        let key_blob = sshwire::ed25519_public_blob(&self.public);
+        let algorithm = sshwire::OPENSSH_KEY_TYPE_ED25519;
+
+        let signed = sshwire::pubkey_signed_blob(
+            session_id,
+            user_bytes,
+            service_bytes,
+            algorithm,
+            &key_blob,
+        );
+        let signature = posix::ed25519::sign(&self.seed, &signed);
+
+        // RFC 4253 §6.6: a signature on the wire is the algorithm name and the
+        // signature blob, wrapped in one more string. The extra layer is what
+        // lets a verifier reject a signature made under a different algorithm
+        // than the key it was offered under.
+        let mut sig_blob = ssh_string(algorithm);
+        sig_blob.extend_from_slice(&ssh_string(&signature));
+
+        let mut payload =
+            sshwire::pubkey_request_fields(user_bytes, service_bytes, algorithm, &key_blob);
+        payload.extend_from_slice(&ssh_string(&sig_blob));
+        payload
+    }
+}
+
+/// The server's verdict on one authentication attempt.
+///
+/// There is no `Error` variant: a reply that could not be read at all is an
+/// [`SshError`], because the connection is then in a state this client cannot
+/// reason about. This type is only the two answers the protocol defines.
+#[derive(Debug, PartialEq, Eq)]
+enum AuthReply {
+    Success,
+    /// `SSH_MSG_USERAUTH_FAILURE`, carrying the methods that may still work.
+    ///
+    /// Not the same as "wrong password": RFC 4252 §5.1 sends this for a method
+    /// the server never offered, for an account that does not exist, and for a
+    /// key that is not authorized, all identically. That is deliberate — the
+    /// alternative tells an unauthenticated peer which accounts exist.
+    Failure {
+        methods: String,
+    },
+}
+
+/// Is `password` among the methods this list names?
+///
+/// The field is a comma-separated list of names (RFC 4252 §5.1), so this is a
+/// split on commas rather than a substring search. `contains("password")` would
+/// also match a hypothetical `password-expired` or `gssapi-with-password`, and
+/// would then prompt for a secret the server had not asked for.
+fn offers_password(methods: &str) -> bool {
+    methods.split(',').any(|m| m.trim() == "password")
+}
+
+// ============================================================================
+// Argument parsing
+// ============================================================================
+
+/// Everything one invocation of `ssh(1)` was told to do.
+///
+/// The fields stay private and there is no public constructor that takes them
+/// one by one. A caller outside this crate builds one by parsing an argument
+/// list with [`parse_args_from`], which is deliberate: a test that assembles a
+/// `Config` by hand is testing a configuration no command line can produce,
+/// and the defaults it silently picks are exactly the ones a real invocation
+/// gets from the parser rather than from the struct.
+pub struct Config {
+    user: String,
+    hostname: String,
+    port: u16,
+    command: Option<String>,
+    verbose: bool,
+    strict_host_key: StrictHostKey,
+    /// `-o UserKnownHostsFile=`; `None` means `$HOME/.ssh/known_hosts`.
+    known_hosts_file: Option<String>,
+    /// `-i` or `-o IdentityFile=`; `None` means "try `$HOME/.ssh/id_ed25519`
+    /// and say nothing if it is not there".
+    ///
+    /// The distinction between `Some` and `None` is not just a default: it is
+    /// the difference between a user who asked for a key and a user who did
+    /// not, and [`load_identity`] treats a failure to use the file very
+    /// differently in the two cases. See design-decisions.md §778.
+    identity_file: Option<String>,
+    // Parsed from -o ConnectTimeout=N; consumed by the future socket
+    // connect path that wires a real timeout into the TCP handshake.
+    #[allow(dead_code)]
+    connect_timeout: u32,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum StrictHostKey {
+    Yes,
+    No,
+    Ask,
+}
+
+/// Parse this process's own command line.
+fn parse_args() -> Result<Config, String> {
+    parse_args_from(env::args().collect())
+}
+
+/// Parse an argument list, `argv[0]` included, into a [`Config`].
+///
+/// Split from [`parse_args`] so that a caller outside this crate can produce a
+/// `Config` without the process's arguments being the only possible source of
+/// one. That is the whole reason it is public: an interop test needs a client
+/// configured the way a command line configures one, and reaching for the real
+/// parser is the only way to be sure the defaults under test are the defaults
+/// that ship.
+///
+/// # Errors
+///
+/// The usage message, or a description of the first malformed option, as a
+/// string suitable for printing after `ssh: `.
+pub fn parse_args_from(args: Vec<String>) -> Result<Config, String> {
+    if args.len() < 2 {
+        return Err(format!(
+            "Usage: {} [-p port] [-v] [-i identity_file] [-o option=value] \
+             [user@]hostname [command...]",
+            args.first().map(|s| s.as_str()).unwrap_or("ssh")
+        ));
+    }
+
+    let mut port: u16 = 22;
+    let mut verbose = false;
+    let mut strict_host_key = StrictHostKey::Ask;
+    let mut known_hosts_file: Option<String> = None;
+    let mut identity_file: Option<String> = None;
+    let mut connect_timeout: u32 = 30;
+    let mut destination: Option<String> = None;
+    let mut command_parts: Vec<String> = Vec::new();
+
+    // Walked with an iterator rather than an index. An option's value is
+    // whatever `it.next()` yields, so the `i += 1` inside each value-taking arm
+    // -- and the second `i += 1` at the bottom of the loop that existed only to
+    // undo it -- are both gone, and with them the chance of the two getting out
+    // of step. The trailing remote command needs no `args[i..]` slice either:
+    // the iterator is already standing exactly there.
+    let mut it = args.into_iter();
+    it.next(); // argv[0], already consumed for the usage message above.
+
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "-p" => {
+                let val = it
+                    .next()
+                    .ok_or_else(|| "-p requires a port number".to_string())?;
+                port = val.parse().map_err(|_| format!("invalid port: {val}"))?;
+            }
+            "-v" => {
+                verbose = true;
+            }
+            // `-i` takes a path and, unlike `-p`, has no usable default to fall
+            // back on: an empty one would name the current directory. A missing
+            // value is therefore an error rather than a shrug.
+            "-i" => {
+                let val = it
+                    .next()
+                    .ok_or_else(|| "-i requires a path to a private key".to_string())?;
+                identity_file = Some(val);
+            }
+            "-o" => {
+                let opt = it
+                    .next()
+                    .ok_or_else(|| "-o requires an option=value".to_string())?;
+                if let Some(val) = opt.strip_prefix("ConnectTimeout=") {
+                    connect_timeout = val.parse().unwrap_or(30);
+                } else if let Some(val) = opt.strip_prefix("StrictHostKeyChecking=") {
+                    strict_host_key = match val {
+                        "yes" => StrictHostKey::Yes,
+                        "no" => StrictHostKey::No,
+                        _ => StrictHostKey::Ask,
+                    };
+                } else if let Some(val) = opt.strip_prefix("UserKnownHostsFile=") {
+                    known_hosts_file = Some(val.to_string());
+                } else if let Some(val) = opt.strip_prefix("IdentityFile=") {
+                    // The same setting as `-i`, and deliberately the same
+                    // variable: OpenSSH accepts both spellings, and a program
+                    // that honoured one and ignored the other would silently
+                    // authenticate as somebody else's key for half its callers.
+                    identity_file = Some(val.to_string());
+                }
+                // Silently ignore unknown options (like OpenSSH).
+            }
+            _ => {
+                if destination.is_none() {
+                    destination = Some(arg);
+                } else {
+                    // Everything from the destination on is the remote command.
+                    command_parts.push(arg);
+                    command_parts.extend(it.by_ref());
+                    break;
+                }
+            }
+        }
+    }
+
+    let dest = destination.ok_or_else(|| "no destination specified".to_string())?;
+
+    // Parse user@hostname. `split_once` names the two halves in one step; the
+    // `find` plus `[..at]` and `[at + 1..]` it replaces re-derived both ends
+    // from an offset, and the `at + 1` was a byte index into a string whose
+    // contents come from the command line.
+    let (user, hostname) = if let Some((name, host)) = dest.split_once('@') {
+        (name.to_string(), host.to_string())
+    } else {
+        // Default to current user or "root".
+        let user = env::var("USER").unwrap_or_else(|_| "root".to_string());
+        (user, dest)
+    };
+
+    if user.is_empty() {
+        return Err("empty username".to_string());
+    }
+    if hostname.is_empty() {
+        return Err("empty hostname".to_string());
+    }
+
+    let command = if command_parts.is_empty() {
+        None
+    } else {
+        Some(command_parts.join(" "))
+    };
+
+    Ok(Config {
+        user,
+        hostname,
+        port,
+        command,
+        verbose,
+        strict_host_key,
+        known_hosts_file,
+        identity_file,
+        connect_timeout,
+    })
+}
+
+// ============================================================================
+// SSH session — main protocol state machine
+// ============================================================================
+
+/// `data_type_code` for `SSH_MSG_CHANNEL_EXTENDED_DATA` carrying stderr
+/// (RFC 4254 §5.2 — the only code the specification defines).
+const SSH_EXTENDED_DATA_STDERR: u32 = 1;
+
+/// How the remote command ended, if the server said (RFC 4254 §6.10).
+///
+/// `None` on the session means the server never sent either request. That is
+/// the normal case for an interactive session, and for a server that does not
+/// implement the notification — which is why a missing status has to mean
+/// success rather than failure, even though it makes an incomplete server
+/// indistinguishable from a command that worked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteExit {
+    Status(u32),
+    Signal { name: String, core_dumped: bool },
+}
+
+/// One SSH-2 connection, from the version banner to the remote command's exit
+/// status.
+pub struct SshSession {
+    transport: Box<dyn Transport>,
+    buf: StreamBuffer,
+    config: Config,
+    server_version: String,
+    client_kexinit: Vec<u8>,
+    server_kexinit: Vec<u8>,
+    /// The exchange hash of the *first* key exchange, which RFC 4253 §7.2 fixes
+    /// as the session identifier for the life of the connection.
+    ///
+    /// `None` until that first exchange completes. This was `[u8; 32]` with
+    /// all-zeros standing in for "not set yet" — the daemon has always spelled
+    /// the same field `Option<[u8; 32]>`, which is the eleventh place these two
+    /// programs described one protocol value two different ways. The sentinel
+    /// was not reachably wrong (an all-zero SHA-256 is not something an
+    /// attacker can arrange) but it is a state the type permitted and the
+    /// protocol does not, and the accessor below would have had to invent an
+    /// answer for it.
+    session_id: Option<[u8; 32]>,
+    /// The packet layer: framing, cipher, MAC and both sequence numbers.
+    codec: PacketCodec,
+    channel_id: u32,
+    remote_channel_id: u32,
+    remote_window: u32,
+    /// What the server reported about how the remote command ended.
+    remote_exit: Option<RemoteExit>,
+    /// Where this session's unpredictable bytes come from: the packet padding,
+    /// the KEXINIT cookie and the Diffie-Hellman exponent.
+    ///
+    /// [`sshwire::KERNEL_SECRETS`] for every connection the client makes —
+    /// [`SshSession::new`] is the only way to build one and it is the only
+    /// thing that sets this. A test replaces it with
+    /// [`SshSession::with_secret_source`] to get a reproducible handshake.
+    secrets: SecretSource,
+}
+
+impl SshSession {
+    /// Open a session over an already-connected `transport`.
+    ///
+    /// Nothing is sent until [`version_exchange`](Self::version_exchange) or
+    /// [`run`](Self::run) is called.
+    #[must_use]
+    pub fn new(transport: Box<dyn Transport>, config: Config) -> Self {
+        Self {
+            transport,
+            buf: StreamBuffer::new(),
+            config,
+            server_version: String::new(),
+            client_kexinit: Vec::new(),
+            server_kexinit: Vec::new(),
+            session_id: None,
+            codec: PacketCodec::new(),
+            channel_id: 0,
+            remote_channel_id: 0,
+            remote_window: 0,
+            remote_exit: None,
+            secrets: sshwire::KERNEL_SECRETS,
+        }
+    }
+
+    /// Draw this session's secrets from `secrets` instead of the kernel.
+    ///
+    /// Not reachable from the command line, the ssh config file or the network,
+    /// and deliberately so: a client whose entropy source could be *selected*
+    /// would be a downgrade attack with a spelling. The callers are tests,
+    /// which need a handshake that produces the same bytes twice.
+    ///
+    /// The `cfg` is that sentence made structural rather than promised: the
+    /// shipped binary is not compiled with any way to substitute a source, so
+    /// the guarantee does not rest on nobody calling this. The
+    /// `deterministic-secrets` feature exists because the interop test lives in
+    /// a crate of its own and cannot use `cfg(test)`, which is per-crate; it is
+    /// enabled only through that crate's `dev-dependencies`, so it is absent
+    /// from any build that does not compile dev-dependencies — which is every
+    /// build that produces a release artifact.
+    #[cfg(any(test, feature = "deterministic-secrets"))]
+    #[must_use]
+    pub fn with_secret_source(mut self, secrets: SecretSource) -> Self {
+        self.secrets = secrets;
+        self
+    }
+
+    /// The session identifier both ends derive, once the first key exchange has
+    /// produced it (RFC 4253 §7.2). `None` before that.
+    ///
+    /// Public because it is the single value an interop test exists to compare:
+    /// if the client and the daemon agree on this, they agreed on the version
+    /// banners, both KEXINIT payloads, the host key blob, both Diffie-Hellman
+    /// public values and the shared secret, because every one of those is a
+    /// field of the hash. If they disagree, one of them is wrong about the
+    /// protocol and neither one's own test suite can say which.
+    #[must_use]
+    pub fn session_id(&self) -> Option<&[u8; 32]> {
+        self.session_id.as_ref()
+    }
+
+    /// The process exit code this client should exit with.
+    ///
+    /// `ssh(1)`'s contract: exit with the remote command's status, so that
+    /// `ssh host cmd && something` behaves as if `cmd` had been run locally.
+    /// A command killed by a signal has no exit status of its own; OpenSSH
+    /// reports that as 255 and prints why, and matching it keeps scripts
+    /// written against OpenSSH working here.
+    fn exit_code(&self) -> i32 {
+        match &self.remote_exit {
+            Some(RemoteExit::Status(code)) => i32::try_from(*code).unwrap_or(255),
+            Some(RemoteExit::Signal { name, core_dumped }) => {
+                eprintln!(
+                    "ssh: remote command killed by SIG{name}{}",
+                    if *core_dumped { " (core dumped)" } else { "" }
+                );
+                255
+            }
+            None => 0,
+        }
+    }
+
+    fn verbose(&self, msg: &str) {
+        if self.config.verbose {
+            eprintln!("debug1: {msg}");
+        }
+    }
+
+    /// Frame, encrypt and send one packet.
+    ///
+    /// The padding is CSPRNG bytes, as RFC 4253 §6 says it SHOULD be, and a
+    /// failed draw refuses to send rather than falling back to zeros. The codec
+    /// takes the padding as a parameter rather than generating it so that both
+    /// of those decisions are made here, in a program that can report them,
+    /// rather than inside a shared crate that cannot. See
+    /// `design-decisions.md` §773 for why the refusal is the right answer even
+    /// though our current cipher makes predictable padding harmless.
+    fn send_packet(&mut self, payload: &[u8]) -> Result<(), SshError> {
+        let mut padding = vec![0u8; self.codec.padding_len(payload.len())];
+        (self.secrets)(&mut padding)
+            .map_err(|e| SshError::ProtocolError(format!("cannot generate packet padding: {e}")))?;
+        let pkt = self.codec.encode(payload, &padding)?;
+        self.transport.send_all(&pkt)?;
+        Ok(())
+    }
+
+    /// Release the connection.
+    fn close(&mut self) {
+        self.transport.close();
+    }
+
+    /// Block until one whole packet has arrived, then return its payload.
+    ///
+    /// Public for the same reason the daemon's `ConnectionState::recv_packet`
+    /// is: this crate is a library with a thin `main`, and a caller driving a
+    /// session itself — `ssh-interop` is one, but so is anything that wants the
+    /// transport without our relay loop — needs to be able to take the next
+    /// message and decide what it is. Pairing it with [`do_rekey`](Self::do_rekey)
+    /// gives the client exactly the surface the daemon already exposes, which is
+    /// what lets one test drive both ends of a rekey through real entry points
+    /// rather than through anything invented for the test.
+    ///
+    /// # Errors
+    ///
+    /// The transport failed or closed, or the packet did not decode — a bad
+    /// length, a failed MAC, or padding that does not match the frame.
+    pub fn recv_packet(&mut self) -> Result<Vec<u8>, SshError> {
+        loop {
+            if let Some((payload, consumed)) = self.codec.decode(self.buf.unread())? {
+                self.buf.advance(consumed);
+                return Ok(payload);
+            }
+            self.buf.fill_once(self.transport.as_mut())?;
+        }
+    }
+
+    /// Block until the next packet a key exchange is actually waiting for.
+    ///
+    /// RFC 4253 §7.1 stops a peer sending *most* things once it has sent
+    /// `KEXINIT`, but not everything: `SSH_MSG_IGNORE`, `SSH_MSG_DEBUG` and
+    /// `SSH_MSG_DISCONNECT` stay legal throughout, and §11.2 makes `IGNORE`
+    /// something an implementation may send at any time to blur traffic
+    /// analysis — OpenSSH does, under `ObscureKeystrokeTiming`. A key exchange
+    /// that assumed the next packet was its own would fail on a message the RFC
+    /// permits, and would report it as "expected `KEX_DH_REPLY`": a protocol
+    /// error blamed on the peer for behaving correctly.
+    ///
+    /// The daemon's `recv_during_kex` is the same function for the same reason,
+    /// which is a seventh instance of the two-copies problem recorded in
+    /// `known-issues.md`
+    /// `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`
+    /// — the difference being that this time both copies were written together,
+    /// so they start out agreeing.
+    fn recv_during_kex(&mut self) -> Result<Vec<u8>, SshError> {
+        loop {
+            let packet = self.recv_packet()?;
+            match packet.first().copied() {
+                Some(msg::SSH_MSG_IGNORE) => self.verbose("ignoring IGNORE during key exchange"),
+                Some(msg::SSH_MSG_DEBUG) => self.verbose("ignoring DEBUG during key exchange"),
+                Some(msg::SSH_MSG_DISCONNECT) => {
+                    return Err(SshError::ProtocolError(
+                        "server disconnected during key exchange".into(),
+                    ));
+                }
+                _ => return Ok(packet),
+            }
+        }
+    }
+
+    // === Phase 1: Version exchange ===
+    //
+    // (`classify_version_line`, which decides what each line read here *is*,
+    // is a free function below so that it can be tested without a socket.)
+
+    /// Send our version banner and read the server's (RFC 4253 §4.2).
+    ///
+    /// Public so an interop test can run the handshake one phase at a time and
+    /// say which phase disagreed, rather than only that [`run`](Self::run)
+    /// failed somewhere.
+    ///
+    /// # Errors
+    ///
+    /// If the banner cannot be sent, or the server's is absent, malformed, or
+    /// announces a protocol version this client does not speak.
+    pub fn version_exchange(&mut self) -> Result<(), SshError> {
+        self.verbose("sending client version");
+
+        // Send our version string.
+        let version_line = format!("{SSH_VERSION_STRING}\r\n");
+        self.transport.send_all(version_line.as_bytes())?;
+
+        // Read the server's version line. It is accumulated as *bytes*; see
+        // `classify_version_line` for why that is not incidental.
+        let mut line: Vec<u8> = Vec::new();
+        loop {
+            let mut buf = [0u8; 1];
+            let [byte] = *self.transport.recv(&mut buf)? else {
+                return Err(SshError::ProtocolError(
+                    "connection closed during version exchange".into(),
+                ));
+            };
+            if byte == b'\n' {
+                match classify_version_line(&line)? {
+                    VersionLine::Version(v) => {
+                        self.server_version = v;
+                        break;
+                    }
+                    VersionLine::Banner(text) => {
+                        self.verbose(&format!("banner: {text}"));
+                        line.clear();
+                    }
+                }
+            } else {
+                line.push(byte);
+                if line.len() > MAX_GREETING_LINE {
+                    return Err(SshError::ProtocolError("version line too long".into()));
+                }
+            }
+        }
+
+        self.verbose(&format!("remote version: {}", self.server_version));
+
+        // Verify it speaks SSH-2.
+        if !self.server_version.starts_with("SSH-2.0-")
+            && !self.server_version.starts_with("SSH-1.99-")
+        {
+            return Err(SshError::ProtocolError(format!(
+                "unsupported server version: {}",
+                self.server_version
+            )));
+        }
+
+        Ok(())
+    }
+
+    // === Phase 2: Key exchange ===
+
+    /// Exchange KEXINITs, run Diffie-Hellman, verify the host key and activate
+    /// the negotiated cipher (RFC 4253 §7 and §8).
+    ///
+    /// On success [`session_id`](Self::session_id) is set and every packet
+    /// afterwards is encrypted.
+    ///
+    /// Public for the same reason as
+    /// [`version_exchange`](Self::version_exchange): this is the phase where
+    /// two independently-written implementations of one protocol actually find
+    /// out whether they agree.
+    ///
+    /// # Errors
+    ///
+    /// If no algorithm is common to both ends, if the server's Diffie-Hellman
+    /// value is out of range, if the host key signature does not verify, or if
+    /// the key is not the one `known_hosts` records for this host.
+    pub fn key_exchange(&mut self) -> Result<(), SshError> {
+        self.verbose("beginning key exchange");
+
+        // Build and send our KEXINIT.
+        let client_kexinit_payload = self.build_kexinit()?;
+        self.client_kexinit = client_kexinit_payload.clone();
+        self.send_packet(&client_kexinit_payload)?;
+        self.verbose("sent KEXINIT");
+
+        // Receive server KEXINIT.
+        let server_payload = self.recv_packet()?;
+        if server_payload.first() != Some(&msg::SSH_MSG_KEXINIT) {
+            return Err(SshError::ProtocolError(format!(
+                "expected KEXINIT, got message type {}",
+                server_payload.first().copied().unwrap_or(255)
+            )));
+        }
+        self.server_kexinit = server_payload.clone();
+        self.verbose("received server KEXINIT");
+
+        // Perform DH key exchange.
+        self.dh_key_exchange()?;
+
+        Ok(())
+    }
+
+    /// Answer a `KEXINIT` the server sent on its own initiative (RFC 4253 §9).
+    ///
+    /// # Why a client needs this at all
+    ///
+    /// §9 lets *either* end ask, and our daemon does: it rekeys after a gibibyte
+    /// or an hour on one set of keys, because leaving that decision to whoever
+    /// connected would make a long session's security a property of the client.
+    /// A client that ignores the request does not degrade, it **hangs** — from
+    /// the moment the server sent `KEXINIT` it sends nothing else (§7.1), so the
+    /// session goes silent mid-command with no error at either end. That is the
+    /// same failure the daemon used to have in the other direction, recorded as
+    /// `TD-B-SSHD-DOES-NOT-REKEY-SO-A-LONG-SESSION-HANGS`, and it is why this
+    /// half was not left for later: shipping the server's thresholds without it
+    /// would have *introduced* that hang for every long-running session.
+    ///
+    /// # Why nothing needs to be buffered on this side
+    ///
+    /// The daemon has to hold back the client's in-flight channel data while it
+    /// waits for the answering `KEXINIT`. The mirror image does not arise here:
+    /// anything the server sent before its `KEXINIT` is *earlier in the byte
+    /// stream* than the `KEXINIT` itself, so it has already been dispatched by
+    /// the time this is called, and §7.1 stops the server sending more.
+    ///
+    /// # Errors
+    ///
+    /// The exchange failed: a bad host-key signature, a Diffie-Hellman value out
+    /// of range, a transport error, or the server disconnecting part-way.
+    pub fn do_rekey(&mut self, server_kexinit: &[u8]) -> Result<(), SshError> {
+        self.verbose("server requested rekey (KEXINIT); starting key exchange");
+
+        // The server's KEXINIT has been read -- it is this payload -- so it is
+        // recorded rather than read again. Both KEXINITs are fields of the
+        // exchange hash (§8), and their positions there are fixed by the
+        // protocol, not by which end sent first.
+        self.server_kexinit = server_kexinit.to_vec();
+
+        let client_kexinit_payload = self.build_kexinit()?;
+        self.client_kexinit = client_kexinit_payload.clone();
+        self.send_packet(&client_kexinit_payload)?;
+        self.verbose("sent KEXINIT (rekey)");
+
+        // The session identifier is *not* recomputed: §7.2 fixes it at the first
+        // exchange hash, and `dh_key_exchange` keeps it with `get_or_insert`.
+        self.dh_key_exchange()?;
+        self.verbose("rekey complete");
+        Ok(())
+    }
+
+    /// Build a KEXINIT payload advertising our supported algorithms.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the kernel CSPRNG cannot supply the cookie.
+    fn build_kexinit(&self) -> Result<Vec<u8>, SshError> {
+        let mut payload = Vec::new();
+        payload.push(msg::SSH_MSG_KEXINIT);
+
+        // The cookie (RFC 4253 section 7.1) must be random: it is what stops
+        // either side from choosing the exchange hash, since I_C and I_S both
+        // feed into it. Sixteen zero bytes "for simplicity" gave that power to
+        // the server alone.
+        let mut cookie = [0u8; 16];
+        (self.secrets)(&mut cookie).map_err(|e| {
+            SshError::ProtocolError(format!("cannot generate the KEXINIT cookie: {e}"))
+        })?;
+        payload.extend_from_slice(&cookie);
+
+        // Algorithm name-lists. We offer only what we can actually verify:
+        // advertising ssh-rsa would invite a server to send an RSA host key
+        // that `verify_host_key_signature` would then have to refuse, turning
+        // a working connection into a confusing failure.
+        let kex = "diffie-hellman-group14-sha256,diffie-hellman-group14-sha1";
+        let host_key = "ssh-ed25519";
+        let enc = "aes128-ctr";
+        let mac = "hmac-sha2-256";
+        let comp = "none";
+        let lang = "";
+
+        // kex_algorithms
+        payload.extend_from_slice(&ssh_string(kex.as_bytes()));
+        // server_host_key_algorithms
+        payload.extend_from_slice(&ssh_string(host_key.as_bytes()));
+        // encryption_algorithms_client_to_server
+        payload.extend_from_slice(&ssh_string(enc.as_bytes()));
+        // encryption_algorithms_server_to_client
+        payload.extend_from_slice(&ssh_string(enc.as_bytes()));
+        // mac_algorithms_client_to_server
+        payload.extend_from_slice(&ssh_string(mac.as_bytes()));
+        // mac_algorithms_server_to_client
+        payload.extend_from_slice(&ssh_string(mac.as_bytes()));
+        // compression_algorithms_client_to_server
+        payload.extend_from_slice(&ssh_string(comp.as_bytes()));
+        // compression_algorithms_server_to_client
+        payload.extend_from_slice(&ssh_string(comp.as_bytes()));
+        // languages_client_to_server
+        payload.extend_from_slice(&ssh_string(lang.as_bytes()));
+        // languages_server_to_client
+        payload.extend_from_slice(&ssh_string(lang.as_bytes()));
+        // first_kex_packet_follows
+        payload.push(0);
+        // reserved (u32)
+        payload.extend_from_slice(&0u32.to_be_bytes());
+
+        Ok(payload)
+    }
+
+    /// Perform Diffie-Hellman group14 key exchange.
+    fn dh_key_exchange(&mut self) -> Result<(), SshError> {
+        let p_bytes = dh_group14_prime_bytes();
+        let p = BigUint::from_bytes_be(&p_bytes);
+        let generator = BigUint::from_bytes_be(&[DH_GROUP14_G]);
+
+        // Generate private exponent x and compute e = g^x mod p.
+        let x = generate_dh_private(self.secrets)?;
+        self.verbose("generated DH private key");
+
+        let e = generator.mod_pow(&x, &p);
+        let e_bytes = e.to_bytes_be();
+        self.verbose(&format!("DH public value e: {} bytes", e_bytes.len()));
+
+        // Send SSH_MSG_KEX_DH_INIT with e.
+        let mut init_payload = Vec::new();
+        init_payload.push(msg::SSH_MSG_KEX_DH_INIT);
+        init_payload.extend_from_slice(&encode_mpint(&e_bytes));
+        self.send_packet(&init_payload)?;
+        self.verbose("sent KEX_DH_INIT");
+
+        // Receive SSH_MSG_KEX_DH_REPLY.
+        let reply = self.recv_during_kex()?;
+        if reply.first() != Some(&msg::SSH_MSG_KEX_DH_REPLY) {
+            return Err(SshError::ProtocolError(format!(
+                "expected KEX_DH_REPLY, got {}",
+                reply.first().copied().unwrap_or(255)
+            )));
+        }
+        self.verbose("received KEX_DH_REPLY");
+
+        // Parse: K_S (host key blob), f (server DH public), signature.
+        let mut off = 1;
+        let (k_s, next) = read_ssh_string(&reply, off)?;
+        off = next;
+        let k_s = k_s.to_vec();
+
+        let (f_bytes, next) = read_mpint(&reply, off)?;
+        off = next;
+
+        let (sig_blob, _next) = read_ssh_string(&reply, off)?;
+        let sig_blob = sig_blob.to_vec();
+
+        // Extract host key type from the key blob.
+        let (key_type_bytes, _) = read_ssh_string(&k_s, 0)?;
+        let key_type = std::str::from_utf8(key_type_bytes).unwrap_or("unknown");
+        self.verbose(&format!("host key type: {key_type}"));
+
+        // Display fingerprint.
+        let fingerprint = host_key_fingerprint(&k_s);
+        self.verbose(&format!("host key fingerprint: {fingerprint}"));
+
+        // RFC 4253 section 8: reject f outside [2, p-2]. f = 0 or f = 1 would
+        // pin the shared secret to a value the server chose, and f = p-1 has
+        // order 2, so K would be one of two values. A server doing this is
+        // arranging for the session keys to be guessable.
+        let f = BigUint::from_bytes_be(f_bytes);
+        let p_minus_1 = p.sub(&BigUint::one());
+        if f.cmp_unsigned(&BigUint::one()) != std::cmp::Ordering::Greater
+            || f.cmp_unsigned(&p_minus_1) != std::cmp::Ordering::Less
+        {
+            return Err(SshError::ProtocolError(
+                "server DH value out of range (RFC 4253 section 8)".into(),
+            ));
+        }
+
+        // Compute shared secret K = f^x mod p.
+        let k_big = f.mod_pow(&x, &p);
+        let k_bytes = k_big.to_bytes_be();
+        self.verbose("computed shared secret");
+
+        // Compute exchange hash H.
+        let h = compute_exchange_hash(&ExchangeHashInput {
+            client_version: SSH_VERSION_STRING,
+            server_version: &self.server_version,
+            client_kexinit: &self.client_kexinit,
+            server_kexinit: &self.server_kexinit,
+            host_key_blob: &k_s,
+            client_e: &e_bytes,
+            server_f: f_bytes,
+            shared_secret: &k_bytes,
+        });
+        self.verbose(&format!("exchange hash: {}", bytes_to_hex(&h)));
+
+        // Prove the server holds the private half of the key it just sent,
+        // *before* asking the user anything about that key.
+        //
+        // Order matters and it used to be wrong twice over. The signature was
+        // not checked at all, and the known_hosts prompt ran before the
+        // exchange hash even existed -- so the user was asked to trust a key
+        // that nothing had shown the server could use. Any machine that
+        // answers on port 22 could name itself with someone else's public key
+        // and be permanently added to known_hosts under it, which converts
+        // known_hosts from a defence into a way of installing an attacker's
+        // key as trusted.
+        verify_host_key_signature(&k_s, &h, &sig_blob)?;
+        self.verbose("host key signature verified");
+
+        // Only now is it meaningful to ask whether this is the *right* key.
+        // The signature proves the server owns the key; known_hosts decides
+        // whether that key is the one we expect.
+        self.verify_host_key(&k_s, key_type, &fingerprint)?;
+
+        // RFC 4253 §7.2: the session identifier is the *first* exchange hash
+        // and never changes afterwards, so a rekey must not overwrite it.
+        let session_id = *self.session_id.get_or_insert(h);
+
+        // Send and receive NEWKEYS.
+        let newkeys_payload = [msg::SSH_MSG_NEWKEYS];
+        self.send_packet(&newkeys_payload)?;
+        self.verbose("sent NEWKEYS");
+
+        let newkeys_reply = self.recv_during_kex()?;
+        if newkeys_reply.first() != Some(&msg::SSH_MSG_NEWKEYS) {
+            return Err(SshError::ProtocolError(format!(
+                "expected NEWKEYS, got {}",
+                newkeys_reply.first().copied().unwrap_or(255)
+            )));
+        }
+        self.verbose("received NEWKEYS");
+
+        // Install the keys `NEWKEYS` brings into force. Which of RFC 4253
+        // §7.2's six lettered values is the *outbound* one depends on which end
+        // is asking, and saying `Role::Client` is the whole of this end's answer
+        // — the six assignments themselves are the codec's, shared with the
+        // daemon, rather than a block of code here that has to stay the
+        // daemon's mirror image by hand.
+        self.codec
+            .activate(Role::Client, &k_bytes, &h, &session_id)?;
+
+        self.verbose("encryption activated");
+
+        Ok(())
+    }
+
+    /// Verify the server's host key against known_hosts.
+    fn verify_host_key(
+        &self,
+        key_blob: &[u8],
+        key_type: &str,
+        fingerprint: &str,
+    ) -> Result<(), SshError> {
+        let known_hosts_file = self.config.known_hosts_file.as_deref();
+        if check_known_hosts(
+            known_hosts_file,
+            &self.config.hostname,
+            self.config.port,
+            key_blob,
+        )? {
+            self.verbose("host key matches known_hosts");
+            Ok(())
+        } else {
+            // Host not in known_hosts.
+            match self.config.strict_host_key {
+                StrictHostKey::Yes => Err(SshError::HostKeyMismatch(format!(
+                    "host '{}' not found in known_hosts (StrictHostKeyChecking=yes)",
+                    self.config.hostname
+                ))),
+                StrictHostKey::No => {
+                    eprintln!(
+                        "Warning: Permanently added {} ({key_type}) to the list of known hosts.",
+                        quoteaf_os(&self.config.hostname)
+                    );
+                    add_known_host(
+                        known_hosts_file,
+                        &self.config.hostname,
+                        self.config.port,
+                        key_type,
+                        key_blob,
+                    );
+                    Ok(())
+                }
+                StrictHostKey::Ask => {
+                    eprint!(
+                        "The authenticity of host '{}' ({}) can't be established.\n\
+                         {key_type} key fingerprint is {fingerprint}.\n\
+                         Are you sure you want to continue connecting (yes/no)? ",
+                        self.config.hostname, self.config.hostname,
+                    );
+                    io::stderr().flush().ok();
+
+                    let mut answer = String::new();
+                    io::stdin().read_line(&mut answer).map_err(|e| {
+                        SshError::ProtocolError(format!("failed to read answer: {e}"))
+                    })?;
+                    let answer = answer.trim().to_lowercase();
+
+                    if answer == "yes" {
+                        eprintln!(
+                            "Warning: Permanently added {} ({key_type}) to the list of known hosts.",
+                            quoteaf_os(&self.config.hostname)
+                        );
+                        add_known_host(
+                            known_hosts_file,
+                            &self.config.hostname,
+                            self.config.port,
+                            key_type,
+                            key_blob,
+                        );
+                        Ok(())
+                    } else {
+                        Err(SshError::HostKeyMismatch(
+                            "host key verification declined by user".into(),
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    // === Phase 3: Service request + user authentication ===
+
+    fn authenticate(&mut self) -> Result<(), SshError> {
+        // Request the "ssh-userauth" service.
+        self.verbose("requesting ssh-userauth service");
+        let mut payload = Vec::new();
+        payload.push(msg::SSH_MSG_SERVICE_REQUEST);
+        payload.extend_from_slice(&ssh_string(b"ssh-userauth"));
+        self.send_packet(&payload)?;
+
+        let reply = self.recv_packet()?;
+        if reply.first() != Some(&msg::SSH_MSG_SERVICE_ACCEPT) {
+            return Err(SshError::ProtocolError(format!(
+                "expected SERVICE_ACCEPT, got {}",
+                reply.first().copied().unwrap_or(255)
+            )));
+        }
+        self.verbose("service accepted: ssh-userauth");
+
+        // The key is loaded before anything is sent, so a `-i` naming a file
+        // that cannot be used fails before the user is asked for a password
+        // they did not intend to type. See `load_identity`.
+        let identity = load_identity(self.config.identity_file.as_deref())?;
+
+        let refused_methods = match identity {
+            Some(identity) => match self.try_publickey_auth(&identity)? {
+                AuthReply::Success => {
+                    self.verbose("authentication successful (publickey)");
+                    return Ok(());
+                }
+                AuthReply::Failure { methods } => {
+                    self.verbose(&format!(
+                        "public key not accepted; server offers: {methods}"
+                    ));
+                    Some(methods)
+                }
+            },
+            None => None,
+        };
+
+        // Asking for a password the server has already said it will not look at
+        // is worse than useless: the user types a real secret, at a prompt, into
+        // a session that will reject it -- and if the far end is not the host
+        // they think it is, they have just handed it over for nothing. The
+        // failure message names what the server *will* accept instead.
+        if let Some(methods) = &refused_methods
+            && !offers_password(methods)
+        {
+            return Err(SshError::AuthFailed(format!(
+                "the public key was not accepted, and this server does not offer \
+                 password authentication. Available methods: {methods}"
+            )));
+        }
+
+        let password = self.read_password()?;
+
+        self.verbose("sending password authentication");
+        let mut auth_payload = Vec::new();
+        auth_payload.push(msg::SSH_MSG_USERAUTH_REQUEST);
+        auth_payload.extend_from_slice(&ssh_string(self.config.user.as_bytes()));
+        auth_payload.extend_from_slice(&ssh_string(b"ssh-connection"));
+        auth_payload.extend_from_slice(&ssh_string(b"password"));
+        auth_payload.push(0); // not a password change
+        auth_payload.extend_from_slice(&ssh_string(password.as_bytes()));
+        self.send_packet(&auth_payload)?;
+
+        match self.read_auth_reply()? {
+            AuthReply::Success => {
+                self.verbose("authentication successful (password)");
+                Ok(())
+            }
+            AuthReply::Failure { methods } => Err(SshError::AuthFailed(format!(
+                "password rejected. Available methods: {methods}"
+            ))),
+        }
+    }
+
+    /// Offer `identity` and a signature proving we hold it (RFC 4252 §7).
+    ///
+    /// The query form of the request — `has_signature` FALSE, asking whether
+    /// the key *would* be accepted before paying to sign — is not sent. It
+    /// exists to spare an agent or a hardware token a signature that will be
+    /// thrown away; this client holds the seed in memory, so the query would
+    /// cost a round trip to save an operation that takes microseconds.
+    fn try_publickey_auth(&mut self, identity: &Identity) -> Result<AuthReply, SshError> {
+        // The signature binds the session identifier, so there is nothing to
+        // sign before the first key exchange has produced one. Reaching here
+        // without it would mean authentication had been attempted on an
+        // unencrypted connection.
+        let session_id = self.session_id.ok_or_else(|| {
+            SshError::ProtocolError(
+                "cannot authenticate with a public key before the key exchange".into(),
+            )
+        })?;
+
+        self.verbose("offering public key");
+        let payload =
+            identity.auth_request(self.config.user.as_bytes(), b"ssh-connection", &session_id);
+        self.send_packet(&payload)?;
+        self.read_auth_reply()
+    }
+
+    /// Wait for the server's verdict on one authentication attempt.
+    ///
+    /// Banners are printed and the wait continues: RFC 4252 §5.4 lets one
+    /// arrive at any point during authentication, and it is not a verdict.
+    /// Anything else is logged and ignored rather than treated as a failure,
+    /// because a message this client does not implement is not the server
+    /// saying no.
+    fn read_auth_reply(&mut self) -> Result<AuthReply, SshError> {
+        loop {
+            let reply = self.recv_packet()?;
+            match reply.first().copied() {
+                Some(msg::SSH_MSG_USERAUTH_SUCCESS) => return Ok(AuthReply::Success),
+                Some(msg::SSH_MSG_USERAUTH_FAILURE) => {
+                    let (methods, _) = read_ssh_string(&reply, 1)?;
+                    // Not `from_utf8_lossy`: this is a protocol field RFC 4252
+                    // §5.1 defines as a comma-separated list of method names,
+                    // all of which are US-ASCII. Bytes that are not that are a
+                    // broken server, and saying so beats printing replacement
+                    // characters as if they were method names.
+                    return Ok(AuthReply::Failure {
+                        methods: std::str::from_utf8(methods)
+                            .unwrap_or("(unreadable)")
+                            .to_string(),
+                    });
+                }
+                Some(msg::SSH_MSG_USERAUTH_BANNER) => {
+                    // Display the banner message.
+                    if let Ok((banner_msg, _)) = read_ssh_string(&reply, 1) {
+                        let text = std::str::from_utf8(banner_msg).unwrap_or("");
+                        if !text.is_empty() {
+                            eprint!("{text}");
+                        }
+                    }
+                    // Continue waiting for success/failure.
+                }
+                Some(other) => {
+                    self.verbose(&format!("ignoring message type {other} during auth"));
+                }
+                None => {
+                    return Err(SshError::ProtocolError("empty auth response".into()));
+                }
+            }
+        }
+    }
+
+    /// Read a password from stdin with echo disabled.
+    /// On Slate OS, we write to stderr to prompt, then read a line from stdin.
+    /// Real echo suppression requires ioctl — here we just do a basic read.
+    fn read_password(&self) -> Result<String, SshError> {
+        eprint!("{}@{}'s password: ", self.config.user, self.config.hostname);
+        io::stderr().flush().ok();
+
+        let mut password = String::new();
+        io::stdin()
+            .read_line(&mut password)
+            .map_err(|e| SshError::ProtocolError(format!("failed to read password: {e}")))?;
+
+        // Print newline after password entry.
+        eprintln!();
+
+        Ok(password
+            .trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .to_string())
+    }
+
+    // === Phase 4: Channel open + PTY + shell/exec ===
+
+    fn open_session_channel(&mut self) -> Result<(), SshError> {
+        self.verbose("opening session channel");
+
+        self.channel_id = 0;
+        let initial_window: u32 = 2_097_152; // 2 MiB
+        let max_packet = u32::try_from(MAX_CHANNEL_CHUNK).unwrap_or(u32::MAX);
+
+        let mut payload = Vec::new();
+        payload.push(msg::SSH_MSG_CHANNEL_OPEN);
+        payload.extend_from_slice(&ssh_string(b"session"));
+        payload.extend_from_slice(&self.channel_id.to_be_bytes());
+        payload.extend_from_slice(&initial_window.to_be_bytes());
+        payload.extend_from_slice(&max_packet.to_be_bytes());
+        self.send_packet(&payload)?;
+
+        // Wait for CHANNEL_OPEN_CONFIRMATION.
+        loop {
+            let reply = self.recv_packet()?;
+            match reply.first().copied() {
+                Some(msg::SSH_MSG_CHANNEL_OPEN_CONFIRMATION) => {
+                    let (_, off) = read_u32(&reply, 1)?; // recipient channel
+                    let (remote_id, off) = read_u32(&reply, off)?;
+                    let (remote_window, _off) = read_u32(&reply, off)?;
+                    self.remote_channel_id = remote_id;
+                    self.remote_window = remote_window;
+                    self.verbose(&format!(
+                        "channel open: remote_id={remote_id}, window={remote_window}"
+                    ));
+                    break;
+                }
+                Some(msg::SSH_MSG_CHANNEL_OPEN_FAILURE) => {
+                    let reason = if reply.len() > 8 {
+                        read_ssh_string(&reply, 5)
+                            .ok()
+                            .and_then(|(msg, _)| std::str::from_utf8(msg).ok().map(String::from))
+                            .unwrap_or_else(|| "unknown".to_string())
+                    } else {
+                        "unknown".to_string()
+                    };
+                    return Err(SshError::ProtocolError(format!(
+                        "channel open failed: {reason}"
+                    )));
+                }
+                Some(msg::SSH_MSG_IGNORE | msg::SSH_MSG_DEBUG) => {
+                    // Skip informational messages.
+                }
+                Some(other) => {
+                    self.verbose(&format!(
+                        "ignoring message type {other} while opening channel"
+                    ));
+                }
+                None => {
+                    return Err(SshError::ProtocolError("empty response".into()));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Request a PTY for the session channel.
+    fn request_pty(&mut self) -> Result<(), SshError> {
+        self.verbose("requesting PTY");
+
+        let term = env::var("TERM").unwrap_or_else(|_| "xterm".to_string());
+        let cols: u32 = 80;
+        let rows: u32 = 24;
+        let width_px: u32 = 0;
+        let height_px: u32 = 0;
+
+        // Terminal modes — empty for simplicity.
+        let modes: &[u8] = &[0]; // TTY_OP_END
+
+        let mut payload = Vec::new();
+        payload.push(msg::SSH_MSG_CHANNEL_REQUEST);
+        payload.extend_from_slice(&self.remote_channel_id.to_be_bytes());
+        payload.extend_from_slice(&ssh_string(b"pty-req"));
+        payload.push(1); // want reply
+        payload.extend_from_slice(&ssh_string(term.as_bytes()));
+        payload.extend_from_slice(&cols.to_be_bytes());
+        payload.extend_from_slice(&rows.to_be_bytes());
+        payload.extend_from_slice(&width_px.to_be_bytes());
+        payload.extend_from_slice(&height_px.to_be_bytes());
+        payload.extend_from_slice(&ssh_string(modes));
+        self.send_packet(&payload)?;
+
+        // Wait for CHANNEL_SUCCESS or CHANNEL_FAILURE.
+        loop {
+            let reply = self.recv_packet()?;
+            match reply.first().copied() {
+                Some(msg::SSH_MSG_CHANNEL_SUCCESS) => {
+                    self.verbose("PTY allocated");
+                    return Ok(());
+                }
+                Some(msg::SSH_MSG_CHANNEL_FAILURE) => {
+                    // PTY failed but we can continue without it for exec.
+                    self.verbose("PTY request failed (continuing without)");
+                    return Ok(());
+                }
+                Some(msg::SSH_MSG_IGNORE | msg::SSH_MSG_DEBUG) => {}
+                Some(msg::SSH_MSG_CHANNEL_WINDOW_ADJUST) => {
+                    self.handle_window_adjust(&reply);
+                }
+                Some(other) => {
+                    self.verbose(&format!("ignoring message type {other} during PTY request"));
+                }
+                None => {
+                    return Err(SshError::ProtocolError("empty response".into()));
+                }
+            }
+        }
+    }
+
+    /// Request a shell or execute a command.
+    fn request_shell_or_exec(&mut self) -> Result<(), SshError> {
+        if let Some(ref cmd) = self.config.command {
+            self.verbose(&format!("requesting exec: {cmd}"));
+            let mut payload = Vec::new();
+            payload.push(msg::SSH_MSG_CHANNEL_REQUEST);
+            payload.extend_from_slice(&self.remote_channel_id.to_be_bytes());
+            payload.extend_from_slice(&ssh_string(b"exec"));
+            payload.push(1); // want reply
+            payload.extend_from_slice(&ssh_string(cmd.as_bytes()));
+            self.send_packet(&payload)?;
+        } else {
+            self.verbose("requesting shell");
+            let mut payload = Vec::new();
+            payload.push(msg::SSH_MSG_CHANNEL_REQUEST);
+            payload.extend_from_slice(&self.remote_channel_id.to_be_bytes());
+            payload.extend_from_slice(&ssh_string(b"shell"));
+            payload.push(1); // want reply
+            self.send_packet(&payload)?;
+        }
+
+        // Wait for CHANNEL_SUCCESS.
+        loop {
+            let reply = self.recv_packet()?;
+            match reply.first().copied() {
+                Some(msg::SSH_MSG_CHANNEL_SUCCESS) => {
+                    self.verbose("shell/exec started");
+                    return Ok(());
+                }
+                Some(msg::SSH_MSG_CHANNEL_FAILURE) => {
+                    // Name which request was refused: "shell request failed"
+                    // and "exec request failed" have different causes, and a
+                    // combined message sends the reader looking in the wrong
+                    // place. A server with no pseudo-terminal support refuses
+                    // `shell` and accepts `exec`.
+                    let what = if self.config.command.is_some() {
+                        "exec"
+                    } else {
+                        "shell"
+                    };
+                    return Err(SshError::ProtocolError(format!(
+                        "{what} request failed on channel {}",
+                        self.channel_id
+                    )));
+                }
+                Some(msg::SSH_MSG_CHANNEL_WINDOW_ADJUST) => {
+                    self.handle_window_adjust(&reply);
+                }
+                Some(msg::SSH_MSG_CHANNEL_DATA) => {
+                    // Early data — process it.
+                    self.handle_channel_data(&reply);
+                }
+                Some(msg::SSH_MSG_CHANNEL_EXTENDED_DATA) => {
+                    // Early stderr — a command that fails immediately can have
+                    // written its diagnostic before the reply arrives.
+                    self.handle_channel_extended_data(&reply);
+                }
+                Some(msg::SSH_MSG_IGNORE | msg::SSH_MSG_DEBUG) => {}
+                Some(other) => {
+                    self.verbose(&format!(
+                        "ignoring message type {other} during shell request"
+                    ));
+                }
+                None => {
+                    return Err(SshError::ProtocolError("empty response".into()));
+                }
+            }
+        }
+    }
+
+    // === Phase 5: Data relay (interactive session) ===
+
+    /// Main data relay loop. Reads from stdin and sends to server,
+    /// reads from server and writes to stdout.
+    fn data_loop(&mut self) -> Result<(), SshError> {
+        self.verbose("entering data relay loop");
+
+        // For a command execution, we only read from server and write to stdout.
+        // For interactive, we also read stdin. In this simplified implementation,
+        // we use a blocking approach: try to read from TCP (non-blocking would
+        // be ideal but requires poll/select syscalls).
+
+        let mut stdin_buf = [0u8; 4096];
+        let mut closed = false;
+
+        loop {
+            // Try to receive a packet from the server.
+            // We use a polling approach: attempt recv, if no data available
+            // the kernel blocks briefly and returns.
+            match self.try_recv_packet() {
+                Ok(Some(payload)) => {
+                    if self.process_server_message(&payload)? {
+                        break; // Channel closed.
+                    }
+                }
+                Ok(None) => {
+                    // No data available yet — that's fine.
+                }
+                Err(e) => {
+                    // Connection error.
+                    self.verbose(&format!("recv error: {e}"));
+                    break;
+                }
+            }
+
+            // Read from stdin and send to server.
+            if !closed {
+                match io::stdin().read(&mut stdin_buf) {
+                    Ok(0) => {
+                        // EOF on stdin (Ctrl+D).
+                        self.verbose("stdin EOF, sending channel EOF");
+                        self.send_channel_eof()?;
+                        closed = true;
+                    }
+                    Ok(n) => {
+                        // `get` rather than `[..n]`. `Read::read` is
+                        // contractually bound never to report more than the
+                        // buffer holds, so this cannot fail -- but the same was
+                        // said of the kernel's recv length, and saying it with
+                        // a range that has to be valid costs nothing.
+                        let data = stdin_buf.get(..n).ok_or_else(|| {
+                            SshError::ProtocolError(
+                                "stdin read reported more bytes than were asked for".into(),
+                            )
+                        })?;
+                        self.send_channel_data(data)?;
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        // No stdin data — continue.
+                    }
+                    Err(e) => {
+                        self.verbose(&format!("stdin error: {e}"));
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Try to receive one packet, returning None if no data available.
+    /// In this simplified implementation, this always blocks for at least
+    /// one recv call.
+    fn try_recv_packet(&mut self) -> Result<Option<Vec<u8>>, SshError> {
+        // A whole packet may already be buffered from an earlier read.
+        if let Some((payload, consumed)) = self.codec.decode(self.buf.unread())? {
+            self.buf.advance(consumed);
+            return Ok(Some(payload));
+        }
+
+        // Otherwise one read, not a loop: the caller has a terminal to service
+        // and must not be parked here while the server has nothing to say.
+        self.buf.fill_once(self.transport.as_mut())?;
+
+        if let Some((payload, consumed)) = self.codec.decode(self.buf.unread())? {
+            self.buf.advance(consumed);
+            Ok(Some(payload))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Process a server message. Returns true if the channel is closed.
+    fn process_server_message(&mut self, payload: &[u8]) -> Result<bool, SshError> {
+        match payload.first().copied() {
+            Some(msg::SSH_MSG_CHANNEL_DATA) => {
+                self.handle_channel_data(payload);
+                Ok(false)
+            }
+            Some(msg::SSH_MSG_CHANNEL_EXTENDED_DATA) => {
+                self.handle_channel_extended_data(payload);
+                Ok(false)
+            }
+            Some(msg::SSH_MSG_CHANNEL_EOF) => {
+                self.verbose("received channel EOF");
+                Ok(false) // Wait for CLOSE.
+            }
+            Some(msg::SSH_MSG_CHANNEL_CLOSE) => {
+                self.verbose("received channel close");
+                // Send CLOSE back.
+                self.send_channel_close()?;
+                Ok(true)
+            }
+            Some(msg::SSH_MSG_CHANNEL_WINDOW_ADJUST) => {
+                self.handle_window_adjust(payload);
+                Ok(false)
+            }
+            Some(msg::SSH_MSG_CHANNEL_REQUEST) => {
+                // Server-initiated channel request (e.g., exit-status).
+                self.handle_channel_request(payload)?;
+                Ok(false)
+            }
+            Some(msg::SSH_MSG_DISCONNECT) => {
+                let reason = if payload.len() > 8 {
+                    read_ssh_string(payload, 5)
+                        .ok()
+                        .and_then(|(msg, _)| std::str::from_utf8(msg).ok().map(String::from))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                self.verbose(&format!("server disconnected: {reason}"));
+                Ok(true)
+            }
+            Some(msg::SSH_MSG_KEXINIT) => {
+                // The server is rekeying on one of RFC 4253 §9's thresholds.
+                //
+                // This runs to completion here, inline, rather than setting a
+                // flag for the relay loop: from the moment the server sent this
+                // it sends nothing but key-exchange packets (§7.1), so there is
+                // no other traffic to interleave with, and returning to the loop
+                // would only mean reading `KEX_DH_REPLY` somewhere that does not
+                // know what it is. Stdin relay pauses for the exchange, which is
+                // what §7.1 requires of us in the other direction as well.
+                self.do_rekey(payload)?;
+                Ok(false)
+            }
+            Some(msg::SSH_MSG_IGNORE | msg::SSH_MSG_DEBUG | msg::SSH_MSG_UNIMPLEMENTED) => {
+                // Skip.
+                Ok(false)
+            }
+            Some(other) => {
+                self.verbose(&format!("unhandled message type: {other}"));
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Handle CHANNEL_DATA: extract data and write to stdout.
+    fn handle_channel_data(&self, payload: &[u8]) {
+        // Format: u8 type, u32 recipient_channel, string data
+        if let Ok((data, _)) = read_ssh_string(payload, 5) {
+            let _ = io::stdout().write_all(data);
+            let _ = io::stdout().flush();
+        }
+    }
+
+    /// Handle `CHANNEL_EXTENDED_DATA`: the remote command's stderr.
+    ///
+    /// Writing it to *our* stderr is what keeps `ssh host cmd > file` honest:
+    /// the file gets the command's output and the terminal gets its
+    /// diagnostics, exactly as if the command had run locally. Before this
+    /// existed the message fell through to "unhandled message type" and every
+    /// byte the remote command wrote to stderr was silently discarded.
+    ///
+    /// Format: `u8 type, u32 recipient_channel, u32 data_type_code, string data`.
+    fn handle_channel_extended_data(&self, payload: &[u8]) {
+        let Ok((data_type_code, off)) = read_u32(payload, 5) else {
+            return;
+        };
+        let Ok((data, _)) = read_ssh_string(payload, off) else {
+            return;
+        };
+        if data_type_code == SSH_EXTENDED_DATA_STDERR {
+            // Ignoring the write failure: a closed stderr is not a reason to
+            // abandon a session whose real output is going to stdout.
+            let _ = io::stderr().write_all(data);
+            let _ = io::stderr().flush();
+        } else {
+            // No other code is defined. Discarding is required — writing an
+            // unknown stream to stdout would corrupt the command's output.
+            self.verbose(&format!(
+                "discarding {} bytes of extended data, unknown type {data_type_code}",
+                data.len()
+            ));
+        }
+    }
+
+    /// Handle CHANNEL_WINDOW_ADJUST: increase our send window.
+    fn handle_window_adjust(&mut self, payload: &[u8]) {
+        // Format: u8 type, u32 recipient_channel, u32 bytes_to_add
+        if let Ok((adjustment, _)) = read_u32(payload, 5) {
+            self.remote_window = self.remote_window.saturating_add(adjustment);
+            self.verbose(&format!(
+                "window adjust +{adjustment}, now {}",
+                self.remote_window
+            ));
+        }
+    }
+
+    /// Handle a server-initiated `CHANNEL_REQUEST`.
+    ///
+    /// The two that matter are `exit-status` and `exit-signal` (RFC 4254
+    /// §6.10) — between them they are the *only* way the server says how the
+    /// remote command ended. This used to parse the request type, log it, and
+    /// throw it away, which made `ssh host false` exit 0 no matter what the
+    /// server reported.
+    fn handle_channel_request(&mut self, payload: &[u8]) -> Result<(), SshError> {
+        // Format: u8 type, u32 recipient_channel, string request_type, bool want_reply, ...
+        let mut off = 1;
+        let (_, next) = read_u32(payload, off)?; // recipient_channel
+        off = next;
+        let (req_type, next) = read_ssh_string(payload, off)?;
+        off = next;
+        let (want_reply, next) = read_byte(payload, off)?;
+        off = next;
+
+        let req_type_str = std::str::from_utf8(req_type).unwrap_or("unknown");
+        self.verbose(&format!("channel request: {req_type_str}"));
+
+        match req_type_str {
+            "exit-status" => {
+                let (status, _) = read_u32(payload, off)?;
+                self.verbose(&format!("remote command exited with status {status}"));
+                self.remote_exit = Some(RemoteExit::Status(status));
+            }
+            "exit-signal" => {
+                // string signal name (no "SIG" prefix), bool core dumped,
+                // string error message, string language tag.
+                let (name_bytes, next) = read_ssh_string(payload, off)?;
+                let name = String::from_utf8_lossy(name_bytes).into_owned();
+                let (core_dumped, _) = read_byte(payload, next)?;
+                self.verbose(&format!("remote command killed by SIG{name}"));
+                self.remote_exit = Some(RemoteExit::Signal {
+                    name,
+                    core_dumped: core_dumped != 0,
+                });
+            }
+            _ => {}
+        }
+
+        if want_reply != 0 {
+            // Nothing a server can ask of this client is something it can do,
+            // so the answer is FAILURE. It goes through `send_packet` so the
+            // send sequence number advances with it: the sequence number is
+            // an input to every packet's MAC, and a packet sent without
+            // bumping it desynchronises the server's MAC check for the whole
+            // rest of the connection. (This function previously called
+            // `tcp_send_all` directly and did not advance it.)
+            let mut reply = Vec::new();
+            reply.push(msg::SSH_MSG_CHANNEL_FAILURE);
+            reply.extend_from_slice(&self.remote_channel_id.to_be_bytes());
+            self.send_packet(&reply)?;
+        }
+
+        Ok(())
+    }
+
+    /// Send data to the remote channel.
+    fn send_channel_data(&mut self, data: &[u8]) -> Result<(), SshError> {
+        // Respect the remote window size. Walking a shrinking `rest` rather
+        // than an offset keeps "how much is left" and "where that starts" from
+        // being two facts that can disagree: `data[offset..offset + chunk_size]`
+        // re-derived both ends from a running counter and a length computed
+        // three lines earlier, and `split_at` derives them from one number
+        // that the `.min` on the line above has just bounded.
+        let mut rest = data;
+        while !rest.is_empty() {
+            if self.remote_window == 0 {
+                // Wait for a window adjust.
+                let payload = self.recv_packet()?;
+                let _ = self.process_server_message(&payload);
+                continue;
+            }
+            let chunk_size = rest
+                .len()
+                .min(self.remote_window as usize)
+                .min(MAX_CHANNEL_CHUNK);
+            let (chunk, tail) = rest.split_at(chunk_size);
+
+            let mut payload = Vec::new();
+            payload.push(msg::SSH_MSG_CHANNEL_DATA);
+            payload.extend_from_slice(&self.remote_channel_id.to_be_bytes());
+            payload.extend_from_slice(&ssh_string(chunk));
+            self.send_packet(&payload)?;
+
+            self.remote_window = self
+                .remote_window
+                .saturating_sub(u32::try_from(chunk_size).unwrap_or(u32::MAX));
+            rest = tail;
+        }
+        Ok(())
+    }
+
+    /// Send CHANNEL_EOF.
+    fn send_channel_eof(&mut self) -> Result<(), SshError> {
+        let mut payload = Vec::new();
+        payload.push(msg::SSH_MSG_CHANNEL_EOF);
+        payload.extend_from_slice(&self.remote_channel_id.to_be_bytes());
+        self.send_packet(&payload)
+    }
+
+    /// Send CHANNEL_CLOSE.
+    fn send_channel_close(&mut self) -> Result<(), SshError> {
+        let mut payload = Vec::new();
+        payload.push(msg::SSH_MSG_CHANNEL_CLOSE);
+        payload.extend_from_slice(&self.remote_channel_id.to_be_bytes());
+        self.send_packet(&payload)
+    }
+
+    /// Send a disconnect message.
+    fn send_disconnect(&mut self, reason_code: u32, description: &str) {
+        let mut payload = Vec::new();
+        payload.push(msg::SSH_MSG_DISCONNECT);
+        payload.extend_from_slice(&reason_code.to_be_bytes());
+        payload.extend_from_slice(&ssh_string(description.as_bytes()));
+        payload.extend_from_slice(&ssh_string(b"")); // language tag
+        // Best-effort — ignore errors during disconnect.
+        let _ = self.send_packet(&payload);
+    }
+
+    /// Run the full SSH session lifecycle.
+    fn run(&mut self) -> Result<(), SshError> {
+        self.version_exchange()?;
+        self.key_exchange()?;
+        self.authenticate()?;
+        self.open_session_channel()?;
+
+        // Request PTY only for interactive sessions.
+        if self.config.command.is_none() {
+            self.request_pty()?;
+        }
+
+        self.request_shell_or_exec()?;
+        self.data_loop()?;
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Entry point
+// ============================================================================
+
+/// `ssh(1)`'s reserved exit code for a failure of the client or the
+/// connection, as opposed to a status the remote command returned.
+///
+/// The whole point of reserving one code is that `ssh host cmd; echo $?` can
+/// distinguish "cmd failed" from "cmd never ran". 255 is the value OpenSSH
+/// documents, so scripts written against OpenSSH keep working.
+pub const EXIT_SSH_FAILURE: i32 = 255;
+
+/// Run the `ssh(1)` command line and report the status the process should
+/// exit with.
+///
+/// Returns the code rather than calling `process::exit` itself. That is the
+/// whole difference between this and the `main` it replaces, and it is what
+/// makes the binary a shim: ending the process is the binary's business, and a
+/// library that can end its caller's process is not one a test can call.
+#[must_use]
+pub fn run_cli() -> i32 {
+    let config = match parse_args() {
+        Ok(c) => c,
+        Err(msg) => {
+            eprintln!("ssh: {msg}");
+            return EXIT_SSH_FAILURE;
+        }
+    };
+
+    let verbose = config.verbose;
+
+    if verbose {
+        eprintln!(
+            "debug1: connecting to {} port {}",
+            config.hostname, config.port
+        );
+    }
+
+    // Resolve hostname.
+    let ip = match dns_resolve(&config.hostname) {
+        Ok(ip) => ip,
+        Err(e) => {
+            eprintln!("ssh: {e}");
+            return EXIT_SSH_FAILURE;
+        }
+    };
+
+    if verbose {
+        let octets = ip.to_be_bytes();
+        eprintln!(
+            "debug1: resolved to {}.{}.{}.{}",
+            octets[0], octets[1], octets[2], octets[3]
+        );
+    }
+
+    // Open TCP connection.
+    let transport = match TcpTransport::connect(ip, config.port) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "ssh: connect to host {} port {}: {e}",
+                config.hostname, config.port
+            );
+            return EXIT_SSH_FAILURE;
+        }
+    };
+
+    if verbose {
+        eprintln!("debug1: connection established");
+    }
+
+    // Run the SSH session.
+    let mut session = SshSession::new(Box::new(transport), config);
+    match session.run() {
+        Ok(()) => {
+            session.send_disconnect(11, "disconnected by user");
+        }
+        Err(e) => {
+            eprintln!("ssh: {e}");
+            session.send_disconnect(2, "protocol error");
+            session.close();
+            // 255 is `ssh(1)`'s reserved code for "the connection or the
+            // client failed", as distinct from any status a remote command
+            // could return — the distinction a caller needs in order to tell
+            // "the command failed" from "ssh could not run it".
+            return EXIT_SSH_FAILURE;
+        }
+    }
+
+    session.close();
+
+    // Report the remote command's status. Read after the socket is closed
+    // because the caller ends the process the moment this returns, and a
+    // `process::exit` there runs no destructors.
+    session.exit_code()
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+// Panicking on bad data is what a test is *for*: a test that carefully
+// propagates an error instead of unwrapping just reports "ok" less loudly.
+// The defensive lints stay on for the production code above.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> Config {
+        Config {
+            user: "alice".into(),
+            hostname: "example".into(),
+            port: 22,
+            command: Some("true".into()),
+            verbose: false,
+            strict_host_key: StrictHostKey::No,
+            // Never `None` in a test: `None` means the operator's real
+            // `~/.ssh/known_hosts`, and `StrictHostKeyChecking=no` above would
+            // append to it. The empty path is deliberate -- no platform can
+            // open or create it, so it is "a file that is not there" stated in
+            // a way that cannot accidentally become a file that is.
+            known_hosts_file: Some(String::new()),
+            // `None` here would be `~/.ssh/id_ed25519`, so a test that reached
+            // authentication would behave differently depending on whether the
+            // operator owns a key. The empty path is "a file that is not there"
+            // for the same reason as the trust store above.
+            identity_file: Some(String::new()),
+            connect_timeout: 0,
+        }
+    }
+
+    /// A session over an in-memory stream whose peer end is dropped
+    /// immediately, so any I/O reports a closed connection rather than
+    /// reaching a kernel that would refuse it anyway.
+    ///
+    /// This used to be `SshSession::new(0, ...)` — a raw handle 0, valid only
+    /// because nothing exercised below does I/O. That is a precondition no type
+    /// enforced and no reader could see; a transport that is genuinely closed
+    /// is the same guarantee stated where the compiler can keep it.
+    ///
+    /// Its secrets come from a stand-in for the same reason its transport is
+    /// in memory: a test must not depend on the machine it runs on. `randrange`
+    /// refuses on this host on purpose (`open-questions.md`, "The test machine
+    /// cannot produce random numbers, on purpose…"), which is what made
+    /// `the_kexinit_cookie_is_random` and its three neighbours fail on every
+    /// run — four red tests of real properties, failing for one irrelevant
+    /// reason, in the suite of a program whose bugs are invisible locally.
+    fn test_session() -> SshSession {
+        let (near, far) = sshwire::memory_pair();
+        drop(far);
+        SshSession::new(Box::new(near), test_config()).with_secret_source(varying_secrets)
+    }
+
+    /// A source that never hands out the same bytes twice.
+    ///
+    /// The "is it random?" tests need *variation*, not unpredictability, and a
+    /// counter gives them that on every platform. Where a test needs the same
+    /// bytes twice instead, it passes its own fixed source.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the Result is the SecretSource signature, not this function's choice"
+    )]
+    fn varying_secrets(out: &mut [u8]) -> Result<(), randrange::EntropyError> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mut word = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        for byte in out.iter_mut() {
+            // A 64-bit LCG, so successive bytes within one draw differ too --
+            // a per-call constant would make `[0u8; 16]` and "sixteen equal
+            // bytes" indistinguishable to a test looking for zeros.
+            word = word
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            *byte = u8::try_from(word >> 56).unwrap_or(0);
+        }
+        Ok(())
+    }
+
+    /// A source that refuses, the way the kernel does when it cannot answer.
+    fn refusing_secrets(_out: &mut [u8]) -> Result<(), randrange::EntropyError> {
+        Err(randrange::EntropyError::Unavailable)
+    }
+
+    fn channel_request(req_type: &[u8], want_reply: bool, rest: &[u8]) -> Vec<u8> {
+        let mut p = vec![msg::SSH_MSG_CHANNEL_REQUEST];
+        p.extend_from_slice(&0u32.to_be_bytes()); // recipient channel
+        p.extend_from_slice(&ssh_string(req_type));
+        p.push(u8::from(want_reply));
+        p.extend_from_slice(rest);
+        p
+    }
+
+    // ---- exit-status / exit-signal ----
+
+    #[test]
+    fn exit_status_is_recorded_and_becomes_the_process_exit_code() {
+        let mut s = test_session();
+        assert_eq!(s.remote_exit, None);
+        let payload = channel_request(b"exit-status", false, &42u32.to_be_bytes());
+        s.handle_channel_request(&payload).expect("parse");
+        assert_eq!(s.remote_exit, Some(RemoteExit::Status(42)));
+        assert_eq!(s.exit_code(), 42);
+    }
+
+    /// The bug this whole path exists to prevent: a server that reports
+    /// failure must not produce a client that reports success.
+    #[test]
+    fn a_nonzero_remote_status_does_not_become_success() {
+        let mut s = test_session();
+        let payload = channel_request(b"exit-status", false, &1u32.to_be_bytes());
+        s.handle_channel_request(&payload).expect("parse");
+        assert_ne!(s.exit_code(), 0);
+    }
+
+    /// A server that never sends `exit-status` — an interactive session, or a
+    /// server that does not implement the notification — must not be treated
+    /// as a failure.
+    #[test]
+    fn a_missing_exit_status_is_success() {
+        let s = test_session();
+        assert_eq!(s.remote_exit, None);
+        assert_eq!(s.exit_code(), 0);
+    }
+
+    #[test]
+    fn exit_signal_is_recorded_and_reported_as_255() {
+        let mut s = test_session();
+        let mut rest = ssh_string(b"TERM");
+        rest.push(1); // core dumped
+        rest.extend_from_slice(&ssh_string(b"killed by SIGTERM"));
+        rest.extend_from_slice(&ssh_string(b""));
+        let payload = channel_request(b"exit-signal", false, &rest);
+        s.handle_channel_request(&payload).expect("parse");
+        assert_eq!(
+            s.remote_exit,
+            Some(RemoteExit::Signal {
+                name: "TERM".into(),
+                core_dumped: true,
+            })
+        );
+        // A signalled command has no exit status of its own; `ssh(1)` reports
+        // its reserved failure code rather than inventing one.
+        assert_eq!(s.exit_code(), EXIT_SSH_FAILURE);
+    }
+
+    /// The signal name arrives without a `SIG` prefix (RFC 4254 §6.10); a
+    /// client that stripped or added one would print the wrong name.
+    #[test]
+    fn exit_signal_name_is_stored_verbatim() {
+        let mut s = test_session();
+        let mut rest = ssh_string(b"KILL");
+        rest.push(0);
+        rest.extend_from_slice(&ssh_string(b""));
+        rest.extend_from_slice(&ssh_string(b""));
+        s.handle_channel_request(&channel_request(b"exit-signal", false, &rest))
+            .expect("parse");
+        match s.remote_exit {
+            Some(RemoteExit::Signal { ref name, .. }) => assert_eq!(name, "KILL"),
+            ref other => panic!("expected a signal exit, got {other:?}"),
+        }
+    }
+
+    /// An unrecognised request must be ignored, not mistaken for an exit
+    /// report and not allowed to overwrite one already received.
+    #[test]
+    fn an_unknown_request_leaves_the_exit_status_alone() {
+        let mut s = test_session();
+        s.handle_channel_request(&channel_request(b"exit-status", false, &7u32.to_be_bytes()))
+            .expect("parse");
+        s.handle_channel_request(&channel_request(b"keepalive@openssh.com", false, &[]))
+            .expect("parse");
+        assert_eq!(s.remote_exit, Some(RemoteExit::Status(7)));
+    }
+
+    /// A truncated request must be an error, not a silent zero: reading past
+    /// the end and defaulting would turn a malformed packet into "success".
+    #[test]
+    fn a_truncated_exit_status_is_an_error() {
+        let mut s = test_session();
+        let payload = channel_request(b"exit-status", false, &[0, 0]); // two of four bytes
+        assert!(s.handle_channel_request(&payload).is_err());
+        assert_eq!(s.remote_exit, None);
+    }
+
+    // ---- extended data ----
+
+    /// Type 1 is the only defined extended-data code. Anything else must be
+    /// discarded rather than written to stdout, where it would corrupt the
+    /// command's real output.
+    #[test]
+    fn extended_data_of_an_unknown_type_is_discarded() {
+        let s = test_session();
+        let mut p = vec![msg::SSH_MSG_CHANNEL_EXTENDED_DATA];
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&99u32.to_be_bytes()); // not SSH_EXTENDED_DATA_STDERR
+        p.extend_from_slice(&ssh_string(b"junk"));
+        s.handle_channel_extended_data(&p); // must not panic, must not print
+        assert_eq!(SSH_EXTENDED_DATA_STDERR, 1);
+    }
+
+    /// A malformed extended-data message must be dropped, not partially
+    /// written: a truncated length prefix would otherwise emit whatever
+    /// happened to follow it.
+    #[test]
+    fn malformed_extended_data_is_dropped() {
+        let s = test_session();
+        s.handle_channel_extended_data(&[msg::SSH_MSG_CHANNEL_EXTENDED_DATA, 0, 0]);
+        let mut p = vec![msg::SSH_MSG_CHANNEL_EXTENDED_DATA];
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&1u32.to_be_bytes());
+        p.extend_from_slice(&[0, 0, 0, 8, b'a']); // claims 8 bytes, carries 1
+        s.handle_channel_extended_data(&p);
+    }
+
+    // ---- exit code contract ----
+
+    /// 255 must stay reserved for client/connection failure, so that a caller
+    /// can tell "the command failed" from "ssh could not run it".
+    #[test]
+    fn ssh_failure_code_matches_openssh() {
+        assert_eq!(EXIT_SSH_FAILURE, 255);
+    }
+
+    // ---- encoding helpers used by the above ----
+
+    #[test]
+    fn channel_request_round_trips() {
+        let payload = channel_request(b"exit-status", false, &3u32.to_be_bytes());
+        let (recipient, off) = read_u32(&payload, 1).expect("recipient");
+        assert_eq!(recipient, 0);
+        let (req_type, off) = read_ssh_string(&payload, off).expect("type");
+        assert_eq!(req_type, b"exit-status");
+        let (want_reply, off) = read_byte(&payload, off).expect("want_reply");
+        assert_eq!(want_reply, 0);
+        let (status, _) = read_u32(&payload, off).expect("status");
+        assert_eq!(status, 3);
+    }
+
+    // ========================================================================
+    // Host key signature verification (RFC 4253 section 8)
+    //
+    // These tests are the reason the check exists. Each one is a thing a
+    // machine in the network path can do, and each one used to succeed,
+    // because the client read the signature blob and threw it away.
+    // ========================================================================
+
+    /// A host key on the wire: `string algorithm`, `string public`.
+    fn key_blob(algorithm: &[u8], public: &[u8]) -> Vec<u8> {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&ssh_string(algorithm));
+        blob.extend_from_slice(&ssh_string(public));
+        blob
+    }
+
+    /// A signature on the wire: `string algorithm`, `string signature`.
+    fn sig_blob(algorithm: &[u8], signature: &[u8]) -> Vec<u8> {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&ssh_string(algorithm));
+        blob.extend_from_slice(&ssh_string(signature));
+        blob
+    }
+
+    /// Everything a server needs to answer a key exchange, from one seed.
+    struct Server {
+        seed: [u8; 32],
+        public: [u8; 32],
+    }
+
+    impl Server {
+        fn new(fill: u8) -> Self {
+            let seed = [fill; 32];
+            let public = posix::ed25519::public_key(&seed);
+            Self { seed, public }
+        }
+
+        fn key_blob(&self) -> Vec<u8> {
+            key_blob(b"ssh-ed25519", &self.public)
+        }
+
+        fn sign(&self, exchange_hash: &[u8; 32]) -> Vec<u8> {
+            sig_blob(
+                b"ssh-ed25519",
+                &posix::ed25519::sign(&self.seed, exchange_hash),
+            )
+        }
+    }
+
+    #[test]
+    fn a_genuine_server_signature_is_accepted() {
+        let server = Server::new(0x11);
+        let h = [0x42u8; 32];
+        verify_host_key_signature(&server.key_blob(), &h, &server.sign(&h))
+            .expect("the real server's own signature must verify");
+    }
+
+    /// The attack the check exists to stop. A machine in the path copies the
+    /// real server's host key blob — it is public, it goes over the wire in
+    /// the clear — and completes its own Diffie-Hellman exchange with the
+    /// client. It cannot produce the matching signature, because it does not
+    /// have the private half. Before this check, `known_hosts` would then
+    /// confirm the copied key as the expected one and the client would
+    /// proceed, having authenticated nobody.
+    #[test]
+    fn replaying_the_real_host_key_without_the_private_half_is_rejected() {
+        let real = Server::new(0x11);
+        let attacker = Server::new(0x22);
+        let h = [0x42u8; 32];
+
+        // The attacker presents the real key and signs with its own.
+        let err = verify_host_key_signature(&real.key_blob(), &h, &attacker.sign(&h))
+            .expect_err("a signature by the wrong key must not verify");
+        assert!(matches!(err, SshError::HostKeyMismatch(_)), "{err:?}");
+    }
+
+    /// A signature is only evidence about the handshake it covers. Since `H`
+    /// commits to both Diffie-Hellman public values, a recording of yesterday's
+    /// session cannot be replayed into today's.
+    #[test]
+    fn a_signature_over_a_different_exchange_hash_is_rejected() {
+        let server = Server::new(0x11);
+        let recorded = server.sign(&[0x01u8; 32]);
+        let this_session = [0x02u8; 32];
+
+        let err = verify_host_key_signature(&server.key_blob(), &this_session, &recorded)
+            .expect_err("a signature from another exchange must not verify");
+        assert!(matches!(err, SshError::HostKeyMismatch(_)), "{err:?}");
+    }
+
+    /// One side must not get to pick the label while the other picks the
+    /// verifier. If the blobs disagree about the algorithm, the disagreement
+    /// itself is the answer.
+    #[test]
+    fn algorithm_confusion_between_key_and_signature_is_rejected() {
+        let server = Server::new(0x11);
+        let h = [0x42u8; 32];
+        let mislabelled = sig_blob(b"ssh-rsa", &posix::ed25519::sign(&server.seed, &h));
+
+        let err = verify_host_key_signature(&server.key_blob(), &h, &mislabelled)
+            .expect_err("mismatched algorithm names must be refused");
+        match err {
+            SshError::HostKeyMismatch(m) => {
+                assert!(m.contains("ssh-rsa"), "{m}");
+                assert!(m.contains("ssh-ed25519"), "{m}");
+            }
+            other => panic!("expected a host key mismatch, got {other:?}"),
+        }
+    }
+
+    /// "We cannot check this one" must resolve to *no*. Resolving it to yes is
+    /// the same bug in a smaller box: a server that wants to skip
+    /// authentication would simply advertise an algorithm we do not implement.
+    #[test]
+    fn an_algorithm_we_cannot_verify_is_refused_not_waved_through() {
+        let h = [0x42u8; 32];
+        let rsa_key = key_blob(b"ssh-rsa", &[0xAAu8; 256]);
+        let rsa_sig = sig_blob(b"ssh-rsa", &[0xBBu8; 256]);
+
+        let err = verify_host_key_signature(&rsa_key, &h, &rsa_sig)
+            .expect_err("an unimplemented algorithm must be an error, not an acceptance");
+        match err {
+            SshError::HostKeyMismatch(m) => assert!(m.contains("ssh-ed25519"), "{m}"),
+            other => panic!("expected a host key mismatch, got {other:?}"),
+        }
+    }
+
+    /// A single flipped bit is a forgery like any other.
+    #[test]
+    fn a_tampered_signature_is_rejected() {
+        let server = Server::new(0x11);
+        let h = [0x42u8; 32];
+        let mut blob = server.sign(&h);
+        let last = blob.len() - 1;
+        blob[last] ^= 0x01;
+
+        assert!(verify_host_key_signature(&server.key_blob(), &h, &blob).is_err());
+    }
+
+    /// Malformed input must produce an error and not, say, an early `Ok` from
+    /// a short-circuiting parse.
+    #[test]
+    fn truncated_blobs_are_errors_not_acceptances() {
+        let server = Server::new(0x11);
+        let h = [0x42u8; 32];
+        let good_key = server.key_blob();
+        let good_sig = server.sign(&h);
+
+        for cut in 1..good_sig.len() {
+            let err = verify_host_key_signature(&good_key, &h, &good_sig[..cut])
+                .expect_err("a truncated signature blob must never verify");
+            assert!(matches!(
+                err,
+                SshError::ProtocolError(_) | SshError::HostKeyMismatch(_)
+            ));
+        }
+        for cut in 1..good_key.len() {
+            let err = verify_host_key_signature(&good_key[..cut], &h, &good_sig)
+                .expect_err("a truncated key blob must never verify");
+            assert!(matches!(
+                err,
+                SshError::ProtocolError(_) | SshError::HostKeyMismatch(_)
+            ));
+        }
+    }
+
+    /// An ed25519 public key is exactly 32 bytes and a signature exactly 64.
+    /// A blob of the right shape but the wrong size must be refused rather
+    /// than reaching the verifier with a slice it cannot interpret.
+    #[test]
+    fn a_wrongly_sized_key_or_signature_is_rejected() {
+        let server = Server::new(0x11);
+        let h = [0x42u8; 32];
+
+        let short_key = key_blob(b"ssh-ed25519", &server.public[..31]);
+        assert!(verify_host_key_signature(&short_key, &h, &server.sign(&h)).is_err());
+
+        let short_sig = sig_blob(b"ssh-ed25519", &[0u8; 63]);
+        assert!(verify_host_key_signature(&server.key_blob(), &h, &short_sig).is_err());
+    }
+
+    // ========================================================================
+    // Randomness
+    // ========================================================================
+
+    /// The private exponent used to be `sha256(two compile-time constants)` —
+    /// not merely weak but *constant*, identical in every connection made by
+    /// every copy of this binary, which makes every session key derivable by
+    /// anyone holding the same binary.
+    #[test]
+    fn the_dh_private_exponent_is_not_a_constant() {
+        let a = generate_dh_private(varying_secrets).expect("the stand-in answers");
+        let b = generate_dh_private(varying_secrets).expect("the stand-in answers");
+        assert_ne!(a.to_bytes_be(), b.to_bytes_be());
+    }
+
+    /// Fail closed: a connection whose exponent could not be drawn must not be
+    /// made at all. There is no weaker exponent to fall back to — the exponent
+    /// *is* the secret — so the only alternatives to an error are a predictable
+    /// one and a panic, and a client handed an error can refuse to connect.
+    #[test]
+    fn no_exponent_is_produced_when_the_source_refuses() {
+        assert!(matches!(
+            generate_dh_private(refusing_secrets),
+            Err(SshError::ProtocolError(_))
+        ));
+    }
+
+    /// A 256-bit exponent with the top bit set: full length, and odd so it
+    /// cannot share the small factor 2 with the group order.
+    #[test]
+    fn the_dh_private_exponent_has_the_expected_shape() {
+        let x = generate_dh_private(varying_secrets)
+            .expect("the stand-in answers")
+            .to_bytes_be();
+        assert_eq!(x.len(), 32, "expected a full 256-bit exponent");
+        assert!(x[0] & 0x80 != 0, "top bit must be set");
+        assert!(x[31] & 1 == 1, "exponent must be odd");
+    }
+
+    /// The KEXINIT cookie is half of what stops either side alone from
+    /// choosing the exchange hash: both `I_C` and `I_S` feed into `H`.
+    ///
+    /// This client sent sixteen zero bytes. The comment left behind when that
+    /// was fixed said the constant "gave that power to the server alone" —
+    /// which was wrong, and wrong in the way this whole stack keeps being
+    /// wrong: `sshd`'s cookie was `sha256(b"sshd-kex-cookie")`, one constant
+    /// baked into the binary, so neither end contributed anything and `H` was
+    /// a function of the DH values alone. Nothing noticed, because each end
+    /// tested its own copy against its own idea of the protocol and passed.
+    #[test]
+    fn the_kexinit_cookie_is_random() {
+        let s = test_session();
+        let a = s.build_kexinit().expect("the stand-in answers");
+        let b = s.build_kexinit().expect("the stand-in answers");
+        assert_eq!(a[0], msg::SSH_MSG_KEXINIT);
+        assert_ne!(a[1..17], [0u8; 16], "the cookie must not be zeros");
+        assert_ne!(a[1..17], b[1..17], "the cookie must differ per connection");
+        // Everything after the cookie is a fixed algorithm advertisement.
+        assert_eq!(a[17..], b[17..]);
+    }
+
+    /// Fail closed here too: a KEXINIT whose cookie could not be drawn would be
+    /// a predictable cookie, which is the fault above wearing an apology.
+    #[test]
+    fn no_kexinit_is_built_when_the_source_refuses() {
+        let s = test_session().with_secret_source(refusing_secrets);
+        assert!(matches!(s.build_kexinit(), Err(SshError::ProtocolError(_))));
+    }
+
+    /// The risk this guards is a client that ships with a test source wired in,
+    /// which no test of "the cookie looks random" would ever catch — every one
+    /// of them passes against `varying_secrets`, which is a counter.
+    #[test]
+    fn a_session_draws_its_secrets_from_the_kernel_unless_a_test_says_otherwise() {
+        let (near, far) = sshwire::memory_pair();
+        drop(far);
+        let s = SshSession::new(Box::new(near), test_config());
+        assert!(
+            core::ptr::fn_addr_eq(s.secrets, sshwire::KERNEL_SECRETS),
+            "a session the client opens must draw from the kernel CSPRNG"
+        );
+    }
+
+    /// We must not advertise an algorithm we would then have to refuse: that
+    /// turns a connection that could have worked into a confusing failure.
+    #[test]
+    fn we_only_offer_host_key_algorithms_we_can_verify() {
+        let s = test_session();
+        let payload = s.build_kexinit().expect("the stand-in answers");
+        // byte + 16-byte cookie, then kex_algorithms, then host key algorithms.
+        let (_kex, off) = read_ssh_string(&payload, 17).expect("kex list");
+        let (host_key, _) = read_ssh_string(&payload, off).expect("host key list");
+        assert_eq!(host_key, b"ssh-ed25519");
+    }
+
+    /// A `KEXINIT` from the server mid-session is answered, not logged.
+    ///
+    /// The mirror image of the daemon's
+    /// `a_kexinit_mid_session_starts_a_key_exchange_instead_of_being_ignored`,
+    /// and it exists for the same reason: message type 20 used to fall through
+    /// to "unhandled message type", which returns `Ok` having sent nothing. The
+    /// cost of that is not a lost feature but a **hang** — RFC 4253 §7.1 says a
+    /// peer that has sent `KEXINIT` sends nothing but key-exchange packets
+    /// until the exchange finishes, so a server rekeying on one of §9's
+    /// thresholds and a client quietly ignoring it leaves both ends waiting on
+    /// each other forever, with no error printed anywhere. Nothing distinguishes
+    /// "ignored it" from "handled it" except what goes back out on the wire, so
+    /// that is what this reads.
+    ///
+    /// The exchange cannot *finish*: this peer sends no `KEX_DH_REPLY`, it
+    /// closes. That is deliberate — it is what makes a failing run terminate
+    /// instead of demonstrating the very hang the test is about — and the
+    /// resulting error is part of the assertion, since ignoring the message
+    /// would have returned `Ok(false)`.
+    #[test]
+    fn a_server_kexinit_mid_session_is_answered_with_our_own_rather_than_ignored() {
+        let (near, mut far) = sshwire::memory_pair();
+        let mut s =
+            SshSession::new(Box::new(near), test_config()).with_secret_source(varying_secrets);
+
+        // The peer must read on its own thread: the client blocks inside
+        // `dh_key_exchange` waiting for a reply, so a same-thread peer would
+        // never get to look at what was sent.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            let mut wire = [0u8; 4096];
+            // Enough to reach the message type: uint32 length, one
+            // padding-length byte, then the payload (RFC 4253 §6).
+            while seen.len() < 6 {
+                match far.recv(&mut wire) {
+                    Ok([]) | Err(_) => break,
+                    Ok(bytes) => seen.extend_from_slice(bytes),
+                }
+            }
+            tx.send(seen).ok();
+        });
+
+        // A KEXINIT is only recognised by its first byte here; what follows is
+        // parsed during the exchange, which this peer never reaches.
+        let server_kexinit = vec![msg::SSH_MSG_KEXINIT; 32];
+        let outcome = s.process_server_message(&server_kexinit);
+        // Closing this end is what makes a *failure* fail rather than hang: a
+        // client that ignored the KEXINIT sends nothing, and the reader is
+        // parked until it has a message or the pipe closes.
+        drop(s);
+        let sent = rx.recv().expect("the reader thread must report");
+        reader.join().expect("the reader thread must not panic");
+
+        assert_eq!(
+            sent.get(5).copied(),
+            Some(msg::SSH_MSG_KEXINIT),
+            "the client answered the server's KEXINIT with {sent:?}; a rekey \
+             begins by sending our own KEXINIT, and sending nothing at all is \
+             what hangs the session"
+        );
+        assert!(
+            outcome.is_err(),
+            "the peer sent no KEX_DH_REPLY and then closed, so the exchange must \
+             fail rather than report success"
+        );
+    }
+
+    /// `bytes_to_hex` is the only hex helper left here: its partner
+    /// `hex_to_bytes` existed to turn the group-14 prime into bytes, and the
+    /// prime moved to `sshwire`, so the parser went with it.
+    #[test]
+    fn bytes_render_as_lowercase_hex_pairs() {
+        assert_eq!(bytes_to_hex(&[0x00, 0xff, 0x10, 0xab]), "00ff10ab");
+        assert_eq!(bytes_to_hex(&[]), "");
+        // Every byte is two digits, so a value below 16 keeps its leading zero.
+        assert_eq!(bytes_to_hex(&[0x05]), "05");
+    }
+
+    // ------------------------------------------------------------------
+    // Version exchange (RFC 4253 §4.2)
+    // ------------------------------------------------------------------
+
+    fn version_of(line: &[u8]) -> String {
+        match classify_version_line(line) {
+            Ok(VersionLine::Version(v)) => v,
+            Ok(VersionLine::Banner(b)) => panic!("expected a version line, got banner {b:?}"),
+            Err(e) => panic!("expected a version line, got error {e}"),
+        }
+    }
+
+    #[test]
+    fn the_version_line_is_recognised_and_stripped_of_its_cr() {
+        assert_eq!(version_of(b"SSH-2.0-OpenSSH_9.6\r"), "SSH-2.0-OpenSSH_9.6");
+    }
+
+    #[test]
+    fn a_bare_lf_terminator_is_accepted_too() {
+        // OpenSSH tolerates a missing CR, and the byte we hash is the same
+        // either way -- the CRLF is framing, not part of V_S.
+        assert_eq!(version_of(b"SSH-2.0-Dropbear"), "SSH-2.0-Dropbear");
+    }
+
+    #[test]
+    fn only_the_terminating_cr_is_removed() {
+        // A CR earlier in the line is not framing. Trimming every trailing CR
+        // would be a second place where our bytes and the server's could differ.
+        assert_eq!(version_of(b"SSH-2.0-x\r\r"), "SSH-2.0-x\r");
+    }
+
+    #[test]
+    fn the_version_string_we_keep_is_byte_for_byte_what_arrived() {
+        // The regression: `char::from(byte)` read each byte as Latin-1, so this
+        // line came back out as its UTF-8 re-encoding -- one more byte than the
+        // server hashed, and so a different exchange hash and a signature that
+        // could not verify. UTF-8 is not legal here, but a server that sends it
+        // must either be understood exactly or refused, never quietly altered.
+        let raw = "SSH-2.0-Ünicode".as_bytes();
+        assert_eq!(version_of(raw).as_bytes(), raw);
+    }
+
+    #[test]
+    fn a_version_line_that_is_not_utf8_is_refused_rather_than_mangled() {
+        // 0xFF is not valid UTF-8 in any position. The old code turned it into
+        // U+00FF and carried on, hashing two bytes where the server hashed one.
+        let err = classify_version_line(b"SSH-2.0-bad\xFFname\r");
+        assert!(
+            matches!(err, Err(SshError::ProtocolError(_))),
+            "a version line we cannot reproduce byte-for-byte must be an error"
+        );
+    }
+
+    #[test]
+    fn lines_before_the_version_are_banners() {
+        let Ok(VersionLine::Banner(text)) = classify_version_line(b"Authorized users only\r")
+        else {
+            panic!("a line not starting with SSH- is a banner");
+        };
+        assert_eq!(text, "Authorized users only");
+    }
+
+    #[test]
+    fn a_banner_cannot_smuggle_control_sequences_to_the_terminal() {
+        // Banners arrive from an unauthenticated peer and get printed. Escaping
+        // them is why they are not simply decoded.
+        let Ok(VersionLine::Banner(text)) = classify_version_line(b"evil\x1b[2Jbanner") else {
+            panic!("expected a banner");
+        };
+        assert!(
+            !text.contains('\x1b'),
+            "escape byte reached the output: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_banner_that_is_not_utf8_is_shown_rather_than_fatal() {
+        // Unlike the version line, a banner is not hashed, so an undecodable one
+        // is not a reason to refuse to talk to the server.
+        assert!(matches!(
+            classify_version_line(b"caf\xE9"),
+            Ok(VersionLine::Banner(_))
+        ));
+    }
+
+    // The `mpint` reader/writer roundtrip that used to be asserted here is now
+    // `sshwire`'s -- `an_mpint_roundtrips_through_the_shared_writer` and
+    // `an_mpint_comes_back_without_the_sign_pad_the_writer_added` -- because
+    // both halves of it are. A copy here would test the same two functions a
+    // second time and, worse, would keep passing if this crate ever grew a
+    // private reader again, which is the failure the shared crate exists to
+    // make impossible.
+
+    // ------------------------------------------------------------------
+    // AES-128 and AES-128-CTR
+    //
+    // The cipher is `sshwire::Aes128Ctr` now, and so are its tests: FIPS-197's
+    // block and key-schedule vectors, and RFC 3686's and NIST SP 800-38A's
+    // counter-mode vectors. Six tests lived here; four moved, and two are gone
+    // because the shared type retired the thing they were checking.
+    //
+    //   * `aes_ctr_declines_a_short_key_or_iv_rather_than_encrypting_with_padding`
+    //     asserted that a 15-byte key left the data alone. `Aes128Ctr::new`
+    //     takes `&[u8; 16]`, so a short key no longer compiles and there is
+    //     nothing left to assert at run time.
+    //   * `aes_ctr_round_trips_a_length_that_is_not_a_block_multiple` is the
+    //     shape of test that let the counter bug live for as long as it did:
+    //     encrypt-then-decrypt with the same wrong counter returns the
+    //     plaintext perfectly. RFC 3686's 36-byte vector covers the short final
+    //     block against a published answer instead, and `sshwire`'s
+    //     `the_keystream_never_repeats_across_packets` covers what a roundtrip
+    //     structurally cannot see.
+    // ------------------------------------------------------------------
+
+    // base64's tests moved to `sshwire` with the functions -- including the
+    // RFC 4648 vectors, the every-length round trip, and the line-wrapping
+    // tolerance a hand-edited `known_hosts` needs. What used to be tested here
+    // as well is the case this crate no longer decides: a stray character is
+    // now an error rather than a zero sextet, which is what `Corrupt` below
+    // exists to carry.
+
+    // ------------------------------------------------------------------
+    // known_hosts
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn known_hosts_names_a_nondefault_port_the_way_openssh_does() {
+        assert_eq!(known_hosts_pattern("example.com", 22), "example.com");
+        assert_eq!(
+            known_hosts_pattern("example.com", 2222),
+            "[example.com]:2222"
+        );
+    }
+
+    #[test]
+    fn known_hosts_recognises_a_stored_key() {
+        let blob = b"\x00\x00\x00\x0bssh-ed25519some-key-bytes".to_vec();
+        let content = format!(
+            "# a comment\n\n\
+             other.example ssh-ed25519 {}\n\
+             example.com ssh-ed25519 {} a trailing comment\n",
+            base64_encode_padded(b"a different key"),
+            base64_encode_padded(&blob),
+        );
+
+        assert_eq!(
+            known_hosts_lookup(&content, "example.com", &blob),
+            KnownHostsVerdict::Match
+        );
+        assert_eq!(
+            known_hosts_lookup(&content, "unlisted.example", &blob),
+            KnownHostsVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn known_hosts_reports_a_changed_key_rather_than_treating_it_as_unknown() {
+        // The distinction is the whole point: an unknown host may be added on
+        // the operator's say-so, but a host whose key has *changed* must not
+        // be, because that is what a man in the middle looks like.
+        let stored = b"the-real-host-key".to_vec();
+        let content = format!(
+            "example.com ssh-ed25519 {}\n",
+            base64_encode_padded(&stored)
+        );
+
+        assert_eq!(
+            known_hosts_lookup(&content, "example.com", b"an-impostors-key"),
+            KnownHostsVerdict::Mismatch
+        );
+    }
+
+    #[test]
+    fn known_hosts_reports_a_damaged_entry_as_damaged_and_not_as_an_attack() {
+        // With a decoder that dropped unrecognised characters, this line
+        // decoded to a *shorter* blob, compared unequal, and came out as
+        // `Mismatch` -- so a typo in the trust store printed "someone could be
+        // eavesdropping on you". The advice that warning gives is also wrong
+        // here: removing "the old entry" is right, but accepting the new key
+        // appends below a line the lookup stops at, so the prompt would return
+        // on every connection.
+        let blob = b"the-real-host-key".to_vec();
+        let content = "example.com ssh-ed25519 not!valid!base64!\n";
+
+        assert_eq!(
+            known_hosts_lookup(content, "example.com", &blob),
+            KnownHostsVerdict::Corrupt
+        );
+    }
+
+    #[test]
+    fn known_hosts_matches_any_name_in_a_comma_separated_list() {
+        let blob = b"shared-key".to_vec();
+        let content = format!(
+            "alias.example,example.com,[example.com]:2222 ssh-ed25519 {}\n",
+            base64_encode_padded(&blob),
+        );
+
+        for pattern in ["alias.example", "example.com", "[example.com]:2222"] {
+            assert_eq!(
+                known_hosts_lookup(&content, pattern, &blob),
+                KnownHostsVerdict::Match,
+                "pattern {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn known_hosts_skips_lines_that_are_not_three_fields() {
+        // A truncated line must not be read as naming the host: the old code
+        // checked `parts.len() < 3` and then indexed `parts[0..3]` separately,
+        // so this is the case where those two could have parted company.
+        let blob = b"key".to_vec();
+        let content = "example.com\nexample.com ssh-ed25519\n\n   \n";
+        assert_eq!(
+            known_hosts_lookup(content, "example.com", &blob),
+            KnownHostsVerdict::Unknown
+        );
+    }
+
+    #[test]
+    fn known_hosts_does_not_match_a_host_that_is_merely_a_prefix() {
+        let blob = b"key".to_vec();
+        let content = format!(
+            "example.com.evil.test ssh-ed25519 {}\n",
+            base64_encode_padded(&blob)
+        );
+        assert_eq!(
+            known_hosts_lookup(&content, "example.com", &blob),
+            KnownHostsVerdict::Unknown
+        );
+    }
+
+    // ---- -o UserKnownHostsFile= ----
+
+    #[test]
+    fn without_the_option_the_trust_store_is_the_users_own_file() {
+        let path = known_hosts_path(None);
+        assert!(
+            path.ends_with("/.ssh/known_hosts"),
+            "default trust store moved: {path}"
+        );
+    }
+
+    #[test]
+    fn the_option_names_the_file_and_nothing_is_appended_to_it() {
+        // OpenSSH takes the value as the whole path, not a directory or a stem.
+        assert_eq!(known_hosts_path(Some("/tmp/hosts")), "/tmp/hosts");
+    }
+
+    #[test]
+    fn a_key_written_to_the_named_file_is_recognised_when_read_back() {
+        // The round trip is the point: `add_known_host` writes base64 and
+        // `check_known_hosts` decodes it, and a disagreement between those two
+        // would make every host look unknown for ever -- while each function's
+        // own test kept passing.
+        let scratch = scratchdir::ScratchDir::new("ssh-known-hosts");
+        let path = scratch.path("known_hosts");
+        let file = path.to_str().expect("the scratch path is UTF-8");
+        let blob = b"a-host-key-blob".to_vec();
+
+        assert!(
+            !check_known_hosts(Some(file), "example.com", 2222, &blob)
+                .expect("no file is not an error"),
+            "an absent file must read as 'host unknown', not as a match"
+        );
+
+        add_known_host(Some(file), "example.com", 2222, "ssh-ed25519", &blob);
+        assert!(
+            check_known_hosts(Some(file), "example.com", 2222, &blob).expect("readable"),
+            "the key just written was not recognised"
+        );
+
+        // The port is part of the identity, so the same key on another port is
+        // a different host and is still unknown.
+        assert!(
+            !check_known_hosts(Some(file), "example.com", 22, &blob).expect("readable"),
+            "a different port must not match"
+        );
+
+        // A different key for a host we know is the man-in-the-middle case,
+        // and must be an error rather than "unknown" -- "unknown" would let
+        // StrictHostKeyChecking=no silently append the impostor's key.
+        assert!(
+            check_known_hosts(Some(file), "example.com", 2222, b"an-impostors-key").is_err(),
+            "a changed key must be reported, not treated as a new host"
+        );
+    }
+
+    #[test]
+    fn the_option_keeps_a_test_out_of_the_operators_own_trust_store() {
+        // The reason the option exists. `StrictHostKeyChecking=no` appends the
+        // server's key to the trust store, so without a way to name a different
+        // file, running the client under test would edit `~/.ssh/known_hosts`.
+        let scratch = scratchdir::ScratchDir::new("ssh-known-hosts-isolated");
+        let path = scratch.path("known_hosts");
+        let file = path.to_str().expect("the scratch path is UTF-8");
+        add_known_host(Some(file), "example.com", 22, "ssh-ed25519", b"key");
+        assert!(path.exists(), "the named file is the one that was written");
+
+        let default = known_hosts_path(None);
+        assert_ne!(default, file, "the named file must not be the default one");
+    }
+
+    // ---- publickey authentication (RFC 4252 §7) ----
+
+    /// The seed and public key of RFC 8032 §7.1's first Ed25519 test vector.
+    ///
+    /// An external anchor, and the reason these tests use it rather than
+    /// `[7u8; 32]`: the public half below was written by the IETF, not by this
+    /// tree. `ssh-keygen` in this repository derived a *different* public key
+    /// for every key it wrote, and every test it had passed, because each one
+    /// compared its arithmetic against its own arithmetic. A fixture whose two
+    /// halves come from outside cannot do that.
+    const RFC_8032_SEED: [u8; 32] = [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c,
+        0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
+        0x7f, 0x60,
+    ];
+    const RFC_8032_PUBLIC: [u8; 32] = [
+        0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07,
+        0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07,
+        0x51, 0x1a,
+    ];
+
+    fn test_identity() -> Identity {
+        Identity {
+            seed: RFC_8032_SEED,
+            public: RFC_8032_PUBLIC,
+        }
+    }
+
+    // ---- -i / -o IdentityFile= ----
+
+    #[test]
+    fn without_the_option_the_key_is_the_users_own_file() {
+        let path = identity_path(None);
+        assert!(
+            path.ends_with("/.ssh/id_ed25519"),
+            "default identity moved: {path}"
+        );
+    }
+
+    #[test]
+    fn the_identity_option_names_the_file_and_nothing_is_appended_to_it() {
+        assert_eq!(identity_path(Some("/tmp/k")), "/tmp/k");
+    }
+
+    #[test]
+    fn both_spellings_of_the_identity_option_set_the_same_thing() {
+        // OpenSSH accepts `-i` and `-o IdentityFile=` interchangeably. A client
+        // that honoured one and ignored the other would, for half its callers,
+        // silently authenticate with a key they did not ask for -- and succeed,
+        // so nothing would ever say so.
+        let dash_i = parse_args_from(vec![
+            "ssh".into(),
+            "-i".into(),
+            "/tmp/k".into(),
+            "host".into(),
+        ])
+        .expect("valid");
+        let dash_o = parse_args_from(vec![
+            "ssh".into(),
+            "-o".into(),
+            "IdentityFile=/tmp/k".into(),
+            "host".into(),
+        ])
+        .expect("valid");
+
+        assert_eq!(dash_i.identity_file.as_deref(), Some("/tmp/k"));
+        assert_eq!(dash_o.identity_file, dash_i.identity_file);
+    }
+
+    #[test]
+    fn no_identity_option_leaves_the_choice_to_the_default() {
+        let c = parse_args_from(vec!["ssh".into(), "host".into()]).expect("valid");
+        assert_eq!(
+            c.identity_file, None,
+            "`None` is what tells `load_identity` the user did not name a file"
+        );
+    }
+
+    #[test]
+    fn a_dash_i_with_no_path_is_an_error_rather_than_an_empty_path() {
+        // An empty path would name the current directory, which is not a key
+        // file and never will be; taking it silently would report the mistake
+        // as "cannot read ''" from somewhere much further along.
+        // Not `expect_err`: that would need `Config: Debug`, which it does not
+        // have -- and should not grow, since it is the struct a passphrase
+        // field would land in.
+        let Err(err) = parse_args_from(vec!["ssh".into(), "-i".into()]) else {
+            panic!("a `-i` with no path must not parse");
+        };
+        assert!(
+            err.contains("-i"),
+            "the message must name the option: {err}"
+        );
+    }
+
+    // ---- reading a key file ----
+
+    #[test]
+    fn a_well_formed_key_file_yields_the_seed_and_the_public_half_the_rfc_gives() {
+        let text = sshwire::encode_openssh_private_key(
+            &RFC_8032_SEED,
+            &RFC_8032_PUBLIC,
+            "alice@test",
+            0x0102_0304,
+        );
+        let id = Identity::from_openssh_text(&text).expect("a key this crate wrote must load");
+        assert_eq!(id.seed, RFC_8032_SEED);
+        assert_eq!(
+            id.public, RFC_8032_PUBLIC,
+            "the loaded public half must be RFC 8032's, not whatever we derived"
+        );
+    }
+
+    #[test]
+    fn a_key_file_whose_two_halves_disagree_is_refused() {
+        // This is not a hypothetical. `ssh-keygen` in this tree derived the
+        // wrong public key for every key it ever wrote, so real files in this
+        // shape exist. Accepting one means signing with a seed that does not
+        // correspond to the key blob we offered: the server rejects it with a
+        // bare USERAUTH_FAILURE, which is the same thing it says for a key that
+        // is simply not authorized. The user would have no way to tell those
+        // apart, and the file would stay broken.
+        let wrong_public = [0xAA_u8; 32];
+        assert_ne!(wrong_public, RFC_8032_PUBLIC);
+        let text = sshwire::encode_openssh_private_key(
+            &RFC_8032_SEED,
+            &wrong_public,
+            "broken@test",
+            0x0102_0304,
+        );
+
+        let err = Identity::from_openssh_text(&text).expect_err("halves disagree");
+        assert!(
+            err.contains("does not match"),
+            "the message must say what is wrong: {err}"
+        );
+    }
+
+    #[test]
+    fn text_that_is_not_a_key_file_at_all_is_refused_with_a_reason() {
+        let err = Identity::from_openssh_text("hello\n").expect_err("not a key");
+        assert!(!err.is_empty(), "a refusal must say something");
+    }
+
+    // ---- what an unusable identity file does, and why it depends ----
+
+    #[test]
+    fn an_identity_the_user_named_and_that_is_not_there_stops_the_client() {
+        // The reason for the whole `explicit` distinction. Falling back to a
+        // password prompt here means the user types their password believing
+        // the key was used, gets in, and is never told otherwise.
+        let scratch = scratchdir::ScratchDir::new("ssh-identity-missing");
+        let path = scratch.path("id_ed25519");
+        let file = path.to_str().expect("the scratch path is UTF-8");
+
+        let err = load_identity_from(file, true).expect_err("an explicit key must not be skipped");
+        let msg = err.to_string();
+        assert!(msg.contains(file), "the message must name the file: {msg}");
+    }
+
+    #[test]
+    fn a_default_identity_that_is_not_there_is_not_an_error() {
+        // Most invocations of this client have no key at all. Reporting the
+        // absence of a file the user never mentioned would put a message on
+        // every one of them.
+        let scratch = scratchdir::ScratchDir::new("ssh-identity-default-missing");
+        let path = scratch.path("id_ed25519");
+        let file = path.to_str().expect("the scratch path is UTF-8");
+
+        let got = load_identity_from(file, false).expect("an absent default is not an error");
+        assert!(got.is_none(), "there is no key, so there is no identity");
+    }
+
+    #[test]
+    fn a_default_identity_that_cannot_be_used_is_skipped_rather_than_fatal() {
+        // Distinct from the case above: the file exists, so something meant it
+        // to be a key. That earns a warning on stderr -- but not a refusal to
+        // connect, because the user never asked for this file by name.
+        let scratch = scratchdir::ScratchDir::new("ssh-identity-default-broken");
+        let path = scratch.path("id_ed25519");
+        std::fs::write(&path, "not a key at all\n").expect("write");
+        let file = path.to_str().expect("the scratch path is UTF-8");
+
+        let got = load_identity_from(file, false).expect("a broken default must not be fatal");
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn an_identity_the_user_named_and_that_cannot_be_used_stops_the_client() {
+        let scratch = scratchdir::ScratchDir::new("ssh-identity-explicit-broken");
+        let path = scratch.path("id_ed25519");
+        std::fs::write(&path, "not a key at all\n").expect("write");
+        let file = path.to_str().expect("the scratch path is UTF-8");
+
+        let err = load_identity_from(file, true).expect_err("an explicit key must not be skipped");
+        let msg = err.to_string();
+        assert!(msg.contains(file), "the message must name the file: {msg}");
+    }
+
+    #[test]
+    fn a_key_file_written_here_is_read_back_through_the_real_file_path() {
+        // The two halves of `load_identity_from` -- the read and the decode --
+        // exercised together over a real file, so a change that broke the
+        // reading rather than the parsing is still caught.
+        let scratch = scratchdir::ScratchDir::new("ssh-identity-roundtrip");
+        let path = scratch.path("id_ed25519");
+        std::fs::write(
+            &path,
+            sshwire::encode_openssh_private_key(&RFC_8032_SEED, &RFC_8032_PUBLIC, "alice@test", 7),
+        )
+        .expect("write");
+        let file = path.to_str().expect("the scratch path is UTF-8");
+
+        let id = load_identity_from(file, true)
+            .expect("readable")
+            .expect("present");
+        assert_eq!(id.seed, RFC_8032_SEED);
+        assert_eq!(id.public, RFC_8032_PUBLIC);
+    }
+
+    // ---- the request that goes on the wire ----
+
+    /// Take the request apart the way a server does, and check every field.
+    ///
+    /// Written out field by field rather than compared against a second call
+    /// to the builder: the builder agreeing with itself is not evidence. What
+    /// this pins is the *layout* RFC 4252 §7 specifies, and it is the layout
+    /// that the server -- a different program, in a different crate -- parses.
+    #[test]
+    fn the_request_is_the_publickey_userauth_request_rfc_4252_specifies() {
+        let id = test_identity();
+        let payload = id.auth_request(b"alice", b"ssh-connection", &[0x11; 32]);
+
+        assert_eq!(
+            payload.first().copied(),
+            Some(msg::SSH_MSG_USERAUTH_REQUEST)
+        );
+        let (user, off) = read_ssh_string(&payload, 1).expect("user name");
+        assert_eq!(user, b"alice");
+        let (service, off) = read_ssh_string(&payload, off).expect("service name");
+        assert_eq!(service, b"ssh-connection");
+        let (method, off) = read_ssh_string(&payload, off).expect("method name");
+        assert_eq!(method, b"publickey");
+        let (has_sig, off) = read_byte(&payload, off).expect("has-signature flag");
+        assert_eq!(
+            has_sig, 1,
+            "a request with no signature proves nothing and is not what this sends"
+        );
+        let (algorithm, off) = read_ssh_string(&payload, off).expect("algorithm name");
+        assert_eq!(algorithm, b"ssh-ed25519");
+        let (key_blob, off) = read_ssh_string(&payload, off).expect("key blob");
+        let (sig_blob, off) = read_ssh_string(&payload, off).expect("signature blob");
+        assert_eq!(off, payload.len(), "nothing may follow the signature");
+
+        // The key blob is itself `string(algorithm) string(point)` (RFC 8709).
+        let (blob_alg, boff) = read_ssh_string(key_blob, 0).expect("blob algorithm");
+        assert_eq!(blob_alg, b"ssh-ed25519");
+        let (point, boff) = read_ssh_string(key_blob, boff).expect("blob point");
+        assert_eq!(point, RFC_8032_PUBLIC, "the offered key must be ours");
+        assert_eq!(boff, key_blob.len());
+
+        // And the signature blob is `string(algorithm) string(64 bytes)`
+        // (RFC 4253 §6.6) -- the wrapper is what stops a signature made under
+        // one algorithm being presented as one made under another.
+        let (sig_alg, soff) = read_ssh_string(sig_blob, 0).expect("signature algorithm");
+        assert_eq!(sig_alg, b"ssh-ed25519");
+        let (signature, soff) = read_ssh_string(sig_blob, soff).expect("signature");
+        assert_eq!(signature.len(), 64, "an Ed25519 signature is 64 bytes");
+        assert_eq!(soff, sig_blob.len());
+    }
+
+    /// The signature verifies under the key the request *offers*.
+    ///
+    /// Deliberately verified against the point parsed back out of the payload
+    /// rather than against `identity.public`, because the failure this guards
+    /// is precisely the two coming apart: a client that signs with one key and
+    /// offers another produces a request that is well-formed, parses cleanly at
+    /// both ends, and is rejected with a bare `USERAUTH_FAILURE` naming no
+    /// cause. That is the `ssh-keygen` bug wearing a different hat.
+    #[test]
+    fn the_signature_verifies_under_the_key_the_request_offers() {
+        let id = test_identity();
+        let session_id = [0x11_u8; 32];
+        let payload = id.auth_request(b"alice", b"ssh-connection", &session_id);
+
+        let (user, off) = read_ssh_string(&payload, 1).expect("user");
+        let (service, off) = read_ssh_string(&payload, off).expect("service");
+        let (_method, off) = read_ssh_string(&payload, off).expect("method");
+        let (_flag, off) = read_byte(&payload, off).expect("flag");
+        let (algorithm, off) = read_ssh_string(&payload, off).expect("algorithm");
+        let (key_blob, off) = read_ssh_string(&payload, off).expect("key blob");
+        let (sig_blob, _) = read_ssh_string(&payload, off).expect("signature blob");
+        let (_sig_alg, soff) = read_ssh_string(sig_blob, 0).expect("signature algorithm");
+        let (signature, _) = read_ssh_string(sig_blob, soff).expect("signature");
+
+        // Rebuilt the way the server rebuilds it -- from the fields the request
+        // carried, plus a session identifier the request does not carry at all.
+        let signed = sshwire::pubkey_signed_blob(&session_id, user, service, algorithm, key_blob);
+        let (_, poff) = read_ssh_string(key_blob, 0).expect("blob algorithm");
+        let (point, _) = read_ssh_string(key_blob, poff).expect("blob point");
+
+        assert!(
+            posix::ed25519::verify_slices(point, &signed, signature),
+            "the signature does not verify under the key the request offered"
+        );
+    }
+
+    #[test]
+    fn a_signature_made_for_one_session_does_not_verify_in_another() {
+        // The session identifier is the whole replay defence, and it is the one
+        // field of the signed blob that never appears on the wire -- so a
+        // client that left it out, or hashed a constant, would still produce
+        // requests a matching implementation accepted. Two sessions, one key.
+        let id = test_identity();
+        let first = id.auth_request(b"alice", b"ssh-connection", &[0x11; 32]);
+        let second = id.auth_request(b"alice", b"ssh-connection", &[0x22; 32]);
+        assert_ne!(
+            first, second,
+            "the same key in two sessions must not sign the same bytes"
+        );
+
+        // Stronger than "the bytes differ": the first session's signature must
+        // actually fail against the second session's blob.
+        let key_blob = sshwire::ed25519_public_blob(&RFC_8032_PUBLIC);
+        let other_signed = sshwire::pubkey_signed_blob(
+            &[0x22; 32],
+            b"alice",
+            b"ssh-connection",
+            b"ssh-ed25519",
+            &key_blob,
+        );
+        let (_, off) = read_ssh_string(&first, 1).expect("user");
+        let (_, off) = read_ssh_string(&first, off).expect("service");
+        let (_, off) = read_ssh_string(&first, off).expect("method");
+        let (_, off) = read_byte(&first, off).expect("flag");
+        let (_, off) = read_ssh_string(&first, off).expect("algorithm");
+        let (_, off) = read_ssh_string(&first, off).expect("key blob");
+        let (sig_blob, _) = read_ssh_string(&first, off).expect("signature blob");
+        let (_, soff) = read_ssh_string(sig_blob, 0).expect("signature algorithm");
+        let (signature, _) = read_ssh_string(sig_blob, soff).expect("signature");
+
+        assert!(
+            !posix::ed25519::verify_slices(&RFC_8032_PUBLIC, &other_signed, signature),
+            "a signature from one session verified in another: it is not bound to the session"
+        );
+    }
+
+    #[test]
+    fn a_request_for_one_account_does_not_authenticate_another() {
+        let id = test_identity();
+        let alice = id.auth_request(b"alice", b"ssh-connection", &[0x11; 32]);
+        let root = id.auth_request(b"root", b"ssh-connection", &[0x11; 32]);
+        assert_ne!(alice, root);
+
+        let key_blob = sshwire::ed25519_public_blob(&RFC_8032_PUBLIC);
+        let as_root = sshwire::pubkey_signed_blob(
+            &[0x11; 32],
+            b"root",
+            b"ssh-connection",
+            b"ssh-ed25519",
+            &key_blob,
+        );
+        let (_, off) = read_ssh_string(&alice, 1).expect("user");
+        let (_, off) = read_ssh_string(&alice, off).expect("service");
+        let (_, off) = read_ssh_string(&alice, off).expect("method");
+        let (_, off) = read_byte(&alice, off).expect("flag");
+        let (_, off) = read_ssh_string(&alice, off).expect("algorithm");
+        let (_, off) = read_ssh_string(&alice, off).expect("key blob");
+        let (sig_blob, _) = read_ssh_string(&alice, off).expect("signature blob");
+        let (_, soff) = read_ssh_string(sig_blob, 0).expect("signature algorithm");
+        let (signature, _) = read_ssh_string(sig_blob, soff).expect("signature");
+
+        assert!(
+            !posix::ed25519::verify_slices(&RFC_8032_PUBLIC, &as_root, signature),
+            "alice's signature authenticated root: the user name is not bound"
+        );
+    }
+
+    // ---- whether to prompt for a password at all ----
+
+    #[test]
+    fn the_method_list_is_read_as_a_list_and_not_as_text() {
+        assert!(offers_password("publickey,password"));
+        assert!(offers_password("password"));
+        assert!(
+            offers_password("publickey, password"),
+            "a server that pads the list still offers the method"
+        );
+        assert!(!offers_password("publickey"));
+        assert!(!offers_password(""));
+        // The reason this is a split rather than `contains`: these name other
+        // methods, and prompting for a password on either would be asking the
+        // user for a secret the server never offered to accept.
+        assert!(!offers_password("gssapi-with-password"));
+        assert!(!offers_password("keyboard-interactive,password-expired"));
+    }
+}

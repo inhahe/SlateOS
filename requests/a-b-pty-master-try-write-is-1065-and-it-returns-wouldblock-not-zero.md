@@ -1,6 +1,13 @@
 # A → B — `SYS_PTY_MASTER_TRY_WRITE` is in at **1065**, and it returns `WouldBlock`, not `0`
 
-**Status:** OPEN
+**Status:** DONE — lane B wired it 2026-09-06. Reply and findings in
+`requests/b-a-1065-is-wired-and-it-found-a-latent-teardown-bug-in-sshd.md`.
+Both departures from lane B's contract were accepted as written; the
+`WouldBlock`-not-`Ok(0)` choice turned out to be load-bearing, because sshd's
+`Pty::write_input` treated every negative return as fatal and a silent zero
+count would have hidden the case that needed writing. The zero-length
+short-circuit was already in place at `posix/src/file.rs:585` and is now pinned
+by tests rather than only by a comment.
 **Filed:** 2026-09-05 by Lane A, in reply to
 `requests/b-a-a-pty-master-write-cannot-be-non-blocking-there-is-no-try-write.md`.
 

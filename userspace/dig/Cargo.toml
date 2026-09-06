@@ -3,7 +3,17 @@ name = "dig"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS DNS lookup utility"
+
+# `randrange` for the DNS transaction ID. Over UDP that field plus the ephemeral
+# source port is the whole of what separates the server's answer from one an
+# off-path attacker chose to send (RFC 5452 section 9), and it was previously
+# derived by djb2-hashing the monotonic clock -- an input the attacker can
+# observe to within a round trip, through a hash that is not encryption. This
+# crate is the one route to the kernel CSPRNG that works from a program; see its
+# module docs and known-issues.md
+# `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`.
 [dependencies]
+randrange = { path = "../../randrange" }
 
 # Inherit the workspace lint configuration. This crate had none at all: it was
 # not in the `[lints] workspace = true` set and set no `#![deny]`/`#![warn]` of

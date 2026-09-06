@@ -55411,3 +55411,29 @@ that used to be listed had nothing to bind them to and were removed:
 
 Put the rows back -- with a `Command` each -- when either prerequisite lands.
 Restoring one is two lines in the table plus an arm in `run`.
+
+## su -: the login-shell argv[0] convention is not implemented (lane B, 2026-09-06)
+
+A shell decides whether to read its login profile by looking at its own
+`argv[0]`: a leading `-` (`-bash`, `-sh`) means "login shell". `su -` is
+supposed to arrange that.
+
+`exec_as_user` in `userspace/su/src/main.rs` used to compute exactly that
+string -- `format!("-{base}")` from the shell's basename -- and then drop it on
+the floor, because `std::process::Command` sets `argv[0]` to the program path
+and offers no way to override it. The value was never passed to anything. Its
+own comment said so ("the login-shell convention is best-effort"), which is
+how it survived being read.
+
+The computation is now deleted rather than left in place, because a dead
+computation reads as a working feature to the next person, and `su -` failing
+to run `/etc/profile` is a real bug that it was hiding. What is *not* fixed is
+the behaviour: `su -` still starts a shell that does not know it is a login
+shell.
+
+The fix needs an exec that takes `argv[0]` separately from the program path.
+`SYS_PROCESS_SPAWN_EX2` does; `std::process::Command` does not. Either call it
+directly here, or -- better, since `login`, `sshd` and `getty` all want the
+same thing -- add a small helper next to `posix`'s process spawn that takes
+(program, argv0, args) and use it from all four. Do this when one of the other
+three needs it, so the helper is shaped by more than one caller.

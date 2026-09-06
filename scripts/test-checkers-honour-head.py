@@ -660,11 +660,19 @@ def case_gate3_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
 # finding in a single edit.
 #
 # What it reads from a tree, and therefore what has to be made to differ: the
-# `.rs` sources under `userspace/coreutils`, *which* `.rs` files are there at
-# all, the baseline, and -- outside `--check` -- the survey of everything else
-# under `userspace/`. Four inputs, four cases; a checker converted for the
-# first three and left reading the disk for the fourth would pass a suite that
-# only tested contents.
+# `.rs` sources under `userspace/`, *which* `.rs` files are there at all, the
+# baseline, the `Cargo.toml` of every crate -- which is what decides whether a
+# crate is in scope at all -- and, outside `--check`, the survey of the crates
+# that are not. Five inputs, five cases; a checker converted for four of them
+# and left reading the disk for the fifth would pass a suite that only tested
+# contents.
+#
+# The manifests are the input added on 2026-09-05, when the gate stopped being
+# "the `userspace/coreutils` directory" and became "every crate that does not
+# declare itself unimplemented by depending on `userspace/notimpl`". That moved
+# a decision about *scope* into file contents, which is the one kind of input
+# whose disk-vs-revision disagreement is completely silent: the gate does not
+# report a crate it never judged.
 #
 # The checker loads `strip_comments_and_strings` out of `raced-globals.py`
 # through `srcload.py`, so both are installed alongside it. In the end-to-end
@@ -691,6 +699,12 @@ fn main() {
 
 _AU_BASELINE = "# nothing known-panicking yet\n"
 
+# The manifest that puts a crate *out* of scope, and the one that leaves it in.
+# The declaration is a dependency on `userspace/notimpl`; anything else --
+# including no `[dependencies]` at all -- is a crate the gate judges.
+_CARGO_STUB = '[package]\nname = "s"\n\n[dependencies]\nnotimpl = { path = "../notimpl" }\n'
+_CARGO_REAL = '[package]\nname = "s"\nversion = "0.1.0"\n'
+
 # The finding the fixtures below argue about, spelled the way the baseline
 # spells it: `<path>:<rule>`.
 _AU_KEY = "userspace/coreutils/src/bin/tool.rs:argv-as-string"
@@ -704,6 +718,11 @@ def _argv_repo(tmp: str, name: str) -> str:
     "the checker found nothing" can never be reached by the checker finding no
     *files*, which is the way this gate would fail silently if the enumeration
     were ever pointed at the wrong tree or the wrong prefix.
+
+    `coreutils` is given no `Cargo.toml` on purpose. A crate is out of scope
+    only if it *says* it is unimplemented, so a crate with no manifest at all
+    is judged -- and the fixture that relies on that is the one that proves the
+    default is the safe direction rather than a lucky accident.
     """
     root = new_repo(tmp, name, _G4_CHECKERS)
     write(root, "scripts/argv-utf8-baseline.txt", _AU_BASELINE)
@@ -836,8 +855,13 @@ def case_gate4_the_ungated_survey_reads_the_same_tree(tmp: str) -> None:
     prints a number about a tree nobody is publishing, and both runs still exit
     0. The bare run is what a human uses, so a wrong number here is a wrong
     number in the only place anyone reads it.
+
+    The stub has to *declare* itself one, or it is not outside the gate at all
+    -- it is a crate with a panicking bin in it, and the run that was supposed
+    to report a number would refuse the push instead.
     """
     root = _argv_repo(tmp, "g4j")
+    write(root, "userspace/stub/Cargo.toml", _CARGO_STUB)
     write(root, "userspace/stub/src/main.rs", _ARGV_PANIC)
     sha = commit(root)
     remove(root, "userspace/stub/src/main.rs")
@@ -851,6 +875,96 @@ def case_gate4_the_ungated_survey_reads_the_same_tree(tmp: str) -> None:
     check("gate 4: the commit does, and it is counted",
           "1 finding(s) in 1 file(s) under userspace, outside the gate"
           in disk.stdout + rev.stdout, True)
+
+
+def case_gate4_the_scope_declaration_is_read_from_the_same_tree(tmp: str) -> None:
+    """The fifth input: which crates are judged at all.
+
+    Since 2026-09-05 a crate is out of scope only if its `Cargo.toml` depends
+    on `userspace/notimpl`. That is a *scope* decision taken from file
+    contents, and it is the most silent input this gate has: every other one
+    fails by reporting the wrong thing, while this one fails by reporting
+    nothing about a crate it decided not to look at. A checker reading
+    manifests from the disk and sources from the revision would find the
+    panicking bin, ask the disk whether its crate counts, be told no, and pass.
+
+    The fixture is the edit that actually happens: a stub being fleshed out
+    into a program. The commit deletes the `notimpl` dependency and puts a
+    panicking `main` in -- so the commit must be refused -- while the working
+    tree still carries the old manifest, under which there is nothing to judge.
+
+    Both directions, because the pair is what pins it. The reverse fixture --
+    the declaration added in the commit and absent from the disk -- is the one
+    that catches a checker reading manifests from the revision but *ignoring*
+    them, which the forward case alone cannot see.
+    """
+    root = _argv_repo(tmp, "g4n")
+    write(root, "userspace/tool/Cargo.toml", _CARGO_STUB)
+    write(root, "userspace/tool/src/main.rs", _ARGV_OK)
+    commit(root, "a stub, declared")
+    write(root, "userspace/tool/Cargo.toml", _CARGO_REAL)
+    write(root, "userspace/tool/src/main.rs", _ARGV_PANIC)
+    sha = commit(root, "fleshed out, and it reads argv as String")
+    # The disk goes back to the manifest that exempts it, keeping the source
+    # the commit added: the *only* thing that differs between the two trees'
+    # verdicts is which manifest was read.
+    write(root, "userspace/tool/Cargo.toml", _CARGO_STUB)
+
+    disk = run_checker(root, "argv-utf8.py", "--check")
+    rev = run_checker(root, "argv-utf8.py", "--check", "--head", sha)
+    check("gate 4: the disk's manifest still exempts the crate",
+          disk.returncode, 0)
+    check("gate 4: the commit's does not, and the push is refused",
+          rev.returncode, 1)
+    check("gate 4: ...naming the crate the disk excused",
+          "userspace/tool/src/main.rs" in rev.stdout.replace("\\", "/"), True)
+
+    # The other direction: exempted in the commit, judged on the disk.
+    root = _argv_repo(tmp, "g4o")
+    write(root, "userspace/tool/Cargo.toml", _CARGO_REAL)
+    write(root, "userspace/tool/src/main.rs", _ARGV_PANIC)
+    commit(root, "a program that panics")
+    write(root, "userspace/tool/Cargo.toml", _CARGO_STUB)
+    sha = commit(root, "declared unimplemented after all")
+    write(root, "userspace/tool/Cargo.toml", _CARGO_REAL)
+
+    disk = run_checker(root, "argv-utf8.py", "--check")
+    rev = run_checker(root, "argv-utf8.py", "--check", "--head", sha)
+    check("gate 4: the disk judges the crate its manifest puts in scope",
+          disk.returncode, 1)
+    check("gate 4: the commit's declaration takes it out, and passes",
+          rev.returncode, 0)
+
+
+def case_gate4_a_declaration_in_the_wrong_table_does_not_exempt(tmp: str) -> None:
+    """The scope rule's own edge, end to end rather than in the self-test.
+
+    `--selftest` rule 8 pins `declares_stub` on manifest text, which is where
+    the reasoning lives. What it cannot see is the wiring: a checker that
+    grepped the manifest for the crate name instead of calling that predicate
+    would pass every self-test rule and still let any crate leave the gate by
+    adding four characters to `[dev-dependencies]` -- a table no reviewer reads
+    for scope, because it has never meant anything about scope.
+
+    So this asserts the predicate is what actually decides, through the same
+    entry point the hook uses.
+    """
+    root = _argv_repo(tmp, "g4p")
+    write(root, "userspace/tool/Cargo.toml",
+          '[package]\nname = "s"\n\n'
+          '[dev-dependencies]\nnotimpl = { path = "../notimpl" }\n')
+    write(root, "userspace/tool/src/main.rs", _ARGV_PANIC)
+    sha = commit(root)
+
+    rev = run_checker(root, "argv-utf8.py", "--check", "--head", sha)
+    check("gate 4: a dev-dependency on notimpl does not exempt a crate",
+          rev.returncode, 1)
+
+    # The control: the same line in the table that does mean it.
+    write(root, "userspace/tool/Cargo.toml", _CARGO_STUB)
+    sha = commit(root, "declare it properly")
+    rev = run_checker(root, "argv-utf8.py", "--check", "--head", sha)
+    check("gate 4: ...and a real dependency on it does", rev.returncode, 0)
 
 
 def case_gate4_build_output_is_skipped_on_the_side_that_can_see_it(tmp: str) -> None:
@@ -3937,6 +4051,8 @@ CASES = (
     case_gate4_a_file_absent_from_the_disk_is_still_judged,
     case_gate4_the_stale_half_of_the_ratchet_describes_the_commit,
     case_gate4_the_ungated_survey_reads_the_same_tree,
+    case_gate4_the_scope_declaration_is_read_from_the_same_tree,
+    case_gate4_a_declaration_in_the_wrong_table_does_not_exempt,
     case_gate4_build_output_is_skipped_on_the_side_that_can_see_it,
     case_gate4_a_tree_with_no_gated_sources_is_not_a_clean_tree,
     case_gate4_a_baseline_absent_from_the_tree_is_not_four_new_findings,
@@ -4031,9 +4147,9 @@ CASES = (
 def main() -> int:
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes. Assert a floor, as the sibling suites do.
-    if len(CASES) < 117:
+    if len(CASES) < 119:
         print(f"FATAL: only {len(CASES)} cases registered; the suite has at "
-              f"least 117. The list is broken, not the code.")
+              f"least 119. The list is broken, not the code.")
         return 1
     # ...and each converted gate must be represented, through the real hook as
     # well as directly. A floor on the count alone would be met by any number of
@@ -4074,8 +4190,17 @@ def main() -> int:
     # So: when the next checker is converted, raise the overall floor and add
     # its row here. Do not add a row for a gate whose cases do not exist yet to
     # make the table look complete; add the cases, and the floor with them.
+    #
+    # A floor also rises when an existing gate gains an *input*, which is why
+    # gate 4 reads 15 rather than 13. On 2026-09-05 its scope stopped being the
+    # `userspace/coreutils` directory and became "every crate that does not
+    # declare itself unimplemented by depending on `userspace/notimpl`", which
+    # moved a decision about scope into file contents -- the one kind of input
+    # whose disk-vs-revision disagreement is completely silent, because the gate
+    # does not report a crate it never judged. The two cases that cover it are
+    # held down here for the same reason as every other number in this table.
     for gate, floor, e2e_floor in (("gate2", 10, 3), ("gate3", 13, 4),
-                                   ("gate4", 13, 3), ("gate5", 7, 3),
+                                   ("gate4", 15, 3), ("gate5", 7, 3),
                                    ("gate6", 14, 3), ("gate8", 14, 3),
                                    ("gate9", 9, 3), ("gate11", 11, 3),
                                    ("gate13", 12, 3), ("gate14", 14, 4)):

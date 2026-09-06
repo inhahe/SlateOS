@@ -53,5 +53,45 @@ sshwire = { path = "../sshwire" }
 # modes (the process just exits)". For a network client a panic reachable from
 # a server's bytes is a remote denial of service, not a tidy exit.
 # See known-issues.md `TD-B-USERSPACE-CRATES-DO-NOT-INHERIT-THE-WORKSPACE-LINTS`.
+# Test-only. `-o UserKnownHostsFile=` is tested against a real file, and a real
+# file in a test needs a private directory that goes away afterwards — the
+# alternative being a clock-named temp path, which is not unique and which only
+# gets cleaned up when the test passes. See that crate's module docs.
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }
+
+# `deterministic-secrets` exposes `SshSession::with_secret_source`, which lets a
+# caller replace the source this client draws its Diffie-Hellman exponent,
+# KEXINIT cookie and packet padding from.
+#
+# It is a Cargo feature rather than a plain `pub fn` because a feature is
+# *absent* from a build that does not ask for it, and the only thing that asks
+# is the interop test crate, through its `dev-dependencies`. A release artifact
+# does not compile dev-dependencies, so it does not contain this method at all
+# -- a stronger statement than "nothing calls it", and the right strength for a
+# method whose misuse is a client negotiating a key an observer can predict.
+# `cfg(test)` cannot serve here because it is per-crate, and the interop test is
+# a different crate.
+#
+# Nothing in any crate's `[dependencies]` enables it, so no ordinary build can
+# turn it on through feature unification.
+[features]
+deterministic-secrets = []
+
+# This crate is a library with a three-line binary on top, and the split is
+# load-bearing rather than cosmetic: a binary crate has no rlib for another
+# crate to link, so while the client was a `main.rs` no test could drive it
+# against the real server. Six bugs have now come out of the two ends of this
+# protocol disagreeing while each end's own suite passed. See the library's
+# module docs and known-issues.md
+# `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.
+[lib]
+name = "ssh"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ssh"
+path = "src/main.rs"
+
 [lints]
 workspace = true

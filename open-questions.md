@@ -2548,6 +2548,128 @@ undo.
 that a single-crate compile can block for nine minutes on directory listing
 alone. I have not changed any setting or moved anything.
 
+## The test machine cannot produce random numbers, on purpose, and about eighteen tests in the apps now depend on that. Should it start? (lane B, 2026-09-05)
+
+**In short:** Every part of this OS that needs an unpredictable number — a
+password, an encryption key, which card comes next — asks one small library,
+`randrange`. On SlateOS it asks the kernel and gets real randomness. On the
+Windows machine we run the tests on, it has always refused to produce any, and
+that refusal was deliberate: with no randomness available, a test can watch the
+security code *decline to invent a fake secret*, which is the single most
+important thing it does. I have a working change that gives the test machine
+real randomness (Windows has offered it since Vista) and reproduces that
+refusal a better way, by handing the code a stand-in that says no — which then
+also gets tested on SlateOS itself, where it never was before. The change is
+finished, tested and parked on a branch; I have not landed it. **The problem is
+that "the test machine has no randomness" turned out to be load-bearing in
+somebody else's tree:** roughly eighteen tests across seventeen of lane C's
+apps are written to check for it, and they go red. They are in a folder I am
+forbidden to write to, and the convention is a documented one rather than an
+accident, so I am not willing to overturn it by myself.
+
+**Nothing about the shipped OS changes either way.** The new code is compiled
+only for the Windows test host; the SlateOS build is byte-for-byte what it was.
+This is entirely a question about what our tests are allowed to assume.
+
+### Why I wanted the change
+
+- **`userspace/ssh` has four tests that fail on every single run** — the
+  Diffie-Hellman private exponent and the KEXINIT cookie (both just "an
+  unpredictable number the handshake needs") cannot be drawn on the host, so
+  four tests of genuinely real properties fail for one irrelevant reason. A
+  suite with four permanently-red tests is a suite in which nobody notices the
+  fifth.
+- **The SSH client-against-server test cannot be written at all.** We have the
+  same wire protocol implemented twice, in `userspace/ssh` and
+  `userspace/sshd`, and nothing checks that the two copies agree. Nine places
+  where they had silently drifted apart have been found so far — *every one of
+  them by reading the code, none by a test*. The fix is a test that runs the
+  real client against the real server in one process; a handshake needs an
+  unpredictable exponent; with no randomness there is no exponent and no
+  handshake.
+- **The no-randomness branch was being tested on the one platform SlateOS is
+  not.** The code that decides what a game does when the kernel's randomness
+  call fails ran only in the Windows suite and never on the target. That is the
+  same accident wearing the other hat.
+
+### What it breaks
+
+These tests assert, in one form or another, "asking the system for randomness
+here produces the fallback constant, because this machine has none." That
+sentence stops being true.
+
+| Where | Shape |
+|---|---|
+| `apps/dots`, `apps/flashcards` | assert a fresh game's seed **equals** the named fallback constant |
+| `apps/wordle`, `apps/videoplayer`, `apps/radio`, `apps/memory`, `apps/lightsout`, `apps/match3`, `apps/pipes`, `apps/tetris`, `apps/musicplayer`, `apps/hangman`, `apps/speedtest` | a `#[cfg(not(unix))]` test — i.e. one that exists *only* on the Windows host — whose subject is that the host declines |
+| `gui/desktop` (wallpaper, ×2), `gui/credentials` (×2) | same shape; `gui/credentials` asserts the password generator refuses when the kernel is out of reach |
+| `apps/battleship`, `apps/freecell` | still **pass** (they assert *inequality*), but their comments and their mutation-testing harnesses (`mutate.py`) now describe something false |
+
+Every one of them has a strictly better replacement that works on both
+platforms — assert the fresh value differs from a named seed
+(`assert_ne!(fresh, with_seed(42))`) rather than that it equals the fallback —
+so this is rework, not loss. But it is roughly eighteen edits in `apps/**` and
+`gui/**`, which lane B may never write to.
+
+`apps/battleship` is worth singling out because its own history says this
+plainly. `roadmap.md` records fault (15) of its window-wiring pass as:
+`randrange`'s fallback *was* the very constant the bug used, "so on any machine
+with no kernel randomness to open the ships still stood exactly where the bug
+put them — the fault moved rather than fixed, and invisible to every test run
+off Slate OS." A test that passes only because the host cannot produce
+randomness is testing the host.
+
+### The options
+
+**A — Land it; lane C rewrites its eighteen tests.**
+*What changes:* the test machine produces real randomness; four red tests in
+`userspace/ssh` go green; the client-against-server test becomes possible;
+eighteen tests in `apps/` and `gui/` go red until lane C converts them to the
+`assert_ne!` form. I would file the request and the list; lane C does the work
+in its own tree. `main` stays red in between unless lane C moves first.
+
+**B — Put it back; the test machine stays unable to produce randomness.**
+*What changes:* nothing moves. `userspace/ssh` keeps four permanently-failing
+tests, the two-copies-of-SSH problem keeps being found by reading rather than
+by testing, and the "what happens when the kernel says no" branch keeps being
+tested only on the platform we do not ship.
+
+**C — Land it, and lane B fixes lane C's tests itself, then tells lane C.**
+*What changes:* same as A, but `main` never goes red, at the cost of lane B
+writing eighteen tests inside lane C's forbidden globs. There is a precedent
+(`requests/a-b-i-edited-two-of-your-diff-harnesses-to-unred-main.md`, lane A
+editing lane B's files to un-red `main`), but that was a two-token fix in a
+shared script; this is eighteen tests deep inside another lane's tree, which is
+exactly what the lane split exists to prevent.
+
+### What I am doing regardless of your answer
+
+**Not waiting on this.** The SSH interoperability test does not actually need
+the host to have randomness — it needs *the SSH code* to accept a
+randomness source as a parameter, which is a better design anyway and is
+entirely inside lane B. I am threading an injectable byte source through
+`SshSession` and `ConnectionState` (three uses: the DH exponent, the KEXINIT
+cookie, the per-packet padding). That fixes the four red `userspace/ssh` tests
+*and* makes the handshake deterministic, so the interop test can assert the
+exact session identifier both ends derive rather than merely that they agree.
+So this question gates nothing; it is about whether the rest of the tree gets
+the same benefit.
+
+### My recommendation
+
+**A.** The eighteen tests assert something that is false about the machine we
+actually ship to, and they cost us the ability to test anything that consumes a
+secret. The replacement assertion is better on its own terms — it works on both
+platforms and it is what those tests were reaching for anyway. C is A with the
+lane rule bent to save lane C a chore, and I would rather not set that
+precedent for eighteen files.
+
+**If this is never answered:** nothing degrades and nothing is at risk — the
+change stays on branch `lane-b-randrange-entropy`, unmerged, and `lane-b` and
+`main` are unaffected. The cost is ongoing rather than sudden: every future test
+of anything that needs a secret has to work around a host that cannot produce
+one, and the SSH duplication keeps being caught by reading.
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

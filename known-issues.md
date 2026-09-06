@@ -262,6 +262,8 @@ walking the real string and therefore only ever returns offsets into it:
 
 | App | Site |
 |---|---|
+| `whiteboard` | drawing tools, layers, pages, undo, sticky notes | events. `on_canvas_press`/`move`/`release`/`scroll` and `start_pan` were all written and none was called, and `Tool::shortcut` named a letter per tool that nothing dispatched on | `None` -- nothing on a board moves on its own |
+| `photomanager` | albums, EXIF, ratings, tags, smart albums, duplicates | any input at all, and a scroll offset: the grid cut itself off at the window edge with no offset to move, so a library of four hundred photos showed the first screenful and hid the rest for good | `SLIDESHOW_TICK` while a slideshow runs |
 | `videoplayer` | playback, playlist, chapters, subtitles, equalizer | any input at all -- and it drew a **Keyboard Shortcuts** tab listing thirty-two keys, none of which were bound to anything, because the file did not import `guitk::event` | `FRAME_TICK` while playing or a message is expiring |
 | `podcast` | subscriptions, playback, downloads, queue, search, OPML | any input at all. The file did not import `guitk::event`: there was no key handler and no click handler, so every one of those features was reachable only from a test | `PLAYBACK_TICK` while playing or downloading |
 | `ebook` | `find_all_matches` |
@@ -57391,7 +57393,7 @@ and that is exactly the shape that survives a reading.
 screenful of information that is a constant compiled into the program. The
 drawing is real, the filtering and sorting and searching are real, the parsing
 is real — and there is no source. This entry names the pattern, because it has
-now been found twelve times and writing it up twelve times separately would train
+now been found fourteen times and writing it up fourteen times separately would train
 the reader to skim it.
 
 **`email` is the sharpest case and the least fixable today.** The client is
@@ -59164,6 +59166,27 @@ being absorbed into the daemon's memory — and, because a `write` to a master
 does not honour `O_NONBLOCK` (there is no `SYS_PTY_MASTER_TRY_WRITE`), the
 readiness check is what stops one uninterested process from freezing the whole
 daemon.
+
+> **Amended 2026-09-06.** The second half of that sentence no longer holds, and
+> the readiness check it justified is gone. Lane A built the missing call —
+> `SYS_PTY_MASTER_TRY_WRITE` is **1065**
+> (`requests/a-b-pty-master-try-write-is-1065-and-it-returns-wouldblock-not-zero.md`)
+> — so `posix::write` now routes a master fd carrying `O_NONBLOCK` to it, `Pty`
+> sets that flag on the master alongside the pipes, and `pump_channel_input`
+> writes without polling first. The poll was never able to do the job claimed
+> for it: it reported that there *was* room, and another writer on a dup'd
+> master could take it before the write landed. The check and the transfer now
+> happen under one lock inside the kernel, so the write's own return is the only
+> non-racy reading of the destination.
+>
+> One thing had to be fixed in the same change or the flag would have been
+> actively harmful: `Pty::write_input` treated every negative return as a fatal
+> error, and a terminal's input half failing tears down the whole session
+> because one descriptor carries both directions. That was safe only while
+> `EAGAIN` was unreachable there. With the flag set, a shell that had merely
+> stopped reading for a moment would have been read as a dead session and hung
+> up mid-keystroke. It now returns `Ok(0)` for `EAGAIN`, exactly as the pipe
+> path always has.
 
 **5. Ending a session waits for both halves.** The channel closes only once the
 process has exited *and* the terminal has run dry — tracked as two separate
@@ -64828,8 +64851,10 @@ tool, the tool is right.
 
 **Every conversion has uncovered unrelated bugs in the `main` it
 replaced** — three in `rm`, four in `mv`, six in `cp`, four in `ln`, four in
-`mkdir`, nine in `ed`, none of
-them about UTF-8. In the first five, all of them were in code that no test touched. `ed` broke that half of the pattern and kept the other half — it had 35 unit tests and all nine defects survived them (see its section below) — which sharpens the claim rather than weakening it: the marker is not "no tests", it is *no test of the observable behaviour*. That is the argument for converting these
+`mkdir`, nine in `ed`, and five in `sudo` (2026-09-06, outside coreutils but
+the same pattern — see
+`TD-B-SUDO-DIED-BEFORE-ITS-FIRST-STATEMENT-ON-A-NON-UTF-8-COMMAND-LINE`), none of
+them about UTF-8. In the first five, all of them were in code that no test touched. `ed` broke that half of the pattern and kept the other half — it had 35 unit tests and all nine defects survived them (see its section below) — which sharpens the claim rather than weakening it: the marker is not "no tests", it is *no test of the observable behaviour*. `sudo` is the sharpest instance so far, because three of its five are exploitable by an unprivileged local user. That is the argument for converting these
 files properly rather than mechanically swapping `env::args()` for
 `env::args_os()`: the defect is a marker for *untested `main`*, and the panic
 is only the part of that a checker can see.
@@ -118916,9 +118941,13 @@ the client had not sent yet.
 **Verified:** 7 new tests, 191 passing in `cargo test -p sshd`, clippy clean.
 The keepalive test asserts the exact bytes an OpenSSH probe gets back.
 
-## TD-B-SSHD-DOES-NOT-REKEY-SO-A-LONG-SESSION-HANGS (lane B)
+## TD-B-SSHD-DOES-NOT-REKEY-SO-A-LONG-SESSION-HANGS (lane B) — FIXED 2026-09-05
 
-**Status:** OPEN. Found 2026-09-05 while fixing the global-request entry above.
+**Status:** FIXED. Found 2026-09-05 while fixing the global-request entry above;
+all five numbered steps below are done, on `lane-b`. The code lives in
+`userspace/sshd/src/lib.rs` and `userspace/ssh/src/lib.rs` — the pointers to
+`main.rs` further down are from when this was written and are wrong; `sshd`'s
+`main.rs` is a sixteen-line shim over the library.
 
 **In short:** SSH periodically renegotiates its encryption keys, on a timer and
 by volume of data. Our server never does, and — worse — ignores the client when
@@ -118973,11 +119002,49 @@ Implement server-side rekeying. Concretely:
 The sequence numbers do **not** reset across a rekey, which the existing
 `recv_seq`/`send_seq` handling already gets right.
 
-### Until then
+### What was actually done
 
-The `KEXINIT` arm logs `client requested rekey (KEXINIT); unsupported, ignoring`
-in debug mode, which at least makes a stalled session diagnosable instead of
-inexplicable. That is a diagnostic, not a fix.
+All five, in two commits.
+
+Steps 1–4 (`userspace/sshd/src/lib.rs`): the handshake was split into
+`run_key_exchange`, which runs against an already-encrypted connection as
+happily as a fresh one; `do_rekey` is the entry the `SSH_MSG_KEXINIT` dispatch
+arm now calls instead of logging. The session id is kept with `get_or_insert`,
+so only the first exchange sets it (§7.2). `PacketCodec::activate` swaps each
+direction's cipher and MAC independently at the packet after its own `NEWKEYS`,
+and deliberately does *not* reset the sequence numbers.
+
+A detail that was not in the plan above and that §11.2 requires: a key exchange
+must tolerate `SSH_MSG_IGNORE` and `SSH_MSG_DEBUG` arriving in the middle of it,
+and report `SSH_MSG_DISCONNECT` as a disconnection rather than as "expected
+`KEX_DH_REPLY`". OpenSSH sends `IGNORE` at arbitrary points under
+`ObscureKeystrokeTiming`, so without this the fix would have failed against the
+most common client for a reason it would have blamed on that client. Both ends
+grew a `recv_during_kex` for this.
+
+Step 5 (the same file, plus `userspace/ssh/src/lib.rs`): `rekey_is_due` is
+checked at the top of `handle_channels`, against a gibibyte of traffic under the
+current keys (`PacketCodec::bytes_under_current_keys`, the larger of the two
+directions — they have separate keys) or an hour since they were installed
+(`keys_installed_at`, set in `run_key_exchange` where a key's life begins).
+`start_rekey` sends our `KEXINIT` and then has to buffer the client's in-flight
+channel data for one round trip, because §7.1 gags a peer once *it* has sent
+`KEXINIT`, not once it has received one; that buffer is bounded at 64 packets
+and a client exceeding it is disconnected rather than silently truncated.
+
+Shipping step 5 alone would have *introduced* this same hang in the other
+direction, against our own client: the `ssh` client had no arm for an
+unsolicited `KEXINIT` either. It has one now (`SshSession::do_rekey`), in the
+same change. The client needs no in-flight buffer — anything the server sent
+before its `KEXINIT` is earlier in the byte stream and already dispatched.
+
+Both directions are exercised end to end in `userspace/ssh-interop`
+(`the_client_can_rekey_an_established_session_and_the_daemon_serves_it` and
+`the_daemon_can_rekey_an_established_session_and_the_client_serves_it`), each
+running two rekeys rather than one: the second travels under the first's keys,
+so a rekey that derived different keys at the two ends cannot be read at all
+instead of passing quietly and failing later as a MAC error on unrelated
+traffic.
 
 ## TD-B-SSHD-SIGNS-AN-EXCHANGE-HASH-OVER-A-CLIENT-VERSION-THE-CLIENT-NEVER-SENT (lane B) — FIXED 2026-09-05
 
@@ -119092,7 +119159,17 @@ below.
 
 ## TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE (lane B)
 
-**Status:** PARTLY FIXED, 2026-09-05. **Items 1–3 below are done.** Nothing in
+**Status:** FIXED, 2026-09-05. **All four items below are done.** Item 4 — the
+interop test, the one that matters most and the reason this entry existed — is
+`userspace/ssh-interop`, which links both peers as dev-dependencies, joins them
+with `sshwire::memory_pair()`, runs each on its own thread and asserts they
+derive the same RFC 4253 §7.2 session identifier from the same transcript. It
+also pins that identifier to a recorded constant, because agreement alone cannot
+see a change both ends make together — which is the exact state this stack was
+in when the server hashed a placeholder client version and its own tests,
+recomputing the hash the same wrong way, agreed with it. See the closing note.
+
+**Items 1–3 are done.** Nothing in
 the wire and transport layer is written twice any more: encoders, decoders, the
 identification line, the key-exchange arithmetic, the transport crypto and — as
 of the last change — the RFC 4253 §6 packet framing all live in
@@ -119106,10 +119183,9 @@ for the two faults that move fixed, and
 `TD-B-THE-AES-CTR-COUNTER-IS-REUSED-BY-THE-CLIENT-AND-INVENTED-BY-THE-SERVER`
 for the confidentiality bug that drove the crypto across.
 
-**Item 4 — an interop test — is untouched, and is the item that matters most**;
-see the note at the end. `PacketCodec` narrows the gap slightly on its own:
-`what_one_end_encodes_the_other_end_decodes` is the first test in this stack
-that runs one end against the other rather than against its own output. It
+`PacketCodec` narrowed the gap slightly on its own before item 4 landed:
+`what_one_end_encodes_the_other_end_decodes` was the first test in this stack
+that ran one end against the other rather than against its own output. It
 covers the framing only, not the state machines above it.
 
 Filed 2026-09-05 alongside the fix above, which is the first bug this
@@ -119138,6 +119214,33 @@ result was a server no client could connect to.
 | `build_packet`, `read_packet`, `try_parse_packet` | RFC 4253 §6 framing | shared, as the stateful `PacketCodec` — **the third bug this arrangement produced**, two faults in the server's decoder |
 | `BigUint` and its fourteen methods | RFC 4253 §8 key-exchange arithmetic | shared — **the fourth bug**, a pre-auth denial of service in the server |
 | the group-14 prime and generator | RFC 3526 §3 | shared as `DH_GROUP14_P_HEX` — 512 hex digits that were transcribed twice and checked never |
+| the KEXINIT cookie (RFC 4253 §7.1) | each end's only unpredictable contribution to `H` | **the fifth bug** — see below; the source is now shared as `sshwire::SecretSource`, the cookie itself is per-connection and stays each end's own |
+
+**The fifth bug: neither end's KEXINIT cookie was random.** RFC 4253 §7.1 wants
+sixteen random bytes because both KEXINIT payloads in full are fields of the
+exchange hash, so the cookie is the only thing each end contributes that the
+other cannot predict — the mechanism that stops either end steering `H` on its
+own. `ssh` sent sixteen zero bytes. `sshd` sent
+`sha256(b"sshd-kex-cookie")[..16]`, one constant compiled into the binary and
+identical on every connection it had ever served, with a comment calling it
+"pseudo-random". The client's was fixed on 2026-09-04; the comment left behind
+there says the constant "gave that power to the server alone", written on the
+assumption that the server's cookie was real. It was not, so `H` was a function
+of the two DH public values alone.
+
+This is the second fault of the shape *a fix reached one copy and had no way to
+reach the other* — the first being the wire readers, which sshd carried in
+their un-hardened form long after the client's had been rewritten. It is the
+shape that most argues for item 4: a test that ran the two ends together would
+not have caught this one either (both ends accept any cookie), but the class of
+"I fixed the client, and believed something about the server that I had not
+read" is exactly what an interop test makes impossible to sustain.
+
+sshd's test for this asserted that the payload began with `SSH_MSG_KEXINIT` and
+was longer than seventeen bytes — both of which a constant cookie satisfies for
+ever. It certified the bug rather than catching it. It now asserts the cookie's
+*provenance*: that the sixteen bytes are the ones the secret source supplied,
+and that two connections do not share them.
 
 The first extraction stopped at the line between total functions and fallible
 ones: everything that returns a value moved as-is, while everything returning
@@ -119185,7 +119288,8 @@ The extraction simply stopped short of the protocol layer.
 Every one of these functions is a *contract between two programs*, and a
 divergence in any of them is invisible to both test suites: each end tests its
 copy against its own expectations and passes. The failure only appears when the
-two are made to talk, which nothing currently does.
+two are made to talk, which for the whole life of this stack nothing did.
+`userspace/ssh-interop` is now the thing that does.
 
 The severity of a divergence is not uniform, which is the trap — a drift in
 `ssh_string` would break loudly and instantly, while the `V_C` drift produced a
@@ -119235,17 +119339,243 @@ seventh
 is the one where the divergence was not a mistake at all: someone found the
 client's key-exchange arithmetic unusably slow and fixed it properly, and the
 fix simply had no route to the copy in the server, which is a worse place to be
-slow. Duplication does not only propagate bugs; it blocks fixes. That ratio is
-the argument for item 4, which is the outstanding work here.
+slow. Duplication does not only propagate bugs; it blocks fixes. That ratio was
+the argument for item 4, which has since been built.
+
+The count above stops at seven because it was written before `ssh-keygen` was
+brought into the same arrangement. It is now **eight live divergences out of
+fourteen duplications**, and the eighth is the one that breaks the "found by
+reading, never by a test" streak — see the `ssh-keygen` note at the end of this
+entry. It was found by a test, on that test's first run, and reading would not
+have found it.
 
 **Known obstacle to item 4:** both crates' `syscall0/1/3/4` are host stubs that
 return `-ENOSYS` on the Windows host build *and* on the WSL Linux build, so
 neither `ssh` nor `sshd` can open a socket in a `cargo test`. An interop test
-therefore either needs the two ends driven over an in-process transport (the
-handshake logic would have to be separable from `tcp_send_all`/`tcp_recv`, which
-today it is not), or has to run under QEMU as a boot-test stage. The first is
-more work and more useful; the second proves more. Neither is blocked on another
-lane.
+therefore either needs the two ends driven over an in-process transport, or has
+to run under QEMU as a boot-test stage. The first is more work and more useful;
+the second proves more. Neither is blocked on another lane.
+
+> **The in-process route is now open, 2026-09-05.** The obstacle above used to
+> continue "the handshake logic would have to be separable from
+> `tcp_send_all`/`tcp_recv`, which today it is not". It now is. Both binaries
+> talk to `sshwire::Transport` — four methods, `send`/`recv`/`readable`/`close`,
+> with `send_all` as a provided method so the short-write loop is written once —
+> and each holds a `Box<dyn Transport>` rather than a `u64` socket handle. The
+> only code in either program that knows the protocol runs over TCP is a
+> `TcpTransport` struct of about seventy lines at the top of each file.
+>
+> `sshwire::memory_pair()` is the other end of that: two connected in-memory
+> transports, each direction a `VecDeque<u8>` behind a `Mutex` with a `Condvar`
+> beside it. It **blocks**, exactly like the socket it stands in for — a `recv`
+> with nothing to read waits until the peer writes or hangs up — so both ends
+> can run unmodified on two threads. A non-blocking stand-in would have forced
+> both programs to be restructured around polling *in order to be testable*,
+> which is the tail wagging the dog, and would have meant the code under test
+> was not the code that ships.
+>
+> Two things came out of the conversion itself, before any interop test exists:
+>
+> - **A ninth duplicated type.** `StreamBuffer` — the thing that holds a partial
+>   packet, since a stream has no packet boundaries — existed in both binaries
+>   with the same two fields and the same four methods, and as with the other
+>   eight the two were not equal: the server's `fill_once` ended `&tmp[..n]`,
+>   indexing a length the kernel reported, under the crate-wide panic-lint
+>   suppression that used to sit at the top of that file. It is now
+>   `sshwire::StreamBuffer`, and the kernel's number becomes a range in exactly
+>   one place per binary, inside `TcpTransport::recv`, where it is refused if it
+>   does not fit.
+> - **A latent correctness bug in sshd.** The session loop decided whether a
+>   client had hung up *orderly* or had failed by testing whether the error's
+>   message string contained `"connection closed"` — in two places. Any future
+>   error whose text happened to contain that phrase would have been reported to
+>   the operator as a normal disconnect. It is now an `SshdError::PeerClosed`
+>   variant, matched as a variant.
+>
+> What remains for item 4 is the test itself: `ssh` and `sshd` are both
+> bin-only crates, so neither can be depended on. Each needs a `lib.rs` with a
+> thin `main.rs` over it before a third crate can drive one against the other.
+
+> **The second obstacle is entropy, and the fix chosen for it is injection,
+> not a better host — 2026-09-05.** A key exchange needs a Diffie-Hellman
+> private exponent, and drawing one goes through `randrange::fill_secret`,
+> which on this Windows host returns `Unavailable` for every request. That is
+> deliberate: `fill_from_kernel` is `#[cfg(not(unix))] -> Err(Unavailable)`, so
+> that a test reaching for the system source on the host sees it decline, and
+> "fails closed when there is no entropy" is a property something asserts.
+> Downstream of it: four permanently-red tests in `userspace/ssh` (the DH
+> exponent and the KEXINIT cookie), and no handshake, so no interop test.
+>
+> There are two ways out, and only one of them is lane B's to take.
+>
+> - **Give the host a real CSPRNG.** `fill_from_kernel` gains a
+>   `#[cfg(windows)]` arm over `BCryptGenRandom`, and the fail-closed property
+>   moves from "a platform we compile for" to "a filler a test hands over",
+>   which then also exercises it on the SlateOS target, where it never ran.
+>   This is written, tested and green, but it is **parked on branch
+>   `lane-b-randrange-entropy` and not merged**: "the host has no entropy" is a
+>   documented testing convention in lane C's tree, and about eighteen tests
+>   across seventeen `apps/`/`gui/` crates assert it. Overturning another
+>   lane's convention and reddening `main` is not a call lane B makes alone, so
+>   it is queued for the operator in `open-questions.md` ("The test machine
+>   cannot produce random numbers, on purpose…"), with the list in
+>   `requests/b-c-a-pending-question-would-red-eighteen-of-your-tests-that-assert-the-host-has-no-entropy.md`.
+> - **Make the SSH code take its byte source as a parameter.** `SshSession` and
+>   `ConnectionState` carry a filler defaulting to `randrange::fill_secret`,
+>   covering all three uses — the DH exponent, the KEXINIT cookie, the
+>   per-packet padding. This is entirely inside lane B, it is the better design
+>   on its own terms (what is under test stops depending on which platform it
+>   was compiled for), and it yields a **deterministic** handshake, so the
+>   interop test can assert the exact session identifier both ends derive
+>   rather than merely that they agree on one.
+>
+> The second is what unblocks item 4, so item 4 is **not** waiting on the
+> operator. The first would additionally un-red the four `userspace/ssh` tests
+> for the whole tree rather than only along the injected path, which is why it
+> is still worth asking about.
+>
+> `ssh` also gained `-o UserKnownHostsFile=` (`7a3bbb969`), which the test
+> needs for a reason worth stating separately from the option's own merits: the
+> client verifies the server's host key against `$HOME/.ssh/known_hosts`, and a
+> test that drove the real client would either have to skip verification —
+> testing the wrong program — or write into the operator's real trust store,
+> which is a side effect no test is entitled to have.
+
+> **Item 4 landed, 2026-09-05: `userspace/ssh-interop`.** The real client and
+> the real server now complete a version exchange and a key exchange against
+> each other in one process, and are asserted to derive the same session
+> identifier. Two tests, both green.
+>
+> **Why a third crate.** A crate's own tests can only reach one side of a
+> two-party protocol; to have both ends in one process something has to depend
+> on both, and a crate cannot depend on itself. The crate ships nothing — its
+> library is a page of documentation — and both peers arrive as
+> `dev-dependencies`. That is also the last thing the `lib.rs`/`main.rs` splits
+> in `ssh` and `sshd` were for: a bin-only crate produces no rlib.
+>
+> **Why the session id is the assertion.** RFC 4253 §7.2 makes it the exchange
+> hash of the first key exchange, and both ends compute it independently from
+> the same eight inputs: the two version strings, the two KEXINIT payloads, the
+> host key, both DH public values, the shared secret. A disagreement about any
+> of them — a field order, a length prefix, an integer encoding, a version
+> string one side remembers differently — yields two different values. It is the
+> sharpest single comparison available between these two programs, and it is the
+> one that was missing while six divergences shipped.
+>
+> **Why agreement alone was not enough.** Two ends can agree on a value neither
+> computed the way the RFC says; that is precisely what
+> `TD-B-SSHD-SIGNS-AN-EXCHANGE-HASH-OVER-A-CLIENT-VERSION-THE-CLIENT-NEVER-SENT`
+> was. So the transcript is pinned as well: with the host key seed and both
+> secret sources fixed, every byte either end hashes is fixed, and the session
+> id is one recorded constant. A deliberate protocol change is expected to
+> update it, which is the point — it forces the change to be looked at from both
+> sides at once.
+>
+> **What makes it reproducible.** A counting `SecretSource` whose counter is
+> **thread-local**, and both peers on spawned threads. A shared counter would be
+> drawn from by the two peer threads concurrently, so each peer's bytes would
+> depend on the interleaving — a source that is deterministic in the sense that
+> it uses no entropy and nondeterministic in the only sense that matters. A peer
+> driven on the harness's own thread would likewise inherit whatever that thread
+> had already drawn. Verified by three separate process runs producing the same
+> identifier, not assumed.
+>
+> **What it does not cover yet.** It stops after key exchange. `NEWKEYS` is
+> inside that (both `do_key_exchange` and `key_exchange` send and receive it),
+> but nothing yet drives authentication, channel open, or a data round-trip
+> through the encrypted transport — so the *state machines* above the handshake
+> are still each end tested against its own expectations. Extending it that far
+> is the obvious next increment, and it is cheap now that the harness exists.
+
+> **The third program: `ssh-keygen`, 2026-09-05.** Everything above concerns two
+> programs. There is a third, and it had diverged worse than either — twice, in
+> ways that made it not merely inconsistent but *broken*, and both found in one
+> sitting once it was pulled into the same arrangement.
+>
+> **Divergences 12–14: base64, the key container, and the public key blob.** All
+> three were the same shape as the table above. `ssh-keygen` carried a fourth
+> copy of base64 (the tree's third), a fourth copy of RFC 4253 §6's
+> length-prefixed string, and a private key container of its own invention. All
+> three now come from `sshwire`, and the crate gained a `lib.rs` with a
+> three-line `main.rs` over it, for the same reason `ssh` and `sshd` did.
+>
+> **The seventh live divergence, and the first that a user could hit by
+> following the documentation.** `ssh-keygen` wrote
+> `-----BEGIN ED25519 PRIVATE KEY-----` around a bare `seed || public ||
+> comment` blob. Nothing else in this tree — or anywhere else — can read that,
+> so the documented two-command setup
+>
+> ```text
+> ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key
+> sshd
+> ```
+>
+> ended with the daemon refusing to start on the key its own key tool had just
+> written. Both crates' suites were green: each tested its encoder against its
+> own decoder, which is the one arrangement that structurally cannot notice a
+> disagreement. Fixed in `7e43e99ce`; the container is now `openssh-key-v1`,
+> unencrypted, from `sshwire`.
+>
+> **The eighth live divergence is the worst one in this entry, and it is the
+> only one a test found rather than a reading.** The interop test written to
+> close the item above — build a key with `ssh-keygen`, hand it to
+> `sshd::HostKey`, then make the daemon serve a whole handshake on it — failed
+> on its first run, but not on the container. `sshd` said *"the public key in the
+> file does not match the private seed"*.
+>
+> `ssh-keygen` implemented Ed25519 itself: a `Fe` field element over five 51-bit
+> limbs, an `EdPoint` in extended coordinates, a scalar multiply and a private
+> SHA-512, about 560 lines. Given RFC 8032 §7.1's first test vector it derived
+>
+> ```text
+> got e000725923fbbcd2f42112493aaf11599423a8fadb3a1e5630b6704e53591403
+> rfc d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
+> ```
+>
+> So **the public half of every key this tool ever generated did not correspond
+> to its private half.** An `authorized_keys` line copied from its output
+> rejects its own owner; a host key it writes makes every client report a bad
+> signature. This was not a formatting problem with a recoverable key inside —
+> the keys themselves were not usable keys.
+>
+> Its suite was green and could not have been otherwise. Every test of the
+> derivation compared one of its outputs against another of its outputs. The
+> three that looked like coverage of exactly this were
+> `test_ed25519_keygen_from_zero_seed`, `..._from_ones_seed` and
+> `test_ed25519_deterministic` — "non-zero", "non-zero", "the same seed gives
+> the same answer" — all three of which a function returning a fixed constant
+> passes. Below them, the field and curve tests checked `x + 0 == x`,
+> `x - x == 0`, `-(-x) == x`, `0*G == identity`: internal identities that a
+> self-consistent implementation of the *wrong curve* satisfies by construction.
+> They were deleted with the code they tested, and nothing was lost.
+>
+> Fixed in `e74f049d9` by the same move as everything else here: the private
+> Ed25519 is gone and `posix::ed25519` is called instead — the copy `sshd`
+> already verifies host key signatures with, checked against all four RFC 8032
+> §7.1 vectors for derivation, signing *and* verification. The private SHA-512
+> went with it, having had no other caller. 543 lines removed.
+> `the_public_key_derived_here_is_the_one_rfc_8032_specifies` replaces the three
+> self-referential tests and deliberately keeps the vector on `ssh-keygen`'s
+> side of the call, so a future reintroduction of a private derivation is
+> noticed in the crate that did it rather than two crates away.
+>
+> **This is the sentence the whole entry has been building toward.** Eleven
+> duplications of this stack were found by a human reading two files side by
+> side, and none by a test. The eighth live divergence was invisible to that
+> method — the arithmetic *looks* right, and checking it by eye means
+> reimplementing Ed25519 in your head — and the first cross-crate test that
+> could see it found it in under a second, before anyone went looking. The
+> argument for item 4 was always that it catches the class. It also catches
+> things reading never will.
+>
+> **The general lesson, stated plainly because it generalises past SSH:** a test
+> that compares an implementation against itself certifies whatever the
+> implementation does. Round-trip tests, "same input gives the same output"
+> tests, and internal algebraic identities all have this property. At least one
+> assertion per algorithm must compare against a number that came from outside
+> this tree — a published test vector, or a second independent implementation
+> made to agree. Everything else is a consistency check, and consistency with a
+> mistake is a mistake.
 
 ### TD-B-SSH-RE-ENCODED-THE-SERVER-VERSION-BEFORE-HASHING-IT
 
@@ -119294,11 +119624,12 @@ not have one.
 arbitrary control sequences to the user's terminal before the handshake even
 started. They are now escaped.
 
-**What is still true after this.** Only that these two ends agree; there is
-still no test that runs one against the other. See
+**What was still true after this, and no longer is.** This fix established only
+that the two ends agree; no test ran one against the other. That was
 `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`
-item 4 — an interop test remains the only thing that would have caught either of
-these without someone happening to read the right two functions on the same day.
+item 4, and it is now `userspace/ssh-interop` — the only thing that would have
+caught either of these without someone happening to read the right two functions
+on the same day.
 
 ### TD-B-THE-TWO-ENDS-DISAGREED-ABOUT-WHICH-CARRIAGE-RETURNS-ARE-FRAMING
 
@@ -119684,6 +120015,132 @@ X25519, per `TD-B-SSH-KEY-EXCHANGE-LEAKS-ITS-SECRET-THROUGH-TIMING` — now has 
 single place to land instead of two, which is the same property this entry is
 about, running the other way.
 
+### TD-B-SSHD-UNDERFLOWED-THE-LOGIN-GRACE-TIMER-WHEN-THE-CLOCK-FAILED
+
+**Status: FIXED**, 2026-09-05. `clock_monotonic_ms` returns `Option<u64>`; an
+unreadable clock refuses the connection instead of subtracting from zero.
+
+**In short:** the server gives a peer that has not logged in yet a limited
+number of seconds to do so — the "login grace time". It measured that by
+reading the clock when the connection opened, reading it again during
+authentication, and subtracting. The function it used to read the clock
+reported **the number zero when the read failed**, which is indistinguishable
+from "the machine booted this instant". So if the clock answered when the
+connection opened and failed later, the server subtracted a real time from
+zero. On unsigned arithmetic that goes below zero and wraps: in a debug build
+it crashes the daemon, and in a release build it produces an enormous elapsed
+time, so *every* connection is dropped the moment it arrives with "login grace
+time expired". Either one is reachable by anyone who can open a socket, with no
+password and no account.
+
+### Where it lived
+
+`userspace/sshd/src/main.rs`, `do_user_auth`:
+
+```rust
+let elapsed_s = (clock_monotonic_ms() - conn.connection_start_ms) / 1000;
+```
+
+against
+
+```rust
+fn clock_monotonic_ms() -> u64 {
+    let ret = unsafe { syscall0(SYS_CLOCK_MONOTONIC) };
+    if ret < 0 { 0 } else { ret as u64 }   // <-- failure spelled as a time
+}
+```
+
+### Why it was invisible
+
+`do_user_auth` carried
+`#[expect(clippy::arithmetic_side_effects, reason = "not yet audited for panics
+on peer-controlled input")]`. The lint that exists to find exactly this had been
+switched off over the function, with a note saying the audit was owed. The
+suppression was not hiding a false positive; it was hiding the true one. That is
+the argument for treating the remaining 21 such suppressions as a queue of
+unread bug reports rather than as settled exemptions — this was the first one
+opened, and it contained a remotely-reachable panic.
+
+It is the same shape as `PeerClosed` elsewhere in this file: a real condition
+encoded as a value that an ordinary case can also produce, so no caller can tell
+the two apart. `clock_monotonic_ms` had only two call sites, which is why the
+honest fix was cheap.
+
+### The fix, and the tradeoff inside it
+
+`clock_monotonic_ms() -> Option<u64>`, `connection_start_ms: Option<u64>`, and a
+grace check that **fails closed**: a clock it cannot read disconnects the peer
+rather than treating the elapsed time as zero. Saturating subtraction on top,
+so a clock that steps backwards cannot underflow either.
+
+Failing closed is a real choice and is recorded in `design-decisions.md` §775.
+The alternative — carry on with the timer disabled — hands unlimited connection
+time to unauthenticated peers, which is precisely the population the timer
+exists to bound, so a broken clock would switch the bound off for exactly the
+wrong people. The cost is that a transient clock-syscall failure refuses logins;
+the daemon already reasons this way about an unreadable host key, where it stops
+rather than serving under a substitute identity.
+
+### Also retired here
+
+`parse_version_string`'s `#[expect(clippy::arithmetic_side_effects)]`. That one
+audited clean — but rather than re-justify the suppression, the arithmetic was
+removed: `strip_prefix` and `split_once` do the same work with no byte offset to
+get wrong, so there is nothing left for a future audit to re-examine. Its three
+`auth_attempts += 1` counters became `saturating_add(1)` for the same reason.
+
+### The mirror-image defect: written *once*, and checked against nothing
+
+**Status: FIXED for base64** (`userspace/sshwire/src/lib.rs`,
+`every_one_of_the_sixty_four_digits_is_the_one_rfc_4648_names`). Found
+2026-09-05 by mutation-testing `ssh-interop`'s new publickey tests, i.e. by
+attacking the fix for this entry rather than the code it fixed.
+
+**In short:** everything above is about a format written twice by two programs
+that then disagreed, and the fix was to write it once in `sshwire` and have both
+call it. That fix cannot be checked the way the bugs were found. Two ends that
+share one implementation agree *by construction* — so an interop test, which
+compares our client to our server, will pass no matter what that shared
+implementation does. The remaining way to be wrong is to be wrong in the same
+way at both ends, and the only thing it breaks is the one thing nothing in this
+tree can speak for: talking to an SSH that is not ours.
+
+**How it was demonstrated.** Swapping `'A'` and `'B'` in `sshwire`'s
+`B64_ALPHABET` left every test in the tree green: 350 across `sshwire`,
+`ssh-keygen` and `sshd`, and all 7 of `ssh-interop`. Base64 is now written
+once and called by all three, the encoder and the decoder share the one
+alphabet (the decoder builds its lookup table *from* it), so a corrupt table
+round-trips perfectly and every one of our own comparisons agrees. A key file
+written under it would be unreadable by OpenSSH, and one OpenSSH wrote
+unreadable by us, with nothing failing anywhere else to say so.
+
+`the_rfc_4648_test_vectors_encode_as_the_rfc_says` was already there and already
+says exactly this in its own comment — *"a round-trip passes for any
+self-consistent alphabet, including a wrong one"*. It is right; it just did not
+go far enough. RFC 4648 §10's vectors are all `"foobar"` prefixes, and between
+them `"Zg=="` … `"Zm9vYmFy"` use ten distinct digits. **Fifty-four of the
+sixty-four table entries were pinned by nothing.** A published vector set is not
+the same as coverage of the table it exercises, and that gap is invisible when
+reading the test.
+
+**The general rule.** Deduplicating a format removes the ability of our two ends
+to disagree; it does not create any evidence that what they now agree on is
+correct. A shared implementation of a *published* format needs a known-answer
+test against the publication — and one that covers the whole of whatever table
+or constant it turns on, not merely the part the standard's example vectors
+happen to touch. The expected value must be transcribed independently, because a
+test that reads the constant agrees with whatever the constant holds.
+
+**The rest of the stack was audited against this and is clean.** Ed25519 has RFC
+8032 §7.1 vectors and derives its curve constants from their definitions; SHA-256
+and SHA-512 have the FIPS 180-4 examples; AES has the FIPS 197 vectors and
+RFC 3686 for CTR mode. The group-14 prime is the interesting one: it is a
+512-hex-digit transcription, so beyond checking both ends and the bit length it
+is verified by Euler's criterion — `2^((p-1)/2) mod p == 1`, which a prime with
+any single digit altered would almost certainly fail, since it would almost
+certainly not be prime. That is the shape to copy: a check that the value is
+*right*, not that it is self-consistent.
+
 ## A-ADA-PREBUILT-VERIFICATION-NEVER-RAN-BECAUSE-THE-RTS-WAS-INCOMPLETE
 
 **[A] 2026-09-05 — ✅ FIXED.**
@@ -119782,6 +120239,1317 @@ the only thing standing between a silent gap and a person noticing — so it mus
 state what is no longer being checked, never what still is. A degradation
 message that lists the surviving checks reads as reassurance and buries the gap
 it was written to expose.
+
+## TD-B-SSH-REPORTS-A-PASSPHRASE-PROTECTED-KEY-AS-A-DAMAGED-FILE (lane B)
+
+**In short:** A private key file can be *encrypted with a passphrase*, so that
+stealing the file is not enough to steal the key — the thief also needs the
+words. Neither `ssh` nor `sshd` nor `ssh-keygen` in this tree can read one, and
+none of them says so. `ssh -i ~/.ssh/id_ed25519 host` on a passphrase-protected
+key — which is what a user who copied a key over from a real machine will have —
+reports the file as unusable, which reads as "your key is corrupt". The user's
+key is fine; this client cannot open it.
+
+**Where it lives:** `sshwire::decode_openssh_private_key`
+(`userspace/sshwire/src/lib.rs`) reads the `openssh-key-v1` container's cipher
+name and refuses anything that is not `none`. `userspace/ssh/src/lib.rs`
+`load_identity_from` turns that refusal into an error naming the file, per
+design-decisions.md §778; `sshd::HostKey::from_openssh_text` and `ssh-keygen`
+do the equivalent.
+
+**Reproduce:** take any key written by real `ssh-keygen -t ed25519` with a
+non-empty passphrase (its container names `aes256-ctr` and `bcrypt`), and hand
+it to `ssh -i`. The message describes the container, not the passphrase.
+
+**Two defects, and only the second is large:**
+
+1. *The message is wrong.* An encrypted container is a recognisable thing — its
+   cipher-name field says `aes256-ctr` where an unencrypted one says `none` —
+   so the decoder can distinguish "this key is locked" from "this file is
+   damaged" without implementing anything. Saying so is a small change and
+   should happen regardless of when (2) does.
+2. *The feature is missing.* Reading one needs bcrypt-pbkdf (a deliberately slow
+   key-derivation function) and AES-256-CTR over the private section. The
+   AES is already in `sshwire`; bcrypt-pbkdf is not, and is the real work.
+   `ssh-keygen -p` (change a passphrase) and writing an encrypted key are the
+   same machinery in reverse.
+
+**Why this matters beyond convenience:** the current arrangement quietly
+pressures users toward *unencrypted* private keys, because those are the only
+ones that work. That is a security regression dressed as a missing feature — the
+file on disk is the whole secret.
+
+**The proper fix:** implement (1) now as a distinct `PrivateKeyError::Encrypted`
+variant carrying the cipher name, and (2) as `bcrypt-pbkdf` in a shared crate
+with `sshwire` decrypting the private section, plus a passphrase prompt in `ssh`
+and `ssh-keygen` and a `-P` flag for scripts. Both halves belong in `sshwire`,
+not in the three binaries, for the reason the whole crate exists: a
+key file one program can open and another cannot is precisely the class of bug
+this stack has produced fourteen times.
+
+**Until then:** design-decisions.md §778's rule — an explicit `-i` that cannot
+be used stops the client — is right for a damaged file and wrong for a locked
+one, which should prompt. Revisit that rule when (2) lands.
+
+## TD-B-NO-SSH-TOOL-CAN-READ-A-PASSPHRASE-PROTECTED-PRIVATE-KEY (lane B)
+
+**In short:** A private key file can be *encrypted with a passphrase*, so that
+stealing the file is not enough to steal the key — the thief also needs the
+words. Real `ssh-keygen` offers to do this every time it makes a key, so a user
+arriving from any other machine is likely to have one. No tool in this tree can
+read one. The diagnosis is already good — `key is encrypted with aes256-ctr;
+there is no passphrase prompt here, re-create it with an empty passphrase` — so
+this is a missing feature, not a misleading error. It is filed anyway because
+of what the missing feature *pushes users to do*.
+
+**Where it lives:** `sshwire::decode_openssh_private_key`
+(`userspace/sshwire/src/lib.rs`) reads the `openssh-key-v1` container's
+`ciphername` field and returns `PrivateKeyError::Encrypted { cipher }` for
+anything but `none`. All three callers surface it verbatim:
+`userspace/ssh/src/lib.rs` `load_identity_from`,
+`sshd::HostKey::from_openssh_text`, and `ssh-keygen`.
+
+**Reproduce:** take any key written by real `ssh-keygen -t ed25519` with a
+non-empty passphrase (its container names `aes256-ctr` and `bcrypt`) and hand it
+to `ssh -i`.
+
+**Why this is more than an inconvenience:** the advice the message gives —
+"re-create it with an empty passphrase" — is the only thing a user can do, and
+it is the *less safe* configuration. So the gap does not merely block a feature;
+it steadily converts protected keys into unprotected ones, on the disks of the
+users who cared enough to set a passphrase in the first place. The file on disk
+is the whole secret.
+
+**What it would take:** `bcrypt-pbkdf` (a deliberately slow key-derivation
+function, Blowfish-based) to turn the passphrase into a key, then AES-256-CTR
+over the private section. The AES is already in `sshwire`; `bcrypt-pbkdf` is the
+real work and exists nowhere in this tree. Writing an encrypted key, and
+`ssh-keygen -p` to change a passphrase, are the same machinery in reverse.
+
+**The proper fix:** `bcrypt-pbkdf` and the private-section decryption go in
+`sshwire`, not in the three binaries — for the reason that crate exists: a key
+file one program can open and another cannot is exactly the class of defect this
+stack has produced fourteen times. On top of that, a passphrase prompt in `ssh`
+and `ssh-keygen`, and a way to supply one non-interactively for scripts.
+
+`sshd` is the exception and must stay one: it is started by init with no
+terminal to prompt on, so an encrypted *host* key has to remain an error there
+however this is implemented. That asymmetry is the reason the decoder reports
+the fact and each caller decides what it means, rather than prompting itself.
+
+**Interaction with design-decisions.md §778:** that rule makes an explicit `-i`
+naming an unusable key a hard error rather than a silent fall back to a password
+prompt. For an encrypted key that is currently right — there is no passphrase
+prompt to offer — but it stops being right the moment there is one. Revisit §778
+together with this entry.
+
+## TD-B-SSHD-ACCEPTS-ONLY-ONE-AUTHORIZEDKEYSFILE-PATH-WHERE-OPENSSH-ACCEPTS-A-LIST (lane B, 2026-09-05)
+
+**In short:** `sshd_config` has a setting, `AuthorizedKeysFile`, naming the file
+that lists which keys may log into an account. Real OpenSSH lets an
+administrator write *several* files there, separated by spaces, and tries each
+in turn. We read the whole setting as one file name. An administrator who
+carries over a config using the list form gets a daemon looking for a single
+file whose name contains spaces, which will not exist — so publickey
+authentication silently stops working for every account, and the clients are
+told only that their keys were not accepted.
+
+**Where it lives:** `authorized_keys_path` in `userspace/sshd/src/lib.rs`
+resolves exactly one pattern, and `pubkey_auth_for_account` reads exactly one
+file. The config parser (`"authorizedkeysfile"` in `SshdConfig::parse`) stores
+the rest of the line verbatim, spaces included.
+
+**Reproduce:** put `AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2`
+in `sshd_config` and try to log in with a key listed in the first file. It is
+refused. The daemon looked for a file literally named
+`.ssh/authorized_keys .ssh/authorized_keys2`.
+
+**Why the list form is not obscure:** it is how `.ssh/authorized_keys2` — the
+second file every OpenSSH has read since the SSH-1/SSH-2 split — is still
+configured, and it is how an administrator adds a system-wide file
+(`/etc/ssh/authorized_keys/%u`) *alongside* the user's own rather than instead
+of it. That combination is the standard recipe for "the admin can grant access
+and the user can too", so the configs most likely to use it are the ones written
+by someone being careful.
+
+**Severity:** a config-compatibility gap rather than a security hole. The
+failure is closed — an unresolvable path authorises nothing — so it refuses
+logins that should work and never admits one that should not. Nothing in this
+tree writes the list form today, so it bites only an operator bringing a config
+from a real OpenSSH.
+
+**The proper fix:** split the setting on whitespace at *parse* time, keeping
+`SshdConfig::authorized_keys_file` a `Vec<String>`, and have
+`pubkey_auth_for_account` resolve and read each in order, concatenating what it
+finds. Resolution stays per-path so `%h`/`%u`/`%U` expand in each. A file that
+is absent must remain not-an-error, exactly as the single-file case already
+treats it — with a list, most accounts will have only the first.
+
+The one thing to get right is that a *missing* file and an *unreadable* one stay
+indistinguishable to the peer, as they are now: reporting which is which across
+several paths would let an unauthenticated client map the filesystem. And the
+concatenation must not stop at the first file that exists — OpenSSH reads all of
+them, and stopping early would silently ignore keys an administrator had granted.
+
+Note that quoting is *not* part of this: OpenSSH splits on whitespace with no
+quoting mechanism, so a path containing a space cannot be configured there
+either. Matching that exactly is better than inventing quoting we would then
+have to keep agreeing with.
+
+## B-SSHD-LOGIN-GRACE-TIMER-COMPARED-MICROSECONDS-AGAINST-SECONDS (lane B) — FIXED 2026-09-05
+
+**Status:** FIXED — `userspace/sshd/src/lib.rs`, commit on `lane-b` 2026-09-05.
+
+**In short:** the SSH server disconnected every client during login, always,
+with the message "login grace time expired". `LoginGraceTime` is the limit on
+how long an unauthenticated connection may stay open — two minutes by default.
+The code read the clock in *nanoseconds* and then converted as though it were
+*milliseconds*, which left it comparing microseconds against a number of
+seconds. Two minutes became a hundred and twenty **microseconds**, and a real
+handshake takes several thousand times that. Nobody could log in.
+
+### Where
+
+`userspace/sshd/src/lib.rs`. The clock reader was called `clock_monotonic_ms`
+and converted nothing — `SYS_CLOCK_MONOTONIC` is documented in
+`kernel/src/syscall/number.rs` as "nanoseconds since boot", and the host-build
+shim (`posix::syscall`'s `host_clock::monotonic_ns`) returns nanoseconds to
+match. Its one caller, the authentication loop, then did
+
+```rust
+let elapsed_s = now.saturating_sub(start) / 1000;
+if elapsed_s > u64::from(conn.config.login_grace_time) {
+```
+
+so `elapsed_s` held microseconds while `login_grace_time` held seconds (120 by
+default, as OpenSSH's `LoginGraceTime` is).
+
+### Why nothing caught it
+
+The name. `clock_monotonic_ms` reads as a millisecond clock, and against a
+millisecond clock `/ 1000` is exactly right — so the arithmetic looks correct at
+the call site and the error is one identifier away, in a function whose body is
+a single `try_from`. A unit that is asserted in a name and nowhere else is not
+checked by anything.
+
+Nor did the tests reach it. `sshd`'s own suite tests the pieces of
+authentication (`decide_publickey_request`, the config parser, the password
+path) rather than the loop that drives them, and the `ssh-interop` suite runs
+the version and key exchanges but authenticates by calling the decision function
+directly. The grace check sits in `handle_authentication`, which no test enters.
+Nothing was wrong with any of those tests individually; the gap is that the one
+loop containing the timer had no test at all.
+
+### The fix
+
+`clock_monotonic_ns`, named for what it returns, with the kernel's documentation
+cited in its doc comment; a `NANOS_PER_SEC` constant; and the comparison itself
+extracted into `login_grace_expired(start_ns, now_ns, grace_secs)`, which is
+where the two units meet and is now the thing under test. The field
+`connection_start_ms` became `connection_start_ns` for the same reason the
+function was renamed.
+
+The regression test — `the_login_grace_timer_measures_seconds_and_not_micro`
+`seconds` — uses the numbers that actually occur rather than round ones: 10 ms
+elapsed against a 120-second grace is the case every successful login passes
+through, and it is the case that failed. It also pins the backwards-clock-step
+behaviour, since that path is reachable by an unauthenticated peer.
+
+### The general lesson
+
+A unit carried only in an identifier is a comment that the compiler does not
+read. Where a value crosses from one unit to another — a syscall's nanoseconds
+into a configuration file's seconds — the conversion deserves to be a named
+function with its own test, not an inline division whose correctness depends on
+the reader remembering what the variable it divides is measured in.
+
+---
+
+## B-INETD-RATE-LIMIT-WINDOW-WAS-MICROSECONDS-NOT-MINUTES (lane B) — FIXED 2026-09-05
+
+**In short:** `inetd`'s per-source rate limiter — the thing that is supposed to
+stop one machine opening a thousand connections a second to a service — counted
+connections over a window it believed was sixty seconds but which was in fact
+sixty *microseconds*. Nothing can be too fast for a sixty-microsecond window, so
+every connection arrived to find the previous one already forgotten, the
+measured rate never rose above one, and a `MaxRate` limit of any value was never
+once exceeded. The daemon logged nothing and rejected nobody: the limit was
+configured, displayed, parsed, tested — and dead.
+
+This is the second instance of the same defect found in the same hour; the first
+is `B-SSHD-LOGIN-GRACE-TIMER-COMPARED-MICROSECONDS-AGAINST-SECONDS` above. They
+were written independently and share no code, which is the point of recording
+both.
+
+### Where
+
+`userspace/inetd/src/main.rs`. The window was a bare literal in
+`SourceTracker::prune`:
+
+```rust
+/// Prune timestamps older than 60 seconds from the rate window.
+fn prune(&mut self, now_ms: u64) {
+    let cutoff = now_ms.saturating_sub(60_000);
+    self.recent_timestamps.retain(|&ts| ts >= cutoff);
+}
+```
+
+`now_ms` came, through five call sites, from a wrapper named
+`clock_monotonic_ms` that read `SYS_CLOCK_MONOTONIC` and returned it unchanged.
+That syscall returns **nanoseconds since boot** (`kernel/src/syscall/number.rs`;
+host shim `posix::syscall::host_clock::monotonic_ns`). So `60_000` was 60 µs.
+
+### Why nothing caught it
+
+Three separate reasons, each individually reasonable:
+
+- **The unit lived in a name, and the name was wrong.** Every use of `now_ms`
+  reads correctly if you accept the name. `saturating_sub(60_000)` against a
+  millisecond clock *is* sixty seconds.
+- **The tests were written against the same wrong unit.** `prune` had a test —
+  `test_source_tracker_prune_old_timestamps`, with timestamps 1000/50 000/70 000
+  and a prune at 70 000 — and it passed, because it asserted the arithmetic of a
+  `60_000` window rather than asserting that the window was a minute. A test
+  that restates the implementation's constant cannot detect that the constant is
+  wrong. This is the more interesting failure of the two: the code had coverage,
+  and the coverage was of the wrong proposition.
+- **No host test could reach the real clock.** `inetd` defines its own
+  `syscall0` whose off-target stub returns `-38` (ENOSYS) for everything, so on
+  the dev machine `clock_monotonic_*` answers 0 and the tests must pass their
+  own timestamps in. Nothing on the host ever observes the true unit.
+
+Note that `sleep_ms` immediately above the clock wrapper already carries a
+comment about an identical unit bug against `SYS_SLEEP`, fixed earlier. The
+comment was right there and the same mistake was made again ten lines below it,
+which is the argument for a shared accessor rather than a per-binary wrapper.
+
+### The fix
+
+`clock_monotonic_ns`, named for what it returns; a `NANOS_PER_SEC` constant; and
+the window promoted from a literal to `const RATE_WINDOW_NS: u64 = 60 *
+NANOS_PER_SEC` with a doc comment saying which configuration key it implements.
+The sixteen `now_ms` parameters became `now_ns`.
+
+The three tests that had encoded the old window (`prune_old_timestamps`,
+`garbage_collect`, `rate_expires_after_window`) were rewritten in terms of
+`RATE_WINDOW_NS`, so they now test the *pruning* and move with the constant
+instead of pinning it.
+
+Pinning the constant is a separate test, and a behavioural one rather than an
+`assert_eq!` restating the definition:
+`test_rate_window_is_one_minute_of_the_monotonic_clock` records ten connections
+spread over one second and asserts the rate is ten. Under the old window it
+reports `left: 1, right: 10` — which is precisely the production symptom, not a
+proxy for it.
+
+### The general lesson
+
+Beyond the unit lesson from the sshd entry: **a test that reuses the
+implementation's constant tests only self-consistency.** `prune`'s test would
+have passed for any window whatsoever. Where a constant encodes a claim about
+the outside world — "a minute", "a gigabyte", "the MTU" — at least one test must
+assert the claim in the outside world's terms (ten connections in one second are
+inside a one-minute window) rather than in the constant's.
+
+---
+
+## B-DIG-DNS-TRANSACTION-ID-WAS-A-HASH-OF-THE-CLOCK (lane B) — FIXED 2026-09-05
+
+**In short:** DNS over UDP has no handshake and no signature. When `dig` asks a
+question, the only thing that lets it recognise the *server's* answer — rather
+than one that some other host on the network chose to send — is a 16-bit
+"transaction ID" it puts in the question and expects to see echoed back, plus
+the port it asked from. `dig` was generating that ID by hashing the current
+time. The time is not a secret; anyone in a position to send a forged answer is
+in a position to know, to within a round trip, when the question went out. So
+the check `dig` performed on every answer — "does this ID match the one I sent?"
+— was a check the forger could pass, and `dig` would print the forged answer as
+fact. The tool people reach for *because* they suspect DNS is lying to them
+could itself be lied to.
+
+### Where
+
+`userspace/dig/src/main.rs`:
+
+```rust
+/// Simple non-cryptographic hash for generating transaction IDs.
+fn make_txn_id() -> u16 {
+    // Use the monotonic clock as a source of entropy.
+    let t = clock_monotonic_us();
+    let mut h: u32 = 5381;
+    for b in t.to_le_bytes() {
+        h = h.wrapping_mul(33).wrapping_add(u32::from(b));
+    }
+    (h & 0xFFFF) as u16
+}
+```
+
+The result is compared against the response in `perform_query`, so the field was
+load-bearing rather than decorative — the code took the defence seriously and
+then built it on a public value.
+
+RFC 5452 §9 is explicit that the ID must be unpredictable and drawn from a
+cryptographically secure source. A hash is not encryption: djb2 over eight known
+bytes is invertible by search in negligible time, and two IDs drawn microseconds
+apart differ only in the low bits of a hash of two adjacent integers.
+
+### The unit bug next door
+
+`clock_monotonic_us` returned the syscall's value unconverted, and
+`SYS_CLOCK_MONOTONIC` returns nanoseconds — the comment on the constant three
+lines above the wrapper *said* "boot-relative nanoseconds" while the wrapper
+below it said `_us`. This was the third instance found in one sitting
+(`B-SSHD-LOGIN-GRACE-TIMER-…`, `B-INETD-RATE-LIMIT-WINDOW-…`). Here it was
+arithmetically harmless, because the only consumer hashed the value — which is
+its own kind of warning: the wrong unit was invisible because nothing downstream
+cared what the number meant, and nothing downstream caring what the number meant
+is exactly why it was the wrong number to use.
+
+### The fix
+
+`make_txn_id` draws two bytes from `randrange::fill_secret` and returns
+`Result<u16, DigError>`. There is no fallback: `randrange`'s documentation is
+explicit that a caller must never substitute a guessable value for a secret, and
+a predictable transaction ID is that. `clock_monotonic_us` and the now-unused
+`SYS_CLOCK_MONOTONIC` constant are deleted, since the txn ID was their only
+consumer.
+
+Failing closed is the point, and it is what the regression test asserts:
+`a_transaction_id_is_drawn_or_refused_and_never_guessed` probes the CSPRNG and
+then requires that an ID exists **if and only if** entropy did. The old code
+could not fail — it always produced a number — which is why the defect was
+invisible: nothing looked wrong at the call site or in the output.
+
+Note this changes nothing about `dig` on a host build. `randrange` declines on
+non-Unix hosts by design, so `dig` there now refuses to send a query — but on a
+host build every network syscall in `dig` is already a stub returning `-ENOSYS`,
+so no query could have been sent regardless.
+
+### Not fixed here: the source port
+
+RFC 5452's other half is source-port randomisation, and `dig` gets its port from
+`SYS_UDP_BIND`'s ephemeral allocation, i.e. from the kernel. Whether that
+allocation is randomised was checked, and it is not:
+`udp::allocate_ephemeral_port` scans linearly from 49152, so the first socket a
+process opens always gets exactly that port. The transaction ID is therefore
+doing all the work alone -- 16 bits where RFC 5452 asks for about 30. The
+kernel's own in-tree resolver (`kernel/src/net/dns.rs`) randomises its port and
+says in a comment why, so the requirement is understood there; it is simply not
+reachable through the userspace socket API. Not lane B's to fix, and filed as
+`requests/b-a-ephemeral-udp-ports-are-predictable.md`.
+
+---
+
+## B-EVERY-PROGRAM-HAD-ITS-OWN-MONOTONIC-CLOCK-AND-HALF-GOT-THE-UNIT-WRONG (lane B) — FIXED 2026-09-05
+
+**In short:** Two live defects in one hour — `sshd` refusing every login and
+`inetd`'s flood limiter never firing — were the same mistake, made independently
+in programs that share no code: a number read from the kernel's monotonic clock
+was carried around in a plain `u64` whose *unit* was recorded only in the
+variable's name, and the name was wrong. Fixing both instances left the cause
+untouched, because nothing stopped the third program from doing it again. This
+entry records the structural fix: a tiny crate, `monoclock`, in which a clock
+reading and a span of time are distinct types, so a mismatched unit is a
+compile error rather than a comment nobody reads.
+
+### The audit
+
+Every lane-B program that reads `SYS_CLOCK_MONOTONIC` was checked. Four
+hand-rolled wrappers, and the split is the interesting part:
+
+| Program | Wrapper | Verdict |
+|---|---|---|
+| `userspace/sshd` | `clock_monotonic_ms` | **Wrong.** Login grace compared µs against seconds; no client could authenticate. |
+| `userspace/inetd` | `clock_monotonic_ms` | **Wrong.** The "60 second" rate window was 60 µs; `MaxRate` was never exceeded. |
+| `userspace/dig` | `clock_monotonic_us` | Misnamed but harmless — the value was only hashed. Deleted, along with the hash it fed (see the entry above; that turned out to be a security defect for an unrelated reason). |
+| `services/init` | `clock_monotonic` | **Correct.** |
+| `services/ticker` | `clock_monotonic` | **Correct.** |
+
+The two that are correct are correct for a reason worth stating: `init` and
+`ticker` suffix *every* variable, field and constant `_ns` — `started_at_ns`,
+`backoff_ns`, `BACKOFF_MAX_NS`, `uptime_ns` — and never once claim a unit the
+syscall does not return. That is discipline, and it worked. It worked in the two
+programs whose authors happened to keep it up, and failed in the two that did
+not. Discipline that must be re-applied at every one of sixteen call sites is not
+a defence; it is a probability.
+
+### The fix
+
+`monoclock` (workspace member; `no_std`, no dependencies, no `alloc`, every
+method `const`):
+
+- `Instant` — a reading of the monotonic clock. Constructed only by
+  `Instant::from_nanos_since_boot`, a name long enough that a reader can check
+  the claim against `kernel/src/syscall/number.rs` without leaving the line, and
+  which should appear exactly once per program, immediately around the syscall.
+  `Instant::BOOT` names the clock's zero.
+- `Elapsed` — a span, constructed from a figure in an explicit unit
+  (`from_secs`, `from_millis`, `from_micros`, `from_nanos`) and read back the
+  same way. Configuration files and RFCs are written in seconds; the conversion
+  happens once, in a constructor named for the unit it is given.
+- The only arithmetic offered is `saturating_since` (difference of two instants),
+  `saturating_add` and `saturating_sub` (offset an instant by a span). There is
+  no `Instant + u64` and no `Elapsed` from a bare integer, so
+  `now.saturating_sub(60_000)` — the exact shape of the `inetd` bug — does not
+  compile.
+
+Saturation, not wrapping and not panicking, in all three: the callers are
+timeouts and rate windows that unauthenticated peers can reach, so a backwards
+clock step must report "no time passed" rather than a 584-year span, and a window
+reaching back past boot must cover everything rather than nothing.
+
+`sshd` and `inetd` are converted; their wrappers now return `Instant` and every
+downstream field, parameter and constant holds `Instant` or `Elapsed`.
+
+### Why the crate does not issue the syscall
+
+The obvious design — one `monoclock::now()` that makes the syscall — was
+rejected, and the boundary drawn at *what the number means* instead of *where it
+came from*, for three reasons:
+
+- **The callers are heterogeneous.** `init` and `ticker` are bare-metal
+  `no_main` binaries; `sshd` and `inetd` are `std` programs. A crate that
+  contains the inline `syscall` asm cannot be used off-target at all, so the
+  `std` daemons' host tests could not link it — and those tests are the only
+  tests that exist for this code.
+- **Callers legitimately disagree about failure.** `sshd` returns `Option` and
+  refuses the connection when it cannot read the clock, because a grace timer it
+  cannot measure must not be treated as satisfied. `inetd` substitutes
+  `Instant::BOOT`, because its only consumer is a sliding window and a window
+  that contains everything over-counts, which fails towards rejecting a flood
+  rather than admitting one. Both are right; a shared `now()` would have to pick
+  one.
+- **`posix` cannot be the home for it.** Depending on the `posix` rlib links a
+  second libc in which every syscall is `#[cfg(target_os = "none")]`-gated out
+  and answers `-ENOSYS` — see
+  `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`.
+
+So each program keeps its four-line wrapper and its own error policy, and hands
+the result straight to `Instant::from_nanos_since_boot`. What is centralised is
+the part that was actually going wrong: the unit, and the arithmetic done in it.
+
+### The general lesson
+
+**A unit carried only in an identifier is a comment the compiler does not read.**
+Renaming `now_ms` to `now_ns` fixes today's bug and leaves tomorrow's available;
+the name is checked by nobody, at no call site, ever. Where a value's meaning
+constrains what may legally be done to it — a unit, a coordinate space, a
+character encoding, a trust level — that meaning belongs in the type. It costs a
+newtype and buys the whole class.
+
+## TD-B-SSHD-NEVER-FREED-A-CLOSED-CHANNEL-SO-A-PEER-COULD-GROW-IT-WITHOUT-LIMIT
+
+**Status: FIXED**, 2026-09-05. A channel is now freed once both ends have
+closed it; `MaxSessions` counts the whole table; the channel-number counter
+refuses rather than overflows.
+
+**In short:** an SSH connection carries several independent *channels* — one per
+shell, per remote command, per file copy. The daemon created them and never
+destroyed them. A channel the client had finished with stayed in the connection's
+table until the client hung up, still holding whatever it had buffered — up to
+two megabytes of the client's own keystrokes — with nothing left that could ever
+read them, because the session's descriptors were dropped on the same pass. An
+authenticated client that kept one channel open and cycled others could make the
+daemon's memory grow for as long as it cared to, and the `MaxSessions` setting
+did not stop it, because it counted only the channels still *running*.
+
+### Where it lived
+
+`userspace/sshd/src/lib.rs` — `Channel`, `handle_channel_open`,
+`handle_channel_close`, `handle_channels`, `dispatch_channel_message`.
+
+Three defects, one shape. Nothing owned the end of a channel's life:
+
+```rust
+// handle_channel_open: the limit counts only what is still running,
+// so entries this side has closed are invisible to it.
+let active = conn.channels.iter().filter(|ch| !ch.closed).count();
+if active >= conn.config.max_sessions as usize { /* refuse */ }
+
+let local_id = conn.next_channel_id;
+conn.next_channel_id += 1;          // <-- unchecked, on a peer-driven counter
+```
+
+and no `retain`, anywhere, ever: `conn.channels` only grew.
+
+### How to reach it
+
+Authenticate, then repeat: open a session channel, send data to a program that
+is not reading it (`ssh host 'sleep 1000' < /dev/zero` will do), close the
+channel. Keep one channel open throughout so the connection does not end. Each
+cycle leaves behind a `Channel` whose `pending_input` holds up to
+`INITIAL_LOCAL_WINDOW` — 2 MiB — and nothing frees any of them.
+
+A slower variant needs no data at all: open channels and simply never answer the
+daemon's `CHANNEL_CLOSE`. Because half-closed entries did not count against
+`MaxSessions`, the supply of slots was unlimited.
+
+### Why it was invisible
+
+`handle_channel_open` carried `#[expect(clippy::arithmetic_side_effects, reason
+= "not yet audited for panics on peer-controlled input")]`. As with
+`TD-B-SSHD-UNDERFLOWED-THE-LOGIN-GRACE-TIMER-WHEN-THE-CLOCK-FAILED`, the
+suppression was not covering a false positive — it was covering the true one.
+`conn.next_channel_id += 1` is an unchecked increment on a counter a peer
+advances, which panics in a debug build and wraps in a release build, and a wrap
+hands a new channel the number of a live one.
+
+That is now the **second** of these suppressions to be opened and found to
+contain a real, remotely-reachable defect. The remaining nineteen should be read
+as unreviewed bug reports, not as settled exemptions.
+
+The leak itself was invisible for a different reason: every individual piece was
+correct. `handle_channel_close` carefully drops the terminal, kills the shell and
+reaps the process — the expensive resources — and a reader checking for a leak
+finds that code and stops. What it does not do is free the *entry*, and no test
+asked whether the table ever shrank, because no test had a reason to look at a
+table that only ever grew by one.
+
+### The fix
+
+Three changes, argued in `design-decisions.md` §1002:
+
+- **`Channel::close_received` beside `Channel::closed`.** RFC 4254 §5.3 ends a
+  channel when both ends have sent `CHANNEL_CLOSE`, and that is the earliest
+  moment at which no message for it can still be in flight. The entry is
+  reaped there. Two flags rather than one because the connection asks them
+  different questions: *is there anything left to serve?* is answered by our own
+  close alone — it must not wait on a peer that never replies — while *may this
+  storage go?* needs both.
+- **`MaxSessions` counts `conn.channels.len()`**, not the un-closed subset. A
+  limit that excludes exactly the entries a hostile peer can accumulate is not a
+  limit. A well-behaved client is unaffected: its close reaps the entry and
+  returns the slot within a round trip.
+- **`next_channel_id.checked_add(1)`**, refusing the open with
+  `SSH_MSG_CHANNEL_OPEN_FAILURE` / resource-shortage when the numbers run out,
+  reusing the reply `MaxSessions` already sends. Numbers are still issued once
+  and never reused, so a channel number in a log names one session for the life
+  of the connection.
+
+`pending_input` is also emptied on close, which matters for the half-closed
+window: an entry waiting on a peer that never answers now holds a `Vec::new()`
+rather than 2 MiB.
+
+Six tests pin it, including the two states that used to be indistinguishable —
+a connection whose last channel was just reaped, and one that has not opened a
+channel yet. Both are the empty table, and `all()` is vacuously true on an empty
+table, so without `ConnectionState::channel_ever_opened` the connection loop
+would hang up on its first pass.
+
+### The general lesson
+
+**A resource limit must count what the attacker can create, not what the happy
+path leaves behind.** `MaxSessions` was written against the case it was named
+for — how many shells may run at once — and the entries that accumulate are the
+ones that are *not* running. The question to ask of any bound is not "does this
+count the thing the feature is about?" but "what can a peer make that this does
+not count?"
+
+## TD-B-SSHD-DIES-BEFORE-ITS-FIRST-STATEMENT-ON-A-NON-UTF-8-COMMAND-LINE (lane B, 2026-09-05)
+
+**In short:** on this OS a filename may hold any byte except `/` and NUL — that
+is written down in `design.txt`, not an accident. `sshd` reads its command line
+as text that must be valid Unicode, so `sshd -f /etc/ssh/conf-<0x80>` does not
+report a bad filename: it aborts with a Rust panic message before running a
+single line this repository wrote. The same goes for `-h <hostkey>`. The daemon
+does not start, and the panic text says nothing about which argument caused it.
+
+Nobody can trigger this remotely — argv comes from an init script written by
+root, not from the network — so it is a robustness defect, not a
+vulnerability. But an init script is exactly where an odd byte goes unnoticed
+for months, and a daemon that fails to boot with a panic backtrace is the worst
+available way to report a bad path.
+
+### Where it lives
+
+`userspace/sshd/src/lib.rs`:
+
+```rust
+fn parse_args() -> Result<Self, i32> {
+    Self::parse_from(env::args().skip(1))     // <-- panics on a non-UTF-8 argument
+}
+```
+
+`std::env::args()`'s iterator is documented to panic on an argument that is not
+valid Unicode; its body is a literal `unwrap`. This is the same defect that
+`scripts/argv-utf8.py` gates for the 84 shipped coreutils, and for the same
+reason — but that gate's stated scope is `userspace/coreutils/`, so `sshd` is
+outside it and nothing catches this.
+
+### Why it is not simply `args_os()`
+
+The path does not stop at the parser. `CliOptions::config_file` and
+`host_key_file` are `String`, and so is `SshdConfig::host_key_file`, which is
+*also* filled from the config file's own text — so a host key path can arrive by
+two routes and both are UTF-8-only. Fixing only `parse_from` would move the
+panic to the first `fs_read_file` and change nothing a user sees.
+
+### The proper fix
+
+Carry the two paths as `OsString`/`PathBuf` from `parse_from` through
+`CliOptions`, `SshdConfig` and the config parser to `fs_read_file` /
+`HostKey::load_from_file`, which is the shape `coreutils::getopt` already uses
+for the utilities that are clean. Then extend `scripts/argv-utf8.py`'s scope, or
+add sshd to it explicitly, so the next daemon does not reintroduce it.
+
+### How it was found
+
+Opening the `#[expect(clippy::indexing_slicing, clippy::arithmetic_side_effects)]`
+on the argument parser during the sshd panic-lint audit. The suppression was
+covering `args[i]` and `i += 1`; the `String` in the line above them was not
+what the lint was pointing at, and is the larger defect of the two.
+
+### Fixed 2026-09-05 — and the second route was the worse of the two
+
+Done as prescribed, in three commits, working inwards from `open` so that each
+one compiled and tested on its own:
+
+| Commit | Layer |
+|---|---|
+| `20f8f07fa` | `fs_read_file`, `fs_write_private_file`, `fs_set_mode`, `HostKey::{load_from_file, generate_and_persist}` and the OpenSSH writers take `&Path`. Diagnostics name the file through `Path::display`, so the *message* is lossy and the bytes handed to `open` are not. |
+| `76d60980d` | `SshdConfig::{host_key_file, banner_file}` are `PathBuf`; `SshdConfig::parse` takes `&[u8]` and splits lines itself. New dependency on `userspace/quoting` for `os_from_bytes` rather than a fourth private copy of the `#[cfg(unix)]` bytes↔`OsString` dance. |
+| `2895bdce6` | `parse_args` uses `env::args_os()`; `parse_from` takes `OsString`; `CliOptions::{config_file, host_key_file}` are paths. |
+
+**The `SshdConfig` route was not merely a second way in — it was the one that
+did real damage, and it did it with no argv involved at all.** `run_cli` read
+the configuration file through `String::from_utf8_lossy`, so a `HostKey` line
+naming a file whose name held byte 0x80 reached the opener with U+FFFD in it,
+and opened nothing. What follows is the whole point: an unreadable host key
+path is *deliberately* treated as a first start, so that a fresh machine comes
+up with a key. So the daemon generated a **new host key**, and every client
+reported that the host identity had changed — the exact warning host key
+verification exists to raise, produced by the daemon itself, on a machine
+nobody had touched. A conversion three functions away defeated a policy the
+code states in its own comment.
+
+Two things fell out of the conversion that were not in the plan:
+
+* **A non-UTF-8 value on a directive that is *not* a file name is now refused,
+  naming the directive**, where the lossy read substituted U+FFFD and carried
+  on. `AllowUsers al<0xff>ice` used to become a pattern matching no account,
+  silently. A daemon that will not start is strictly better than one that
+  quietly means something the administrator did not write.
+
+* **`-f` now records that a configuration file was *asked for*, not which one**
+  (`ba0f3be56`; `CliOptions::config_file` is an `Option<PathBuf>`). `run_cli`
+  refuses to start when a named config cannot be read but falls back to
+  built-in settings when none was named, and it told the two apart by comparing
+  the path against the default's *spelling*. That was wrong in both directions:
+  `-f /etc/ssh/./sshd_config` was refused where omitting `-f` would have
+  worked, and `-f /etc/ssh/sshd_config` on a machine with no such file started
+  on built-in settings and said nothing — the administrator asked for a
+  configuration by name, got none, and was not told. Which half a deployment
+  hit depended on how its init script happened to spell a path.
+
+Ten tests, of which six pin byte-exactness under `#[cfg(unix)]`, where an
+`OsStr` *is* its bytes. None of them can call `env::args()`, so none can
+reproduce the original panic directly; the guard against its return is the item
+type, since `parse_from` taking `OsString` means `parse_args` cannot be written
+with `env::args()` without a type error.
+
+**Not done, and deliberately so:** `SshdConfig::authorized_keys_file` is still
+a `String`. It is expanded against `PasswdEntry::{username, home}`, which come
+from `/etc/passwd` read through `String::from_utf8_lossy` — converting this one
+field alone would move the conversion one call later rather than remove it. See
+`TD-B-SSHD-CANNOT-REPRESENT-A-HOME-DIRECTORY-WHOSE-NAME-IS-NOT-UTF-8` below.
+**The `scripts/argv-utf8.py` scope extension called for above is done.** The
+gate no longer covers `userspace/coreutils` and nothing else; it covers every
+crate under `userspace/` that does not *declare itself* unimplemented, and the
+declaration is a dependency on `userspace/notimpl` — something a crate says,
+not something the script infers about it. Inference was tried and does not
+work: `abiword-cli` prints canned text and declares no dependencies at all,
+while `getty`, `telnet` and `dnsmasq` declare none either and are real
+programs, so no property of a manifest separates them.
+
+474 of the 2760 crates there are now in scope, against the one the old rule
+could see. The number that matters for this entry is what that turned up:
+**464 findings in 450 crates**, where the old scope reported 4. `sudo`, `su`,
+`login`, `doas`, `passwd`, `useradd`, `chpasswd`, `getty`, `ftpd`, `ftp`,
+`sftp`, `scp`, `ssh`, `ssh-keygen`, `syslogd`, `crond`, `logind`, `inetd`,
+`telnet`, `ntpd`, `dhcpcd`, `dnsmasq`, `chroot`, `firejail`, `unshare`,
+`nsenter`, `capsh`, `newgrp` and `chage` all have the defect `sshd` had —
+every one of them a program that dies before its first statement on an
+argument holding a byte that is legal in a filename here. They are recorded in
+`scripts/argv-utf8-baseline.txt`, which is a ratchet and only shrinks; the
+next `sshd` cannot be added silently, which is what this follow-up was for.
+
+**`sudo` and `su` are done (2026-09-06), leaving 27 of that list; the baseline
+is at 461.** The list above is left as it was measured, because it is the record of
+what the scope extension found; the live count is whatever
+`python scripts/argv-utf8.py --check` prints. The `sudo` conversion is written
+up under
+`TD-B-SUDO-DIED-BEFORE-ITS-FIRST-STATEMENT-ON-A-NON-UTF-8-COMMAND-LINE` below,
+and it is the one to read before starting any of the other 27: it turned up
+five unrelated defects, three of them exploitable by an unprivileged local
+user, including an audit log that could be forged from the *working directory*
+by a user whose sudo access was being denied.
+
+`su` followed the same day and found five more (see
+`TD-B-SU-DIED-BEFORE-ITS-FIRST-STATEMENT-ON-A-NON-UTF-8-COMMAND-LINE` below).
+The pattern is now established well enough to state as a prediction rather
+than a surprise: **the conversion is not the value; walking every line that
+touches a command-line string is.** Both programs' worst defects were
+injection into a line-oriented file or terminal, by a value that reached it
+verbatim — and in both cases the line in question was the one the system keeps
+in order to say who did what. Expect the same in `login`, `passwd` and
+`chage`, all of which write records of exactly that shape.
+
+Roughly half of the 450 are crates that print canned output and never said so
+— they import nothing that could touch a file, a socket or a subprocess. The
+fix for those is the same one line as their 2286 siblings,
+`notimpl::guard(env!("CARGO_PKG_NAME"))`, which also fixes the panic: the
+guard runs before `env::args()` is ever called. The rest are real work, and
+are the backlog this baseline exists to count.
+
+## TD-B-SSHD-CANNOT-REPRESENT-A-HOME-DIRECTORY-WHOSE-NAME-IS-NOT-UTF-8 (lane B, 2026-09-05)
+
+**In short:** on this OS a directory name may hold any byte except `/` and NUL.
+`sshd` reads `/etc/passwd` as text, replacing any byte that is not valid Unicode
+with U+FFFD (the "replacement character" a terminal draws as a black diamond
+with a question mark in it). It does not fail; it produces a *different name*,
+three bytes long where the original was one. So an account whose home
+directory has an odd byte in it gets its `authorized_keys` looked for in a
+directory that does not exist, and **public key authentication silently stops
+working for that user** — they are asked for a password instead, with nothing in
+the log to say why. If the account has no password, they are locked out of the
+machine.
+
+Nothing here is remotely triggerable: `/etc/passwd` is written by root. But a
+home directory acquires an odd byte the ordinary way — a name typed in a
+non-UTF-8 locale, a directory restored from a backup taken on another system, a
+`useradd` driven from a script — and the failure it produces looks nothing like
+its cause.
+
+### Where it lives
+
+`userspace/sshd/src/lib.rs`:
+
+```rust
+fn lookup_passwd(username: &str) -> Option<PasswdEntry> {
+    let data = fs_read_file(Path::new("/etc/passwd")).ok()?;
+    let content = String::from_utf8_lossy(&data);   // <-- here
+    ...
+}
+
+struct PasswdEntry {
+    username: String,
+    uid: u32,
+    gid: u32,
+    home: String,      // <-- and here
+    shell: String,
+}
+```
+
+The lossy string then reaches three places that each turn it back into
+something the kernel is asked to act on:
+
+| Site | What it does with `home`/`shell` |
+|---|---|
+| `authorized_keys_path` | joins `home` with the expanded `AuthorizedKeysFile` pattern and opens the result — this is the one that breaks publickey auth |
+| `expand_path_tokens` | substitutes `%h` (home) and `%u` (user name) into that pattern |
+| the session-start path | `chdir`s to `home` and `exec`s `shell` |
+
+Note that `parse_passwd` itself takes `&str` and splits on `:`, so making this
+right is not a one-line change at the `from_utf8_lossy`: the parser, the record,
+the two path helpers and the session-start path all move together.
+
+### Why it was left when the rest of sshd's paths were fixed
+
+`TD-B-SSHD-DIES-BEFORE-ITS-FIRST-STATEMENT-ON-A-NON-UTF-8-COMMAND-LINE` (above)
+converted the command line, the configuration file and the host key path to
+`OsString`/`PathBuf` on 2026-09-05. `SshdConfig::authorized_keys_file` was
+deliberately *not* converted in that work, and this entry is why: it is only
+ever used by being expanded against `PasswdEntry::home` and `::username`. Making
+it a `PathBuf` while those are `String` would move the lossy conversion one call
+later — from the config parser into `authorized_keys_path` — without removing
+it, and would leave the code looking as though the problem were solved.
+
+### The proper fix
+
+`PasswdEntry::{home, shell}` become `PathBuf` and `username` an `OsString`;
+`parse_passwd` takes `&[u8]` and splits on `b':'` (the same shape
+`SshdConfig::parse` was given in `76d60980d`, and for the same reason);
+`expand_path_tokens` builds an `OsString` by pushing byte slices;
+`authorized_keys_path` returns a `PathBuf`; `SshdConfig::authorized_keys_file`
+becomes a `PathBuf` at the same time. `uid`/`gid` are already numbers and are
+unaffected.
+
+Two constraints the conversion must respect:
+
+* **`expand_path_tokens`'s single-pass property is the security property**, not
+  a performance one: replacement text is pushed and never re-read, so a `%h`
+  that arrives *inside a user name* — which at that point in the connection is
+  a string the unauthenticated peer chose — is not expanded. A byte-oriented
+  rewrite must keep that shape; scanning for `%` in the *output* would
+  reintroduce exactly the hole the current code is written to avoid.
+
+* **The comparison in `authorized_keys_path` must stay `Path::has_root()`**,
+  not `starts_with('/')` and not `is_absolute()`. On the target the three are
+  the same predicate; on the Windows development host they diverge, and
+  `has_root` is the only one under which the tests exercise the target's rule.
+  The existing comment says so — keep it.
+
+A user name that is not UTF-8 also needs a decision at the protocol edge: SSH
+carries the user name as bytes on the wire, and `handle_userauth_request`
+currently does `String::from_utf8_lossy` on it before anything compares it to
+`/etc/passwd`. Two lossy names that differ in the original bytes compare
+*equal* after that conversion, which is an authentication question rather than
+a path question. Convert the wire name to `OsString` in the same pass so the
+comparison is over bytes.
+
+### How it was found
+
+Bounding the scope of the `OsString` conversion above: `authorized_keys_file`
+was the one path-shaped field in `SshdConfig` that could not be converted with
+the others, and following why led here.
+
+## TD-B-SUDO-DIED-BEFORE-ITS-FIRST-STATEMENT-ON-A-NON-UTF-8-COMMAND-LINE (lane B, 2026-09-06) — FIXED
+
+**In short:** `sudo` — the program that hands out root — read its command line
+with a Rust function that *crashes* when an argument contains a byte that is
+not valid text. On this OS a file name may hold every byte except `/` and NUL,
+so `sudo rm <a file with an odd byte in its name>` did not refuse, did not log,
+and did not reach a single line of sudo's own code: it died with a Rust panic
+message before `main`'s first statement. It read the *environment* the same
+way, so a single odd byte in any exported variable killed it too — no argument
+needed. Converted to carry argv and the environment as bytes end to end. The
+conversion uncovered five further defects that have nothing to do with text
+encoding, **three of them security bugs**, and those are the part of this entry
+worth reading.
+
+**Where it lived:** `userspace/sudo/src/main.rs`, two lines:
+
+```rust
+let args: Vec<String> = env::args().collect();   // argv
+for (key, val) in std::env::vars() { ... }       // the environment
+```
+
+Both were baseline entries in `scripts/argv-utf8-baseline.txt`
+(`userspace/sudo/src/main.rs:argv-as-string` and `:env-as-string`), which is why
+this was picked up first out of the 29 privileged programs the gate's scope
+extension found — see
+`TD-B-SSHD-DIES-BEFORE-ITS-FIRST-STATEMENT-ON-A-NON-UTF-8-COMMAND-LINE` above.
+The baseline is a ratchet and shrank 464 → 462.
+
+### The five defects the conversion found
+
+None of them is about UTF-8. They are what the conversion walked past.
+
+**1. The audit log could be forged, by three independent routes — and one of
+them needed no odd bytes at all.** The log is one record per line, fields
+separated by ` ; `, ending `RESULT=ALLOWED` or `RESULT=NOT_ALLOWED`. Three
+fields were written into that line verbatim and each could carry a newline:
+
+| Field | How a caller sets it |
+|---|---|
+| `COMMAND=` | argv — chosen outright |
+| `TTY=` | `$TTY`, a plain environment variable; nothing validated it |
+| `PWD=` | the working directory — one `mkdir` of a name containing a newline and one `cd` |
+
+So anyone who could run `sudo` at all — including someone whose every attempt
+was *denied* — could append a fabricated `RESULT=ALLOWED` record naming another
+user, into the very file whose only purpose is to say who ran what. The `PWD=`
+route is the notable one: it is reachable with an ordinary command line
+containing only printable characters, because the newline lives in a directory
+name rather than in anything sudo was passed. Path names here may hold every
+byte but `/` and NUL, so that directory is legal, not malformed.
+
+Fixed by putting all five variable fields through `escape_os`, whose output is
+valid UTF-8 by construction — a newline becomes a two-character backslash-`n`
+escape, a byte that is no part of a character becomes three octal digits — so a
+record is text no matter what went into it, and a field that was already plain
+comes through unchanged. `username` and `target_user` are escaped too; they
+come from the user database rather than from argv, but "a step further from the
+caller" is not a property worth relying on in an audit log.
+
+The record formatting was split out of `log_command` into `format_log_record`
+purely so the property could be *tested*: writing the log needs a root-owned
+`/var/log`, which no test has, and a security property checkable only by
+reading the source is one that comes back. Three tests now pin it, including
+one asserting that an ordinary record is byte-for-byte unchanged by the
+escaping.
+
+**2. `sudoedit` could copy your edit back over the wrong file.** It built its
+temporary path as
+
+```rust
+original_path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+```
+
+so *every* basename that is not valid UTF-8 collapsed onto the single path
+`/tmp/sudoedit-<pid>-file`. Editing two such files in one invocation therefore
+gave both of them one temp file, and the copy-back wrote the second edit over
+the first original. A wrong-file write is the worst outcome an editor wrapper
+can have, and it needed only a file name nobody chose to type. The basename is
+now carried across as an `OsStr`.
+
+**3. `sudoreplay -l` silently omitted recordings.** `list_sessions` obtained
+the session id with `file_name().and_then(|n| n.to_str())` and `continue`d on
+`None`. A session directory whose name is not UTF-8 therefore did not fail to
+replay — it failed to *appear*, and the listing showed no sign that anything
+had been left out. The recording existed on disk the whole time.
+`SessionEntry::id` is an `OsString` now, and the listing renders it through
+`escape_os` because it is a fixed-width table: a session name containing a tab
+or a newline would otherwise rewrite the rows below it.
+
+**4. A non-UTF-8 `EDITOR` was silently ignored, and `$TTY` silently became
+`unknown`.** Both used `env::var` in a fallback chain:
+
+```rust
+env::var("SUDO_EDITOR").or_else(|_| env::var("VISUAL")).or_else(|_| env::var("EDITOR"))
+```
+
+`env::var` reports a non-UTF-8 value as `Err(NotUnicode)`, which an `or_else`
+chain **cannot tell apart from "unset"**. So an `EDITOR` that was set, and
+valid, and pointed at a real program fell through to the built-in default, and
+the user's `sudoedit` opened in a different editor than every other command
+they ran, with nothing said. The `$TTY` instance of the same shape wrote
+`TTY=unknown` into the audit log for a terminal that had a perfectly good name.
+Both now use `env::var_os`, where "unset" is the only `None`.
+
+**5. The editor was handed a path that did not exist.**
+`.arg(temp_path.display().to_string())` — `Path::display` substitutes U+FFFD for
+every byte it cannot decode, so whenever the original's name was not UTF-8 the
+editor was launched on a different path from the one `sudoedit` had just
+written. It is now `.arg(&temp_path)`, which passes the bytes.
+
+### Three duplications removed as part of the fix, not around it
+
+* `current_pwd()` — the expression
+  `current_dir().map(|p| p.display().to_string()).unwrap_or_else(...)` appeared
+  at **six** call sites, spelled out by hand at each. Six copies of a lossy
+  conversion is six places to fix it and six chances to miss one.
+* `editor_command()` — `sudoedit` and `visudo` had a copy each of the
+  `SUDO_EDITOR` → `VISUAL` → `EDITOR` → default order. Two copies of a
+  preference order is a way to end up with two preference orders.
+* `format_log_record()` — split out for the testability reason under defect 1.
+
+### One behavioural change that is not a bug fix
+
+The `env_check` scan — which drops a preserved variable whose value contains
+`/` or `%` — now runs over the raw bytes instead of a decoded `String`. `/` and
+`%` are single bytes in UTF-8 and can be no part of a multi-byte character, so
+the byte scan finds exactly what the string scan found; it additionally works
+on values that could not be decoded, which are precisely the ones a caller
+would try to smuggle something through in. Before the conversion those values
+did not reach the scan at all — `env::vars()` panicked first.
+
+### Testing
+
+The new tests are in two blocks. **"argv is bytes"** covers what could not
+previously be written down at all: arguments that are not valid text, which is
+impossible through `&str` and impossible to produce on the Windows development
+host through a real process spawn. They pin that a command survives parsing
+unchanged, that two commands differing around a non-text unit do not collapse
+together, that everything after `--` is taken as command even when it is not
+text, that a value-taking flag refuses an argument that is not text, that
+`visudo`'s file and `sudoreplay`'s directory and session are carried through,
+and that the personality is chosen from a basename that need not be text.
+
+**A `#[cfg(unix)]` fixture would have run nowhere that matters, and the first
+draft of these tests found that out the hard way.** They were written on
+`quoting::os_from_bytes`, which is byte-exact under `#[cfg(unix)]` — where an
+`OsStr` *is* its bytes — and goes through `String::from_utf8_lossy` off unix.
+So on the Windows host `b"tool\xff"` arrived as `tool\u{fffd}`: valid text, and
+precisely the substitution the tests exist to rule out. All seven failed on
+exactly that, which is the good outcome; had the assertions been one degree
+weaker they would have passed while testing the host's lossy conversion against
+itself. Gating them `#[cfg(unix)]` would have been the easy answer and the
+wrong one — Windows is where this code is actually built and run, so a case
+gated out there is a case that runs nowhere.
+
+The fix is a `not_text(prefix, suffix)` fixture that asks each platform for the
+cheapest thing its `OsString` can hold that `to_str()` refuses: byte `0xff` on
+unix, and **an unpaired surrogate `U+D800` on Windows**, which `OsString` stores
+happily because it is WTF-8 there. The fixture asserts its own result is not
+valid text, so a platform where that stopped being true would fail loudly
+rather than quietly assert nothing. The byte-exact assertions are kept as
+*additional* `#[cfg(unix)]` tests alongside the platform-free ones, because
+byte-exactness is the property that matters on the target, where the command is
+handed to `exec` as bytes and one substituted byte is a different program.
+**This technique is the thing to copy into the other 28 conversions**; every
+`OsString` conversion in this tree written before it has its non-text coverage
+confined to unix and therefore, in practice, to nowhere. The size of that hole
+was measured the same day and has its own entry:
+`TD-B-CFG-UNIX-GATED-TESTS-RUN-NOWHERE` — **198 `#[cfg(unix)]` tests across 40
+files**, none of which have ever executed on the development host.
+
+**"The audit log is one record per line, and stays that way"** (three tests) is
+the guard on defect 1: a forged record attempted through the command field, the
+same attempted through `$TTY` and through the working directory, and the
+byte-for-byte control proving an ordinary record is undisturbed.
+
+`detect_personality` was made generic over `AsRef<OsStr>` rather than taking
+`&OsStr`, so that its existing call sites read `detect_personality("visudo")`
+and not `detect_personality(OsStr::new("visudo"))`. The ceremony is what stops
+cases being added.
+
+`cargo test -p sudo` finishes at **253 passed, 0 failed** (was 234 before this
+work), with three of the additions kept deliberately `#[cfg(unix)]` as the
+byte-exact controls described above.
+
+### Why it survived
+
+The same reason as every other entry in this audit: the development host is
+Windows, where argv arrives as UTF-16 and no test can hand a process an invalid
+argument; and `cargo test` never runs the binary at all, only its internal
+functions. `main` is the least-tested line in the file. **This is the pattern
+holding for the seventh consecutive conversion** — three unrelated bugs in
+`rm`, four in `mv`, six in `cp`, four in `ln`, four in `mkdir`, nine in `ed`,
+and now five in `sudo`, none of them about UTF-8. What makes `sudo` the
+sharpest instance is *which* bugs: three of the five are exploitable by an
+unprivileged local user, and the log-forging one is exploitable by a user whose
+sudo access is being *denied* — the case the log exists to record.
+
+### Still to do — the other 28
+
+`su`, `login`, `doas`, `passwd`, `useradd`, `chpasswd`, `getty`, `newgrp`,
+`chage`, `chroot`, `firejail`, `unshare`, `nsenter`, `capsh` and the network
+daemons all have the defect `sudo` had, and are recorded in
+`scripts/argv-utf8-baseline.txt`. `sudo`'s five defects are the argument for
+converting each of them properly rather than swapping `env::args()` for
+`env::args_os()` and moving on: the panic is only the part of an untested
+`main` that a checker can see.
+
+## TD-B-CFG-UNIX-GATED-TESTS-RUN-NOWHERE (lane B, 2026-09-06)
+
+**In short:** A test written `#[cfg(unix)]` is not compiled at all on Windows,
+and Windows is the machine this project is developed and tested on. There are
+**198 such tests in 40 files** under `userspace/**` and `posix/**` (census of
+5239 `.rs` files, 2026-09-06). Every one of them has never run here and will
+not run until someone tests on Linux. That is fine for the ones that are gated
+because the *behaviour* is unix-only — you cannot check a umask on Windows.
+It is not fine for the ones that are gated because the *test fixture* only
+works on unix, because those are usually the byte-exactness tests: precisely
+the assertions written to prove that a non-UTF-8 path survives a conversion.
+The gate silently converts "we proved bytes are preserved" into "we proved
+nothing, anywhere." The `sudo` conversion (see
+`TD-B-SUDO-DIED-BEFORE-ITS-FIRST-STATEMENT-ON-A-NON-UTF-8-COMMAND-LINE`) hit
+this live: seven tests written with `quoting::os_from_bytes` failed on Windows
+with `left: [..., 239, 191, 189] right: [..., 255]` — the fixture itself had
+been lossily converted to `U+FFFD` before the assertion ever ran. Had they been
+gated `#[cfg(unix)]` instead of fixed, they would have "passed" forever by not
+existing.
+
+### Where it lives
+
+The gated-test population, largest first:
+
+| Tests | File |
+|---|---|
+| 58 | `userspace/coreutils/src/bin/cp.rs` |
+| 22 | `userspace/coreutils/src/bin/mv.rs` |
+| 17 | `userspace/coreutils/src/dirfd.rs` |
+| 15 | `userspace/coreutils/src/fsattr.rs` |
+| 15 | `userspace/coreutils/src/bin/tar.rs` |
+| 9 | `userspace/coreutils/src/bin/rm.rs` |
+| 7 | `userspace/coreutils/src/bin/touch.rs` |
+| 5 | `userspace/coreutils/src/bin/ln.rs` |
+| 4 | `userspace/sshd/src/lib.rs` |
+| 3 each | `sudo/src/main.rs`, `coreutils/src/umask.rs`, `mkdir.rs`, `rmdir.rs` |
+| 1–2 each | 27 further files |
+
+The three in `sudo` and some of the coreutils ones are *correctly* gated — they
+are the byte-exact controls that sit beside a portable test of the same
+property, added deliberately in the same commit. The rest have not been
+triaged.
+
+### The root cause of the fixture half
+
+`quoting::os_bytes` / `quoting::os_from_bytes`
+(`userspace/quoting/src/lib.rs:1325–1364`) are byte-exact **only** under
+`#[cfg(unix)]`, where an `OsStr` is its bytes. Off unix they route through
+`String::from_utf8_lossy` / `to_string_lossy`, so `b"tool\xff"` arrives as
+`tool\u{fffd}`. That is the right behaviour for the library — there is no
+byte-exact `OsString` on Windows — but it makes the pair useless as a *test
+fixture* for "not valid Unicode," and the natural reaction to the resulting
+failure is to gate the test rather than to fix the fixture.
+
+### The fix, which is cheap
+
+Windows `OsString` is WTF-8: it can hold an **unpaired surrogate**, which no
+`&str` can. So a portable "this is not valid text" fixture exists:
+
+```rust
+fn not_text(prefix: &str, suffix: &str) -> OsString {
+    #[cfg(unix)]
+    let out = { /* prefix + byte 0xff + suffix, via os_from_bytes */ };
+    #[cfg(not(unix))]
+    let out = {
+        use std::os::windows::ffi::OsStringExt;
+        let mut w: Vec<u16> = prefix.encode_utf16().collect();
+        w.push(0xD800);                       // unpaired surrogate
+        w.extend(suffix.encode_utf16());
+        OsString::from_wide(&w)
+    };
+    assert!(out.to_str().is_none(), "the fixture must not be valid text");
+    out
+}
+```
+
+The trailing assertion is the important line: it makes a platform whose fixture
+quietly became valid text fail loudly instead of asserting nothing. The
+reference implementation is in `userspace/sudo/src/main.rs` (test module, near
+the `-- argv is bytes --` block), together with the doc comment explaining why
+`argv_bytes` may not be used off unix.
+
+This covers everything that only needs *an argument that is not Unicode* —
+parsing, propagation, comparison, non-collapse, error messages. It does **not**
+cover "these exact bytes come out the other end," which genuinely cannot be
+expressed on Windows; those stay `#[cfg(unix)]`, and should be written as a
+*second* test beside a portable first one, never as the only one.
+
+### What to do
+
+Triage the 198. For each, decide which of three it is:
+
+1. **Behaviour is unix-only** (umask, symlink, fifo, `st_mode`, `dirfd`) —
+   correctly gated, leave it, but note that it is unverified on the dev host.
+2. **Fixture was unix-only** — rewrite with the `not_text` shape above and
+   remove the gate. This is the bug class; every conversion in this tree
+   written before 2026-09-06 has its non-text coverage confined to unix and
+   therefore, in practice, to nowhere.
+3. **Correctly gated byte-exact control with a portable sibling** — leave it.
+
+Start with `cp.rs` (58) and `mv.rs` (22), which are more than a third of the
+total and are also the two programs whose conversions found the most bugs.
+
+A checker for this belongs in `scripts/` eventually — something that flags a
+`#[cfg(unix)]` test whose body mentions `os_from_bytes`/`os_bytes` and has no
+non-gated sibling — but the triage does not need it and should not wait for it.
+
+### Why it survived
+
+Because a gated-out test is indistinguishable, in `cargo test` output, from a
+test that does not exist: the count simply is what it is, and nothing reports
+"40 files contributed zero tests on this host." The failure mode is silence,
+and it is self-reinforcing — the fastest way to make a failing byte-exactness
+test green on Windows is to gate it, which is exactly the wrong move and looks
+like the right one.
+
+## TD-B-SU-DIED-BEFORE-ITS-FIRST-STATEMENT-ON-A-NON-UTF-8-COMMAND-LINE (lane B, 2026-09-06) — FIXED
+
+**In short:** `su` — the program you use to become root — read its command line
+with a Rust function that *crashes* when an argument holds a byte that is not
+valid text. On this OS a file name may hold every byte except `/` and NUL, so
+`su -s /bin/<a shell whose name has an odd byte> alice` did not refuse and did
+not report anything: it died with a Rust panic before `run_su` executed a
+single statement. Converted to carry argv and the environment as bytes end to
+end. As with `sudo` the day before, the conversion is not the interesting part
+— **five further defects came out of walking the lines it touched, and the
+worst of them let any local user forge a login session record.**
+
+**Where it lived:** `userspace/su/src/main.rs`, one line —
+
+```rust
+let args: Vec<String> = env::args().collect();
+```
+
+— the baseline entry `userspace/su/src/main.rs:argv-as-string` in
+`scripts/argv-utf8-baseline.txt`, which is a ratchet and shrank 462 → 461.
+
+### The five defects the conversion found
+
+**1. `who` and `w` could be made to report a login session that does not
+exist.** On a login switch, `su` writes `/run/sessions/<pid>` as a
+`key=value\n` record:
+
+```
+user=alice
+tty=pts/0
+host=
+time=1757...
+pid=1234
+```
+
+The `tty=` value came from `detect_tty`, which reads the `/proc/self/fd/0`
+symlink and strips `/dev/`. **Stdin is the caller's to choose.** A redirection
+is an ordinary thing an unprivileged user may write, and a file name here may
+contain a newline:
+
+```sh
+mkdir -p "/dev/shm/$(printf 'x\nuser=root\nhost=')" ...
+su - alice < "/dev/shm/x
+user=root"
+```
+
+The record then carries a second `user=` line, and every reader of that
+directory reports a root session that nobody is in. Nothing in the path
+validated the name, because nothing in the path was looking at it as anything
+but a string to interpolate.
+
+Fixed by screening the name for control bytes (`< 0x20` and `0x7f`) in
+`tty_name_is_plausible`, which is split out of `detect_tty` so that it can be
+tested — the real function reads `/proc/self/fd/0`, which a unit test cannot
+arrange. **A suspicious name is reported as `?`, not sanitised.** Repairing it
+would produce a name that looks real and is not, which is the same bug one
+step further along.
+
+**2. The unknown-user message interpolated the name raw.** `eprintln!("su:
+unknown user: {}", opts.target_user)` — with the name coming straight from
+argv, so
+
+```sh
+su "$(printf 'nobody\nsu: switched to root. #')"
+```
+
+wrote a convincing second line onto the caller's terminal. That is a phishing
+primitive rather than a privilege escalation, but `su` is precisely the program
+whose output a user reads to decide whether they are root. Now `quoteaf_os`,
+as are the unknown-option and exec-failure messages, which had the same shape.
+
+**3. `TERM` was read with `env::var`.** A terminal name that is not valid text
+came back as `Err(NotUnicode)`, indistinguishable from unset, so the login
+shell started with no `TERM` at all — no line editing, no arrow keys. `var_os`
+now, and the value is handed to the child untouched: this program never needs
+to read it as text.
+
+**4. A computed `argv[0]` was built and thrown away.** The interactive branch
+of `exec_as_user` computed `-bash` from the shell's basename — the convention
+by which a shell decides to read its login profile — and then discarded it,
+because `std::process::Command` sets `argv[0]` to the program path and offers
+no way to override it. Its own comment conceded this ("best-effort"), which is
+how it survived. Deleted rather than left in place: a computation whose result
+is dropped reads to the next person as a feature that works, and `su -` not
+running the login profile is a real bug that this dead code was hiding. The
+convention needs an exec that takes `argv[0]` separately
+(`SYS_PROCESS_SPAWN_EX2`); noted in `todo.txt`.
+
+**5. `USER` was read with `env::var` in the caller-uid fallback.** Same
+`Err(NotUnicode)`-is-unset confusion as (3). Harmless in outcome here — a
+non-text name cannot appear in a YAML database either way — but it was written
+as `if let Ok(...)`, which cannot tell the two apart, and that is the shape
+that produced the real bug in `sudo`'s `EDITOR` handling.
+
+### What the tests pin
+
+`cargo test -p su` finishes at **43 passed, 0 failed** (was 34 before this
+work). All nine additions are portable and were confirmed by name in the run,
+which is the point of the paragraph below.
+
+The argument-parsing suite moved from `Vec<String>` to `Vec<OsString>`, and six
+non-text cases were added. They use the portable `not_text` fixture — an
+unpaired surrogate on Windows, byte `0xff` on unix — rather than the
+`#[cfg(unix)]` byte fixture, so that they actually execute on this project's
+development host. See `TD-B-CFG-UNIX-GATED-TESTS-RUN-NOWHERE`: 198 tests across
+40 files are gated the other way and have never once run here.
+
+The sharpest of the six is
+`a_leading_dash_is_an_unknown_option_even_when_the_rest_is_not_text`. Whether
+an argument is an option is decided by its **first byte**, not by whether
+`to_str()` succeeds. Deciding it the obvious way — falling into the positional
+branch whenever the argument is not text — would make a mistyped option
+containing a stray byte into a *username*, and because the last positional
+wins, it would then **silently discard the real username typed after it** and
+start a shell as somebody else. That is the failure this conversion could most
+easily have introduced, and it exists only because the fixture runs.
+
+Also pinned: the control-byte screen refuses `\n`, `\r`, NUL and the empty
+name while still accepting `tty1`, `pts/0`, `ttyS0`, `console` and a
+non-UTF-8 device name (the screen is for control characters, not for
+non-UTF-8); and `is_safe_filename` refuses `""`, `.`, `..`, `../etc/passwd`,
+`a/b` and an embedded NUL, which guards the `/tmp/.users/<username>` marker
+this program writes and deletes as root.
 
 ## TD-A-DF-IS-THE-SEVENTH-COPY-OF-THE-FATAL-FAULT-GUARD (lane A)
 

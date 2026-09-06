@@ -45,8 +45,9 @@
 //! and a fallback marker to `/tmp/.users/` so that `who`/`w` can
 //! report the logged-in user.
 
-use quoting::quoteaf_os;
+use quoting::{os_bytes, quoteaf_os};
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
 use std::process;
@@ -237,8 +238,16 @@ fn get_caller_uid(users: &UserDb) -> u32 {
     }
 
     // Fallback: resolve USER env var against the database.
-    if let Ok(name) = env::var("USER")
-        && let Some(user) = users.find(&name)
+    //
+    // `var_os` and an explicit `to_str`, not `var`. A value that is not text
+    // cannot name a user in a YAML file, so the outcome is the same either
+    // way — but `var` reports it as `Err(NotUnicode)`, which an `if let Ok`
+    // silently treats as "unset". The two are different facts, and writing
+    // code that cannot tell them apart is how `sudo` ended up ignoring a set
+    // `EDITOR` (see known-issues.md, TD-B-SUDO-...).
+    if let Some(name) = env::var_os("USER")
+        && let Some(name) = name.to_str()
+        && let Some(user) = users.find(name)
         && let Some(uid) = user.uid()
     {
         return uid;
@@ -285,22 +294,56 @@ fn current_epoch_secs() -> u64 {
 // Session tracking (who/w integration)
 // ============================================================================
 
+/// Whether `name` is safe to use as a single filename under a directory this
+/// program creates.
+///
+/// The fallback marker is written to `/tmp/.users/<username>`, with the name
+/// coming from the user database — so a database entry named `../../etc/shadow`
+/// would have this program, running as root, truncate a file two directories up.
+/// The database is administrator-controlled and this is therefore not a local
+/// privilege escalation, but "only an administrator can trigger it" is not the
+/// same as "it is fine", and the guard costs one comparison.
+///
+/// Empty, `.`, `..`, and anything containing `/` or a NUL are refused; those are
+/// the only byte sequences that can escape the directory, since a path here is
+/// bytes with `/` as the one separator (`design.txt`).
+fn is_safe_filename(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0')
+}
+
 /// Record a login session so that `who` and `w` can see it.
 ///
 /// Writes to both `/run/sessions/<pid>` (Slate OS native) and
 /// `/tmp/.users/<username>` (fallback). Errors are non-fatal since
 /// the switch itself should still proceed.
-fn record_session(username: &str, tty: &str) {
+fn record_session(username: &str, tty: &OsStr) {
     let now = current_epoch_secs();
     let pid = process::id();
 
-    // Slate OS native session file.
+    // Slate OS native session file. Assembled as **bytes**, because `tty` is a
+    // device name and a device name is bytes on this OS. It used to be built
+    // with `format!`, which meant `detect_tty` had to hand over a `String` and
+    // therefore had to run the name through `to_string_lossy` first — so a
+    // terminal whose name is not valid UTF-8 was recorded as one with U+FFFD
+    // in it, and `who` reported a terminal nobody is on.
     let session_dir = "/run/sessions";
     let _ = fs::create_dir_all(session_dir);
-    let session_content = format!("user={username}\ntty={tty}\nhost=\ntime={now}\npid={pid}\n");
+    let mut session_content = Vec::new();
+    session_content.extend_from_slice(b"user=");
+    session_content.extend_from_slice(username.as_bytes());
+    session_content.extend_from_slice(b"\ntty=");
+    session_content.extend_from_slice(&os_bytes(tty));
+    session_content.extend_from_slice(b"\nhost=\ntime=");
+    session_content.extend_from_slice(now.to_string().as_bytes());
+    session_content.extend_from_slice(b"\npid=");
+    session_content.extend_from_slice(pid.to_string().as_bytes());
+    session_content.push(b'\n');
     let _ = fs::write(format!("{session_dir}/{pid}"), &session_content);
 
     // Fallback marker for /tmp/.users/.
+    if !is_safe_filename(username) {
+        return;
+    }
     let users_dir = "/tmp/.users";
     let _ = fs::create_dir_all(users_dir);
     let _ = fs::write(format!("{users_dir}/{username}"), format!("{now}"));
@@ -310,7 +353,11 @@ fn record_session(username: &str, tty: &str) {
 fn remove_session(username: &str) {
     let pid = process::id();
     let _ = fs::remove_file(format!("/run/sessions/{pid}"));
-    let _ = fs::remove_file(format!("/tmp/.users/{username}"));
+    // Same guard as the write: a name that was never used to create a file
+    // must not be used to delete one either.
+    if is_safe_filename(username) {
+        let _ = fs::remove_file(format!("/tmp/.users/{username}"));
+    }
 }
 
 // ============================================================================
@@ -326,8 +373,8 @@ fn remove_session(username: &str) {
 /// Returns the exit code of the child process.
 fn exec_as_user(
     target: &Record,
-    shell_override: Option<&str>,
-    command: Option<&str>,
+    shell_override: Option<&OsStr>,
+    command: Option<&OsStr>,
     login_mode: bool,
     preserve_env: bool,
 ) -> i32 {
@@ -335,41 +382,30 @@ fn exec_as_user(
     let target_home = home_of(target);
     let target_name = name_of(target);
     let target_uid = target.uid().unwrap_or(u32::MAX);
-    let shell = shell_override.unwrap_or(&target_shell);
+    // `-s` names a path, and a path on this OS is bytes; the database's own
+    // `shell:` field comes from YAML and so is text. Both are borrowed as
+    // `&OsStr`, which is the type that can hold either.
+    let shell: &OsStr = shell_override.unwrap_or_else(|| target_shell.as_ref());
 
-    // Determine the program and arguments.
-    let (program, args): (String, Vec<String>) = if let Some(cmd) = command {
-        // Run a single command via the shell's -c flag.
-        (shell.to_string(), vec!["-c".to_string(), cmd.to_string()])
-    } else {
-        // Interactive shell. For login shells, argv[0] is prefixed with '-'.
-        let argv0 = if login_mode {
-            let base = shell.rsplit('/').next().unwrap_or(shell);
-            format!("-{base}")
-        } else {
-            shell.to_string()
-        };
-        (shell.to_string(), vec![argv0])
-    };
+    let mut cmd = process::Command::new(shell);
 
-    let mut cmd = process::Command::new(&program);
-
-    // For a "shell -c 'command'" invocation, args are ["-c", "command"].
-    // For an interactive shell, the single arg is the argv[0] name.
-    // process::Command already sets argv[0] to the program path, but for
-    // login shells we want the '-bash' convention. Since Command does not
-    // let us override argv[0] directly, we pass it as the shell argument
-    // and let the shell detect it. On our OS the shell may or may not
-    // honour this convention, but we follow standard practice.
-    if command.is_some() {
-        // -c mode: pass ["-c", "command"].
-        for arg in &args {
-            cmd.arg(arg);
-        }
+    // `-c` mode passes ["-c", "command"] through untouched: the command is
+    // the shell's to parse, and this program must not narrow what it can say.
+    //
+    // Interactive mode passes nothing. There used to be a computed argv[0]
+    // here — `-bash` for a login shell, per the convention a shell uses to
+    // decide whether to read its login profile — and it was dead code, as its
+    // own comment conceded: `std::process::Command` sets argv[0] to the
+    // program path and offers no way to override it, so the value was built
+    // and then dropped on the floor for interactive shells and passed as a
+    // *positional argument* for none. It is gone rather than left in place,
+    // because a computation whose result is discarded reads to the next
+    // person as a feature that works. The convention needs an exec that takes
+    // argv[0] separately (`SYS_PROCESS_SPAWN_EX2`); see `todo.txt`.
+    if let Some(c) = command {
+        cmd.arg("-c");
+        cmd.arg(c);
     }
-    // For interactive mode (no -c), we just launch the shell with no args.
-    // The shell reads its own argv[0] from the OS, which we cannot override
-    // via std::process::Command. The login-shell convention is best-effort.
 
     if login_mode && !preserve_env {
         // Clean environment: only set what a login shell expects.
@@ -381,7 +417,14 @@ fn exec_as_user(
         cmd.env("PATH", default_path_for_uid(target_uid));
 
         // Propagate TERM if set -- shells need it for line editing.
-        if let Ok(term) = env::var("TERM") {
+        //
+        // `var_os`, not `var`: the value is handed straight back to a child
+        // process, so this program never needs to read it as text, and `var`
+        // would drop a non-UTF-8 terminal name on the floor as
+        // `Err(NotUnicode)` — leaving the login shell with no TERM at all and
+        // therefore no line editing, which is the failure a user reports as
+        // "su - breaks my arrow keys".
+        if let Some(term) = env::var_os("TERM") {
             cmd.env("TERM", term);
         }
 
@@ -412,7 +455,7 @@ fn exec_as_user(
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("su: failed to execute {program}: {e}");
+            eprintln!("su: failed to execute {}: {e}", quoteaf_os(shell));
             126
         }
     }
@@ -434,15 +477,52 @@ fn default_path_for_uid(uid: u32) -> &'static str {
 // ============================================================================
 
 /// Detect the controlling terminal name for session tracking.
-fn detect_tty() -> String {
+///
+/// Returns an `OsString` rather than a `String` because a device name is bytes
+/// on this OS, and the caller writes it into a file `who` and `w` read back.
+/// The previous version went through `to_string_lossy`, so a terminal whose
+/// name is not valid UTF-8 was recorded with U+FFFD substituted for the bytes
+/// that made it unique — two such terminals recorded identically, and neither
+/// name could be matched against anything real.
+///
+/// The prefix is stripped with `Path::strip_prefix`, not `str::strip_prefix`:
+/// the string form would need a lossy conversion first, and it is the
+/// conversion that loses the bytes.
+///
+/// # Why the name is screened for control bytes
+///
+/// `/proc/self/fd/0` names whatever stdin happens to be, which the *caller*
+/// chooses — `su - alice < /dev/shm/evil` is an ordinary redirection any
+/// unprivileged user may perform. The name goes into a `key=value\n` record,
+/// so a name containing a newline appends attacker-chosen fields to it, and a
+/// name containing a NUL truncates the record where the reader splits. Neither
+/// is a name any real terminal has, so screening costs nothing and closes the
+/// injection: a suspicious name is reported as unknown rather than sanitised,
+/// because a *silently repaired* name is one `who` reports as real.
+fn detect_tty() -> OsString {
     // Try /proc/self/fd/0 symlink.
-    if let Ok(link) = fs::read_link("/proc/self/fd/0") {
-        let path_str = link.to_string_lossy();
-        if let Some(tty) = path_str.strip_prefix("/dev/") {
-            return tty.to_string();
-        }
+    if let Ok(link) = fs::read_link("/proc/self/fd/0")
+        && let Ok(rest) = link.strip_prefix("/dev/")
+        && tty_name_is_plausible(rest.as_os_str())
+    {
+        return rest.as_os_str().to_os_string();
     }
-    "?".to_string()
+    OsString::from("?")
+}
+
+/// Whether `name` could be a terminal's name, as opposed to something chosen
+/// to be written into a `key=value` record.
+///
+/// Split out from [`detect_tty`] so it can be tested: the input the real
+/// function reads is `/proc/self/fd/0`, which a unit test cannot arrange.
+///
+/// Every byte below `0x20` and `0x7f` (DEL) is refused. `\n` is the one that
+/// matters — it ends a field — but a NUL truncates at the syscall boundary and
+/// a `\r` can hide the rest of a line on a terminal, and no terminal has ever
+/// been named with any of them, so the whole control range goes.
+fn tty_name_is_plausible(name: &OsStr) -> bool {
+    let bytes = os_bytes(name);
+    !bytes.is_empty() && !bytes.iter().any(|b| *b < 0x20 || *b == 0x7f)
 }
 
 // ============================================================================
@@ -450,18 +530,27 @@ fn detect_tty() -> String {
 // ============================================================================
 
 /// Parsed options for `su`.
+///
+/// Every field that comes from the command line is an `OsString`. Two of them
+/// name things the kernel names in bytes — a shell is a path, and a `-c`
+/// command is handed to that shell verbatim — so narrowing them to `String`
+/// would mean this program could not express arguments the system it runs on
+/// can. `target_user` is text in the end (the database is YAML), but it is
+/// held as an `OsString` so that a name which *is not* text can be reported
+/// back to the user instead of aborting the process: `env::args()` panics on a
+/// non-UTF-8 argument, which killed `su` before it reached its first statement.
 #[derive(Debug)]
 struct SuOptions {
     /// Target username (default: "root").
-    target_user: String,
+    target_user: OsString,
     /// Login shell mode (-l, --login, leading `-`).
     login: bool,
     /// Command to run via shell -c.
-    command: Option<String>,
+    command: Option<OsString>,
     /// Preserve the caller's environment (-m, -p, --preserve-environment).
     preserve_env: bool,
     /// Override the target user's shell (-s, --shell).
-    shell: Option<String>,
+    shell: Option<OsString>,
 }
 
 /// Parse `su` command-line arguments.
@@ -473,58 +562,70 @@ struct SuOptions {
 ///   su -c 'cmd' [username]
 ///   su -s /path/shell [username]
 ///   su -m [username]
-fn parse_su_args(args: &[String]) -> Result<SuOptions, i32> {
+///
+/// # Dispatching on `to_str()`
+///
+/// Every option this program understands is ASCII, so an argument that is not
+/// valid text cannot be one of them and the `None` arm of `to_str()` falls
+/// through to the positional/unknown-option branch. That branch must not use
+/// the same `None` as its own test, though: whether an argument is an option
+/// is decided by its **first byte**, not by whether it is text. `-` followed
+/// by a non-UTF-8 byte is a misspelled option and has to be rejected as one;
+/// treating it as a username instead would make `su -<garbage>` silently try
+/// to become a user by that name, and — because the last positional wins —
+/// silently discard a real username given after it.
+fn parse_su_args(args: &[OsString]) -> Result<SuOptions, i32> {
     let mut opts = SuOptions {
-        target_user: "root".to_string(),
+        target_user: OsString::from("root"),
         login: false,
         command: None,
         preserve_env: false,
         shell: None,
     };
 
-    let mut positional: Vec<String> = Vec::new();
+    let mut positional: Vec<OsString> = Vec::new();
     // Driven by the iterator rather than an index, so that "this option takes
     // a value" is expressed by consuming the next item and cannot run off the
     // end of the slice.
     let mut rest = args.iter().skip(1);
 
     while let Some(arg) = rest.next() {
-        match arg.as_str() {
-            "-" | "-l" | "--login" => {
+        match arg.to_str() {
+            Some("-" | "-l" | "--login") => {
                 opts.login = true;
             }
-            "-c" | "--command" => {
+            Some("-c" | "--command") => {
                 let Some(value) = rest.next() else {
                     eprintln!("su: option {} requires an argument", quoteaf_os(arg));
                     return Err(1);
                 };
                 opts.command = Some(value.clone());
             }
-            "-m" | "-p" | "--preserve-environment" => {
+            Some("-m" | "-p" | "--preserve-environment") => {
                 opts.preserve_env = true;
             }
-            "-s" | "--shell" => {
+            Some("-s" | "--shell") => {
                 let Some(value) = rest.next() else {
                     eprintln!("su: option {} requires an argument", quoteaf_os(arg));
                     return Err(1);
                 };
                 opts.shell = Some(value.clone());
             }
-            "-h" | "--help" => {
+            Some("-h" | "--help") => {
                 print_su_help();
                 return Err(0);
             }
-            "-V" | "--version" => {
+            Some("-V" | "--version") => {
                 println!("su (Slate OS) 0.1.0");
                 return Err(0);
             }
-            other => {
-                if other.starts_with('-') {
-                    eprintln!("su: unknown option: {other}");
+            _ => {
+                if os_bytes(arg).first() == Some(&b'-') {
+                    eprintln!("su: unknown option: {}", quoteaf_os(arg));
                     eprintln!("Try 'su --help' for usage.");
                     return Err(1);
                 }
-                positional.push(other.to_string());
+                positional.push(arg.clone());
             }
         }
     }
@@ -560,7 +661,7 @@ fn print_su_help() {
 }
 
 /// Run the `su` command.
-fn run_su(args: &[String]) -> i32 {
+fn run_su(args: &[OsString]) -> i32 {
     let opts = match parse_su_args(args) {
         Ok(o) => o,
         Err(code) => return code,
@@ -570,8 +671,14 @@ fn run_su(args: &[String]) -> i32 {
         return 1;
     };
 
-    let Some(target) = users.find(&opts.target_user) else {
-        eprintln!("su: unknown user: {}", opts.target_user);
+    // A name that is not text cannot appear in a YAML database, so it is an
+    // unknown user — reported through the same message rather than a second
+    // one, because from the caller's side the two are the same fact. The
+    // message quotes the name (`quoteaf_os`); it used to interpolate it raw,
+    // which let `su $'root\nsu: switched to root'` write a convincing second
+    // line onto the caller's terminal.
+    let Some(target) = opts.target_user.to_str().and_then(|n| users.find(n)) else {
+        eprintln!("su: unknown user: {}", quoteaf_os(&opts.target_user));
         return 1;
     };
 
@@ -625,7 +732,12 @@ fn run_su(args: &[String]) -> i32 {
 // honest outcome — the `sudo` behaviour lives in `userspace/sudo`.
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    // `args_os`, not `args`. `env::args()` panics on an argument that is not
+    // valid UTF-8, and on this OS a path may hold every byte but `/` and NUL —
+    // so `su -s /bin/<non-utf8> alice` did not fail with a message, it aborted
+    // the process before `run_su` ran a single statement, printing a panic that
+    // named this program's internals rather than the user's mistake.
+    let args: Vec<OsString> = env::args_os().collect();
     process::exit(run_su(&args));
 }
 
@@ -833,10 +945,55 @@ users:
 
     // --- su argument parsing ---
 
+    /// A command line, as `main` would hand it over.
+    fn argv(parts: &[&str]) -> Vec<OsString> {
+        parts.iter().map(OsString::from).collect()
+    }
+
+    /// An `OsString` that is *not* valid text, on either host.
+    ///
+    /// This exists to be a portable fixture, and the portability is the whole
+    /// point. The obvious way to build one is a raw byte such as `0xff` via
+    /// `OsStringExt::from_vec`, which is unix-only — so a test written that way
+    /// has to be `#[cfg(unix)]`, which on this project's Windows development
+    /// host means it never runs at all. That is not hypothetical: 198 tests
+    /// across 40 files are gated that way and have never once executed here
+    /// (`known-issues.md`, TD-B-CFG-UNIX-GATED-TESTS-RUN-NOWHERE).
+    ///
+    /// The Windows arm uses an unpaired surrogate (`U+D800`), which `OsString`
+    /// stores — its internal encoding is WTF-8 — and which `to_str()` refuses,
+    /// exactly as byte `0xff` is refused on unix. The two hosts disagree about
+    /// *which* sequence is unrepresentable, but agree that this one is, and
+    /// that agreement is all these tests rest on.
+    ///
+    /// The fixture asserts its own postcondition, so a future standard-library
+    /// or platform change that made either sequence valid text fails loudly
+    /// here rather than quietly turning every caller into a duplicate of the
+    /// plain-ASCII test next to it.
+    fn not_text(prefix: &str, suffix: &str) -> OsString {
+        #[cfg(unix)]
+        let out = {
+            use std::os::unix::ffi::OsStringExt;
+            let mut v = prefix.as_bytes().to_vec();
+            v.push(0xff);
+            v.extend_from_slice(suffix.as_bytes());
+            OsString::from_vec(v)
+        };
+        #[cfg(not(unix))]
+        let out = {
+            use std::os::windows::ffi::OsStringExt;
+            let mut w: Vec<u16> = prefix.encode_utf16().collect();
+            w.push(0xD800);
+            w.extend(suffix.encode_utf16());
+            OsString::from_wide(&w)
+        };
+        assert!(out.to_str().is_none(), "the fixture must not be valid text");
+        out
+    }
+
     #[test]
     fn test_su_args_default() {
-        let args = vec!["su".to_string()];
-        let opts = parse_su_args(&args).unwrap();
+        let opts = parse_su_args(&argv(&["su"])).unwrap();
         assert_eq!(opts.target_user, "root");
         assert!(!opts.login);
         assert!(opts.command.is_none());
@@ -846,98 +1003,167 @@ users:
 
     #[test]
     fn test_su_args_user() {
-        let args = vec!["su".to_string(), "alice".to_string()];
-        let opts = parse_su_args(&args).unwrap();
+        let opts = parse_su_args(&argv(&["su", "alice"])).unwrap();
         assert_eq!(opts.target_user, "alice");
         assert!(!opts.login);
     }
 
     #[test]
     fn test_su_args_login_dash() {
-        let args = vec!["su".to_string(), "-".to_string()];
-        let opts = parse_su_args(&args).unwrap();
+        let opts = parse_su_args(&argv(&["su", "-"])).unwrap();
         assert!(opts.login);
         assert_eq!(opts.target_user, "root");
     }
 
     #[test]
     fn test_su_args_login_dash_user() {
-        let args = vec!["su".to_string(), "-".to_string(), "alice".to_string()];
-        let opts = parse_su_args(&args).unwrap();
+        let opts = parse_su_args(&argv(&["su", "-", "alice"])).unwrap();
         assert!(opts.login);
         assert_eq!(opts.target_user, "alice");
     }
 
     #[test]
     fn test_su_args_login_l() {
-        let args = vec!["su".to_string(), "-l".to_string(), "bob".to_string()];
-        let opts = parse_su_args(&args).unwrap();
+        let opts = parse_su_args(&argv(&["su", "-l", "bob"])).unwrap();
         assert!(opts.login);
         assert_eq!(opts.target_user, "bob");
     }
 
     #[test]
     fn test_su_args_command() {
-        let args = vec![
-            "su".to_string(),
-            "-c".to_string(),
-            "whoami".to_string(),
-            "alice".to_string(),
-        ];
-        let opts = parse_su_args(&args).unwrap();
-        assert_eq!(opts.command.as_deref(), Some("whoami"));
+        let opts = parse_su_args(&argv(&["su", "-c", "whoami", "alice"])).unwrap();
+        assert_eq!(opts.command.as_deref(), Some(OsStr::new("whoami")));
         assert_eq!(opts.target_user, "alice");
     }
 
     #[test]
     fn test_su_args_preserve_env() {
-        let args = vec!["su".to_string(), "-m".to_string(), "alice".to_string()];
-        let opts = parse_su_args(&args).unwrap();
+        let opts = parse_su_args(&argv(&["su", "-m", "alice"])).unwrap();
         assert!(opts.preserve_env);
         assert_eq!(opts.target_user, "alice");
     }
 
     #[test]
     fn test_su_args_shell_override() {
-        let args = vec![
-            "su".to_string(),
-            "-s".to_string(),
-            "/bin/zsh".to_string(),
-            "root".to_string(),
-        ];
-        let opts = parse_su_args(&args).unwrap();
-        assert_eq!(opts.shell.as_deref(), Some("/bin/zsh"));
+        let opts = parse_su_args(&argv(&["su", "-s", "/bin/zsh", "root"])).unwrap();
+        assert_eq!(opts.shell.as_deref(), Some(OsStr::new("/bin/zsh")));
         assert_eq!(opts.target_user, "root");
     }
 
     #[test]
     fn test_su_args_command_missing_arg() {
-        let args = vec!["su".to_string(), "-c".to_string()];
-        assert_eq!(parse_su_args(&args).unwrap_err(), 1);
+        assert_eq!(parse_su_args(&argv(&["su", "-c"])).unwrap_err(), 1);
     }
 
     #[test]
     fn test_su_args_shell_missing_arg() {
-        let args = vec!["su".to_string(), "-s".to_string()];
-        assert_eq!(parse_su_args(&args).unwrap_err(), 1);
+        assert_eq!(parse_su_args(&argv(&["su", "-s"])).unwrap_err(), 1);
     }
 
     #[test]
     fn test_su_args_unknown_option() {
-        let args = vec!["su".to_string(), "--bogus".to_string()];
-        assert_eq!(parse_su_args(&args).unwrap_err(), 1);
+        assert_eq!(parse_su_args(&argv(&["su", "--bogus"])).unwrap_err(), 1);
     }
 
     #[test]
     fn test_su_args_help() {
-        let args = vec!["su".to_string(), "--help".to_string()];
-        assert_eq!(parse_su_args(&args).unwrap_err(), 0);
+        assert_eq!(parse_su_args(&argv(&["su", "--help"])).unwrap_err(), 0);
     }
 
     #[test]
     fn test_su_args_version() {
-        let args = vec!["su".to_string(), "--version".to_string()];
-        assert_eq!(parse_su_args(&args).unwrap_err(), 0);
+        assert_eq!(parse_su_args(&argv(&["su", "--version"])).unwrap_err(), 0);
+    }
+
+    // --- Arguments that are not text ---
+    //
+    // `env::args()` panicked on every one of these, so before the conversion
+    // this program did not misparse them — it died before `run_su` executed a
+    // statement, and printed a panic naming this file rather than the mistake.
+    // The parser must now carry them intact to the place that can report them.
+
+    /// A shell path is a path, and a path on this OS is any bytes but `/` and
+    /// NUL. `-s` therefore has to survive one that is not text — this is the
+    /// case with a real user behind it, since the shell is *executed*, so a
+    /// name this program cannot express is a shell it cannot start.
+    #[test]
+    fn a_shell_override_that_is_not_text_survives_parsing() {
+        let shell = not_text("/bin/", "sh");
+        let args = vec![
+            OsString::from("su"),
+            OsString::from("-s"),
+            shell.clone(),
+            OsString::from("root"),
+        ];
+        let opts = parse_su_args(&args).unwrap();
+        assert_eq!(opts.shell.as_deref(), Some(shell.as_os_str()));
+        assert_eq!(opts.target_user, "root");
+    }
+
+    /// `-c` hands its argument to the shell verbatim, so this program must not
+    /// narrow what may be said in it. A command that names a file whose name
+    /// is not text is the ordinary case.
+    #[test]
+    fn a_command_that_is_not_text_survives_parsing() {
+        let command = not_text("cat /tmp/", ".log");
+        let args = vec![OsString::from("su"), OsString::from("-c"), command.clone()];
+        let opts = parse_su_args(&args).unwrap();
+        assert_eq!(opts.command.as_deref(), Some(command.as_os_str()));
+        // Still the default target: the command consumed the only positional.
+        assert_eq!(opts.target_user, "root");
+    }
+
+    /// A username that is not text reaches the lookup as itself. It will not
+    /// be found — the database is YAML and YAML is text — but *not being
+    /// found* is the outcome, reported with a quoted name, rather than a
+    /// process that never started.
+    #[test]
+    fn a_username_that_is_not_text_reaches_the_lookup_intact() {
+        let name = not_text("ali", "ce");
+        let args = vec![OsString::from("su"), name.clone()];
+        let opts = parse_su_args(&args).unwrap();
+        assert_eq!(opts.target_user, name);
+        assert!(
+            opts.target_user.to_str().is_none(),
+            "run_su reports this as an unknown user rather than looking it up"
+        );
+    }
+
+    /// The branch that decides "option or positional" tests the **first byte**,
+    /// not whether the argument is text. Deciding it by `to_str()` instead
+    /// would make a mistyped option that happens to contain a stray byte into
+    /// a *username*, and — since the last positional wins — silently discard
+    /// the real username typed after it, running a shell as the wrong user.
+    #[test]
+    fn a_leading_dash_is_an_unknown_option_even_when_the_rest_is_not_text() {
+        let bogus = not_text("--bog", "us");
+        let args = vec![OsString::from("su"), bogus, OsString::from("alice")];
+        assert_eq!(
+            parse_su_args(&args).unwrap_err(),
+            1,
+            "must be refused as an option, not accepted as a username"
+        );
+    }
+
+    /// The mirror of the case above: no leading dash means positional, whatever
+    /// the remaining bytes are.
+    #[test]
+    fn no_leading_dash_is_a_positional_even_when_the_rest_is_not_text() {
+        let name = not_text("bo", "b");
+        let args = vec![OsString::from("su"), name.clone(), OsString::from("-l")];
+        let opts = parse_su_args(&args).unwrap();
+        assert!(opts.login);
+        assert_eq!(opts.target_user, name);
+    }
+
+    /// A value consumed by `-s`/`-c` is never re-examined as an option, so a
+    /// shell path that legitimately begins with `-` is a value, not a flag.
+    #[test]
+    fn an_option_value_beginning_with_a_dash_is_still_a_value() {
+        let opts = parse_su_args(&argv(&["su", "-c", "-l", "alice"])).unwrap();
+        assert_eq!(opts.command.as_deref(), Some(OsStr::new("-l")));
+        assert!(!opts.login, "the -l was the command, not a flag");
+        assert_eq!(opts.target_user, "alice");
     }
 
     // --- Default path ---
@@ -991,44 +1217,97 @@ users:
         // Only the last positional is the username; earlier ones are ignored.
         // (Matches traditional su behavior: extra args before the username
         //  are not meaningful.)
-        let args = vec!["su".to_string(), "first".to_string(), "second".to_string()];
-        let opts = parse_su_args(&args).unwrap();
+        let opts = parse_su_args(&argv(&["su", "first", "second"])).unwrap();
         assert_eq!(opts.target_user, "second");
     }
 
     #[test]
     fn test_su_args_login_and_command() {
-        let args = vec![
-            "su".to_string(),
-            "-l".to_string(),
-            "-c".to_string(),
-            "id".to_string(),
-            "alice".to_string(),
-        ];
-        let opts = parse_su_args(&args).unwrap();
+        let opts = parse_su_args(&argv(&["su", "-l", "-c", "id", "alice"])).unwrap();
         assert!(opts.login);
-        assert_eq!(opts.command.as_deref(), Some("id"));
+        assert_eq!(opts.command.as_deref(), Some(OsStr::new("id")));
         assert_eq!(opts.target_user, "alice");
     }
 
     #[test]
     fn test_su_args_all_flags_combined() {
-        let args = vec![
-            "su".to_string(),
-            "-l".to_string(),
-            "-p".to_string(),
-            "-s".to_string(),
-            "/bin/fish".to_string(),
-            "-c".to_string(),
-            "uname -a".to_string(),
-            "root".to_string(),
-        ];
-        let opts = parse_su_args(&args).unwrap();
+        let opts = parse_su_args(&argv(&[
+            "su",
+            "-l",
+            "-p",
+            "-s",
+            "/bin/fish",
+            "-c",
+            "uname -a",
+            "root",
+        ]))
+        .unwrap();
         assert!(opts.login);
         assert!(opts.preserve_env);
-        assert_eq!(opts.shell.as_deref(), Some("/bin/fish"));
-        assert_eq!(opts.command.as_deref(), Some("uname -a"));
+        assert_eq!(opts.shell.as_deref(), Some(OsStr::new("/bin/fish")));
+        assert_eq!(opts.command.as_deref(), Some(OsStr::new("uname -a")));
         assert_eq!(opts.target_user, "root");
+    }
+
+    // --- The session record `who` and `w` read ---
+
+    /// The record is `key=value` lines, so a value carrying a newline appends
+    /// fields to it. `/proc/self/fd/0` names whatever stdin is, and stdin is
+    /// the *caller's* to choose — `su - alice < '/dev/shm/x\nuser=root'` is an
+    /// ordinary redirection — so this is reachable by an unprivileged user and
+    /// would have `who` report a root session that does not exist.
+    #[test]
+    fn a_terminal_name_that_could_forge_a_session_field_is_refused() {
+        for hostile in [
+            &b"pts/0\nuser=root"[..],
+            &b"pts/0\rwho cares"[..],
+            &b"pts/0\0trailing"[..],
+            b"",
+        ] {
+            let name = quoting::os_from_bytes(hostile);
+            assert!(
+                !tty_name_is_plausible(&name),
+                "{:?} must not be recorded as a terminal name",
+                String::from_utf8_lossy(hostile)
+            );
+        }
+    }
+
+    /// The names real terminals have must still get through — a screen that
+    /// rejects everything is the same bug as one that accepts everything, just
+    /// harder to notice, because the fallback `?` looks like a plausible
+    /// answer.
+    #[test]
+    fn the_names_real_terminals_have_are_accepted() {
+        for good in ["tty1", "pts/0", "ttyS0", "console"] {
+            assert!(
+                tty_name_is_plausible(OsStr::new(good)),
+                "{good} is a real terminal name"
+            );
+        }
+        // Including one that is not text: a device name is bytes on this OS,
+        // and screening is for control characters, not for non-UTF-8.
+        assert!(tty_name_is_plausible(&not_text("pts/", "0")));
+    }
+
+    /// The fallback marker is `/tmp/.users/<username>`, with the name coming
+    /// from the database. A name of `..` or one containing `/` would have this
+    /// program — running as root — write and later *delete* a file outside the
+    /// directory it created.
+    #[test]
+    fn a_username_that_would_escape_the_marker_directory_is_refused() {
+        for hostile in ["", ".", "..", "../etc/passwd", "a/b", "nul\0byte"] {
+            assert!(
+                !is_safe_filename(hostile),
+                "{hostile:?} must not be used as a filename"
+            );
+        }
+        for ordinary in ["root", "alice", "user.name", "a-b_c"] {
+            assert!(
+                is_safe_filename(ordinary),
+                "{ordinary:?} is an ordinary name"
+            );
+        }
     }
 
     // --- The shared failed-attempt tally (§354) ---

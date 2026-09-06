@@ -42,9 +42,10 @@
 
 #![deny(clippy::all)]
 
-use quoting::quoteaf_os;
+use quoting::{escape_os, os_bytes, os_from_bytes, quoteaf_os};
 use std::collections::HashMap;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read as _, Write as _};
@@ -131,19 +132,35 @@ impl fmt::Display for Personality {
     }
 }
 
-fn detect_personality(argv0: &str) -> Personality {
+/// Which of the four programs this invocation is, from `argv[0]`.
+///
+/// Takes bytes rather than `&str` because `argv[0]` is a path and a path here
+/// may hold any byte but `/` and NUL. The four names it recognises are ASCII,
+/// so a byte comparison decides exactly the same set as a string comparison
+/// did -- what changes is that a name it does *not* recognise is now answered
+/// (`Personality::Sudo`, the default) instead of aborting the process.
+///
+/// Generic over `AsRef<OsStr>` rather than taking `&OsStr` outright so that a
+/// caller with a `&str` -- every test below, and any future one -- says
+/// `detect_personality("visudo")` and not `detect_personality(OsStr::new(...))`.
+/// The ceremony is what stops cases being added.
+fn detect_personality<S: AsRef<OsStr>>(argv0: S) -> Personality {
+    let argv0 = os_bytes(argv0.as_ref());
     // `rsplit` over both separators rather than a hand-rolled scan producing a
     // byte index to slice at: that index landed on a character boundary only
     // because `/` and `\` happen to be ASCII, which is a fact about the
     // separators rather than anything the code established. `rsplit` always
     // yields at least one item, so the fallback is unreachable.
-    let base = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
-    let base = base.strip_suffix(".exe").unwrap_or(base);
+    let base = argv0
+        .rsplit(|&b| b == b'/' || b == b'\\')
+        .next()
+        .unwrap_or(&argv0);
+    let base = base.strip_suffix(b".exe").unwrap_or(base);
 
     match base {
-        "sudoedit" => Personality::Sudoedit,
-        "visudo" => Personality::Visudo,
-        "sudoreplay" => Personality::Sudoreplay,
+        b"sudoedit" => Personality::Sudoedit,
+        b"visudo" => Personality::Visudo,
+        b"sudoreplay" => Personality::Sudoreplay,
         _ => Personality::Sudo,
     }
 }
@@ -1231,13 +1248,19 @@ fn validate_sudoers_line(line: &str, line_num: usize, strict: bool, errors: &mut
 // ============================================================================
 
 /// Check if a user is authorized by the sudoers config to run a specific command.
+///
+/// `command` is bytes because it is a path the caller is about to `exec`, and a
+/// path here may hold any byte but `/` and NUL. The sudoers file it is matched
+/// against is text, so a command that is not text can match only `ALL` or a
+/// trailing-`*` prefix — which is the right answer, arrived at by comparison
+/// rather than by refusing to look.
 fn check_authorization(
     config: &SudoersConfig,
     username: &str,
     hostname: &str,
     target_user: &str,
     target_group: &str,
-    command: &str,
+    command: &[u8],
     user_groups: &[String],
 ) -> Option<CmndSpec> {
     // Iterate privileges in reverse order (last match wins, like real sudo).
@@ -1373,7 +1396,7 @@ fn runas_matches(
 fn command_matches(
     spec_cmd: &str,
     spec_args: &str,
-    actual_cmd: &str,
+    actual_cmd: &[u8],
     aliases: &HashMap<String, Vec<String>>,
 ) -> bool {
     if spec_cmd == "ALL" {
@@ -1417,8 +1440,16 @@ fn command_matches(
 }
 
 /// Compare command paths, handling directory wildcards.
-fn command_path_matches(spec: &str, actual: &str) -> bool {
-    if spec == actual {
+/// One sudoers command spec against one actual command path.
+///
+/// `spec` is text — it came out of `/etc/sudoers`, which this crate reads with
+/// `read_to_string`. `actual` is bytes, for the reason [`check_authorization`]
+/// gives. Every comparison below is therefore between `spec`'s bytes and
+/// `actual`, which decides exactly what the `&str`/`&str` version decided for
+/// every path that *was* text, and answers rather than aborting for the rest.
+fn command_path_matches(spec: &str, actual: &[u8]) -> bool {
+    let spec_bytes = spec.as_bytes();
+    if spec_bytes == actual {
         return true;
     }
     // Wildcard: `/usr/bin/*` matches any command in `/usr/bin/`.
@@ -1428,13 +1459,16 @@ fn command_path_matches(spec: &str, actual: &str) -> bool {
     if let Some(dir) = spec.strip_suffix('*')
         && dir.ends_with('/')
     {
-        return actual.starts_with(dir);
+        return actual.starts_with(dir.as_bytes());
     }
     // Basename match: if spec has no path separator, match basename of actual.
-    if !spec.contains('/')
-        && let Some(base) = actual.rsplit('/').next()
-    {
-        return base == spec;
+    // `rsplit` on a slice always yields at least one item, so the `is_some_and`
+    // is a formality rather than a case that can fail.
+    if !spec.contains('/') {
+        return actual
+            .rsplit(|&b| b == b'/')
+            .next()
+            .is_some_and(|base| base == spec_bytes);
     }
     false
 }
@@ -1593,6 +1627,17 @@ fn current_epoch() -> u64 {
 // ============================================================================
 
 /// Build the sanitized environment for the command execution.
+///
+/// Reads the environment with `vars_os`, not `vars`. `std::env::vars()`'s
+/// iterator panics on a variable whose name *or value* is not valid Unicode,
+/// and `PATH` on this OS is a list of paths, which may hold any byte but `/`
+/// and NUL. So one stray byte anywhere in the inherited environment made this
+/// program unable to run anything at all — including the `-E`-less default
+/// path, which was about to *discard* that variable.
+///
+/// The keys the sudoers lists and `ENV_BLACKLIST` name are ASCII, so comparing
+/// them against `OsStr` decides the same set as before; what changes is that a
+/// variable outside those sets is now dropped or carried rather than fatal.
 fn build_environment(
     config: &SudoersConfig,
     preserve_env: bool,
@@ -1600,71 +1645,79 @@ fn build_environment(
     target_home: &str,
     target_shell: &str,
     login_shell: bool,
-) -> Vec<(String, String)> {
+) -> Vec<(OsString, OsString)> {
     let env_reset = config.is_default_set("env_reset") || config.get_default("env_reset").is_none();
     let keep_list = config.env_keep_list();
     let check_list = config.env_check_list();
 
-    let mut env: Vec<(String, String)> = Vec::new();
+    let blacklisted = |key: &OsStr| ENV_BLACKLIST.iter().any(|&b| key == OsStr::new(b));
+
+    let mut env: Vec<(OsString, OsString)> = Vec::new();
 
     if preserve_env {
         // -E flag: preserve all current env vars except blacklisted.
-        for (key, val) in std::env::vars() {
-            if !ENV_BLACKLIST.iter().any(|&b| b == key) {
+        for (key, val) in std::env::vars_os() {
+            if !blacklisted(&key) {
                 env.push((key, val));
             }
         }
     } else if env_reset {
         // Default: reset environment, only keep allowed vars.
-        for (key, val) in std::env::vars() {
-            if keep_list.iter().any(|k| k == &key) {
-                // Check for dangerous values in env_check vars.
-                if check_list.iter().any(|k| k == &key) && (val.contains('/') || val.contains('%'))
-                {
+        for (key, val) in std::env::vars_os() {
+            if keep_list.iter().any(|k| OsStr::new(k) == key) {
+                // Check for dangerous values in env_check vars. Bytewise: `/`
+                // and `%` are single bytes in UTF-8 and can be no part of a
+                // multi-byte character, so scanning for them in the raw value
+                // finds exactly what scanning the decoded string found — and
+                // it also works on the values that could not be decoded, which
+                // are precisely the ones a caller would try to smuggle through.
+                let suspicious = check_list.iter().any(|k| OsStr::new(k) == key)
+                    && os_bytes(&val).iter().any(|&b| b == b'/' || b == b'%');
+                if suspicious {
                     continue; // Skip suspicious values.
                 }
-                if !ENV_BLACKLIST.iter().any(|&b| b == key) {
+                if !blacklisted(&key) {
                     env.push((key, val));
                 }
             }
         }
     } else {
         // No env_reset: inherit everything except blacklisted.
-        for (key, val) in std::env::vars() {
-            if !ENV_BLACKLIST.iter().any(|&b| b == key) {
+        for (key, val) in std::env::vars_os() {
+            if !blacklisted(&key) {
                 env.push((key, val));
             }
         }
     }
 
     // Always set these.
-    set_or_replace(&mut env, "USER", target_user);
-    set_or_replace(&mut env, "LOGNAME", target_user);
-    set_or_replace(&mut env, "SUDO_USER", &current_username());
+    set_or_replace(&mut env, "USER", target_user.as_ref());
+    set_or_replace(&mut env, "LOGNAME", target_user.as_ref());
+    set_or_replace(&mut env, "SUDO_USER", current_username().as_ref());
 
     if login_shell {
-        set_or_replace(&mut env, "HOME", target_home);
-        set_or_replace(&mut env, "SHELL", target_shell);
+        set_or_replace(&mut env, "HOME", target_home.as_ref());
+        set_or_replace(&mut env, "SHELL", target_shell.as_ref());
         set_or_replace(
             &mut env,
             "PATH",
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".as_ref(),
         );
     } else {
         // Preserve HOME and SHELL from current env or set to target.
         if !env.iter().any(|(k, _)| k == "HOME") {
-            env.push(("HOME".to_string(), target_home.to_string()));
+            env.push((OsString::from("HOME"), OsString::from(target_home)));
         }
         if !env.iter().any(|(k, _)| k == "SHELL") {
-            env.push(("SHELL".to_string(), target_shell.to_string()));
+            env.push((OsString::from("SHELL"), OsString::from(target_shell)));
         }
     }
 
     // Record original command info.
     if let Ok(pwd) = std::env::current_dir() {
-        set_or_replace(&mut env, "SUDO_COMMAND", "");
-        set_or_replace(&mut env, "SUDO_GID", &format!("{}", current_gid()));
-        set_or_replace(&mut env, "SUDO_UID", &format!("{}", current_uid()));
+        set_or_replace(&mut env, "SUDO_COMMAND", "".as_ref());
+        set_or_replace(&mut env, "SUDO_GID", format!("{}", current_gid()).as_ref());
+        set_or_replace(&mut env, "SUDO_UID", format!("{}", current_uid()).as_ref());
         let _ = pwd; // Acknowledged: we set SUDO_COMMAND to empty initially.
     }
 
@@ -1672,11 +1725,14 @@ fn build_environment(
 }
 
 /// Set or replace an environment variable in the env list.
-fn set_or_replace(env: &mut Vec<(String, String)>, key: &str, val: &str) {
+///
+/// `key` stays `&str` because every caller passes a literal: these are the
+/// names sudo itself sets, not names it received from anywhere.
+fn set_or_replace(env: &mut Vec<(OsString, OsString)>, key: &str, val: &OsStr) {
     if let Some(entry) = env.iter_mut().find(|(k, _)| k == key) {
-        entry.1 = val.to_string();
+        entry.1 = val.to_os_string();
     } else {
-        env.push((key.to_string(), val.to_string()));
+        env.push((OsString::from(key), val.to_os_string()));
     }
 }
 
@@ -1685,17 +1741,51 @@ fn set_or_replace(env: &mut Vec<(String, String)>, key: &str, val: &str) {
 // ============================================================================
 
 /// Log a sudo command execution.
+///
+/// **Every variable field goes through [`escape_os`], and that is not
+/// cosmetic.** The log is one record per line with ` ; ` between fields, so any
+/// field able to carry a newline could *append a line of its own*: anyone able
+/// to run `sudo` at all could write a fabricated `RESULT=ALLOWED` entry naming
+/// another user, into the very file whose purpose is to say who ran what.
+/// Three fields could carry one, by three different routes:
+///
+/// - `command` — argv, chosen outright by the caller.
+/// - `tty` — read from `$TTY`, which is just an environment variable the
+///   caller sets; nothing validates it.
+/// - `pwd` — the working directory, so a `mkdir` of a name containing a
+///   newline and a `cd` into it is the whole exploit. Path names here may hold
+///   every byte but `/` and NUL, so this is an ordinary directory, not a
+///   malformed one.
+///
+/// `username` and `target_user` are escaped too. They come from the user
+/// database rather than from argv, so they are a step further away, but "a step
+/// further away" is not a property worth relying on in an audit log, and
+/// escaping a name that was already plain leaves it unchanged.
+///
+/// [`escape_os`] renders `\n` as the two characters `\n`, and a byte that is
+/// not part of a character as three octal digits, so the record stays one line,
+/// stays readable, and says what actually happened.
+///
+/// The formatting lives in [`format_log_record`] so that the escaping above is
+/// pinned by tests rather than only by this paragraph — the writing half needs
+/// a root-owned `/var/log`, which no test has, and a security property that can
+/// only be checked by reading the source is one that comes back.
 fn log_command(
     username: &str,
-    tty: &str,
-    pwd: &str,
+    tty: &OsStr,
+    pwd: &OsStr,
     target_user: &str,
-    command: &str,
+    command: &OsStr,
     result: &str,
 ) {
-    let timestamp = format_timestamp(current_epoch());
-    let log_line = format!(
-        "{timestamp} : {username} : TTY={tty} ; PWD={pwd} ; USER={target_user} ; COMMAND={command} ; RESULT={result}\n"
+    let log_line = format_log_record(
+        &format_timestamp(current_epoch()),
+        username,
+        tty,
+        pwd,
+        target_user,
+        command,
+        result,
     );
 
     // Attempt to write — failure is non-fatal.
@@ -1709,6 +1799,32 @@ fn log_command(
     {
         let _ = f.write_all(log_line.as_bytes());
     }
+}
+
+/// Render one audit record, including its trailing newline.
+///
+/// Split out of [`log_command`] purely so it can be tested; see that function
+/// for why each field is escaped. Returns a `String` rather than bytes because
+/// [`escape_os`]'s output is always valid UTF-8 by construction — it emits a
+/// byte that is not part of a character as three octal digits — so the record
+/// is text no matter what went into it.
+fn format_log_record(
+    timestamp: &str,
+    username: &str,
+    tty: &OsStr,
+    pwd: &OsStr,
+    target_user: &str,
+    command: &OsStr,
+    result: &str,
+) -> String {
+    let username = escape_os(username);
+    let tty = escape_os(tty);
+    let pwd = escape_os(pwd);
+    let target_user = escape_os(target_user);
+    let command = escape_os(command);
+    format!(
+        "{timestamp} : {username} : TTY={tty} ; PWD={pwd} ; USER={target_user} ; COMMAND={command} ; RESULT={result}\n"
+    )
 }
 
 /// Format an epoch timestamp as a human-readable string.
@@ -1790,7 +1906,13 @@ fn is_leap_year(year: u64) -> bool {
 /// A recorded session entry.
 #[derive(Debug, Clone)]
 struct SessionEntry {
-    id: String,
+    /// The session's directory name. An `OsString` because that is what a
+    /// directory name is: the previous `String` was filled from
+    /// `file_name().and_then(|n| n.to_str())`, whose `None` arm `continue`d --
+    /// so a session directory whose name is not valid UTF-8 did not fail to
+    /// replay, it failed to *appear*, and `sudoreplay -l` listed the recording
+    /// as though it had never been made.
+    id: OsString,
     user: String,
     target_user: String,
     command: String,
@@ -1799,7 +1921,7 @@ struct SessionEntry {
 }
 
 /// List recorded sessions from the I/O log directory.
-fn list_sessions(io_dir: &str) -> Vec<SessionEntry> {
+fn list_sessions(io_dir: &OsStr) -> Vec<SessionEntry> {
     let mut sessions = Vec::new();
     let dir = Path::new(io_dir);
     if !dir.is_dir() {
@@ -1821,9 +1943,8 @@ fn list_sessions(io_dir: &str) -> Vec<SessionEntry> {
             continue;
         }
 
-        let session_id = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
+        let Some(session_id) = path.file_name().map(OsStr::to_os_string) else {
+            continue;
         };
 
         // Read the log file.
@@ -1868,7 +1989,7 @@ fn list_sessions(io_dir: &str) -> Vec<SessionEntry> {
 }
 
 /// Replay a recorded session.
-fn replay_session(io_dir: &str, session_id: &str, speed_factor: f64) -> Result<(), SudoError> {
+fn replay_session(io_dir: &OsStr, session_id: &OsStr, speed_factor: f64) -> Result<(), SudoError> {
     let session_dir = Path::new(io_dir).join(session_id);
     if !session_dir.is_dir() {
         return Err(SudoError::IoError(format!(
@@ -1890,7 +2011,7 @@ fn replay_session(io_dir: &str, session_id: &str, speed_factor: f64) -> Result<(
     // Read log info.
     let log_path = session_dir.join("log");
     if let Ok(log_content) = fs::read_to_string(&log_path) {
-        eprintln!("Replaying session {session_id}:");
+        eprintln!("Replaying session {}:", quoteaf_os(session_id));
         for line in log_content.lines() {
             eprintln!("  {line}");
         }
@@ -2171,8 +2292,46 @@ fn current_gid() -> u32 {
 }
 
 /// Get the current tty name.
-fn current_tty() -> String {
-    std::env::var("TTY").unwrap_or_else(|_| "unknown".to_string())
+///
+/// `var_os`, not `var`: a tty name is a path under `/dev`, and `var` reports a
+/// non-UTF-8 value as `Err(NotUnicode)`, which is indistinguishable here from
+/// unset — so the log would record `TTY=unknown` for a terminal that has a
+/// perfectly good name. An audit log that quietly says "unknown" is worse than
+/// one that says something awkward, because only the first is silent about it.
+/// The value is escaped at the point it is written; see [`log_command`].
+fn current_tty() -> OsString {
+    env::var_os("TTY").unwrap_or_else(|| OsString::from("unknown"))
+}
+
+/// The working directory, for the `PWD=` field of the audit log.
+///
+/// Extracted because the expression it replaces appeared at six call sites,
+/// each spelling `current_dir().map(|p| p.display().to_string())` by hand — and
+/// `display()` substitutes U+FFFD for any byte it cannot decode, so six copies
+/// of the same lossy rendering had to be found and fixed together or not at
+/// all. A directory name here may hold every byte but `/` and NUL, so the loss
+/// is reachable from an ordinary `mkdir`. The value is escaped at the point it
+/// is written; see [`log_command`].
+fn current_pwd() -> OsString {
+    env::current_dir().map_or_else(|_| OsString::from("unknown"), PathBuf::into_os_string)
+}
+
+/// The editor to launch, in sudo's documented order of preference.
+///
+/// `var_os`, not `var`: an editor setting names a program, and a program path
+/// on this system may hold any byte but `/` and NUL. `var` reports a non-UTF-8
+/// value as `Err(NotUnicode)`, which the `or_else` chain cannot distinguish
+/// from "unset" — so `EDITOR=/opt/\xffed` silently fell through to the *default*
+/// editor. Discarding the user's choice without a word is worse than either
+/// honouring it or refusing it, and honouring it costs nothing.
+///
+/// Shared by `sudoedit` and `visudo`, which had a copy each. Two copies of a
+/// preference order is a way to end up with two preference orders.
+fn editor_command() -> OsString {
+    env::var_os("SUDO_EDITOR")
+        .or_else(|| env::var_os("VISUAL"))
+        .or_else(|| env::var_os("EDITOR"))
+        .unwrap_or_else(|| OsString::from(DEFAULT_EDITOR))
 }
 
 /// The groups `username` belongs to, including the per-user group.
@@ -2303,6 +2462,26 @@ fn json_escape(s: &str) -> String {
 // ============================================================================
 
 /// Parsed command-line options for the sudo personality.
+///
+/// # Why the command is bytes and the names are not
+///
+/// `command` is [`OsString`] and everything else here is [`String`], and the
+/// split is deliberate rather than half-finished work.
+///
+/// The command becomes a path and is handed to `exec`. A path on this OS may
+/// hold every byte but `/` and NUL, so narrowing it to text would either panic
+/// (what this crate did until 2026-09-06) or *change which program runs* --
+/// a lossy conversion maps distinct byte strings onto one `U+FFFD`-bearing
+/// name, and in the crate that grants root, two arguments that collapse into
+/// one is the worst available failure.
+///
+/// The names -- `-u`, `-g` -- are matched against `/etc/sudoers` and
+/// `/etc/users.yaml`, which are text files. A name that is not valid text
+/// cannot equal any entry in them, so the only possible outcome is a denial.
+/// [`parse_sudo_args`] therefore refuses such a value at the boundary, which
+/// reaches that same outcome sooner and says why. `-p` is a prompt: it is only
+/// ever printed, and printing it losslessly is [`escape_os`]'s job, not this
+/// struct's.
 #[derive(Debug)]
 struct SudoOpts {
     target_user: String,
@@ -2318,7 +2497,7 @@ struct SudoOpts {
     edit_mode: bool,
     preserve_env: bool,
     prompt: String,
-    command: Vec<String>,
+    command: Vec<OsString>,
 }
 
 impl Default for SudoOpts {
@@ -2384,20 +2563,24 @@ fn short_option(flag: char) -> Option<ShortOption> {
 /// it looks: the old loop advanced `i` from inside the flag-bundle loop to
 /// consume an option's value, so two counters shared responsibility for one
 /// position and every `args[i]` after that point rested on both being right.
-fn parse_sudo_args(args: &[String]) -> Result<SudoOpts, SudoError> {
+fn parse_sudo_args(args: &[OsString]) -> Result<SudoOpts, SudoError> {
     let mut opts = SudoOpts::default();
     let mut rest = args;
 
     while let Some((arg, tail)) = rest.split_first() {
         rest = tail;
+        // Every option this program understands is ASCII, so the decisions
+        // below are the same ones the `&str` version made -- but they are made
+        // on bytes, because the *values* between the options are paths.
+        let bytes = os_bytes(arg);
 
-        if arg == "--" {
+        if *bytes == *b"--" {
             // Everything after `--` is the command, options included.
             opts.command.extend(rest.iter().cloned());
             break;
         }
 
-        if !arg.starts_with('-') {
+        if !bytes.starts_with(b"-") {
             // The first non-option argument starts the command, and takes the
             // remainder with it.
             opts.command.push(arg.clone());
@@ -2405,22 +2588,38 @@ fn parse_sudo_args(args: &[String]) -> Result<SudoOpts, SudoError> {
             break;
         }
 
-        if arg.starts_with("--") {
-            return Err(SudoError::UsageError(format!("unknown option: {arg}")));
+        if bytes.starts_with(b"--") {
+            return Err(SudoError::UsageError(format!(
+                "unknown option: {}",
+                quoteaf_os(arg)
+            )));
         }
 
-        let flags = arg.strip_prefix('-').unwrap_or(arg);
+        let flags = bytes.strip_prefix(b"-").unwrap_or(&bytes);
         if flags.is_empty() {
             // A bare `-`, which names no option at all.
-            return Err(SudoError::UsageError(format!("unknown option: {arg}")));
+            return Err(SudoError::UsageError(format!(
+                "unknown option: {}",
+                quoteaf_os(arg)
+            )));
         }
 
-        let mut chars = flags.chars();
-        while let Some(flag) = chars.next() {
-            // `chars.as_str()` is the untouched remainder of the bundle after
-            // this character - exactly what `-uroot` needs, and correct for a
-            // multi-byte character, which an index into `as_bytes()` was not.
-            let glued = chars.as_str();
+        let mut bundle = flags;
+        while let Some((&lead, glued)) = bundle.split_first() {
+            bundle = glued;
+            // Splitting off one *byte* is what makes `glued` correct for a
+            // value that is not text at all -- `-u` never takes one, but `-p`
+            // may, and the old `chars()` walk could not produce a remainder it
+            // could not first decode. Every flag below is ASCII, so a byte is
+            // also a whole character here; a non-ASCII lead byte is not a flag
+            // and is refused before any remainder is computed, which is where
+            // an `as_bytes()` index would have split a character in half.
+            let Some(flag) = lead.is_ascii().then(|| char::from(lead)) else {
+                return Err(SudoError::UsageError(format!(
+                    "unknown option in {}",
+                    quoteaf_os(arg)
+                )));
+            };
             match short_option(flag) {
                 None => {
                     return Err(SudoError::UsageError(format!("unknown option: -{flag}")));
@@ -2436,8 +2635,19 @@ fn parse_sudo_args(args: &[String]) -> Result<SudoOpts, SudoError> {
                         rest = after_next;
                         next.clone()
                     } else {
-                        glued.to_string()
+                        os_from_bytes(glued)
                     };
+                    // Refused here rather than carried and lost later: `-u` and
+                    // `-g` name entries in text files and `-p` is printed, so a
+                    // value that is not text can only ever end in a denial or a
+                    // mangled prompt. Saying so names the option; denying it
+                    // three hundred lines later would not. See `SudoOpts`.
+                    let value = value.into_string().map_err(|bad| {
+                        SudoError::UsageError(format!(
+                            "-{flag}: argument is not valid text: {}",
+                            quoteaf_os(&bad)
+                        ))
+                    })?;
                     set(&mut opts, value);
                     // The remainder of the bundle was the value.
                     break;
@@ -2454,10 +2664,13 @@ fn parse_sudo_args(args: &[String]) -> Result<SudoOpts, SudoError> {
 // ============================================================================
 
 /// Parsed command-line options for the visudo personality.
+///
+/// `file` is [`OsString`]: `-f` names a file to open, and an alternate sudoers
+/// path is exactly as free in its bytes as any other path on this OS.
 #[derive(Debug)]
 struct VisudoOpts {
     check_only: bool,
-    file: String,
+    file: OsString,
     strict: bool,
 }
 
@@ -2465,14 +2678,14 @@ impl Default for VisudoOpts {
     fn default() -> Self {
         Self {
             check_only: false,
-            file: SUDOERS_PATH.to_string(),
+            file: OsString::from(SUDOERS_PATH),
             strict: false,
         }
     }
 }
 
 /// Parse visudo command-line arguments.
-fn parse_visudo_args(args: &[String]) -> Result<VisudoOpts, SudoError> {
+fn parse_visudo_args(args: &[OsString]) -> Result<VisudoOpts, SudoError> {
     let mut opts = VisudoOpts::default();
     // A slice cursor, as in `parse_sudo_args`: `-f` takes its value from a tail
     // already proved non-empty, so there is no `i + 1` to bounds-check
@@ -2481,22 +2694,30 @@ fn parse_visudo_args(args: &[String]) -> Result<VisudoOpts, SudoError> {
 
     while let Some((arg, tail)) = rest.split_first() {
         rest = tail;
-        match arg.as_str() {
-            "-c" => opts.check_only = true,
-            "-s" => opts.strict = true,
-            "-f" => {
+        // Matching on bytes rather than on `&str`: the three options are ASCII
+        // so the recognised set does not change, and an argument that is not
+        // text now reaches the diagnostic below instead of the panic that used
+        // to happen before this function was ever entered.
+        match &*os_bytes(arg) {
+            b"-c" => opts.check_only = true,
+            b"-s" => opts.strict = true,
+            b"-f" => {
                 let Some((value, after_value)) = rest.split_first() else {
                     return Err(SudoError::UsageError("-f requires an argument".to_string()));
                 };
                 opts.file = value.clone();
                 rest = after_value;
             }
-            other if other.starts_with('-') => {
-                return Err(SudoError::UsageError(format!("unknown option: {other}")));
-            }
-            other => {
+            other if other.starts_with(b"-") => {
                 return Err(SudoError::UsageError(format!(
-                    "unexpected argument: {other}"
+                    "unknown option: {}",
+                    quoteaf_os(arg)
+                )));
+            }
+            _ => {
+                return Err(SudoError::UsageError(format!(
+                    "unexpected argument: {}",
+                    quoteaf_os(arg)
                 )));
             }
         }
@@ -2510,19 +2731,24 @@ fn parse_visudo_args(args: &[String]) -> Result<VisudoOpts, SudoError> {
 // ============================================================================
 
 /// Parsed command-line options for the sudoreplay personality.
+///
+/// `directory` and `session_id` are [`OsString`] because both are joined into
+/// a path — the session id is a directory name under `directory`, not a label.
+/// `speed_factor` stays an `f64`: it is a number, and a value that does not
+/// parse as one was already an error before any of this.
 #[derive(Debug)]
 struct SudoreplayOpts {
     list: bool,
-    directory: String,
+    directory: OsString,
     speed_factor: f64,
-    session_id: Option<String>,
+    session_id: Option<OsString>,
 }
 
 impl Default for SudoreplayOpts {
     fn default() -> Self {
         Self {
             list: false,
-            directory: SUDO_IO_DIR.to_string(),
+            directory: OsString::from(SUDO_IO_DIR),
             speed_factor: 1.0,
             session_id: None,
         }
@@ -2530,41 +2756,48 @@ impl Default for SudoreplayOpts {
 }
 
 /// Parse sudoreplay command-line arguments.
-fn parse_sudoreplay_args(args: &[String]) -> Result<SudoreplayOpts, SudoError> {
+fn parse_sudoreplay_args(args: &[OsString]) -> Result<SudoreplayOpts, SudoError> {
     let mut opts = SudoreplayOpts::default();
     // A slice cursor, as in `parse_sudo_args` and `parse_visudo_args`.
     let mut rest = args;
 
     while let Some((arg, tail)) = rest.split_first() {
         rest = tail;
-        match arg.as_str() {
-            "-l" => opts.list = true,
-            "-d" => {
+        // On bytes, as in `parse_visudo_args`, and for the same reason.
+        match &*os_bytes(arg) {
+            b"-l" => opts.list = true,
+            b"-d" => {
                 let Some((value, after_value)) = rest.split_first() else {
                     return Err(SudoError::UsageError("-d requires an argument".to_string()));
                 };
                 opts.directory = value.clone();
                 rest = after_value;
             }
-            "-s" => {
+            b"-s" => {
                 let Some((value, after_value)) = rest.split_first() else {
                     return Err(SudoError::UsageError("-s requires an argument".to_string()));
                 };
                 rest = after_value;
+                // A speed factor that is not text is not a number either, so it
+                // takes the same arm as `-s wombat` rather than a second one.
                 opts.speed_factor = value
-                    .parse::<f64>()
-                    .map_err(|_| SudoError::UsageError("invalid speed factor".to_string()))?;
+                    .to_str()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .ok_or_else(|| SudoError::UsageError("invalid speed factor".to_string()))?;
                 if opts.speed_factor <= 0.0 {
                     return Err(SudoError::UsageError(
                         "speed factor must be positive".to_string(),
                     ));
                 }
             }
-            other if other.starts_with('-') => {
-                return Err(SudoError::UsageError(format!("unknown option: {other}")));
+            other if other.starts_with(b"-") => {
+                return Err(SudoError::UsageError(format!(
+                    "unknown option: {}",
+                    quoteaf_os(arg)
+                )));
             }
-            other => {
-                opts.session_id = Some(other.to_string());
+            _ => {
+                opts.session_id = Some(arg.clone());
             }
         }
     }
@@ -2606,7 +2839,7 @@ fn print_sudoreplay_usage() {
 // ============================================================================
 
 /// Main entry point for the `sudo` personality.
-fn run_sudo(args: &[String]) -> i32 {
+fn run_sudo(args: &[OsString]) -> i32 {
     let opts = match parse_sudo_args(args) {
         Ok(o) => o,
         Err(e) => {
@@ -2679,11 +2912,9 @@ fn run_sudo(args: &[String]) -> i32 {
                         log_command(
                             &username,
                             &current_tty(),
-                            &std::env::current_dir()
-                                .map(|p| p.display().to_string())
-                                .unwrap_or_else(|_| "unknown".to_string()),
+                            &current_pwd(),
                             &opts.target_user,
-                            "(validate)",
+                            OsStr::new("(validate)"),
                             "AUTH_FAILURE",
                         );
                         return 1;
@@ -2710,14 +2941,27 @@ fn run_sudo(args: &[String]) -> i32 {
 
     // Determine the actual command.
     let (target_home, target_shell) = get_user_info(&opts.target_user);
-    let effective_command = if opts.command.is_empty() {
+    let effective_command: Vec<OsString> = if opts.command.is_empty() {
         // -i or -s without command: run the target user's shell.
-        vec![target_shell.clone()]
+        vec![OsString::from(target_shell.clone())]
     } else {
         opts.command.clone()
     };
 
-    let command_str = effective_command.join(" ");
+    // The whole command as one string, for `sh -c` and for the log. Built by
+    // pushing rather than by `join`, because `[OsString]` has no `join` and
+    // because the alternative -- joining the *lossy* forms -- would hand the
+    // shell a different command from the one that was authorised.
+    let command_str = {
+        let mut joined = OsString::new();
+        for (i, part) in effective_command.iter().enumerate() {
+            if i > 0 {
+                joined.push(" ");
+            }
+            joined.push(part);
+        }
+        joined
+    };
 
     // Bind the program and its arguments in the same step that proves there is
     // a program, rather than indexing `[0]` at three later points that each
@@ -2738,7 +2982,7 @@ fn run_sudo(args: &[String]) -> i32 {
         &hostname,
         &opts.target_user,
         &opts.target_group,
-        program,
+        &os_bytes(program),
         &user_groups,
     );
 
@@ -2753,9 +2997,7 @@ fn run_sudo(args: &[String]) -> i32 {
             log_command(
                 &username,
                 &current_tty(),
-                &std::env::current_dir()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| "unknown".to_string()),
+                &current_pwd(),
                 &opts.target_user,
                 &command_str,
                 "NOT_ALLOWED",
@@ -2774,9 +3016,7 @@ fn run_sudo(args: &[String]) -> i32 {
                 log_command(
                     &username,
                     &current_tty(),
-                    &std::env::current_dir()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| "unknown".to_string()),
+                    &current_pwd(),
                     &opts.target_user,
                     &command_str,
                     "AUTH_REQUIRED",
@@ -2792,9 +3032,7 @@ fn run_sudo(args: &[String]) -> i32 {
                         log_command(
                             &username,
                             &current_tty(),
-                            &std::env::current_dir()
-                                .map(|p| p.display().to_string())
-                                .unwrap_or_else(|_| "unknown".to_string()),
+                            &current_pwd(),
                             &opts.target_user,
                             &command_str,
                             "AUTH_FAILURE",
@@ -2827,9 +3065,7 @@ fn run_sudo(args: &[String]) -> i32 {
     log_command(
         &username,
         &current_tty(),
-        &std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "unknown".to_string()),
+        &current_pwd(),
         &opts.target_user,
         &command_str,
         "ALLOWED",
@@ -2876,7 +3112,7 @@ fn run_sudo(args: &[String]) -> i32 {
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("sudo: unable to execute {program}: {e}");
+            eprintln!("sudo: unable to execute {}: {e}", quoteaf_os(program));
             1
         }
     }
@@ -2890,7 +3126,7 @@ fn load_sudoers() -> Result<SudoersConfig, SudoError> {
 }
 
 /// Main entry point for the `sudoedit` personality.
-fn run_sudoedit(files: &[String]) -> i32 {
+fn run_sudoedit(files: &[OsString]) -> i32 {
     if files.is_empty() {
         eprintln!("sudoedit: no files specified");
         eprintln!("usage: sudoedit file [file ...]");
@@ -2917,7 +3153,7 @@ fn run_sudoedit(files: &[String]) -> i32 {
         &hostname,
         "root",
         "",
-        "sudoedit",
+        b"sudoedit",
         &user_groups,
     );
 
@@ -2930,40 +3166,45 @@ fn run_sudoedit(files: &[String]) -> i32 {
                 &hostname,
                 "root",
                 "",
-                file,
+                &os_bytes(file),
                 &user_groups,
             );
             if result.is_none() {
-                eprintln!("sudoedit: {username} is not allowed to edit {file} on {hostname}");
+                eprintln!(
+                    "sudoedit: {username} is not allowed to edit {} on {hostname}",
+                    quoteaf_os(file)
+                );
                 return 1;
             }
         }
     }
 
-    let editor = std::env::var("SUDO_EDITOR")
-        .or_else(|_| std::env::var("VISUAL"))
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| DEFAULT_EDITOR.to_string());
+    let editor = editor_command();
 
     let mut exit_code = 0;
 
     for file in files {
         let original_path = Path::new(file);
 
-        // Create a temporary copy.
-        let temp_path = PathBuf::from(format!(
-            "/tmp/sudoedit-{}-{}",
-            std::process::id(),
+        // Create a temporary copy. The basename is carried across as an
+        // `OsStr`, not through `to_str().unwrap_or("file")` as it used to be:
+        // that fallback mapped *every* basename which is not valid UTF-8 onto
+        // the single path `/tmp/sudoedit-<pid>-file`, so `sudoedit a\xff b\xff`
+        // gave both files one temp file and copied the second edit back over
+        // the first original. A wrong-file write is the worst outcome an editor
+        // wrapper can have, and it needed only a filename nobody chose to type.
+        let mut temp_name = OsString::from(format!("/tmp/sudoedit-{}-", std::process::id()));
+        temp_name.push(
             original_path
                 .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("file")
-        ));
+                .unwrap_or_else(|| OsStr::new("file")),
+        );
+        let temp_path = PathBuf::from(temp_name);
 
         // Copy original to temp (if it exists).
         if original_path.exists() {
             if let Err(e) = fs::copy(original_path, &temp_path) {
-                eprintln!("sudoedit: cannot copy {file} to temp: {e}");
+                eprintln!("sudoedit: cannot copy {} to temp: {e}", quoteaf_os(file));
                 exit_code = 1;
                 continue;
             }
@@ -2976,16 +3217,18 @@ fn run_sudoedit(files: &[String]) -> i32 {
             }
         }
 
-        // Launch editor on the temp file.
-        let status = process::Command::new(&editor)
-            .arg(temp_path.display().to_string())
-            .status();
+        // Launch editor on the temp file. `.arg(&temp_path)` rather than
+        // `.arg(temp_path.display().to_string())`: `display()` substitutes U+FFFD
+        // for any byte it cannot decode, so the editor was handed a path that
+        // does not exist whenever the original's name was not UTF-8. The path
+        // goes across as the bytes it is.
+        let status = process::Command::new(&editor).arg(&temp_path).status();
 
         match status {
             Ok(s) if s.success() => {
                 // Copy edited temp back to original.
                 if let Err(e) = fs::copy(&temp_path, original_path) {
-                    eprintln!("sudoedit: cannot write back to {file}: {e}");
+                    eprintln!("sudoedit: cannot write back to {}: {e}", quoteaf_os(file));
                     exit_code = 1;
                 }
             }
@@ -3006,14 +3249,23 @@ fn run_sudoedit(files: &[String]) -> i32 {
         let _ = fs::remove_file(&temp_path);
     }
 
+    // Assembled by pushing rather than by `join`, for the same reason as in
+    // `run_sudo`: `[OsString]` has no `join`, and joining the lossy forms would
+    // record in the audit log a set of filenames other than the ones edited.
+    let logged = {
+        let mut joined = OsString::from("sudoedit");
+        for file in files {
+            joined.push(" ");
+            joined.push(file);
+        }
+        joined
+    };
     log_command(
         &username,
         &current_tty(),
-        &std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "unknown".to_string()),
+        &current_pwd(),
         "root",
-        &format!("sudoedit {}", files.join(" ")),
+        &logged,
         if exit_code == 0 { "SUCCESS" } else { "FAILURE" },
     );
 
@@ -3021,7 +3273,7 @@ fn run_sudoedit(files: &[String]) -> i32 {
 }
 
 /// Main entry point for the `visudo` personality.
-fn run_visudo(args: &[String]) -> i32 {
+fn run_visudo(args: &[OsString]) -> i32 {
     let opts = match parse_visudo_args(args) {
         Ok(o) => o,
         Err(e) => {
@@ -3038,19 +3290,19 @@ fn run_visudo(args: &[String]) -> i32 {
         let content = match fs::read_to_string(file_path) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("visudo: cannot read {}: {e}", opts.file);
+                eprintln!("visudo: cannot read {}: {e}", quoteaf_os(&opts.file));
                 return 1;
             }
         };
 
         let errors = validate_sudoers(&content, opts.strict);
         if errors.is_empty() {
-            println!("{} parsed OK", opts.file);
+            println!("{} parsed OK", quoteaf_os(&opts.file));
             return 0;
         }
 
         for err in &errors {
-            eprintln!("visudo: {}: {err}", opts.file);
+            eprintln!("visudo: {}: {err}", quoteaf_os(&opts.file));
         }
 
         let fatal_count = errors.iter().filter(|e| !e.is_warning).count();
@@ -3060,7 +3312,7 @@ fn run_visudo(args: &[String]) -> i32 {
         if opts.strict {
             return 1;
         }
-        println!("{} parsed with warnings", opts.file);
+        println!("{} parsed with warnings", quoteaf_os(&opts.file));
         return 0;
     }
 
@@ -3085,16 +3337,11 @@ fn run_visudo(args: &[String]) -> i32 {
         return 1;
     }
 
-    let editor = std::env::var("SUDO_EDITOR")
-        .or_else(|_| std::env::var("VISUAL"))
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| DEFAULT_EDITOR.to_string());
+    let editor = editor_command();
 
     // Edit loop: keep re-editing until valid or user quits.
     loop {
-        let status = process::Command::new(&editor)
-            .arg(temp_path.display().to_string())
-            .status();
+        let status = process::Command::new(&editor).arg(&temp_path).status();
 
         match status {
             Ok(s) if !s.success() => {
@@ -3132,7 +3379,7 @@ fn run_visudo(args: &[String]) -> i32 {
         if fatal_errors.is_empty() {
             // Valid — write back.
             if let Err(e) = fs::write(file_path, &new_content) {
-                eprintln!("visudo: cannot write {}: {e}", opts.file);
+                eprintln!("visudo: cannot write {}: {e}", quoteaf_os(&opts.file));
                 let _ = fs::remove_file(&temp_path);
                 release_lock(&lock_path);
                 return 1;
@@ -3148,7 +3395,7 @@ fn run_visudo(args: &[String]) -> i32 {
 
         // Report errors and ask what to do.
         for err in &fatal_errors {
-            eprintln!("visudo: {}: {err}", opts.file);
+            eprintln!("visudo: {}: {err}", quoteaf_os(&opts.file));
         }
         eprint!("What now? (e)dit again, e(x)it without saving, (Q)uit and save: ");
         let _ = io::stderr().flush();
@@ -3169,7 +3416,7 @@ fn run_visudo(args: &[String]) -> i32 {
             "Q" => {
                 // Save despite errors.
                 if let Err(e) = fs::write(file_path, &new_content) {
-                    eprintln!("visudo: cannot write {}: {e}", opts.file);
+                    eprintln!("visudo: cannot write {}: {e}", quoteaf_os(&opts.file));
                     let _ = fs::remove_file(&temp_path);
                     release_lock(&lock_path);
                     return 1;
@@ -3188,7 +3435,7 @@ fn run_visudo(args: &[String]) -> i32 {
 }
 
 /// Main entry point for the `sudoreplay` personality.
-fn run_sudoreplay(args: &[String]) -> i32 {
+fn run_sudoreplay(args: &[OsString]) -> i32 {
     let opts = match parse_sudoreplay_args(args) {
         Ok(o) => o,
         Err(e) => {
@@ -3202,7 +3449,10 @@ fn run_sudoreplay(args: &[String]) -> i32 {
     if opts.list {
         let sessions = list_sessions(&opts.directory);
         if sessions.is_empty() {
-            println!("No recorded sessions found in {}", opts.directory);
+            println!(
+                "No recorded sessions found in {}",
+                quoteaf_os(&opts.directory)
+            );
             return 0;
         }
 
@@ -3214,9 +3464,18 @@ fn run_sudoreplay(args: &[String]) -> i32 {
 
         for session in &sessions {
             let date = format_timestamp(session.timestamp);
+            // `escape_os`, not the raw name: this is a fixed-width table, and
+            // a session directory named with a newline or a tab would otherwise
+            // rewrite the rows below it. A name that is already plain text
+            // comes through `escape_os` unchanged, so the ordinary listing is
+            // exactly as it was.
             println!(
                 "{:<12} {:<12} {:<12} {:<20} {}",
-                session.id, session.user, session.target_user, date, session.command
+                escape_os(&session.id),
+                session.user,
+                session.target_user,
+                date,
+                session.command
             );
         }
 
@@ -3247,7 +3506,16 @@ fn run_sudoreplay(args: &[String]) -> i32 {
 // ============================================================================
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    // `args_os`, not `args`. `env::args()`'s iterator is documented to panic on
+    // an argument that is not valid Unicode and its body is a literal `unwrap`,
+    // so `sudo /usr/local/bin/tool\xff` did not deny the command, did not log
+    // it, and did not reach a single line this crate wrote -- it aborted with a
+    // Rust panic before `main`'s first statement. On this OS a path may hold
+    // every byte but `/` and NUL (`design.txt`), so that argument is legal and
+    // the panic was reachable by an ordinary filename. See
+    // `known-issues.md` -> `B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT` and the
+    // ratchet in `scripts/argv-utf8.py`.
+    let args: Vec<OsString> = env::args_os().collect();
 
     // `detect_personality` takes the basename and strips `.exe` itself, so the
     // hand-rolled copy of that logic which used to stand here was a second
@@ -3257,8 +3525,8 @@ fn main() {
     // where the arguments begin.
     let (argv0, rest) = args
         .split_first()
-        .map_or(("sudo", [].as_slice()), |(argv0, rest)| {
-            (argv0.as_str(), rest)
+        .map_or((OsStr::new("sudo"), [].as_slice()), |(argv0, rest)| {
+            (argv0.as_os_str(), rest)
         });
     let personality = detect_personality(argv0);
 
@@ -4168,7 +4436,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            "/usr/bin/ls",
+            b"/usr/bin/ls",
             &["root".to_string()],
         );
         assert!(result.is_some());
@@ -4183,7 +4451,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            "/usr/bin/ls",
+            b"/usr/bin/ls",
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -4198,7 +4466,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            "/usr/bin/apt",
+            b"/usr/bin/apt",
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -4213,7 +4481,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            "/usr/bin/rm",
+            b"/usr/bin/rm",
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -4228,7 +4496,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            "/usr/bin/ls",
+            b"/usr/bin/ls",
             &["alice".to_string(), "wheel".to_string()],
         );
         assert!(result.is_some());
@@ -4243,7 +4511,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            "/usr/bin/ls",
+            b"/usr/bin/ls",
             &["alice".to_string(), "users".to_string()],
         );
         assert!(result.is_none());
@@ -4259,7 +4527,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            "/usr/bin/ls",
+            b"/usr/bin/ls",
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -4274,7 +4542,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "db1",
             "root",
             "",
-            "/usr/bin/ls",
+            b"/usr/bin/ls",
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -4289,7 +4557,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "web1",
             "root",
             "",
-            "/usr/bin/ls",
+            b"/usr/bin/ls",
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -4305,7 +4573,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "web2",
             "root",
             "",
-            "/usr/bin/ls",
+            b"/usr/bin/ls",
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -4320,7 +4588,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            "/usr/bin/ls",
+            b"/usr/bin/ls",
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -4337,7 +4605,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            "/sbin/ifconfig",
+            b"/sbin/ifconfig",
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -4352,7 +4620,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            "/usr/bin/apt",
+            b"/usr/bin/apt",
             &["alice".to_string()],
         );
         assert!(spec.is_some());
@@ -4371,7 +4639,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            "/usr/bin/ls",
+            b"/usr/bin/ls",
             &["alice".to_string()],
         );
         assert!(spec.is_some());
@@ -4387,7 +4655,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            "/usr/bin/anything",
+            b"/usr/bin/anything",
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -4402,7 +4670,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "localhost",
             "root",
             "",
-            "/usr/sbin/something",
+            b"/usr/sbin/something",
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -4413,25 +4681,30 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     #[test]
     fn command_match_exact() {
         let aliases = HashMap::new();
-        assert!(command_matches("/usr/bin/ls", "", "/usr/bin/ls", &aliases));
+        assert!(command_matches("/usr/bin/ls", "", b"/usr/bin/ls", &aliases));
     }
 
     #[test]
     fn command_match_all() {
         let aliases = HashMap::new();
-        assert!(command_matches("ALL", "", "/any/command", &aliases));
+        assert!(command_matches("ALL", "", b"/any/command", &aliases));
     }
 
     #[test]
     fn command_match_wildcard() {
         let aliases = HashMap::new();
-        assert!(command_matches("/usr/bin/*", "", "/usr/bin/ls", &aliases));
+        assert!(command_matches("/usr/bin/*", "", b"/usr/bin/ls", &aliases));
     }
 
     #[test]
     fn command_no_match() {
         let aliases = HashMap::new();
-        assert!(!command_matches("/usr/bin/ls", "", "/usr/bin/rm", &aliases));
+        assert!(!command_matches(
+            "/usr/bin/ls",
+            "",
+            b"/usr/bin/rm",
+            &aliases
+        ));
     }
 
     #[test]
@@ -4440,30 +4713,30 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
         assert!(!command_matches(
             "!/usr/bin/rm",
             "",
-            "/usr/bin/rm",
+            b"/usr/bin/rm",
             &aliases
         ));
     }
 
     #[test]
     fn command_path_match_exact() {
-        assert!(command_path_matches("/usr/bin/ls", "/usr/bin/ls"));
+        assert!(command_path_matches("/usr/bin/ls", b"/usr/bin/ls"));
     }
 
     #[test]
     fn command_path_match_wildcard() {
-        assert!(command_path_matches("/usr/bin/*", "/usr/bin/ls"));
-        assert!(command_path_matches("/usr/bin/*", "/usr/bin/cat"));
+        assert!(command_path_matches("/usr/bin/*", b"/usr/bin/ls"));
+        assert!(command_path_matches("/usr/bin/*", b"/usr/bin/cat"));
     }
 
     #[test]
     fn command_path_no_match_wildcard() {
-        assert!(!command_path_matches("/usr/bin/*", "/usr/sbin/ls"));
+        assert!(!command_path_matches("/usr/bin/*", b"/usr/sbin/ls"));
     }
 
     #[test]
     fn command_path_basename_match() {
-        assert!(command_path_matches("ls", "/usr/bin/ls"));
+        assert!(command_path_matches("ls", b"/usr/bin/ls"));
     }
 
     // -- User matching tests --
@@ -4819,9 +5092,80 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     // -- Sudo option parsing tests --
 
+    /// An argv, in the form the parsers take it.
+    ///
+    /// The parsers take `[OsString]` because argv *is* bytes on this system
+    /// (see [`SudoOpts`]), but a fixture that spells `OsString::from` at every
+    /// element is a fixture nobody adds a case to — these used to say
+    /// `.to_string()` at every element for exactly that reason, and it would be
+    /// the same problem in a new type. `argv(&["-u", "bob", "ls"])` reads as the
+    /// command line it stands for.
+    fn argv(parts: &[&str]) -> Vec<OsString> {
+        parts.iter().map(OsString::from).collect()
+    }
+
+    /// The same, for arguments that are *not* valid UTF-8 and so cannot be
+    /// written as a `&str` at all — the arguments that used to abort the
+    /// process inside `env::args()` before `main` ran a line.
+    ///
+    /// **Unix only, because off unix it would silently test nothing.**
+    /// `quoting::os_from_bytes` is byte-exact under `#[cfg(unix)]`, where an
+    /// `OsStr` *is* its bytes; on Windows an `OsString` is UTF-16-shaped and the
+    /// same call goes through `String::from_utf8_lossy`, so `b"tool\xff"`
+    /// arrives as `tool\u{fffd}` — valid text, and the very substitution these
+    /// tests exist to rule out. A byte-exactness assertion built on it would
+    /// have compared the host's lossy conversion against itself and passed.
+    /// Use [`not_text`] for the cases that only need an argument which is not
+    /// valid Unicode; it works on both platforms.
+    #[cfg(unix)]
+    fn argv_bytes(parts: &[&[u8]]) -> Vec<OsString> {
+        parts.iter().map(|b| os_from_bytes(b)).collect()
+    }
+
+    /// An `OsString` spelled `prefix`, then one unit that is **not valid
+    /// Unicode**, then `suffix`.
+    ///
+    /// This exists so that the "argv need not be text" cases run on the
+    /// development host as well as on the target, which matters more here than
+    /// anywhere else: Windows is where this code is actually built and tested,
+    /// and a case gated out on Windows is a case that only runs where nobody
+    /// looks. Each platform gets the cheapest thing its `OsString` can hold that
+    /// `to_str()` refuses:
+    ///
+    /// - unix: byte `0xff`, which begins no UTF-8 sequence.
+    /// - Windows: `U+D800`, an unpaired surrogate. `OsString` there is WTF-8 and
+    ///   stores it happily; `to_str()` returns `None`, exactly as for the byte.
+    ///
+    /// The two are not the same value and no test may assume they are — a test
+    /// that needs *specific bytes* wants [`argv_bytes`] and `#[cfg(unix)]`.
+    /// What every caller here needs instead is weaker and platform-free: an
+    /// argument that is not text, carried through unchanged.
+    fn not_text(prefix: &str, suffix: &str) -> OsString {
+        #[cfg(unix)]
+        let out = {
+            let mut v = prefix.as_bytes().to_vec();
+            v.push(0xff);
+            v.extend_from_slice(suffix.as_bytes());
+            os_from_bytes(&v)
+        };
+        #[cfg(not(unix))]
+        let out = {
+            use std::os::windows::ffi::OsStringExt;
+            let mut w: Vec<u16> = prefix.encode_utf16().collect();
+            w.push(0xD800);
+            w.extend(suffix.encode_utf16());
+            OsString::from_wide(&w)
+        };
+        // Whatever it is made of, it must be the thing the caller asked for:
+        // something no `&str` can hold. A platform whose fixture quietly became
+        // valid text would make every test below assert nothing.
+        assert!(out.to_str().is_none(), "the fixture must not be valid text");
+        out
+    }
+
     #[test]
     fn parse_sudo_args_simple_command() {
-        let args = vec!["ls".to_string(), "-la".to_string()];
+        let args = argv(&["ls", "-la"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert_eq!(opts.command, vec!["ls", "-la"]);
         assert_eq!(opts.target_user, "root");
@@ -4829,7 +5173,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn parse_sudo_args_target_user() {
-        let args = vec!["-u".to_string(), "bob".to_string(), "ls".to_string()];
+        let args = argv(&["-u", "bob", "ls"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert_eq!(opts.target_user, "bob");
         assert_eq!(opts.command, vec!["ls"]);
@@ -4837,14 +5181,14 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn parse_sudo_args_target_group() {
-        let args = vec!["-g".to_string(), "staff".to_string(), "ls".to_string()];
+        let args = argv(&["-g", "staff", "ls"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert_eq!(opts.target_group, "staff");
     }
 
     #[test]
     fn parse_sudo_args_login_shell() {
-        let args = vec!["-i".to_string()];
+        let args = argv(&["-i"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert!(opts.login_shell);
         assert!(opts.command.is_empty());
@@ -4852,82 +5196,77 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn parse_sudo_args_shell() {
-        let args = vec!["-s".to_string(), "ls".to_string()];
+        let args = argv(&["-s", "ls"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert!(opts.shell);
     }
 
     #[test]
     fn parse_sudo_args_list() {
-        let args = vec!["-l".to_string()];
+        let args = argv(&["-l"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert!(opts.list);
     }
 
     #[test]
     fn parse_sudo_args_validate() {
-        let args = vec!["-v".to_string()];
+        let args = argv(&["-v"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert!(opts.validate);
     }
 
     #[test]
     fn parse_sudo_args_invalidate() {
-        let args = vec!["-k".to_string()];
+        let args = argv(&["-k"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert!(opts.invalidate);
     }
 
     #[test]
     fn parse_sudo_args_remove_timestamp() {
-        let args = vec!["-K".to_string()];
+        let args = argv(&["-K"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert!(opts.remove_timestamp);
     }
 
     #[test]
     fn parse_sudo_args_non_interactive() {
-        let args = vec!["-n".to_string(), "ls".to_string()];
+        let args = argv(&["-n", "ls"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert!(opts.non_interactive);
     }
 
     #[test]
     fn parse_sudo_args_background() {
-        let args = vec!["-b".to_string(), "sleep".to_string(), "60".to_string()];
+        let args = argv(&["-b", "sleep", "60"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert!(opts.background);
     }
 
     #[test]
     fn parse_sudo_args_edit() {
-        let args = vec!["-e".to_string(), "/etc/hosts".to_string()];
+        let args = argv(&["-e", "/etc/hosts"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert!(opts.edit_mode);
     }
 
     #[test]
     fn parse_sudo_args_preserve_env() {
-        let args = vec!["-E".to_string(), "ls".to_string()];
+        let args = argv(&["-E", "ls"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert!(opts.preserve_env);
     }
 
     #[test]
     fn parse_sudo_args_custom_prompt() {
-        let args = vec!["-p".to_string(), "Enter: ".to_string(), "ls".to_string()];
+        let args = argv(&["-p", "Enter: ", "ls"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert_eq!(opts.prompt, "Enter: ");
     }
 
     #[test]
     fn parse_sudo_args_double_dash() {
-        let args = vec![
-            "-u".to_string(),
-            "root".to_string(),
-            "--".to_string(),
-            "-k".to_string(),
-        ];
+        let args = argv(&["-u", "root", "--", "-k"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert_eq!(opts.command, vec!["-k"]);
         assert!(!opts.invalidate);
@@ -4935,7 +5274,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn parse_sudo_args_combined_flags() {
-        let args = vec!["-inE".to_string(), "ls".to_string()];
+        let args = argv(&["-inE", "ls"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert!(opts.login_shell);
         assert!(opts.non_interactive);
@@ -4944,22 +5283,206 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn parse_sudo_args_unknown_flag() {
-        let args = vec!["-Z".to_string()];
+        let args = argv(&["-Z"]);
         assert!(parse_sudo_args(&args).is_err());
     }
 
     #[test]
     fn parse_sudo_args_u_missing_value() {
-        let args = vec!["-u".to_string()];
+        let args = argv(&["-u"]);
         assert!(parse_sudo_args(&args).is_err());
     }
 
     #[test]
     fn parse_sudo_args_empty() {
-        let args: Vec<String> = vec![];
+        let args: Vec<OsString> = vec![];
         let opts = parse_sudo_args(&args).unwrap();
         assert!(opts.command.is_empty());
         assert_eq!(opts.target_user, "root");
+    }
+
+    // -- argv is bytes --
+    //
+    // The whole point of the `OsString` conversion. Every case here was, before
+    // it, either a process abort inside `env::args()` before `main` ran a line,
+    // or a silent substitution of U+FFFD for a byte -- in the one crate whose
+    // job is to decide which user runs which program.
+
+    #[test]
+    fn a_command_that_is_not_utf8_survives_parsing_unchanged() {
+        let wanted = not_text("/usr/local/bin/tool", "");
+        let opts = parse_sudo_args(std::slice::from_ref(&wanted)).unwrap();
+        assert_eq!(opts.command, vec![wanted]);
+    }
+
+    /// The byte-exact form of the case above. Only on unix, because only there
+    /// is an `OsStr` its bytes; see [`argv_bytes`]. This is the assertion that
+    /// matters on the target, where the command is eventually handed to `exec`
+    /// as bytes and one substituted byte is a different program.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_is_not_utf8_survives_parsing_byte_for_byte() {
+        let args = argv_bytes(&[b"/usr/local/bin/tool\xff"]);
+        let opts = parse_sudo_args(&args).unwrap();
+        assert_eq!(opts.command.len(), 1);
+        assert_eq!(&*os_bytes(&opts.command[0]), b"/usr/local/bin/tool\xff");
+    }
+
+    /// Two commands differing only in a unit no `String` can hold must stay two
+    /// commands. Had either gone through `to_string_lossy`, both would render
+    /// as `tool\u{fffd}` and authorising one would authorise the other.
+    ///
+    /// Spelled with the *prefix* varying rather than the non-text unit, so that
+    /// it says the same thing on both platforms: [`not_text`] has only one
+    /// non-text unit to offer per platform, and the property under test is that
+    /// the surrounding text is not flattened along with it.
+    #[test]
+    fn two_commands_differing_around_a_non_text_unit_do_not_collapse_together() {
+        let a = parse_sudo_args(&[not_text("tool", "a")]).unwrap();
+        let b = parse_sudo_args(&[not_text("tool", "b")]).unwrap();
+        assert_ne!(a.command, b.command);
+    }
+
+    /// The unix-only sharpening of the case above: two commands differing
+    /// *only* in the non-text byte itself, which is the shape a caller would
+    /// actually use to smuggle one command past authorisation for another.
+    #[cfg(unix)]
+    #[test]
+    fn two_commands_differing_only_in_a_high_byte_do_not_collapse_together() {
+        let a = parse_sudo_args(&argv_bytes(&[b"tool\xfe"])).unwrap();
+        let b = parse_sudo_args(&argv_bytes(&[b"tool\xff"])).unwrap();
+        assert_ne!(a.command, b.command);
+    }
+
+    /// What follows `--` is a command, not options, whatever it contains.
+    #[test]
+    fn everything_after_a_double_dash_is_command_even_when_it_is_not_text() {
+        let tail = not_text("arg", "");
+        let args = vec![OsString::from("--"), OsString::from("-k"), tail.clone()];
+        let opts = parse_sudo_args(&args).unwrap();
+        assert!(!opts.invalidate, "-k after -- is an argument, not a flag");
+        assert_eq!(opts.command, vec![OsString::from("-k"), tail]);
+    }
+
+    /// `-u` names a user, and a user name is looked up in `/etc/users.yaml`,
+    /// which is text. A name that is not text cannot match any record there, so
+    /// the parser refuses it at the boundary and says why, rather than carrying
+    /// it inward to fail as "no such user" three layers down. See [`SudoOpts`].
+    #[test]
+    fn a_value_flag_refuses_an_argument_that_is_not_text() {
+        let args = vec![
+            OsString::from("-u"),
+            not_text("oper", "ator"),
+            OsString::from("ls"),
+        ];
+        let err = parse_sudo_args(&args).expect_err("a non-text user name is refused");
+        let SudoError::UsageError(msg) = err else {
+            panic!("expected a usage error, got {err:?}");
+        };
+        assert!(msg.contains("not valid text"), "unhelpful message: {msg}");
+    }
+
+    /// A file to edit is a path, not a name, so `visudo -f` takes it as it came.
+    #[test]
+    fn visudo_takes_the_file_to_edit_as_bytes() {
+        let wanted = not_text("/etc/sudoers.d/", "");
+        let opts = parse_visudo_args(&[OsString::from("-f"), wanted.clone()]).unwrap();
+        assert_eq!(opts.file, wanted);
+    }
+
+    /// Likewise the I/O-log directory and the session id, which are both
+    /// directory names.
+    #[test]
+    fn sudoreplay_takes_the_directory_and_session_as_bytes() {
+        let dir = not_text("/var/log/io", "");
+        let sess = not_text("sess", "");
+        let opts =
+            parse_sudoreplay_args(&[OsString::from("-d"), dir.clone(), sess.clone()]).unwrap();
+        assert_eq!(opts.directory, dir);
+        assert_eq!(opts.session_id, Some(sess));
+    }
+
+    /// argv[0] chooses the personality, and it is a path like any other. A
+    /// directory component that is not text must not stop `visudo` being
+    /// `visudo` — the basename is the only part that decides.
+    #[test]
+    fn the_personality_is_chosen_from_a_basename_that_need_not_be_text() {
+        assert_eq!(
+            detect_personality(not_text("/usr/sbin/", "/visudo")),
+            Personality::Visudo
+        );
+        assert_eq!(
+            detect_personality(not_text("/opt/", "/sudoedit.exe")),
+            Personality::Sudoedit
+        );
+    }
+
+    // -- The audit log is one record per line, and stays that way --
+
+    /// The forging case. Before the fields were escaped, a command containing a
+    /// newline appended a *second* line to `/var/log/sudo.log`, so anyone able
+    /// to run `sudo` at all could write a fabricated `RESULT=ALLOWED` record
+    /// naming another user into the file whose entire purpose is to say who ran
+    /// what.
+    #[test]
+    fn a_newline_in_the_command_cannot_forge_a_second_record() {
+        let forged = "ls\n2026-01-01 00:00:00 : root : TTY=x ; PWD=/ ; USER=root ; \
+                      COMMAND=/bin/sh ; RESULT=ALLOWED";
+        let record = format_log_record(
+            "2026-09-06 12:00:00",
+            "mallory",
+            OsStr::new("/dev/pts/0"),
+            OsStr::new("/home/mallory"),
+            "root",
+            OsStr::new(forged),
+            "NOT_ALLOWED",
+        );
+        assert_eq!(record.matches('\n').count(), 1, "record: {record:?}");
+        assert!(record.ends_with('\n'));
+        assert!(record.contains("RESULT=NOT_ALLOWED\n"));
+        assert!(
+            !record.contains("RESULT=ALLOWED\n"),
+            "the forged verdict became a record of its own: {record:?}"
+        );
+    }
+
+    /// `$TTY` is an environment variable the caller sets outright, and the
+    /// working directory is one `mkdir` plus one `cd` away — path names here
+    /// may hold every byte but `/` and NUL. Both are as forgeable as argv.
+    #[test]
+    fn neither_the_tty_nor_the_working_directory_can_forge_a_record() {
+        let record = format_log_record(
+            "2026-09-06 12:00:00",
+            "mallory",
+            OsStr::new("x\nRESULT=ALLOWED"),
+            &os_from_bytes(b"/tmp/\n\xffdir"),
+            "root",
+            OsStr::new("/bin/ls"),
+            "NOT_ALLOWED",
+        );
+        assert_eq!(record.matches('\n').count(), 1, "record: {record:?}");
+        assert!(record.ends_with('\n'));
+    }
+
+    /// A field that was already plain text must come through unchanged, or the
+    /// escaping would have made every ordinary log line harder to read in order
+    /// to defend against the rare one.
+    #[test]
+    fn an_ordinary_record_is_not_disturbed_by_the_escaping() {
+        let record = format_log_record(
+            "2026-09-06 12:00:00",
+            "alice",
+            OsStr::new("/dev/pts/2"),
+            OsStr::new("/home/alice"),
+            "root",
+            OsStr::new("/usr/bin/apt install curl"),
+            "SUCCESS",
+        );
+        assert_eq!(
+            record,
+            "2026-09-06 12:00:00 : alice : TTY=/dev/pts/2 ; PWD=/home/alice ; \
+             USER=root ; COMMAND=/usr/bin/apt install curl ; RESULT=SUCCESS\n"
+        );
     }
 
     // The cases below are the ones the single option table exists for: each is a
@@ -4968,45 +5491,45 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn a_value_glued_to_its_flag_reaches_the_same_field_as_a_separate_one() {
-        let glued = parse_sudo_args(&["-uoperator".to_string()]).unwrap();
-        let separate = parse_sudo_args(&["-u".to_string(), "operator".to_string()]).unwrap();
+        let glued = parse_sudo_args(&argv(&["-uoperator"])).unwrap();
+        let separate = parse_sudo_args(&argv(&["-u", "operator"])).unwrap();
         assert_eq!(glued.target_user, "operator");
         assert_eq!(glued.target_user, separate.target_user);
     }
 
     #[test]
     fn a_value_flag_ending_a_bundle_takes_the_next_argument() {
-        let args = ["-nu".to_string(), "operator".to_string(), "id".to_string()];
+        let args = argv(&["-nu", "operator", "id"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert!(opts.non_interactive);
         assert_eq!(opts.target_user, "operator");
-        assert_eq!(opts.command, vec!["id".to_string()]);
+        assert_eq!(opts.command, vec!["id"]);
     }
 
     #[test]
     fn a_value_flag_mid_bundle_swallows_the_rest_of_it() {
         // `-nuoperator` is `-n` plus `-u operator`, not `-n -u -o -p -e ...`.
-        let opts = parse_sudo_args(&["-nuoperator".to_string()]).unwrap();
+        let opts = parse_sudo_args(&argv(&["-nuoperator"])).unwrap();
         assert!(opts.non_interactive);
         assert_eq!(opts.target_user, "operator");
     }
 
     #[test]
     fn a_bundle_missing_its_trailing_value_is_an_error() {
-        assert!(parse_sudo_args(&["-nu".to_string()]).is_err());
+        assert!(parse_sudo_args(&argv(&["-nu"])).is_err());
     }
 
     #[test]
     fn a_bare_dash_and_a_long_option_are_both_rejected() {
-        assert!(parse_sudo_args(&["-".to_string()]).is_err());
-        assert!(parse_sudo_args(&["--frobnicate".to_string()]).is_err());
+        assert!(parse_sudo_args(&argv(&["-"])).is_err());
+        assert!(parse_sudo_args(&argv(&["--frobnicate"])).is_err());
     }
 
     #[test]
     fn an_option_after_the_command_belongs_to_the_command() {
-        let args = ["id".to_string(), "-u".to_string()];
+        let args = argv(&["id", "-u"]);
         let opts = parse_sudo_args(&args).unwrap();
-        assert_eq!(opts.command, vec!["id".to_string(), "-u".to_string()]);
+        assert_eq!(opts.command, vec!["id", "-u"]);
         assert_eq!(opts.target_user, "root");
     }
 
@@ -5014,7 +5537,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn parse_visudo_defaults() {
-        let args: Vec<String> = vec![];
+        let args: Vec<OsString> = vec![];
         let opts = parse_visudo_args(&args).unwrap();
         assert!(!opts.check_only);
         assert_eq!(opts.file, SUDOERS_PATH);
@@ -5023,34 +5546,34 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn parse_visudo_check_only() {
-        let args = vec!["-c".to_string()];
+        let args = argv(&["-c"]);
         let opts = parse_visudo_args(&args).unwrap();
         assert!(opts.check_only);
     }
 
     #[test]
     fn parse_visudo_alternate_file() {
-        let args = vec!["-f".to_string(), "/tmp/sudoers".to_string()];
+        let args = argv(&["-f", "/tmp/sudoers"]);
         let opts = parse_visudo_args(&args).unwrap();
         assert_eq!(opts.file, "/tmp/sudoers");
     }
 
     #[test]
     fn parse_visudo_strict() {
-        let args = vec!["-s".to_string()];
+        let args = argv(&["-s"]);
         let opts = parse_visudo_args(&args).unwrap();
         assert!(opts.strict);
     }
 
     #[test]
     fn parse_visudo_unknown_flag() {
-        let args = vec!["-z".to_string()];
+        let args = argv(&["-z"]);
         assert!(parse_visudo_args(&args).is_err());
     }
 
     #[test]
     fn parse_visudo_f_missing_value() {
-        let args = vec!["-f".to_string()];
+        let args = argv(&["-f"]);
         assert!(parse_visudo_args(&args).is_err());
     }
 
@@ -5058,7 +5581,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn parse_sudoreplay_defaults() {
-        let args: Vec<String> = vec![];
+        let args: Vec<OsString> = vec![];
         let opts = parse_sudoreplay_args(&args).unwrap();
         assert!(!opts.list);
         assert_eq!(opts.directory, SUDO_IO_DIR);
@@ -5068,47 +5591,47 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn parse_sudoreplay_list() {
-        let args = vec!["-l".to_string()];
+        let args = argv(&["-l"]);
         let opts = parse_sudoreplay_args(&args).unwrap();
         assert!(opts.list);
     }
 
     #[test]
     fn parse_sudoreplay_directory() {
-        let args = vec!["-d".to_string(), "/tmp/logs".to_string()];
+        let args = argv(&["-d", "/tmp/logs"]);
         let opts = parse_sudoreplay_args(&args).unwrap();
         assert_eq!(opts.directory, "/tmp/logs");
     }
 
     #[test]
     fn parse_sudoreplay_speed() {
-        let args = vec!["-s".to_string(), "2.5".to_string()];
+        let args = argv(&["-s", "2.5"]);
         let opts = parse_sudoreplay_args(&args).unwrap();
         assert!((opts.speed_factor - 2.5).abs() < f64::EPSILON);
     }
 
     #[test]
     fn parse_sudoreplay_session_id() {
-        let args = vec!["abc123".to_string()];
+        let args = argv(&["abc123"]);
         let opts = parse_sudoreplay_args(&args).unwrap();
-        assert_eq!(opts.session_id.as_deref(), Some("abc123"));
+        assert_eq!(opts.session_id.as_deref(), Some(OsStr::new("abc123")));
     }
 
     #[test]
     fn parse_sudoreplay_negative_speed() {
-        let args = vec!["-s".to_string(), "-1".to_string()];
+        let args = argv(&["-s", "-1"]);
         assert!(parse_sudoreplay_args(&args).is_err());
     }
 
     #[test]
     fn parse_sudoreplay_zero_speed() {
-        let args = vec!["-s".to_string(), "0".to_string()];
+        let args = argv(&["-s", "0"]);
         assert!(parse_sudoreplay_args(&args).is_err());
     }
 
     #[test]
     fn parse_sudoreplay_invalid_speed() {
-        let args = vec!["-s".to_string(), "notanumber".to_string()];
+        let args = argv(&["-s", "notanumber"]);
         assert!(parse_sudoreplay_args(&args).is_err());
     }
 
@@ -5495,18 +6018,41 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn set_or_replace_new() {
-        let mut env: Vec<(String, String)> = vec![];
-        set_or_replace(&mut env, "KEY", "val");
+        let mut env: Vec<(OsString, OsString)> = vec![];
+        set_or_replace(&mut env, "KEY", OsStr::new("val"));
         assert_eq!(env.len(), 1);
-        assert_eq!(env[0], ("KEY".to_string(), "val".to_string()));
+        assert_eq!(env[0], (OsString::from("KEY"), OsString::from("val")));
     }
 
     #[test]
     fn set_or_replace_existing() {
-        let mut env = vec![("KEY".to_string(), "old".to_string())];
-        set_or_replace(&mut env, "KEY", "new");
+        let mut env = vec![(OsString::from("KEY"), OsString::from("old"))];
+        set_or_replace(&mut env, "KEY", OsStr::new("new"));
         assert_eq!(env.len(), 1);
         assert_eq!(env[0].1, "new");
+    }
+
+    /// A variable's *value* is bytes: `PATH` and `HOME` are paths, and a path
+    /// here may hold every byte but `/` and NUL. The value must reach the child
+    /// process as the bytes it is, not as whatever survives a UTF-8 check.
+    #[test]
+    fn set_or_replace_carries_a_value_that_is_not_text() {
+        let mut env: Vec<(OsString, OsString)> = vec![];
+        let weird = not_text("/home/", "");
+        set_or_replace(&mut env, "HOME", &weird);
+        assert_eq!(env[0].1, weird);
+    }
+
+    /// The byte-exact form, on the platform where an `OsStr` is its bytes.
+    /// `HOME` is handed to the child through `execve`'s environment as bytes;
+    /// one substituted byte is a different directory.
+    #[cfg(unix)]
+    #[test]
+    fn set_or_replace_carries_a_value_byte_for_byte() {
+        let mut env: Vec<(OsString, OsString)> = vec![];
+        let weird = os_from_bytes(b"/home/\xff");
+        set_or_replace(&mut env, "HOME", &weird);
+        assert_eq!(&*os_bytes(&env[0].1), b"/home/\xff");
     }
 
     // -- Defaults parsing edge cases --
@@ -5559,7 +6105,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn parse_sudo_combined_with_user() {
-        let args = vec!["-iubob".to_string(), "ls".to_string()];
+        let args = argv(&["-iubob", "ls"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert!(opts.login_shell);
         assert_eq!(opts.target_user, "bob");
@@ -5568,14 +6114,14 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn parse_sudo_combined_flags_with_group() {
-        let args = vec!["-gstaff".to_string(), "ls".to_string()];
+        let args = argv(&["-gstaff", "ls"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert_eq!(opts.target_group, "staff");
     }
 
     #[test]
     fn parse_sudo_combined_flags_with_prompt() {
-        let args = vec!["-pEnter:".to_string(), "ls".to_string()];
+        let args = argv(&["-pEnter:", "ls"]);
         let opts = parse_sudo_args(&args).unwrap();
         assert_eq!(opts.prompt, "Enter:");
     }

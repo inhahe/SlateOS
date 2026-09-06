@@ -61,6 +61,11 @@
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
 
+// Clock readings and spans as types rather than as `u64`s named after a unit.
+// This daemon is one of the two reasons that crate exists: the rate-limit
+// window was written `60_000` against a reading in nanoseconds, so the window
+// was sixty *microseconds* and no configured `MaxRate` was ever exceeded.
+use monoclock::{Elapsed, Instant};
 use std::collections::HashMap;
 #[cfg(not(test))]
 use std::env;
@@ -269,11 +274,30 @@ fn sleep_ms(ms: u64) {
     let _ = unsafe { syscall1(SYS_SLEEP, ms.saturating_mul(1_000_000)) };
 }
 
-/// Get monotonic clock time in milliseconds.
-fn clock_monotonic_ms() -> u64 {
+/// Read the monotonic clock.
+///
+/// This is the one place in this program that asserts what the syscall's return
+/// value *means*: `SYS_CLOCK_MONOTONIC` returns nanoseconds since boot — see
+/// `kernel/src/syscall/number.rs`, and the host shim
+/// `posix::syscall::host_clock::monotonic_ns` that stands in for it off-target
+/// — so [`Instant::from_nanos_since_boot`] is the correct wrapper. Everything
+/// downstream holds [`Instant`] and [`Elapsed`] and cannot lose the unit again.
+///
+/// It did lose it: this returned a bare `u64`, was called `clock_monotonic_ms`,
+/// and converted nothing, so the rate limiter's "sixty second" window was
+/// `saturating_sub(60_000)` — sixty microseconds — and never once fired. See
+/// `known-issues.md` → `B-INETD-RATE-LIMIT-WINDOW-WAS-MICROSECONDS-NOT-MINUTES`.
+///
+/// A failed read reports boot rather than `None`. Unlike `sshd`'s grace timer,
+/// which refuses the connection when it cannot measure the timeout, the only
+/// consumer here is a sliding window: an [`Instant`] at boot puts every recorded
+/// timestamp inside the window, so the limiter counts *more* rather than fewer,
+/// which is the direction that fails towards rejecting a flood rather than
+/// admitting one.
+fn clock_monotonic() -> Instant {
     // SAFETY: SYS_CLOCK_MONOTONIC takes no pointer arguments.
     let ret = unsafe { syscall0(SYS_CLOCK_MONOTONIC) };
-    if ret < 0 { 0 } else { ret as u64 }
+    u64::try_from(ret).map_or(Instant::BOOT, Instant::from_nanos_since_boot)
 }
 
 /// Get the current process ID.
@@ -1166,13 +1190,26 @@ fn parse_config(
 // Rate limiting / Connection tracking
 // ============================================================================
 
+/// The span a `MaxRate` limit is measured over.
+///
+/// `MaxRate` is documented in the configuration as "connections per source IP
+/// per minute", and the rejection message says `/min`, so the window is a
+/// minute — said once, here, in the unit a minute is written in.
+///
+/// It was once the bare literal `60_000` subtracted from a nanosecond clock: a
+/// sixty-*microsecond* window, which nothing on a network can fall inside, so
+/// the limiter accepted every connection. An [`Elapsed`] cannot be subtracted
+/// from anything but an [`Instant`], and `from_secs` is the only place the
+/// number 60 meets a unit, so that shape is no longer writable.
+const RATE_WINDOW: Elapsed = Elapsed::from_secs(60);
+
 /// Per-source-IP connection tracking entry.
 #[derive(Debug, Clone)]
 struct SourceTracker {
     /// Number of currently active connections.
     active_count: u32,
-    /// Timestamps (monotonic ms) of connections in the current rate window.
-    recent_timestamps: Vec<u64>,
+    /// When each connection in the current rate window arrived.
+    recent_timestamps: Vec<Instant>,
 }
 
 impl SourceTracker {
@@ -1183,16 +1220,23 @@ impl SourceTracker {
         }
     }
 
-    /// Prune timestamps older than 60 seconds from the rate window.
-    fn prune(&mut self, now_ms: u64) {
-        let cutoff = now_ms.saturating_sub(60_000);
+    /// Drop timestamps that have fallen out of the [`RATE_WINDOW`].
+    ///
+    /// `saturating_sub` on the cutoff matters for the first minute after boot,
+    /// when the window reaches back further than the machine has been running:
+    /// it stops at boot, so the window covers everything there is. A wrapping
+    /// subtraction would put the cutoff near the end of the clock and discard
+    /// every timestamp — the limiter switching itself off for its first minute
+    /// of life, which is exactly when an unattended machine is flooded.
+    fn prune(&mut self, now: Instant) {
+        let cutoff = now.saturating_sub(RATE_WINDOW);
         self.recent_timestamps.retain(|&ts| ts >= cutoff);
     }
 
     /// Record a new connection attempt.
-    fn record_connection(&mut self, now_ms: u64) {
-        self.prune(now_ms);
-        self.recent_timestamps.push(now_ms);
+    fn record_connection(&mut self, now: Instant) {
+        self.prune(now);
+        self.recent_timestamps.push(now);
         self.active_count = self.active_count.saturating_add(1);
     }
 
@@ -1229,13 +1273,13 @@ impl ConnectionTracker {
         service_port: u16,
         max_rate: u32,
         max_per_source: u32,
-        now_ms: u64,
+        now: Instant,
     ) -> Result<(), InetdError> {
         let tracker = self
             .sources
             .entry((src_ip, service_port))
             .or_insert_with(SourceTracker::new);
-        tracker.prune(now_ms);
+        tracker.prune(now);
 
         if max_per_source > 0 && tracker.active_count >= max_per_source {
             return Err(InetdError::RateLimit(format!(
@@ -1253,12 +1297,12 @@ impl ConnectionTracker {
     }
 
     /// Record a new accepted connection.
-    fn record(&mut self, src_ip: u32, service_port: u16, now_ms: u64) {
+    fn record(&mut self, src_ip: u32, service_port: u16, now: Instant) {
         let tracker = self
             .sources
             .entry((src_ip, service_port))
             .or_insert_with(SourceTracker::new);
-        tracker.record_connection(now_ms);
+        tracker.record_connection(now);
     }
 
     /// Release a connection (decrement active count).
@@ -1269,9 +1313,9 @@ impl ConnectionTracker {
     }
 
     /// Clean up entries with no active connections and no recent timestamps.
-    fn garbage_collect(&mut self, now_ms: u64) {
+    fn garbage_collect(&mut self, now: Instant) {
         self.sources.retain(|_key, tracker| {
-            tracker.prune(now_ms);
+            tracker.prune(now);
             tracker.active_count > 0 || !tracker.recent_timestamps.is_empty()
         });
     }
@@ -1292,9 +1336,9 @@ impl ConnectionTracker {
 
     /// Get rate (connections in last minute) for a given source/port pair.
     #[allow(dead_code)] // Used in tests and future status reporting.
-    fn rate_for(&mut self, src_ip: u32, service_port: u16, now_ms: u64) -> u32 {
+    fn rate_for(&mut self, src_ip: u32, service_port: u16, now: Instant) -> u32 {
         if let Some(tracker) = self.sources.get_mut(&(src_ip, service_port)) {
-            tracker.prune(now_ms);
+            tracker.prune(now);
             tracker.rate()
         } else {
             0
@@ -1645,7 +1689,7 @@ fn handle_tcp_connection(
 ) {
     let slot = &slots[slot_idx];
     let svc = &services[slot.service_idx];
-    let now_ms = clock_monotonic_ms();
+    let now = clock_monotonic();
 
     // Get peer address for rate limiting.
     let (src_ip, _src_port) = match tcp_peer_addr(conn_handle) {
@@ -1658,15 +1702,13 @@ fn handle_tcp_connection(
     };
 
     // Check rate limits.
-    if let Err(e) =
-        tracker.check_allowed(src_ip, svc.port, svc.max_rate, svc.max_per_source, now_ms)
-    {
+    if let Err(e) = tracker.check_allowed(src_ip, svc.port, svc.max_rate, svc.max_per_source, now) {
         logger.log(LogLevel::Warning, &format!("{e}"));
         tcp_close(conn_handle);
         return;
     }
 
-    tracker.record(src_ip, svc.port, now_ms);
+    tracker.record(src_ip, svc.port, now);
 
     logger.log(
         LogLevel::Debug,
@@ -1733,17 +1775,15 @@ fn handle_udp_datagram(
 ) {
     let slot = &slots[slot_idx];
     let svc = &services[slot.service_idx];
-    let now_ms = clock_monotonic_ms();
+    let now = clock_monotonic();
 
     // Check rate limits.
-    if let Err(e) =
-        tracker.check_allowed(src_ip, svc.port, svc.max_rate, svc.max_per_source, now_ms)
-    {
+    if let Err(e) = tracker.check_allowed(src_ip, svc.port, svc.max_rate, svc.max_per_source, now) {
         logger.log(LogLevel::Warning, &format!("{e}"));
         return;
     }
 
-    tracker.record(src_ip, svc.port, now_ms);
+    tracker.record(src_ip, svc.port, now);
 
     logger.log(
         LogLevel::Debug,
@@ -1871,8 +1911,8 @@ fn run_daemon(cfg: &Config) -> i32 {
         // every ~100 iterations.
         gc_counter = gc_counter.wrapping_add(1);
         if gc_counter.is_multiple_of(100) {
-            let now_ms = clock_monotonic_ms();
-            tracker.garbage_collect(now_ms);
+            let now = clock_monotonic();
+            tracker.garbage_collect(now);
         }
 
         // Sleep briefly to avoid busy-spinning. 10 ms gives reasonable
@@ -2380,11 +2420,11 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
     #[test]
     fn test_source_tracker_record_and_release() {
         let mut tracker = SourceTracker::new();
-        tracker.record_connection(1000);
+        tracker.record_connection(Instant::from_nanos_since_boot(1000));
         assert_eq!(tracker.active_count, 1);
         assert_eq!(tracker.rate(), 1);
 
-        tracker.record_connection(2000);
+        tracker.record_connection(Instant::from_nanos_since_boot(2000));
         assert_eq!(tracker.active_count, 2);
         assert_eq!(tracker.rate(), 2);
 
@@ -2392,19 +2432,77 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
         assert_eq!(tracker.active_count, 1);
     }
 
+    /// The smallest span this clock can express, for stepping just off an edge.
+    const A_TICK: Elapsed = Elapsed::from_nanos(1);
+
+    /// An instant `n` rate windows after boot.
+    ///
+    /// The tracker's arithmetic is entirely relative, so the absolute point is
+    /// arbitrary — but expressing it in windows is what keeps these tests
+    /// straddling the boundary if the window is ever changed, and keeps them
+    /// far enough from boot that subtracting a window does not saturate there
+    /// and quietly turn "just outside the window" into "at boot, inside it".
+    fn windows_after_boot(n: u64) -> Instant {
+        Instant::BOOT.saturating_add(Elapsed::from_nanos(n * RATE_WINDOW.as_nanos()))
+    }
+
     #[test]
     fn test_source_tracker_prune_old_timestamps() {
+        // Written against `RATE_WINDOW` rather than against numbers that happen
+        // to straddle it, so that changing the window — or getting its unit
+        // wrong again — moves the test with the code instead of leaving a green
+        // suite behind a broken limiter.
         let mut tracker = SourceTracker::new();
-        tracker.record_connection(1000); // old
-        tracker.record_connection(50_000); // old
-        tracker.record_connection(70_000); // recent
-        tracker.prune(70_000);
-        // Cutoff is 70000 - 60000 = 10000, so the first timestamp (1000) is pruned.
-        assert_eq!(tracker.rate(), 2);
+        let now = windows_after_boot(10);
+        let window_ago = now.saturating_sub(RATE_WINDOW);
+        tracker.record_connection(window_ago.saturating_sub(A_TICK)); // Just outside.
+        tracker.record_connection(window_ago); // Exactly on the edge.
+        tracker.record_connection(now); // Inside.
 
-        tracker.prune(130_001);
-        // Now all timestamps are older than 60s from 130001.
-        assert_eq!(tracker.rate(), 0);
+        tracker.prune(now);
+        assert_eq!(
+            tracker.rate(),
+            2,
+            "pruning at {now:?} kept the wrong set: the window is {RATE_WINDOW:?}"
+        );
+
+        tracker.prune(now.saturating_add(RATE_WINDOW).saturating_add(A_TICK));
+        assert_eq!(
+            tracker.rate(),
+            0,
+            "timestamps survived a full window past the newest of them"
+        );
+    }
+
+    /// The window is a minute of the clock the daemon actually reads.
+    ///
+    /// This is the regression test for the defect that made rate limiting dead
+    /// code: the window was the literal `60_000` compared against a nanosecond
+    /// clock, i.e. sixty microseconds. An attacker opening connections as fast
+    /// as a network allows still puts more than sixty microseconds between
+    /// them, so every timestamp was pruned before the next arrived and
+    /// `rate()` never exceeded one.
+    ///
+    /// Note what this asserts and what it does not: it says nothing about
+    /// `RATE_WINDOW`'s definition, because a test that restates the constant
+    /// only proves the constant equals itself — which is exactly why the
+    /// original bug survived a passing suite. It states a fact about the
+    /// outside world instead: ten connections one tenth of a second apart are
+    /// one burst.
+    #[test]
+    fn test_rate_window_is_one_minute_of_the_monotonic_clock() {
+        let mut tracker = SourceTracker::new();
+        let now = windows_after_boot(1);
+        // Ten connections spread over a second — far too fast to be a person,
+        // and the case the limiter exists to catch.
+        for i in 0..10u64 {
+            tracker.record_connection(now.saturating_add(Elapsed::from_millis(i * 100)));
+        }
+        assert_eq!(
+            tracker.rate(),
+            10,
+            "ten connections inside one second were not all inside the window"
+        );
     }
 
     #[test]
@@ -2425,7 +2523,7 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
         let mut tracker = ConnectionTracker::new();
         let ip = 0x7F000001; // 127.0.0.1
         let port = 22;
-        let now = 100_000u64;
+        let now = Instant::from_nanos_since_boot(100_000);
 
         tracker.record(ip, port, now);
         assert_eq!(tracker.active_for(ip, port), 1);
@@ -2437,15 +2535,21 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
         let mut tracker = ConnectionTracker::new();
         let ip = 0x7F000001;
         let port = 80;
-        let now = 100_000u64;
+        let now = Instant::from_nanos_since_boot(100_000);
 
         // Record 5 connections.
         for i in 0..5u64 {
-            tracker.record(ip, port, now + i);
+            tracker.record(ip, port, now.saturating_add(Elapsed::from_nanos(i)));
         }
 
         // With max_rate=5, the 6th should be rejected.
-        let result = tracker.check_allowed(ip, port, 5, 100, now + 10);
+        let result = tracker.check_allowed(
+            ip,
+            port,
+            5,
+            100,
+            now.saturating_add(Elapsed::from_nanos(10)),
+        );
         assert!(result.is_err());
     }
 
@@ -2454,7 +2558,7 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
         let mut tracker = ConnectionTracker::new();
         let ip = 0x7F000001;
         let port = 80;
-        let now = 100_000u64;
+        let now = Instant::from_nanos_since_boot(100_000);
 
         // Record 3 active connections.
         for _ in 0..3 {
@@ -2471,7 +2575,7 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
         let mut tracker = ConnectionTracker::new();
         let ip = 0x7F000001;
         let port = 80;
-        let now = 100_000u64;
+        let now = Instant::from_nanos_since_boot(100_000);
 
         tracker.record(ip, port, now);
         assert_eq!(tracker.active_for(ip, port), 1);
@@ -2485,12 +2589,14 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
         let ip = 0x7F000001;
         let port = 80;
 
-        tracker.record(ip, port, 1000);
+        let now = windows_after_boot(1);
+        tracker.record(ip, port, now);
         tracker.release(ip, port);
         assert_eq!(tracker.tracked_sources(), 1);
 
-        // After GC with a time far enough in the future, the entry is removed.
-        tracker.garbage_collect(100_000);
+        // An entry is only collectable once its last timestamp has aged out of
+        // the rate window, so the GC has to run a full window later.
+        tracker.garbage_collect(now.saturating_add(RATE_WINDOW).saturating_add(A_TICK));
         assert_eq!(tracker.tracked_sources(), 0);
     }
 
@@ -2498,7 +2604,7 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
     fn test_connection_tracker_different_ports_independent() {
         let mut tracker = ConnectionTracker::new();
         let ip = 0x7F000001;
-        let now = 100_000u64;
+        let now = Instant::from_nanos_since_boot(100_000);
 
         tracker.record(ip, 22, now);
         tracker.record(ip, 80, now);
@@ -2517,7 +2623,7 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
         let ip1 = 0x7F000001;
         let ip2 = 0xC0A80001;
         let port = 80;
-        let now = 100_000u64;
+        let now = Instant::from_nanos_since_boot(100_000);
 
         // Fill up ip1.
         for _ in 0..5 {
@@ -2534,7 +2640,7 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
         let mut tracker = ConnectionTracker::new();
         let ip = 0x7F000001;
         let port = 80;
-        let now = 100_000u64;
+        let now = Instant::from_nanos_since_boot(100_000);
 
         for _ in 0..1000 {
             tracker.record(ip, port, now);
@@ -2550,7 +2656,7 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
         let mut tracker = ConnectionTracker::new();
         let ip = 0x7F000001;
         let port = 80;
-        let now = 100_000u64;
+        let now = Instant::from_nanos_since_boot(100_000);
 
         // Record 10 connections at time=now.
         for _ in 0..10 {
@@ -2561,8 +2667,8 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
             tracker.release(ip, port);
         }
 
-        // At now+61s, the rate window has moved past all those connections.
-        let later = now + 61_000;
+        // A tick past a full window later, all those connections have aged out.
+        let later = now.saturating_add(RATE_WINDOW).saturating_add(A_TICK);
         let rate = tracker.rate_for(ip, port, later);
         assert_eq!(rate, 0);
 

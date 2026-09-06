@@ -705,6 +705,129 @@ pub fn self_test() -> KernelResult<()> {
     }
     serial_println!("[multiwait]   Registration is swept on every exit: OK");
 
+    // --- Phase 9: a mixed set — two families in one wait, and the ready one
+    // is named. ---
+    //
+    // Every phase above waits on exactly one *blockable* target (phase 8's
+    // second member is a `PollOnly` that never becomes ready), so nothing yet
+    // tests the property the whole feature exists for: N objects of different
+    // families in one wait. A fan-out that only took effect for the last member
+    // of `targets` would pass phases 1-8 and hang here.
+    //
+    // The second member is a **disarmed** timerfd, chosen so it contributes no
+    // deadline: if the pipe's own wake is lost, there is no timer quietly
+    // standing by to rescue the park, and the 2 s timeout is far outside the
+    // window the assertion allows.
+    //
+    // Readiness is computed through `revents_for_handle` — the same fifteen-arm
+    // table `poll` and `SYS_WAIT_MULTIPLE` share — masked by `POLLIN` exactly as
+    // the syscall masks by the caller's `events`. A bespoke scan here would test
+    // the test; this way the phase also pins that the shared table answers for a
+    // *native* handle, which is how `SYS_WAIT_MULTIPLE` calls it.
+    MW_WROTE.store(0, SeqCst);
+    let (rh, wh) = super::pipe::create();
+    let t = super::timerfd::create(super::timerfd::CLOCK_MONOTONIC);
+    if let Err(e) = sched::spawn(b"mw-mixed", 16, mw_pipe_writer_task, wh.raw(), 0) {
+        serial_println!("[multiwait]   FAIL: could not spawn the mixed-set writer: {e}");
+        super::pipe::close(rh);
+        super::pipe::close(wh);
+        super::timerfd::close(t);
+        return Err(e);
+    }
+    let mut pipe_revents = 0u16;
+    let mut timer_revents = 0u16;
+    let started = crate::hrtimer::now_ns();
+    let targets = [WaitTarget::Pipe(rh.raw()), WaitTarget::TimerFd(t.raw())];
+    let r = wait_multiple(&targets, Some(2_000_000_000), || {
+        use crate::proc::linux_fd::HandleKind;
+        use crate::syscall::linux::{poll_bits, revents_for_handle};
+        // POLLERR/POLLHUP are unrequestable and always reported, per poll(2);
+        // POLLOUT is masked out because a pipe read end is writable-adjacent
+        // enough to be permanently "ready" and would defeat the park.
+        let mask = poll_bits::POLLIN | poll_bits::POLLERR | poll_bits::POLLHUP;
+        pipe_revents = revents_for_handle(HandleKind::Pipe, rh.raw(), 0, None) & mask;
+        timer_revents = revents_for_handle(HandleKind::Timerfd, t.raw(), 0, None) & mask;
+        usize::from(pipe_revents != 0).saturating_add(usize::from(timer_revents != 0))
+    });
+    let elapsed = crate::hrtimer::now_ns().saturating_sub(started);
+    let wrote = MW_WROTE.load(SeqCst);
+    super::pipe::close(rh);
+    super::pipe::close(wh);
+    super::timerfd::close(t);
+    let n = r?;
+    if n != 1
+        || wrote != 1
+        || elapsed > 1_000_000_000
+        || pipe_revents & crate::syscall::linux::poll_bits::POLLIN == 0
+        || timer_revents != 0
+    {
+        serial_println!(
+            "[multiwait]   FAIL: mixed set returned n={n} after {elapsed}ns (writer ran: {wrote}, \
+             pipe revents {pipe_revents:#x}, timer revents {timer_revents:#x})"
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[multiwait]   Mixed pipe+timerfd set wakes on the pipe alone ({elapsed}ns): OK"
+    );
+
+    // --- Phase 10: a `PollOnly` member caps the whole wait. ---
+    //
+    // This is the row a TCP socket lands in — testable but not blockable — and
+    // the reason readiness and blockability are two dispatches rather than one.
+    // The assertion has to be a *contrast*, because "it eventually returned"
+    // is true either way and would not prove the backoff ran at all: the same
+    // readiness change, one that announces itself to no waiter set, is seen
+    // promptly when a `PollOnly` is in the set and only at the timeout when it
+    // is not.
+    //
+    // The blockable member is a pipe nobody ever writes to. It is there so the
+    // two waits differ in exactly one thing — the presence of the `PollOnly` —
+    // rather than in whether they had anything to register on at all.
+    let (rh, wh) = super::pipe::create();
+
+    let silent_at = crate::hrtimer::now_ns().saturating_add(40_000_000);
+    let started = crate::hrtimer::now_ns();
+    let capped = wait_multiple(
+        &[WaitTarget::Pipe(rh.raw()), WaitTarget::PollOnly],
+        Some(300_000_000),
+        || usize::from(crate::hrtimer::now_ns() >= silent_at),
+    );
+    let capped_elapsed = crate::hrtimer::now_ns().saturating_sub(started);
+
+    let silent_at = crate::hrtimer::now_ns().saturating_add(40_000_000);
+    let started = crate::hrtimer::now_ns();
+    let uncapped = wait_multiple(&[WaitTarget::Pipe(rh.raw())], Some(300_000_000), || {
+        usize::from(crate::hrtimer::now_ns() >= silent_at)
+    });
+    let uncapped_elapsed = crate::hrtimer::now_ns().saturating_sub(started);
+
+    super::pipe::close(rh);
+    super::pipe::close(wh);
+    let capped_n = capped?;
+    uncapped?;
+    // 40 ms until ready plus at most one 20 ms backoff step, against a 300 ms
+    // timeout: the two outcomes are an order of magnitude apart, so the bounds
+    // do not need to be tight to be decisive.
+    if capped_n != 1 || capped_elapsed >= 200_000_000 {
+        serial_println!(
+            "[multiwait]   FAIL: capped wait returned n={capped_n} after {capped_elapsed}ns — a \
+             PollOnly member did not put the wait on the backoff path"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if uncapped_elapsed < 250_000_000 {
+        serial_println!(
+            "[multiwait]   FAIL: blockable-only wait returned after {uncapped_elapsed}ns — it \
+             should have slept to its timeout, so the contrast in this phase proves nothing"
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[multiwait]   PollOnly member caps the wait ({capped_elapsed}ns vs {uncapped_elapsed}ns \
+         without one): OK"
+    );
+
     serial_println!("[multiwait] multiwait::self_test PASSED");
     Ok(())
 }

@@ -934,6 +934,10 @@ mod tests {
         let yaml_path = tmp("users.yaml");
         let mut db = userdb::UserDb::new();
         let mut record = userdb::Record::new();
+        // The uid is not decoration: since `design-decisions.md` §353, a save
+        // also generates `/etc/passwd`, and a record with no uid has no line
+        // to generate. An account without one was never a real account.
+        record.set_uid(1000);
         record.set("username", "alice");
         record
             .set_password_with_salt("native", "nativesalt")
@@ -941,6 +945,9 @@ mod tests {
         db.push(record);
         db.save(&yaml_path).expect("save yaml");
 
+        // Written *after* the save, which also generates a `shadow` beside the
+        // database: this fixture is asserting over its own contrived entry,
+        // not over the generated one.
         let shadow_path = tmp("shadow");
         std::fs::write(
             &shadow_path,
@@ -964,6 +971,9 @@ mod tests {
         let yaml_path = tmp("locked.yaml");
         let mut db = userdb::UserDb::new();
         let mut record = userdb::Record::new();
+        // See `the_native_store_wins_when_it_has_the_user`: a save generates
+        // `/etc/passwd` too, and that needs a uid.
+        record.set_uid(1000);
         record.set("username", "alice");
         record
             .set_password_with_salt("correct horse", "nativesalt")

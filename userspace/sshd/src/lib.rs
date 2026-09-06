@@ -131,6 +131,7 @@ use std::io;
 use std::io::Read as _;
 #[allow(unused_imports)]
 use std::io::Write;
+use std::path::Path;
 use std::process;
 
 // Clock readings and spans as types rather than as `u64`s named after a unit.
@@ -371,19 +372,32 @@ const READ_PROBE_BYTES: u64 = MAX_FILE_BYTES as u64 + 1;
 /// working, with the cut landing mid-line so the remains parsed as a malformed
 /// entry rather than as the key it was. Nobody would have been told. Refusing an
 /// oversized file says what happened and names the file.
-fn fs_read_file(path: &str) -> Result<Vec<u8>, SshdError> {
+///
+/// # Why `&Path` and not `&str`
+///
+/// A path on this OS is bytes — every byte but `/` and NUL (`design.txt`) — and
+/// a `&str` parameter is a promise that it is UTF-8, made by a function that has
+/// no way to keep it. The promise was kept by breaking the name: the config file
+/// was read through `String::from_utf8_lossy`, so a `HostKey` line naming a file
+/// whose name held byte 0x80 arrived here as a name with U+FFFD in it, which
+/// opens nothing. What happened next is the part that matters: an unreadable
+/// host key path is treated as a first start, so the daemon *generated a new
+/// host key* and every client saw the host identity change. `&Path` carries the
+/// bytes the operator wrote.
+fn fs_read_file(path: &Path) -> Result<Vec<u8>, SshdError> {
+    let name = path.display();
     let file = fs::File::open(path).map_err(|e| {
-        SshdError::IoError(io::Error::new(e.kind(), format!("cannot read {path}: {e}")))
+        SshdError::IoError(io::Error::new(e.kind(), format!("cannot read {name}: {e}")))
     })?;
     let mut buf = Vec::new();
     file.take(READ_PROBE_BYTES)
         .read_to_end(&mut buf)
         .map_err(|e| {
-            SshdError::IoError(io::Error::new(e.kind(), format!("cannot read {path}: {e}")))
+            SshdError::IoError(io::Error::new(e.kind(), format!("cannot read {name}: {e}")))
         })?;
     if buf.len() > MAX_FILE_BYTES {
         return Err(SshdError::IoError(io::Error::other(format!(
-            "cannot read {path}: larger than the {MAX_FILE_BYTES} byte limit"
+            "cannot read {name}: larger than the {MAX_FILE_BYTES} byte limit"
         ))));
     }
     Ok(buf)
@@ -414,9 +428,10 @@ fn fs_read_file(path: &str) -> Result<Vec<u8>, SshdError> {
 /// file somebody else left at that path would otherwise inherit its
 /// permissions.
 #[cfg(unix)]
-fn fs_write_private_file(path: &str, data: &[u8]) -> Result<(), SshdError> {
+fn fs_write_private_file(path: &Path, data: &[u8]) -> Result<(), SshdError> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
+    let name = path.display();
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -426,13 +441,13 @@ fn fs_write_private_file(path: &str, data: &[u8]) -> Result<(), SshdError> {
         .map_err(|e| {
             SshdError::IoError(io::Error::new(
                 e.kind(),
-                format!("cannot write {path}: {e}"),
+                format!("cannot write {name}: {e}"),
             ))
         })?;
     file.write_all(data).map_err(|e| {
         SshdError::IoError(io::Error::new(
             e.kind(),
-            format!("cannot write {path}: {e}"),
+            format!("cannot write {name}: {e}"),
         ))
     })?;
     drop(file);
@@ -451,11 +466,12 @@ fn fs_write_private_file(path: &str, data: &[u8]) -> Result<(), SshdError> {
 ///
 /// [`SshdError::IoError`] if the file cannot be written.
 #[cfg(not(unix))]
-fn fs_write_private_file(path: &str, data: &[u8]) -> Result<(), SshdError> {
+fn fs_write_private_file(path: &Path, data: &[u8]) -> Result<(), SshdError> {
+    let name = path.display();
     fs::write(path, data).map_err(|e| {
         SshdError::IoError(io::Error::new(
             e.kind(),
-            format!("cannot write {path}: {e}"),
+            format!("cannot write {name}: {e}"),
         ))
     })
 }
@@ -478,13 +494,14 @@ fn fs_write_private_file(path: &str, data: &[u8]) -> Result<(), SshdError> {
 ///
 /// [`SshdError::IoError`] if the mode cannot be set.
 #[cfg(unix)]
-fn fs_set_mode(path: &str, mode: u32) -> Result<(), SshdError> {
+fn fs_set_mode(path: &Path, mode: u32) -> Result<(), SshdError> {
     use std::os::unix::fs::PermissionsExt as _;
 
+    let name = path.display();
     fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777)).map_err(|e| {
         SshdError::IoError(io::Error::new(
             e.kind(),
-            format!("cannot set mode on {path}: {e}"),
+            format!("cannot set mode on {name}: {e}"),
         ))
     })
 }
@@ -1790,7 +1807,7 @@ impl HostKey {
     /// Fails if the kernel cannot supply random bytes, or if the key cannot be
     /// written. Both are fatal: a daemon that runs with a key it could not
     /// persist is a daemon whose identity changes silently.
-    fn generate_and_persist(path: &str) -> Result<Self, SshdError> {
+    fn generate_and_persist(path: &Path) -> Result<Self, SshdError> {
         let mut seed = [0u8; 32];
         randrange::fill_secret(&mut seed)
             .map_err(|e| SshdError::ConfigError(format!("cannot generate a host key: {e}")))?;
@@ -1844,13 +1861,14 @@ impl HostKey {
     /// successfully with a host key unrelated to the file named, and the
     /// operator's only clue would have been that every client reported a
     /// changed host key. Failing to parse a host key must stop the daemon.
-    fn load_from_file(path: &str) -> Result<Self, SshdError> {
+    fn load_from_file(path: &Path) -> Result<Self, SshdError> {
+        let name = path.display();
         let data = fs_read_file(path)?;
         let text = String::from_utf8_lossy(&data);
 
         if text.contains("BEGIN OPENSSH PRIVATE KEY") {
             return Self::from_openssh_text(&text)
-                .map_err(|e| SshdError::ConfigError(format!("{path}: {e}")));
+                .map_err(|e| SshdError::ConfigError(format!("{name}: {e}")));
         }
 
         if data.len() == 32 {
@@ -1868,13 +1886,13 @@ impl HostKey {
             for (byte, pair) in seed.iter_mut().zip(pairs) {
                 let digits = String::from_utf8_lossy(pair);
                 *byte = u8::from_str_radix(&digits, 16)
-                    .map_err(|_| SshdError::ConfigError(format!("invalid hex in {path}")))?;
+                    .map_err(|_| SshdError::ConfigError(format!("invalid hex in {name}")))?;
             }
             return Ok(Self::from_seed(seed));
         }
 
         Err(SshdError::ConfigError(format!(
-            "cannot parse host key from {path}: expected an OpenSSH private key, \
+            "cannot parse host key from {name}: expected an OpenSSH private key, \
              32 raw bytes, or 64 hex digits"
         )))
     }
@@ -1935,7 +1953,7 @@ impl HostKey {
 /// [`SshdError::ConfigError`] if the system random number generator is
 /// unavailable, or [`SshdError::IoError`] if the file cannot be written.
 fn write_openssh_private_key(
-    path: &str,
+    path: &Path,
     seed: &[u8; 32],
     public: &[u8; 32],
 ) -> Result<(), SshdError> {
@@ -1966,7 +1984,7 @@ fn write_openssh_private_key(
 ///
 /// [`SshdError::IoError`] if the file cannot be written.
 fn write_openssh_private_key_with_checkint(
-    path: &str,
+    path: &Path,
     seed: &[u8; 32],
     public: &[u8; 32],
     checkint: u32,
@@ -2527,7 +2545,7 @@ fn parse_passwd(content: &str) -> Vec<PasswdEntry> {
 /// Returns `None` when the file is unreadable or the name is absent. Callers
 /// must treat that as a refusal to run anything — see [`session_command`].
 fn lookup_passwd(username: &str) -> Option<PasswdEntry> {
-    let data = fs_read_file("/etc/passwd").ok()?;
+    let data = fs_read_file(Path::new("/etc/passwd")).ok()?;
     let content = String::from_utf8_lossy(&data);
     parse_passwd(&content)
         .into_iter()
@@ -3912,7 +3930,7 @@ fn handle_service_request(conn: &mut ConnectionState) -> Result<(), SshdError> {
 
     // Send banner if configured.
     if !conn.config.banner_file.is_empty()
-        && let Ok(banner_data) = fs_read_file(&conn.config.banner_file)
+        && let Ok(banner_data) = fs_read_file(Path::new(&conn.config.banner_file))
     {
         let mut banner_msg = Vec::new();
         banner_msg.push(msg::SSH_MSG_USERAUTH_BANNER);
@@ -4431,7 +4449,7 @@ fn pubkey_auth_for_account(
     // outcome is identical to an empty file's, and deliberately so; reporting
     // *which* it was would tell an unauthenticated peer whether an account
     // exists.
-    let Ok(data) = fs_read_file(&keys_path) else {
+    let Ok(data) = fs_read_file(Path::new(&keys_path)) else {
         return Ok(PubkeyOutcome::Rejected);
     };
     let keys_content = String::from_utf8_lossy(&data).into_owned();
@@ -6564,7 +6582,7 @@ pub fn run_cli() -> i32 {
     };
 
     // Load config.
-    let mut config = if let Ok(data) = fs_read_file(&opts.config_file) {
+    let mut config = if let Ok(data) = fs_read_file(Path::new(&opts.config_file)) {
         let content = String::from_utf8_lossy(&data);
         match SshdConfig::parse(&content) {
             Ok(c) => c,
@@ -6612,14 +6630,14 @@ pub fn run_cli() -> i32 {
     // substitute identity would present clients with a host key that is not the
     // one the operator installed. That is indistinguishable, from the client's
     // side, from the attack host key verification exists to detect, so we stop.
-    let host_key = match HostKey::load_from_file(&config.host_key_file) {
+    let host_key = match HostKey::load_from_file(Path::new(&config.host_key_file)) {
         Ok(hk) => hk,
         Err(SshdError::IoError(_)) => {
             log_info(
                 &format!("no host key at {}, generating one", config.host_key_file),
                 opts.log_stderr,
             );
-            match HostKey::generate_and_persist(&config.host_key_file) {
+            match HostKey::generate_and_persist(Path::new(&config.host_key_file)) {
                 Ok(hk) => hk,
                 Err(e) => {
                     log_error(&format!("cannot create a host key: {e}"), opts.log_stderr);
@@ -7047,10 +7065,23 @@ DenyGroups nogroup
     /// `_` drops it immediately and deletes the directory. See
     /// [`authenticator_with_shadow`] for the same warning, and the bug that
     /// earned it.
-    fn scratch_path(name: &str) -> (String, ScratchDir) {
+    /// A `PathBuf` rather than a `String` because that is what the functions
+    /// under test take, and converting here would put the very conversion they
+    /// exist to avoid between the fixture and the call.
+    fn scratch_path(name: &str) -> (std::path::PathBuf, ScratchDir) {
         let dir = ScratchDir::new("sshd_files");
-        let path = dir.path(name).to_string_lossy().into_owned();
+        let path = dir.path(name);
         (path, dir)
+    }
+
+    /// A path as it appears in this daemon's diagnostics.
+    ///
+    /// The assertions below check that an error names the file it failed on, and
+    /// the name in the message is `Path::display`'s rendering rather than the
+    /// path itself. Spelled once so that a change to how paths are rendered
+    /// moves one line rather than eight.
+    fn as_named(path: &Path) -> String {
+        path.display().to_string()
     }
 
     #[test]
@@ -7081,7 +7112,7 @@ DenyGroups nogroup
 
         let err = fs_read_file(&path).expect_err("a file that was never written");
         assert!(
-            err.to_string().contains(&path),
+            err.to_string().contains(&as_named(&path)),
             "the error must name the file it could not read, got: {err}"
         );
     }
@@ -7110,7 +7141,7 @@ DenyGroups nogroup
         let err = fs_read_file(&path).expect_err("a file over the cap");
         let msg = err.to_string();
         assert!(
-            msg.contains(&path) && msg.contains("limit"),
+            msg.contains(&as_named(&path)) && msg.contains("limit"),
             "the error must name the file and say it was too large, got: {msg}"
         );
     }
@@ -7118,7 +7149,7 @@ DenyGroups nogroup
     #[test]
     fn writing_a_key_into_a_directory_that_does_not_exist_says_which_file() {
         let (dir_path, _dir) = scratch_path("no_such_directory");
-        let path = format!("{dir_path}/key");
+        let path = dir_path.join("key");
 
         let seed = [1u8; 32];
         let err = write_openssh_private_key_with_checkint(
@@ -7129,7 +7160,7 @@ DenyGroups nogroup
         )
         .expect_err("a write under a missing directory");
         assert!(
-            err.to_string().contains(&path),
+            err.to_string().contains(&as_named(&path)),
             "the error must name the file it could not write, got: {err}"
         );
     }
@@ -7218,7 +7249,7 @@ DenyGroups nogroup
 
         let err = HostKey::load_from_file(&path).expect_err("a file that is not a host key");
         assert!(
-            err.to_string().contains(&path),
+            err.to_string().contains(&as_named(&path)),
             "the error must name the file, got: {err}"
         );
     }

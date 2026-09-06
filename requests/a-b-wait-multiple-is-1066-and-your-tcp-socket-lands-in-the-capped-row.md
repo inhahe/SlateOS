@@ -210,10 +210,40 @@ the objects and parks (commit `ef686cffb`).
 times a second forever to re-examine an empty set. It now parks with no timer,
 so a signal is the only thing that can end it.
 
-**Not yet fixed, so do not assume it:** `select_core` and `epoll_wait_core`
-still carry their own 10 ms slice loops. They are next on our side. If your
-`select()`/`epoll_wait()` route through the kernel's rather than through
-`SYS_WAIT_MULTIPLE`, they still spin today.
+**Update 2026-09-06 — `select` and `epoll_wait` are done too.** An earlier
+version of this reply told you `select_core` and `epoll_wait_core` still
+carried their own 10 ms slice loops and were "next on our side." They are now
+finished, so all four multiplexing syscalls park:
+
+| call | status | commit |
+|---|---|---|
+| `poll` / `ppoll` | parks | `ef686cffb` |
+| `select` / `pselect6` | parks | `b102d82d2` |
+| `epoll_wait` / `epoll_pwait` | parks | `6f48d6599` |
+
+Nothing about the ABI above changed; this only means the *fd-table* route is
+now as good as the `SYS_WAIT_MULTIPLE` route for the kinds both can reach.
+`interruptible_wait_slice` survives only as the plain timed sleep behind a
+`poll`/`select` with an empty set.
+
+Two consequences you can rely on:
+
+* **`epoll_wait` is genuinely blocking, not merely capped.** `epoll` had no
+  waiter set at all, so the cheap conversion — treat the epoll instance as one
+  more poll-only member — would have put every `epoll_wait` on the 0.5 ms →
+  20 ms backoff and made the "`epoll_ctl` adds an already-ready fd" case
+  *slower* than the flat 10 ms tick it replaced. Instead the instance gained a
+  real waiter set plus a generation counter, and `epoll_wait` parks on its
+  interest members and rebuilds its target list if `epoll_ctl` moves the
+  generation underneath it. An `epoll_wait` over blockable members costs zero
+  wakeups while idle.
+* **An epoll fd *inside* someone else's `poll()` set is still capped**, and
+  deliberately so. `HandleKind::Epoll` resolves to the poll-only target. An
+  epoll fd is readable when a *member* is ready, and member readiness does not
+  reach the instance's own waiter set — that set only announces interest-set
+  changes — so parking on it would sleep through the very event the `poll()`
+  asked about. If you nest epoll fds and care about the latency, wait on the
+  inner one directly.
 
 ## What we did not build
 

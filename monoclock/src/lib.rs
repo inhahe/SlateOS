@@ -208,6 +208,20 @@ impl Elapsed {
         Self(nanos)
     }
 
+    /// This span followed by `other`, saturating at the longest expressible span.
+    ///
+    /// Two spans add to a span — the one arithmetic on `Elapsed` that stays
+    /// inside the type system's story, unlike adding two `Instant`s, which is
+    /// meaningless and is therefore not offered. It saturates for the same
+    /// reason [`from_secs`](Self::from_secs) does: a span that overflows should
+    /// become "effectively forever" rather than wrapping to nearly nothing,
+    /// because every comparison in this tree uses a span as an allowance and
+    /// wrapping would turn a huge allowance into an instant expiry.
+    #[must_use]
+    pub const fn saturating_add(self, other: Self) -> Self {
+        Self(self.0.saturating_add(other.0))
+    }
+
     /// Whole seconds in this span, rounding down.
     #[must_use]
     pub const fn as_secs(self) -> u64 {
@@ -325,6 +339,25 @@ mod tests {
         assert_eq!(Elapsed::from_millis(1500).subsec_millis(), 500);
         assert_eq!(Elapsed::from_micros(1).as_nanos(), 1_000);
         assert_eq!(Elapsed::from_nanos(999).as_micros(), 0);
+    }
+
+    /// Adding spans stays in seconds, and overflow lands on "forever".
+    ///
+    /// The saturating direction is the point: `sshd` compares a key's age
+    /// against an hour, and a span built by addition that had wrapped to a
+    /// small value would make every key look freshly installed forever.
+    #[test]
+    fn two_spans_add_to_a_span_and_saturate_rather_than_wrapping() {
+        assert_eq!(
+            Elapsed::from_secs(90).saturating_add(Elapsed::from_secs(30)),
+            Elapsed::from_secs(120)
+        );
+        // Just past a threshold, which is how a test steps off an edge.
+        let an_hour = Elapsed::from_secs(60 * 60);
+        assert!(an_hour.saturating_add(Elapsed::from_nanos(1)) > an_hour);
+
+        let forever = Elapsed::from_nanos(u64::MAX);
+        assert_eq!(forever.saturating_add(Elapsed::from_secs(1)), forever);
     }
 
     /// A configured value large enough to overflow becomes "forever", not "now".

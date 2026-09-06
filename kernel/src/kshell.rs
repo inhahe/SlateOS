@@ -882,6 +882,43 @@ fn is_array(name: &str) -> bool {
     ARRAY_VARS.lock().contains_key(name)
 }
 
+/// Whether an expansion pass may do anything besides produce text.
+///
+/// Expansion looks like a pure `bytes -> bytes` transform and is not: five of
+/// the expander's arms reach outside it, and the difference matters the moment
+/// something other than "run this line" wants to know what a word expands to.
+/// Tab completion is that something.
+///
+/// | construct | what it does besides produce text |
+/// |---|---|
+/// | `$(cmd)` | runs an arbitrary command |
+/// | `` `cmd` `` | the same |
+/// | `$((i = i + 1))` | assigns — `eval_arith_stmt` handles the assignment form |
+/// | `$((bad))` | prints a diagnostic *and* sets `$?` |
+/// | `${N:=d}` / `${N:?m}` | assigns / prints, in [`expand_brace_expr`] |
+///
+/// So `ls $(rm -rf /tmp/x)/<TAB>` would delete a directory because the user
+/// pressed Tab. That is not a subtle regression — it is the difference between
+/// completion being a *read* of the shell's state and completion being an
+/// *execution* of the line. Real bash declines to expand for the same reason.
+///
+/// The mode is threaded rather than tested for at one call site because
+/// **effects nest**: [`expand_brace_expr`] recurses into the whole expander to
+/// evaluate an array subscript, so `${arr[$(rm -rf /tmp/x)]}` reaches
+/// `capture_command` down a path containing neither `:=` nor `:?`. An effect
+/// inventory has to be closed over recursion, not merely over the arms of one
+/// `match`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Effects {
+    /// Executing a real command line: `$(…)` runs, `$((i=i+1))` assigns,
+    /// `${x:?m}` reports, `$?` is clobbered.
+    Perform,
+    /// Speculative — a Tab press. Reading shell state is fine; *changing*
+    /// anything, running anything or printing anything is not, so any arm in
+    /// the table above aborts the whole pass.
+    Refuse,
+}
+
 /// Expand `$VAR` and `${VAR}` references, accumulating into bytes.
 ///
 /// - `$NAME` expands the longest run of alphanumeric/underscore chars.
@@ -902,7 +939,55 @@ fn is_array(name: &str) -> bool {
 /// Copying the byte verbatim is both the fix and the simpler operation: bytes
 /// this function does not interpret should pass through untouched, which is
 /// exactly what `Vec::push` does and exactly what `String::push` cannot.
+///
+/// This is the *command* path — [`Effects::Perform`] — so every effect in the
+/// [`Effects`] table happens. A caller that is only asking what a word would
+/// mean wants [`expand_vars_speculative`] instead.
 fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
+    match expand_vars_bytes_inner(bytes, Effects::Perform) {
+        Some(out) => out,
+        // Unreachable: every `None` in the body is guarded by
+        // `Effects::Refuse`. Returning the input unchanged rather than
+        // panicking is the safe reading of a bug that should not exist — an
+        // unexpanded word is wrong, but a panic here is a dead shell.
+        None => bytes.to_vec(),
+    }
+}
+
+/// Expand for a Tab press: read shell state, change nothing.
+///
+/// `None` means the word contained one of the effectful constructs in the
+/// [`Effects`] table and **nothing was expanded** — not that it expanded to
+/// nothing. The distinction is the point. Expanding `$(pwd)/no<TAB>` to `/no`
+/// would make completion search a real directory that has nothing to do with
+/// what the user typed and then insert a suffix of it; refusing leaves the
+/// caller to fall back on the literal word, which is exactly today's
+/// behaviour. Refusal cannot regress anything; guessing can.
+fn expand_vars_speculative(bytes: &[u8]) -> Option<Vec<u8>> {
+    expand_vars_bytes_inner(bytes, Effects::Refuse)
+}
+
+/// [`expand_vars_speculative`] for the `&str` callers, mirroring the way
+/// [`expand_vars`] narrows [`expand_vars_bytes`].
+///
+/// The extra `None` this can produce — expansion succeeded but the result is
+/// not UTF-8 — is not reachable today (`capture_command`'s output is filtered
+/// through `shell_bytes_as_str`, and every other arm splices in a `String`),
+/// but it is the honest type: the moment the word path really is byte-clean,
+/// a speculative expansion of a byte-clean word will have somewhere to fail.
+fn expand_vars_speculative_str(input: &str) -> Option<String> {
+    String::from_utf8(expand_vars_speculative(input.as_bytes())?).ok()
+}
+
+/// The shared body of [`expand_vars_bytes`] and [`expand_vars_speculative`].
+///
+/// Returns `Some` unconditionally under [`Effects::Perform`]; under
+/// [`Effects::Refuse`] it returns `None` the instant it reaches a construct it
+/// cannot evaluate without a side effect. The refusal propagates through `?`,
+/// including up out of [`expand_brace_expr`]'s recursion, which is the reason
+/// this is an `Option` rather than a sentinel value: there is no in-band string
+/// that could not also be a legitimately-empty expansion.
+fn expand_vars_bytes_inner(bytes: &[u8], effects: Effects) -> Option<Vec<u8>> {
     let len = bytes.len();
     let mut result: Vec<u8> = Vec::with_capacity(len);
     let mut i = 0;
@@ -960,6 +1045,16 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
                 i = i.saturating_add(1);
             } else if next == b'(' && bytes.get(i.saturating_add(1)) == Some(&b'(') {
                 // `$((...))` — arithmetic expansion.
+                //
+                // Refused wholesale under `Effects::Refuse`, before the body is
+                // even located: `eval_arith_stmt` performs the assignment in
+                // `$((i = i + 1))`, and the error path prints and sets `$?`.
+                // Neither can be suppressed by inspecting the expression first
+                // — deciding whether an expression assigns is most of
+                // evaluating it — so the construct is refused as a whole.
+                if effects == Effects::Refuse {
+                    return None;
+                }
                 i = i.saturating_add(2); // skip `((`
                 let start = i;
                 // Find matching `))`.
@@ -1003,7 +1098,11 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
                     i = i.saturating_add(1);
                 }
             } else if next == b'(' {
-                // `$(command)` — command substitution.
+                // `$(command)` — command substitution.  Runs a command, so it
+                // is the construct the speculative mode exists for.
+                if effects == Effects::Refuse {
+                    return None;
+                }
                 // Find the matching `)`, tracking parenthesis nesting.
                 //
                 // `i` is *on* the `(`, so it has to be stepped over before the
@@ -1069,7 +1168,11 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
                         // value, a length, a formatted number — so it keeps
                         // its `String` accumulator and is spliced in here.
                         let mut brace_out = String::new();
-                        expand_brace_expr(inner, &mut brace_out);
+                        // `?`, not a discarded result: `${N:=d}` assigns and
+                        // `${N:?m}` prints, and the array-subscript arm
+                        // re-enters this expander, so a refusal can originate
+                        // arbitrarily deep inside the braces.
+                        expand_brace_expr(inner, &mut brace_out, effects)?;
                         result.extend_from_slice(brace_out.as_bytes());
                     }
                 }
@@ -1154,7 +1257,11 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
                 i = i.saturating_add(1);
             }
         } else if b == b'`' {
-            // Backtick command substitution: `command`
+            // Backtick command substitution: `command` — same effect as
+            // `$(command)`, same refusal.
+            if effects == Effects::Refuse {
+                return None;
+            }
             i = i.saturating_add(1);
             let start = i;
             // Find the closing backtick.
@@ -1211,7 +1318,7 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
         }
     }
 
-    result
+    Some(result)
 }
 
 /// Expand `$VAR` and `${VAR}` references in a string. See
@@ -1547,7 +1654,17 @@ fn command_parses_own_quotes(cmd: &str) -> bool {
 ///   - `${NAME##prefix}` — remove longest prefix match
 ///   - `${NAME:offset}`, `${NAME:offset:length}` — substring; see
 ///     [`expand_substring`], which is where the two arithmetic operands live
-fn expand_brace_expr(inner: &str, result: &mut String) {
+///
+/// # The mode
+///
+/// `effects` is [`Effects::Refuse`] when a Tab press is asking what a word
+/// *would* mean, and `None` is this function's way of saying "not without a
+/// side effect". Two of the forms above assign or print (`${N:=d}`, `${N:?m}`),
+/// and — the case that makes a substring test at the caller insufficient — the
+/// `${NAME[index]}` arm re-enters the *whole* expander to evaluate its
+/// subscript, so `${arr[$(cmd)]}` runs a command down a path containing neither
+/// `:=` nor `:?`. See [`Effects`].
+fn expand_brace_expr(inner: &str, result: &mut String, effects: Effects) -> Option<()> {
     // ${#NAME[@]} — array length.
     if let Some(name) = inner.strip_prefix('#') {
         if let Some(arr_name) = name
@@ -1556,7 +1673,7 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
         {
             let len = array_len(arr_name).unwrap_or(0);
             result.push_str(&alloc::format!("{}", len));
-            return;
+            return Some(());
         }
         // ${#NAME} — string length (scalar), in *characters*.
         //
@@ -1567,7 +1684,7 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
         // characters (see `expand_substring` for why), so this must too.
         let val = env_get(name).unwrap_or_default();
         result.push_str(&alloc::format!("{}", val.chars().count()));
-        return;
+        return Some(());
     }
 
     // ${NAME[index]} — array element access.
@@ -1585,18 +1702,29 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
                     if let Some(all) = array_all(arr_name) {
                         result.push_str(&all);
                     }
-                    return;
+                    return Some(());
                 }
                 // Parse numeric index (supports variable expansion in index).
-                let expanded_idx = expand_vars(idx_str);
+                //
+                // This is the re-entry the doc comment warns about: the
+                // subscript is expanded with the *whole* grammar, so an effect
+                // is reachable here at arbitrary depth. Under `Refuse` the
+                // recursion has to go through the speculative entry point and
+                // the refusal has to propagate — calling `expand_vars` and
+                // discarding the question is exactly the hole that a `:=`/`:?`
+                // test at the caller would leave open.
+                let expanded_idx = match effects {
+                    Effects::Perform => expand_vars(idx_str),
+                    Effects::Refuse => expand_vars_speculative_str(idx_str)?,
+                };
                 if let Ok(index) = expanded_idx.trim().parse::<usize>() {
                     if let Some(val) = array_get(arr_name, index) {
                         result.push_str(&val);
                     }
-                    return;
+                    return Some(());
                 }
                 // Non-numeric index — treat as error, expand to empty.
-                return;
+                return Some(());
             }
         }
     }
@@ -1613,12 +1741,12 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
         // Simple ${NAME}.  Check arrays first (${arr} → first element).
         if let Some(val) = array_get(name, 0) {
             result.push_str(&val);
-            return;
+            return Some(());
         }
         if let Some(val) = env_get(name) {
             result.push_str(&val);
         }
-        return;
+        return Some(());
     }
 
     let val = env_get(name);
@@ -1641,6 +1769,14 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
         if is_set_nonempty {
             result.push_str(val.as_deref().unwrap_or(""));
         } else {
+            // The refusal is only needed on the branch that actually assigns:
+            // when the variable is already set and non-empty this form is a
+            // plain read, and declining it would make Tab give up on a word it
+            // could have answered. This is a state mutation from a keystroke,
+            // so it belongs with `$(…)` in severity, not with `${N:?m}`.
+            if effects == Effects::Refuse {
+                return None;
+            }
             env_set(name, default);
             result.push_str(default);
         }
@@ -1649,6 +1785,11 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
         if is_set_nonempty {
             result.push_str(val.as_deref().unwrap_or(""));
         } else {
+            // As above: the diagnostic and the `$?` it sets are the effect, so
+            // only the reporting branch refuses.
+            if effects == Effects::Refuse {
+                return None;
+            }
             let error_msg = if msg.is_empty() {
                 alloc::format!("{}: parameter null or not set", name)
             } else {
@@ -1797,6 +1938,8 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
             result.push_str(&v);
         }
     }
+
+    Some(())
 }
 
 /// `${NAME:offset}` / `${NAME:offset:length}` — substring expansion.
@@ -5945,6 +6088,104 @@ fn longest_common_prefix(candidates: &[&str]) -> String {
     first.get(..prefix_len).unwrap_or("").into()
 }
 
+/// The path a word denotes, as far as completion can tell without running
+/// anything.
+///
+/// `execute` puts a word through three stages before the command sees it:
+/// `expand_vars`, then `expand_braces`, then `remove_quotes`. Completion used
+/// to run only the last, so `ls $HOME/<TAB>` looked up a directory literally
+/// named `$HOME`, found nothing, and silently offered nothing — as did
+/// `ls ~/<TAB>`, since [`resolve_path`] has no tilde arm either.
+///
+/// Two of the three are run here:
+///
+/// * **`expand_vars`, speculatively.** A Tab press must not run the `$(…)` the
+///   user is halfway through typing, so this is
+///   [`expand_vars_speculative_str`], which refuses rather than perform. On a
+///   refusal the literal word is looked up, which is precisely the behaviour
+///   this function replaced — a refusal can therefore never regress anything.
+/// * **`remove_quotes`.** No file is named `"My`.
+///
+/// **`expand_braces` is deliberately left out**, and is not an oversight to
+/// finish later: brace expansion turns one word into *several*, and a
+/// completion has a single insertion point. `ls {a,b}/<TAB>` stays literal by
+/// design.
+fn completion_view(word: &str) -> String {
+    match expand_vars_speculative_str(word) {
+        Some(expanded) => remove_quotes(&expanded),
+        None => remove_quotes(word),
+    }
+}
+
+/// Would appending `insert` to the typed word really add `raw_suffix` to the
+/// path that was looked up?
+///
+/// Completion is *append-only* — it never rewrites what the user typed — and
+/// that is what makes expanding the word for the lookup cheap. It is also what
+/// makes it dangerous, because appending to an expansion does not always append
+/// to its result:
+///
+/// ```text
+/// FOO=/root/no
+/// ls $FOO<TAB>    looked up "/root/no", candidate "notes.txt", insert "tes.txt"
+///                 line becomes  ls $FOOtes.txt
+/// ```
+///
+/// `$FOOtes` is a *different variable* — `$NAME` takes the longest
+/// alphanumeric/underscore run — so the completed line expands to `.txt` and
+/// names nothing. The insertion extended the variable, not the path. A bare
+/// trailing `~` does the same thing by a different route: `~` expands to the
+/// home directory but `~oot` does not expand at all.
+///
+/// Rather than enumerate the constructs that behave this way — a second parser
+/// that must agree with [`expand_vars_bytes_inner`] forever, and would still be
+/// silent about any arm added later — this asks the expander itself, which is
+/// the actual definition of the property: *look the completed word up again and
+/// require that it come out as the old lookup plus the suffix.* Everything the
+/// enumeration would have caught falls out of it, including the escaping done
+/// by [`shellquote::quote_suffix_str`], which is checked end to end here for
+/// free.
+///
+/// `insert` is the escaped text that goes into the line; `raw_suffix` is the
+/// unescaped tail of the candidate name it is supposed to stand for.
+fn completion_is_faithful(raw_word: &str, looked_up: &str, insert: &str, raw_suffix: &str) -> bool {
+    let mut completed = String::from(raw_word);
+    completed.push_str(insert);
+    let mut expected = String::from(looked_up);
+    expected.push_str(raw_suffix);
+    completion_view(&completed) == expected
+}
+
+/// Is the word still open to being typed into after `insert` goes in?
+///
+/// [`completion_is_faithful`] answers the question for the text completion
+/// actually inserts, which is the whole story at the unique-match site: the
+/// word is finished there, a space or `/` follows it, and what the user types
+/// afterwards starts a new word. The multiple-match site is different — it
+/// inserts a common prefix and leaves the cursor *inside* the word, having
+/// just printed a list inviting the user to keep going. If the common prefix
+/// is empty (the candidates share nothing beyond what was typed) the
+/// faithfulness check has nothing to test, and `ls $H<TAB>` with `$H` unset
+/// would expand to the empty string, match every name in the working
+/// directory, and offer all of them for a word no keystroke can reach.
+///
+/// So that site asks the question about a *hypothetical* next keystroke. The
+/// probe is a name character because that is both what the user would type and
+/// what an unterminated `$NAME` or a bare `~` would swallow.
+fn completion_word_stays_open(
+    raw_word: &str,
+    looked_up: &str,
+    insert: &str,
+    raw_suffix: &str,
+) -> bool {
+    const PROBE: &str = "a";
+    let mut word = String::from(raw_word);
+    word.push_str(insert);
+    let mut looked = String::from(looked_up);
+    looked.push_str(raw_suffix);
+    completion_is_faithful(&word, &looked, PROBE, PROBE)
+}
+
 /// Perform tab completion on the current line.
 ///
 /// Returns the completed text to insert (may be empty if no match),
@@ -6003,18 +6244,17 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
         // containing a space was wrong in a different way.
         let word_start = shellquote::word_start_at(text_before.as_bytes(), text_before.len());
 
-        // The word as typed still carries its quoting, and no file is named
-        // `"My`, so it has to come off before the name is looked up -- finding
-        // the word boundary correctly and then searching for the quote
-        // characters would only move the failure. `remove_quotes` is the same
-        // stage the dispatcher applies to a finished command, so completion
-        // now searches for exactly the name the command would receive.
+        // The word as typed carries both its quoting and its expansions, and
+        // neither is what the command would receive, so neither can be looked
+        // up as a path. `completion_view` runs the two stages that apply --
+        // see its doc for which, and for why the third is left out.
         //
         // The quote is deliberately allowed to be unterminated: the user is
         // mid-word by definition, so `cat "My Fi` must complete. The scanner
         // treats end-of-input inside a quote as the end of the region, which
         // is the reading that makes that work.
-        let partial_owned = remove_quotes(text_before.get(word_start..).unwrap_or(""));
+        let raw_word = text_before.get(word_start..).unwrap_or("");
+        let partial_owned = completion_view(raw_word);
         let partial_path = partial_owned.as_str();
 
         // Determine the directory to search and the prefix to match.
@@ -6066,6 +6306,13 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
             let Some(mut result) = shellquote::quote_suffix_str(raw, ctx) else {
                 return (String::new(), Vec::new());
             };
+            // Appending to an expansion does not always append to its result;
+            // see `completion_is_faithful`. Checked before the trailing `/` or
+            // space is added, because those are punctuation for the line editor
+            // rather than part of the name.
+            if !completion_is_faithful(raw_word, partial_path, &result, raw) {
+                return (String::new(), Vec::new());
+            }
             // Add trailing slash for directories, space for files.
             if first.entry_type == crate::fs::EntryType::Directory {
                 result.push('/');
@@ -6093,11 +6340,18 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
         // Escaped the same way, and for the same reason. No closer is added
         // here: the word is *not* finished, so a quote the user opened stays
         // open for them to keep typing into.
-        let Some(suffix) =
-            shellquote::quote_suffix_str(common.get(name_prefix.len()..).unwrap_or(""), ctx)
-        else {
+        let raw = common.get(name_prefix.len()..).unwrap_or("");
+        let Some(suffix) = shellquote::quote_suffix_str(raw, ctx) else {
             return (String::new(), Vec::new());
         };
+        // Same check as the unique-match site, plus the one that site does not
+        // need: the word is *not* finished here, so it also has to survive the
+        // keystroke the printed list is inviting.
+        if !completion_is_faithful(raw_word, partial_path, &suffix, raw)
+            || !completion_word_stays_open(raw_word, partial_path, &suffix, raw)
+        {
+            return (String::new(), Vec::new());
+        }
         let display: Vec<String> = matches
             .iter()
             .map(|(e, n)| {
@@ -22780,6 +23034,188 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             expand_vars("$(echo hi)/x"),
             "the two spellings of command substitution disagree"
         );
+    }
+
+    serial_println!(
+        "  kshell::self_test 121: Tab completion looks up the word the command \
+         would receive, without running anything to find out"
+    );
+    {
+        // Rung 121 -- speculative expansion, and tab completion built on it.
+        //
+        // Two halves, in the order they have to be believed:
+        //
+        //  1. `expand_vars_speculative_str` reads shell state and refuses every
+        //     construct that would change it. The refusals are asserted by
+        //     their *absence of effect*, not just by the `None` -- a `None`
+        //     returned after the assignment already happened would look
+        //     identical from the return value alone.
+        //  2. `tab_complete` uses it, so `$VAR/` and `~/` complete; and it
+        //     declines when appending to the typed word would not append to the
+        //     path, which is the hazard that comes with completion being
+        //     append-only.
+        //
+        // Fixture names are prefixed `zz_tc` for the same reason as rung 116:
+        // a leftover from a failed run must be unmistakable, and must not
+        // change the answer a later boot gets.
+
+        // -- half 1: the speculative expander --------------------------------
+
+        env_set("ZZ_TC_DIR", "/tmp");
+        assert_eq!(
+            expand_vars_speculative_str("$ZZ_TC_DIR/x").as_deref(),
+            Some("/tmp/x"),
+            "a plain variable read is not an effect and must survive Refuse"
+        );
+        let tilde_performed = expand_vars("~/x");
+        assert_eq!(
+            expand_vars_speculative_str("~/x").as_deref(),
+            Some(tilde_performed.as_str()),
+            "tilde expansion is a pure env read; both modes must agree"
+        );
+        assert!(
+            expand_vars_speculative_str("$(echo hi)").is_none(),
+            "command substitution must not run on a Tab press"
+        );
+        assert!(
+            expand_vars_speculative_str("`echo hi`").is_none(),
+            "the backtick spelling is the same construct and the same refusal"
+        );
+        assert!(
+            expand_vars_speculative_str("$((1 + 1))").is_none(),
+            "arithmetic expansion can assign, so it is refused whole"
+        );
+        // The subscript arm re-enters the *whole* expander, so an effect is
+        // reachable through a `${…}` containing neither `:=` nor `:?`. This is
+        // the case a substring test at the call site would have missed.
+        assert!(
+            expand_vars_speculative_str("${ZZ_TC_ARR[$(echo 0)]}").is_none(),
+            "an effect nested in an array subscript must propagate out"
+        );
+        // `:=` and `:?` refuse only on the branch that actually acts. When the
+        // variable is set they are plain reads, and declining them would make
+        // Tab give up on a word it could have answered.
+        assert_eq!(
+            expand_vars_speculative_str("${ZZ_TC_DIR:=/other}").as_deref(),
+            Some("/tmp"),
+            "`:=` on a set variable assigns nothing, so it must not refuse"
+        );
+        assert_eq!(
+            expand_vars_speculative_str("${ZZ_TC_UNSET:-d}").as_deref(),
+            Some("d"),
+            "`:-` never assigns"
+        );
+        assert!(
+            expand_vars_speculative_str("${ZZ_TC_UNSET:=d}").is_none(),
+            "`:=` on an unset variable would assign, so it refuses"
+        );
+        // The load-bearing assertion of half 1: the refusal happened *before*
+        // the effect, not after it.
+        assert!(
+            env_get("ZZ_TC_UNSET").is_none(),
+            "the refusal came too late -- `${{:=}}` assigned before declining"
+        );
+
+        // -- half 2: tab completion ------------------------------------------
+
+        const EXP: &str = "/tmp/zz_tc_exp.txt";
+        assert!(
+            crate::fs::Vfs::write_file(EXP, b"x").is_ok(),
+            "could not build the rung-121 fixture"
+        );
+
+        // The bug this rung exists for: the lookup used the word as typed, so
+        // the directory searched was one literally named `$ZZ_TC_DIR`.
+        let typed = "cat $ZZ_TC_DIR/zz_tc_exp";
+        let (suffix, _) = tab_complete(typed, typed.len());
+        assert_eq!(suffix, ".txt ", "`$VAR/` must complete");
+        let typed = "cat ${ZZ_TC_DIR}/zz_tc_exp";
+        let (suffix, _) = tab_complete(typed, typed.len());
+        assert_eq!(suffix, ".txt ", "`${{VAR}}/` must complete");
+        // Inside double quotes the `$` still expands, and the closer is still
+        // added -- the two fixes have to compose.
+        let typed = "cat \"$ZZ_TC_DIR/zz_tc_exp";
+        let (suffix, _) = tab_complete(typed, typed.len());
+        assert_eq!(suffix, ".txt\" ", "a quoted `$VAR/` completes and closes");
+        // Inside single quotes nothing expands, so there is nothing to find.
+        let typed = "cat '$ZZ_TC_DIR/zz_tc_exp";
+        let (suffix, _) = tab_complete(typed, typed.len());
+        assert!(suffix.is_empty(), "single quotes suppress the expansion");
+
+        // The free win: `resolve_path` has no tilde arm, so before speculative
+        // expansion `~/…` resolved to `<cwd>/~/` and completion found nothing.
+        let saved_home = env_get("HOME");
+        env_set("HOME", "/tmp");
+        let typed = "cat ~/zz_tc_exp";
+        let (suffix, _) = tab_complete(typed, typed.len());
+        assert_eq!(suffix, ".txt ", "`~/` must complete");
+
+        // The hazard. Completion is append-only, so the insertion has to land
+        // after the reference, not inside it. `~` expanding to a *partial*
+        // name is the tilde form of it: `~` is the home directory but `~p` is
+        // not a tilde expansion at all.
+        env_set("HOME", "/tm");
+        let (suffix, candidates) = tab_complete("cat ~", 5);
+        assert!(
+            suffix.is_empty() && candidates.is_empty(),
+            "appending to a bare `~` stops it expanding, so it must be declined"
+        );
+        match saved_home {
+            Some(h) => {
+                env_set("HOME", &h);
+            }
+            None => {
+                env_remove("HOME");
+            }
+        }
+
+        // The variable form of the same hazard: `$ZZ_TC_PRE` + `xp.txt` is
+        // `$ZZ_TC_PRExp`, a different variable, so the completed line would
+        // expand to `.txt` and name nothing.
+        env_set("ZZ_TC_PRE", "/tmp/zz_tc_e");
+        let typed = "cat $ZZ_TC_PRE";
+        let (suffix, candidates) = tab_complete(typed, typed.len());
+        assert!(
+            suffix.is_empty() && candidates.is_empty(),
+            "appending would extend the variable name, not the path"
+        );
+        // ...and the same reference *terminated* completes, because the
+        // insertion then lands after it. This is the pair that says the rule is
+        // "is the reference still open", not "does the word contain a `$`".
+        let typed = "cat ${ZZ_TC_PRE}xp";
+        let (suffix, _) = tab_complete(typed, typed.len());
+        assert_eq!(suffix, ".txt ", "a closed reference is safe to append to");
+
+        // A construct with effects: nothing is offered, and nothing is run.
+        // The refusal is asserted through `$?`, because that is the observable
+        // trace `capture_command` would leave -- a shell that ran `pwd` from a
+        // keystroke would also have overwritten the exit status of whatever the
+        // user last ran, which is state they can see.
+        //
+        // No space inside the substitution: `word_start_at` splits on bare
+        // blanks and does not know `$(` from any other two bytes, so a spelling
+        // with a space in it would test the word after the space instead.
+        set_exit(77);
+        let typed = "cat $(pwd)/zz_tc_exp";
+        let (suffix, candidates) = tab_complete(typed, typed.len());
+        assert!(
+            suffix.is_empty() && candidates.is_empty(),
+            "a word with a command substitution falls back to the literal word"
+        );
+        assert_eq!(last_exit(), 77, "a Tab press ran a command and set `$?`");
+
+        // Unrelated words are untouched: the ordinary path completion that
+        // rung 116 pins still behaves the same with expansion in front of it.
+        let typed = "cat /tmp/zz_tc_exp";
+        let (suffix, _) = tab_complete(typed, typed.len());
+        assert_eq!(suffix, ".txt ", "a literal path still completes");
+
+        assert!(
+            crate::fs::Vfs::remove(EXP).is_ok(),
+            "the rung-121 fixture outlived the rung"
+        );
+        env_remove("ZZ_TC_DIR");
+        env_remove("ZZ_TC_PRE");
     }
 
     serial_println!("  kshell::self_test PASSED");

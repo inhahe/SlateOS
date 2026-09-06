@@ -111,8 +111,6 @@ userspace/dmesg/src/main.rs:argv-as-string
 userspace/dmidecode/src/main.rs:argv-as-string
 userspace/dmsetup/src/main.rs:argv-as-string
 userspace/dnsmasq/src/main.rs:argv-as-string
-userspace/doas/src/main.rs:argv-as-string
-userspace/doas/src/main.rs:env-as-string
 userspace/dotool-cli/src/main.rs:argv-as-string
 userspace/du/src/main.rs:argv-as-string
 userspace/dusty3d-cli/src/main.rs:argv-as-string

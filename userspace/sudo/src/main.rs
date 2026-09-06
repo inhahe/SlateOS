@@ -5307,7 +5307,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     #[test]
     fn a_command_that_is_not_utf8_survives_parsing_unchanged() {
         let wanted = not_text("/usr/local/bin/tool", "");
-        let opts = parse_sudo_args(&[wanted.clone()]).unwrap();
+        let opts = parse_sudo_args(std::slice::from_ref(&wanted)).unwrap();
         assert_eq!(opts.command, vec![wanted]);
     }
 

@@ -116610,6 +116610,50 @@ The practical consequence for anyone reading a self-test: **a rung's existence
 is not evidence, and neither is a green boot from before it was written.** The
 only thing that counts is a boot whose tree contained the rung, which
 `bench/boot-history.jsonl` can answer by commit.
+
+**[A] 2026-09-06 — step 1 is done in `968f55327`, and it is not in the three
+parsers this entry told it to go in. The entry named the wrong location.**
+
+Step 1 above says the fix is *"three parsers (`parse_cut_args`,
+`parse_fold_args`, `parse_base64_args`)"*. That would have been a bug, for the
+reason §910 exists: GNU attempts **every** operand and reports the **worst**
+status. `fold a '' b` prints `a`, reports `''`, prints `b`, and exits 1 — three
+outputs from a list containing one bad element. A parser that rejected the list
+would abort before `a` was ever printed, so the fix as specified would have
+turned one wrong error message into one missing file's worth of output.
+
+All three commands already have the correct GNU-shaped run loop. The guard went
+next to the existing `path == "-"` case in each:
+
+| Command | Location | Shape |
+|---|---|---|
+| `cut` | `cut_run`, before `resolve_path` | print, `worst = worst.max(1)`, `continue` |
+| `fold` | `fold_run`, same position | print, `worst = worst.max(1)`, `continue` |
+| `base64` | `base64_run`, a `Some("") =>` arm placed after `None \| Some("-")` and before `Some(path)` | print, `set_exit(1)`, `return` |
+
+`base64` is the exception that proves the rule rather than a departure from it:
+it takes **at most one** FILE, so there is no list to keep processing and its
+guard is correctly terminal.
+
+**The generalisable mistake.** This entry located the fix by asking *where is
+the empty string created?* and answering "the parser". The right question is
+*where is the empty string given its meaning?* — which is the run loop, because
+that is the only place that knows an operand list has other members waiting.
+When a write-up proposes a location, treat it as a hypothesis about the code and
+re-derive it; the entry was written by someone who had just finished reading
+`split_words`, and it shows.
+
+Rung 122 covers all of it (`fold ''`, `fold FILE '' FILE`, the exit status not
+leaking into the next command, `cut -d, -f1 ''`, `base64 ''`, and a bare
+`base64` still meaning stdin). Per the addendum immediately above, **that rung
+has not executed yet** — no boot has been run against a tree containing it. It
+is written, gated by `check-selftest-rung-numbers`, and unproven, which is
+exactly the state that addendum warns against reading as evidence.
+
+**Step 2 is untouched and still open**: `resolve_path("") == "/"` remains a
+documented property, and the ~257 `resolve_path(args)` call sites still express
+"no argument was given" as the empty string. This entry stays open for it.
+
 ## TD-B-SIX-TRACKED-FILES-HELD-CRLF-IN-THE-LANE-B-WORKTREE-AND-THE-WRITER-IS-UNIDENTIFIED (lane B, 2026-09-04)
 
 **In short:** the boot test refused to build because six files declared

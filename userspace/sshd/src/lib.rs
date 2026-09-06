@@ -7355,7 +7355,7 @@ DenyGroups nogroup
     ///
     /// The guard must stay bound for as long as the path is used; binding it as
     /// `_` drops it immediately and deletes the directory. See
-    /// [`authenticator_with_shadow`] for the same warning, and the bug that
+    /// [`authenticator_with_entry`] for the same warning, and the bug that
     /// earned it.
     /// A `PathBuf` rather than a `String` because that is what the functions
     /// under test take, and converting here would put the very conversion they
@@ -7800,13 +7800,36 @@ DenyGroups nogroup
     /// The returned `ScratchDir` is a guard: it must stay bound for as long as the
     /// `Authenticator` is used, because dropping it deletes the shadow file the
     /// authenticator reads. Bind it as `_dir`, not `_`.
-    fn authenticator_with_shadow(line: &str) -> (authlib::Authenticator, ScratchDir) {
+    /// An [`authlib::Authenticator`] over a temporary account database in which
+    /// `username` has `stored` as its password entry.
+    ///
+    /// It used to write a `/etc/shadow` and point the verifier at that, with a
+    /// `users.yaml` that did not exist so the shadow branch was the one under
+    /// test. `design-decisions.md` §353 item 3 deleted that branch: the account
+    /// database is the only store there is, and the flat file beside it is
+    /// generated from the database rather than read.
+    ///
+    /// The returned `ScratchDir` is a guard: it must stay bound for as long as
+    /// the `Authenticator` is used, because dropping it deletes the database
+    /// the authenticator reads. Bind it as `_dir`, not `_`.
+    fn authenticator_with_entry(
+        username: &str,
+        stored: &str,
+    ) -> (authlib::Authenticator, ScratchDir) {
         let dir = ScratchDir::new("sshd_test");
-        let shadow = dir.path("shadow");
-        std::fs::write(&shadow, line).expect("write shadow");
-        let missing = dir.path("no_such_users.yaml");
+        let path = dir.path("users.yaml");
+        let mut db = userdb::UserDb::new();
+        let mut record = userdb::Record::new();
+        // A record with no uid has no `/etc/passwd` line to generate, and a
+        // save that cannot generate one fails -- so a fixture without one was
+        // never a fixture of a real account.
+        record.set_uid(1000);
+        record.set(userdb::field::USERNAME, username);
+        record.set(userdb::field::PASSWORD_HASH, stored);
+        db.push(record);
+        db.save(&path).expect("write the test database");
         (
-            authlib::Authenticator::with_stores(&missing, &shadow).with_clock(frozen_clock),
+            authlib::Authenticator::with_stores(&path).with_clock(frozen_clock),
             dir,
         )
     }
@@ -7828,8 +7851,7 @@ DenyGroups nogroup
         let stored = shadow_entry_for("correct horse");
         let mut held: Vec<(usize, authlib::Authenticator, ScratchDir)> = (0..20)
             .map(|i| {
-                let (auth, dir) =
-                    authenticator_with_shadow(&format!("user{i}:{stored}:1:0:99999:7:::\n"));
+                let (auth, dir) = authenticator_with_entry(&format!("user{i}"), &stored);
                 (i, auth, dir)
             })
             .collect();
@@ -7862,8 +7884,7 @@ DenyGroups nogroup
     #[test]
     fn a_password_set_with_passwd_authenticates() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, _dir) =
-            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+        let (mut auth, _dir) = authenticator_with_entry("alice", &stored);
 
         let payload = password_request(b"correct horse");
         let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
@@ -7873,8 +7894,7 @@ DenyGroups nogroup
     #[test]
     fn a_wrong_password_does_not_authenticate() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, _dir) =
-            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+        let (mut auth, _dir) = authenticator_with_entry("alice", &stored);
 
         let payload = password_request(b"correct hors");
         let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
@@ -7889,7 +7909,7 @@ DenyGroups nogroup
     /// what is in it.
     #[test]
     fn a_plaintext_shadow_field_no_longer_lets_anyone_in() {
-        let (mut auth, _dir) = authenticator_with_shadow("alice:password123:1:0:99999:7:::\n");
+        let (mut auth, _dir) = authenticator_with_entry("alice", "password123");
 
         let payload = password_request(b"password123");
         let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
@@ -7908,8 +7928,7 @@ DenyGroups nogroup
         salted.extend_from_slice(b"mypass");
         salted.extend_from_slice(b"mysalt");
         let hex: String = sha256(&salted).iter().map(|b| format!("{b:02x}")).collect();
-        let (mut auth, _dir) =
-            authenticator_with_shadow(&format!("alice:$5$mysalt${hex}:1:0:99999:7:::\n"));
+        let (mut auth, _dir) = authenticator_with_entry("alice", &format!("$5$mysalt${hex}"));
 
         let payload = password_request(b"mypass");
         let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
@@ -7919,8 +7938,7 @@ DenyGroups nogroup
     #[test]
     fn a_locked_account_admits_no_password() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, _dir) =
-            authenticator_with_shadow(&format!("alice:!{stored}:1:0:99999:7:::\n"));
+        let (mut auth, _dir) = authenticator_with_entry("alice", &format!("!{stored}"));
 
         let payload = password_request(b"correct horse");
         let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
@@ -7932,8 +7950,7 @@ DenyGroups nogroup
     #[test]
     fn an_unknown_user_is_rejected_exactly_as_a_wrong_password_is() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, _dir) =
-            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+        let (mut auth, _dir) = authenticator_with_entry("alice", &stored);
 
         let payload = password_request(b"anything");
         let unknown = handle_password_auth(&payload, 0, "mallory", &mut auth).expect("parse");
@@ -7959,8 +7976,7 @@ DenyGroups nogroup
             .expect("hash")
             .to_string();
 
-        let (mut auth, _dir) =
-            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+        let (mut auth, _dir) = authenticator_with_entry("alice", &stored);
         let payload = password_request(raw);
         let outcome = handle_password_auth(&payload, 0, "alice", &mut auth).expect("parse");
         assert_eq!(
@@ -7983,8 +7999,7 @@ DenyGroups nogroup
     #[test]
     fn guessing_is_rate_limited_across_connections_not_just_within_one() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, _dir) =
-            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+        let (mut auth, _dir) = authenticator_with_entry("alice", &stored);
 
         let wrong = password_request(b"nope");
         for _ in 0..=authlib::FREE_ATTEMPTS {
@@ -8026,7 +8041,7 @@ DenyGroups nogroup
 
     #[test]
     fn a_truncated_password_request_is_an_error_not_an_acceptance() {
-        let (mut auth, _dir) = authenticator_with_shadow("alice:!:1:0:99999:7:::\n");
+        let (mut auth, _dir) = authenticator_with_entry("alice", "!");
         for cut in 0..5 {
             let payload = vec![0u8; cut];
             assert!(handle_password_auth(&payload, 0, "alice", &mut auth).is_err());

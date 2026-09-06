@@ -1289,7 +1289,7 @@ mod tests {
     /// than `Authenticator::new`.
     fn scratch_authenticator() -> authlib::Authenticator {
         let missing = std::path::Path::new("/nonexistent/login-test/users.yaml");
-        authlib::Authenticator::with_stores(missing, missing)
+        authlib::Authenticator::with_stores(missing)
     }
 
     /// A database path that does not exist, for the tests about *refusal*:

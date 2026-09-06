@@ -1731,7 +1731,7 @@ mod tests {
     /// machine. `with_stores` attaches no faillock file; `new()` would.
     fn scratch_authenticator() -> authlib::Authenticator {
         let missing = std::path::Path::new("/nonexistent/passwd-tests");
-        authlib::Authenticator::with_stores(missing, missing)
+        authlib::Authenticator::with_stores(missing)
     }
 
     /// A wrong current password is charged to the shared tally, so that

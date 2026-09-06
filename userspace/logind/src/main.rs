@@ -2459,7 +2459,7 @@ mod tests {
     ///
     /// The hash is computed rather than pasted so the fixture cannot drift
     /// from the hasher the verifier uses.
-    fn shadow_fixture() -> String {
+    fn stored_entry() -> String {
         let mut setting_buf = posix::crypt::buf();
         let setting = posix::crypt::setting_into(
             posix::crypt::Method::Sha512,
@@ -2469,9 +2469,9 @@ mod tests {
         .expect("setting")
         .to_string();
         let mut hash_buf = posix::crypt::buf();
-        let hash = posix::crypt::hash_into(b"correct horse", setting.as_bytes(), &mut hash_buf)
-            .expect("hash");
-        format!("alice:{hash}:19000:0:99999:7:::\n")
+        posix::crypt::hash_into(b"correct horse", setting.as_bytes(), &mut hash_buf)
+            .expect("hash")
+            .to_string()
     }
 
     use scratchdir::ScratchDir;
@@ -2497,16 +2497,24 @@ mod tests {
     /// `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE`.
     fn authenticating_daemon(name: &str) -> (Daemon, ScratchDir) {
         let dir = ScratchDir::new(&format!("logind_{name}"));
-        let shadow = dir.path("shadow");
-        std::fs::write(&shadow, shadow_fixture()).expect("write shadow fixture");
 
-        // No `users.yaml`: the verifier falls through to the shadow store when
-        // the native one is absent, which is what this fixture wants to test.
-        let missing = dir.path("absent-users-yaml");
+        // An account database, not a `/etc/shadow`. The fixture used to write
+        // the latter and leave `users.yaml` absent, because `authlib` fell
+        // through to the shadow store for a user the database did not have;
+        // `design-decisions.md` §353 item 3 deleted that branch.
+        let path = dir.path("users.yaml");
+        let mut db = userdb::UserDb::new();
+        let mut record = userdb::Record::new();
+        // A record with no uid has no `/etc/passwd` line to generate, and a
+        // save that cannot generate one fails.
+        record.set_uid(1000);
+        record.set(userdb::field::USERNAME, "alice");
+        record.set(userdb::field::PASSWORD_HASH, &stored_entry());
+        db.push(record);
+        db.save(&path).expect("write the test database");
+
         let mut d = test_daemon();
-        d.set_verifier(
-            authlib::Authenticator::with_stores(&missing, &shadow).with_clock(frozen_clock),
-        );
+        d.set_verifier(authlib::Authenticator::with_stores(&path).with_clock(frozen_clock));
         (d, dir)
     }
 

@@ -1320,7 +1320,7 @@ users:
     /// would do, silently, every time it ran.
     fn scratch_authenticator() -> authlib::Authenticator {
         let missing = std::path::Path::new("/nonexistent/su-tests");
-        authlib::Authenticator::with_stores(missing, missing)
+        authlib::Authenticator::with_stores(missing)
     }
 
     /// A record with a real, verifiable password.
@@ -1445,16 +1445,14 @@ users:
         let missing = std::path::Path::new("/nonexistent/su-tests");
 
         // What `login` recorded.
-        let mut as_login =
-            authlib::Authenticator::with_stores(missing, missing).with_faillock(&faillock);
+        let mut as_login = authlib::Authenticator::with_stores(missing).with_faillock(&faillock);
         for _ in 0..FREE_ATTEMPTS_HEADROOM {
             as_login.note_failure("ivan");
         }
 
         // What `su` sees: a separate process, a fresh in-memory tally, the
         // same file.
-        let mut as_su =
-            authlib::Authenticator::with_stores(missing, missing).with_faillock(&faillock);
+        let mut as_su = authlib::Authenticator::with_stores(missing).with_faillock(&faillock);
         assert!(
             as_su.rate_limited("ivan").is_some(),
             "su must honour the delay login earned"

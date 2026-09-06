@@ -3160,13 +3160,49 @@ mod tests {
     /// The returned `ScratchDir` is a guard: it must stay bound for as long as the
     /// `Authenticator` is used, because dropping it deletes the shadow file the
     /// authenticator reads. Bind it as `_dir`, not `_`.
-    fn authenticator_with_shadow(line: &str) -> (authlib::Authenticator, ScratchDir) {
+    /// An [`authlib::Authenticator`] over a temporary account database in which
+    /// `username` has `stored` as its password entry.
+    ///
+    /// It used to write a `/etc/shadow` and point the verifier at that, with a
+    /// `users.yaml` that did not exist so the shadow branch was the one under
+    /// test. `design-decisions.md` §353 item 3 deleted that branch: the account
+    /// database is the only store there is, and the flat file beside it is
+    /// generated from the database rather than read.
+    ///
+    /// The returned `ScratchDir` is a guard: it must stay bound for as long as
+    /// the `Authenticator` is used, because dropping it deletes the database
+    /// the authenticator reads. Bind it as `_dir`, not `_`.
+    fn authenticator_with_entry(
+        username: &str,
+        stored: &str,
+    ) -> (authlib::Authenticator, ScratchDir) {
         let dir = ScratchDir::new("ftpd_test");
-        let shadow = dir.path("shadow");
-        fs::write(&shadow, line).expect("write shadow");
-        let missing = dir.path("no_such_users.yaml");
+        let path = dir.path("users.yaml");
+        let mut db = userdb::UserDb::new();
+        let mut record = userdb::Record::new();
+        // A record with no uid has no `/etc/passwd` line to generate, and a
+        // save that cannot generate one fails -- so a fixture without one was
+        // never a fixture of a real account.
+        record.set_uid(1000);
+        record.set(userdb::field::USERNAME, username);
+        record.set(userdb::field::PASSWORD_HASH, stored);
+        db.push(record);
+        db.save(&path).expect("write the test database");
         (
-            authlib::Authenticator::with_stores(&missing, &shadow).with_clock(frozen_clock),
+            authlib::Authenticator::with_stores(&path).with_clock(frozen_clock),
+            dir,
+        )
+    }
+
+    /// An authenticator over a database with no accounts in it at all.
+    fn authenticator_with_no_accounts() -> (authlib::Authenticator, ScratchDir) {
+        let dir = ScratchDir::new("ftpd_test");
+        let path = dir.path("users.yaml");
+        userdb::UserDb::new()
+            .save(&path)
+            .expect("write the test database");
+        (
+            authlib::Authenticator::with_stores(&path).with_clock(frozen_clock),
             dir,
         )
     }
@@ -3188,10 +3224,10 @@ mod tests {
     fn twenty_fixtures_alive_at_once_each_authenticate_their_own_user() {
         let mut held: Vec<(usize, authlib::Authenticator, ScratchDir)> = (0..20)
             .map(|i| {
-                let (auth, dir) = authenticator_with_shadow(&format!(
-                    "user{i}:{}:1:0:99999:7:::\n",
-                    shadow_entry_for("correct horse")
-                ));
+                let (auth, dir) = authenticator_with_entry(
+                    &format!("user{i}"),
+                    &shadow_entry_for("correct horse"),
+                );
                 (i, auth, dir)
             })
             .collect();
@@ -3215,7 +3251,7 @@ mod tests {
 
     #[test]
     fn test_validate_password_anonymous() {
-        let (mut auth, _dir) = authenticator_with_shadow("");
+        let (mut auth, _dir) = authenticator_with_no_accounts();
         assert!(validate_password("anonymous", "", true, &mut auth).is_accepted());
         assert!(
             validate_password("anonymous", "user@example.com", true, &mut auth).is_accepted(),
@@ -3230,8 +3266,7 @@ mod tests {
     #[test]
     fn a_named_user_needs_the_right_password_not_merely_an_account() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, _dir) =
-            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+        let (mut auth, _dir) = authenticator_with_entry("alice", &stored);
 
         assert!(validate_password("alice", "correct horse", false, &mut auth).is_accepted());
         assert!(
@@ -3243,8 +3278,7 @@ mod tests {
     #[test]
     fn a_locked_account_admits_no_password() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, _dir) =
-            authenticator_with_shadow(&format!("alice:!{stored}:1:0:99999:7:::\n"));
+        let (mut auth, _dir) = authenticator_with_entry("alice", &format!("!{stored}"));
 
         assert_eq!(
             validate_password("alice", "correct horse", false, &mut auth),
@@ -3257,7 +3291,7 @@ mod tests {
     /// nobody, least of all whoever can read the file and retype it.
     #[test]
     fn an_unrecomputable_entry_is_broken_not_wrong() {
-        let (mut auth, _dir) = authenticator_with_shadow("alice:password123:1:0:99999:7:::\n");
+        let (mut auth, _dir) = authenticator_with_entry("alice", "password123");
 
         let outcome = validate_password("alice", "password123", false, &mut auth);
         assert_eq!(outcome, authlib::Outcome::Unusable);
@@ -3270,8 +3304,7 @@ mod tests {
     #[test]
     fn an_unknown_user_is_indistinguishable_from_a_wrong_password() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, _dir) =
-            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+        let (mut auth, _dir) = authenticator_with_entry("alice", &stored);
 
         let unknown = validate_password("mallory", "guess", false, &mut auth);
         let wrong = validate_password("alice", "guess", false, &mut auth);
@@ -3284,8 +3317,7 @@ mod tests {
     #[test]
     fn repeated_guesses_are_rate_limited() {
         let stored = shadow_entry_for("correct horse");
-        let (mut auth, _dir) =
-            authenticator_with_shadow(&format!("alice:{stored}:1:0:99999:7:::\n"));
+        let (mut auth, _dir) = authenticator_with_entry("alice", &stored);
 
         for _ in 0..=authlib::FREE_ATTEMPTS {
             assert!(!validate_password("alice", "nope", false, &mut auth).is_accepted());
@@ -3300,7 +3332,7 @@ mod tests {
     /// must not themselves be refused because someone else has been guessing.
     #[test]
     fn anonymous_login_never_reaches_the_verifier() {
-        let (mut auth, _dir) = authenticator_with_shadow("alice:!:1:0:99999:7:::\n");
+        let (mut auth, _dir) = authenticator_with_entry("alice", "!");
 
         for _ in 0..20 {
             assert!(validate_password("anonymous", "a@b.c", true, &mut auth).is_accepted());

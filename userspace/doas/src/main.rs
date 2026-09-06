@@ -1157,17 +1157,22 @@ mod tests {
 
     /// A `/etc/shadow` line for `user` whose password is `password`, hashed the
     /// way `passwd` hashes it.
-    fn shadow_line(user: &str, password: &str) -> String {
+    /// The stored entry for `password`, hashed the way `passwd` writes one.
+    ///
+    /// It used to return a whole `shadow(5)` line, name and aging fields and
+    /// all, because the fixture wrote a shadow file. There is no shadow file
+    /// to write since `design-decisions.md` §353 item 3, and a record's
+    /// password field is the entry alone.
+    fn entry_for(password: &str) -> String {
         let mut setting_buf = posix::crypt::buf();
         let setting =
             posix::crypt::setting_into(posix::crypt::Method::Sha512, b"doastest", &mut setting_buf)
                 .expect("valid crypt setting");
         let setting = setting.to_string();
         let mut hash_buf = posix::crypt::buf();
-        let hashed =
-            posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hash_buf)
-                .expect("hashable password");
-        format!("{user}:{hashed}:19500:0:99999:7:::\n")
+        posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hash_buf)
+            .expect("hashable password")
+            .to_string()
     }
 
     /// A note on why this suite never went red despite holding a copy of the
@@ -1175,18 +1180,35 @@ mod tests {
     /// came from a hand-maintained naming convention that nothing checked, and
     /// one copy-pasted test with a duplicated tag would have undone it. That is
     /// why `ScratchDir::new`'s prefix plays no part in uniqueness.
-    /// An [`authlib::Authenticator`] backed by a temporary shadow file holding
-    /// `content`, and by a `users.yaml` that does not exist -- so the shadow
-    /// file is the only thing that can answer.
+    /// An [`authlib::Authenticator`] over a temporary account database in which
+    /// `username` has `stored` as its password entry.
     ///
-    /// The returned [`ScratchDir`] must be held for as long as the authenticator
-    /// is used: dropping it removes the shadow file out from under it.
-    fn authenticator_with_shadow(content: &str) -> (authlib::Authenticator, ScratchDir) {
+    /// It used to write a `/etc/shadow` and point the verifier at that, with a
+    /// `users.yaml` that did not exist so the shadow branch was the one under
+    /// test. `design-decisions.md` §353 item 3 deleted that branch: the account
+    /// database is the only store there is, and the flat file beside it is
+    /// generated from the database rather than read.
+    ///
+    /// The returned `ScratchDir` is a guard: it must stay bound for as long as
+    /// the `Authenticator` is used, because dropping it deletes the database
+    /// the authenticator reads. Bind it as `_dir`, not `_`.
+    fn authenticator_with_entry(
+        username: &str,
+        stored: &str,
+    ) -> (authlib::Authenticator, ScratchDir) {
         let dir = ScratchDir::new("doas_test");
-        let shadow = dir.path("shadow");
-        fs::write(&shadow, content).expect("write temp shadow");
-        let missing = dir.path("no-users-yaml");
-        (authlib::Authenticator::with_stores(&missing, &shadow), dir)
+        let path = dir.path("users.yaml");
+        let mut db = userdb::UserDb::new();
+        let mut record = userdb::Record::new();
+        // A record with no uid has no `/etc/passwd` line to generate, and a
+        // save that cannot generate one fails -- so a fixture without one was
+        // never a fixture of a real account.
+        record.set_uid(1000);
+        record.set(userdb::field::USERNAME, username);
+        record.set(userdb::field::PASSWORD_HASH, stored);
+        db.push(record);
+        db.save(&path).expect("write the test database");
+        (authlib::Authenticator::with_stores(&path), dir)
     }
 
     // ---- the fixture's own wiring ----
@@ -1205,7 +1227,7 @@ mod tests {
         // all pass the *same* content shape, which the old tag-based scheme
         // relied on callers never doing.
         let fixtures: Vec<(authlib::Authenticator, ScratchDir)> = (0..20)
-            .map(|i| authenticator_with_shadow(&shadow_line(&format!("user{i}"), "hunter2")))
+            .map(|i| authenticator_with_entry(&format!("user{i}"), &entry_for("hunter2")))
             .collect();
         let paths: Vec<PathBuf> = fixtures.iter().map(|(_, d)| d.path("shadow")).collect();
 
@@ -1235,7 +1257,7 @@ mod tests {
     fn a_password_set_with_passwd_opens_a_doas_prompt() {
         // The whole point of the change: before it, this was `Rejected`, and
         // there was no password anyone could type that would not be.
-        let (mut auth, _dir) = authenticator_with_shadow(&shadow_line("alice", "hunter2"));
+        let (mut auth, _dir) = authenticator_with_entry("alice", &entry_for("hunter2"));
         assert_eq!(
             auth.authenticate("alice", b"hunter2"),
             authlib::Outcome::Accepted
@@ -1244,7 +1266,7 @@ mod tests {
 
     #[test]
     fn a_wrong_password_does_not() {
-        let (mut auth, _dir) = authenticator_with_shadow(&shadow_line("alice", "hunter2"));
+        let (mut auth, _dir) = authenticator_with_entry("alice", &entry_for("hunter2"));
         assert_eq!(
             auth.authenticate("alice", b"hunter3"),
             authlib::Outcome::Rejected
@@ -1253,7 +1275,7 @@ mod tests {
 
     #[test]
     fn a_locked_account_cannot_escalate() {
-        let (mut auth, _dir) = authenticator_with_shadow("alice:!:19500:0:99999:7:::\n");
+        let (mut auth, _dir) = authenticator_with_entry("alice", "!");
         // Not `Rejected`: no password opens it, and `is_accepted` is the only
         // thing `main` asks, so an `Outcome` that is not `Accepted` is a refusal
         // however it got there.
@@ -1266,7 +1288,7 @@ mod tests {
     fn an_account_with_no_password_cannot_escalate() {
         // `login` answers this one the other way for a console login. Escalation
         // is not a login: `nopass` in doas.conf is the only consent that counts.
-        let (mut auth, _dir) = authenticator_with_shadow("alice::19500:0:99999:7:::\n");
+        let (mut auth, _dir) = authenticator_with_entry("alice", "");
         let outcome = auth.authenticate("alice", b"");
         assert_eq!(outcome, authlib::Outcome::NoPassword);
         assert!(!outcome.is_accepted());
@@ -1277,9 +1299,8 @@ mod tests {
         // A system that ran the old `doas`, or the old `passwd`, has entries in
         // this shape. They must be distinguishable from a typo, because no
         // amount of retyping will ever clear one.
-        let (mut auth, _dir) = authenticator_with_shadow(
-            "alice:$sha256$battery_staple$0123456789abcdef:19500:0:99999:7:::\n",
-        );
+        let (mut auth, _dir) =
+            authenticator_with_entry("alice", "$sha256$battery_staple$0123456789abcdef");
         let outcome = auth.authenticate("alice", b"correct_horse");
         assert_eq!(outcome, authlib::Outcome::Unusable);
         assert!(outcome.needs_administrator());
@@ -1287,7 +1308,7 @@ mod tests {
 
     #[test]
     fn a_caller_with_no_entry_looks_exactly_like_a_wrong_password() {
-        let (mut auth, _dir) = authenticator_with_shadow(&shadow_line("alice", "hunter2"));
+        let (mut auth, _dir) = authenticator_with_entry("alice", &entry_for("hunter2"));
         assert_eq!(
             auth.authenticate("mallory", b"anything"),
             authlib::Outcome::Rejected

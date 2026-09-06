@@ -4158,6 +4158,7 @@ dependencies = [
  "posix",
  "quoting",
  "scratchdir",
+ "userdb",
 ]
 
 [[package]]
@@ -5862,6 +5863,7 @@ dependencies = [
  "authlib",
  "posix",
  "scratchdir",
+ "userdb",
 ]
 
 [[package]]
@@ -9457,6 +9459,7 @@ dependencies = [
  "libservicebus",
  "posix",
  "scratchdir",
+ "userdb",
 ]
 
 [[package]]
@@ -16803,6 +16806,7 @@ dependencies = [
  "scratchdir",
  "sha2",
  "sshwire",
+ "userdb",
 ]
 
 [[package]]

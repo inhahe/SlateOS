@@ -1046,9 +1046,23 @@ Roadmap:
       treats `-1` as *clear the field*, implements the interactive form
       `chage USER` is supposed to show, and requires root to change a policy or
       to read another account's — it had no permission check at all.
-  - `[ ]` **3. Collapse `authlib`'s guess.** Its per-lookup "YAML if it has the
-    user, `/etc/shadow` otherwise" fallback is a policy invented before §353
-    and must become a straight YAML lookup, the shadow branch deleted.
+  - `[x]` **3. Collapse `authlib`'s guess (2026-09-06).** `Authenticator` has
+    one store. `DEFAULT_SHADOW`, the whole `authlib::shadow` module, and
+    `with_stores`'s second argument are deleted rather than left as a fallback,
+    for §353's own reason: a fallback that fires means the generation broke,
+    and admitting someone on the strength of a stale account file is worse than
+    refusing. The note that used to stand on `resolve` predicted exactly this
+    ("one of the two branches becomes dead code here and no caller changes"),
+    and no caller did. `login` moved first, since it was the only *production*
+    reader of `authlib::shadow`: it now reads the account from the database,
+    which also removed the "in `/etc/passwd` but not `/etc/shadow`" case it
+    needed a branch for. Four test fixtures (`doas`, `ftpd`, `sshd`, `logind`)
+    wrote a shadow file to authenticate against and now write a database.
+    **Found on the way:** `login`'s account-expiry check only treated the
+    single value `expire_date == 1` as expired -- with a comment saying it
+    "would check against current time" -- so every account with a real expiry
+    date in the past logged in, and the test that covered it passed by using
+    the sentinel.
   - Adjacent, and newly *reachable* because of item 2: `known-issues.md` →
     `B-USERS-YAML-IS-WORLD-READABLE-AND-HOLDS-EVERY-PASSWORD-HASH`.
     `/etc/group`/`/etc/gshadow` are **not** in §353's scope and remain a

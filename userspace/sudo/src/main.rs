@@ -3584,7 +3584,7 @@ mod tests {
     /// which is exactly the scope a test wants.
     fn scratch_authenticator() -> authlib::Authenticator {
         let missing = std::path::Path::new("/nonexistent/sudo-tests");
-        authlib::Authenticator::with_stores(missing, missing)
+        authlib::Authenticator::with_stores(missing)
     }
 
     /// Enough failures to be past the free allowance and unambiguously into
@@ -3852,7 +3852,7 @@ mod tests {
 
         // `login` (or `su`, or the greeter) burns through the allowance.
         {
-            let mut elsewhere = authlib::Authenticator::with_stores(missing, missing)
+            let mut elsewhere = authlib::Authenticator::with_stores(missing)
                 .with_faillock(&faillock)
                 .with_clock(frozen_now);
             while elsewhere.rate_limited("alice").is_none() {
@@ -3862,7 +3862,7 @@ mod tests {
 
         // `sudo` starts fresh, reads the same file, and refuses.
         let db = auth_fixture();
-        let mut auth = authlib::Authenticator::with_stores(missing, missing)
+        let mut auth = authlib::Authenticator::with_stores(missing)
             .with_faillock(&faillock)
             .with_clock(frozen_now);
         // Naming the number, not just `is_some()`: the loop above stops at the

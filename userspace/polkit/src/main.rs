@@ -1678,7 +1678,7 @@ mod tests {
     /// The clock is frozen — see `frozen_clock`.
     fn scratch_authenticator() -> authlib::Authenticator {
         let missing = std::path::Path::new("/nonexistent/polkit-tests");
-        authlib::Authenticator::with_stores(missing, missing).with_clock(frozen_clock)
+        authlib::Authenticator::with_stores(missing).with_clock(frozen_clock)
     }
 
     /// Enough failures to be past the free allowance and unambiguously into
@@ -1835,7 +1835,7 @@ mod tests {
 
         // `login` (or `su`, or `sudo`) burns through the allowance.
         {
-            let mut elsewhere = authlib::Authenticator::with_stores(missing, missing)
+            let mut elsewhere = authlib::Authenticator::with_stores(missing)
                 .with_faillock(&faillock)
                 .with_clock(frozen_clock);
             while elsewhere.rate_limited("alice").is_none() {
@@ -1848,7 +1848,7 @@ mod tests {
         // authenticators must share the frozen clock: the faillock file records
         // an *absolute* failure time, so a reader on a different clock would
         // compute a different remaining delay from the same bytes.
-        let mut auth = authlib::Authenticator::with_stores(missing, missing)
+        let mut auth = authlib::Authenticator::with_stores(missing)
             .with_faillock(&faillock)
             .with_clock(frozen_clock);
         assert!(

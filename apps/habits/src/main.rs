@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -49,6 +48,11 @@ const SURFACE1: Color = Color::from_hex(0x45475A);
 const SURFACE2: Color = Color::from_hex(0x585B70);
 const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
+// Part of the complete Catppuccin Mocha palette, kept whole even though no
+// widget currently paints with this one: a named palette with a hole in it is
+// not the palette it is named after, and the next widget to want one would
+// otherwise re-derive the hex by hand.
+#[allow(dead_code, reason = "the palette is kept complete")]
 const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
 const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
@@ -125,22 +129,28 @@ struct Date {
 }
 
 impl Date {
+    /// A date, or `None` if there is no such day.
+    ///
+    /// Only the tests build dates this way -- production makes them from a
+    /// clock, where the fields are valid by construction -- which is why the
+    /// non-test build reports it unused. `#[cfg(test)]` says that plainly
+    /// instead of leaving a warning for the next person to re-diagnose.
+    ///
+    /// Calls `date::days_in_month` rather than a local forwarding wrapper:
+    /// there were two such wrappers here whose only caller was this function,
+    /// which made three names for one answer.
+    #[cfg(test)]
     fn new(year: i32, month: u32, day: u32) -> Option<Self> {
         if !(1..=12).contains(&month) {
             return None;
         }
-        let max_d = days_in_month(year, month);
+        let max_d = date::days_in_month(year, month);
         if day < 1 || day > max_d {
             return None;
         }
         Some(Self { year, month, day })
     }
 
-    /// This date in the shared calendar, for arithmetic.
-    ///
-    /// Private, and paired with [`from_civil`](Self::from_civil): the struct
-    /// itself stays, because its three fields are read directly all over the
-    /// grid rendering, but nothing computes on them any more.
     fn civil(self) -> date::Date {
         date::Date::from_ymd(self.year, self.month, self.day)
     }
@@ -229,14 +239,6 @@ impl Date {
 // today and all of them waiting for a caller that does not validate first.
 // The shared version clamps into 1..=12, which is the only answer that keeps
 // every caller's loop terminating.
-
-fn is_leap_year(year: i32) -> bool {
-    date::is_leap_year(year)
-}
-
-fn days_in_month(year: i32, month: u32) -> u32 {
-    date::days_in_month(year, month)
-}
 
 fn month_short(m: u32) -> &'static str {
     match m {
@@ -350,9 +352,7 @@ impl Frequency {
 
 #[derive(Debug, Clone)]
 struct Habit {
-    id: u32,
     name: String,
-    description: String,
     category: Category,
     frequency: Frequency,
     /// Dates on which this habit was checked in
@@ -363,18 +363,17 @@ struct Habit {
 }
 
 impl Habit {
-    fn new(
-        id: u32,
-        name: &str,
-        description: &str,
-        category: Category,
-        frequency: Frequency,
-        created: Date,
-    ) -> Self {
+    /// Took an `id` and a `description` until neither turned out to exist.
+    ///
+    /// The `id` was handed out by a counter, stored, incremented, and never
+    /// read: every lookup here is by position, `active_habits` maps a filtered
+    /// position back to a real one, and nothing is persisted, so there is no
+    /// identity to preserve across a restart. The `description` came from a
+    /// form field with no key handler -- it was always the empty string, and
+    /// nothing displayed it.
+    fn new(name: &str, category: Category, frequency: Frequency, created: Date) -> Self {
         Self {
-            id,
             name: String::from(name),
-            description: String::from(description),
             category,
             frequency,
             check_ins: Vec::new(),
@@ -604,7 +603,6 @@ struct HabitTrackerApp {
     width: f32,
     height: f32,
     habits: Vec<Habit>,
-    next_id: u32,
     today: Date,
     screen: Screen,
     selected_habit: usize,
@@ -612,7 +610,6 @@ struct HabitTrackerApp {
     category_filter: Option<Category>,
     show_create_form: bool,
     create_name: String,
-    create_description: String,
     create_category_idx: usize,
     create_frequency_daily: bool,
     create_weekly_count: u32,
@@ -625,7 +622,6 @@ struct HabitTrackerApp {
 impl HabitTrackerApp {
     const HEADER_H: f32 = 50.0;
     const ROW_H: f32 = 52.0;
-    const SIDEBAR_W: f32 = 200.0;
     const DAY_COL_W: f32 = 38.0;
     const STATUS_H: f32 = 28.0;
     const NAV_H: f32 = 36.0;
@@ -642,7 +638,6 @@ impl HabitTrackerApp {
             width: 1000.0,
             height: 700.0,
             habits: Vec::new(),
-            next_id: 1,
             today,
             screen: Screen::Dashboard,
             selected_habit: 0,
@@ -650,7 +645,6 @@ impl HabitTrackerApp {
             category_filter: None,
             show_create_form: false,
             create_name: String::new(),
-            create_description: String::new(),
             create_category_idx: 0,
             create_frequency_daily: true,
             create_weekly_count: 3,
@@ -666,15 +660,7 @@ impl HabitTrackerApp {
         let base = self.today.add_days(-45);
 
         // 1) Exercise -- daily, fitness
-        let mut h1 = Habit::new(
-            self.next_id,
-            "Exercise",
-            "30 minutes of physical activity",
-            Category::Fitness,
-            Frequency::Daily,
-            base,
-        );
-        self.next_id = self.next_id.saturating_add(1);
+        let mut h1 = Habit::new("Exercise", Category::Fitness, Frequency::Daily, base);
         // Simulate some check-ins over the last 45 days (about 70% completion)
         for i in 0..45 {
             let d = base.add_days(i);
@@ -685,15 +671,7 @@ impl HabitTrackerApp {
         self.habits.push(h1);
 
         // 2) Read -- daily, learning
-        let mut h2 = Habit::new(
-            self.next_id,
-            "Read 30 min",
-            "Read for at least 30 minutes",
-            Category::Learning,
-            Frequency::Daily,
-            base,
-        );
-        self.next_id = self.next_id.saturating_add(1);
+        let mut h2 = Habit::new("Read 30 min", Category::Learning, Frequency::Daily, base);
         for i in 0..45 {
             let d = base.add_days(i);
             if i % 3 != 2 {
@@ -703,15 +681,7 @@ impl HabitTrackerApp {
         self.habits.push(h2);
 
         // 3) Meditate -- daily, mindfulness
-        let mut h3 = Habit::new(
-            self.next_id,
-            "Meditate",
-            "10 minutes of mindfulness meditation",
-            Category::Mindfulness,
-            Frequency::Daily,
-            base,
-        );
-        self.next_id = self.next_id.saturating_add(1);
+        let mut h3 = Habit::new("Meditate", Category::Mindfulness, Frequency::Daily, base);
         for i in 0..45 {
             let d = base.add_days(i);
             if i % 5 != 4 {
@@ -721,15 +691,7 @@ impl HabitTrackerApp {
         self.habits.push(h3);
 
         // 4) Meal prep -- weekly 3x, health
-        let mut h4 = Habit::new(
-            self.next_id,
-            "Meal Prep",
-            "Prepare healthy meals for the week",
-            Category::Health,
-            Frequency::Weekly(3),
-            base,
-        );
-        self.next_id = self.next_id.saturating_add(1);
+        let mut h4 = Habit::new("Meal Prep", Category::Health, Frequency::Weekly(3), base);
         for i in 0..45 {
             let d = base.add_days(i);
             let dow = d.day_of_week();
@@ -740,15 +702,7 @@ impl HabitTrackerApp {
         self.habits.push(h4);
 
         // 5) Journal -- daily, productivity
-        let mut h5 = Habit::new(
-            self.next_id,
-            "Journal",
-            "Write in daily journal",
-            Category::Productivity,
-            Frequency::Daily,
-            base,
-        );
-        self.next_id = self.next_id.saturating_add(1);
+        let mut h5 = Habit::new("Journal", Category::Productivity, Frequency::Daily, base);
         for i in 0..45 {
             let d = base.add_days(i);
             if i % 4 != 3 {
@@ -799,18 +753,9 @@ impl HabitTrackerApp {
         } else {
             Frequency::Weekly(self.create_weekly_count.clamp(1, 7))
         };
-        let habit = Habit::new(
-            self.next_id,
-            &self.create_name,
-            &self.create_description,
-            category,
-            frequency,
-            self.today,
-        );
-        self.next_id = self.next_id.saturating_add(1);
+        let habit = Habit::new(&self.create_name, category, frequency, self.today);
         self.habits.push(habit);
         self.create_name.clear();
-        self.create_description.clear();
         self.create_category_idx = 0;
         self.create_frequency_daily = true;
         self.create_weekly_count = 3;
@@ -1086,6 +1031,13 @@ impl HabitTrackerApp {
         result
     }
 
+    /// The colour of one cell of the contribution graph.
+    ///
+    /// Had no caller until now: the renderer drew every checked day in flat
+    /// `GREEN`, which makes a grid rather than a heatmap. A contribution graph
+    /// says *how much*, and a two-colour one has thrown that away -- the
+    /// module doc calls this a "Contribution/heatmap graph" and it was the
+    /// half without the heat.
     fn heatmap_color(checked: bool, intensity: f32) -> Color {
         if !checked {
             return SURFACE0;
@@ -1093,6 +1045,40 @@ impl HabitTrackerApp {
         // Blend GREEN with intensity
         let alpha = (intensity * 255.0).clamp(80.0, 255.0) as u8;
         Color::rgba(166, 227, 161, alpha)
+    }
+
+    /// How strongly to colour each day of `data`.
+    ///
+    /// The run of consecutive checked days a day belongs to, scaled against
+    /// the longest run on screen. A boolean habit has no count to shade by, so
+    /// the thing worth seeing is momentum: a fortnight kept reads darker than
+    /// three separate Tuesdays, which is the question a habit tracker is
+    /// looked at to answer.
+    ///
+    /// Scaled against the longest run *shown* rather than a fixed ceiling, so
+    /// the graph uses its whole range whether the best run is five days or
+    /// fifty. A judgment call -- see `todo.txt`.
+    fn heatmap_intensities(data: &[(Date, bool)]) -> Vec<f32> {
+        let mut run = 0u32;
+        let mut runs: Vec<u32> = Vec::with_capacity(data.len());
+        for (_, checked) in data {
+            run = if *checked { run.saturating_add(1) } else { 0 };
+            runs.push(run);
+        }
+        let longest = runs.iter().copied().max().unwrap_or(0);
+        if longest == 0 {
+            return vec![0.0; data.len()];
+        }
+        runs.iter()
+            .map(|&r| {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a run length is bounded by the days on screen"
+                )]
+                let scaled = r as f32 / longest as f32;
+                scaled
+            })
+            .collect()
     }
 
     // ── Rendering ───────────────────────────────────────────────────
@@ -1988,6 +1974,7 @@ impl HabitTrackerApp {
         }
 
         // Draw cells
+        let intensities = Self::heatmap_intensities(&data);
         for (i, (_, checked)) in data.iter().enumerate() {
             let week = i / 7;
             let day = i % 7;
@@ -1998,7 +1985,7 @@ impl HabitTrackerApp {
                 break;
             }
 
-            let color = if *checked { GREEN } else { SURFACE0 };
+            let color = Self::heatmap_color(*checked, intensities.get(i).copied().unwrap_or(1.0));
             cmds.push(RenderCommand::FillRect {
                 x: cx,
                 y: cy,
@@ -2044,11 +2031,15 @@ impl HabitTrackerApp {
             max_width: Some(40.0),
             overflow: TextOverflow::Ellipsis,
         });
+        // Sampled from the same function the cells are drawn with, so the key
+        // cannot drift from the thing it is a key to. It used to be four
+        // hand-written colours -- and it was the only honest part of the
+        // screen, promising a "Less -> More" gradient the graph did not draw.
         let legend_colors = [
             SURFACE0,
-            Color::rgba(166, 227, 161, 80),
-            Color::rgba(166, 227, 161, 160),
-            GREEN,
+            Self::heatmap_color(true, 0.0),
+            Self::heatmap_color(true, 0.5),
+            Self::heatmap_color(true, 1.0),
         ];
         for (li, lc) in legend_colors.iter().enumerate() {
             cmds.push(RenderCommand::FillRect {
@@ -2425,19 +2416,13 @@ mod tests {
         assert!(Date::new(2026, 4, 31).is_none());
     }
 
-    #[test]
-    fn test_leap_year() {
-        assert!(is_leap_year(2024));
-        assert!(!is_leap_year(2023));
-        assert!(is_leap_year(2000));
-        assert!(!is_leap_year(1900));
-    }
-
-    #[test]
-    fn test_days_in_february() {
-        assert_eq!(days_in_month(2024, 2), 29);
-        assert_eq!(days_in_month(2023, 2), 28);
-    }
+    // The leap-year and February-length tests that stood here asserted
+    // 2000/1900/2024 and Feb 2000/1900 -- the same cases, on the same
+    // implementation, that `guitk::date`'s own tests already assert. They
+    // reached it through two habits-local wrappers that forwarded and did
+    // nothing else, so what looked like calendar coverage in this app was a
+    // second copy of another crate's tests. Both wrappers and both tests are
+    // gone; `date::` is the one place either question is answered.
 
     #[test]
     fn test_date_add_days_forward() {
@@ -2679,8 +2664,7 @@ mod tests {
             month: 5,
             day: 1,
         };
-        let h = Habit::new(1, "Test", "Desc", Category::Health, Frequency::Daily, d);
-        assert_eq!(h.id, 1);
+        let h = Habit::new("Test", Category::Health, Frequency::Daily, d);
         assert_eq!(h.name, "Test");
         assert!(!h.archived);
         assert!(h.check_ins.is_empty());
@@ -2693,7 +2677,7 @@ mod tests {
             month: 5,
             day: 18,
         };
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, d);
+        let mut h = Habit::new("Test", Category::Health, Frequency::Daily, d);
         assert!(!h.is_checked_on(d));
         h.toggle_check_in(d);
         assert!(h.is_checked_on(d));
@@ -2708,7 +2692,7 @@ mod tests {
             month: 5,
             day: 1,
         };
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, base);
+        let mut h = Habit::new("Test", Category::Health, Frequency::Daily, base);
         for i in 0..5 {
             h.toggle_check_in(base.add_days(i));
         }
@@ -2725,7 +2709,7 @@ mod tests {
             month: 5,
             day: 1,
         };
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, base);
+        let mut h = Habit::new("Test", Category::Health, Frequency::Daily, base);
         h.toggle_check_in(base.add_days(5));
         h.toggle_check_in(base.add_days(2));
         h.toggle_check_in(base.add_days(8));
@@ -2742,9 +2726,7 @@ mod tests {
             day: 18,
         };
         let mut h = Habit::new(
-            1,
             "Test",
-            "",
             Category::Health,
             Frequency::Daily,
             today.add_days(-10),
@@ -2763,9 +2745,7 @@ mod tests {
             day: 18,
         };
         let mut h = Habit::new(
-            1,
             "Test",
-            "",
             Category::Health,
             Frequency::Daily,
             today.add_days(-10),
@@ -2785,9 +2765,7 @@ mod tests {
             day: 18,
         };
         let mut h = Habit::new(
-            1,
             "Test",
-            "",
             Category::Health,
             Frequency::Daily,
             today.add_days(-10),
@@ -2806,7 +2784,7 @@ mod tests {
             month: 5,
             day: 18,
         };
-        let h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, today);
+        let h = Habit::new("Test", Category::Health, Frequency::Daily, today);
         assert_eq!(h.current_streak(today), 0);
     }
 
@@ -2818,9 +2796,7 @@ mod tests {
             day: 18,
         };
         let mut h = Habit::new(
-            1,
             "Test",
-            "",
             Category::Health,
             Frequency::Daily,
             today.add_days(-20),
@@ -2844,7 +2820,7 @@ mod tests {
             day: 18,
         };
         let start = today.add_days(-28);
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Weekly(3), start);
+        let mut h = Habit::new("Test", Category::Health, Frequency::Weekly(3), start);
         // Fill 3+ days for last 3 weeks
         for week_offset in 0..3 {
             let ws = today.add_days(-(week_offset * 7));
@@ -2866,7 +2842,7 @@ mod tests {
             day: 18,
         };
         let start = today.add_days(-60);
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Weekly(2), start);
+        let mut h = Habit::new("Test", Category::Health, Frequency::Weekly(2), start);
         // 4 consecutive weeks meeting target
         for week in 0..4 {
             let ws = start.add_days(week * 7).week_start_monday();
@@ -2888,9 +2864,7 @@ mod tests {
             day: 18,
         };
         let mut h = Habit::new(
-            1,
             "Test",
-            "",
             Category::Health,
             Frequency::Daily,
             today.add_days(-10),
@@ -2910,9 +2884,7 @@ mod tests {
             day: 18,
         };
         let mut h = Habit::new(
-            1,
             "Test",
-            "",
             Category::Health,
             Frequency::Daily,
             today.add_days(-10),
@@ -2933,7 +2905,7 @@ mod tests {
             month: 5,
             day: 18,
         };
-        let h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, today);
+        let h = Habit::new("Test", Category::Health, Frequency::Daily, today);
         assert_eq!(h.completion_rate(today, 0), 0.0);
     }
 
@@ -2945,7 +2917,7 @@ mod tests {
             day: 18,
         };
         let start = today.add_days(-28);
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Weekly(3), start);
+        let mut h = Habit::new("Test", Category::Health, Frequency::Weekly(3), start);
         // Meet target 2 out of 4 weeks
         for week in [0, 2] {
             let ws = today.add_days(-(week * 7)).week_start_monday();
@@ -2966,7 +2938,7 @@ mod tests {
             day: 18,
         };
         let created = today.add_days(-10);
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Daily, created);
+        let mut h = Habit::new("Test", Category::Health, Frequency::Daily, created);
         // 5 out of 11 days (inclusive)
         for i in 0..5 {
             h.check_ins.push(today.add_days(-i));
@@ -2983,9 +2955,7 @@ mod tests {
             day: 18,
         };
         let mut h = Habit::new(
-            1,
             "Test",
-            "",
             Category::Health,
             Frequency::Daily,
             today.add_days(-10),
@@ -3476,6 +3446,156 @@ mod tests {
     }
 
     #[test]
+    fn heatmap_color_darkens_with_intensity() {
+        // The whole point of the function: a stronger day is a stronger cell.
+        // The old test only asked that a checked day differ from an unchecked
+        // one, which a flat `GREEN` also satisfies -- and flat `GREEN` was in
+        // fact what the renderer drew.
+        let faint = HabitTrackerApp::heatmap_color(true, 0.0);
+        let strong = HabitTrackerApp::heatmap_color(true, 1.0);
+        assert!(
+            strong.a > faint.a,
+            "intensity 1.0 ({}) should be more opaque than 0.0 ({})",
+            strong.a,
+            faint.a
+        );
+        assert_eq!((strong.r, strong.g, strong.b), (faint.r, faint.g, faint.b));
+    }
+
+    #[test]
+    fn heatmap_intensities_scale_with_run_length() {
+        // A day inside a long run outranks an isolated one, and the longest
+        // run on screen reaches the top of the scale.
+        let d = Date {
+            year: 2026,
+            month: 3,
+            day: 1,
+        };
+        let checks = [true, false, true, true, true, true];
+        let data: Vec<(Date, bool)> = checks
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| (d.add_days(i as i32), c))
+            .collect();
+        let got = HabitTrackerApp::heatmap_intensities(&data);
+        assert_eq!(got.len(), data.len());
+        assert!(got[0] < got[5], "an isolated day is fainter than a run");
+        assert_eq!(got[1], 0.0, "an unchecked day has no intensity");
+        assert!(
+            got[2] < got[3] && got[3] < got[4] && got[4] < got[5],
+            "intensity climbs through a run: {got:?}"
+        );
+        assert_eq!(got[5], 1.0, "the longest run reaches full intensity");
+    }
+
+    #[test]
+    fn heatmap_intensities_restart_after_a_gap() {
+        // Momentum is what is being shown, so a break resets it: the day after
+        // a miss is as faint as any first day, however good the week before.
+        let d = Date {
+            year: 2026,
+            month: 3,
+            day: 1,
+        };
+        let checks = [true, true, true, true, false, true];
+        let data: Vec<(Date, bool)> = checks
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| (d.add_days(i as i32), c))
+            .collect();
+        let got = HabitTrackerApp::heatmap_intensities(&data);
+        assert_eq!(got[0], got[5], "the day after a gap starts over");
+        assert!(got[5] < got[3]);
+    }
+
+    #[test]
+    fn heatmap_intensities_flat_when_nothing_is_checked() {
+        // Every run is zero long, so there is no longest run to divide by --
+        // the case that would otherwise divide by zero.
+        let d = Date {
+            year: 2026,
+            month: 3,
+            day: 1,
+        };
+        let data: Vec<(Date, bool)> = (0..5).map(|i| (d.add_days(i), false)).collect();
+        let got = HabitTrackerApp::heatmap_intensities(&data);
+        assert_eq!(got, vec![0.0; 5]);
+    }
+
+    #[test]
+    fn heatmap_intensities_of_nothing_is_nothing() {
+        assert!(HabitTrackerApp::heatmap_intensities(&[]).is_empty());
+    }
+
+    #[test]
+    fn render_heatmap_shades_cells_by_run_length() {
+        // The regression this whole change exists for. The renderer drew
+        // `if checked { GREEN } else { SURFACE0 }` -- two colours, whatever
+        // the data -- while `heatmap_color` sat unused with only its own test
+        // for company.
+        //
+        // Reads only the graph, not the legend. The legend is drawn from the
+        // same `heatmap_color` and is four swatches of the same size, so a
+        // test that took every small square passed against the flat renderer
+        // on the strength of the legend alone -- which is exactly how the
+        // flat graph went unnoticed under a gradient key in the first place.
+        // The graph is the seven topmost rows; the legend sits below them.
+        let mut app = HabitTrackerApp::new();
+        app.screen = Screen::HeatMap;
+        app.heatmap_habit_idx = 0;
+        let today = app.today;
+        let Some(h) = app.habits.get_mut(0) else {
+            panic!("the starting library has at least one habit");
+        };
+        h.check_ins.clear();
+        // Days back from today: a lone day, a gap, then a five-day run.
+        for back in [1, 8, 9, 10, 11, 12] {
+            h.check_ins.push(today.add_days(-back));
+        }
+        h.check_ins.sort();
+
+        let squares: Vec<(u32, Color)> = app
+            .render_commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if (width - height).abs() < f32::EPSILON && width < 20.0 => {
+                    Some((y.to_bits(), color))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut rows: Vec<u32> = squares.iter().map(|(y, _)| *y).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        assert!(rows.len() > 7, "expected 7 graph rows plus a legend row");
+        let graph_rows = &rows[..7];
+
+        let mut shades: Vec<u8> = squares
+            .iter()
+            .filter(|(y, c)| graph_rows.contains(y) && *c != SURFACE0)
+            .map(|(_, c)| c.a)
+            .collect();
+        assert_eq!(shades.len(), 6, "six checked days should be drawn");
+        shades.sort_unstable();
+        shades.dedup();
+        assert!(
+            shades.len() > 1,
+            "checked days all came out one colour ({shades:?}) -- flat again"
+        );
+        assert_eq!(
+            shades.last().copied(),
+            Some(255),
+            "the longest run should reach full strength"
+        );
+    }
+
+    #[test]
     fn test_heatmap_color_unchecked() {
         let c = HabitTrackerApp::heatmap_color(false, 0.5);
         assert_eq!(c, SURFACE0);
@@ -3641,7 +3761,7 @@ mod tests {
             month: 5,
             day: 18,
         }; // Monday
-        let mut h = Habit::new(1, "Test", "", Category::Health, Frequency::Weekly(3), base);
+        let mut h = Habit::new("Test", Category::Health, Frequency::Weekly(3), base);
         h.check_ins.push(base);
         h.check_ins.push(base.add_days(2));
         h.check_ins.push(base.add_days(4));
@@ -3655,7 +3775,7 @@ mod tests {
             month: 5,
             day: 18,
         };
-        let h = Habit::new(1, "Test", "", Category::Health, Frequency::Weekly(3), base);
+        let h = Habit::new("Test", Category::Health, Frequency::Weekly(3), base);
         assert_eq!(h.completions_in_week(base), 0);
     }
 
@@ -3693,14 +3813,19 @@ mod tests {
     }
 
     #[test]
-    fn test_next_id_increments() {
+    fn creating_two_habits_appends_two_habits() {
+        // Was `test_next_id_increments`, which watched a counter that nothing
+        // ever read. What the test was reaching for -- that creating twice
+        // creates two -- is asserted here against the list itself.
         let mut app = HabitTrackerApp::new();
-        let id_before = app.next_id;
+        let before = app.habits.len();
         app.create_name = String::from("A");
         app.create_habit();
         app.create_name = String::from("B");
         app.create_habit();
-        assert_eq!(app.next_id, id_before + 2);
+        assert_eq!(app.habits.len(), before + 2);
+        let names: Vec<&str> = app.habits.iter().map(|h| h.name.as_str()).collect();
+        assert!(names.contains(&"A") && names.contains(&"B"), "{names:?}");
     }
 
     #[test]

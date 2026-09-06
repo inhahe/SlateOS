@@ -55599,3 +55599,58 @@ along with the field limits:
   currently ask for.
 * **The library needs a name typed for the pattern**, and the window has three
   fields with no fourth for a name, nor a modal to ask in.
+
+## Judgment Calls -- lane C, 2026-09-06 (blanket `#![allow(dead_code)]` sweep, apps 11-16)
+
+- habits: the contribution graph now shades a day by **the length of the run
+  of consecutive checked days it belongs to, scaled against the longest run
+  currently on screen**. `heatmap_color(checked, intensity)` already existed
+  and had never been called; the renderer drew a flat two-colour grid while
+  the legend beneath it advertised a "Less -> More" gradient. Two choices were
+  free and I picked both:
+    - *What the intensity means.* A boolean habit has no count to shade by, so
+      there is no obvious quantity. Run length says "momentum", which is the
+      question a habit tracker is looked at to answer -- a fortnight kept reads
+      darker than three separate Tuesdays. Alternatives: days-since (recency),
+      or a rolling 7-day completion rate. Any of the three is defensible.
+    - *What full strength is.* Scaled against the longest run **shown**, not a
+      fixed ceiling, so the graph uses its whole range whether the best run is
+      five days or fifty. The cost is that the same day changes colour as the
+      window scrolls past a better run. A fixed ceiling (say 14 days) would be
+      stable but flat for a beginner.
+  Both are one-line changes in `heatmap_intensities`. If the operator prefers
+  another reading, that is the function to edit.
+
+- habits: `Habit::id` and `Habit::description` **deleted** rather than wired.
+  The id was handed out by a counter, stored, incremented and never read --
+  every lookup is positional, `active_habits()` maps a filtered position back
+  to a real one, and nothing is persisted, so there is no identity to keep
+  across a restart. The description came from `create_description`, a form
+  field with no key handler: it was always empty, and nothing displayed it.
+  Wiring either would have been adding a feature, not fixing one. If habits
+  ever gains persistence (see the note below), ids come back with it.
+
+- lockscreen: `account_has_password` **kept** with an `#[allow(dead_code)]`
+  though it has no production caller, because the fail-closed rule it
+  implements is the one that decides who gets in, and the caller it is for --
+  a typed username rather than a picked one -- is a plausible near addition.
+  Its tests are the specification of that rule. If a typed-username field is
+  still absent in a few months, delete it and move the rule's tests onto
+  `record_has_password`.
+
+- defrag: `lighten_color`/`darken_color` **kept** with an `#[allow]`. No widget
+  shades a block today; the block map is the obvious future caller.
+
+## Notes / smaller findings from the same sweep
+
+- **habits has no persistence at all.** No save, no load, no serde -- the
+  sample habits are regenerated at every launch and everything the user does
+  is lost on exit. Not fixed here (it is a feature, not a defect in what
+  exists) but it makes the app a demonstration rather than a tool, and it is
+  the reason `Habit::id` had nothing to be an identity for.
+
+- **Four apps in this sweep carried an orphan sidebar-width constant** --
+  `SIDEBAR_W`/`SIDEBAR_WIDTH` declared and never used (habits, systemrestore,
+  and two earlier). They look like the residue of a common template that had a
+  sidebar these apps never grew. Deleted in each case; worth a grep across the
+  rest of `apps/` for the same shape.

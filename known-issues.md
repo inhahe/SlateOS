@@ -262,6 +262,7 @@ walking the real string and therefore only ever returns offsets into it:
 
 | App | Site |
 |---|---|
+| `videoplayer` | playback, playlist, chapters, subtitles, equalizer | any input at all -- and it drew a **Keyboard Shortcuts** tab listing thirty-two keys, none of which were bound to anything, because the file did not import `guitk::event` | `FRAME_TICK` while playing or a message is expiring |
 | `podcast` | subscriptions, playback, downloads, queue, search, OPML | any input at all. The file did not import `guitk::event`: there was no key handler and no click handler, so every one of those features was reachable only from a test | `PLAYBACK_TICK` while playing or downloading |
 | `ebook` | `find_all_matches` |
 | `pdfviewer` | `PdfDocument::search` |
@@ -57390,7 +57391,7 @@ and that is exactly the shape that survives a reading.
 screenful of information that is a constant compiled into the program. The
 drawing is real, the filtering and sorting and searching are real, the parsing
 is real — and there is no source. This entry names the pattern, because it has
-now been found eleven times and writing it up eleven times separately would train
+now been found twelve times and writing it up twelve times separately would train
 the reader to skim it.
 
 **`email` is the sharpest case and the least fixable today.** The client is

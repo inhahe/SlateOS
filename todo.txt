@@ -55472,3 +55472,40 @@ what the built-in presets happen to use.
 
 `Station::url` is now displayed in the now-playing bar, which is the honest
 thing to show for a station that cannot be fetched: what would be played.
+
+## credmanager: what a credential manager still cannot do
+
+Adding a credential and copying a field are wired up as of this change. The
+rest of the vault's API is still reachable from nothing, and each dead item now
+carries a `#[allow(dead_code, reason = ...)]` saying which control is missing
+rather than a blanket `#![allow(dead_code)]` over the file -- that blanket is
+what hid the Add button doing nothing.
+
+In rough order of how much a user would miss it:
+
+* **Edit** — `Vault::update_entry` and `get_entry_mut`. The detail view shows a
+  credential and cannot change one, so a password that has been rotated cannot
+  be recorded.
+* **Delete** — `Vault::remove_entry`.
+* **Export and backup** — `export_csv`, `escape_csv`, `serialize_backup`, all
+  advertised in the module doc. There is no filesystem to write to; the
+  clipboard is the sink these can have today, which is what `/copy` already
+  uses.
+* **Favourites** — `Vault::toggle_star`. The sidebar filters by favourites and
+  nothing can set one, so that filter is always empty. Same shape for
+  **tags** (`add_tag`/`remove_tag`, and the sidebar's tag list) and
+  **folders** (`Folder`, `add_folder`/`remove_folder`/`rename_folder`/
+  `set_folder`).
+* **Generator length** — `PasswordGenerator::set_length`. The panel shows the
+  length and offers no way to change it.
+* **Jump from an audit issue to its entry** — `AuditIssue::entry_id` is carried
+  and never read.
+* **Breach flagging** — `Vault::set_compromised`, which needs a feed to learn
+  from as well as a control.
+* **Persistence** — `Vault::from_stored` is the door a loader would come in
+  through. Every launch opens an empty vault, as the module doc says.
+
+One duplicate to resolve rather than build: `Vault::search_entries` is a second
+full-text search beside the toolbar's, which filters through
+`AppState::refresh_filter`. One of the two should go once it is clear which
+shape the UI wants.

@@ -55432,3 +55432,17 @@ are visible in the code and both are deliberate:
 `tick_interval` returns `None` for the same reason: nothing arrives on a timer.
 It becomes `Some(...)` -- or better, a wakeup on the socket -- when there is a
 connection to read from.
+
+## radio: two player states with no way into them
+
+`apps/radio` has no network, so `PlayState::Buffering` and `PlayState::Error`
+are never constructed -- nothing can be waiting for a stream to fill, and
+nothing can fail to connect, until something connects. Both are kept with a
+`#[allow(dead_code)]` and a reason rather than deleted, because the player bar
+already knows how to draw them: `PlayState::label` covers all four, and the
+states become reachable the moment there is a socket. Same for `Codec::Wma`,
+which is part of the vocabulary for describing a stream rather than a list of
+what the built-in presets happen to use.
+
+`Station::url` is now displayed in the now-playing bar, which is the honest
+thing to show for a station that cannot be fetched: what would be played.

@@ -262,6 +262,7 @@ walking the real string and therefore only ever returns offsets into it:
 
 | App | Site |
 |---|---|
+| `radio` | stations, genres, favourites, sleep timer, recording, spectrum | a caller. **The compiler already knew**: with `main` never calling the private `render`, dead-code analysis reported the whole UI -- every palette colour, `PlayState::Playing`, three of four `Screen`s, every `SleepTimer` duration -- and `#![allow(dead_code)]` at the top of the file said not to mention it | `FRAME_TICK` while playing or a sleep timer runs |
 | `ircclient` | IRC parsing, channels, users, slash commands | anything to type with. `input_text` was drawn by the renderer and written by nobody, and `input_history`/`input_history_idx` beside it were written once in `new` and never touched | `None` -- messages come from a server, not a timer |
 | `whiteboard` | drawing tools, layers, pages, undo, sticky notes | events. `on_canvas_press`/`move`/`release`/`scroll` and `start_pan` were all written and none was called, and `Tool::shortcut` named a letter per tool that nothing dispatched on | `None` -- nothing on a board moves on its own |
 | `photomanager` | albums, EXIF, ratings, tags, smart albums, duplicates | any input at all, and a scroll offset: the grid cut itself off at the window edge with no offset to move, so a library of four hundred photos showed the first screenful and hid the rest for good | `SLIDESHOW_TICK` while a slideshow runs |
@@ -57308,7 +57309,7 @@ and that is exactly the shape that survives a reading.
 screenful of information that is a constant compiled into the program. The
 drawing is real, the filtering and sorting and searching are real, the parsing
 is real — and there is no source. This entry names the pattern, because it has
-now been found fifteen times and writing it up fifteen times separately would train
+now been found sixteen times and writing it up sixteen times separately would train
 the reader to skim it.
 
 **`email` is the sharpest case and the least fixable today.** The client is

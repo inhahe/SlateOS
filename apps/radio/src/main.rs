@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Internet Radio — streaming radio player for SlateOS.
 //!
 //! Features:
@@ -15,11 +14,16 @@
 //! - Station search
 
 use guitk::color::Color;
+use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::listview::ListViewport;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
+use oswindow::app::{self, App, Response};
+use oswindow::{Event, RenderTree};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ── Layout ─────────────────────────────────────────────────────────────────
 //
@@ -52,11 +56,30 @@ const LIST_MORE_HEIGHT: f32 = 16.0;
 /// the renderer walks down this distance a piece at a time while
 /// [`RadioApp::genre_rows`] needs it as a single number, and two spellings of
 /// one distance is one spelling too many; the renderer asserts they agree.
-const GENRE_ROWS_TOP: f32 = 32.0
-    + 3.0 * SIDEBAR_TAB_HEIGHT
-    + 8.0
-    + 16.0
-    + GENRE_ROW_HEIGHT;
+const GENRE_ROWS_TOP: f32 = 32.0 + 3.0 * SIDEBAR_TAB_HEIGHT + 8.0 + 16.0 + GENRE_ROW_HEIGHT;
+
+/// A window smaller than this has no list left beside the sidebar.
+const MIN_WINDOW_WIDTH: f32 = 480.0;
+const MIN_WINDOW_HEIGHT: f32 = 320.0;
+const WINDOW_WIDTH: f32 = 1000.0;
+const WINDOW_HEIGHT: f32 = 700.0;
+/// How often the spectrum is redrawn while something is playing.
+const FRAME_TICK: Duration = Duration::from_millis(100);
+
+/// A rectangle on screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Rect {
+    fn contains(self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+}
 
 /// Height of one station row in the main list.
 const STATION_ROW_HEIGHT: f32 = 50.0;
@@ -69,6 +92,10 @@ const MANTLE: Color = Color::from_hex(0x181825);
 const CRUST: Color = Color::from_hex(0x11111B);
 const SURFACE0: Color = Color::from_hex(0x313244);
 const SURFACE1: Color = Color::from_hex(0x45475A);
+// Part of the complete Catppuccin Mocha palette, kept whole even though no
+// widget currently paints with this one: a named palette with a hole in it is
+// not the palette it is named after.
+#[allow(dead_code, reason = "the palette is kept complete")]
 const SURFACE2: Color = Color::from_hex(0x585B70);
 const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
@@ -107,9 +134,21 @@ enum Genre {
 
 impl Genre {
     const ALL: [Self; 15] = [
-        Self::Rock, Self::Pop, Self::Jazz, Self::Classical, Self::Electronic,
-        Self::HipHop, Self::Country, Self::RnB, Self::Metal, Self::Blues,
-        Self::Ambient, Self::News, Self::Talk, Self::Lofi, Self::World,
+        Self::Rock,
+        Self::Pop,
+        Self::Jazz,
+        Self::Classical,
+        Self::Electronic,
+        Self::HipHop,
+        Self::Country,
+        Self::RnB,
+        Self::Metal,
+        Self::Blues,
+        Self::Ambient,
+        Self::News,
+        Self::Talk,
+        Self::Lofi,
+        Self::World,
     ];
 
     fn label(self) -> &'static str {
@@ -156,6 +195,10 @@ impl Genre {
 // ── Audio Codec ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the vocabulary for describing a stream, not a list of what the presets happen to use"
+)]
 enum Codec {
     Mp3,
     Aac,
@@ -195,124 +238,204 @@ struct Station {
 fn preset_stations() -> Vec<Station> {
     vec![
         Station {
-            name: "Classic Rock FM".into(), url: "http://classicrock.fm/stream".into(),
-            genre: Genre::Rock, bitrate_kbps: 192, codec: Codec::Mp3,
+            name: "Classic Rock FM".into(),
+            url: "http://classicrock.fm/stream".into(),
+            genre: Genre::Rock,
+            bitrate_kbps: 192,
+            codec: Codec::Mp3,
             description: "The best classic rock from the 60s, 70s, and 80s".into(),
-            country: "US".into(), language: "English".into(),
+            country: "US".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Indie Rock Radio".into(), url: "http://indierock.io/live".into(),
-            genre: Genre::Rock, bitrate_kbps: 128, codec: Codec::Aac,
+            name: "Indie Rock Radio".into(),
+            url: "http://indierock.io/live".into(),
+            genre: Genre::Rock,
+            bitrate_kbps: 128,
+            codec: Codec::Aac,
             description: "Indie and alternative rock discoveries".into(),
-            country: "UK".into(), language: "English".into(),
+            country: "UK".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Pop Hits Today".into(), url: "http://pophits.today/stream".into(),
-            genre: Genre::Pop, bitrate_kbps: 256, codec: Codec::Mp3,
+            name: "Pop Hits Today".into(),
+            url: "http://pophits.today/stream".into(),
+            genre: Genre::Pop,
+            bitrate_kbps: 256,
+            codec: Codec::Mp3,
             description: "Today's biggest pop hits, 24/7".into(),
-            country: "US".into(), language: "English".into(),
+            country: "US".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Smooth Jazz Cafe".into(), url: "http://smoothjazz.cafe/live".into(),
-            genre: Genre::Jazz, bitrate_kbps: 320, codec: Codec::Flac,
+            name: "Smooth Jazz Cafe".into(),
+            url: "http://smoothjazz.cafe/live".into(),
+            genre: Genre::Jazz,
+            bitrate_kbps: 320,
+            codec: Codec::Flac,
             description: "Smooth jazz for relaxation and focus".into(),
-            country: "US".into(), language: "English".into(),
+            country: "US".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Jazz FM London".into(), url: "http://jazzfm.london/stream".into(),
-            genre: Genre::Jazz, bitrate_kbps: 192, codec: Codec::Aac,
+            name: "Jazz FM London".into(),
+            url: "http://jazzfm.london/stream".into(),
+            genre: Genre::Jazz,
+            bitrate_kbps: 192,
+            codec: Codec::Aac,
             description: "London's premier jazz station".into(),
-            country: "UK".into(), language: "English".into(),
+            country: "UK".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Classical WQXR".into(), url: "http://wqxr.org/stream".into(),
-            genre: Genre::Classical, bitrate_kbps: 320, codec: Codec::Flac,
+            name: "Classical WQXR".into(),
+            url: "http://wqxr.org/stream".into(),
+            genre: Genre::Classical,
+            bitrate_kbps: 320,
+            codec: Codec::Flac,
             description: "Classical music from New York".into(),
-            country: "US".into(), language: "English".into(),
+            country: "US".into(),
+            language: "English".into(),
         },
         Station {
-            name: "BBC Radio 3".into(), url: "http://bbc.co.uk/radio3/stream".into(),
-            genre: Genre::Classical, bitrate_kbps: 320, codec: Codec::Aac,
+            name: "BBC Radio 3".into(),
+            url: "http://bbc.co.uk/radio3/stream".into(),
+            genre: Genre::Classical,
+            bitrate_kbps: 320,
+            codec: Codec::Aac,
             description: "Classical, jazz, world music from the BBC".into(),
-            country: "UK".into(), language: "English".into(),
+            country: "UK".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Electro Beats FM".into(), url: "http://electrobeats.fm/live".into(),
-            genre: Genre::Electronic, bitrate_kbps: 256, codec: Codec::Ogg,
+            name: "Electro Beats FM".into(),
+            url: "http://electrobeats.fm/live".into(),
+            genre: Genre::Electronic,
+            bitrate_kbps: 256,
+            codec: Codec::Ogg,
             description: "Electronic dance music around the clock".into(),
-            country: "DE".into(), language: "English".into(),
+            country: "DE".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Chillwave Radio".into(), url: "http://chillwave.radio/stream".into(),
-            genre: Genre::Electronic, bitrate_kbps: 192, codec: Codec::Opus,
+            name: "Chillwave Radio".into(),
+            url: "http://chillwave.radio/stream".into(),
+            genre: Genre::Electronic,
+            bitrate_kbps: 192,
+            codec: Codec::Opus,
             description: "Chill electronic vibes for any mood".into(),
-            country: "NL".into(), language: "English".into(),
+            country: "NL".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Beats1 Hip-Hop".into(), url: "http://beats1.hiphop/live".into(),
-            genre: Genre::HipHop, bitrate_kbps: 192, codec: Codec::Mp3,
+            name: "Beats1 Hip-Hop".into(),
+            url: "http://beats1.hiphop/live".into(),
+            genre: Genre::HipHop,
+            bitrate_kbps: 192,
+            codec: Codec::Mp3,
             description: "Hip-hop and rap, new and classic".into(),
-            country: "US".into(), language: "English".into(),
+            country: "US".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Nashville Country".into(), url: "http://nashville.country/stream".into(),
-            genre: Genre::Country, bitrate_kbps: 128, codec: Codec::Mp3,
+            name: "Nashville Country".into(),
+            url: "http://nashville.country/stream".into(),
+            genre: Genre::Country,
+            bitrate_kbps: 128,
+            codec: Codec::Mp3,
             description: "Country music straight from Nashville".into(),
-            country: "US".into(), language: "English".into(),
+            country: "US".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Soul & RnB Radio".into(), url: "http://soulrnb.radio/live".into(),
-            genre: Genre::RnB, bitrate_kbps: 192, codec: Codec::Aac,
+            name: "Soul & RnB Radio".into(),
+            url: "http://soulrnb.radio/live".into(),
+            genre: Genre::RnB,
+            bitrate_kbps: 192,
+            codec: Codec::Aac,
             description: "Soul, R&B, and Motown classics".into(),
-            country: "US".into(), language: "English".into(),
+            country: "US".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Metal Mayhem".into(), url: "http://metalmayhem.fm/stream".into(),
-            genre: Genre::Metal, bitrate_kbps: 256, codec: Codec::Mp3,
+            name: "Metal Mayhem".into(),
+            url: "http://metalmayhem.fm/stream".into(),
+            genre: Genre::Metal,
+            bitrate_kbps: 256,
+            codec: Codec::Mp3,
             description: "Heavy metal, thrash, death metal".into(),
-            country: "SE".into(), language: "English".into(),
+            country: "SE".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Delta Blues Radio".into(), url: "http://deltablues.radio/live".into(),
-            genre: Genre::Blues, bitrate_kbps: 192, codec: Codec::Mp3,
+            name: "Delta Blues Radio".into(),
+            url: "http://deltablues.radio/live".into(),
+            genre: Genre::Blues,
+            bitrate_kbps: 192,
+            codec: Codec::Mp3,
             description: "Mississippi delta blues and Chicago blues".into(),
-            country: "US".into(), language: "English".into(),
+            country: "US".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Ambient Worlds".into(), url: "http://ambientworlds.fm/stream".into(),
-            genre: Genre::Ambient, bitrate_kbps: 256, codec: Codec::Flac,
+            name: "Ambient Worlds".into(),
+            url: "http://ambientworlds.fm/stream".into(),
+            genre: Genre::Ambient,
+            bitrate_kbps: 256,
+            codec: Codec::Flac,
             description: "Ambient soundscapes for meditation and sleep".into(),
-            country: "JP".into(), language: "English".into(),
+            country: "JP".into(),
+            language: "English".into(),
         },
         Station {
-            name: "NPR News".into(), url: "http://npr.org/stream".into(),
-            genre: Genre::News, bitrate_kbps: 64, codec: Codec::Mp3,
+            name: "NPR News".into(),
+            url: "http://npr.org/stream".into(),
+            genre: Genre::News,
+            bitrate_kbps: 64,
+            codec: Codec::Mp3,
             description: "National Public Radio news and analysis".into(),
-            country: "US".into(), language: "English".into(),
+            country: "US".into(),
+            language: "English".into(),
         },
         Station {
-            name: "BBC World Service".into(), url: "http://bbc.co.uk/worldservice/stream".into(),
-            genre: Genre::News, bitrate_kbps: 96, codec: Codec::Aac,
+            name: "BBC World Service".into(),
+            url: "http://bbc.co.uk/worldservice/stream".into(),
+            genre: Genre::News,
+            bitrate_kbps: 96,
+            codec: Codec::Aac,
             description: "International news from the BBC".into(),
-            country: "UK".into(), language: "English".into(),
+            country: "UK".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Lo-Fi Hip Hop Beats".into(), url: "http://lofi.beats/stream".into(),
-            genre: Genre::Lofi, bitrate_kbps: 128, codec: Codec::Ogg,
+            name: "Lo-Fi Hip Hop Beats".into(),
+            url: "http://lofi.beats/stream".into(),
+            genre: Genre::Lofi,
+            bitrate_kbps: 128,
+            codec: Codec::Ogg,
             description: "Lo-fi beats to relax/study to".into(),
-            country: "JP".into(), language: "English".into(),
+            country: "JP".into(),
+            language: "English".into(),
         },
         Station {
-            name: "Lo-Fi Cafe".into(), url: "http://lofi.cafe/live".into(),
-            genre: Genre::Lofi, bitrate_kbps: 192, codec: Codec::Opus,
+            name: "Lo-Fi Cafe".into(),
+            url: "http://lofi.cafe/live".into(),
+            genre: Genre::Lofi,
+            bitrate_kbps: 192,
+            codec: Codec::Opus,
             description: "Cozy lo-fi music for focus and chill".into(),
-            country: "US".into(), language: "English".into(),
+            country: "US".into(),
+            language: "English".into(),
         },
         Station {
-            name: "World Music Channel".into(), url: "http://worldmusic.ch/stream".into(),
-            genre: Genre::World, bitrate_kbps: 192, codec: Codec::Mp3,
+            name: "World Music Channel".into(),
+            url: "http://worldmusic.ch/stream".into(),
+            genre: Genre::World,
+            bitrate_kbps: 192,
+            codec: Codec::Mp3,
             description: "Music from every corner of the globe".into(),
-            country: "CH".into(), language: "Multiple".into(),
+            country: "CH".into(),
+            language: "Multiple".into(),
         },
     ]
 }
@@ -322,8 +445,15 @@ fn preset_stations() -> Vec<Station> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlayState {
     Stopped,
+    /// Waiting for a stream to fill. Unreachable until there is a socket to
+    /// wait on -- see `todo.txt`; the state is kept because the player bar
+    /// already knows how to say so.
+    #[allow(dead_code, reason = "reachable when there is a transport")]
     Buffering,
     Playing,
+    /// A stream that would not play. Unreachable for the same reason as
+    /// `Buffering`: nothing can fail to connect until something connects.
+    #[allow(dead_code, reason = "reachable when there is a transport")]
     Error,
 }
 
@@ -446,6 +576,13 @@ struct RadioApp {
     status_message: String,
     width: f32,
     height: f32,
+    /// Milliseconds seen since the last whole second was counted.
+    ///
+    /// The tick arrives at frame rate and the counters move in seconds, so
+    /// what is left over has to be kept rather than thrown away -- discarding
+    /// it would lose most of every second and every clock in the window would
+    /// crawl.
+    tick_carry_ms: u64,
 }
 
 /// Seed used when the kernel's entropy source cannot be reached.
@@ -490,6 +627,7 @@ impl RadioApp {
             search_active: false,
             screen: Screen::Browse,
             status_message: "Select a station and press Enter to play".into(),
+            tick_carry_ms: 0,
             width: 900.0,
             height: 650.0,
         };
@@ -577,7 +715,9 @@ impl RadioApp {
         match self.screen {
             Screen::Browse => {
                 if let Some(genre) = self.genre_filter {
-                    self.stations.iter().enumerate()
+                    self.stations
+                        .iter()
+                        .enumerate()
                         .filter(|(_, s)| s.genre == genre)
                         .map(|(i, _)| i)
                         .collect()
@@ -664,8 +804,9 @@ impl RadioApp {
 
     fn toggle_favorite(&mut self) {
         let filtered = self.filtered_stations();
+        let was_favorite = self.is_current_favorite();
         if let Some(&idx) = filtered.get(self.selected_station()) {
-            if self.favorites.contains(&idx) {
+            if was_favorite {
                 self.favorites.retain(|&i| i != idx);
                 if let Some(s) = self.stations.get(idx) {
                     self.status_message = format!("Removed '{}' from favorites", s.name);
@@ -681,7 +822,8 @@ impl RadioApp {
 
     fn is_current_favorite(&self) -> bool {
         let filtered = self.filtered_stations();
-        filtered.get(self.selected_station())
+        filtered
+            .get(self.selected_station())
             .map(|idx| self.favorites.contains(idx))
             .unwrap_or(false)
     }
@@ -694,9 +836,27 @@ impl RadioApp {
         self.status_message = format!("Sleep timer: {}", self.sleep_timer.label());
     }
 
-    fn tick(&mut self) {
+    /// Advance everything that moves on its own. Returns whether anything did.
+    ///
+    /// Two rates in one tick. The spectrum is redrawn every frame, because a
+    /// bar chart that changes once a second is a slideshow; the counters --
+    /// listening time, the recording length, the sleep timer -- only move on a
+    /// whole second, which is what they are counted in. This took no argument
+    /// at all and assumed one call meant one second, which is a thing no
+    /// caller could have promised.
+    pub fn tick(&mut self, elapsed_ms: u64) -> bool {
+        if self.play_state != PlayState::Playing && self.sleep_remaining_secs.is_none() {
+            return false;
+        }
+        self.tick_carry_ms = self.tick_carry_ms.saturating_add(elapsed_ms);
+        let whole_seconds = self.tick_carry_ms / 1000;
+        self.tick_carry_ms = self
+            .tick_carry_ms
+            .saturating_sub(whole_seconds.saturating_mul(1000));
+        let seconds = u32::try_from(whole_seconds).unwrap_or(u32::MAX);
+
         if self.play_state == PlayState::Playing {
-            self.listen_time_secs = self.listen_time_secs.saturating_add(1);
+            self.listen_time_secs = self.listen_time_secs.saturating_add(seconds);
 
             // Update spectrum (simulated).
             //
@@ -729,23 +889,20 @@ impl RadioApp {
                 // Saturating rather than `-`/`+`: every base is below the
                 // ceiling today, but an edit that raised one above it should
                 // quietly draw a flat bar, not underflow to a headroom of 256.
-                let headroom =
-                    usize::from(SPECTRUM_CEILING.saturating_sub(base)).saturating_add(1);
+                let headroom = usize::from(SPECTRUM_CEILING.saturating_sub(base)).saturating_add(1);
                 let noise = u8::try_from(self.spectrum_rng.below(headroom)).unwrap_or(0);
                 *bar = base.saturating_add(noise).min(SPECTRUM_CEILING);
             }
 
             // Recording timer
             if self.recording {
-                self.record_duration_secs = self.record_duration_secs.saturating_add(1);
+                self.record_duration_secs = self.record_duration_secs.saturating_add(seconds);
             }
         }
 
         // Sleep timer countdown
         if let Some(ref mut remaining) = self.sleep_remaining_secs {
-            if *remaining > 0 {
-                *remaining = remaining.saturating_sub(1);
-            }
+            *remaining = remaining.saturating_sub(seconds);
             if *remaining == 0 {
                 self.stop();
                 self.sleep_timer = SleepTimer::Off;
@@ -753,6 +910,12 @@ impl RadioApp {
                 self.status_message = "Sleep timer: playback stopped".into();
             }
         }
+        true
+    }
+
+    /// Is there anything a tick would move?
+    pub fn has_work(&self) -> bool {
+        self.play_state == PlayState::Playing || self.sleep_remaining_secs.is_some()
     }
 
     // ── Recording ──────────────────────────────────────────────────────
@@ -816,138 +979,302 @@ impl RadioApp {
 
     // ── Input ──────────────────────────────────────────────────────────
 
-    fn handle_key(&mut self, key: &str, ctrl: bool, _shift: bool) {
+    /// Adopt a new window size. Returns whether it changed.
+    pub fn set_window_size(&mut self, width: f32, height: f32) -> bool {
+        let width = width.max(MIN_WINDOW_WIDTH);
+        let height = height.max(MIN_WINDOW_HEIGHT);
+        if (self.width - width).abs() < f32::EPSILON && (self.height - height).abs() < f32::EPSILON
+        {
+            return false;
+        }
+        self.set_size(width, height);
+        true
+    }
+
+    /// The three screen tabs down the top of the sidebar.
+    pub fn screen_tabs(&self) -> Vec<(Screen, Rect)> {
+        [Screen::Browse, Screen::Favorites, Screen::Recent]
+            .into_iter()
+            .enumerate()
+            .map(|(i, screen)| {
+                #[allow(clippy::cast_precision_loss, reason = "there are three tabs")]
+                let y = 32.0 + (i as f32) * SIDEBAR_TAB_HEIGHT;
+                (
+                    screen,
+                    Rect {
+                        x: 0.0,
+                        y,
+                        width: SIDEBAR_WIDTH,
+                        height: SIDEBAR_TAB_HEIGHT,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Which screen tab a point is on, if any.
+    pub fn screen_tab_at(&self, x: f32, y: f32) -> Option<Screen> {
+        self.screen_tabs()
+            .into_iter()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(screen, _)| screen)
+    }
+
+    /// The station list pane: everything right of the sidebar, above the
+    /// player bar.
+    pub fn station_list_rect(&self) -> Rect {
+        Rect {
+            x: SIDEBAR_WIDTH,
+            y: 0.0,
+            width: (self.width - SIDEBAR_WIDTH).max(1.0),
+            height: (self.height - PLAYER_BAR_HEIGHT).max(1.0),
+        }
+    }
+
+    /// Which row of the station list a point is on, counted among the rows on
+    /// screen rather than among all of them.
+    pub fn station_row_at(&self, x: f32, y: f32) -> Option<usize> {
+        let pane = self.station_list_rect();
+        if !pane.contains(x, y) {
+            return None;
+        }
+        let top = pane.y + STATION_ROWS_TOP;
+        if y < top {
+            return None;
+        }
+        #[allow(
+            clippy::cast_sign_loss,
+            clippy::cast_possible_truncation,
+            reason = "guarded at or below `top` just above"
+        )]
+        let drawn = ((y - top) / STATION_ROW_HEIGHT) as usize;
+        if drawn >= self.station_rows() {
+            return None;
+        }
+        let len = self.filtered_stations().len();
+        let index = self
+            .station_view
+            .visible_range(len)
+            .start
+            .checked_add(drawn)?;
+        (index < len).then_some(index)
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        let (x, y) = (event.x, event.y);
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                if let Some(screen) = self.screen_tab_at(x, y) {
+                    if self.screen == screen {
+                        return false;
+                    }
+                    self.show_screen(screen);
+                    return true;
+                }
+                if let Some(row) = self.station_row_at(x, y) {
+                    // First click selects, second plays: a list you cannot
+                    // look at without starting a stream is one you cannot
+                    // browse.
+                    if self.selected_station() == row {
+                        let stations = self.filtered_stations();
+                        if let Some(&idx) = stations.get(row) {
+                            self.play_station(idx);
+                        }
+                    } else {
+                        self.select_station(row);
+                    }
+                    return true;
+                }
+                false
+            }
+            MouseEventKind::Scroll { dy, .. } => {
+                if !self.station_list_rect().contains(x, y) {
+                    return false;
+                }
+                let len = self.filtered_stations().len();
+                // `dy` is in notches, positive away from the user, which
+                // scrolls towards the start of the list.
+                if dy > 0.0 {
+                    self.station_view.select_prev(len);
+                } else if dy < 0.0 {
+                    self.station_view.select_next(len);
+                } else {
+                    return false;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Handle one input event. Returns whether anything changed.
+    pub fn handle_event(&mut self, event: &Event) -> bool {
+        match event {
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Tick { elapsed_ms } => self.tick(*elapsed_ms),
+            _ => false,
+        }
+    }
+
+    /// Act on a keystroke. Returns whether anything changed.
+    ///
+    /// This took a `&str` and matched on `"Return"`, `"BackSpace"`, `"Prior"`
+    /// and `"Next"` -- an X11 keysym vocabulary invented here, which nothing
+    /// in the tree produces. Nothing could have called it without a
+    /// translation table naming every key a second time.
+    pub fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        let ctrl = event.modifiers.ctrl;
+
         // Search mode
         if self.search_active {
-            match key {
-                "Escape" => {
+            match event.key {
+                Key::Escape => {
                     self.search_active = false;
                     self.search_query.clear();
                     self.search_results.clear();
                     self.screen = Screen::Browse;
+                    return true;
                 }
-                "Return" | "Enter"
-                    if !self.search_results.is_empty() => {
-                        self.screen = Screen::Search;
-                        self.search_active = false;
+                Key::Enter if !self.search_results.is_empty() => {
+                    self.screen = Screen::Search;
+                    self.search_active = false;
+                    return true;
+                }
+                Key::Backspace => {
+                    if self.search_query.pop().is_none() {
+                        return false;
                     }
-                "BackSpace" => {
-                    self.search_query.pop();
                     self.perform_search();
+                    return true;
                 }
-                _ if key.len() == 1 && !ctrl => {
-                    self.search_query.push_str(key);
+                _ => {
+                    let typed: String = event.typed().collect();
+                    if typed.is_empty() || ctrl {
+                        return false;
+                    }
+                    self.search_query.push_str(&typed);
                     self.perform_search();
+                    return true;
                 }
-                _ => {}
             }
-            return;
         }
 
-        match key {
+        match event.key {
             // Playback
-            " " | "Return" | "Enter" => self.toggle_play(),
-            "s" if !ctrl => self.stop(),
-
-            // Volume
-            "+" | "=" => self.volume_up(),
-            "-" => self.volume_down(),
-            "m" if !ctrl => self.toggle_mute(),
+            Key::Space | Key::Enter => {
+                self.toggle_play();
+                return true;
+            }
 
             // Navigation. Every arm scrolls the list to keep the new selection
             // on screen, which is the whole reason it goes through the viewport
             // rather than assigning an index: moving a selection the list does
             // not follow is how Down used to walk off the bottom of the pane.
             //
-            // A page is now a windowful rather than a fixed five rows, so
-            // PageDown lands on the row after the last one visible instead of
-            // somewhere in the middle of the page it was already showing.
-            "Up" => {
+            // A page is a windowful rather than a fixed five rows, so PageDown
+            // lands on the row after the last one visible instead of somewhere
+            // in the middle of the page it was already showing.
+            Key::Up => {
                 let len = self.filtered_stations().len();
                 self.station_view.select_prev(len);
+                return true;
             }
-            "Down" => {
+            Key::Down => {
                 let len = self.filtered_stations().len();
                 self.station_view.select_next(len);
+                return true;
             }
-            "PageUp" | "Prior" => {
+            Key::PageUp => {
                 let len = self.filtered_stations().len();
                 self.station_view.page_up(len);
+                return true;
             }
-            "PageDown" | "Next" => {
+            Key::PageDown => {
                 let len = self.filtered_stations().len();
                 self.station_view.page_down(len);
+                return true;
             }
 
             // Genre filter
-            "Left" if self.screen == Screen::Browse => {
-                // Cycle genre filter backward, wrapping through "All".
-                let previous = match self.genre_filter {
-                    None => Some(Genre::World),
-                    Some(g) => {
-                        let idx = Genre::ALL.iter().position(|&x| x == g).unwrap_or(0);
-                        if idx == 0 {
-                            None
-                        } else {
-                            Genre::ALL.get(idx.saturating_sub(1)).copied()
-                        }
-                    }
-                };
-                self.set_genre_filter(previous);
+            Key::Left if self.screen == Screen::Browse => {
+                self.cycle_genre(-1);
+                return true;
             }
-            "Right" if self.screen == Screen::Browse => {
-                let next = match self.genre_filter {
-                    None => Some(Genre::Rock),
-                    Some(g) => {
-                        let idx = Genre::ALL.iter().position(|&x| x == g).unwrap_or(0);
-                        let next = idx.saturating_add(1);
-                        if next >= Genre::ALL.len() {
-                            None
-                        } else {
-                            Genre::ALL.get(next).copied()
-                        }
-                    }
-                };
-                self.set_genre_filter(next);
+            Key::Right if self.screen == Screen::Browse => {
+                self.cycle_genre(1);
+                return true;
             }
+            _ => {}
+        }
 
-            // Favorite
-            "f" if !ctrl => self.toggle_favorite(),
-
-            // Screen switching
+        if ctrl {
+            return false;
+        }
+        let Some(ch) = event.typed().next() else {
+            return false;
+        };
+        match ch.to_ascii_lowercase() {
+            's' => self.stop(),
+            '+' | '=' => self.volume_up(),
+            '-' => self.volume_down(),
+            'm' => self.toggle_mute(),
+            'f' => self.toggle_favorite(),
             // A screen switch replaces the list rather than editing it, so the
             // old position names nothing; `select_station` scrolls back to the
             // top as well as picking the first row.
-            "1" => { self.screen = Screen::Browse; self.select_station(0); }
-            "2" => { self.screen = Screen::Favorites; self.select_station(0); }
-            "3" => { self.screen = Screen::Recent; self.select_station(0); }
-
-            // Search
-            "/" => {
+            '1' => self.show_screen(Screen::Browse),
+            '2' => self.show_screen(Screen::Favorites),
+            '3' => self.show_screen(Screen::Recent),
+            '/' => {
                 self.search_active = true;
                 self.search_query.clear();
                 self.status_message = "Type to search stations...".into();
             }
-
-            // Sleep timer
-            "t" if !ctrl => self.set_sleep_timer(),
-
-            // Recording
-            "r" if !ctrl => self.toggle_recording(),
-
-            _ => {}
+            't' => self.set_sleep_timer(),
+            'r' => self.toggle_recording(),
+            _ => return false,
         }
+        true
     }
 
-    // ── Rendering ──────────────────────────────────────────────────────
+    /// Step the genre filter along, wrapping through "All Genres".
+    fn cycle_genre(&mut self, direction: isize) {
+        let wanted = match (self.genre_filter, direction >= 0) {
+            (None, true) => Genre::ALL.first().copied(),
+            (None, false) => Genre::ALL.last().copied(),
+            (Some(g), forward) => {
+                let idx = Genre::ALL.iter().position(|&x| x == g).unwrap_or(0);
+                if forward {
+                    Genre::ALL.get(idx.saturating_add(1)).copied()
+                } else if idx == 0 {
+                    None
+                } else {
+                    Genre::ALL.get(idx.saturating_sub(1)).copied()
+                }
+            }
+        };
+        self.set_genre_filter(wanted);
+    }
 
-    fn render(&self) -> Vec<RenderCommand> {
+    /// Show a screen, starting at the top of the list it puts up.
+    pub fn show_screen(&mut self, screen: Screen) {
+        self.screen = screen;
+        self.select_station(0);
+    }
+
+    /// Render the whole window to a list of render commands.
+    pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width: self.width, height: self.height,
-            color: BASE, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: self.height,
+            color: BASE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         // Layout:
@@ -984,15 +1311,22 @@ impl RadioApp {
             "the sidebar must be the one `genre_rows` sized the genre list for"
         );
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: h,
-            color: MANTLE, corner_radii: CornerRadii::ZERO,
+            x,
+            y,
+            width: w,
+            height: h,
+            color: MANTLE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         // Title
         cmds.push(RenderCommand::Text {
-            x: x + 12.0, y: y + 10.0,
-            text: "Internet Radio".into(), font_size: 14.0,
-            color: BLUE, font_weight: FontWeightHint::Bold,
+            x: x + 12.0,
+            y: y + 10.0,
+            text: "Internet Radio".into(),
+            font_size: 14.0,
+            color: BLUE,
+            font_weight: FontWeightHint::Bold,
             max_width: Some(w - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
@@ -1008,15 +1342,25 @@ impl RadioApp {
             let active = self.screen == *scr;
             if active {
                 cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0, y: ty, width: w - 8.0, height: 20.0,
-                    color: SURFACE0, corner_radii: CornerRadii::all(4.0),
+                    x: x + 4.0,
+                    y: ty,
+                    width: w - 8.0,
+                    height: 20.0,
+                    color: SURFACE0,
+                    corner_radii: CornerRadii::all(4.0),
                 });
             }
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: ty + 4.0,
-                text: label.to_string(), font_size: 10.0,
+                x: x + 12.0,
+                y: ty + 4.0,
+                text: label.to_string(),
+                font_size: 10.0,
                 color: if active { TEXT_COLOR } else { SUBTEXT0 },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(w - 24.0),
                 overflow: TextOverflow::Ellipsis,
             });
@@ -1028,9 +1372,12 @@ impl RadioApp {
         // Genre filter (only in Browse)
         if self.screen == Screen::Browse {
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: ty,
-                text: "Genres [Left/Right]".into(), font_size: 10.0,
-                color: OVERLAY0, font_weight: FontWeightHint::Bold,
+                x: x + 12.0,
+                y: ty,
+                text: "Genres [Left/Right]".into(),
+                font_size: 10.0,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Bold,
                 max_width: Some(w - 24.0),
                 overflow: TextOverflow::Ellipsis,
             });
@@ -1040,13 +1387,19 @@ impl RadioApp {
             let all_active = self.genre_filter.is_none();
             if all_active {
                 cmds.push(RenderCommand::FillRect {
-                    x: x + 6.0, y: ty, width: w - 12.0, height: 18.0,
-                    color: SURFACE0, corner_radii: CornerRadii::all(3.0),
+                    x: x + 6.0,
+                    y: ty,
+                    width: w - 12.0,
+                    height: 18.0,
+                    color: SURFACE0,
+                    corner_radii: CornerRadii::all(3.0),
                 });
             }
             cmds.push(RenderCommand::Text {
-                x: x + 14.0, y: ty + 3.0,
-                text: "All Genres".into(), font_size: 10.0,
+                x: x + 14.0,
+                y: ty + 3.0,
+                text: "All Genres".into(),
+                font_size: 10.0,
                 color: if all_active { TEXT_COLOR } else { SUBTEXT0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 28.0),
@@ -1066,8 +1419,11 @@ impl RadioApp {
             // Bounded by where the search hint begins, not by the sidebar's
             // bottom edge: the old `ty + 18.0 > y + h` let the last genres draw
             // straight over the hint at `y + h - SEARCH_HINT_HEIGHT`.
-            let window =
-                scroll_window::visible_count(Genre::ALL.len(), self.genre_rows(), self.genre_view.first_visible());
+            let window = scroll_window::visible_count(
+                Genre::ALL.len(),
+                self.genre_rows(),
+                self.genre_view.first_visible(),
+            );
             for (row, genre) in Genre::ALL
                 .get(window.start..window.end())
                 .unwrap_or_default()
@@ -1078,18 +1434,28 @@ impl RadioApp {
                 let active = self.genre_filter == Some(*genre);
                 if active {
                     cmds.push(RenderCommand::FillRect {
-                        x: x + 6.0, y: gy, width: w - 12.0, height: 18.0,
-                        color: SURFACE0, corner_radii: CornerRadii::all(3.0),
+                        x: x + 6.0,
+                        y: gy,
+                        width: w - 12.0,
+                        height: 18.0,
+                        color: SURFACE0,
+                        corner_radii: CornerRadii::all(3.0),
                     });
                 }
                 // Genre color dot
                 cmds.push(RenderCommand::FillRect {
-                    x: x + 10.0, y: gy + 5.0, width: 8.0, height: 8.0,
-                    color: genre.color(), corner_radii: CornerRadii::all(4.0),
+                    x: x + 10.0,
+                    y: gy + 5.0,
+                    width: 8.0,
+                    height: 8.0,
+                    color: genre.color(),
+                    corner_radii: CornerRadii::all(4.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: x + 22.0, y: gy + 3.0,
-                    text: genre.label().to_string(), font_size: 10.0,
+                    x: x + 22.0,
+                    y: gy + 3.0,
+                    text: genre.label().to_string(),
+                    font_size: 10.0,
                     color: if active { TEXT_COLOR } else { SUBTEXT0 },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 36.0),
@@ -1114,17 +1480,24 @@ impl RadioApp {
 
         // Search hint
         cmds.push(RenderCommand::Text {
-            x: x + 12.0, y: y + h - SEARCH_HINT_HEIGHT,
-            text: "[/] Search".into(), font_size: 9.0,
-            color: OVERLAY0, font_weight: FontWeightHint::Regular,
+            x: x + 12.0,
+            y: y + h - SEARCH_HINT_HEIGHT,
+            text: "[/] Search".into(),
+            font_size: 9.0,
+            color: OVERLAY0,
+            font_weight: FontWeightHint::Regular,
             max_width: Some(w - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
 
         // Separator
         cmds.push(RenderCommand::FillRect {
-            x: x + w - 1.0, y, width: 1.0, height: h,
-            color: SURFACE0, corner_radii: CornerRadii::ZERO,
+            x: x + w - 1.0,
+            y,
+            width: 1.0,
+            height: h,
+            color: SURFACE0,
+            corner_radii: CornerRadii::ZERO,
         });
     }
 
@@ -1141,9 +1514,12 @@ impl RadioApp {
         };
 
         cmds.push(RenderCommand::Text {
-            x: x + 12.0, y: y + 8.0,
-            text: title, font_size: 13.0,
-            color: TEXT_COLOR, font_weight: FontWeightHint::Bold,
+            x: x + 12.0,
+            y: y + 8.0,
+            text: title,
+            font_size: 13.0,
+            color: TEXT_COLOR,
+            font_weight: FontWeightHint::Bold,
             max_width: Some(w - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
@@ -1161,9 +1537,12 @@ impl RadioApp {
 
         if filtered.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: x + 20.0, y: start_y + 10.0,
-                text: "No stations".into(), font_size: 12.0,
-                color: OVERLAY0, font_weight: FontWeightHint::Regular,
+                x: x + 20.0,
+                y: start_y + 10.0,
+                text: "No stations".into(),
+                font_size: 12.0,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 40.0),
                 overflow: TextOverflow::Ellipsis,
             });
@@ -1182,12 +1561,7 @@ impl RadioApp {
         // back on. Enumerating first and subtracting is the same number by a
         // route that underflows if the two ever disagree.
         let first = window.start;
-        for (row, &station_idx) in filtered
-            .get(window)
-            .unwrap_or_default()
-            .iter()
-            .enumerate()
-        {
+        for (row, &station_idx) in filtered.get(window).unwrap_or_default().iter().enumerate() {
             if let Some(station) = self.stations.get(station_idx) {
                 let ry = start_y + (row as f32) * row_h;
                 let is_sel = self.station_view.selected() == Some(first.saturating_add(row));
@@ -1196,24 +1570,40 @@ impl RadioApp {
 
                 if is_sel {
                     cmds.push(RenderCommand::FillRect {
-                        x: x + 4.0, y: ry, width: w - 8.0, height: row_h - 4.0,
-                        color: SURFACE0, corner_radii: CornerRadii::all(6.0),
+                        x: x + 4.0,
+                        y: ry,
+                        width: w - 8.0,
+                        height: row_h - 4.0,
+                        color: SURFACE0,
+                        corner_radii: CornerRadii::all(6.0),
                     });
                 }
 
                 // Playing indicator
                 if is_playing {
                     cmds.push(RenderCommand::FillRect {
-                        x: x + 8.0, y: ry + 8.0, width: 4.0, height: row_h - 20.0,
-                        color: GREEN, corner_radii: CornerRadii::all(2.0),
+                        x: x + 8.0,
+                        y: ry + 8.0,
+                        width: 4.0,
+                        height: row_h - 20.0,
+                        color: GREEN,
+                        corner_radii: CornerRadii::all(2.0),
                     });
                 }
 
                 // Station name
                 cmds.push(RenderCommand::Text {
-                    x: x + 18.0, y: ry + 4.0,
-                    text: station.name.clone(), font_size: 13.0,
-                    color: if is_playing { GREEN } else if is_sel { TEXT_COLOR } else { SUBTEXT1 },
+                    x: x + 18.0,
+                    y: ry + 4.0,
+                    text: station.name.clone(),
+                    font_size: 13.0,
+                    color: if is_playing {
+                        GREEN
+                    } else if is_sel {
+                        TEXT_COLOR
+                    } else {
+                        SUBTEXT1
+                    },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(w - 100.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1221,24 +1611,43 @@ impl RadioApp {
 
                 // Genre badge
                 cmds.push(RenderCommand::FillRect {
-                    x: x + w - 80.0, y: ry + 4.0, width: 60.0, height: 16.0,
+                    x: x + w - 80.0,
+                    y: ry + 4.0,
+                    width: 60.0,
+                    height: 16.0,
                     color: station.genre.color(),
                     corner_radii: CornerRadii::all(8.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: x + w - 72.0, y: ry + 6.0,
-                    text: station.genre.label().to_string(), font_size: 8.0,
-                    color: CRUST, font_weight: FontWeightHint::Bold,
+                    x: x + w - 72.0,
+                    y: ry + 6.0,
+                    text: station.genre.label().to_string(),
+                    font_size: 8.0,
+                    color: CRUST,
+                    font_weight: FontWeightHint::Bold,
                     max_width: Some(52.0),
                     overflow: TextOverflow::Ellipsis,
                 });
 
                 // Info line
-                let fav_mark = if self.favorites.contains(&station_idx) { " *" } else { "" };
+                let fav_mark = if self.favorites.contains(&station_idx) {
+                    " *"
+                } else {
+                    ""
+                };
                 cmds.push(RenderCommand::Text {
-                    x: x + 18.0, y: ry + 20.0,
-                    text: format!("{}kbps {} | {}{}", station.bitrate_kbps, station.codec.label(), station.country, fav_mark),
-                    font_size: 9.0, color: OVERLAY0,
+                    x: x + 18.0,
+                    y: ry + 20.0,
+                    text: format!(
+                        "{}kbps {} | {} | {}{}",
+                        station.bitrate_kbps,
+                        station.codec.label(),
+                        station.country,
+                        station.language,
+                        fav_mark
+                    ),
+                    font_size: 9.0,
+                    color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 40.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1246,9 +1655,12 @@ impl RadioApp {
 
                 // Description
                 cmds.push(RenderCommand::Text {
-                    x: x + 18.0, y: ry + 32.0,
-                    text: station.description.clone(), font_size: 9.0,
-                    color: SUBTEXT0, font_weight: FontWeightHint::Regular,
+                    x: x + 18.0,
+                    y: ry + 32.0,
+                    text: station.description.clone(),
+                    font_size: 9.0,
+                    color: SUBTEXT0,
+                    font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 40.0),
                     overflow: TextOverflow::Ellipsis,
                 });
@@ -1276,23 +1688,37 @@ impl RadioApp {
 
     fn render_player_bar(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: h,
-            color: CRUST, corner_radii: CornerRadii::ZERO,
+            x,
+            y,
+            width: w,
+            height: h,
+            color: CRUST,
+            corner_radii: CornerRadii::ZERO,
         });
 
         // Separator
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: 1.0,
-            color: SURFACE0, corner_radii: CornerRadii::ZERO,
+            x,
+            y,
+            width: w,
+            height: 1.0,
+            color: SURFACE0,
+            corner_radii: CornerRadii::ZERO,
         });
 
         if let Some(idx) = self.current_station {
             if let Some(station) = self.stations.get(idx) {
                 // Station name
                 cmds.push(RenderCommand::Text {
-                    x: x + 12.0, y: y + 8.0,
-                    text: station.name.clone(), font_size: 14.0,
-                    color: if self.play_state == PlayState::Playing { GREEN } else { TEXT_COLOR },
+                    x: x + 12.0,
+                    y: y + 8.0,
+                    text: station.name.clone(),
+                    font_size: 14.0,
+                    color: if self.play_state == PlayState::Playing {
+                        GREEN
+                    } else {
+                        TEXT_COLOR
+                    },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(250.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1306,9 +1732,17 @@ impl RadioApp {
                     PlayState::Error => "Error",
                 };
                 cmds.push(RenderCommand::Text {
-                    x: x + 12.0, y: y + 26.0,
-                    text: format!("{} | {} | {}kbps", status, Self::format_time(self.listen_time_secs), station.bitrate_kbps),
-                    font_size: 10.0, color: SUBTEXT0,
+                    x: x + 12.0,
+                    y: y + 26.0,
+                    text: format!(
+                        "{} | {} | {}kbps | {}",
+                        status,
+                        Self::format_time(self.listen_time_secs),
+                        station.bitrate_kbps,
+                        station.url
+                    ),
+                    font_size: 10.0,
+                    color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(250.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1334,9 +1768,11 @@ impl RadioApp {
             }
         } else {
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: y + 20.0,
+                x: x + 12.0,
+                y: y + 20.0,
                 text: "No station playing — Select and press Enter".into(),
-                font_size: 12.0, color: OVERLAY0,
+                font_size: 12.0,
+                color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(400.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1345,10 +1781,16 @@ impl RadioApp {
 
         // Volume
         let vol_x = w - 180.0;
-        let vol_label = if self.muted { "Muted".into() } else { format!("Vol: {}%", self.volume) };
+        let vol_label = if self.muted {
+            "Muted".into()
+        } else {
+            format!("Vol: {}%", self.volume)
+        };
         cmds.push(RenderCommand::Text {
-            x: vol_x, y: y + 8.0,
-            text: vol_label, font_size: 10.0,
+            x: vol_x,
+            y: y + 8.0,
+            text: vol_label,
+            font_size: 10.0,
             color: if self.muted { RED } else { SUBTEXT1 },
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
@@ -1357,20 +1799,34 @@ impl RadioApp {
 
         // Volume bar
         cmds.push(RenderCommand::FillRect {
-            x: vol_x, y: y + 22.0, width: 80.0, height: 4.0,
-            color: SURFACE0, corner_radii: CornerRadii::all(2.0),
+            x: vol_x,
+            y: y + 22.0,
+            width: 80.0,
+            height: 4.0,
+            color: SURFACE0,
+            corner_radii: CornerRadii::all(2.0),
         });
-        let vol_fill = if self.muted { 0.0 } else { (self.volume as f32) * 0.8 };
+        let vol_fill = if self.muted {
+            0.0
+        } else {
+            (self.volume as f32) * 0.8
+        };
         cmds.push(RenderCommand::FillRect {
-            x: vol_x, y: y + 22.0, width: vol_fill, height: 4.0,
-            color: GREEN, corner_radii: CornerRadii::all(2.0),
+            x: vol_x,
+            y: y + 22.0,
+            width: vol_fill,
+            height: 4.0,
+            color: GREEN,
+            corner_radii: CornerRadii::all(2.0),
         });
 
         // Controls hint
         cmds.push(RenderCommand::Text {
-            x: vol_x, y: y + 34.0,
+            x: vol_x,
+            y: y + 34.0,
             text: "[Space] Play/Stop [+/-] Vol [M] Mute".into(),
-            font_size: 8.0, color: OVERLAY0,
+            font_size: 8.0,
+            color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(170.0),
             overflow: TextOverflow::Ellipsis,
@@ -1379,9 +1835,11 @@ impl RadioApp {
         // Sleep timer
         if let Some(remaining) = self.sleep_remaining_secs {
             cmds.push(RenderCommand::Text {
-                x: vol_x, y: y + 48.0,
+                x: vol_x,
+                y: y + 48.0,
                 text: format!("Sleep: {}", Self::format_time(remaining)),
-                font_size: 9.0, color: YELLOW,
+                font_size: 9.0,
+                color: YELLOW,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1391,13 +1849,19 @@ impl RadioApp {
         // Recording indicator
         if self.recording {
             cmds.push(RenderCommand::FillRect {
-                x: vol_x + 100.0, y: y + 8.0, width: 8.0, height: 8.0,
-                color: RED, corner_radii: CornerRadii::all(4.0),
+                x: vol_x + 100.0,
+                y: y + 8.0,
+                width: 8.0,
+                height: 8.0,
+                color: RED,
+                corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: vol_x + 112.0, y: y + 8.0,
+                x: vol_x + 112.0,
+                y: y + 8.0,
                 text: format!("REC {}", Self::format_time(self.record_duration_secs)),
-                font_size: 9.0, color: RED,
+                font_size: 9.0,
+                color: RED,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1406,9 +1870,12 @@ impl RadioApp {
 
         // Status
         cmds.push(RenderCommand::Text {
-            x: x + 12.0, y: y + h - 16.0,
-            text: self.status_message.clone(), font_size: 9.0,
-            color: SUBTEXT0, font_weight: FontWeightHint::Regular,
+            x: x + 12.0,
+            y: y + h - 16.0,
+            text: self.status_message.clone(),
+            font_size: 9.0,
+            color: SUBTEXT0,
+            font_weight: FontWeightHint::Regular,
             max_width: Some(w - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
@@ -1421,8 +1888,12 @@ impl RadioApp {
         let sy: f32 = 40.0;
 
         cmds.push(RenderCommand::FillRect {
-            x: sx, y: sy, width: sw, height: sh,
-            color: SURFACE1, corner_radii: CornerRadii::all(8.0),
+            x: sx,
+            y: sy,
+            width: sw,
+            height: sh,
+            color: SURFACE1,
+            corner_radii: CornerRadii::all(8.0),
         });
 
         let display = if self.search_query.is_empty() {
@@ -1431,9 +1902,15 @@ impl RadioApp {
             format!("{}|", self.search_query)
         };
         cmds.push(RenderCommand::Text {
-            x: sx + 12.0, y: sy + 8.0,
-            text: display, font_size: 14.0,
-            color: if self.search_query.is_empty() { OVERLAY0 } else { TEXT_COLOR },
+            x: sx + 12.0,
+            y: sy + 8.0,
+            text: display,
+            font_size: 14.0,
+            color: if self.search_query.is_empty() {
+                OVERLAY0
+            } else {
+                TEXT_COLOR
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(sw - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -1441,9 +1918,11 @@ impl RadioApp {
 
         if !self.search_results.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: sx + 12.0, y: sy + 28.0,
+                x: sx + 12.0,
+                y: sy + 28.0,
                 text: format!("{} results — Enter to view", self.search_results.len()),
-                font_size: 10.0, color: GREEN,
+                font_size: 10.0,
+                color: GREEN,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sw - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1452,8 +1931,83 @@ impl RadioApp {
     }
 }
 
-fn main() {
-    let _app = RadioApp::new();
+impl App for RadioApp {
+    fn title(&self) -> String {
+        // What is playing, because that is what a radio is left open for.
+        match (self.play_state, self.current_station) {
+            (PlayState::Playing, Some(idx)) => self
+                .stations
+                .get(idx)
+                .map_or_else(|| "Radio".to_string(), |st| format!("{} - Radio", st.name)),
+            (_, Some(idx)) => self.stations.get(idx).map_or_else(
+                || "Radio".to_string(),
+                |st| format!("{} (stopped) - Radio", st.name),
+            ),
+            _ => "Radio".to_string(),
+        }
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive constants well inside u32"
+        )]
+        {
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        }
+    }
+
+    /// A clock while a stream is playing or a sleep timer is running.
+    ///
+    /// A stopped radio has nothing to advance -- no spectrum, no listening
+    /// time, no countdown -- and waking the machine ten times a second to
+    /// establish that is `known-issues.md` lesson 47.
+    fn tick_interval(&self) -> Option<Duration> {
+        self.has_work().then_some(FRAME_TICK)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        match event {
+            Event::CloseRequested => Response::Exit,
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension in pixels is exact in f32"
+                )]
+                let (w, h) = (*width as f32, *height as f32);
+                if self.set_window_size(w, h) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            other => {
+                if self.handle_event(other) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The handed size wins over the recorded one: the first frame is drawn
+        // before any `Event::Resize` arrives, so a window opened at another
+        // size would be laid out for the size that was asked for, and every
+        // hit box in it would name the wrong rectangle.
+        self.set_window_size(width, height);
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = RadioApp::new();
+    app.set_size(WINDOW_WIDTH, WINDOW_HEIGHT);
+    app::launch("radio", &mut app)
 }
 
 #[cfg(test)]
@@ -1471,6 +2025,29 @@ mod tests {
     )]
 
     use super::*;
+
+    use guitk::event::Modifiers;
+
+    /// A keystroke, in the toolkit's own key vocabulary.
+    fn key(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    /// A letter or digit, carrying the text it typed -- the letter shortcuts
+    /// read `typed()` so that a board which puts `m` elsewhere still mutes.
+    fn typed(k: Key, ch: char) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: ch.to_string(),
+        }
+    }
 
     #[test]
     fn test_preset_stations() {
@@ -1622,14 +2199,14 @@ mod tests {
     fn test_tick_increments_listen_time() {
         let mut app = RadioApp::new();
         app.play_station(0);
-        app.tick();
+        app.tick(1000);
         assert_eq!(app.listen_time_secs, 1);
     }
 
     #[test]
     fn test_tick_no_increment_when_stopped() {
         let mut app = RadioApp::new();
-        app.tick();
+        app.tick(1000);
         assert_eq!(app.listen_time_secs, 0);
     }
 
@@ -1638,8 +2215,8 @@ mod tests {
         let mut app = RadioApp::new();
         app.play_station(0);
         app.sleep_remaining_secs = Some(1);
-        app.tick(); // decrements to 0
-        app.tick(); // triggers stop
+        app.tick(1000); // decrements to 0
+        app.tick(1000); // triggers stop
         assert_eq!(app.play_state, PlayState::Stopped);
     }
 
@@ -1649,7 +2226,7 @@ mod tests {
         app.play_station(0);
         app.toggle_recording();
         assert!(app.recording);
-        app.tick();
+        app.tick(1000);
         assert_eq!(app.record_duration_secs, 1);
         app.toggle_recording();
         assert!(!app.recording);
@@ -1720,7 +2297,7 @@ mod tests {
     #[test]
     fn test_key_space_plays() {
         let mut app = RadioApp::new();
-        app.handle_key(" ", false, false);
+        app.handle_key(&key(Key::Space));
         assert_eq!(app.play_state, PlayState::Playing);
     }
 
@@ -1728,57 +2305,57 @@ mod tests {
     fn test_key_volume() {
         let mut app = RadioApp::new();
         let before = app.volume;
-        app.handle_key("+", false, false);
+        app.handle_key(&typed(Key::Equals, '+'));
         assert_eq!(app.volume, before + 5);
-        app.handle_key("-", false, false);
+        app.handle_key(&typed(Key::Minus, '-'));
         assert_eq!(app.volume, before);
     }
 
     #[test]
     fn test_key_mute() {
         let mut app = RadioApp::new();
-        app.handle_key("m", false, false);
+        app.handle_key(&typed(Key::M, 'm'));
         assert!(app.muted);
     }
 
     #[test]
     fn test_key_favorite() {
         let mut app = RadioApp::new();
-        app.handle_key("f", false, false);
+        app.handle_key(&typed(Key::F, 'f'));
         assert!(app.is_current_favorite());
     }
 
     #[test]
     fn test_key_screen_switch() {
         let mut app = RadioApp::new();
-        app.handle_key("2", false, false);
+        app.handle_key(&typed(Key::Num2, '2'));
         assert_eq!(app.screen, Screen::Favorites);
-        app.handle_key("3", false, false);
+        app.handle_key(&typed(Key::Num3, '3'));
         assert_eq!(app.screen, Screen::Recent);
-        app.handle_key("1", false, false);
+        app.handle_key(&typed(Key::Num1, '1'));
         assert_eq!(app.screen, Screen::Browse);
     }
 
     #[test]
     fn test_key_search() {
         let mut app = RadioApp::new();
-        app.handle_key("/", false, false);
+        app.handle_key(&typed(Key::Slash, '/'));
         assert!(app.search_active);
     }
 
     #[test]
     fn test_key_navigation() {
         let mut app = RadioApp::new();
-        app.handle_key("Down", false, false);
+        app.handle_key(&key(Key::Down));
         assert_eq!(app.selected_station(), 1);
-        app.handle_key("Up", false, false);
+        app.handle_key(&key(Key::Up));
         assert_eq!(app.selected_station(), 0);
     }
 
     #[test]
     fn test_render_browse() {
         let app = RadioApp::new();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -1786,7 +2363,7 @@ mod tests {
     fn test_render_playing() {
         let mut app = RadioApp::new();
         app.play_station(0);
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -1794,7 +2371,7 @@ mod tests {
     fn test_render_favorites() {
         let mut app = RadioApp::new();
         app.screen = Screen::Favorites;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -1802,7 +2379,7 @@ mod tests {
     fn test_render_search_overlay() {
         let mut app = RadioApp::new();
         app.search_active = true;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -1811,7 +2388,7 @@ mod tests {
         let mut app = RadioApp::new();
         app.play_station(0);
         let before = app.spectrum_bars;
-        app.tick();
+        app.tick(1000);
         // Spectrum should change
         assert_ne!(app.spectrum_bars, before);
     }
@@ -1825,7 +2402,7 @@ mod tests {
         app.play_station(0);
         (0..frames)
             .map(|_| {
-                app.tick();
+                app.tick(1000);
                 app.spectrum_bars
             })
             .collect()
@@ -1881,9 +2458,8 @@ mod tests {
         // `seeded_from_system` takes the fallback -- which is what makes this
         // checkable. Asserting *which* seed, not that two apps differ: a
         // variety check would pass on the old hardcoded 42 and fail on the fix.
-        let draws = |mut rng: SeededRng| -> Vec<usize> {
-            (0..12).map(|_| rng.below(1000)).collect()
-        };
+        let draws =
+            |mut rng: SeededRng| -> Vec<usize> { (0..12).map(|_| rng.below(1000)).collect() };
         let from_system = draws(RadioApp::new().spectrum_rng);
         assert_eq!(
             from_system,
@@ -1915,12 +2491,13 @@ mod tests {
     /// y range: a filter on position is exactly the thing that silently
     /// returns nothing when the geometry it assumes has moved.
     fn drawn_stations(app: &RadioApp) -> Vec<String> {
-        app.render()
+        app.render_commands()
             .into_iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { x, text, font_size, .. }
-                    if (x - (SIDEBAR_WIDTH + 18.0)).abs() < 0.01
-                        && (font_size - 13.0).abs() < 0.01 =>
+                RenderCommand::Text {
+                    x, text, font_size, ..
+                } if (x - (SIDEBAR_WIDTH + 18.0)).abs() < 0.01
+                    && (font_size - 13.0).abs() < 0.01 =>
                 {
                     Some(text)
                 }
@@ -1931,14 +2508,16 @@ mod tests {
 
     /// Genre labels drawn in the sidebar, with the y each was drawn at.
     fn drawn_genres(app: &RadioApp) -> Vec<(String, f32)> {
-        app.render()
+        app.render_commands()
             .into_iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { x, y, text, font_size, .. }
-                    if (x - 22.0).abs() < 0.01 && (font_size - 10.0).abs() < 0.01 =>
-                {
-                    Some((text, y))
-                }
+                RenderCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size,
+                    ..
+                } if (x - 22.0).abs() < 0.01 && (font_size - 10.0).abs() < 0.01 => Some((text, y)),
                 _ => None,
             })
             .collect()
@@ -1946,11 +2525,15 @@ mod tests {
 
     /// The "N more" line a list draws when it is hiding rows, if any.
     fn more_line(app: &RadioApp, x: f32) -> Option<String> {
-        app.render().into_iter().find_map(|c| match c {
-            RenderCommand::Text { x: cx, text, font_size, .. }
-                if (cx - x).abs() < 0.01
-                    && (font_size - 9.0).abs() < 0.01
-                    && text.ends_with(" more") =>
+        app.render_commands().into_iter().find_map(|c| match c {
+            RenderCommand::Text {
+                x: cx,
+                text,
+                font_size,
+                ..
+            } if (cx - x).abs() < 0.01
+                && (font_size - 9.0).abs() < 0.01
+                && text.ends_with(" more") =>
             {
                 Some(text)
             }
@@ -1980,7 +2563,10 @@ mod tests {
     fn the_station_list_follows_the_selection_down() {
         let mut app = RadioApp::new();
         let total = app.filtered_stations().len();
-        assert!(total > app.station_rows(), "need a list longer than the pane");
+        assert!(
+            total > app.station_rows(),
+            "need a list longer than the pane"
+        );
 
         for step in 0..total {
             let selected = app.selected_station();
@@ -1995,7 +2581,7 @@ mod tests {
                 drawn_stations(&app).contains(&name),
                 "station {step} ({name}) is selected but not drawn"
             );
-            app.handle_key("Down", false, false);
+            app.handle_key(&key(Key::Down));
         }
     }
 
@@ -2004,10 +2590,10 @@ mod tests {
         let mut app = RadioApp::new();
         let total = app.filtered_stations().len();
         for _ in 0..total {
-            app.handle_key("Down", false, false);
+            app.handle_key(&key(Key::Down));
         }
         for _ in 0..total {
-            app.handle_key("Up", false, false);
+            app.handle_key(&key(Key::Up));
         }
         assert_eq!(app.selected_station(), 0);
         let first = app
@@ -2025,8 +2611,15 @@ mod tests {
     #[test]
     fn paging_through_the_station_list_never_leaves_the_selection_off_screen() {
         let mut app = RadioApp::new();
-        for key in ["PageDown", "PageDown", "PageDown", "PageUp", "PageDown", "PageUp"] {
-            app.handle_key(key, false, false);
+        for k in [
+            Key::PageDown,
+            Key::PageDown,
+            Key::PageDown,
+            Key::PageUp,
+            Key::PageDown,
+            Key::PageUp,
+        ] {
+            app.handle_key(&key(k));
             let name = app
                 .filtered_stations()
                 .get(app.selected_station())
@@ -2035,7 +2628,7 @@ mod tests {
                 .expect("selected station exists");
             assert!(
                 drawn_stations(&app).contains(&name),
-                "after {key} the selection ({name}) is off screen"
+                "after {k:?} the selection ({name}) is off screen"
             );
         }
     }
@@ -2045,7 +2638,10 @@ mod tests {
         let app = RadioApp::new();
         let total = app.filtered_stations().len();
         let shown = drawn_stations(&app).len();
-        assert!(shown < total, "the default window should not fit every station");
+        assert!(
+            shown < total,
+            "the default window should not fit every station"
+        );
         assert_eq!(
             more_line(&app, SIDEBAR_WIDTH + 18.0),
             Some(format!("{} more", total - shown)),
@@ -2065,10 +2661,10 @@ mod tests {
     fn switching_screens_scrolls_the_station_list_back_to_the_top() {
         let mut app = RadioApp::new();
         for _ in 0..15 {
-            app.handle_key("Down", false, false);
+            app.handle_key(&key(Key::Down));
         }
         assert!(app.station_view.first_visible() > 0, "should have scrolled");
-        app.handle_key("1", false, false);
+        app.handle_key(&typed(Key::Num1, '1'));
         assert_eq!(app.selected_station(), 0);
         assert_eq!(
             app.station_view.first_visible(),
@@ -2100,10 +2696,13 @@ mod tests {
         let mut app = RadioApp::new();
         // Short enough that the genre list cannot show all of `Genre::ALL`.
         app.set_size(900.0, 400.0);
-        assert!(app.genre_rows() < Genre::ALL.len(), "need an overflowing list");
+        assert!(
+            app.genre_rows() < Genre::ALL.len(),
+            "need an overflowing list"
+        );
 
         for expected in Genre::ALL {
-            app.handle_key("Right", false, false);
+            app.handle_key(&key(Key::Right));
             assert_eq!(app.genre_filter, Some(expected));
             let labels: Vec<String> = drawn_genres(&app).into_iter().map(|(l, _)| l).collect();
             assert!(
@@ -2119,10 +2718,9 @@ mod tests {
         let mut app = RadioApp::new();
         app.set_size(900.0, 400.0);
         for _ in 0..Genre::ALL.len() {
-            app.handle_key("Left", false, false);
+            app.handle_key(&key(Key::Left));
             if let Some(genre) = app.genre_filter {
-                let labels: Vec<String> =
-                    drawn_genres(&app).into_iter().map(|(l, _)| l).collect();
+                let labels: Vec<String> = drawn_genres(&app).into_iter().map(|(l, _)| l).collect();
                 assert!(
                     labels.iter().any(|l| l == genre.label()),
                     "the filter is {} but the sidebar shows {labels:?}",
@@ -2137,7 +2735,10 @@ mod tests {
         let mut app = RadioApp::new();
         app.set_size(900.0, 400.0);
         let shown = drawn_genres(&app).len();
-        assert!(shown < Genre::ALL.len(), "the short window should hide genres");
+        assert!(
+            shown < Genre::ALL.len(),
+            "the short window should hide genres"
+        );
         assert_eq!(
             more_line(&app, 22.0),
             Some(format!("{} more", Genre::ALL.len() - shown)),
@@ -2165,7 +2766,10 @@ mod tests {
     fn the_two_more_lines_are_distinguishable() {
         let mut app = RadioApp::new();
         app.set_size(900.0, 400.0);
-        assert!(more_line(&app, 22.0).is_some(), "genres are hidden at 400px");
+        assert!(
+            more_line(&app, 22.0).is_some(),
+            "genres are hidden at 400px"
+        );
         assert!(
             more_line(&app, SIDEBAR_WIDTH + 18.0).is_some(),
             "stations are hidden at 400px too"
@@ -2177,4 +2781,554 @@ mod tests {
         );
     }
 
+    // ======================================================================
+    // Window, pointer and the two-rate clock
+    // ======================================================================
+
+    fn sized() -> RadioApp {
+        let mut app = RadioApp::new();
+        app.set_size(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app
+    }
+
+    fn click(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// The middle of the station row drawn at `slot`.
+    fn station_row_point(app: &RadioApp, slot: usize) -> (f32, f32) {
+        let pane = app.station_list_rect();
+        #[allow(clippy::cast_precision_loss)]
+        let y = pane.y + STATION_ROWS_TOP + (slot as f32 + 0.5) * STATION_ROW_HEIGHT;
+        (pane.x + 40.0, y)
+    }
+
+    // --- the pointer ---
+
+    #[test]
+    fn clicking_a_screen_tab_opens_it() {
+        let mut app = sized();
+        let tabs = app.screen_tabs();
+        let (screen, rect) = tabs[1];
+        assert_eq!(screen, Screen::Favorites);
+        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        assert_eq!(app.screen_tab_at(x, y), Some(screen));
+        assert!(app.handle_event(&click(x, y)));
+        assert_eq!(app.screen, screen);
+    }
+
+    #[test]
+    fn every_screen_tab_is_reachable_where_it_is_drawn() {
+        let app = sized();
+        for (screen, rect) in app.screen_tabs() {
+            assert_eq!(
+                app.screen_tab_at(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+                Some(screen),
+                "{screen:?} is drawn at {rect:?} and must be clickable there"
+            );
+        }
+    }
+
+    #[test]
+    fn clicking_the_tab_you_are_on_asks_for_no_frame() {
+        let mut app = sized();
+        let rect = app.screen_tabs()[0].1;
+        assert_eq!(app.screen, Screen::Browse);
+        assert!(!app.handle_event(&click(rect.x + 4.0, rect.y + 4.0)));
+    }
+
+    #[test]
+    fn clicking_a_station_selects_it_and_clicking_again_plays_it() {
+        let mut app = sized();
+        let (x, y) = station_row_point(&app, 2);
+        assert_eq!(app.station_row_at(x, y), Some(2));
+        assert!(app.handle_event(&click(x, y)));
+        assert_eq!(app.selected_station(), 2);
+        assert_eq!(
+            app.play_state,
+            PlayState::Stopped,
+            "the first click selects, so a list can be browsed without \
+             starting a stream on every row it passes"
+        );
+        assert!(app.handle_event(&click(x, y)));
+        assert_eq!(app.play_state, PlayState::Playing);
+    }
+
+    #[test]
+    fn every_drawn_station_row_is_reachable_where_it_is_drawn() {
+        let app = sized();
+        let drawn = app.station_rows().min(app.filtered_stations().len());
+        assert!(drawn > 1, "the fixture must draw a few rows");
+        for slot in 0..drawn {
+            let (x, y) = station_row_point(&app, slot);
+            assert_eq!(app.station_row_at(x, y), Some(slot));
+        }
+    }
+
+    #[test]
+    fn clicking_above_the_first_station_row_selects_nothing() {
+        let app = sized();
+        let pane = app.station_list_rect();
+        assert_eq!(
+            app.station_row_at(pane.x + 40.0, pane.y + STATION_ROWS_TOP - 4.0),
+            None,
+            "the list's own heading is not a row"
+        );
+    }
+
+    #[test]
+    fn clicking_below_the_last_drawn_row_selects_nothing() {
+        let app = sized();
+        let drawn = app.station_rows();
+        let (x, y) = station_row_point(&app, drawn.saturating_add(1));
+        assert_eq!(app.station_row_at(x, y), None);
+    }
+
+    #[test]
+    fn clicking_in_the_sidebar_is_not_a_station() {
+        let app = sized();
+        let (_, y) = station_row_point(&app, 1);
+        assert_eq!(
+            app.station_row_at(SIDEBAR_WIDTH - 4.0, y),
+            None,
+            "the station list starts where the sidebar ends"
+        );
+    }
+
+    #[test]
+    fn a_scrolled_list_is_hit_tested_where_it_was_drawn() {
+        let mut app = sized();
+        // Push the selection far enough down that the view has scrolled.
+        for _ in 0..40 {
+            app.handle_key(&key(Key::Down));
+        }
+        let len = app.filtered_stations().len();
+        let first = app.station_view.visible_range(len).start;
+        assert!(first > 0, "the fixture must actually scroll");
+        let (x, y) = station_row_point(&app, 0);
+        assert_eq!(
+            app.station_row_at(x, y),
+            Some(first),
+            "the top row of a scrolled list is the row the scroll put there"
+        );
+    }
+
+    #[test]
+    fn the_wheel_moves_the_selection() {
+        let mut app = sized();
+        let pane = app.station_list_rect();
+        let (x, y) = (pane.x + 40.0, pane.y + pane.height / 2.0);
+        app.handle_key(&key(Key::Down));
+        let before = app.selected_station();
+        assert!(app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+        })));
+        assert!(
+            app.selected_station() < before,
+            "a notch away from the user goes towards the start of the list"
+        );
+    }
+
+    #[test]
+    fn the_wheel_over_the_sidebar_does_nothing() {
+        let mut app = sized();
+        let before = app.selected_station();
+        assert!(!app.handle_event(&Event::Mouse(MouseEvent {
+            x: 20.0,
+            y: 200.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+        })));
+        assert_eq!(app.selected_station(), before);
+    }
+
+    // --- the key vocabulary ---
+
+    #[test]
+    fn the_keys_speak_the_toolkits_names() {
+        // The handler used to match on `"Return"`, `"BackSpace"`, `"Prior"`
+        // and `"Next"` -- an X11 keysym vocabulary invented here that nothing
+        // in the tree produces.
+        let mut app = sized();
+        assert!(app.handle_key(&key(Key::Enter)), "Enter plays");
+        assert_eq!(app.play_state, PlayState::Playing);
+        assert!(app.handle_key(&key(Key::Space)), "and so does Space");
+        assert_eq!(app.play_state, PlayState::Stopped);
+
+        app.search_active = true;
+        app.search_query = "jazz".into();
+        assert!(app.handle_key(&key(Key::Backspace)));
+        assert_eq!(app.search_query, "jaz");
+
+        app.search_active = false;
+        assert!(app.handle_key(&key(Key::PageDown)));
+        assert!(app.handle_key(&key(Key::PageUp)));
+    }
+
+    #[test]
+    fn a_key_that_changes_nothing_asks_for_no_frame() {
+        let mut app = sized();
+        assert!(!app.handle_key(&key(Key::F9)));
+        assert!(!app.handle_key(&typed(Key::Z, 'z')));
+        assert_eq!(app.on_event(&Event::Key(key(Key::F9))), Response::Idle);
+    }
+
+    #[test]
+    fn a_control_chord_is_not_a_letter_shortcut() {
+        let mut app = sized();
+        let ctrl_m = KeyEvent {
+            key: Key::M,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+            text: "m".to_string(),
+        };
+        assert!(!app.handle_key(&ctrl_m));
+        assert!(!app.muted, "Ctrl+M is not Mute");
+    }
+
+    #[test]
+    fn backspace_on_an_empty_search_asks_for_no_frame() {
+        let mut app = sized();
+        app.search_active = true;
+        app.search_query.clear();
+        assert!(!app.handle_key(&key(Key::Backspace)));
+    }
+
+    #[test]
+    fn typing_into_the_search_filters_it() {
+        let mut app = sized();
+        assert!(app.handle_key(&typed(Key::Slash, '/')));
+        assert!(app.search_active);
+        for ch in "jazz".chars() {
+            app.handle_key(&typed(Key::J, ch));
+        }
+        assert_eq!(app.search_query, "jazz");
+        assert!(app.handle_key(&key(Key::Escape)));
+        assert!(!app.search_active);
+        assert_eq!(app.search_query, "");
+    }
+
+    #[test]
+    fn the_genre_filter_wraps_through_all_genres() {
+        let mut app = sized();
+        assert_eq!(app.genre_filter, None);
+        app.handle_key(&key(Key::Right));
+        assert_eq!(app.genre_filter, Genre::ALL.first().copied());
+        app.handle_key(&key(Key::Left));
+        assert_eq!(app.genre_filter, None, "back past the first is All Genres");
+        app.handle_key(&key(Key::Left));
+        assert_eq!(
+            app.genre_filter,
+            Genre::ALL.last().copied(),
+            "and back again is the last"
+        );
+    }
+
+    #[test]
+    fn walking_right_through_every_genre_returns_to_all() {
+        let mut app = sized();
+        for _ in 0..=Genre::ALL.len() {
+            app.handle_key(&key(Key::Right));
+        }
+        assert_eq!(app.genre_filter, None);
+    }
+
+    // --- the two-rate clock ---
+
+    #[test]
+    fn the_counters_move_a_second_at_a_time() {
+        let mut app = sized();
+        app.play_station(0);
+        assert_eq!(app.listen_time_secs, 0);
+        for _ in 0..9 {
+            app.tick(100);
+        }
+        assert_eq!(
+            app.listen_time_secs, 0,
+            "nine tenths of a second is not a second"
+        );
+        app.tick(100);
+        assert_eq!(app.listen_time_secs, 1);
+    }
+
+    #[test]
+    fn the_leftover_of_a_tick_is_not_thrown_away() {
+        let mut app = sized();
+        app.play_station(0);
+        // Seven ticks of 150ms is 1050ms: one second and a bit.
+        for _ in 0..7 {
+            app.tick(150);
+        }
+        assert_eq!(app.listen_time_secs, 1);
+        for _ in 0..7 {
+            app.tick(150);
+        }
+        assert_eq!(
+            app.listen_time_secs, 2,
+            "the fifty milliseconds left over the first time have to be kept, \
+             or every clock in the window crawls"
+        );
+    }
+
+    #[test]
+    fn a_long_tick_counts_every_second_in_it() {
+        let mut app = sized();
+        app.play_station(0);
+        app.tick(5000);
+        assert_eq!(app.listen_time_secs, 5);
+    }
+
+    #[test]
+    fn the_spectrum_moves_every_frame_not_every_second() {
+        let mut app = sized();
+        app.play_station(0);
+        let before = app.spectrum_bars;
+        app.tick(100);
+        assert_ne!(
+            before, app.spectrum_bars,
+            "a bar chart that changes once a second is a slideshow"
+        );
+    }
+
+    #[test]
+    fn a_stopped_radio_advances_nothing() {
+        let mut app = sized();
+        let before = app.spectrum_bars;
+        assert!(!app.tick(1000));
+        assert_eq!(app.listen_time_secs, 0);
+        assert_eq!(before, app.spectrum_bars);
+    }
+
+    #[test]
+    fn the_sleep_timer_counts_down_and_stops_the_stream() {
+        let mut app = sized();
+        app.play_station(0);
+        app.set_sleep_timer();
+        let remaining = app.sleep_remaining_secs.expect("a timer was set");
+        assert!(remaining > 0);
+        app.tick(u64::from(remaining).saturating_mul(1000));
+        assert_eq!(app.play_state, PlayState::Stopped);
+        assert_eq!(app.sleep_remaining_secs, None);
+    }
+
+    #[test]
+    fn a_sleep_timer_keeps_ticking_with_the_stream_stopped() {
+        // Otherwise setting a timer and pressing stop would leave it running
+        // forever with no clock to finish it.
+        let mut app = sized();
+        app.play_station(0);
+        app.set_sleep_timer();
+        app.stop();
+        assert!(app.has_work(), "the countdown is still work to do");
+        assert!(app.tick(1000));
+    }
+
+    #[test]
+    fn recording_counts_only_while_playing() {
+        let mut app = sized();
+        app.play_station(0);
+        app.toggle_recording();
+        app.tick(3000);
+        assert_eq!(app.record_duration_secs, 3);
+
+        // Stopping the stream ends the recording with it -- there is nothing
+        // left to record -- so the length goes back to zero rather than
+        // sitting there as a number nothing is adding to.
+        app.stop();
+        assert!(!app.recording);
+        assert_eq!(app.record_duration_secs, 0);
+        app.tick(5000);
+        assert_eq!(app.record_duration_secs, 0);
+    }
+
+    // --- the strap ---
+
+    #[test]
+    fn the_title_names_the_station() {
+        let mut app = sized();
+        assert_eq!(app.title(), "Radio");
+        app.play_station(0);
+        let name = app
+            .stations
+            .first()
+            .map(|s| s.name.clone())
+            .expect("a station");
+        assert_eq!(app.title(), format!("{name} - Radio"));
+        app.stop();
+        assert_eq!(
+            app.title(),
+            format!("{name} (stopped) - Radio"),
+            "a stopped radio and a playing one are not the same window"
+        );
+    }
+
+    #[test]
+    fn the_clock_runs_only_while_something_moves() {
+        let mut app = sized();
+        assert_eq!(app.tick_interval(), None);
+        app.play_station(0);
+        assert_eq!(app.tick_interval(), Some(FRAME_TICK));
+        app.stop();
+        assert_eq!(app.tick_interval(), None);
+    }
+
+    #[test]
+    fn a_tick_with_nothing_to_do_asks_for_no_frame() {
+        let mut app = sized();
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 100 }),
+            Response::Idle
+        );
+    }
+
+    #[test]
+    fn a_resize_relays_out_and_a_repeat_of_it_does_not() {
+        let mut app = sized();
+        let resize = Event::Resize {
+            width: 800,
+            height: 600,
+        };
+        assert_eq!(app.on_event(&resize), Response::Redraw);
+        assert_eq!(app.width, 800.0);
+        assert_eq!(app.on_event(&resize), Response::Idle);
+    }
+
+    #[test]
+    fn a_taller_window_shows_more_stations() {
+        let mut app = sized();
+        app.set_window_size(WINDOW_WIDTH, 400.0);
+        let short = app.station_rows();
+        app.set_window_size(WINDOW_WIDTH, 900.0);
+        assert!(app.station_rows() > short);
+    }
+
+    #[test]
+    fn a_window_dragged_tiny_keeps_a_list() {
+        let mut app = sized();
+        app.set_window_size(1.0, 1.0);
+        assert!(app.width >= MIN_WINDOW_WIDTH);
+        assert!(app.height >= MIN_WINDOW_HEIGHT);
+        assert!(app.station_list_rect().width >= 1.0);
+    }
+
+    #[test]
+    fn the_first_frame_uses_the_size_the_compositor_gave() {
+        let mut app = sized();
+        let tree = app.render(900.0, 650.0);
+        assert_eq!(app.width, 900.0);
+        assert_eq!(app.height, 650.0);
+        assert!(!tree.commands.is_empty());
+    }
+
+    #[test]
+    fn the_close_button_exits() {
+        let mut app = sized();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn a_station_row_shows_what_it_knows_about_the_station() {
+        // `language` and `url` were carried on every station and shown
+        // nowhere, which the compiler had been reporting as dead fields.
+        let mut app = sized();
+        app.play_station(0);
+        let station = app.stations.first().cloned().expect("a station");
+        let text: Vec<String> = app
+            .render_commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text.iter().any(|t| t.contains(&station.language)),
+            "no drawn text mentions the station's language"
+        );
+        assert!(
+            text.iter().any(|t| t.contains(&station.url)),
+            "no drawn text mentions the stream it is playing"
+        );
+    }
+
+    #[test]
+    fn a_click_below_the_fold_of_a_long_list_selects_nothing() {
+        // The guard against a row past the last *drawn* one only matters when
+        // the list is longer than the pane: with a short list the row lookup
+        // fails anyway, and with a long one it succeeds -- on a station that
+        // is nowhere on screen.
+        let mut app = sized();
+        app.set_window_size(WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+        let drawn = app.station_rows();
+        assert!(
+            drawn < app.filtered_stations().len(),
+            "the fixture must overflow the pane: {drawn} rows for {} stations",
+            app.filtered_stations().len()
+        );
+        let (x, y) = station_row_point(&app, drawn);
+        assert_eq!(
+            app.station_row_at(x, y),
+            None,
+            "a station drawn nowhere cannot be clicked"
+        );
+    }
+
+    #[test]
+    fn a_click_past_the_end_of_a_short_list_selects_nothing() {
+        // The other way round: room for more rows than there are stations.
+        let mut app = sized();
+        app.set_genre_filter(Genre::ALL.last().copied());
+        let count = app.filtered_stations().len();
+        assert!(count > 0, "the fixture needs at least one station");
+        assert!(
+            count < app.station_rows(),
+            "the fixture must leave empty rows below the list"
+        );
+        let (x, y) = station_row_point(&app, count);
+        assert_eq!(
+            app.station_row_at(x, y),
+            None,
+            "the empty space under the last station is not a station"
+        );
+    }
+
+    #[test]
+    fn a_click_right_of_the_sidebar_is_not_a_screen_tab() {
+        let app = sized();
+        let rect = app.screen_tabs()[0].1;
+        assert_eq!(
+            app.screen_tab_at(SIDEBAR_WIDTH + 40.0, rect.y + rect.height / 2.0),
+            None,
+            "the tabs end where the sidebar does, and the station list starts              there"
+        );
+    }
+
+    #[test]
+    fn a_control_chord_does_not_type_into_the_search() {
+        let mut app = sized();
+        app.handle_key(&typed(Key::Slash, '/'));
+        assert!(app.search_active);
+        let ctrl_a = KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+            text: "a".to_string(),
+        };
+        assert!(!app.handle_key(&ctrl_a));
+        assert_eq!(
+            app.search_query, "",
+            "Ctrl+A is a command nobody has bound, not the letter A"
+        );
+    }
 }

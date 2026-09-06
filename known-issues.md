@@ -39930,6 +39930,37 @@ every worktree at 0 the "every lane's CRLF working copies convert on their next
 checkout" side-effect that made it risky no longer has anything to convert.
 That window will not stay open on its own.
 
+**[A] 2026-09-06 — first recurrence since the close, and the gate caught it.**
+Four tracked files came back CRLF in the lane-A worktree, and the boot test
+refused to build on `check-eol` after 424s of gates. Recorded because the close
+above rests on the gate being the mitigation, and this is the evidence it works:
+the condition recurred within a day and was stopped before it reached a build.
+
+The cause is the one §911 and the gate's own message name — **a tool rewriting a
+tracked file through Python's default text mode**, which on Windows turns
+every newline into a carriage-return/newline pair. Here it was an agent
+using `pathlib.Path.write_text()` to patch files in place. The four affected
+were exactly the four written that way;
+files edited through other means in the same session stayed LF, and the two
+written later with `newline=""` were also clean. So the discriminator is the
+call, not the file type: `write_text(s)` corrupts, `write_text(s, newline="")`
+and `write_bytes(...)` do not.
+
+**Nothing was committed wrong.** The clean filter normalises on `git add`, so
+every blob stayed LF and the repair produced a zero-byte diff — which is the
+entry's own point restated: `git status` called the tree modified, `git diff`
+showed nothing, and `git add` staged nothing.
+
+Worth naming the trap for whoever hits it next, because it defeats the obvious
+check: a shell `grep` for a carriage return does **not** reliably detect one
+here. When the shell leaves the escape uninterpreted, grep receives an
+*empty pattern*, which matches every line — so a CRLF file and an LF file
+both report a count equal to
+the file's line count, and the LF file looks corrupt. That false positive was
+read here as "CRLF is repo-wide and pre-existing, therefore harmless", which
+delayed the fix until the gate found it. Detect it with `git ls-files --eol`
+(`w/crlf` is unambiguous) or a binary read, never with `grep`.
+
 ---
 
 ## [B] The sudoers parser cannot reject a malformed `Defaults` or command list (2026-08-18)

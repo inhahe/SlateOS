@@ -20,8 +20,6 @@
 //! SystemRestoreUI     -- guitk-based GUI with tree view, timeline, details panel
 //! ```
 
-#![allow(dead_code)]
-
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -44,6 +42,11 @@ const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
 const COLOR_MANTLE: Color = Color::from_hex(0x181825);
 const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
 const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
+// Part of the complete Catppuccin Mocha palette, kept whole even though no
+// widget currently paints with this one: a named palette with a hole in it is
+// not the palette it is named after, and the next widget to want one would
+// otherwise re-derive the hex by hand.
+#[allow(dead_code, reason = "the palette is kept complete")]
 const COLOR_SURFACE2: Color = Color::from_hex(0x585B70);
 const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
 const COLOR_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
@@ -81,7 +84,6 @@ const WINDOW_WIDTH: f32 = 1050.0;
 const WINDOW_HEIGHT: f32 = 700.0;
 const HEADER_HEIGHT: f32 = 48.0;
 const TOOLBAR_HEIGHT: f32 = 40.0;
-const SIDEBAR_WIDTH: f32 = 280.0;
 const DETAILS_PANEL_HEIGHT: f32 = 160.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 const PADDING: f32 = 12.0;

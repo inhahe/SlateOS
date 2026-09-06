@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Slate OS App Launcher
 //!
 //! A Spotlight/Alfred-style application launcher providing:
@@ -37,6 +36,7 @@ mod theme {
     /// Mantle — slightly darker background for input area.
     pub const MANTLE: Color = Color::from_hex(0x181825);
     /// Surface0 — card/result row background.
+    #[allow(dead_code, reason = "the palette is kept complete")]
     pub const SURFACE0: Color = Color::from_hex(0x313244);
     /// Surface1 — hover/selected highlight.
     pub const SURFACE1: Color = Color::from_hex(0x45475A);

@@ -3,7 +3,11 @@
 **From:** Lane B (POSIX & userland)
 **To:** Lane A (kernel & core)
 **Date:** 2026-09-05
-**Status:** OPEN
+**Status:** ✅ LANDED 2026-09-06 as `SYS_WAIT_MULTIPLE` = 1066, in the shape asked
+for. Reply, including the two caveats that change what lane B should write —
+a TCP socket is capped rather than blocking, and a pty is reachable only
+through this syscall and not through a Linux fd — is
+`requests/a-b-wait-multiple-is-1066-and-your-tcp-socket-lands-in-the-capped-row.md`.
 **Priority:** medium — nothing is blocked, but every event-driven program in the
 tree is paying for this, and the workarounds are diverging.
 

@@ -3209,6 +3209,28 @@ impl ConnectionState {
         self.channel_ever_opened && self.channels.iter().all(|ch| ch.closed)
     }
 
+    /// The channel numbered `local_id`, or `None` if this connection has none.
+    ///
+    /// Channel *numbers*, not positions in `channels`, are what the rest of the
+    /// daemon passes around. A position is valid only until the table changes,
+    /// and the table does change while a connection is running: a channel
+    /// closed from both ends is reaped where it sits (RFC 4254 §5.3;
+    /// design-decisions.md §1002), which moves every entry after it. A number
+    /// is issued once and never reissued, so it either names the channel it
+    /// has always named or names nothing — and "nothing" is a case the caller
+    /// is made to answer, rather than a subscript that would answer it by
+    /// panicking or, worse, by returning somebody else's session.
+    fn channel(&self, local_id: u32) -> Option<&Channel> {
+        self.channels.iter().find(|ch| ch.local_id == local_id)
+    }
+
+    /// The channel numbered `local_id`, mutably.
+    ///
+    /// See [`ConnectionState::channel`] for why the lookup is by number.
+    fn channel_mut(&mut self, local_id: u32) -> Option<&mut Channel> {
+        self.channels.iter_mut().find(|ch| ch.local_id == local_id)
+    }
+
     /// Frame, encrypt and send one packet.
     ///
     /// The padding is CSPRNG bytes, as RFC 4253 §6 says it SHOULD be, and a
@@ -5252,10 +5274,6 @@ fn env_request_allowed(config: &SshdConfig, name: &str, value: &str) -> bool {
 /// reply is the only signal the protocol gives it. A refusal is not a defeat:
 /// FAILURE means "not set", the client can act on it, and OpenSSH answers
 /// exactly the same way for a name outside `AcceptEnv`.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
 fn handle_env_request(
     conn: &mut ConnectionState,
     local_id: u32,
@@ -5277,7 +5295,10 @@ fn handle_env_request(
         return Ok(());
     }
 
-    let Some(idx) = conn.channels.iter().position(|ch| ch.local_id == local_id) else {
+    // Located and borrowed in one step. Finding a position and then
+    // subscripting with it says the same thing in two statements that a later
+    // edit could separate, and only the second of them can panic.
+    let Some(channel) = conn.channel_mut(local_id) else {
         if want_reply {
             send_channel_failure(conn, remote_id)?;
         }
@@ -5287,7 +5308,6 @@ fn handle_env_request(
     // Setting a variable twice replaces it rather than appending, so the child
     // cannot receive two entries for one name — and a client cannot use
     // repetition of an allowed name to fill the limits below.
-    let channel = &mut conn.channels[idx];
     if let Some(slot) = channel.env.iter_mut().find(|(k, _)| k == &name) {
         slot.1 = value;
         if want_reply {
@@ -5365,10 +5385,6 @@ fn channel_is_busy(channel: &Channel) -> bool {
 /// spawned *before* the request is answered, because RFC 4254 §6.5's reply
 /// reports whether the request was accepted, and a shell that could not be
 /// started was not.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
 fn start_shell_session(
     conn: &mut ConnectionState,
     local_id: u32,
@@ -5379,28 +5395,27 @@ fn start_shell_session(
         return Ok(());
     };
 
-    let Some(idx) = conn.channels.iter().position(|ch| ch.local_id == local_id) else {
+    let Some(channel) = conn.channel(local_id) else {
         return Ok(());
     };
-    if channel_is_busy(&conn.channels[idx]) {
+    if channel_is_busy(channel) {
         conn.debug_log("shell refused: the channel already runs a session");
         if want_reply {
             send_channel_failure(conn, remote_id)?;
         }
         return Ok(());
     }
-    let term = conn.channels[idx].term.clone();
+    let term = channel.term.clone();
     // Cloned rather than borrowed: the spawn closure below runs while `conn` is
     // borrowed mutably to answer the request, and a session's accepted
     // variables are a few hundred bytes at most.
-    let client_env = conn.channels[idx].env.clone();
+    let client_env = channel.env.clone();
 
-    let Some(slave_fd) = conn.channels[idx].io.pty().map(Pty::slave_fd) else {
+    let Some(slave_fd) = channel.io.pty().map(Pty::slave_fd) else {
         // No terminal: `ssh -T`. The login shell runs on pipes instead, with no
         // command line, so it reads its script from stdin.
         return start_pipe_session_with(
             conn,
-            idx,
             local_id,
             remote_id,
             "shell",
@@ -5409,28 +5424,57 @@ fn start_shell_session(
         );
     };
 
-    match spawn_in_home(&user, || shell_command(&user, &term, slave_fd, &client_env)) {
-        Ok(child) => {
-            // The parent must give up its own copy of the slave now. Hangup on
-            // the master means "the last slave closed", and while this daemon
-            // holds one, a shell that has exited leaves a terminal that never
-            // reports the end of the session — the client sits at a dead prompt
-            // until it gives up. This single `close` is the difference between
-            // a session that ends and one that hangs.
-            if let Some(pty) = conn.channels[idx].io.pty_mut() {
-                pty.close_slave();
+    // The spawn does not touch `conn`, but attaching the child and answering
+    // the request both do — and they cannot share one borrow. So the child is
+    // attached first, under its own lookup, and the reply is sent afterwards
+    // from the outcome.
+    let outcome = match spawn_in_home(&user, || shell_command(&user, &term, slave_fd, &client_env))
+    {
+        Ok(mut child) => match conn.channel_mut(local_id) {
+            Some(channel) => {
+                // The parent must give up its own copy of the slave now. Hangup
+                // on the master means "the last slave closed", and while this
+                // daemon holds one, a shell that has exited leaves a terminal
+                // that never reports the end of the session — the client sits
+                // at a dead prompt until it gives up. This single `close` is
+                // the difference between a session that ends and one that
+                // hangs.
+                if let Some(pty) = channel.io.pty_mut() {
+                    pty.close_slave();
+                }
+                channel.child = Some(child);
+                Ok(())
             }
-            conn.channels[idx].child = Some(child);
+            // Unreachable today: the channel was found at the top of this
+            // function and nothing since then can remove one. It is handled
+            // rather than subscripted past because the two ways of being wrong
+            // are not equally bad — a lookup that finds nothing costs one
+            // refused `shell`, whereas dropping the `Child` on the floor would
+            // leave a zombie holding a terminal for the life of the daemon
+            // (`Child`'s destructor does not wait), and indexing would panic
+            // and take every other session on the connection with it.
+            None => {
+                discard_child(&mut child);
+                Err("the channel went away while its shell was starting".to_string())
+            }
+        },
+        Err(e) => Err(e.to_string()),
+    };
+
+    match outcome {
+        Ok(()) => {
             conn.debug_log(&format!("shell started on channel {local_id}"));
             if want_reply {
                 send_channel_success(conn, remote_id)?;
             }
         }
-        Err(e) => {
-            conn.debug_log(&format!("shell spawn failed: {e}"));
+        Err(reason) => {
+            conn.debug_log(&format!("shell spawn failed: {reason}"));
             // Release the terminal: nothing is going to run on it, and holding
             // it would leak a pty for the life of the connection.
-            conn.channels[idx].io = SessionIo::None;
+            if let Some(channel) = conn.channel_mut(local_id) {
+                channel.io = SessionIo::None;
+            }
             if want_reply {
                 send_channel_failure(conn, remote_id)?;
             }
@@ -5439,15 +5483,26 @@ fn start_shell_session(
     Ok(())
 }
 
+/// Kill and reap a child that has no channel to be attached to.
+///
+/// Both results are discarded deliberately: `kill` fails only if the child has
+/// already exited, and `wait` only if it was never started — and in both of
+/// those cases the thing we want (no orphan holding our descriptors) is
+/// already true.
+///
+/// Simply dropping the `Child` would not do: its destructor does not wait, so
+/// the process would stay in the table as a zombie, and one started on a
+/// terminal would hold that terminal open for the life of the daemon.
+fn discard_child(child: &mut process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Run `command_line` on three pipes, streamed by the session pump.
 ///
 /// This is the one path behind `exec` and `subsystem` — a subsystem is an
 /// `exec` whose command line came from the server's configuration rather than
 /// from the client — and it is also where a `shell` with no terminal ends up.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
 fn start_pipe_session(
     conn: &mut ConnectionState,
     local_id: u32,
@@ -5458,19 +5513,19 @@ fn start_pipe_session(
     let Some(user) = session_user(conn, remote_id, "exec", want_reply)? else {
         return Ok(());
     };
-    let Some(idx) = conn.channels.iter().position(|ch| ch.local_id == local_id) else {
+    let Some(channel) = conn.channel(local_id) else {
         return Ok(());
     };
-    if channel_is_busy(&conn.channels[idx]) {
+    if channel_is_busy(channel) {
         conn.debug_log("exec refused: the channel already runs a session");
         if want_reply {
             send_channel_failure(conn, remote_id)?;
         }
         return Ok(());
     }
-    let client_env = conn.channels[idx].env.clone();
+    let client_env = channel.env.clone();
     let spawned = spawn_session_command(&user, command_line, &client_env);
-    start_pipe_session_with(conn, idx, local_id, remote_id, "exec", want_reply, spawned)
+    start_pipe_session_with(conn, local_id, remote_id, "exec", want_reply, spawned)
 }
 
 /// Attach an already-spawned pipe-backed child to its channel, and answer the
@@ -5479,13 +5534,8 @@ fn start_pipe_session(
 /// Taking the `Result` rather than spawning here is what lets `shell`, `exec`
 /// and `subsystem` share every line of this while each builds its own very
 /// different `Command`.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
 fn start_pipe_session_with(
     conn: &mut ConnectionState,
-    idx: usize,
     local_id: u32,
     remote_id: u32,
     what: &str,
@@ -5511,19 +5561,27 @@ fn start_pipe_session_with(
         // would risk stalling every other connection on the daemon. Kill the
         // child rather than leave it attached to descriptors nobody reads.
         conn.debug_log(&format!("{what} refused: pipes would block"));
-        // Both results are discarded deliberately: `kill` fails only if the
-        // child has already exited, and `wait` only if it was never started —
-        // and in both of those cases the thing we wanted (no orphan holding
-        // our descriptors) is already true.
-        let _ = child.kill();
-        let _ = child.wait();
+        discard_child(&mut child);
         if want_reply {
             send_channel_failure(conn, remote_id)?;
         }
         return Ok(());
     };
-    conn.channels[idx].io = SessionIo::Pipes(pipes);
-    conn.channels[idx].child = Some(child);
+
+    // Unreachable today — every caller has just located this channel — but a
+    // `Child` dropped here would be a zombie for the life of the daemon, so
+    // the vanished case reaps it and refuses rather than being subscripted
+    // past. See `ConnectionState::channel`.
+    let Some(channel) = conn.channel_mut(local_id) else {
+        discard_child(&mut child);
+        conn.debug_log(&format!("{what} refused: channel {local_id} went away"));
+        if want_reply {
+            send_channel_failure(conn, remote_id)?;
+        }
+        return Ok(());
+    };
+    channel.io = SessionIo::Pipes(pipes);
+    channel.child = Some(child);
     conn.debug_log(&format!("{what} started on channel {local_id}"));
     if want_reply {
         send_channel_success(conn, remote_id)?;
@@ -5563,20 +5621,21 @@ const SESSION_READS_PER_PASS: usize = 16;
 ///
 /// It is the mirror image of `Channel::pending_input`, which *must* buffer,
 /// because window credit for arriving data is owed the moment it arrives.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
 fn pump_channel_output(
     conn: &mut ConnectionState,
-    idx: usize,
     local_id: u32,
 ) -> Result<(bool, bool), SshdError> {
     let mut buf = [0u8; 8192];
     let mut worked = false;
 
     for _ in 0..SESSION_READS_PER_PASS {
-        let budget = usize::try_from(conn.channels[idx].remote_window).unwrap_or(usize::MAX);
+        // A channel that is not there has no output still to come, so it is
+        // reported finished: the caller's next step is to stop pumping it,
+        // which is the right thing to do with a channel that does not exist.
+        let Some(channel) = conn.channel_mut(local_id) else {
+            return Ok((worked, true));
+        };
+        let budget = usize::try_from(channel.remote_window).unwrap_or(usize::MAX);
         if budget == 0 {
             // No credit, so nothing can be read this pass — but whether the
             // session is *finished* is a fact about its streams, not about the
@@ -5586,12 +5645,12 @@ fn pump_channel_output(
             // end-of-file would strand a completed session whose last write
             // happened to consume the last of the window, waiting for a
             // `WINDOW_ADJUST` a satisfied client has no reason to send.
-            return Ok((worked, conn.channels[idx].io.output_finished()));
+            return Ok((worked, channel.io.output_finished()));
         }
 
         // The borrow of `io` is scoped to the read alone, so that `conn` is
         // free for the send below.
-        let (stderr, outcome) = match &mut conn.channels[idx].io {
+        let (stderr, outcome) = match &mut channel.io {
             SessionIo::None => (false, StreamRead::Empty),
             SessionIo::Terminal(pty) => {
                 if pty.ready().0 {
@@ -5617,17 +5676,17 @@ fn pump_channel_output(
             }
             // Nothing at this instant. Whether that is the end depends on the
             // streams, not on the empty read — see `SessionIo::output_finished`.
-            StreamRead::Empty => return Ok((worked, conn.channels[idx].io.output_finished())),
+            StreamRead::Empty => return Ok((worked, channel.io.output_finished())),
             StreamRead::Hangup => {
                 worked = true;
-                match &conn.channels[idx].io {
+                match &channel.io {
                     // The terminal is gone and its buffered output was
                     // delivered ahead of the `EIO`. Drop the master, but do
                     // *not* invent an exit status: it is not known until `wait`
                     // reports it, and a fabricated one would tell a caller's
                     // `if ssh host cmd; then` the wrong thing.
                     SessionIo::Terminal(_) | SessionIo::None => {
-                        conn.channels[idx].io = SessionIo::None;
+                        channel.io = SessionIo::None;
                         return Ok((worked, true));
                     }
                     // One of the two pipes reached end-of-file and closed
@@ -5643,8 +5702,13 @@ fn pump_channel_output(
         }
     }
 
-    // The read budget ran out with data still flowing.
-    Ok((worked, conn.channels[idx].io.output_finished()))
+    // The read budget ran out with data still flowing. A channel that is no
+    // longer there is finished, for the same reason as at the head of the loop.
+    Ok((
+        worked,
+        conn.channel(local_id)
+            .is_none_or(|ch| ch.io.output_finished()),
+    ))
 }
 
 /// Hand one channel's queued input to its session, and credit the window.
@@ -5670,22 +5734,23 @@ fn pump_channel_output(
 /// rather than the end of the connection: the process has gone and the pump's
 /// normal exit path will notice and close the channel. Dropping the whole TCP
 /// session because one shell died would take any other channel down with it.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
-fn pump_channel_input(conn: &mut ConnectionState, idx: usize) -> Result<bool, SshdError> {
-    if conn.channels[idx].pending_input.is_empty() {
+fn pump_channel_input(conn: &mut ConnectionState, local_id: u32) -> Result<bool, SshdError> {
+    // A channel that is not there has no queued input and nothing was moved.
+    if conn
+        .channel(local_id)
+        .is_none_or(|ch| ch.pending_input.is_empty())
+    {
         return Ok(false);
     }
 
     let mut written = 0usize;
     let mut failure = None;
-    loop {
-        // A shared borrow, not `&mut`: the loop only reads the channel, which
-        // leaves `conn` free for `debug_log` and keeps the error path from
-        // needing a second pass over the borrow checker.
-        let channel = &conn.channels[idx];
+    // A shared borrow, not `&mut`: the loop only reads the channel, which
+    // leaves `conn` free for `debug_log` and keeps the error path from needing
+    // a second pass over the borrow checker. Re-looked-up each turn because the
+    // borrow cannot outlive the turn, which costs a scan of a table bounded by
+    // `MaxSessions` — a handful of entries.
+    while let Some(channel) = conn.channel(local_id) {
         let Some(rest) = channel.pending_input.get(written..) else {
             break;
         };
@@ -5706,20 +5771,23 @@ fn pump_channel_input(conn: &mut ConnectionState, idx: usize) -> Result<bool, Ss
 
     if let Some(e) = failure {
         conn.debug_log(&format!("session input write failed: {e}"));
-        // Only the *input* half is gone. For a terminal that means the whole
-        // session, since one descriptor carries both directions; for pipes the
-        // command may still be producing output on stdout, and tearing down
-        // its output streams here would truncate it.
-        match &mut conn.channels[idx].io {
-            SessionIo::Terminal(_) => conn.channels[idx].io = SessionIo::None,
-            SessionIo::Pipes(pipes) => pipes.close_input(),
-            SessionIo::None => {}
+        if let Some(channel) = conn.channel_mut(local_id) {
+            // Only the *input* half is gone. For a terminal that means the
+            // whole session, since one descriptor carries both directions; for
+            // pipes the command may still be producing output on stdout, and
+            // tearing down its output streams here would truncate it.
+            match &mut channel.io {
+                SessionIo::Terminal(_) => channel.io = SessionIo::None,
+                SessionIo::Pipes(pipes) => pipes.close_input(),
+                SessionIo::None => {}
+            }
+            // The bytes can never be delivered now. Discard them rather than
+            // pin memory for the rest of the connection; the credit below then
+            // reopens the window, so a client still typing into a dead session
+            // learns that the channel is closing instead of blocking on a
+            // window forever.
+            written = channel.pending_input.len();
         }
-        // The bytes can never be delivered now. Discard them rather than pin
-        // memory for the rest of the connection; the credit below then reopens
-        // the window, so a client still typing into a dead session learns that
-        // the channel is closing instead of blocking on a window forever.
-        written = conn.channels[idx].pending_input.len();
     }
 
     if written == 0 {
@@ -5728,7 +5796,16 @@ fn pump_channel_input(conn: &mut ConnectionState, idx: usize) -> Result<bool, Ss
 
     let mut credit = None;
     {
-        let channel = &mut conn.channels[idx];
+        let Some(channel) = conn.channel_mut(local_id) else {
+            return Ok(false);
+        };
+        // `written` cannot exceed the queue — every increment above came from a
+        // write into a slice of it — but `drain` past the end panics, and the
+        // range is the one thing here the compiler is not checking. The clamp
+        // makes the bound the code's rather than the reader's: if the loop ever
+        // broke its own invariant, a short drain leaves stale bytes queued,
+        // where an unclamped one would take the whole daemon down.
+        let written = written.min(channel.pending_input.len());
         channel.pending_input.drain(..written);
         // A `CHANNEL_EOF` that arrived while bytes were still queued was held
         // back until they were written; now that the queue is empty it can be
@@ -5762,19 +5839,24 @@ fn pump_channel_input(conn: &mut ConnectionState, idx: usize) -> Result<bool, Ss
 ///
 /// Returns `true` if anything happened, which is what tells the connection loop
 /// to try again immediately instead of sleeping.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "not yet audited for panics on peer-controlled input; see known-issues.md"
-)]
 fn pump_sessions(conn: &mut ConnectionState) -> Result<bool, SshdError> {
     let mut worked = false;
 
+    // Positions are used to *walk* the table and nothing else: the channel
+    // number is read out immediately and everything below is done by number.
+    // `get` rather than a subscript because the length was taken once, at the
+    // top; nothing in this loop removes a channel today, but a loop that reads
+    // the length once and indexes with it forever is one edit away from being
+    // wrong, and this one cannot be.
     for idx in 0..conn.channels.len() {
-        if conn.channels[idx].closed {
+        let Some(channel) = conn.channels.get(idx) else {
+            break;
+        };
+        if channel.closed {
             continue;
         }
-        let local_id = conn.channels[idx].local_id;
-        let remote_id = conn.channels[idx].remote_id;
+        let local_id = channel.local_id;
+        let remote_id = channel.remote_id;
 
         // 1. Client input into the session, before anything else, so a keypress
         //    and the output it provokes can both leave in one pass.
@@ -5783,41 +5865,47 @@ fn pump_sessions(conn: &mut ConnectionState) -> Result<bool, SshdError> {
         //    shell has not started yet: type-ahead sent between `pty-req` and
         //    `shell` belongs in the line discipline's buffer, where the shell
         //    will read it, exactly as it would on a local console.
-        if pump_channel_input(conn, idx)? {
+        if pump_channel_input(conn, local_id)? {
             worked = true;
         }
 
-        if conn.channels[idx].child.is_none() {
+        if conn.channel(local_id).is_none_or(|ch| ch.child.is_none()) {
             continue;
         }
 
         // 2. Whatever the session has printed, up to this pass's budget.
-        let (output_worked, output_finished) = pump_channel_output(conn, idx, local_id)?;
+        let (output_worked, output_finished) = pump_channel_output(conn, local_id)?;
         if output_worked {
             worked = true;
         }
 
         // 3. Has the process finished? Record the status the first time it is
         //    available; the session is not over until its output is out too.
-        if conn.channels[idx].exit.is_none() {
-            let finished = match conn.channels[idx].child.as_mut() {
-                Some(child) => match child.try_wait() {
-                    Ok(status) => status.map(|s| classify_exit(&s)),
-                    // `try_wait` fails only if the child was already reaped by
-                    // something else, which cannot happen here — but if it
-                    // somehow does, ending the session with the conventional
-                    // "we do not know" status beats waiting forever on a
-                    // process whose fate can no longer be reported.
-                    Err(e) => {
-                        conn.debug_log(&format!("try_wait failed: {e}"));
-                        Some(SessionExit::Status(255))
-                    }
-                },
-                None => None,
-            };
-            if let Some(exit) = finished {
-                worked = true;
-                conn.channels[idx].exit = Some(exit);
+        let awaited = match conn.channel_mut(local_id) {
+            Some(channel) if channel.exit.is_none() => match channel.child.as_mut() {
+                Some(child) => child.try_wait(),
+                None => Ok(None),
+            },
+            // Either the channel is gone or its status is already recorded;
+            // either way there is nothing to wait for.
+            _ => Ok(None),
+        };
+        let finished = match awaited {
+            Ok(status) => status.map(|s| classify_exit(&s)),
+            // `try_wait` fails only if the child was already reaped by
+            // something else, which cannot happen here — but if it somehow
+            // does, ending the session with the conventional "we do not know"
+            // status beats waiting forever on a process whose fate can no
+            // longer be reported.
+            Err(e) => {
+                conn.debug_log(&format!("try_wait failed: {e}"));
+                Some(SessionExit::Status(255))
+            }
+        };
+        if let Some(exit) = finished {
+            worked = true;
+            if let Some(channel) = conn.channel_mut(local_id) {
+                channel.exit = Some(exit);
             }
         }
 
@@ -5825,19 +5913,24 @@ fn pump_sessions(conn: &mut ConnectionState) -> Result<bool, SshdError> {
         //    have reached end-of-file. Waiting for both is what stops a shell's
         //    final line — `logout`, or the last screen a full-screen program
         //    painted — from being cut off by the close.
-        let ready_to_close = output_finished && conn.channels[idx].exit.is_some();
-        if ready_to_close {
-            let exit = conn.channels[idx]
-                .exit
-                .clone()
-                .unwrap_or(SessionExit::Status(255));
+        //
+        //    Dropping the child and the attachment releases the descriptors and
+        //    reaps the process table entry before the client is told anything,
+        //    so a client that immediately opens another session finds the
+        //    resources already free. That teardown and the status it reports
+        //    are taken in one borrow, so the two can never disagree about which
+        //    session ended.
+        let ending = conn.channel_mut(local_id).and_then(|channel| {
+            if !output_finished || channel.exit.is_none() {
+                return None;
+            }
+            let exit = channel.exit.clone().unwrap_or(SessionExit::Status(255));
+            channel.child = None;
+            channel.io = SessionIo::None;
+            Some(exit)
+        });
+        if let Some(exit) = ending {
             conn.debug_log(&format!("session on channel {local_id} finished: {exit:?}"));
-            // Dropping the child and the attachment releases the descriptors
-            // and reaps the process table entry before the client is told
-            // anything, so a client that immediately opens another session
-            // finds the resources already free.
-            conn.channels[idx].child = None;
-            conn.channels[idx].io = SessionIo::None;
             send_session_exit(conn, remote_id, &exit)?;
             // `send_channel_close` sends the EOF first and sets `closed`.
             send_channel_close(conn, local_id)?;
@@ -9657,7 +9750,7 @@ Z
     fn a_closed_window_does_not_make_a_live_session_look_finished() {
         let mut conn = conn_with_channel(0);
         conn.channels[0].io = SessionIo::Pipes(fake_pipes(-1, 4242, 4243));
-        let (worked, finished) = pump_channel_output(&mut conn, 0, 1).unwrap();
+        let (worked, finished) = pump_channel_output(&mut conn, 1).unwrap();
         assert!(!worked);
         assert!(
             !finished,
@@ -9677,7 +9770,7 @@ Z
         // the streams left that session open until the connection dropped.
         let mut conn = conn_with_channel(0);
         conn.channels[0].io = SessionIo::Pipes(fake_pipes(-1, -1, -1));
-        let (worked, finished) = pump_channel_output(&mut conn, 0, 1).unwrap();
+        let (worked, finished) = pump_channel_output(&mut conn, 1).unwrap();
         assert!(!worked);
         assert!(finished);
     }
@@ -9685,9 +9778,59 @@ Z
     #[test]
     fn an_unattached_channel_reports_finished_immediately() {
         let mut conn = conn_with_channel(32768);
-        let (worked, finished) = pump_channel_output(&mut conn, 0, 1).unwrap();
+        let (worked, finished) = pump_channel_output(&mut conn, 1).unwrap();
         assert!(!worked);
         assert!(finished);
+    }
+
+    /// Pumping a channel number this connection does not have is answered, not
+    /// panicked on.
+    ///
+    /// The pump used to be driven by a position in `channels`, and a position
+    /// that no longer names an entry is a subscript out of range. Since a
+    /// channel closed from both ends is now reaped where it sits, positions do
+    /// go stale — so the pump takes the channel *number*, and a number that
+    /// names nothing is a session with no output still to come.
+    #[test]
+    fn pumping_a_channel_number_that_is_not_there_reports_it_finished() {
+        let mut conn = conn_with_channel(32768);
+        let (worked, finished) = pump_channel_output(&mut conn, 999).unwrap();
+        assert!(!worked, "there was nothing to read");
+        assert!(finished, "a channel that does not exist has no more to say");
+
+        assert!(
+            !pump_channel_input(&mut conn, 999).unwrap(),
+            "and nothing to write"
+        );
+    }
+
+    /// The whole session pump survives a table that has had an entry removed.
+    ///
+    /// This is the failure the refactor exists to prevent: with two channels
+    /// open, reaping the first moves the second from position 1 to position 0,
+    /// and every position the pump was holding then named the wrong session or
+    /// no session at all.
+    #[test]
+    fn the_session_pump_runs_over_a_table_an_entry_has_been_reaped_from() {
+        let (mut conn, _peer) = conn_with_peer(32768);
+        conn.channels.push(Channel::new(2, 3, 32768, 32768));
+        conn.next_channel_id = 3;
+
+        // Close channel 1 from both ends, which reaps it and shifts channel 2
+        // down into the position channel 1 occupied.
+        handle_channel_close(&mut conn, &close_payload(1)).expect("a close is answerable offline");
+        assert_eq!(
+            conn.channels.len(),
+            1,
+            "the closed channel should have been reaped"
+        );
+        assert_eq!(conn.channels[0].local_id, 2, "channel 2 has moved down");
+
+        pump_sessions(&mut conn).expect("the pump must survive the shift");
+        assert_eq!(
+            conn.channels[0].local_id, 2,
+            "and must not have touched the wrong session"
+        );
     }
 
     // ---- window-change (RFC 4254 §6.7) ----

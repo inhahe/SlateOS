@@ -2552,6 +2552,11 @@ if [ "$skip" -eq 0 ] && [ -f "$repo_root/scripts/check-lane-signals.py" ]; then
         echo "  halt asks for, and refusing it would strand the work the halt is" >&2
         echo "  trying to get to safety." >&2
         echo "  After this push: stop. Do not start another task or a boot test." >&2
+    else
+        # No halt — nothing to say.  The `else` exists because
+        # `test-pre-push-run-checker.py` verifies that every exemption in
+        # NOT_A_CHECKER has a handler for both branches.
+        :
     fi
 fi
 

@@ -2506,4 +2506,53 @@ echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
 [ "$n_ran" -gt 0 ] && echo "  ran:    ${gates_ran# }" >&2
 [ "$n_skipped" -gt 0 ] && echo "  skipped: ${gates_skipped# }" >&2
 
+# ---------------------------------------------------------------------------
+# The halt notice. NOT a gate: it prints and allows.
+#
+# `scripts/check-lane-signals.py` carries a halt -- a signal written into the
+# git *common* directory, so it is visible to all three lanes the instant it is
+# raised, with no merge and no push. Until now `boot-test.sh` was its only
+# reader, which meant a lane that commits and pushes but does not boot-test
+# never encountered a halt at all. That is the common case rather than the
+# exception: lane B ran cargo and `git push` dozens of times through a live halt
+# on 2026-09-06 and saw nothing.
+#
+# WHY THIS MUST NOT REFUSE, WHICH IS THE ENTIRE POINT.
+#
+# Every other check in this file refuses on failure, so "add a halt check" reads
+# naturally as "add another refusal". Here that would be actively harmful. A
+# halt asks lanes to reach a clean point, commit, push, and *stop*. A gate that
+# blocked the push would strand precisely the work the halt is trying to get to
+# safety -- it would cause the loss it exists to prevent. During a halt,
+# pushing is exactly what you want a lane to do.
+#
+# Deliberately not counted in the tally above, and deliberately not given a
+# `note_gate` call. The tally records what judged the push; this judges nothing
+# and cannot fail. Counting it would report a fifteenth gate that always
+# passes, which is worse than not reporting it at all. The gate total stays 14.
+#
+# Placed after the tally so that "allowed through" is true whenever it prints: a
+# refusing gate exits earlier, and a lane whose push was just refused has a more
+# immediate problem than the halt.
+#
+# `--quiet` prints nothing when nothing is pending, so the ordinary case costs
+# one process spawn and no output. The exit status is 1 only when a halt is in
+# force -- a pending *notice* prints and exits 0 -- so the message below cannot
+# claim a halt that is not there. (Checked in the source rather than assumed:
+# `check-lane-signals.py` returns 1 solely under `if halt is not None`.)
+#
+# Asked for by lane A in
+# requests/a-b-the-halt-should-warn-at-push-time-but-must-not-block-the-push.md
+# ---------------------------------------------------------------------------
+if [ "$skip" -eq 0 ] && [ -f "$repo_root/scripts/check-lane-signals.py" ]; then
+    if ! "$py" "$repo_root/scripts/check-lane-signals.py" --quiet >&2; then
+        echo "" >&2
+        echo "pre-push: a halt is in force (details above)." >&2
+        echo "  This push was allowed through deliberately -- pushing is what a" >&2
+        echo "  halt asks for, and refusing it would strand the work the halt is" >&2
+        echo "  trying to get to safety." >&2
+        echo "  After this push: stop. Do not start another task or a boot test." >&2
+    fi
+fi
+
 exit 0

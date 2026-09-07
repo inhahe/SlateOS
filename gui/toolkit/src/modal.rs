@@ -755,6 +755,16 @@ impl AlertDialog {
         &self.buttons
     }
 
+    /// The question the dialog is asking.
+    ///
+    /// The counterpart of [`Self::detail`], which was readable while this was
+    /// not -- so a caller could inspect the quiet second line of a dialog but
+    /// not its actual message.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
     /// The quieter second line under the message, if one was set.
     #[must_use]
     pub fn detail(&self) -> Option<&str> {

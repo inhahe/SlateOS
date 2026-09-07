@@ -245,6 +245,42 @@ pub enum SortDir {
 // Clipboard
 // ============================================================================
 
+/// What a file operation did, and whether the user must be made to see it.
+///
+/// Operations used to hand back a single formatted `String` that every caller
+/// dropped into the status bar, so "Deleted 5 item(s)" and "Deleted 3
+/// item(s), 2 failed -- /etc/x: permission denied" arrived in the same place,
+/// in the same colour, and both vanished at the next click. A destructive
+/// operation that half-failed is precisely the thing a user must not miss,
+/// and the status bar is where things go to be missed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Outcome {
+    /// The status-bar line. Always present, success or failure.
+    message: String,
+    /// Present when some part of the operation did not happen. Its content is
+    /// what the dialog says; the `message` still goes to the status bar, so
+    /// the record survives after the dialog is dismissed.
+    failure: Option<String>,
+}
+
+impl Outcome {
+    /// Everything asked for happened.
+    fn ok(message: String) -> Self {
+        Self {
+            message,
+            failure: None,
+        }
+    }
+
+    /// Nothing happened, or not all of it did.
+    fn failed(message: String, detail: String) -> Self {
+        Self {
+            message,
+            failure: Some(detail),
+        }
+    }
+}
+
 /// A modal the file manager is waiting on, and what to do when it answers.
 ///
 /// One field rather than one `Option` per dialog kind: only one modal can be
@@ -257,6 +293,9 @@ enum Modal {
         dialog: AlertDialog,
         action: PendingAction,
     },
+    /// Something went wrong, and the user is being told so they cannot miss
+    /// it. Its only answer is "OK" and nothing acts on it.
+    Notice { dialog: AlertDialog },
     /// A rename in progress, awaiting the new name.
     Rename {
         dialog: InputDialog,
@@ -1004,7 +1043,7 @@ impl ExplorerState {
 
         let mut executor = OperationExecutor::new(plan);
         let events = executor.execute();
-        self.status_message = Self::describe_outcome(&events, "Pasted");
+        self.report(Self::describe_outcome(&events, "Pasted"));
 
         let (undo_op, entries) = executor.into_undo_entries();
         if !entries.is_empty() {
@@ -1042,15 +1081,15 @@ impl ExplorerState {
         }
 
         if permanent {
-            self.status_message =
-                match OperationPlan::plan_delete(&paths, ErrorPolicy::SkipAndContinue) {
-                    Ok(plan) => {
-                        let mut executor = OperationExecutor::new(plan);
-                        let events = executor.execute();
-                        Self::describe_outcome(&events, "Deleted")
-                    }
-                    Err(e) => format!("Delete failed: {e}"),
-                };
+            let outcome = match OperationPlan::plan_delete(&paths, ErrorPolicy::SkipAndContinue) {
+                Ok(plan) => {
+                    let mut executor = OperationExecutor::new(plan);
+                    let events = executor.execute();
+                    Self::describe_outcome(&events, "Deleted")
+                }
+                Err(e) => Outcome::failed(format!("Delete failed: {e}"), e.to_string()),
+            };
+            self.report(outcome);
         } else {
             let mut recycled = Vec::new();
             let mut first_error = None;
@@ -1072,13 +1111,21 @@ impl ExplorerState {
             if !recycled.is_empty() {
                 self.undo.push(FileOperation::Recycle, recycled);
             }
-            self.status_message = match first_error {
-                None => format!("{moved} item(s) moved to recycle bin"),
-                Some(err) => format!(
-                    "{moved} of {} item(s) moved to recycle bin — {err}",
-                    paths.len()
+            let outcome = match first_error {
+                None => Outcome::ok(format!("{moved} item(s) moved to recycle bin")),
+                Some(err) => Outcome::failed(
+                    format!(
+                        "{moved} of {} item(s) moved to recycle bin — {err}",
+                        paths.len()
+                    ),
+                    format!(
+                        "{} of {} item(s) could not be moved to the recycle bin.\n\n{err}",
+                        paths.len().saturating_sub(moved),
+                        paths.len()
+                    ),
                 ),
             };
+            self.report(outcome);
         }
 
         self.load_directory();
@@ -1089,7 +1136,7 @@ impl ExplorerState {
     /// Reports what actually happened. The counts come from the executor's own
     /// summary, so a failed or skipped file is visible to the user instead of
     /// being folded into an unconditional "complete".
-    fn describe_outcome(events: &[FileOpEvent], verb: &str) -> String {
+    fn describe_outcome(events: &[FileOpEvent], verb: &str) -> Outcome {
         let summary = events.iter().find_map(|e| match e {
             FileOpEvent::Complete { summary } => Some(summary),
             _ => None,
@@ -1112,36 +1159,76 @@ impl ExplorerState {
                     _ => None,
                 })
                 .unwrap_or_else(|| "operation did not complete".to_string());
-            return format!("{verb} nothing — {reason}");
+            let message = format!("{verb} nothing — {reason}");
+            return Outcome::failed(message, reason);
         };
 
         let mut msg = format!("{verb} {succeeded} item(s)");
         if *skipped > 0 {
             msg.push_str(&format!(", {skipped} skipped"));
         }
-        if *failed > 0 {
-            msg.push_str(&format!(", {failed} failed"));
-            if let Some(first) = errors.first() {
-                msg.push_str(&format!(" — {}: {}", first.path.display(), first.message));
-            }
+        if *failed == 0 {
+            return Outcome::ok(msg);
         }
-        msg
+
+        msg.push_str(&format!(", {failed} failed"));
+        // The dialog names the first failure in full. Listing all of them
+        // would be the right thing for a queue view and the wrong thing for a
+        // dialog, which has to be readable at a glance; the status bar keeps
+        // the count, so nothing is lost.
+        let detail = match errors.first() {
+            Some(first) => {
+                msg.push_str(&format!(" — {}: {}", first.path.display(), first.message));
+                format!(
+                    "{failed} of {} could not be done.\n\n{}: {}",
+                    succeeded.saturating_add(*failed),
+                    first.path.display(),
+                    first.message
+                )
+            }
+            // A failure count with no error to go with it is the executor
+            // contradicting itself. Say so rather than showing an empty
+            // dialog, which reads as a bug in the dialog.
+            None => format!("{failed} item(s) could not be done, with no reason given."),
+        };
+        Outcome::failed(msg, detail)
+    }
+
+    /// Put an outcome where the user will see it.
+    ///
+    /// The status bar always gets the line. A failure additionally raises a
+    /// dialog, because the status bar is a place a message can be missed
+    /// entirely -- and the one time that matters is when the user asked for
+    /// something destructive and only part of it happened.
+    fn report(&mut self, outcome: Outcome) {
+        self.status_message = outcome.message;
+        if let Some(detail) = outcome.failure {
+            let mut dialog = AlertDialog::error("Could not finish", &detail);
+            dialog.show();
+            self.modal = Some(Modal::Notice { dialog });
+        }
     }
 
     /// Create a new folder.
     pub fn create_folder(&mut self, name: &str) {
         if let Err(reason) = validate_entry_name(name) {
-            self.status_message = format!("Error creating folder: {reason}");
+            self.report(Outcome::failed(
+                format!("Error creating folder: {reason}"),
+                format!("\"{name}\" cannot be used as a name.\n\n{reason}"),
+            ));
             return;
         }
         let path = self.current_path.join(name);
         match fs::create_dir(&path) {
             Ok(()) => {
-                self.status_message = format!("Created folder: {name}");
                 self.load_directory();
+                self.report(Outcome::ok(format!("Created folder: {name}")));
             }
             Err(e) => {
-                self.status_message = format!("Error creating folder: {e}");
+                self.report(Outcome::failed(
+                    format!("Error creating folder: {e}"),
+                    format!("The folder \"{name}\" could not be created.\n\n{e}"),
+                ));
             }
         }
     }
@@ -1171,7 +1258,10 @@ impl ExplorerState {
         let old_path = entry.path.clone();
 
         if let Err(reason) = validate_entry_name(new_name) {
-            self.status_message = format!("Rename failed: {reason}");
+            self.report(Outcome::failed(
+                format!("Rename failed: {reason}"),
+                format!("\"{new_name}\" cannot be used as a name.\n\n{reason}"),
+            ));
             return;
         }
 
@@ -1180,7 +1270,7 @@ impl ExplorerState {
         // Renaming something to the name it already has is what pressing Enter
         // in the rename box does. It is a no-op, not a collision with itself.
         if new_path == old_path {
-            self.status_message = format!("Renamed to: {new_name}");
+            self.report(Outcome::ok(format!("Renamed to: {new_name}")));
             return;
         }
 
@@ -1191,17 +1281,27 @@ impl ExplorerState {
         // not another process creating that exact file inside the intervening
         // microsecond. `fileops`'s engine makes the same tradeoff.
         if new_path.exists() && !is_same_file(&old_path, &new_path) {
-            self.status_message = format!("Rename failed: \"{new_name}\" already exists");
+            self.report(Outcome::failed(
+                format!("Rename failed: \"{new_name}\" already exists"),
+                format!(
+                    "\"{new_name}\" already exists here.\n\nRenaming onto it would \
+                     destroy it, so nothing was changed. Delete it first, or pick \
+                     another name."
+                ),
+            ));
             return;
         }
 
         match fs::rename(&old_path, &new_path) {
             Ok(()) => {
-                self.status_message = format!("Renamed to: {new_name}");
                 self.load_directory();
+                self.report(Outcome::ok(format!("Renamed to: {new_name}")));
             }
             Err(e) => {
-                self.status_message = format!("Rename failed: {e}");
+                self.report(Outcome::failed(
+                    format!("Rename failed: {e}"),
+                    format!("\"{new_name}\" could not be used.\n\n{e}"),
+                ));
             }
         }
     }
@@ -1391,7 +1491,7 @@ impl ExplorerState {
 
         let mut executor = OperationExecutor::new(plan);
         let events = executor.execute();
-        self.status_message = Self::describe_outcome(&events, verb);
+        self.report(Self::describe_outcome(&events, verb));
 
         let (undo_op, entries) = executor.into_undo_entries();
         if !entries.is_empty() {
@@ -1467,7 +1567,9 @@ impl ExplorerState {
         // floats above the window's own furniture, and a confirmation must
         // sit above it too.
         match self.modal.as_mut() {
-            Some(Modal::Confirm { dialog, .. }) => dialog.render(w, h, &mut tree),
+            Some(Modal::Confirm { dialog, .. } | Modal::Notice { dialog }) => {
+                dialog.render(w, h, &mut tree);
+            }
             Some(Modal::Rename { dialog, .. }) => dialog.render(w, h, &mut tree),
             None => {}
         }
@@ -2650,12 +2752,12 @@ impl ExplorerState {
         };
 
         let consumed = match modal {
-            Modal::Confirm { dialog, .. } => dialog.handle_event(event),
+            Modal::Confirm { dialog, .. } | Modal::Notice { dialog } => dialog.handle_event(event),
             Modal::Rename { dialog, .. } => dialog.handle_event(event),
         } == EventResult::Consumed;
 
         let answer = match modal {
-            Modal::Confirm { dialog, .. } => dialog.result().cloned(),
+            Modal::Confirm { dialog, .. } | Modal::Notice { dialog } => dialog.result().cloned(),
             Modal::Rename { dialog, .. } => dialog.result().cloned(),
         };
 
@@ -2687,7 +2789,9 @@ impl ExplorerState {
                 DialogResult::Text(name) => self.rename_path(&target, &name),
                 _ => self.status_message = "Rename cancelled".to_string(),
             },
-            None => {}
+            // Dismissing a notice is the whole of what a notice does. It
+            // has already been reported; there is nothing left to carry out.
+            Some(Modal::Notice { .. }) | None => {}
         }
     }
 
@@ -2700,7 +2804,10 @@ impl ExplorerState {
         match self.entries.iter().position(|e| e.path == target) {
             Some(index) => self.rename_entry(index, new_name),
             None => {
-                self.status_message = "Rename failed: the file is no longer there".to_string();
+                self.report(Outcome::failed(
+                    "Rename failed: the file is no longer there".to_string(),
+                    "That file is no longer in this folder, so it was not renamed.".to_string(),
+                ));
             }
         }
     }
@@ -2716,12 +2823,20 @@ impl ExplorerState {
             return;
         };
 
-        self.status_message = match fileops::execute_undo(&record, Some(&self.recycle)) {
-            Ok(0) => "Nothing to undo: those items were deleted permanently".to_string(),
-            Ok(n) => format!("Undone: {n} item(s) restored"),
-            Err(e) => format!("Undo failed: {e}"),
+        let outcome = match fileops::execute_undo(&record, Some(&self.recycle)) {
+            Ok(0) => {
+                Outcome::ok("Nothing to undo: those items were deleted permanently".to_string())
+            }
+            Ok(n) => Outcome::ok(format!("Undone: {n} item(s) restored")),
+            Err(e) => Outcome::failed(
+                format!("Undo failed: {e}"),
+                format!("The last operation could not be reversed.\n\n{e}"),
+            ),
         };
+        // Reload first: `report` may raise a dialog, and it should be drawn
+        // over the listing as it is *after* the undo, not before.
         self.load_directory();
+        self.report(outcome);
     }
 
     fn go_up_if_possible(&mut self) -> bool {
@@ -5244,6 +5359,160 @@ mod tests {
         assert!(
             root.join("notes.txt").exists(),
             "a copy leaves the original"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Failures are shown, not filed
+    //
+    // Every operation used to hand back one formatted string that the caller
+    // dropped into the status bar, so a half-failed delete and a clean one
+    // arrived in the same place and both vanished at the next click. These
+    // cover the split: the status line still gets everything, and a failure
+    // additionally raises a dialog.
+    // ------------------------------------------------------------------
+
+    /// The text of the open notice, or `None` if there is no notice up.
+    fn notice_text(state: &ExplorerState) -> Option<String> {
+        match state.modal.as_ref() {
+            Some(Modal::Notice { dialog }) => Some(dialog.message().to_string()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_rename_onto_an_existing_name_says_so_in_a_dialog() {
+        let scratch = temp_dir("fail_rename_exists");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "first");
+        write(&root.join("b.txt"), "second");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "a.txt");
+        state.move_selection_to(0);
+        send(&mut state, &key(Key::F2));
+        match state.modal.as_mut() {
+            Some(Modal::Rename { dialog, .. }) => dialog.set_input_text("b.txt"),
+            _ => panic!("no rename box"),
+        }
+        send(&mut state, &key(Key::Enter));
+
+        let notice = notice_text(&state).expect("a refused rename must raise a dialog");
+        assert!(
+            notice.contains("already exists"),
+            "and say why, got {notice:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("b.txt")).expect("intact"),
+            "second",
+            "and must not have destroyed the file it refused to overwrite"
+        );
+    }
+
+    #[test]
+    fn a_rename_that_works_raises_no_dialog() {
+        let scratch = temp_dir("fail_rename_ok");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "first");
+
+        let mut state = state_at(&root);
+        state.move_selection_to(0);
+        send(&mut state, &key(Key::F2));
+        match state.modal.as_mut() {
+            Some(Modal::Rename { dialog, .. }) => dialog.set_input_text("b.txt"),
+            _ => panic!("no rename box"),
+        }
+        send(&mut state, &key(Key::Enter));
+
+        assert!(
+            state.modal.is_none(),
+            "success must not interrupt the user with a dialog"
+        );
+        assert!(root.join("b.txt").exists());
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_created_says_so_in_a_dialog() {
+        let scratch = temp_dir("fail_mkdir");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("taken")).expect("mkdir");
+
+        let mut state = state_at(&root);
+        state.create_folder("taken");
+
+        let notice = notice_text(&state).expect("a refused mkdir must raise a dialog");
+        assert!(
+            notice.contains("taken"),
+            "the dialog must name the folder, got {notice:?}"
+        );
+    }
+
+    #[test]
+    fn a_name_the_filesystem_forbids_is_refused_in_a_dialog() {
+        let scratch = temp_dir("fail_badname");
+        let root = scratch.dir().to_path_buf();
+
+        let mut state = state_at(&root);
+        state.create_folder("a/b");
+
+        assert!(
+            notice_text(&state).is_some(),
+            "a name with a separator in it cannot be a single entry"
+        );
+        assert!(!root.join("a").exists(), "and nothing was created");
+    }
+
+    #[test]
+    fn dismissing_a_notice_closes_it_and_does_nothing_else() {
+        let scratch = temp_dir("fail_dismiss");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("taken")).expect("mkdir");
+
+        let mut state = state_at(&root);
+        state.create_folder("taken");
+        assert!(state.modal.is_some(), "up first");
+
+        send(&mut state, &key(Key::Enter));
+
+        assert!(state.modal.is_none(), "OK closes it");
+        assert!(
+            root.join("taken").is_dir(),
+            "and dismissing a report must not act on anything"
+        );
+    }
+
+    #[test]
+    fn the_notice_is_actually_drawn() {
+        let scratch = temp_dir("fail_draw");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("taken")).expect("mkdir");
+
+        let mut state = state_at(&root);
+        state.create_folder("taken");
+
+        let drawn = texts(&state.render()).join(" ");
+        assert!(
+            drawn.contains("Could not finish"),
+            "the dialog must be on screen, got {drawn:?}"
+        );
+    }
+
+    /// The status bar keeps its line even when a dialog is raised, so the
+    /// record survives being dismissed.
+    #[test]
+    fn a_failure_reaches_both_the_dialog_and_the_status_bar() {
+        let scratch = temp_dir("fail_both");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("taken")).expect("mkdir");
+
+        let mut state = state_at(&root);
+        state.create_folder("taken");
+
+        assert!(notice_text(&state).is_some());
+        assert!(
+            state.status_message.contains("Error creating folder"),
+            "got {:?}",
+            state.status_message
         );
     }
 }

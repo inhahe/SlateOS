@@ -2848,6 +2848,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - `[C]` the file manager asking in the same dialog that reports the failure,
     plus a visible, cancellable queue view and a report when a deferred
     operation finally runs or is dropped.
+    - [x] **Prerequisite done 2026-09-07:** there *is* now a dialog that
+      reports a failure. Until then every operation flattened success and
+      failure into one status-bar line, so there was nowhere for the deferral
+      prompt to be asked. See `design-decisions.md` §814. The deferral itself
+      still waits on the agreed entry format above.
 
 ### 2.4 Networking stack (userspace)
 - [-] `[A]` TCP/IP stack (kernel-resident prototype, will move to userspace)

@@ -89338,10 +89338,16 @@ viewport so the arrow keys drag the view with them. `ListViewport` gained
 a wheel that revealed the selection could not scroll at all, because the view
 would snap back on the next call.
 
-**Still open:** the icon view (`render_icons`), whose offset has to be
-expressed in rows *of icons* rather than rows of entries, and a visible
-scrollbar. Neither is hard; both were left out to keep this change reviewable,
-and the entry stays open until they land. `move_selection` also still exists
+**The icon grid scrolls too, as of the commit after that one.** The offset
+stays in *entries* -- one number for all three views, so changing view mode
+lands you where you were rather than at the top -- and the grid rounds it down
+to a whole row of icons, because starting mid-row would put the first cell in
+the middle of the pane. The wheel multiplies its row step by the column count
+there: a notch is three rows, and in a grid a row is `cols` entries, so
+stepping by entries would move three files and look unresponsive.
+
+**Still open:** a visible scrollbar. There is no way to see how far down a long
+listing you are, or to drag to a position -- only the wheel and the keyboard. `move_selection` also still exists
 rather than deferring to `ListViewport::select_prev`/`select_next` as the plan
 below suggests -- explorer's multi-selection means the viewport is used for
 scrolling only, and folding the two together is the part that needs the

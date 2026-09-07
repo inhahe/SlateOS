@@ -1532,6 +1532,18 @@ impl ExplorerState {
         }
     }
 
+    /// How many icon cells fit across the file pane.
+    ///
+    /// At least one, however narrow: a zero would make the row index a
+    /// division by zero, and a pane too narrow for a cell should clip one
+    /// rather than draw none. Shared by the renderer and the wheel, because a
+    /// wheel stepping by a different column count than the grid is laid out in
+    /// would move by a fraction of a row and feel stuck.
+    fn icon_columns(&self) -> usize {
+        let pane_w = (self.window_width as f32 - self.sidebar_width).max(0.0);
+        ((pane_w / ICON_CELL_W) as usize).max(1)
+    }
+
     /// The icon view: a grid of thumbnail cells, each captioned with its name.
     ///
     /// Every cell draws *something* at every stage. A file whose thumbnail has
@@ -1556,8 +1568,19 @@ impl ExplorerState {
         // the row index a division by zero, and a pane too narrow for a cell
         // should clip one cell rather than draw none.
         let cols = ((w / ICON_CELL_W) as usize).max(1);
-        let visible_rows = (h / ICON_CELL_H).max(0.0) as usize;
-        let visible_cells = visible_rows.saturating_mul(cols);
+        // The offset is kept in *entries*, one number for all three views, so
+        // changing view mode lands you at roughly the same place rather than
+        // back at the top. The grid rounds it down to a whole row of icons:
+        // starting mid-row would put the first cell in the middle of the pane
+        // with a gap beside it.
+        let first = self
+            .viewport
+            .first_visible()
+            .checked_div(cols)
+            .unwrap_or(0)
+            .saturating_mul(cols);
+        let icon_rows = scroll_window::capacity(ICON_CELL_H, h);
+        let visible_cells = icon_rows.saturating_mul(cols);
 
         tree.translate(x, y);
         // The grid is clipped to the pane, not merely truncated to whole rows:
@@ -1565,13 +1588,24 @@ impl ExplorerState {
         // list is, rather than vanish.
         tree.clip(0.0, 0.0, w, h);
 
-        for (i, entry) in self.entries.iter().take(visible_cells).enumerate() {
+        for (cell, entry) in self
+            .entries
+            .iter()
+            .skip(first)
+            .take(visible_cells)
+            .enumerate()
+        {
+            // Laid out by the *visible* cell, identified by the *absolute*
+            // index. Using one number for both would push the first row off
+            // the top the moment the grid scrolled, and would register drop
+            // zones under the wrong files.
+            let i = first.saturating_add(cell);
             // `cols` is at least 1 by the `max` above, so neither `None` arm
             // is reachable — but writing the division as fallible keeps the
             // loop free of an operation whose safety the reader has to prove
             // from a line thirty above it.
-            let cx = i.checked_rem(cols).unwrap_or(0) as f32 * ICON_CELL_W;
-            let cy = i.checked_div(cols).unwrap_or(0) as f32 * ICON_CELL_H;
+            let cx = cell.checked_rem(cols).unwrap_or(0) as f32 * ICON_CELL_W;
+            let cy = cell.checked_div(cols).unwrap_or(0) as f32 * ICON_CELL_H;
 
             // Registered in window coordinates, not the pane-local ones the
             // commands are emitted in: the pointer position a drop arrives
@@ -2166,7 +2200,15 @@ impl ExplorerState {
                 if rows == 0 {
                     return false;
                 }
-                self.viewport.scroll_by(rows, self.entries.len());
+                // In the grid a "row" is a row of icons, which is `cols`
+                // entries. Without this a notch moves three entries -- less
+                // than one visible row on any pane wider than three cells --
+                // and the view appears not to respond.
+                let step = match self.view_mode {
+                    ViewMode::Icons => rows.saturating_mul(self.icon_columns() as isize),
+                    ViewMode::Details | ViewMode::List => rows,
+                };
+                self.viewport.scroll_by(step, self.entries.len());
                 true
             }
             _ => false,
@@ -2506,6 +2548,80 @@ mod tests {
         assert!(
             range.contains(&cursor),
             "the selected row {cursor} is outside the drawn range {range:?}"
+        );
+    }
+
+    #[test]
+    fn the_icon_grid_scrolls_and_reaches_the_last_file() {
+        let dir = ScratchDir::new("explorer-icons-scroll");
+        dir_with_files(&dir.path(""), 60);
+        let mut state = state_at(&dir.path(""));
+        state.view_mode = ViewMode::Icons;
+
+        let cols = state.icon_columns();
+        assert!(cols >= 1);
+        state.viewport.scroll_by(60, state.entries.len());
+        assert!(
+            state.viewport.first_visible() > 0,
+            "the grid did not scroll at all"
+        );
+    }
+
+    #[test]
+    fn a_wheel_notch_in_the_grid_moves_a_whole_row_of_icons() {
+        // A notch is three rows, and in the grid a row is `cols` entries. If
+        // the step were counted in entries, a notch would move three files --
+        // less than one visible row on any pane wider than three cells -- and
+        // the grid would look unresponsive.
+        let dir = ScratchDir::new("explorer-icons-wheel");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        state.view_mode = ViewMode::Icons;
+        let cols = state.icon_columns();
+
+        state.handle_mouse(&MouseEvent {
+            x: 0.0,
+            y: 0.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+
+        assert!(
+            state.viewport.first_visible() >= cols,
+            "a notch moved {} entries, less than one row of {cols}",
+            state.viewport.first_visible()
+        );
+    }
+
+    #[test]
+    fn a_scrolled_icon_cell_names_the_file_that_is_drawn_in_it() {
+        // The sharpest thing that can go wrong in a scrolled grid: the cell is
+        // laid out by its position on screen and identified by its index in
+        // the listing, and using one number for both means the first cell
+        // after a scroll claims to be the first file in the folder. A click
+        // would then open the wrong file, silently.
+        let dir = ScratchDir::new("explorer-icons-zones");
+        dir_with_files(&dir.path(""), 60);
+        let mut state = state_at(&dir.path(""));
+        state.view_mode = ViewMode::Icons;
+        let cols = state.icon_columns();
+        state.viewport.scroll_by(cols as isize, state.entries.len());
+
+        // Through the real path: render to register the zones, then click
+        // the top-left cell and see which file the program thinks was hit.
+        drop(state.render());
+        let first_drawn = (state.viewport.first_visible() / cols) * cols;
+        assert_ne!(
+            first_drawn, 0,
+            "the grid did not scroll, so this proves nothing"
+        );
+
+        let clicked = state.click_at(state.sidebar_width + 10.0, 64.0 + 10.0);
+        assert!(clicked, "the top-left cell was not clickable");
+        assert_eq!(
+            state.selected_indices.as_slice(),
+            [first_drawn],
+            "the top-left cell named file {:?} instead of the one drawn in it",
+            state.selected_indices
         );
     }
 

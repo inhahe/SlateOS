@@ -30,8 +30,9 @@ mod fileops;
 mod thumbs;
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::listview::ListViewport;
+use guitk::modal::{AlertDialog, DialogResult, InputDialog};
 use guitk::render::RenderTree;
 use guitk::scroll_window;
 use guitk::scrollbar;
@@ -244,6 +245,42 @@ pub enum SortDir {
 // Clipboard
 // ============================================================================
 
+/// A modal the file manager is waiting on, and what to do when it answers.
+///
+/// One field rather than one `Option` per dialog kind: only one modal can be
+/// up at a time -- that is what modal means -- and separate fields would make
+/// "a delete confirmation and a rename box, both open" a representable state
+/// that every reader has to rule out by hand.
+enum Modal {
+    /// A destructive action the user has been asked to confirm.
+    Confirm {
+        dialog: AlertDialog,
+        action: PendingAction,
+    },
+    /// A rename in progress, awaiting the new name.
+    Rename {
+        dialog: InputDialog,
+        /// The file being renamed, by path rather than by row index.
+        ///
+        /// A row index is only meaningful against the listing that produced
+        /// it, and the listing is reloaded on every operation; an index held
+        /// across a modal names whatever has since moved into that row. The
+        /// path is the stable identifier, and it is looked up when the dialog
+        /// answers.
+        target: PathBuf,
+    },
+}
+
+/// What a confirmation carries out if it is confirmed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingAction {
+    /// Move the selection to the recycle bin, where it can be restored.
+    Recycle,
+    /// Erase the selection outright. There is no undo for this one, which is
+    /// why its dialog says so.
+    DeletePermanently,
+}
+
 /// File operation pending in clipboard.
 #[derive(Clone, Debug)]
 pub enum ClipboardOp {
@@ -374,6 +411,12 @@ pub struct ExplorerState {
     pub undo: UndoStack,
     /// Recycle bin used by non-permanent delete.
     pub recycle: RecycleBin,
+    /// The dialog currently taking the window's input, if any.
+    ///
+    /// While this is `Some`, every event goes to it and none reaches the
+    /// listing: a confirmation that also let Delete move the selection would
+    /// act on a different file than the one it named.
+    modal: Option<Modal>,
     /// The detail view's column set: which columns are shown, in what order,
     /// at what widths, and which one carries the sort arrow.
     ///
@@ -453,6 +496,7 @@ impl ExplorerState {
             sidebar_width: 200.0,
             undo: UndoStack::new(),
             recycle: RecycleBin::default_location(),
+            modal: None,
             columns: ColumnManager::with_defaults(),
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
@@ -1418,6 +1462,16 @@ impl ExplorerState {
         // rather than under it.
         self.render_drop_feedback(&mut tree);
 
+        // The modal after even that, so it draws over the listing it is
+        // asking about -- the drop feedback is the only other thing here that
+        // floats above the window's own furniture, and a confirmation must
+        // sit above it too.
+        match self.modal.as_mut() {
+            Some(Modal::Confirm { dialog, .. }) => dialog.render(w, h, &mut tree),
+            Some(Modal::Rename { dialog, .. }) => dialog.render(w, h, &mut tree),
+            None => {}
+        }
+
         tree
     }
 
@@ -2309,6 +2363,13 @@ impl ExplorerState {
     /// disagreed, the user would click one file and open another.
     #[must_use]
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // A modal owns the input while it is up. Falling through to the
+        // listing as well is how a Delete confirmation also moves the
+        // selection, so that confirming it acts on a different file than the
+        // one the dialog named.
+        if self.modal.is_some() {
+            return self.handle_modal_event(event);
+        }
         match event {
             Event::Mouse(m) => self.handle_mouse(m),
             Event::Key(k) => k.pressed && self.handle_key(k),
@@ -2475,12 +2536,192 @@ impl ExplorerState {
                 self.load_directory();
                 true
             }
+            // Shift+Delete is the permanent one, by long convention. It is
+            // matched first because `Key::Delete` below would otherwise take
+            // it and quietly recycle instead.
+            Key::Delete if k.modifiers.shift => self.ask_delete(PendingAction::DeletePermanently),
+            Key::Delete => self.ask_delete(PendingAction::Recycle),
+            Key::F2 => self.ask_rename(),
+            Key::Z if ctrl => {
+                self.undo_last();
+                true
+            }
+            Key::C if ctrl => {
+                self.copy_selected();
+                true
+            }
+            Key::X if ctrl => {
+                self.cut_selected();
+                true
+            }
+            Key::V if ctrl => {
+                self.paste();
+                true
+            }
             Key::H if ctrl => {
                 self.toggle_hidden();
                 true
             }
             _ => false,
         }
+    }
+
+    /// Count and name the selection, for a dialog that has to be specific.
+    ///
+    /// "Delete 3 items?" and "Delete 'notes.txt'?" are different questions,
+    /// and the second is the one that lets a user notice they selected the
+    /// wrong file. A dialog that always said "the selected items" would be
+    /// exactly as true and no use at all.
+    fn selection_summary(&self) -> Option<(usize, String)> {
+        let mut selected = self.entries.iter().filter(|e| e.selected);
+        let first = selected.next()?;
+        let rest = selected.count();
+        let name = first.path.file_name().map_or_else(
+            || first.path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        Some((rest.saturating_add(1), name))
+    }
+
+    /// Put up the confirmation for a delete, or refuse if nothing is selected.
+    fn ask_delete(&mut self, action: PendingAction) -> bool {
+        let Some((count, name)) = self.selection_summary() else {
+            self.status_message = "Nothing selected".to_string();
+            return true;
+        };
+
+        let subject = if count == 1 {
+            format!("\"{name}\"")
+        } else {
+            format!("{count} items")
+        };
+
+        let dialog = match action {
+            PendingAction::Recycle => AlertDialog::destructive(
+                "Delete",
+                &format!("Move {subject} to the recycle bin?"),
+                "Delete",
+            )
+            .with_detail("You can put it back from the recycle bin, or with Ctrl+Z."),
+            PendingAction::DeletePermanently => AlertDialog::destructive(
+                "Delete permanently",
+                &format!("Permanently delete {subject}?"),
+                "Delete permanently",
+            )
+            .with_detail("This cannot be undone. The data is erased, not recycled."),
+        };
+
+        let mut dialog = dialog;
+        dialog.show();
+        self.modal = Some(Modal::Confirm { dialog, action });
+        true
+    }
+
+    /// Put up the rename box for the first selected entry.
+    ///
+    /// A dialog rather than an edit field drawn into the row: the row editor
+    /// is the nicer of the two and it does not exist, and a rename that works
+    /// through a plain box is worth more than a rename that is still absent
+    /// because the nicer version was a bigger job.
+    fn ask_rename(&mut self) -> bool {
+        let Some(&index) = self.selected_indices.first() else {
+            self.status_message = "Nothing selected".to_string();
+            return true;
+        };
+        let Some(entry) = self.entries.get(index) else {
+            return false;
+        };
+        let target = entry.path.clone();
+        let current = target
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+
+        let mut dialog = InputDialog::prompt("Rename", "New name:", &current)
+            .with_initial_text(&current);
+        dialog.show();
+        self.modal = Some(Modal::Rename { dialog, target });
+        true
+    }
+
+    /// Feed one event to the open modal, and act if it has answered.
+    fn handle_modal_event(&mut self, event: &Event) -> bool {
+        let Some(modal) = self.modal.as_mut() else {
+            return false;
+        };
+
+        let consumed = match modal {
+            Modal::Confirm { dialog, .. } => dialog.handle_event(event),
+            Modal::Rename { dialog, .. } => dialog.handle_event(event),
+        } == EventResult::Consumed;
+
+        let answer = match modal {
+            Modal::Confirm { dialog, .. } => dialog.result().cloned(),
+            Modal::Rename { dialog, .. } => dialog.result().cloned(),
+        };
+
+        let Some(answer) = answer else {
+            return consumed;
+        };
+
+        // Taken before acting: the action reloads the directory and sets a
+        // status message, and doing that with the dialog still up would leave
+        // it drawn over a listing that no longer matches what it asked about.
+        let modal = self.modal.take();
+        self.apply_modal_answer(modal, answer);
+        true
+    }
+
+    /// Carry out what the answered modal was asking about.
+    fn apply_modal_answer(&mut self, modal: Option<Modal>, answer: DialogResult) {
+        match modal {
+            Some(Modal::Confirm { action, .. }) => {
+                // Only the affirmative acts. `Dismissed` covers Escape and a
+                // click outside, and both mean no.
+                if matches!(answer, DialogResult::Ok | DialogResult::Yes) {
+                    self.delete_selected(action == PendingAction::DeletePermanently);
+                } else {
+                    self.status_message = "Delete cancelled".to_string();
+                }
+            }
+            Some(Modal::Rename { target, .. }) => match answer {
+                DialogResult::Text(name) => self.rename_path(&target, &name),
+                _ => self.status_message = "Rename cancelled".to_string(),
+            },
+            None => {}
+        }
+    }
+
+    /// Rename the entry currently holding `target`.
+    ///
+    /// Looks the row up by path rather than trusting an index captured when
+    /// the dialog opened; if the file has gone in the meantime, that is
+    /// reported rather than renaming whatever now sits in that row.
+    fn rename_path(&mut self, target: &Path, new_name: &str) {
+        match self.entries.iter().position(|e| e.path == target) {
+            Some(index) => self.rename_entry(index, new_name),
+            None => {
+                self.status_message = "Rename failed: the file is no longer there".to_string();
+            }
+        }
+    }
+
+    /// Reverse the most recent operation, and say what actually came back.
+    ///
+    /// The count matters: a record can be legitimately un-undoable (a
+    /// permanent delete leaves nothing to restore), and reporting "Undone"
+    /// for that is the same lie the undo journal used to tell itself.
+    fn undo_last(&mut self) {
+        let Some(record) = self.undo.pop() else {
+            self.status_message = "Nothing to undo".to_string();
+            return;
+        };
+
+        self.status_message = match fileops::execute_undo(&record, Some(&self.recycle)) {
+            Ok(0) => "Nothing to undo: those items were deleted permanently".to_string(),
+            Ok(n) => format!("Undone: {n} item(s) restored"),
+            Err(e) => format!("Undo failed: {e}"),
+        };
+        self.load_directory();
     }
 
     fn go_up_if_possible(&mut self) -> bool {
@@ -4248,6 +4489,15 @@ mod tests {
         })
     }
 
+    fn shift_key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::shift(),
+            text: String::new(),
+        })
+    }
+
     fn ctrl_key(k: Key) -> Event {
         Event::Key(KeyEvent {
             key: k,
@@ -4645,5 +4895,346 @@ mod tests {
             "got {:?}",
             state.title()
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Editing keys
+    //
+    // Delete, F2 and Ctrl+Z were bound to nothing at all: pressing them was
+    // silent, which is indistinguishable from a broken window. Every piece
+    // they needed already existed and was tested -- `delete_selected`,
+    // `rename_entry`, the undo journal, `AlertDialog`, `InputDialog` -- so
+    // what these tests cover is the wiring, and above all that the
+    // destructive ones ask first.
+    // ------------------------------------------------------------------
+
+    /// Deliver an event and drop the redraw flag.
+    ///
+    /// `handle_event` returns "something changed, repaint me", which is not
+    /// what these tests are about -- they assert on the file on disk and on
+    /// the dialog's own state. Discarding it once here beats a `let _ =` on
+    /// every line, and keeps the flag `#[must_use]` where it matters.
+    fn send(state: &mut ExplorerState, event: &Event) {
+        let _ = state.handle_event(event);
+    }
+
+    /// Confirm a dialog by focusing its affirmative button and pressing it.
+    ///
+    /// Tab rather than Enter alone: `destructive_cancel` starts focus on
+    /// Cancel on purpose, so Enter by itself is a refusal. That is the
+    /// behaviour, and a test that reached past it would be testing a dialog
+    /// this app does not use.
+    fn confirm_modal(state: &mut ExplorerState) {
+        send(state, &key(Key::Tab));
+        send(state, &key(Key::Enter));
+    }
+
+    #[test]
+    fn pressing_delete_asks_before_it_deletes() {
+        let scratch = temp_dir("del_asks");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        assert!(
+            state.handle_event(&key(Key::Delete)),
+            "the key must be reported as handled, or the window will not repaint"
+        );
+
+        assert!(
+            root.join("notes.txt").exists(),
+            "Delete must ask first, not act and then ask"
+        );
+        assert!(state.modal.is_some(), "a confirmation must be up");
+    }
+
+    #[test]
+    fn confirming_a_delete_recycles_the_file() {
+        let scratch = temp_dir("del_confirm");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &key(Key::Delete));
+        confirm_modal(&mut state);
+
+        assert!(state.modal.is_none(), "the dialog must close once answered");
+        assert!(!root.join("notes.txt").exists(), "confirmed, so it goes");
+        assert_eq!(
+            state.recycle.list().expect("bin").len(),
+            1,
+            "the plain Delete key recycles rather than erases"
+        );
+    }
+
+    #[test]
+    fn cancelling_a_delete_keeps_the_file() {
+        let scratch = temp_dir("del_cancel");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &key(Key::Delete));
+        send(&mut state, &key(Key::Escape));
+
+        assert!(state.modal.is_none(), "Escape must close the dialog");
+        assert!(
+            root.join("notes.txt").exists(),
+            "a cancelled delete must not delete"
+        );
+        assert_eq!(state.recycle.list().expect("bin").len(), 0);
+    }
+
+    /// Enter alone is a refusal, because focus starts on Cancel.
+    ///
+    /// This is what stops a user dismissing a surprise dialog with the key
+    /// they were already pressing, and losing a file to it.
+    #[test]
+    fn enter_alone_on_a_delete_confirmation_cancels() {
+        let scratch = temp_dir("del_enter");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &key(Key::Delete));
+        send(&mut state, &key(Key::Enter));
+
+        assert!(
+            root.join("notes.txt").exists(),
+            "Enter must land on Cancel, not on Delete"
+        );
+    }
+
+    #[test]
+    fn shift_delete_erases_instead_of_recycling_and_says_so() {
+        let scratch = temp_dir("del_perm");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &shift_key(Key::Delete));
+
+        let detail = match state.modal.as_ref() {
+            Some(Modal::Confirm { dialog, action }) => {
+                assert_eq!(*action, PendingAction::DeletePermanently);
+                dialog.detail().unwrap_or_default().to_string()
+            }
+            _ => panic!("Shift+Delete must raise a confirmation"),
+        };
+        assert!(
+            detail.contains("cannot be undone"),
+            "the permanent one must say it is permanent, got {detail:?}"
+        );
+
+        confirm_modal(&mut state);
+        assert!(!root.join("notes.txt").exists());
+        assert_eq!(
+            state.recycle.list().expect("bin").len(),
+            0,
+            "a permanent delete must not leave a recoverable copy in the bin"
+        );
+    }
+
+    /// While a dialog is up, the listing underneath must not also act.
+    ///
+    /// Otherwise the keys used to reach the buttons drag the selection along
+    /// with them, and confirming deletes a file other than the one named.
+    #[test]
+    fn a_modal_takes_the_keys_the_listing_would_have_used() {
+        let scratch = temp_dir("modal_keys");
+        let root = scratch.dir().to_path_buf();
+        dir_with_files(&root, 5);
+
+        let mut state = state_at(&root);
+        state.move_selection_to(0);
+        send(&mut state, &key(Key::Delete));
+        let before = state.selected_indices.clone();
+
+        send(&mut state, &key(Key::Down));
+        send(&mut state, &key(Key::Down));
+
+        assert_eq!(
+            state.selected_indices, before,
+            "the listing must not move under an open dialog"
+        );
+    }
+
+    #[test]
+    fn the_confirmation_is_actually_drawn() {
+        let scratch = temp_dir("modal_draw");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &key(Key::Delete));
+
+        let drawn = texts(&state.render());
+        // The whole sentence, deliberately. Asserting only that "notes.txt"
+        // was drawn somewhere passes with the dialog entirely absent, because
+        // the listing row behind it draws the same name -- which is what this
+        // test did until it was mutation-checked.
+        //
+        // Joined because the dialog word-wraps its message into one text
+        // command per line, so the phrase is split across two of them. Any
+        // wrap point rejoins with the space it broke on.
+        let joined = drawn.join(" ");
+        assert!(
+            joined.contains("Move \"notes.txt\" to the recycle bin?"),
+            "the dialog must name the file and where it is going, got {drawn:?}"
+        );
+        assert!(
+            drawn.iter().any(|t| t == "Cancel"),
+            "and draw the buttons, or there is nothing to click, got {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn f2_opens_a_rename_box_holding_the_current_name() {
+        let scratch = temp_dir("rename_open");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        state.move_selection_to(0);
+        send(&mut state, &key(Key::F2));
+
+        match state.modal.as_ref() {
+            Some(Modal::Rename { dialog, target }) => {
+                assert_eq!(dialog.input_text(), "notes.txt", "prefilled, not empty");
+                assert_eq!(target, &root.join("notes.txt"));
+            }
+            _ => panic!("F2 must open a rename box"),
+        }
+    }
+
+    #[test]
+    fn renaming_through_the_box_renames_the_file() {
+        let scratch = temp_dir("rename_do");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        state.move_selection_to(0);
+        send(&mut state, &key(Key::F2));
+        match state.modal.as_mut() {
+            Some(Modal::Rename { dialog, .. }) => dialog.set_input_text("renamed.txt"),
+            _ => panic!("no rename box"),
+        }
+        send(&mut state, &key(Key::Enter));
+
+        assert!(state.modal.is_none());
+        assert!(!root.join("notes.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("renamed.txt")).expect("renamed"),
+            "keep me"
+        );
+    }
+
+    /// The rename box holds a path, not a row number.
+    ///
+    /// A row index captured when the dialog opened names whatever has since
+    /// moved into that row. Here the original is removed while the box is
+    /// open, so an index-based rename would rename its neighbour instead.
+    #[test]
+    fn a_rename_whose_target_vanished_is_refused_not_misapplied() {
+        let scratch = temp_dir("rename_stale");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "first");
+        write(&root.join("b.txt"), "second");
+
+        let mut state = state_at(&root);
+        state.move_selection_to(0);
+        send(&mut state, &key(Key::F2));
+
+        fs::remove_file(root.join("a.txt")).expect("remove");
+        state.load_directory();
+
+        match state.modal.as_mut() {
+            Some(Modal::Rename { dialog, .. }) => dialog.set_input_text("c.txt"),
+            _ => panic!("no rename box"),
+        }
+        send(&mut state, &key(Key::Enter));
+
+        assert!(
+            root.join("b.txt").exists(),
+            "the surviving file must keep its name"
+        );
+        assert!(!root.join("c.txt").exists(), "and nothing takes the new one");
+        assert!(
+            state.status_message.contains("no longer there"),
+            "and it must say why, got {:?}",
+            state.status_message
+        );
+    }
+
+    #[test]
+    fn ctrl_z_after_a_delete_puts_the_file_back() {
+        let scratch = temp_dir("undo_key");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &key(Key::Delete));
+        confirm_modal(&mut state);
+        assert!(!root.join("notes.txt").exists());
+
+        send(&mut state, &ctrl_key(Key::Z));
+
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).expect("restored"),
+            "keep me",
+            "Ctrl+Z is the undo the confirmation promises"
+        );
+    }
+
+    /// Undo must not claim to have restored a permanent delete.
+    #[test]
+    fn ctrl_z_after_a_permanent_delete_says_nothing_came_back() {
+        let scratch = temp_dir("undo_key_perm");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &shift_key(Key::Delete));
+        confirm_modal(&mut state);
+
+        send(&mut state, &ctrl_key(Key::Z));
+
+        assert!(
+            state.status_message.contains("Nothing to undo"),
+            "an erased file cannot come back, and undo must not pretend, got {:?}",
+            state.status_message
+        );
+        assert!(!root.join("notes.txt").exists());
+    }
+
+    #[test]
+    fn ctrl_c_then_ctrl_v_copies_within_the_window() {
+        let scratch = temp_dir("clip_keys");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+        fs::create_dir(root.join("sub")).expect("mkdir");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &ctrl_key(Key::C));
+        assert!(state.clipboard.is_some(), "Ctrl+C must fill the clipboard");
+
+        state.navigate_to(&root.join("sub"));
+        send(&mut state, &ctrl_key(Key::V));
+
+        assert_eq!(
+            fs::read_to_string(root.join("sub/notes.txt")).expect("pasted"),
+            "keep me"
+        );
+        assert!(root.join("notes.txt").exists(), "a copy leaves the original");
     }
 }

@@ -89292,7 +89292,54 @@ directory made the file manager read the wrong bytes. As a developer, every
 
 ---
 
-## `TD-C-EXPLORER-HAS-NO-EDITING-KEYS` (lane C, 2026-08-26)
+## `TD-C-EXPLORER-HAS-NO-EDITING-KEYS` (lane C, 2026-08-26) -- **CLOSED 2026-09-07**
+
+**Closed 2026-09-07 (lane C).** Delete, Shift+Delete, F2, Ctrl+Z and
+Ctrl+C/X/V are bound. Delete and Shift+Delete raise a confirmation before
+acting; F2 opens a rename box holding the current name; Ctrl+Z restores.
+
+**Two of the three blockers below were already gone, and I did not check
+before writing them down.** `gui/toolkit`'s `AlertDialog::destructive` --
+affirmative button carrying the verb, drawn in the error colour, focus
+starting on Cancel -- is precisely the confirmation the `Delete` row asks
+for, and `InputDialog` is a text entry that returns what was typed. Both
+predate this entry. The entry asserted they were missing, and the assertion
+was never re-tested; the work turned out to be wiring, not building.
+
+The `Ctrl+C`/`Ctrl+V` row was wrong in a different way. It said the file
+manager had no clipboard. It has had `copy_selected`, `cut_selected`,
+`paste` and a `clipboard` field the whole time -- what it lacks is a
+*system* clipboard, so a file copied here cannot be pasted into another
+application. That is a real limitation and a narrower one, and it is now
+recorded as its own entry rather than as "no clipboard".
+
+What genuinely did not exist was the *inline* rename field, and it still
+does not. A rename dialog is the other standard shape for the same
+operation, so F2 works today without it.
+
+**A latent bug fell out of wiring Ctrl+Z, and it was the reason to do this
+work carefully.** `delete_selected` recorded each recycled file as
+`(path, None)`, because the bin owns the data and restore is by entry id.
+`execute_undo` only acted `if let Some(d) = dest`, so it skipped every
+recycled file and returned `Ok(())` -- an undo that reported success and
+restored nothing. It was invisible because nothing called it on a recycle
+record. The cause was that `Option<PathBuf>` had to mean two opposite
+things: a permanent delete also recorded `None`, for "nothing to reverse",
+and skipping *that* is correct. `UndoTarget` (`Path` / `Recycled` /
+`Nothing`) names the three cases, and `execute_undo` now takes the bin and
+returns how many items it actually put back, so a caller cannot report a
+restore that did not happen. See `0ffb599de`.
+
+**One test was passing vacuously and mutation-checking caught it.** The
+render test asserted that "notes.txt" appeared among the drawn text -- true
+with the dialog entirely absent, because the listing row draws the same
+name. It now asserts the whole sentence, joined across the word wrap, which
+no listing row can produce.
+
+Original entry follows.
+
+---
+
 
 **In short:** the file manager is now a real window you can click and type in,
 but only the keys that *look* at files work — arrows, Home/End, Enter,
@@ -122783,3 +122830,39 @@ is not this project's tree to move), or the search learns the old `D:` location
 once in the environment for all lanes (operator's, and outside any lane's
 files). Lane B has no standing to pick among those, so it is written down with
 the workaround instead.
+
+---
+
+## `TD-C-THE-FILE-MANAGER-CLIPBOARD-STOPS-AT-ITS-OWN-WINDOW` (lane C, 2026-09-07)
+
+**In short:** copying a file in the file manager and pasting it in the file
+manager works. Copying a file there and pasting it *anywhere else* does not,
+because the file manager keeps its copied-files list in a variable of its own
+rather than handing it to the system. Nothing tells the user that; Ctrl+C looks
+identical either way, and the paste simply does not happen in the other window.
+
+**Where it lives.** `apps/explorer/src/main.rs` -> the `clipboard` field, and
+`copy_selected` / `cut_selected` / `paste` around it. The field is an
+`Option<ClipboardOp>` holding `Copy(Vec<PathBuf>)` or `Cut(Vec<PathBuf>)`, and
+it is private to the one running `ExplorerState`.
+
+**Why this entry exists.** It replaces a wrong claim.
+`TD-C-EXPLORER-HAS-NO-EDITING-KEYS` said the file manager had *no* clipboard
+and that Ctrl+C could not be wired until one was built. It has had one all
+along -- what it lacks is a *shared* one. Wiring the keys was therefore
+correct, and the residue is this narrower thing.
+
+**What the proper fix is.** A clipboard owned outside the app, holding a
+*typed* payload rather than text: a file reference is a list of paths plus
+whether it was a copy or a cut, and flattening it to a newline-joined string
+loses the cut/copy distinction and breaks on any path containing a newline
+(our paths allow every byte except `/` and NUL). `gui/toolkit` has a clipboard
+for text only. Whether the system clipboard belongs in the toolkit, the
+compositor or a service is the open part -- text and files want the same
+ownership rules and different payloads, and a text-only clipboard grown a
+files case by accident is how the two end up disagreeing about which one is
+authoritative.
+
+**How you would notice.** Copy a file in the file manager, switch to any other
+window, press Ctrl+V. Nothing arrives, and nothing says why.
+

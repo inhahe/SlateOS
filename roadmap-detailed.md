@@ -1247,6 +1247,82 @@ _File comments: extended attribute `user.comment`, max ~64 KiB. No dedicated ino
 
 _Dedup: (1) Package manager hardlinks in content-addressed store. (2) Filesystem-level via Btrfs/ZFS ports (Phase 6.2). (3) Userspace batch tool — off by default, uses filesystem hashes when available, falls back to reading+hashing._
 
+#### Deferred filesystem operations ("do it when you can, and remember across a reboot")
+
+**Read the premise note before implementing.** The obvious motivation for this
+feature — "the file is locked, so the delete failed" — **does not apply to
+SlateOS**. This is a POSIX-semantics system: `unlink` and `rename` on an open
+file succeed, the directory entry goes immediately and the inode survives until
+the last descriptor closes. Windows needs `MOVEFILE_DELAY_UNTIL_REBOOT` and
+`PendingFileRenameOperations` because Windows *cannot* do that, not because
+deferred deletion is inherently necessary. Building the workaround without the
+limitation would be cargo-culting a Windows wart.
+
+What *does* fail here, and is worth deferring:
+
+- [ ] **A busy mount.** `KernelError::DeviceBusy` is real in `kernel/src/fs/vfs.rs`
+      (unmount refuses while a sub-mount would be orphaned). "Eject this drive
+      when the last user closes it" is the strongest case for the whole feature.
+- [ ] **A read-only mount.** Defer until it is remounted read-write.
+- [ ] **An absent volume.** A removable or network volume that is not attached:
+      queue the delete/rename and apply it when the filesystem returns. This is
+      the case that most needs to survive a reboot.
+- [ ] **A full volume**, where trashing (a rename into that volume's recycle
+      bin) cannot complete but a permanent delete could — the user should be
+      offered the deferral rather than silently getting the wrong one.
+
+##### The queue itself
+- [ ] Persistent, per-filesystem, stored on the filesystem the operation
+      targets — the same reasoning as per-drive recycle bins above: an
+      operation against a drive travels with that drive, and a queue on the
+      system disk naming paths on a drive that has since moved to another
+      machine is a queue of lies.
+- [ ] Entries name **what** (delete / rename-to), **what to**, **why it was
+      deferred**, **who asked**, and **when**.
+- [ ] Idempotent and self-cancelling: an entry whose target no longer exists,
+      or no longer matches what was queued, is dropped rather than applied.
+- [ ] Enumerable and cancellable from CLI and GUI. A deferred operation the
+      user cannot see or call off is a booby trap.
+
+##### Security — the part that must not be got wrong
+- [ ] **Re-check the capability at execution time, not only at queue time.**
+      Windows' `PendingFileRenameOperations` is a well-known persistence and
+      privilege-escalation vector precisely because it runs as SYSTEM, early,
+      against a list written earlier by someone else. An entry must carry the
+      authority of whoever queued it and be re-authorised when it runs; a
+      queued operation must never gain privilege by waiting.
+- [ ] **Resolve by identity, not by path, where possible.** A path queued today
+      may name a different file at reboot. Prefer the filesystem UUID plus
+      inode, and treat a mismatch as "drop the entry", not "apply anyway".
+- [ ] **Never let a deferral escalate a denied operation.** If the delete would
+      have been refused for permission reasons, it is refused — deferral is for
+      *temporary* obstacles (busy, read-only, absent), never for permission.
+
+##### Command line
+- [ ] When an operation fails for a deferrable reason, `rm`/`mv` **ask**
+      whether to defer it — interactively, when stdin is a terminal.
+- [ ] Non-interactive (a script, a pipe): **do not ask and do not defer.** Fail
+      with the real error, and name the flag in the message. Silently queuing
+      an operation a script did not ask for is how a batch job deletes
+      something an hour after it exited.
+- [ ] An explicit flag (`--defer`, say) to queue without asking; and its
+      inverse for interactive use.
+- [ ] A command to list, inspect and cancel pending operations.
+
+##### GUI shell
+- [ ] The file manager **asks**, in the same dialog that reports the failure —
+      "this drive is in use; delete it when it is free?" — rather than a
+      separate opt-in buried elsewhere.
+- [ ] Pending operations are visible somewhere durable (a queue view, and a
+      count where the user can see it), and cancellable from there.
+- [ ] The user is told when a deferred operation eventually runs, and when one
+      is dropped because the target changed.
+
+**Lanes:** the queue and the VFS hooks are **A** (`kernel/src/fs/`); `rm`/`mv`
+and the listing command are **B** (coreutils); the file manager and its queue
+view are **C** (`apps/explorer`, `gui/desktop`). Worth one agreed design before
+any lane starts, since all three ends share the entry format.
+
 #### Recycle Bin
 - [ ] Per-filesystem recycle bins (not one central bin)
 - [ ] Two syscalls: trash-capable delete (default for shell/explorer) and permanent delete

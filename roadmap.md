@@ -489,6 +489,39 @@ on the same day, to the same lane:**
    branch. **If your worktree cannot boot-test, run
    `bash scripts/bootstrap-worktree.sh` before debugging anything.**
 
+**Run `python scripts/check-lane-signals.py` at the *start* of every task, not
+only before a boot test.**
+
+A lane can raise a halt — "stop at your next clean point" — with
+`--raise-halt REASON`, lift it with `--clear-halt`, and leave a one-way message
+with `--notice TEXT --to a|b|c|all`. It is how the operator's "everybody stop"
+reaches three sessions that cannot see each other.
+
+**It has exactly one caller, and it is the wrong one for this purpose.**
+`scripts/boot-test.sh` consults it and refuses to build while a halt stands.
+That is correct and it is also *late*: a halt says "do not start another task
+**or** a boot test", so the enforcement sits on the path a lane takes at the
+*end* of a task, and lane C in particular rarely boot-tests at all. Nothing
+checks when work *begins*.
+
+This is not hypothetical. On 2026-09-07 lane A raised a halt for a messaging-hub
+restart **and** sent a message whose first line read "Not an instruction to
+stop" — true of the message, which was about something else, and false of the
+situation. Lane C read the prose, did not run the checker, started a whole
+feature, and finished and merged it before noticing. Nothing was lost, because
+the halt's actual instruction ("commit and push, then stop") was satisfied by
+accident. It need not have been.
+
+The lesson is not "read your messages more carefully". It is that a signal
+which is only checked on one path is a signal that will be missed on the
+others, and that **prose written by a peer cannot override a mechanism — but it
+will, if the mechanism is never consulted.** One command, no judgement in it,
+at the top of every task:
+
+```bash
+python scripts/check-lane-signals.py        # silent when there is nothing pending
+```
+
 **Why per-branch copies are kept at all** (rather than moving the shared docs
 to `main` only): the per-lane conventions in rule 3 are what make them merge
 cleanly, and they demonstrably do — the numbering split meant
@@ -2762,6 +2795,28 @@ _Port ext4 first. Don't write a custom filesystem._
   substitutes for a contiguous one, which is exactly the state a pool is in when
   its owner most wants to read files off it (design-decisions §248));
   the write sides remain open
+
+- [ ] `[A]`+`[B]`+`[C]` **Deferred filesystem operations** — queue a delete or
+  rename that cannot happen yet, and remember it across a reboot. Operator's
+  request, 2026-09-07. See `roadmap-detailed.md` → "Deferred filesystem
+  operations" for the full inventory, and **read its premise note first**: the
+  usual motivation ("the file is locked") does **not** apply here, because this
+  is a POSIX system and `unlink`/`rename` on an open file already succeed. What
+  is worth deferring is a *busy mount*, a *read-only mount*, an *absent
+  removable/network volume*, and a full volume that cannot accept a trash
+  rename. Three ends to build and one shared entry format, so it wants an agreed
+  design before any lane starts:
+  - `[A]` the persistent per-filesystem queue and the VFS hooks that enqueue and
+    replay it. **The security half is the hard half** — the capability must be
+    re-checked when the operation *runs*, not only when it is queued, or this
+    becomes SlateOS's version of `PendingFileRenameOperations`, a list written
+    by one user and executed early with more authority than they had.
+  - `[B]` `rm`/`mv` offering the deferral when a failure is deferrable —
+    interactively only, with an explicit flag for scripts, and never silently:
+    a batch job must not queue a deletion that happens an hour after it exits.
+  - `[C]` the file manager asking in the same dialog that reports the failure,
+    plus a visible, cancellable queue view and a report when a deferred
+    operation finally runs or is dropped.
 
 ### 2.4 Networking stack (userspace)
 - [-] `[A]` TCP/IP stack (kernel-resident prototype, will move to userspace)

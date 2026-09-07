@@ -6514,7 +6514,13 @@ fi
 # a developer running a debug boot test sees how close the threshold is.
 _staleness="$PROJECT_ROOT/scripts/check-release-staleness.py"
 if [ -f "$_staleness" ]; then
-    "$py" "$_staleness" 2>/dev/null || true
+    # $py is a function-local variable, not available at top level.
+    # Use the same command-v probe other top-level blocks use.
+    if command -v python &>/dev/null; then
+        python "$_staleness" 2>/dev/null || true
+    elif command -v python3 &>/dev/null; then
+        python3 "$_staleness" 2>/dev/null || true
+    fi
     # Non-zero exits are ignored: this is informational, not a gate.
     # The pre-push gate is what actually refuses.
 fi

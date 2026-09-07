@@ -2722,8 +2722,8 @@ not generated".
 the machine is locked — was broken for a day and nobody knew, because nothing
 in this project ever tries to build it. Somebody changed a shared library, the
 lock screen still referred to the old version, and no test anywhere failed. It
-was found by accident. There are roughly 200 more programs in the same
-position. The question is whether to add a slow check that compiles everything
+was found by accident. There are 142 more programs in the same position
+(143 counted, one broken). The question is whether to add a slow check that compiles everything
 before work is merged, and if so, what shape it takes — because whatever we
 pick, all three lanes have to live with it.
 
@@ -2781,46 +2781,108 @@ by remembering it, which is the kind that decays.
 *What changes:* nothing. Broken app crates accumulate silently and are found
 one at a time by whoever next touches them.
 
-### Measured, not guessed
+### Measured — then measured wrong, twice. Read this before the recommendation
 
-I wrote a recommendation for B on the assumption that A costs "minutes added to
-every merge", then measured it. Both numbers moved:
+I first recommended the cheap option (B) on the assumption that a full check
+costs "minutes added to every merge". I then measured, got 58 seconds, and
+reversed to the gate (A). **Both of my numbers were about the wrong thing, and
+two other lanes found the holes.** The corrected position is below; the history
+is kept because the *shape* of the error matters more than the number.
 
-- **How widespread:** `cargo check` over **all 143 app crates** — every one, not
-  a sample — finds **exactly one** broken, the lockscreen already repaired. The
-  failure is rare.
-- **What it costs:** **58 seconds**, warm, for all 143. Not minutes. A merge is
-  almost always warm, because the lane just built and tested the thing it is
-  merging. Cold — a fresh clone, or after a toolchain bump — is far longer, but
-  that is not the case that runs on every merge.
+**What I actually measured.** `cargo check` over the 143 crates in `apps/`,
+enumerated by name and passed as `-p` flags, on an otherwise idle machine:
+58 seconds warm, exactly one broken (the lockscreen, since repaired).
 
-So the argument I actually made for B was wrong on the fact it rested on. B was
-recommended because A seemed expensive; A costs about a minute.
+**Hole 1 — that is not the command the gate would run.** The gate's mechanism
+is `cargo check --workspace` for the host target. On a tree lacking
+`services/hello/target/.../hello`, that does not merely take longer — it *fails
+outright*, because `kernel/src/container.rs` embeds that artifact and it is not
+built by anything cargo runs. My `-p apps/*` enumeration skipped the kernel and
+so never met it. So "58 seconds, all clean" is a number about a command nobody
+would run, and it is the reassuring half. (Found by lane B. Details in
+`known-issues.md` →
+`A-THE-KERNEL-EMBEDS-A-BUILD-ARTIFACT-NOTHING-BUILDS-AND-NOTHING-TRACKS`;
+lane A is fixing the build-graph edge, so this is a prerequisite for the gate,
+not a permanent obstacle.)
+
+**Hole 2 — an idle number is the wrong number for a shared machine.** This
+machine saturates on a *single* cargo run; that is measured, not folklore. So
+the cost of a gate that fires on every merge is not its own wall clock — it is
+its wall clock *under contention*, **plus the degradation it imposes on the
+other two lanes for the duration**. For a gate that runs many times a day
+across three lanes, that second term may well dominate the first.
+
+That distinction is the same one lane A's case for the SSD migration turned on
+(18 random reads/sec contended against 100–150 idle — a 5–8× gap that becomes
+~40× under three-lane load). I read that argument, agreed with it, and then
+failed to apply it to the thing I was proposing. An idle measurement is the
+optimistic half of any question about a machine three agents share.
+
+**So the honest state is: the cost of option A is unmeasured.** Lane B has
+offered to take it — `cargo check --workspace` for the host target, on a
+bootstrapped tree, stating whether the machine was idle or contended when the
+number was taken. Until that exists, anyone recommending A or B on cost is
+guessing, including me an hour ago.
 
 ### Recommendation
 
-**A, plus C.** A minute per merge is a fair price for "the tree compiles", and
-it is the only option that stops a breakage rather than shortening its life.
-The rarity of the failure argues for the cheap option only if the guarantee is
-expensive, and it is not.
+**Adopt C now, regardless. Defer the A-versus-B choice to one number that does
+not exist yet.**
 
-The one real objection to A stands and should be weighed: it means lane A can
-be blocked from merging by lane C's typo. That is already true of the boot test,
-which builds the whole workspace, so it is a difference of degree rather than
-kind — but it is a difference that lands on whoever is merging at the time, not
+**C is free and would have caught this.** A commit message may not claim "no
+caller changes" about a shared library until `grep -rl <symbol> apps/ gui/ net/`
+has been run. It costs nothing, it needs no infrastructure, and it addresses the
+actual failure mode — a change whose callers live in a lane the author cannot
+see. Adopt it whichever way the rest goes.
+
+**Between A and B, here is the decision rule rather than a verdict**, so that
+the answer follows from lane B's measurement instead of from my instinct:
+
+| If the contended workspace check costs… | Then |
+|---|---|
+| under ~1 minute | **A** — a minute per merge is a fair price for "the tree compiles", and it is the only option that *stops* a breakage rather than shortening its life |
+| a few minutes, with the other lanes degraded throughout | **B** — the nightly sweep. The guarantee is no longer cheap, and the rarity of the failure (one crate in 143, found by accident, in a tree nobody had ever compiled whole) stops justifying the standing tax |
+
+I lean A, and I want to be clear that this is a *lean* and not the measured
+conclusion I previously presented: the failure is real and recurring — the same
+`authlib` change broke two callers in two different lanes on one day — and a
+guarantee that fires at the moment of breakage is worth paying for if the price
+is a minute. But I have been wrong twice on this entry's cost figures, in the
+same direction both times, and the operator should weight that.
+
+**The objection to A, restated in the better form lane B gave it.** I had
+written it as "the gate lets one lane block another's merge", and answered that
+this is already true of the boot test. Lane B's version is stronger: *the
+coupling exists whether or not there is a gate.* Today it ran in both
+directions — lane B's `authlib` change broke lane C's lockscreen, and that
+lockscreen then stood between lane B's own `init/login` fix and a green `main`.
+The gate does not create that coupling. It moves discovery from "another lane
+trips over it days later" to "the lane that caused it, at the moment it caused
+it". The cost lands on whoever merges next *without* the gate; with it, it lands
 on whoever broke it.
 
-C costs nothing and is worth adopting whichever of A or B you pick: it catches
-this specific failure — a shared-library change whose callers live in another
-lane — at the moment it is cheapest to fix, before the commit is even written.
+**One condition on A if it is chosen.** Scope it to the members that genuinely
+check cleanly on the host, and scope it for *that stated reason* — never to
+route around a member that is broken. A gate excluding the kernel because the
+kernel does not build is a gate that has hidden the defect it should have
+reported. (Lane B's phrasing; it is the right test for whether a scoped gate is
+honest.)
 
 ### If this is never answered
 
-The current state is safe but degrading. Nothing is blocked — lockscreen is
-repaired and the tree builds — but the gap stays open, and every shared-library
-change is another chance for a silent breakage that is found weeks later by
-somebody who did not cause it. The cost grows with the number of app crates,
-which is growing.
+The current state is safe but degrading, and nothing is blocked: the lockscreen
+is repaired, `main` is green, and adopting C costs nothing and needs no answer
+from you.
+
+What stays open is the gap. Every shared-library change is another chance for a
+breakage that nothing reports and that is found weeks later by somebody who did
+not cause it. **On the day this was raised that happened twice, from one
+commit** — `authlib`'s single-store change broke `apps/lockscreen` and
+`init/login`, in two different lanes, and neither was caught by anything except
+a person happening to look. Both are fixed; the mechanism that let them through
+is untouched.
+
+The cost grows with the number of app crates, which is growing.
 
 # Resolved
 
@@ -3218,3 +3280,4 @@ These numbers are not to be extended; new questions use `A-Q<n>` / `B-Q<n>` /
   option C** (Claude recommended C): keep `nft`/`iptables` as an explicit
   parser/pretty-printer only, fix the docs, steer users to `fw`; defer full/minimal
   kernel wiring (§62).
+

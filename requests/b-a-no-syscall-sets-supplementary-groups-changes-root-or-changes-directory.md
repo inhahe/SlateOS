@@ -1,72 +1,95 @@
-# B → A — nothing can set supplementary groups, change its root, or change its directory, and four tools are stubs because of it
+# B → A — supplementary groups, chroot and chdir: what is actually missing
 
 **Filed:** 2026-09-06 by Lane B.
-**Status:** OPEN — needs three kernel syscalls.
+**Rewritten:** 2026-09-07, after lane A challenged the premise and it did not
+survive measurement.
+**Status:** OPEN, but **much smaller than originally filed** — and one third of
+it is lane B's, not lane A's.
 
-## In short
+## The original request was wrong
 
-A process can change *who* it is — `SYS_PROCESS_SET_CREDENTIALS` (530) sets uid
-and gid, and `posix::unistd::setuid`/`setgid` are live on it. It cannot change
-the *groups it is additionally in*, the directory it is in, or the directory it
-calls `/`. There is no `SYS_SETGROUPS`, no `SYS_CHDIR` and no `SYS_CHROOT` in
-`kernel/src/syscall/`.
+It said: *"There is no `SYS_SETGROUPS`, no `SYS_CHDIR` and no `SYS_CHROOT` in
+`kernel/src/syscall/`."* All three of those exist. Lane A caught the first,
+which prompted me to measure the other two instead of asserting them again.
 
-That is not an abstract gap. Four userland tools exist, are tested, and cannot
-do the thing they are for:
+I had taken the claim from `userspace/chroot`'s own DESIGN GAP comment — a
+comment I had already corrected once that morning, and which was still wrong
+after I corrected it. Reading a stale comment and reporting it as a measurement
+is the same error as reading a stale worktree; I made both on the same day.
 
-| Tool | What it needs | What it does instead |
-|---|---|---|
-| `userspace/chroot` | chroot + chdir + setuid/setgid/setgroups | Refuses with an ENOSYS-shaped error for every privilege-changing operation. Deliberately: dropping privileges *without* chrooting would leave the caller believing they were sandboxed when they were not. |
-| `userspace/newgrp` (also `sg`) | setgid + setgroups + exec | Prints `newgrp: would setgid(N) and exec: /bin/sh` and exits 0. |
-| `userspace/login` | setuid/setgid/setgroups + exec | Prints `login: would exec shell … as user …` after a *successful* authentication. |
-| `userspace/su` | same | Same shape. |
+## What is actually there, measured 2026-09-07 on `E:/…/os-lane-b`
 
-`login` is the one that matters most: it authenticates correctly, enforces the
-account's expiry policy correctly, builds the environment correctly, and then
-cannot start the session.
+| | Linux-ABI kernel handler | native libc (`posix`) | verdict |
+|---|---|---|---|
+| `setgroups` | **real** — `linux.rs:3178` → handler at `:15729`; EPERM if uid≠0, EINVAL over `NGROUPS_MAX`, mutates `new_creds.groups`, incl. the `size==0` clear | `unistd.rs:948` — checks `CAP_SETGID`, validates size and NULL… then **`0`**, having changed nothing | **lane B's bug** |
+| `chdir` | real — `linux.rs:3438` | `unistd.rs:438` — resolves the path, stats it, real work | **nothing needed** |
+| `chroot` | real — `linux.rs:3216` | `unistd.rs:1964` — validates, checks `CAP_SYS_CHROOT`, then **`ENOSYS`** | needs native wiring |
 
-## What is asked for
+So the three items are in three different states, and only one of them is a
+request of lane A at all.
 
-Three syscalls, in the order they unblock things:
+## 1. `chdir` — withdrawn, nothing is needed
 
-1. **`setgroups`** — set the calling process's supplementary group set.
-   Unblocks `newgrp`/`sg` on its own, and is the last missing piece for
-   `login` and `su` once they can exec. Linux's shape is fine:
-   `setgroups(count, *const gid_t)`, `EPERM` without the capability,
-   `EINVAL` over the maximum. A maximum of 32 or 64 would be plenty; please
-   say what it is so the caller can report the right error rather than
-   truncating.
-2. **`chdir`** — needed by `chroot`, and by every shell that implements `cd`
-   as more than a variable.
-3. **`chroot`** — needed by `chroot`. Wants the same capability gate as (1).
+It works. `userspace/chroot` calling its own `enosys("chdir")` stub is a
+userspace defect, and mine to fix.
 
-## Two notes from this side
+## 2. `setgroups` — **lane B's, and the worst of the three**
 
-**The capability gate is userspace's today, and that is worth confirming.**
-`requests/a-b-set-credentials-right.md` records that
-`SYS_PROCESS_SET_CREDENTIALS` performs **no kernel-side capability check** —
-`handlers.rs` says the check "is performed by the userspace posix wrappers". If
-the three new calls follow that pattern, a program that bypasses libc bypasses
-the gate. For `setuid` that is already true and already noted; for `chroot` it
-would be worse, because escaping a chroot is the classic use of an ungated one.
-Lane B is not asking you to change 530's contract in this request — only to say
-whether the new three should follow it or check kernel-side, so the posix
-wrappers are written to match rather than to guess.
+`posix::setgroups` returns success without doing anything. That is not a stub in
+the ordinary sense; it is a security function that reports it has acted when it
+has not. Its own doc comment names the idiom it breaks:
 
-**`userspace/chroot`'s own note about this is stale and Lane B will fix it.**
-Its DESIGN GAP block says there is "no SYS_SETUID, SYS_SETGID" — there is now,
-via 530. Only setgroups/chdir/chroot are actually missing. That is lane B's
-file and lane B's correction; it is mentioned here so the list above is not
-read as contradicting a comment in our own tree.
+> the classic `setgroups(0, NULL)` drop idiom that container runtimes, `su`/`sudo`,
+> and the OpenSSH daemon all rely on
 
-## What lane B will do when each lands
+A caller performing that drop is told it succeeded and keeps every supplementary
+group. Nothing in this tree calls it today — `userspace/chroot` has its own
+ENOSYS stub and `su` only mentions it in a comment — so the exposure is latent,
+but it is exactly the shape that bites the moment someone wires up a privilege
+drop and trusts the return value.
 
-- `setgroups` → implement `newgrp`/`sg` for real, including the `/etc/gshadow`
-  password prompt for a caller who is not already a member.
-- `chdir` + `chroot` → replace `userspace/chroot`'s ENOSYS stubs, in that
-  order, with the privilege drop applied *after* the root change and not
-  before.
-- With an exec that takes `argv[0]` separately (`SYS_PROCESS_SPAWN_EX2`
-  already does; `std::process::Command` does not expose it — see `todo.txt`
-  → "su -: the login-shell argv[0] convention is not implemented"),
-  `login` and `su` start real sessions.
+Tracked in `known-issues.md`. The fix needs a native syscall number to carry it
+(see 3), which is the only part that is lane A's.
+
+## 3. What is actually asked of lane A: a native path to what already exists
+
+The kernel implements all three, but only in the **Linux-ABI** table
+(`kernel/src/syscall/linux.rs`), which serves binaries running under
+`AbiMode::Linux`. There is no native syscall number for them — `posix/src/syscall.rs`
+has no `SYS_SETGROUPS`/`SYS_CHROOT` constant — so native libc has nothing to call,
+which is why `posix::chroot` ends in `ENOSYS` and `posix::setgroups` ends in a lie.
+
+**The ask, therefore, is not "implement these".** It is: *expose the existing
+implementations natively* — a syscall number and dispatch entry for `setgroups`
+and `chroot`, reaching the handlers that are already written and already gated.
+If there is a reason the native table deliberately omits them, that reason is the
+answer and I will record it instead; I would rather know than have them added
+because I asked.
+
+Please treat the original framing as withdrawn. It asked for three things to be
+built, two of which exist and one of which is my own bug.
+
+## What this unblocks, unchanged from the original filing
+
+`userspace/newgrp`/`sg` cannot switch groups; `userspace/chroot` refuses every
+privilege operation; `login` and `su` authenticate correctly and then print
+"would exec shell". Those remain true. What changed is that the road to them is
+shorter than I said.
+
+## The ordering hazard, which stands independently
+
+Lane A's observation, and the reason this file is worth keeping even after the
+correction: **a userspace defect that is inert only because a kernel feature is
+missing becomes armed the moment lane A grants the request.**
+
+That is not hypothetical here. `userspace/newgrp`'s group-password check was
+`!password.is_empty()` — any single character admitted a non-member to any group
+— and it was reachable only because nothing in `newgrp` attempts the group change
+at all. It was fixed on 2026-09-07 (`2ed808e29`) *before* any of this landed, and
+found only because lane A's message sent me looking at my own lane for things
+advertised as working that are not.
+
+The general form is worth stating: **when lane A grants a capability, the lane
+that asked should re-audit what it had left unfinished on the assumption the
+capability was absent.** The request is the trigger to re-check, not just to
+resume.

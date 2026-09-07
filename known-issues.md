@@ -20194,6 +20194,122 @@ the first attempt at this fix went wrong.
 
 ---
 
+## TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER
+
+**In short:** Open Settings, choose "Slow" animations, and the setting is
+saved, survives a restart, and changes nothing — because nothing in the system
+reads it. The same is true of desktop icon size and cursor scheme. Cursor
+*size* is worse: it exists as four separate settings in four places, and the
+program that draws the cursor reads none of them. These are controls that work
+perfectly and do nothing, which is the most expensive kind of broken, because
+the user has no way to tell it from a preference the system is ignoring on
+purpose.
+
+**Found** 2026-09-06 by lane C, auditing which of `AppearanceSettings`' fifteen
+fields have a consumer. This narrows the older observation in
+`TD-APPEARANCE-SETTINGS-ARE-NEVER-WRITTEN-TO-DISK` ("also unread by any
+renderer: `window_corners`, `drop_shadows`, `animation_speed`, `icon_size`,
+`cursor_size`, `cursor_scheme`, and `scaling_percent`"), which was written on
+2026-08-14 and is now half out of date — four of those seven have since been
+wired, and the remaining three plus the cursor-size tangle are what is left.
+
+### What was measured
+
+`grep` for each field across `gui/**` and `apps/**`, discounting the two
+settings *editors* (`gui/desktop/src/appearance_settings.rs` and
+`apps/settings/src/main.rs`) and the model crate itself, since a field being
+read by the panel that edits it is not a consumer.
+
+| Setting | Consumers outside the editors | State |
+|---|---|---|
+| `theme_mode`, `accent_color`, `custom_accent` | desktop palette | **works** |
+| `transparency` | `DesktopTheme` (`lib.rs:1283`, `:1311`) | **works** |
+| `taskbar_style` | `DesktopTheme` (`lib.rs:1308`) | **works** |
+| `accent_taskbar`, `accent_titlebars` | desktop chrome | **works** |
+| `window_corners`, `drop_shadows` | compositor | **works** |
+| `scaling_percent` | `guitk::scaling` via `set_appearance` | **works** |
+| `fonts` | — | out of scope here; see §400 and C-Q1 |
+| **`animation_speed`** | **none** | **dead** |
+| **`icon_size`** | **none** | **dead** |
+| **`cursor_scheme`** | **none** | **dead** |
+| **`cursor_size`** | **none** — and three rival copies | **dead, four ways** |
+
+Two of those need their evidence stated, because "grep found nothing" is a weak
+claim on its own:
+
+- **`animation_speed` has no possible consumer, not merely no actual one.** The
+  shell's `AnimationManager` (`gui/desktop/src/animations.rs`) has no speed,
+  multiplier or scale concept anywhere in it — the field it would multiply does
+  not exist. So this is not a missing call site; it is a missing feature, and
+  the setting was added to the model ahead of the thing it configures. The
+  panel even renders `{:.2}x` next to it, so the UI states a multiplier the
+  animation code cannot receive.
+- **`icon_size`'s only non-editor hits are a false positive.** They are
+  `guitk::scaling`'s own `icon_size()` method in that module's tests — a
+  scaling-context accessor with the same name, unrelated to this preference.
+
+### The cursor-size tangle
+
+One user-facing setting, four independent models, no reader:
+
+| Where | Name | Persisted to |
+|---|---|---|
+| `gui/appearance` | `cursor_size` | `appearance.yaml` |
+| `gui/inputsettings` | `cursor_size` (clamped 16–128) | `input.yaml` |
+| `gui/desktop/src/a11y.rs` | `cursor.size_scale` | the accessibility file |
+| `gui/desktop/src/accessibility_settings.rs` | `cursor_size_multiplier` | — |
+
+And `gui/compositor` — which owns `CursorShape`, tracks `cursor_shape`, and is
+the only thing positioned to draw a pointer at a size — has **no cursor size
+concept at all**. So the four settings do not merely disagree; there is nothing
+for them to disagree *at*.
+
+This is `TD-THREE-INDEPENDENT-APPEARANCE-MODELS` recurring with one more copy
+and, unlike that case, without even one working consumer to be the authority.
+
+**Caveat on this one.** I have verified that the compositor has no cursor size.
+I have *not* traced whether some lower layer (a DRM/KMS hardware cursor plane,
+or the input driver) sizes the pointer independently — if one does, the picture
+changes from "nothing reads it" to "something reads it and the settings cannot
+reach it", which is a different fix. That should be checked before work starts.
+
+### Why this matters more than the count suggests
+
+A setting that is missing is honest. A setting that is present, editable,
+persisted, and inert is a lie the system tells about itself, and it costs the
+user the time to change it, restart, decide they misremembered what it did, and
+change it back. It also costs *us*: `animation_speed` has a test in
+`apps/settings` asserting every speed can be picked
+(`test_every_animation_speed_can_be_picked`), which passes, and proves only
+that a control moves a value nothing consumes. That is the same shape as the
+heatmap whose legend advertised a gradient the graph did not draw
+(design-decisions 812's neighbours) — the test asserts the half that works.
+
+### Proper fix
+
+Per setting, and they are not equal:
+
+1. **`animation_speed`** — give `AnimationManager` a speed multiplier applied
+   where elapsed time enters an animation, and feed it from
+   `DesktopShell::set_appearance`. This is the one with real user value and it
+   is self-contained.
+2. **`icon_size`** — the desktop-icon renderer is the consumer; it should take
+   the size from the setting rather than a constant.
+3. **`cursor_scheme`** and **`cursor_size`** — do *not* wire these until the
+   caveat above is resolved and the four models are collapsed to one. Wiring one
+   of four rival copies to a renderer would make the other three permanently
+   wrong instead of uniformly inert, which is harder to notice and harder to
+   undo.
+
+### Where
+
+`gui/appearance/src/lib.rs` (the model); `gui/desktop/src/animations.rs` (no
+speed concept); `gui/desktop/src/lib.rs` (`set_appearance`, the natural feed);
+`gui/inputsettings/src/lib.rs`, `gui/desktop/src/a11y.rs`,
+`gui/desktop/src/accessibility_settings.rs` (the rival cursor models);
+`gui/compositor/src/lib.rs` (`CursorShape`, no size).
+
+
 ## TD-APPS-ESTIMATE-TEXT-WIDTH — apps still guess at text width instead of measuring it
 
 **Status.** **Closed for the original defect** as of 2026-08-14. `gui/**` was
@@ -122020,3 +122136,214 @@ ignored.
 pre-merge gate is `open-questions.md` -> **C-Q11**, raised by lane C. The real
 objection is that it lets one lane's red crate block another lane's merge --
 which is exactly what happened here, in both directions.
+
+## A-A-REBUILT-SERVICE-DOES-NOT-INVALIDATE-THE-KERNEL-THAT-EMBEDS-IT (lane A's tree, found by lane B 2026-09-07)
+
+**In short:** the kernel compiles six small ring-3 programs *into itself* by
+reading their compiled output off disk. There is a script that builds them and
+it works well. What is missing is the other half: nothing tells cargo the kernel
+*depends* on those files, so rebuilding one of them does not rebuild the kernel.
+The kernel keeps the old copy and says nothing. One of the six is the init
+process.
+
+**This entry replaces a wrong one.** Its first two versions claimed "nothing
+builds them" and counted first one artifact, then three. All of that was wrong,
+and the retraction is below because how it was wrong is more useful than the
+finding.
+
+### What is actually true
+
+`kernel/src/main.rs` and `kernel/src/container.rs` carry nine `include_bytes!`
+sites naming **six** distinct artifacts:
+
+| Artifact | Path references |
+|---|---|
+| `services/hello` | 7 |
+| `services/netstack` | 3 |
+| `services/udpget` | 2 |
+| `services/init`, `services/httpget`, `services/ticker` | 1 each |
+
+**`scripts/bootstrap-worktree.sh` builds all six**, and is a good piece of work:
+it *derives* the list by grepping the `include_bytes!` calls rather than
+hardcoding it, so it cannot fall out of step with the kernel; it explains in its
+header why these services cannot simply be workspace members (they are
+`no_std`/`no_main` with their own linker script, static relocation and large code
+model, and cargo's config hierarchy is CWD-based, so the only reliable way to get
+a service's flags is to invoke cargo from inside its directory); `--check`
+reports what is missing with an exit status `boot-test.sh` reads; and it is
+safe to re-run. On a fresh or freshly-migrated worktree, running it once fixes
+the loud failure entirely.
+
+### The finding that survives
+
+`kernel/build.rs` emits `cargo:rerun-if-changed` for exactly three things --
+`linker.ld`, `ada/{f}` and `ada/prebuilt/stamp.txt` -- and contains **no
+reference to any `services/` path**. Bootstrap is a one-time provisioning step;
+it does not create a dependency edge. So after provisioning:
+
+    edit services/init -> cargo build --release in services/init -> rebuild kernel
+    -> the kernel still embeds the previous init.
+
+Lane C, checking independently in its own tree, confirmed this from the file
+rather than from the shape of the bug, and put the consequence better than I
+did: a missing file fails loudly and immediately, but a *stale embed* produces a
+kernel that builds clean, boots, and runs last week's binary -- so the symptom is
+"my change to that program did nothing", which is indistinguishable from a change
+that genuinely does nothing. Someone debugs the program, not the build. And it is
+worse on a long-lived machine than a fresh one, which inverts the usual order in
+which people suspect their toolchain.
+
+**The fix does not need a new builder,** and an earlier draft of this entry said
+it did -- lane C's prescription, which lane C then withdrew for the same reason
+the rest of this entry was wrong: it assumed no build step existed. One does, and
+`bootstrap-worktree.sh` is better than the thing that draft proposed writing,
+because it derives its list from the `include_bytes!` calls and so cannot drift
+from the kernel, which a hand-maintained `build.rs` list would not give.
+
+What is wanted is the missing half only, in `kernel/build.rs`, **in this order**:
+
+1. derive the artifact list by scanning `kernel/src` for `include_bytes!` of
+   `services/*/target/*/release/*` -- the same derivation
+   `bootstrap-worktree.sh` uses, so the two halves of one invariant cannot
+   disagree when a seventh service is added. Fail closed if the scan finds
+   none: zero means the scanner broke, not that the kernel embeds nothing.
+2. check each artifact exists; if any is missing, **hard-fail naming
+   `scripts/bootstrap-worktree.sh`**.
+3. only then emit `cargo:rerun-if-changed` for each.
+
+**The order is load-bearing, and lane A measured why.** On cargo 1.95.0, a
+`rerun-if-changed` naming a path that does *not* exist makes the build script
+re-run on every build: a counter in `build.rs` gave 1, 2, 3 across three no-op
+builds for a missing path, against 1, 1, 1 for an existing one (and 2 after
+touching it). So emitting the directives before the existence check would trade
+this quiet bug for another one, whose only symptom is that the kernel never
+caches.
+
+A `rerun-if-changed` line *alone* is still not sufficient, but the reason is
+narrower than the earlier draft claimed. Not that cargo must be the thing that
+builds the artifact -- lane A's position, which is the better one, is that a
+fresh clone *should* fail, and what was wrong was failing as fifteen
+`include_bytes!` errors blaming the kernel rather than one error naming the
+script. Step 2 fixes that without pretending the artifact appeared by itself.
+What remains knowingly accepted is that `rerun-if-changed` declares invalidation,
+not production: driving the service builds from `build.rs` would re-couple what
+the root `Cargo.toml` deliberately excluded -- it keeps these crates outside the
+`build-std` blast radius -- and would hide that coupling somewhere the exclusion
+is not stated.
+
+**Owner:** `kernel/**`, so lane A -- specifically the *live* lane A session, which
+during this exchange was not the one that answered to the name.
+
+### The retraction, which is the useful part
+
+This entry was wrong twice before being right, and each time in the same way:
+**I reported the first place I looked as though it were the whole picture.**
+
+| Pass | Claim | Method | Wrong because |
+|---|---|---|---|
+| 1 (me) | one artifact | grepped `container.rs` | stopped at one file |
+| 2 (lane A) | two artifacts | grepped `main.rs`, found `init` | stopped at one more |
+| 3 (me) | three artifacts | `grep kernel/src/*.rs` | glob does not recurse |
+| 4 (lane C) | six embed sites | `grep -c` on `container.rs` | counted one file's sites, not artifacts |
+| 5 (me) | six artifacts, and a script already builds them | `grep -r` all of `kernel/src`, then **read the script** | -- |
+
+Four sessions, five passes, one afternoon, on a defect whose full extent one
+recursive grep would have given at any point. And the thing that actually
+corrected it was not a better grep: it was reading `bootstrap-worktree.sh`, which
+had documented the whole problem, its cause, and why the obvious fix does not
+work -- before any of us started. The tool that finds a fact and the document
+that already contains it are different instruments, and I reached for the first
+four times before the second.
+
+The five passes were not five different mistakes. Every one was a command that
+answered a narrower question than the one being asked, and whose answer was then
+reported at the width of the question: `grep -c` on one file, a glob that does
+not recurse, a `head -3`, a process scan whose regex matched the scanning command
+itself. None of them was wrong; each was asked something small and answered it
+exactly.
+
+Three habits come out of it, all cheap and all general.
+
+**State which tree you measured, in the same sentence as the measurement**
+(lane C's). All of today's errors -- this one, and separately a lockscreen bug
+reported from a worktree 54 commits behind -- were a session reading its own
+worktree and reporting it as the state of the project. That is what worktrees do:
+the isolation that stops three lanes clobbering each other also stops them seeing
+each other.
+
+**When a tool exists for the exact problem you are diagnosing, its documentation
+is a primary source about the problem, not just instructions for the tool**
+(also lane C's, and the sharpest of the three). I reached for `grep` four times
+before reading `bootstrap-worktree.sh`. Lane C did something harder to notice: it
+*ran* the script, used its runtime and the artifact's byte count as evidence in
+three separate messages, and never read its header -- so the disproof of what it
+was about to recommend was in its own terminal output. A script is a text that
+happens to run, and both of us treated it as only the second thing.
+
+**Derive, do not enumerate.** The one artefact in this story that never went
+wrong is the script's list of services, precisely because it is computed from the
+kernel's own source at every run. Four sessions counted by hand and four got a
+different number; the derivation has been right the whole time and unattended.
+That is why `build.rs` should scan rather than hold a list of six.
+
+## B-POSIX-SETGROUPS-REPORTS-SUCCESS-WITHOUT-CHANGING-ANY-GROUPS (lane B, 2026-09-07)
+
+**In short:** the C library function a program calls to drop its extra group
+memberships checks that it is allowed to, checks its arguments, and then returns
+"done" without changing anything. A program that drops privileges this way is
+told it worked and keeps every group it had.
+
+**Where.** `posix/src/unistd.rs:948`, `setgroups`. The body gates on
+`CAP_SETGID`, rejects `size > NGROUPS_MAX` with `EINVAL` and a NULL list with
+`EFAULT` -- all correct and all Linux-faithful -- and then:
+
+```rust
+    0
+}
+```
+
+No syscall is issued. Its own doc comment is explicit about the consequence,
+which is what makes this worth an entry rather than a shrug:
+
+> the classic `setgroups(0, NULL)` drop idiom that container runtimes,
+> `su`/`sudo`, and the OpenSSH daemon all rely on
+
+**Why it is not simply a stub.** A stub that returns `ENOSYS` leaves the caller
+to decide what to do about a capability it does not have. This returns success,
+so the caller proceeds *believing the drop happened*. For a privilege-dropping
+function the difference is the whole thing: `setgroups(0, NULL)` followed by
+`setuid(uid)` is a program deliberately shedding authority, and a silent success
+means it sheds none of it while its own logic records that it did.
+
+**Exposure today is latent.** Nothing in this tree calls it: `userspace/chroot`
+has its own `enosys("setgroups")` stub and `userspace/su` mentions it only in a
+comment. The ctest fixtures link libc but are not known to exercise it. So this
+is a landmine rather than a live wound -- and it is the same shape as
+`userspace/newgrp`'s `!password.is_empty()` group check found the same day: a
+security decision that answers "yes" by default, sitting behind something else
+that is missing.
+
+**Why it cannot simply be fixed here.** The kernel *does* implement
+`sys_setgroups` -- with real gating and a real credential mutation -- but only in
+the Linux-ABI table (`kernel/src/syscall/linux.rs:3178`, handler at `:15729`),
+which serves binaries running under `AbiMode::Linux`. There is no native syscall
+number for it, so native libc has nothing to call. Asked for in
+`requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
+
+**The interim question, deliberately not decided unilaterally.** Until the native
+path exists, `setgroups` could return `-1`/`ENOSYS` instead of `0`. That is more
+honest and matches what `posix::chroot` already does two thousand lines away in
+the same file. It is *not* obviously right: it converts a silent wrong answer
+into a loud failure in code that currently "works", and the callers it would
+newly break are C programs linked against our libc -- including the ctest
+fixtures the boot test runs -- which nobody has audited for it. The tradeoff is
+real in both directions, so it is recorded here rather than taken. **Recommended
+resolution:** make it `ENOSYS` at the same moment the native syscall lands, so
+the honest-failure window is zero; if the native path is declined, make it
+`ENOSYS` anyway and fix the fallout, because a security function that lies is
+worse than one that refuses.
+
+**Related, same file, opposite behaviour:** `posix::chroot`
+(`unistd.rs:1964`) is in the identical position -- kernel handler exists, no
+native number -- and ends in `ENOSYS`. It is the model for what `setgroups`
+should do.

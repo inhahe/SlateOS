@@ -43,7 +43,7 @@ use dropzone::{
 };
 use fileops::{
     ConflictPolicy, ErrorPolicy, FileOpEvent, FileOperation, OperationExecutor, OperationPlan,
-    OperationSummary, RecycleBin, UndoStack,
+    OperationSummary, RecycleBin, UndoStack, UndoTarget,
 };
 use thumbs::{
     ThumbCategory, ThumbConfig, Thumbnail, ThumbnailCache, ThumbnailGenerator, ThumbnailRequest,
@@ -1012,9 +1012,11 @@ impl ExplorerState {
             let mut first_error = None;
             for path in &paths {
                 match self.recycle.recycle(path) {
-                    // The recycle bin owns the moved data, so there is no new
-                    // location to record here; restore is by entry id.
-                    Ok(_) => recycled.push((path.clone(), None)),
+                    // The bin owns the moved data, so the undo record names the
+                    // bin entry rather than a path. Recording `None` here --
+                    // which is what this did -- was indistinguishable from a
+                    // permanent delete, and undo skipped it silently.
+                    Ok(id) => recycled.push((path.clone(), UndoTarget::Recycled(id))),
                     Err(e) => {
                         if first_error.is_none() {
                             first_error = Some(format!("{}: {e}", path.display()));
@@ -3074,6 +3076,35 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("notes.txt")).expect("restored"),
             "keep me"
+        );
+    }
+
+    /// The undo stack's record of a recycle must actually undo it.
+    ///
+    /// This is the undo that a Delete key's confirmation implicitly promises,
+    /// and until this test it was never exercised: the only restore test goes
+    /// through the bin's own listing and takes the id from there, which works
+    /// and says nothing about the undo stack.
+    #[test]
+    fn the_undo_record_for_a_recycle_can_actually_be_undone() {
+        let root_scratch = temp_dir("undo_recycle");
+        let root = root_scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        state.delete_selected(false);
+        assert!(!root.join("notes.txt").exists(), "the file should be gone");
+
+        let record = state.undo.pop().expect("a recycle must leave an undo record");
+        let restored = fileops::execute_undo(&record, Some(&state.recycle))
+            .expect("undoing a recycle must not error");
+        assert_eq!(restored, 1, "undo must report the one file it put back");
+
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).expect("the file must be back"),
+            "keep me",
+            "undo reported success, so the file must actually be restored"
         );
     }
 

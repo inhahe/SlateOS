@@ -587,11 +587,7 @@ impl UndoStack {
     }
 
     /// Push a new undo record and return its id.
-    pub fn push(
-        &mut self,
-        operation: FileOperation,
-        entries: Vec<(PathBuf, UndoTarget)>,
-    ) -> u64 {
+    pub fn push(&mut self, operation: FileOperation, entries: Vec<(PathBuf, UndoTarget)>) -> u64 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.records.push(UndoRecord {
@@ -2912,7 +2908,10 @@ mod tests {
 
         let restored = execute_undo(&record, None).expect("a no-op undo is not an error");
         assert_eq!(restored, 0, "nothing was restored, and it must say so");
-        assert!(!gone.exists(), "a permanently deleted file cannot come back");
+        assert!(
+            !gone.exists(),
+            "a permanently deleted file cannot come back"
+        );
     }
 
     /// Undoing a recycle without the bin is refused rather than skipped.
@@ -2925,7 +2924,10 @@ mod tests {
         let record = UndoRecord {
             id: 1,
             operation: FileOperation::Recycle,
-            entries: vec![(PathBuf::from("/notes.txt"), UndoTarget::Recycled("e1".into()))],
+            entries: vec![(
+                PathBuf::from("/notes.txt"),
+                UndoTarget::Recycled("e1".into()),
+            )],
             timestamp: SystemTime::now(),
         };
 

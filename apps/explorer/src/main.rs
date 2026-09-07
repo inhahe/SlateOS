@@ -2636,8 +2636,8 @@ impl ExplorerState {
             .file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
 
-        let mut dialog = InputDialog::prompt("Rename", "New name:", &current)
-            .with_initial_text(&current);
+        let mut dialog =
+            InputDialog::prompt("Rename", "New name:", &current).with_initial_text(&current);
         dialog.show();
         self.modal = Some(Modal::Rename { dialog, target });
         true
@@ -3337,7 +3337,10 @@ mod tests {
         state.delete_selected(false);
         assert!(!root.join("notes.txt").exists(), "the file should be gone");
 
-        let record = state.undo.pop().expect("a recycle must leave an undo record");
+        let record = state
+            .undo
+            .pop()
+            .expect("a recycle must leave an undo record");
         let restored = fileops::execute_undo(&record, Some(&state.recycle))
             .expect("undoing a recycle must not error");
         assert_eq!(restored, 1, "undo must report the one file it put back");
@@ -5165,7 +5168,10 @@ mod tests {
             root.join("b.txt").exists(),
             "the surviving file must keep its name"
         );
-        assert!(!root.join("c.txt").exists(), "and nothing takes the new one");
+        assert!(
+            !root.join("c.txt").exists(),
+            "and nothing takes the new one"
+        );
         assert!(
             state.status_message.contains("no longer there"),
             "and it must say why, got {:?}",
@@ -5235,6 +5241,9 @@ mod tests {
             fs::read_to_string(root.join("sub/notes.txt")).expect("pasted"),
             "keep me"
         );
-        assert!(root.join("notes.txt").exists(), "a copy leaves the original");
+        assert!(
+            root.join("notes.txt").exists(),
+            "a copy leaves the original"
+        );
     }
 }

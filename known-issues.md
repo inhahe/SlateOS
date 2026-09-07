@@ -89329,6 +89329,25 @@ nothing says why.
 
 ## `TD-C-EXPLORER-DOES-NOT-SCROLL` (lane C, 2026-08-26)
 
+**Narrowed 2026-09-07: the two list views scroll; the icon grid does not yet.**
+`ExplorerState` holds a `ListViewport`, the details and list renderers draw the
+rows `scroll_window::visible` names, the wheel routes through
+`wheel::Accumulator`, and `move_selection_to` syncs the cursor row into the
+viewport so the arrow keys drag the view with them. `ListViewport` gained
+`scroll_by`, which is the one operation there that leaves the selection alone --
+a wheel that revealed the selection could not scroll at all, because the view
+would snap back on the next call.
+
+**Still open:** the icon view (`render_icons`), whose offset has to be
+expressed in rows *of icons* rather than rows of entries, and a visible
+scrollbar. Neither is hard; both were left out to keep this change reviewable,
+and the entry stays open until they land. `move_selection` also still exists
+rather than deferring to `ListViewport::select_prev`/`select_next` as the plan
+below suggests -- explorer's multi-selection means the viewport is used for
+scrolling only, and folding the two together is the part that needs the
+anchor/extend decision the "one genuine mismatch" section describes.
+
+
 **In short:** the file manager draws as many entries as fit in the window and
 then stops. There is no scrollbar, no mouse wheel, no Page Up/Page Down — so in
 a directory with more files than fit on screen, the ones past the bottom edge

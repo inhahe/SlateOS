@@ -9078,21 +9078,33 @@ pub fn self_test_ctest_pty() -> KernelResult<()> {
     if exit_code != Some(EXPECTED) {
         // Decode the interesting child-side codes for the diagnostic.
         let hint = match exit_code {
-            Some(78) => " — the child ran to completion without its SIGINT handler \
+            Some(78) => {
+                " — the child ran to completion without its SIGINT handler \
                          firing: the line discipline did not turn 0x03 into a signal \
                          that reached the foreground group. This is the single result \
-                         this fixture exists to detect",
-            Some(70) => " — isatty(0) false in the child: login_tty did not install \
-                         the slave as fds 0/1/2",
-            Some(c) if (71..=72).contains(&c) => " — signal() returned SIG_ERR or \
-                         the readiness write failed in the child",
-            Some(c) if (1..=4).contains(&c) => " — openpty failed or returned a \
-                         bad/duplicate fd pair",
+                         this fixture exists to detect"
+            }
+            Some(70) => {
+                " — isatty(0) false in the child: login_tty did not install \
+                         the slave as fds 0/1/2"
+            }
+            Some(c) if (71..=72).contains(&c) => {
+                " — signal() returned SIG_ERR or \
+                         the readiness write failed in the child"
+            }
+            Some(c) if (1..=4).contains(&c) => {
+                " — openpty failed or returned a \
+                         bad/duplicate fd pair"
+            }
             Some(c) if (5..=6).contains(&c) => " — isatty false on master or slave",
-            Some(c) if (7..=8).contains(&c) => " — ttyname(slave) NULL or not \
-                         under /dev/pts/",
-            Some(c) if (13..=18).contains(&c) => " — basic byte-path test failed \
-                         (master↔slave data transfer)",
+            Some(c) if (7..=8).contains(&c) => {
+                " — ttyname(slave) NULL or not \
+                         under /dev/pts/"
+            }
+            Some(c) if (13..=18).contains(&c) => {
+                " — basic byte-path test failed \
+                         (master↔slave data transfer)"
+            }
             Some(c) if (21..=27).contains(&c) => " — canonical mode test failed",
             Some(c) if (40..=47).contains(&c) => " — forkpty / signal-delivery phase",
             _ => "",

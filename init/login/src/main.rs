@@ -633,10 +633,9 @@ impl LoginManager {
             password_input: String::new(),
             password_visible: false,
             error_message: None,
-            auth: authlib::Authenticator::with_stores(
-                std::path::Path::new("/nonexistent/login-manager"),
-                std::path::Path::new("/nonexistent/login-manager"),
-            ),
+            auth: authlib::Authenticator::with_stores(std::path::Path::new(
+                "/nonexistent/login-manager",
+            )),
             sessions: HashMap::new(),
             next_session_id: 1,
             lock_timeout_secs: 300,
@@ -2456,7 +2455,7 @@ mod tests {
     /// An in-memory tally on a clock the test drives.
     fn scratch_auth(now: fn() -> u64) -> authlib::Authenticator {
         let missing = std::path::Path::new("/nonexistent/login-manager-tests");
-        authlib::Authenticator::with_stores(missing, missing).with_clock(now)
+        authlib::Authenticator::with_stores(missing).with_clock(now)
     }
 
     /// Guesses are free until `FREE_ATTEMPTS` is spent, and then cost a wait

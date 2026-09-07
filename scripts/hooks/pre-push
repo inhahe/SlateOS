@@ -2493,6 +2493,13 @@ skip_staleness=0
 note_gate release-staleness "$skip_staleness"
 
 if [ "$skip_staleness" != "1" ]; then
+    if ! run_checker release-staleness-selftest "$py" "$staleness" --selftest; then
+        echo "pre-push: release-staleness self-test failed; skipping gate." >&2
+        skip_staleness=1
+    fi
+fi
+
+if [ "$skip_staleness" != "1" ]; then
     if ! run_checker release-staleness "$py" "$staleness"; then
         cat >&2 <<'EOF'
 

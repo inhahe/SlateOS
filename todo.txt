@@ -55711,3 +55711,45 @@ means any test that reaches the real config path silently depends on this
 machine's state, which is how the `pump()` experiment above was caught. Worth a
 sweep for `AppearanceFile::load`/`config::load` calls in test and demo code that
 are not inside a scratch directory.
+
+
+================================================================================
+[A] TRIM os/CLAUDE.md — deferred, not forgotten (2026-09-06)
+================================================================================
+
+**Task.** `os/CLAUDE.md` is 601 lines / ~50 KB / ~12,500 tokens, and it is
+resident in every lane's context on every turn of every session. Roughly 40-50%
+can move behind pointers with nothing lost. Operator has approved the change;
+it is deferred only because the boot test kept holding the tree.
+
+**The test for what may move:** *would the agent know to go and look?* If a
+pointer ("before touching MSVC builds, read `build-env.md`") is enough, it can
+move — the need announces itself. If the rule would be violated *without the
+agent knowing to check*, it must stay resident.
+
+**Safe to move behind a pointer** (measured section sizes):
+  - "Three Sessions" — 154 lines, of which the *rule* is ~5 (run which-lane.py,
+    work only your lane, use worktrees). The rest is the incident history of
+    the `git checkout` that moved every lane's HEAD. Valuable, not resident;
+    belongs in `design-decisions.md`.
+  - "Performance — Benchmark Everything Critical" — 68 lines of target tables,
+    needed only when touching a perf-critical subsystem.
+  - "Build Environment Notes" — 30 lines of vcvarsall/cl.exe paths, needed only
+    when compiling a C dependency.
+  - "Studying Existing Implementations" — 26 lines, needed at subsystem-design
+    time.
+  - `run-timeout.py` usage detail — ~36 lines. The *rule* ("always use it for
+    anything that can hang") stays; the usage is `--help`.
+
+**Must stay resident** — these are violated without the agent knowing to check:
+lane ownership, never-blanket-kill-by-name, never-force-push, never-merge-red,
+the effort/duration calibration (it changes every estimate), and "optimise for
+the end result".
+
+**Already done, for reference:** the sibling `visual studio projects/CLAUDE.md`
+was trimmed 198 -> 112 lines the same day (~2,640 tokens/session) by moving
+per-project architecture into each project's own `design.md` or `CLAUDE.md`,
+which load only when working there. Backups at `D:/tmp/CLAUDE.md.bak{,2}`.
+
+**Caution.** `os/CLAUDE.md` is operator-only by its own terms. This is
+authorised; do not extend it into unrelated edits of that file.

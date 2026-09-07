@@ -12,35 +12,10 @@ This is a Rust microkernel OS for x86_64 desktops. The entire codebase is writte
 
 Read the relevant design files before implementing any subsystem. Do not guess at requirements when the answer is written down. Where `design.txt` conflicts with `design desicions.txt` or `other design decisions.txt`, `design.txt` wins.
 
-## Build Environment Notes
-
-### C/C++ Compilers (for crates with C dependencies like libz-sys, ring, libgit2-sys)
-
-The machine has Visual Studio and Build Tools installed but they are **not on PATH by default**. You must either run vcvarsall.bat first or set `CC`/`CC_x86_64_slateos` to the full path.
-
-**vcvarsall.bat locations:**
-- VS 2022 Community: `"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"`
-- VS 2022 Enterprise: `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"`
-- VS 2026 Build Tools: `"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"`
-- VS 2022 Build Tools: `"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"`
-
-**cl.exe locations (x64 host → x64 target):**
-- VS 2022: `"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\cl.exe"`
-- VS 2026 BT: `"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.50.35717\bin\Hostx64\x64\cl.exe"`
-
-For cross-compiling Rust crates with C dependencies to our custom target (x86_64-slateos), set:
-```
-CC_x86_64_slateos=cl.exe   (after running vcvarsall.bat x64)
-```
-Or from bash without vcvarsall, pass the full cl.exe path and ensure the Windows SDK include/lib dirs are also set.
-
-### Rust toolchains
-
-- `nightly-x86_64-pc-windows-gnu` — primary nightly, has `dlltool.exe` issue with newer crates (getrandom v0.3+). Fixed by copying `dlltool.exe` from self-contained dir to `~/.cargo/bin/`, but it may not work for all crates.
-- `nightly-x86_64-pc-windows-msvc` — alternative nightly, avoids dlltool issues, requires VS build tools on PATH for host-side C compilation.
-- Custom target `toolchain/x86_64-slateos.json` requires `-Zjson-target-spec` (set via `[unstable]` in `.cargo/config.toml`, NOT via env var or CLI flag).
-
----
+- **Compiling a crate with C dependencies, or cross-compiling to
+  `x86_64-slateos`?** The MSVC/vcvarsall/cl.exe paths and the toolchain
+  notes are in `build-env.md`. They are needed only when a build actually
+  fails for want of them.
 
 ## Three Sessions — Find Out Which One You Are, First
 
@@ -108,7 +83,7 @@ invisible in your worktree until you merge. Lane A's
 
 Two corollaries:
 
-- **`origin/main` is the trunk. The `D:\visual studio projects\os` directory
+- **`origin/main` is the trunk. The `E:\visual studio projects\os` directory
   is a *checkout* of it that may be badly stale** — it was 67 commits behind
   when this paragraph was written. Never read a shared doc there and conclude
   something about the project's state without `git -C "…/os" pull` first, or
@@ -125,39 +100,27 @@ If the project ever drops back to a single session, restore
 `roadmap.single-agent.md` over `roadmap.md` and this section reverts to
 "edit any file freely."
 
-The zone names below are a **navigation aid** — they tell you where in
-the tree a given subsystem lives. The lane table above, not this table,
-is the ownership boundary.
-
-| Zone | Covers | Typical paths |
-|------|--------|---------------|
-| **kernel-core** | boot, GDT/IDT, interrupts, memory manager, page allocator, heap, scheduler | `kernel/src/boot/`, `kernel/src/mm/`, `kernel/src/sched/` |
-| **kernel-ipc** | syscall dispatch, channels, pipes, shared memory, futexes, io_uring, IOCP | `kernel/src/ipc/`, `kernel/src/syscall/` |
-| **kernel-security** | capabilities, process namespaces, CFI setup, IOMMU | `kernel/src/cap/`, `kernel/src/security/` |
-| **kernel-process** | process/thread lifecycle, ELF loader, exception handling | `kernel/src/proc/` |
-| **drivers** | driver framework, USB, storage, network, keyboard, display, virtio | `drivers/` |
-| **fs** | VFS, ext4 port, FAT32, recycle bin, change notifications | `fs/` |
-| **net** | TCP/IP stack, UDP, DNS, DHCP, sockets, firewall | `net/` |
-| **posix** | POSIX compatibility layer, libc translation | `posix/` |
-| **init** | service manager, init, startup sequencing | `init/`, `services/` (bare-metal startup binaries) |
-| **shell** | shell, coreutils, terminal emulator | `userspace/shell/`, `userspace/term/` |
-| **gui-core** | compositor, DRM/KMS, GPU drivers, 2D drawing | `gui/compositor/`, `gui/gpu/` |
-| **gui-toolkit** | widget library, layout engine, styling, clipboard, drag-drop | `gui/toolkit/` |
-| **desktop** | window manager, taskbar, start menu, system tray, themes | `gui/desktop/` |
-| **apps** | file explorer, process explorer, settings, text editor, etc. | `apps/` |
-| **pkg** | package manager, content-addressed store, generations | `pkg/` |
-| **bench** | all benchmarks and performance infrastructure | `bench/` |
+The **zone names** used elsewhere in this project (kernel-core, gui-toolkit,
+drivers, and so on) map to directories in `subsystem-map.md`. That is a
+navigation aid only -- the lane table above, not the zone table, is the
+ownership boundary.
 
 ### Worktrees — one checkout per lane
 
-**Work in your lane's own directory, not in `D:\visual studio projects\os`.**
+**Work in your lane's own directory, not in `E:\visual studio projects\os`.**
 
 | Lane | Directory | Branch |
 |---|---|---|
-| **A** | `D:\visual studio projects\os-lane-a` | `lane-a` |
-| **B** | `D:\visual studio projects\os-lane-b` | `lane-b` |
-| **C** | `D:\visual studio projects\os-lane-c` | `lane-c` |
-| — | `D:\visual studio projects\os` | `main` — integration/merge tree only |
+| **A** | `E:\visual studio projects\os-lane-a` | `lane-a` |
+| **B** | `E:\visual studio projects\os-lane-b` | `lane-b` |
+| **C** | `E:\visual studio projects\os-lane-c` | `lane-c` |
+| — | `E:\visual studio projects\os` | `main` — integration/merge tree only |
+
+Migrated from `D:` to `E:` on 2026-09-06. **The `D:` copy still exists as a
+fallback and still has working git**, so a command built from a remembered
+path succeeds quietly against a tree nobody will read. If you find yourself
+on `D:`, stop: your session was copied and its transcript predates the move.
+A halt is armed there saying so.
 
 A branch does **not** isolate a working directory: a repository has one
 checkout per worktree, so three agents sharing `os` and each "working on
@@ -365,99 +328,12 @@ echo "=== finished ==="; tail -20 <logfile>
 
 ---
 
-## Performance — Benchmark Everything Critical
-
-The design spec calls out that AI tends to write "correct-but-naive" code. This OS must be competitive with Linux, Windows, and macOS in performance-critical paths. The mitigation: **write benchmarks first, then optimize against concrete targets.**
-
-### Performance-Critical Subsystems
-
-These subsystems are on the hot path for virtually every workload. Naive implementations here are not acceptable.
-
-| Subsystem | Why it's critical | Benchmark target (reference) |
-|-----------|-------------------|------------------------------|
-| **Syscall dispatch** | Every userspace→kernel transition | Linux: ~100ns for getpid. Target: within 2x of Linux. |
-| **IPC channel send/recv** | Primary inter-process communication | Fuchsia channel round-trip: ~1-2us. L4 IPC: ~0.5-1us. Target: < 2us round-trip. |
-| **Context switch** | Every preemption, every blocking call | Linux: ~1-3us. Target: < 5us. |
-| **Page fault handling** | Demand paging, stack growth, CoW | Linux: ~2-5us for anonymous page fault. Target: < 10us. |
-| **Physical page alloc/free** | Every mmap, every process start | Linux buddy allocator: ~100-500ns. Target: < 1us. |
-| **Heap allocation (kernel)** | Constant kernel bookkeeping | jemalloc small alloc: ~20-50ns. Target: < 200ns for common sizes. |
-| **Scheduler pick_next_task** | Every timer tick, every blocking op | Must be O(1) or O(log n). Never O(n) over all tasks. |
-| **Futex wait/wake (uncontended)** | Userspace mutex fast path | Linux: uncontended = no syscall (atomic CAS in userspace). Contended wake: ~1-3us. Match this design. |
-| **io_uring submission** | High-throughput async I/O | Linux io_uring: ~100-200ns per SQE submission. Target: same order. |
-| **IOCP-like completion wait** | Main event loop for all servers/GUI apps | Windows IOCP / Linux epoll: sub-microsecond for ready events. |
-| **Interrupt dispatch** | Every keystroke, every packet, every timer | Total ISR latency < 10us. Deferred work via softirq/tasklet equivalent. |
-| **VFS path lookup** | Every file open, every path resolution | Linux: cached lookup ~200-500ns per component. Use dcache equivalent. |
-| **Filesystem read/write** | All I/O | Compare to ext4 on Linux for sequential and random I/O throughput. Target: within 20% of Linux ext4. |
-| **Compositor frame** | Every display refresh | Must composite a full desktop in < 2ms at 4K to not miss 144Hz vsync. |
-
-### Benchmarking Protocol
-
-1. **Write the benchmark before or alongside the implementation**, not after. Use `criterion` for microbenchmarks. Put benchmarks in `bench/<subsystem>/`.
-2. **Record baseline numbers** from Linux/Fuchsia/Windows (from published benchmarks, academic papers, or your own measurements on the dev machine). Store these in `bench/baselines.toml`:
-   ```toml
-   [syscall_getpid]
-   linux_ns = 100
-   target_ns = 200
-   source = "measured on dev machine, Linux 6.x, same hardware"
-
-   [ipc_channel_roundtrip]
-   fuchsia_us = 1.5
-   l4_us = 0.8
-   target_us = 2.0
-   source = "Fuchsia perf docs, L4 published benchmarks"
-   ```
-3. **Run benchmarks after every change to a critical subsystem.** Compare to baselines. If a change regresses a benchmark by more than 10%, investigate before merging.
-4. **Optimize iteratively.** Write the correct version first, benchmark it, then optimize. Use profiling (`perf` equivalent, or manual cycle counting via `rdtsc`) to find the actual bottleneck. Don't guess.
-5. **Document optimizations.** When you apply a non-obvious optimization, add a comment explaining what it does, why it helps, and what the benchmark improvement was:
-   ```rust
-   // OPT: Using per-CPU free lists avoids atomic operations on the global
-   // allocator in the common case. Benchmark: page_alloc dropped from 800ns
-   // to 150ns (5.3x improvement). See bench/mm/page_alloc.rs.
-   ```
-
-### Performance Patterns to Follow
-
-- **Per-CPU data structures** for anything accessed on every syscall/interrupt (allocator free lists, scheduler run queues, IPC queues). Avoid cross-CPU atomic contention.
-- **Lock-free fast paths** for high-frequency operations. Futexes should be pure atomic CAS in userspace for the uncontended case. Only enter the kernel on contention.
-- **Cache-line alignment** for per-CPU structures and heavily-contended locks. False sharing destroys performance.
-- **Avoid heap allocation on hot paths.** Pre-allocate, use slab allocators, or use stack allocation. No `Vec::push` in interrupt handlers.
-- **Batching** for I/O operations (io_uring model: submit many, complete many, one syscall).
-- **Lazy computation.** Don't compute what you might not need (relatime for atime updates, lazy TLB shootdown, deferred page zeroing).
-
-### Performance Anti-Patterns to Avoid
-
-- **Premature abstraction that prevents optimization.** A trait with dynamic dispatch (`dyn Trait`) on a hot path costs an indirect call (~5-10ns + branch mispredict). Use monomorphization or manual dispatch for hot paths.
-- **Holding locks across I/O or long operations.** Design for fine-grained locking. If a critical section could block, redesign.
-- **Copying data when you can transfer ownership or use zero-copy.** IPC channels should move pages between address spaces, not copy message contents.
-- **Linear scans** in the scheduler, allocator, or event dispatch. These must be O(1) or O(log n).
-
----
-
-## Studying Existing Implementations
-
-Before implementing any major subsystem, study how proven OSes do it. This is not optional — it is the primary mitigation against writing naive code.
-
-### What to Study and Where
-
-| Subsystem | Study these | Where to find them |
-|-----------|-------------|--------------------|
-| Scheduler | Linux EEVDF, BFS/MuQSS (for desktop ideas), Fuchsia fair scheduler | Linux `kernel/sched/`, BFS patch set, Fuchsia `zircon/kernel/sched/` |
-| Memory manager | Linux buddy allocator + SLUB, Fuchsia PMM | Linux `mm/`, Fuchsia `zircon/kernel/phys/` |
-| IPC | Fuchsia channels, seL4 IPC, L4 family | Fuchsia `zircon/kernel/object/channel_dispatcher.cc`, seL4 source |
-| VFS / filesystem | Linux VFS, ext4 | Linux `fs/`, `fs/ext4/` |
-| Capability system | Fuchsia handles, seL4 capabilities, Capsicum | Fuchsia `zircon/kernel/object/`, seL4 source |
-| I/O scheduler | Linux BFQ | Linux `block/bfq-*` |
-| Graphics compositor | wlroots, Smithay (Rust Wayland), KWin | wlroots source, Smithay crate |
-| GUI toolkit | Iced, Slint, egui (Rust), Qt (for widget design ideas) | Respective repos |
-
-### How to Study
-
-1. Read the source for the specific algorithm or data structure, not the entire subsystem.
-2. Understand the *invariants* and *design tradeoffs*, not just the code.
-3. Adapt the approach to our architecture (e.g., Linux's scheduler assumes CFS/EEVDF semantics; ours uses priority round-robin. Take the per-CPU queue and work-stealing design; drop the virtual-runtime fairness math).
-4. Cite your references in code comments: `// Based on Linux's buddy allocator (mm/page_alloc.c) with 16KiB base page adaptation.`
-
----
+- **Benchmark anything on a hot path, against concrete targets** -- the
+  performance-critical subsystem table, reference numbers from Linux/Fuchsia,
+  the benchmarking protocol and the patterns/anti-patterns are in
+  `performance-targets.md`. Rule of thumb that stays here: write the
+  benchmark before or alongside the implementation, never after, and
+  investigate any regression over 10% before merging.
 
 ## Architectural Rules (from the Design Spec)
 

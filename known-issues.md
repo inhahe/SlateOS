@@ -121465,3 +121465,103 @@ source defect — most likely two `cargo` invocations against the same
 overlap. If it recurs and is *not* transient, the thing to check first is
 whether a `.rlib` in `target/x86_64-pc-windows-gnu/debug/deps/` was written
 for a different target.
+
+## B-A-BREAKING-API-CHANGE-WAS-VERIFIED-BY-GREPPING-ONE-DIRECTORY (lane B, 2026-09-07)
+
+**In short:** I removed two things from a shared library, converted every
+program that used them, and broke the build for all three lanes anyway --
+because the way I found "every program that used them" was to search *one*
+directory, and two of the callers live somewhere else. This is a note about
+the method, not about the two callers, which are fixed.
+
+**What happened.** `5264cba7a` carried out `design-decisions.md` §353 item 3:
+`authlib`'s `/etc/shadow` store is deleted rather than kept as a fallback. That
+removed the whole `authlib::shadow` module and the second parameter of
+`Authenticator::with_stores` -- a hard, compile-breaking API change. To find the
+callers I ran, in effect:
+
+```
+grep -l authlib userspace/*/Cargo.toml
+```
+
+That returned nine crates, all of which I converted and tested. It also silently
+excluded every crate outside `userspace/`. Two exist:
+
+| Crate | Lane | How it broke |
+|---|---|---|
+| `init/login` | B (mine) | two-argument `with_stores`, twice |
+| `apps/lockscreen` | C | two-argument `with_stores`, **and** `authlib::shadow::lookup`, which no longer exists at all -- fixed by lane C in `d9f1f540e` |
+
+`main` did not build for a day. The boot test builds the whole workspace, so it
+blocked all three lanes, not just mine.
+
+**Why the usual safety nets did not catch it.**
+
+- `cargo test -p <crate>` over the crates I had touched cannot see a caller I
+  did not know about. That is the whole point of the list being wrong.
+- `cargo test --workspace` *would* have caught it. I started one and abandoned
+  it as too slow on this machine (it was ~15% through after 15 minutes), then
+  substituted "every crate that depends on `userdb`" -- reasoning that
+  `userdb`'s change was purely additive so the blast radius was bounded. That
+  reasoning was sound for `userdb` and I applied it to the wrong change:
+  `authlib`'s change was *subtractive*, and a subtractive API change has a blast
+  radius of "every caller in the tree", which is exactly the thing I had not
+  enumerated.
+- The pre-push gates are lint- and text-based; none of them compiles the
+  workspace.
+
+**The fix, as a habit:** when a change *removes or narrows* a public item, the
+caller list must come from the whole tree, not a subdirectory:
+
+```
+grep -rl '<crate-name>' --include=Cargo.toml .
+```
+
+and the verification must be a whole-workspace **`cargo check`** -- not
+`cargo test`. `check` skips building and linking test binaries and skips running
+them, which is where nearly all of `cargo test --workspace`'s time goes on this
+tree; it is the cheapest thing that still sees every caller. Measured on this
+machine: see the timing note at the end of this entry.
+
+**Distinguish the two shapes of change**, because the cheap verification is only
+valid for one of them:
+
+- *Additive* (a new function, a new field, a new variant on a `#[non_exhaustive]`
+  enum): existing callers cannot break. Testing the crate and its known
+  dependents is enough.
+- *Subtractive or narrowing* (removing an item, removing a parameter, changing a
+  type, renaming): every caller in the tree is a candidate. Enumerate from the
+  whole tree and `cargo check --workspace` before merging to `main`.
+
+**A grep would not have been enough, which is the sharper point.** Lane C, which
+owns `apps/`, made this observation and it is the one worth keeping: *nothing
+builds `apps/**` at all*. The boot test targets `x86_64-unknown-none`, where
+`apps/*` are not in `default-members`; each lane builds only what it touched;
+there is no CI. `apps/*` **is** a workspace member, so a host-target
+`cargo check --workspace` sees it -- but nobody has a reason to run one. So the
+grep being narrow is how *I* missed it, and the absence of any build covering
+`apps/` is why nothing else caught it either. Two independent holes lined up.
+
+**How it was actually found:** not by me and not by the grep. Lane C was
+stripping blanket `#![allow(dead_code)]` out of `apps/`, which made clippy look
+at the crate for the first time, and the errors fell out. It fixed
+`apps/lockscreen` in `d9f1f540e` and merged it in `97219f95c` before I had
+finished writing the request asking it to. My `init/login` half was the only
+part still outstanding by then.
+
+**Timing, measured rather than assumed (2026-09-07):** lane C measured all 143
+`apps/` crates at **58 seconds** warm. My own `cargo check --workspace` run on
+this machine hit a separate obstacle worth recording: it fails on
+`kernel/src/container.rs`'s `include_bytes!` of
+`services/hello/target/x86_64-unknown-none/release/hello`, a *build artifact*
+that the D:->E: migration deliberately did not copy. So a whole-workspace check
+is not clean out of the box on a fresh tree -- it needs `services/hello` built
+for the bare-metal target first, or that crate excluded. Anyone proposing the
+check as a standing gate has to handle that, or the gate fails for a reason
+unrelated to the change under test, which is the fastest way to get a gate
+ignored.
+
+**Open question:** whether to make a host-target `cargo check --workspace` a
+pre-merge gate is `open-questions.md` -> **C-Q11**, raised by lane C. The real
+objection is that it lets one lane's red crate block another lane's merge --
+which is exactly what happened here, in both directions.

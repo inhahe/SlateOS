@@ -122020,3 +122020,75 @@ ignored.
 pre-merge gate is `open-questions.md` -> **C-Q11**, raised by lane C. The real
 objection is that it lets one lane's red crate block another lane's merge --
 which is exactly what happened here, in both directions.
+
+## A-THE-KERNEL-EMBEDS-A-BUILD-ARTIFACT-NOTHING-BUILDS-AND-NOTHING-TRACKS (lane A's tree, found by lane B 2026-09-07)
+
+**In short:** the kernel compiles a small test program *into itself* by reading
+that program's compiled output off disk. Nothing in the build ever produces that
+output, and nothing tells the build system it depends on it. So on a tree where
+the file happens to be absent the kernel does not compile at all, with an error
+that reads like a corrupt checkout; and on a tree where it is present but stale,
+the kernel silently embeds the old version.
+
+**Where.** `kernel/src/main.rs:7516` and `kernel/src/container.rs:5201`/`:5904`:
+
+```rust
+include_bytes!("../../services/hello/target/x86_64-unknown-none/release/hello")
+```
+
+`kernel/build.rs` sets the linker script and compiles the Ada components, but
+does not build `services/hello` and does not emit a `cargo:rerun-if-changed` for
+its artifact.
+
+**Two defects, not one.**
+
+1. **Nothing builds it.** `grep -rn "services/hello" --include=*.sh --include=*.ps1
+   --include=*.py scripts/ kernel/` finds only the `include_bytes!` itself.
+   `services/hello` is a workspace member, but its artifact is produced only by
+   someone running `cargo build --release` inside `services/hello`, whose
+   `.cargo/config.toml` pins `x86_64-unknown-none`. On a tree where that has
+   never happened, building the kernel fails with:
+
+   ```
+   error: couldn't read `kernel\src\../../services/hello/target/x86_64-unknown-none/release/hello`:
+          The system cannot find the path specified. (os error 3)
+   ```
+
+   which names a path and looks like damage rather than a missing bootstrap step.
+
+2. **Nothing tracks it — and this is the worse half.** With no
+   `cargo:rerun-if-changed` on that path, rebuilding `services/hello` does not
+   invalidate the kernel. The kernel keeps the previously embedded copy and says
+   nothing. A change to the test program that appears to have no effect is
+   indistinguishable from a change that genuinely has none.
+
+**How it surfaced.** The D:->E: migration copied every worktree but excluded
+directories named `target`, on the sound reasoning that cargo bakes absolute
+paths into its fingerprints so a moved `target/` is rebuilt anyway. The file is
+untracked, so git did not carry it either. Lane A measured it afterwards across
+all four E: trees: present in `os-lane-a` (4976 bytes), absent in `os`,
+`os-lane-b` and `os-lane-c` -- which is why it had gone unnoticed. Lane A's
+framing is the right one and worth keeping: *an artifact that source code
+embeds is a build **input** wearing an output's clothes, and the directory it
+lives under is not a reliable guide to which it is.*
+
+**It is not migration damage.** The same failure hits a fresh `git clone`, which
+makes it the first thing a new contributor would meet.
+
+**The remedy, verified 2026-09-07 on `os-lane-b`:**
+
+```
+cd services/hello && cargo build --release      # 2.75 s, produces 4976 bytes
+```
+
+That is a workaround, not the fix. **The fix is to declare the edge** -- have
+`kernel/build.rs` build `services/hello` (as it already shells out to GNAT for
+the Ada objects) and emit `cargo:rerun-if-changed` for the artifact, or make it
+a proper artifact dependency. A gate exclusion would remove the symptom and
+leave both defects standing; lane C made this point when the same file broke a
+proposed whole-workspace check gate, and it is the reason this entry exists
+separately from that discussion (`open-questions.md` -> C-Q11).
+
+**Owner:** `kernel/**` is lane A's, so the fix is lane A's. Filed here rather
+than as a `requests/` entry because lane A found the artifact asymmetry itself
+in the same exchange and is already recording the migration-script half.

@@ -28,10 +28,29 @@ second line — the same shape you already applied next door.
 
 ## Why nobody caught it before now
 
-The call sits in a `#[cfg(unix)]` arm. Every other check in the tree runs
-against the Windows host, which discards that arm, so it compiles clean
-everywhere except the target that actually ships. `check-cfg-unix` is the only
-gate that sees it, it lives inside the boot test, and it fails ~30 minutes in.
+**CORRECTED 2026-09-06, after lane B pointed out this section was wrong.**
+
+This originally said the call sits in a `#[cfg(unix)]` arm, invisible to the
+Windows-host checks. That is false: `init/login/src/main.rs` contains **zero**
+`cfg(unix)` occurrences, and the host target compiles the crate and does see the
+error. The claim came from reading `check-cfg-unix`'s error text — which
+explains what that gate is generally *for* — as a diagnosis of this particular
+failure. The gate builds the whole crate for a unix target, so it catches
+anything that breaks there, cfg-gated or not.
+
+The real reason, from lane B, is narrower and worse: when `5264cba7a` changed
+the signature, the caller list was built by grepping `userspace/*/Cargo.toml`
+for `authlib`. That covers neither `init/` nor `apps/`, which is where both
+missed callers live. The whole-workspace run that would have caught it was
+started and abandoned as too slow on this machine.
+
+What remains true is the *consequence*: no gate in this tree builds every crate
+before a merge, so the first thing to notice was the boot test, ~30 minutes in,
+in a lane that did not cause it. That is precisely lane C's `C-Q11`.
+
+For anyone making a similar change, the full set of crates depending on
+`authlib` (from lane B): `apps/lockscreen`, `init/login`, and
+`userspace/{doas,ftpd,login,logind,passwd,polkit,sshd,su,sudo}`.
 
 Verified on `origin/main`, not just locally: `git show
 origin/main:init/login/src/main.rs` has the two-argument call, so `main` is red

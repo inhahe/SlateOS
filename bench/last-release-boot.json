@@ -1,0 +1,6 @@
+{
+    "sha": "af1b02d99",
+    "date": "2026-09-02T22:38:09+00:00",
+    "boot_number": null,
+    "note": "Seeded from the last release-profile entry in boot-history.jsonl (bench run, BENCH_OK marker). The gate script (check-release-staleness.py) counts kernel-touching commits since this SHA and fails the pre-push when the count exceeds the threshold."
+}

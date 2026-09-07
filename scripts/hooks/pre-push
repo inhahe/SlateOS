@@ -2472,6 +2472,51 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 15: release-profile boot test staleness.
+#
+# Q46 → §914: the operator chose option C (debug by default, periodic release
+# boot) with the instruction "make a solution that will not result in 'never'
+# in practice."  This gate counts kernel-touching commits since the last
+# release-profile boot test and refuses the push when they exceed a threshold.
+# The only way past it is to run the measurement or raise the threshold — both
+# visible diffs.  This is the trigger lane B proposed and the operator approved.
+#
+# NOT scoped to `touches` — the baseline covers kernel/ and bench/, which are
+# the paths the gate counts, so the commit-count since the baseline is the
+# metric regardless of what *this* push touches.  A docs-only push does not
+# get a free pass on staleness.
+# ---------------------------------------------------------------------------
+staleness="$PROJECT_ROOT/scripts/check-release-staleness.py"
+skip_staleness=0
+[ -f "$staleness" ] || skip_staleness=1
+note_gate release-staleness "$skip_staleness"
+
+if [ "$skip_staleness" != "1" ]; then
+    if ! run_checker release-staleness "$py" "$staleness"; then
+        cat >&2 <<'EOF'
+
+pre-push: REFUSING to push — the release-profile boot test is stale.
+
+Run a release boot test:
+
+    ./scripts/boot-test.sh --profile=release
+
+then update bench/last-release-boot.json with the commit SHA and date,
+and push again.
+
+To push anyway (e.g. you are about to run the release boot test):
+    ALLOW_STALE_RELEASE=1 git push ...
+
+EOF
+        if [ "${ALLOW_STALE_RELEASE:-}" = "1" ]; then
+            echo "pre-push: ALLOW_STALE_RELEASE=1 — pushing despite stale release baseline." >&2
+        else
+            exit 1
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # The tally. Unconditional, and on stderr with the rest of the hook's output.
 #
 # This is the line whose absence means "the hook did not run" — the one reading

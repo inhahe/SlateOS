@@ -73,7 +73,7 @@ and on two entries sharing an identifier while one is still open. It only
 duplicate numbers in the archive, both of which are another lane's text to fix
 or history's to keep. Reasoning: `design-decisions.md` §903.
 
-## Q46 — [A] Every benchmark ever recorded measured an `opt-level = 0` kernel. Should the *non-bench* boot test also switch to release, or only the bench path? — Status: ANSWERED C, with instruction to design a concrete trigger for "periodic" re-measurement (not just "never in practice") — needs implementation design from lane A
+## Q46 — [A] Every benchmark ever recorded measured an `opt-level = 0` kernel. Should the *non-bench* boot test also switch to release, or only the bench path? — Status: RESOLVED → §922 (operator chose C + commit-count gate trigger; implemented as pre-push gate 15)
 
 **Background.** `scripts/boot-test.sh:602` runs a bare `cargo build` and stages
 `target/x86_64-unknown-none/debug/kernel`. The bench suite is compiled in

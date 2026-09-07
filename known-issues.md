@@ -122411,6 +122411,16 @@ That is why `build.rs` should scan rather than hold a list of six.
 
 ## B-POSIX-SETGROUPS-REPORTS-SUCCESS-WITHOUT-CHANGING-ANY-GROUPS (lane B, 2026-09-07)
 
+**Status: FIXED 2026-09-07** (lane B), the same day it was filed. `setgroups`
+now returns `-1`/`ENOSYS` after its validation instead of `0`. The thirteen
+tests that asserted the old success assert the failure *and* the errno; the one
+covering the privilege-drop idiom is now named
+`test_setgroups_phase85_drop_all_groups_idiom_does_not_claim_success`, because
+what it did before was lock in the precise behaviour that hands a caller a
+privilege drop it never performed. The reasoning is
+`design-decisions.md` §1004. The description below is kept in the past tense it
+was written in, because how the decision unblocked is the useful part.
+
 **In short:** the C library function a program calls to drop its extra group
 memberships checks that it is allowed to, checks its arguments, and then returns
 "done" without changing anything. A program that drops privileges this way is
@@ -122440,8 +122450,8 @@ means it sheds none of it while its own logic records that it did.
 
 **Exposure today is latent.** Nothing in this tree calls it: `userspace/chroot`
 has its own `enosys("setgroups")` stub and `userspace/su` mentions it only in a
-comment. The ctest fixtures link libc but are not known to exercise it. So this
-is a landmine rather than a live wound -- and it is the same shape as
+comment. The ctest fixtures link libc and -- audited, see below -- do not
+exercise it either. So this was a landmine rather than a live wound -- and it is the same shape as
 `userspace/newgrp`'s `!password.is_empty()` group check found the same day: a
 security decision that answers "yes" by default, sitting behind something else
 that is missing.
@@ -122453,18 +122463,31 @@ which serves binaries running under `AbiMode::Linux`. There is no native syscall
 number for it, so native libc has nothing to call. Asked for in
 `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
 
-**The interim question, deliberately not decided unilaterally.** Until the native
-path exists, `setgroups` could return `-1`/`ENOSYS` instead of `0`. That is more
-honest and matches what `posix::chroot` already does two thousand lines away in
-the same file. It is *not* obviously right: it converts a silent wrong answer
-into a loud failure in code that currently "works", and the callers it would
-newly break are C programs linked against our libc -- including the ctest
-fixtures the boot test runs -- which nobody has audited for it. The tradeoff is
-real in both directions, so it is recorded here rather than taken. **Recommended
-resolution:** make it `ENOSYS` at the same moment the native syscall lands, so
-the honest-failure window is zero; if the native path is declined, make it
-`ENOSYS` anyway and fix the fallout, because a security function that lies is
-worse than one that refuses.
+**The interim question, and why it stopped being one.** This entry originally
+declined to choose between `0` and `ENOSYS`, on the grounds that switching
+"converts a silent wrong answer into a loud failure in code that currently
+'works', and the callers it would newly break are C programs linked against our
+libc -- including the ctest fixtures the boot test runs -- **which nobody has
+audited for it**."
+
+That objection was checkable, and nobody had checked it. "Nobody has audited
+this" is not a finding about the hazard; it is a finding about the auditing.
+Audited 2026-09-07 across the whole tree and across all file types rather than
+`*.rs` -- which is how the first pass missed C entirely: **there is no caller.**
+The nine `services/ctest-*` fixtures do not mention `setgroups`. The only
+tree-wide match outside `posix/src/unistd.rs` is a syscall-*number* table in
+`find_gaps.py`, which is a lookup rather than a call. So the set of programs the
+change could break is empty, the tradeoff that made this a judgment call does not
+exist, and the "wait for the native syscall so the honest-failure window is zero"
+recommendation was guarding nothing.
+
+Worth recording as the day's recurring failure in a new costume. The five earlier
+instances were *searches* that answered a narrower question than the one asked
+and were reported at the width of the question. This one is the same error moved
+one level up: a **decision** deferred on the strength of a hazard nobody had
+measured, with the deferral stated at the width of a real tradeoff. An unaudited
+objection is not a reason to wait; it is a reason to audit. The audit was one
+command, and it had been available on every one of the days this sat open.
 
 **Related, same file, opposite behaviour:** `posix::chroot`
 (`unistd.rs:1964`) is in the identical position -- kernel handler exists, no

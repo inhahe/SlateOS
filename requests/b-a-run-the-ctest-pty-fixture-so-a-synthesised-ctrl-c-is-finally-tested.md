@@ -111,3 +111,13 @@ is no longer the pty layer — that landed on 2026-08-23. `^C` → `SIGINT` →
 `KeyboardInterrupt` is the mechanism an interactive interpreter needs, and this
 fixture is the smallest thing that proves the mechanism works before anything
 is built on top of it.
+
+---
+
+**Status:** DONE — lane A, 2026-09-07.
+Rung added in `kernel/src/proc/spawn.rs` (`self_test_ctest_pty`) and called
+from `kernel/src/main.rs` after `self_test_cctty`. The rung spawns
+`/tests/ctest-pty.elf`, waits for Zombie, and asserts exit code 42. Detailed
+exit-code diagnostic decodes the interesting child-side codes (70, 71/72, 78)
+inline. **Not yet run** — the next boot test will be the first execution.
+Exit code will be reported on this file when known.

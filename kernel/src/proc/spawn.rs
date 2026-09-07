@@ -8984,6 +8984,139 @@ pub fn self_test_cctty() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of **pty-based `^C` signal delivery**.
+///
+/// The fixture (`services/ctest-pty/`) opens a pty pair, forks, and the parent
+/// writes `0x03` (ETX / Ctrl-C) to the master end.  The line discipline turns
+/// that into `SIGINT` on the foreground process group, and the child's signal
+/// handler fires — across a process boundary, with no keyboard and no human.
+///
+/// This is the first test at *any* level that exercises the full path:
+///
+///   `openpty` → `forkpty` → line discipline `VINTR` → `SIGINT` → handler
+///
+/// Previous coverage gaps (from the request):
+/// * Host `cargo test`: the pty wrapper's syscall arm is `#[cfg(target_os = "none")]`.
+/// * Kernel pty self-tests: drive the pty directly, never through libc.
+/// * `ctest-ctty`: console-based, cannot synthesise a keystroke.
+///
+/// Exit code 42 means every check passed; any other code names the failing
+/// step (see `services/ctest-pty/main.c` and the request file for the legend).
+/// Code **78** is the one this fixture exists to detect: the child ran to
+/// completion without its `SIGINT` handler firing, meaning the line discipline
+/// did not turn `0x03` into a signal that reached the foreground group.
+///
+/// The fixture contains no `alarm`/`setitimer` calls (those are known-broken:
+/// `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING`).  Every read is non-blocking
+/// with a bounded spin, so it can fail but cannot hang.
+pub fn self_test_ctest_pty() -> KernelResult<()> {
+    let Some(ctest_elf) = pathz_test_elf("ctest-pty", "ctest-pty")? else {
+        return Ok(());
+    };
+
+    serial_println!(
+        "[spawn] Running pty ^C signal delivery (ring 3, C, native ABI) integration test \
+         ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only after all of its checks pass.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-pty"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-pty",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-pty spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // The fixture forks one child, the parent writes 0x03 to the master, and
+    // the child's signal handler fires.  Several bounded spin loops plus
+    // waitpid — give generous headroom.
+    let mut became_zombie = false;
+    for _ in 0..8000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-pty (ring 3) — expected Zombie, got {:?}. The fixture \
+             uses non-blocking reads with bounded spins, so a non-zombie state means one of \
+             the loops hit its limit (likely the child never received SIGINT and reached its \
+             spin ceiling)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        // Decode the interesting child-side codes for the diagnostic.
+        let hint = match exit_code {
+            Some(78) => " — the child ran to completion without its SIGINT handler \
+                         firing: the line discipline did not turn 0x03 into a signal \
+                         that reached the foreground group. This is the single result \
+                         this fixture exists to detect",
+            Some(70) => " — isatty(0) false in the child: login_tty did not install \
+                         the slave as fds 0/1/2",
+            Some(c) if (71..=72).contains(&c) => " — signal() returned SIG_ERR or \
+                         the readiness write failed in the child",
+            Some(c) if (1..=4).contains(&c) => " — openpty failed or returned a \
+                         bad/duplicate fd pair",
+            Some(c) if (5..=6).contains(&c) => " — isatty false on master or slave",
+            Some(c) if (7..=8).contains(&c) => " — ttyname(slave) NULL or not \
+                         under /dev/pts/",
+            Some(c) if (13..=18).contains(&c) => " — basic byte-path test failed \
+                         (master↔slave data transfer)",
+            Some(c) if (21..=27).contains(&c) => " — canonical mode test failed",
+            Some(c) if (40..=47).contains(&c) => " — forkpty / signal-delivery phase",
+            _ => "",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ctest-pty (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {}{hint}. See services/ctest-pty/main.c and \
+             requests/b-a-run-the-ctest-pty-fixture-so-a-synthesised-ctrl-c-is-finally-tested.md \
+             for the full exit-code legend",
+            exit_code,
+            EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   pty ^C signal delivery (ring 3, native ABI: a program on our own libc \
+         opens a pty pair with openpty, forks with forkpty, the parent writes 0x03 to the \
+         master, and the child's SIGINT handler fires — the line discipline turned a byte \
+         into a signal that crossed a process boundary): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the sysroot's **scanf trampolines**.
 ///
 /// `sscanf`, `scanf` and `fscanf` are assembly trampolines — `va_trampoline!`

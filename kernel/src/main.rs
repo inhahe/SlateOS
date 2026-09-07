@@ -2384,6 +2384,25 @@ extern "C" fn kernel_main() -> ! {
     {
         #[inline(never)]
         fn case() {
+            // Ring-3 end-to-end test of pty-based ^C signal delivery: a native
+            // binary opens a pty pair with openpty, forks with forkpty, the parent
+            // writes 0x03 to the master, and the child's SIGINT handler fires —
+            // the first test at any level that the line discipline turns a byte
+            // into a signal that crosses a process boundary.  Bounded spin loops;
+            // can never hang the boot.
+            if let Err(e) = proc::spawn::self_test_ctest_pty() {
+                serial_println!(
+                    "WARNING: pty ^C signal delivery (ring 3) self-test failed: {:?}",
+                    e
+                );
+            }
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
             // Ring-3 end-to-end test of fastpy pure-mode FILE I/O on-target: a native
             // fastpy binary opens/writes/closes then reopens/reads a file on the /tmp
             // memfs and exits with the byte count read back, proving the full path

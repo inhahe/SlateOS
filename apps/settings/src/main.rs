@@ -1910,6 +1910,13 @@ enum ToggleId {
     ReduceAnimations,
     ReduceTransparency,
     AutoUpdate,
+    /// Slide the taskbar out of the way when it is not in use.
+    ///
+    /// Unlike its neighbours here, the field behind this one lives in the
+    /// shared `appearance` model rather than on `SettingsState`, so flipping it
+    /// is saved to `appearance.yaml` and announced to the running desktop by
+    /// `handle_event`'s before/after comparison -- no extra plumbing.
+    TaskbarAutohide,
 }
 
 /// A row of small selectable buttons — see [`render_pill_row`].
@@ -2993,6 +3000,16 @@ impl SettingsState {
             .map(|sp| (sp.label(), *sp == self.appearance.settings.animation_speed))
             .collect();
         s.pill_row("Animation Speed", PillId::AnimationSpeed, &speeds);
+
+        // Its own section rather than an entry under Effects: hiding the
+        // taskbar is a behaviour, not a visual treatment, which is also why the
+        // saved key is `taskbar.autohide` and not `effects.*`.
+        s.section("Taskbar");
+        s.toggle_row(
+            "Automatically hide the taskbar",
+            ToggleId::TaskbarAutohide,
+            self.appearance.settings.taskbar_autohide,
+        );
     }
 
     // --- Colors page (accent color picker) ---
@@ -4523,6 +4540,7 @@ impl SettingsState {
             ToggleId::ReduceAnimations => &mut self.reduce_animations,
             ToggleId::ReduceTransparency => &mut self.reduce_transparency,
             ToggleId::AutoUpdate => &mut self.auto_update_enabled,
+            ToggleId::TaskbarAutohide => &mut self.appearance.settings.taskbar_autohide,
         })
     }
 
@@ -6321,6 +6339,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_the_taskbar_autohide_toggle_is_on_the_themes_page_and_reaches_the_file() {
+        // Two claims the exhaustive walk above does not make on its own. It
+        // would pass vacuously if this toggle were never *found* -- drawn on a
+        // page `all_pages()` misses, or below a fold `toggles_on_page` does not
+        // reach -- and it never checks that an appearance-backed toggle is
+        // written to disk, because every other toggle's field lives on
+        // `SettingsState` and is lost at exit anyway.
+        appearance::config::testing::with_scratch_config("settings-autohide", |root| {
+            // A plain state, not `fully_expanded`: that fixture deliberately
+            // turns every toggle on the page *on*, which would leave nothing
+            // for the click below to demonstrate.
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Themes;
+            assert!(
+                !state.appearance.settings.taskbar_autohide,
+                "auto-hide should start off"
+            );
+
+            let (cx, cy) = center_of(&state, RowHit::Toggle(ToggleId::TaskbarAutohide))
+                .expect("the toggle should be on the Themes page");
+            let evt = Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            });
+            state.handle_event(&evt);
+
+            assert!(
+                state.appearance.settings.taskbar_autohide,
+                "the click did not take"
+            );
+
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "the click should have written {path:?}");
+
+            // Read it back the way the shell does, which is the claim that
+            // matters: the desktop is the consumer, not this app.
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert!(
+                saved.taskbar_autohide,
+                "the setting did not survive the round trip to disk"
+            );
+        });
     }
 
     #[test]

@@ -20199,7 +20199,10 @@ the first attempt at this fix went wrong.
 **In short:** Open Settings, choose "Slow" animations, and the setting is
 saved, survives a restart, and changes nothing — because nothing in the system
 reads it. The same is true of desktop icon size and cursor scheme.
-(**Animation speed is fixed as of 2026-09-06**; the other three stand.) Cursor
+(**Animation speed is fixed as of 2026-09-06**; the other three stand.
+Taskbar auto-hide, added 2026-09-06, was built the other way round -- setting,
+consumer and Settings control in one change -- precisely so it never joined
+this list.) Cursor
 *size* is worse: it exists as four separate settings in four places, and the
 program that draws the cursor reads none of them. These are controls that work
 perfectly and do nothing, which is the most expensive kind of broken, because

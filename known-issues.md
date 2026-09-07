@@ -122175,9 +122175,43 @@ kernel", it is *every member*, including `userspace/*` -- some thousands of
 crates. Both mental models had it as apps + kernel. Neither party read the
 manifest before reasoning about the difference.
 
+**The case the gate actually fires in** -- lane C's objection to every number
+above, and the right one: a gate runs after `git merge origin/main`, so the
+interesting day is the one where a *shared crate moved* and everything
+downstream re-checks. All the figures above are one-file-touched or no-op,
+which is the cheap day. Measured, same tree, same contention, by touching each
+shared crate and re-checking the whole workspace:
+
+| Shared crate touched | Crates naming it in a manifest | `cargo check --workspace` |
+|---|---|---|
+| `authlib` | 12 | **19 s** |
+| `posix` | 13 direct | **22 s** |
+| `guitk` | 144 | **26 s** |
+| `quoting` | **773** | **49 s** |
+
+So the expensive end -- the widest shared crate in the tree, under contention --
+is **49 seconds**, not the two minutes the cold figure suggested. `cargo check`
+does no codegen, so a downstream re-check is metadata-only: 773 crates in 49 s
+is about 63 ms each.
+
+Two premises were wrong in the discussion that produced this table, both by
+reasoning about a set without counting it -- the same failure as the `head -3`
+and the one-file `grep -c` recorded elsewhere in this entry:
+
+* *"Downstream of `authlib` is most of those 2,759 `userspace` crates."* It is
+  **12**. The blast radius that actually justified the gate was small; what
+  makes it matter is that the victims were in another lane, not that there were
+  many of them.
+* Nobody had identified the widest shared crate. It is not `guitk`, `posix` or
+  `authlib` -- it is **`quoting`**, at 773 dependents, and it was in none of the
+  three candidate lists.
+
+Member counts, for the record: `userspace/*` 2,759, `apps/*` 143, `services/*`
+76, `gui/*` 15, `init/*` 2, `net/*` 2.
+
 **What the numbers do and do not decide.** At 15 s warm-incremental under
-contention, cost cannot decide the policy: the gap between 8 s and 15 s is
-inside the noise of a merge. Scope should therefore be chosen for **coverage**,
+contention -- and 49 s in the worst shared-crate case -- cost cannot decide the
+policy: the gap between 8 s and 15 s is inside the noise of a merge. Scope should therefore be chosen for **coverage**,
 where the two differ sharply -- a gate scoped to `apps/`+`gui/` would have caught
 the `guitk::Event` breakage and would *not* have caught the `authlib` one, whose
 callers are all under `userspace/`. Whole-workspace is the only scope covering

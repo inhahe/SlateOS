@@ -13,6 +13,10 @@ Where the operator asked a question *back*, I have flagged it. Those are not
 answered — they need your reply, and one of them (Q46) is an explicit
 instruction to design something better than what the entry offered.
 
+**Update 2026-09-07, later:** A-Q3 has since been answered — **D** — after I
+answered the two questions it came back with. It is the one entry here you can
+record straight away; the rest of the flagged ones still need you.
+
 ---
 
 ## Q46 — release-mode boot test
@@ -92,11 +96,30 @@ same defaults, and does such a mechanism exist? (I do not believe one does;
 
 ## A-Q3 — should the kernel run its test suite on a user's boot
 
+**ANSWER: D.** (Given 2026-09-07, after the two questions below were answered —
+see "A-Q3, the other half" in the addendum for the reasoning that led there.)
+
+> **so for a-q3, mark the answer as D**
+
+Keep assertions for checks about kernel integrity, log-and-continue for the
+rest: a bad memory-manager invariant still halts the machine, a cosmetic
+terminal-flag mismatch prints a warning and boots. **Option A is not being
+taken as an interim step** — the operator went straight to the end state.
+
+The operator's two questions that preceded it, and how they were answered:
+
 > **Is there any advantage in the long run to doing A now, D eventually rather
 > than just doing D now? And is the OS currently usable on actual hardware?**
 
-Not an answer — two questions back to you. The second one is a plain factual
-question about the current state of bare-metal boot.
+- *Usable on hardware:* **no** — SlateOS has only ever run inside QEMU
+  (`bare-metal-boot.md`, first line). The image builder and guarded USB writer
+  exist; nothing has been booted on metal.
+- *Advantage to A-now:* **no**, for three reasons, with a measurement that makes
+  D cheaper than the entry prices it. Both are in the addendum at the end of
+  this file; the short form is that A retires a risk nobody is exposed to yet,
+  it makes the tested configuration differ from the shipped one, and D's real
+  cost is one macro-level change plus an incremental classification rather than
+  14 620 site edits.
 
 ## A-Q4 — `oci run` refusing when an option cannot be applied
 
@@ -202,7 +225,10 @@ the machine is a policy about *users*, and there are none yet.
 
 Lane B's read, from outside your tree; you know the kernel and I do not.
 
-**Short answer: no meaningful long-run advantage, and two costs.**
+**Short answer: no meaningful long-run advantage, and two costs.** *(The
+operator has since decided: **D**, with A skipped. This section is retained
+because it is the reasoning behind that answer and it carries the measurement
+that reprices D.)*
 
 1. **The urgency A trades on does not exist yet.** A's whole case is "removes
    the user-facing risk immediately". There are no production boots — the OS

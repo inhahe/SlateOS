@@ -13,6 +13,7 @@ use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use yamldoc::Document;
 
 // ============================================================================
 // Colour
@@ -251,6 +252,68 @@ pub enum WidgetKind {
 }
 
 impl WidgetKind {
+    /// The spelling this kind has in `widgets.yaml`.
+    ///
+    /// Deliberately *not* [`label`](Self::label). A label is UI text and is
+    /// free to change -- "System monitor" could become "Resources" tomorrow --
+    /// and if the file spoke labels, that rename would silently discard every
+    /// user's placed widget of that kind. The same separation `appearance`
+    /// keeps between `label()` and its yaml spelling, for the same reason.
+    ///
+    /// `Custom` has no spelling of its own: the app name *is* the spelling,
+    /// behind a `custom:` prefix so it cannot collide with a built-in.
+    #[must_use]
+    pub fn yaml_name(&self) -> String {
+        match self {
+            Self::Clock => "clock".to_string(),
+            Self::Weather => "weather".to_string(),
+            Self::SystemMonitor => "system_monitor".to_string(),
+            Self::Calendar => "calendar".to_string(),
+            Self::Notes => "notes".to_string(),
+            Self::RssFeed => "rss_feed".to_string(),
+            Self::MusicPlayer => "music_player".to_string(),
+            Self::PhotoFrame => "photo_frame".to_string(),
+            Self::WorldClock => "world_clock".to_string(),
+            Self::Reminders => "reminders".to_string(),
+            Self::DiskUsage => "disk_usage".to_string(),
+            Self::NetworkMonitor => "network_monitor".to_string(),
+            Self::BatteryStatus => "battery_status".to_string(),
+            Self::Custom { app_name } => format!("custom:{app_name}"),
+        }
+    }
+
+    /// The kind a `widgets.yaml` spelling names, if this build has it.
+    ///
+    /// `None` for a name this build does not know, which is how a file written
+    /// by a newer desktop degrades: that widget is skipped and the rest load.
+    /// Dropping one unknown entry is the right failure -- refusing the whole
+    /// file would lose the layout a user does have over one they cannot see.
+    #[must_use]
+    pub fn from_yaml_name(name: &str) -> Option<Self> {
+        if let Some(app) = name.strip_prefix("custom:") {
+            // An empty app name is not a widget anyone can draw.
+            return (!app.is_empty()).then(|| Self::Custom {
+                app_name: app.to_string(),
+            });
+        }
+        Some(match name {
+            "clock" => Self::Clock,
+            "weather" => Self::Weather,
+            "system_monitor" => Self::SystemMonitor,
+            "calendar" => Self::Calendar,
+            "notes" => Self::Notes,
+            "rss_feed" => Self::RssFeed,
+            "music_player" => Self::MusicPlayer,
+            "photo_frame" => Self::PhotoFrame,
+            "world_clock" => Self::WorldClock,
+            "reminders" => Self::Reminders,
+            "disk_usage" => Self::DiskUsage,
+            "network_monitor" => Self::NetworkMonitor,
+            "battery_status" => Self::BatteryStatus,
+            _ => return None,
+        })
+    }
+
     /// Human-readable label.
     pub fn label(&self) -> &str {
         match self {
@@ -640,6 +703,80 @@ impl DesktopWidgetManager {
             }
         }
         None
+    }
+
+    /// Write the placed widgets into a configuration document.
+    ///
+    /// Keyed by ordinal rather than by the runtime `WidgetInstanceId`, because
+    /// that id comes from a counter and means nothing across a restart. The
+    /// file says *what widgets exist and where*, which is all a layout is.
+    ///
+    /// Zero-padded so the keys sort the way they are numbered: a file a user
+    /// has hand-edited need not preserve document order, and `"10"` sorting
+    /// before `"2"` would reorder the layout on a load-save round trip.
+    pub fn write_into(&self, doc: &mut Document) {
+        doc.remove(&["widgets"]);
+        for (i, w) in self.widgets.iter().enumerate() {
+            let key = format!("{i:03}");
+            doc.set_str(&["widgets", &key, "kind"], &w.kind.yaml_name());
+            doc.set_i64(&["widgets", &key, "col"], i64::from(w.position.col));
+            doc.set_i64(&["widgets", &key, "row"], i64::from(w.position.row));
+            doc.set_i64(&["widgets", &key, "cols"], i64::from(w.size.cols));
+            doc.set_i64(&["widgets", &key, "rows"], i64::from(w.size.rows));
+            doc.set_bool(&["widgets", &key, "visible"], w.visible);
+        }
+    }
+
+    /// Replace the placed widgets with those in a configuration document.
+    ///
+    /// Total: an entry that cannot be understood is skipped and the rest load.
+    /// An unknown kind is a file from a newer desktop; a position off the grid
+    /// or one overlapping a widget already placed is a file somebody edited by
+    /// hand. Neither is a reason to discard the widgets that *do* make sense.
+    ///
+    /// Every entry goes in through [`add_widget`](Self::add_widget) rather
+    /// than being pushed directly, which is what keeps the no-overlap
+    /// invariant as true for a hand-written file as for a dragged one.
+    pub fn read_from(&mut self, doc: &Document) {
+        self.widgets.clear();
+        let mut keys = doc.keys(&["widgets"]);
+        keys.sort();
+        for key in keys {
+            let Some(kind) = doc
+                .get_str(&["widgets", &key, "kind"])
+                .and_then(|n| WidgetKind::from_yaml_name(&n))
+            else {
+                continue;
+            };
+            let (Some(col), Some(row)) = (
+                doc.get_i64(&["widgets", &key, "col"])
+                    .and_then(|v| u32::try_from(v).ok()),
+                doc.get_i64(&["widgets", &key, "row"])
+                    .and_then(|v| u32::try_from(v).ok()),
+            ) else {
+                continue;
+            };
+            let Some(id) = self.add_widget(kind, GridPos::new(col, row)) else {
+                continue;
+            };
+            // Size and visibility are corrections to what `add_widget` chose,
+            // and each is independently optional: a file missing them still
+            // places the widget at its default size, which beats refusing an
+            // entry that named a kind and a place.
+            if let (Some(cols), Some(rows)) = (
+                doc.get_i64(&["widgets", &key, "cols"])
+                    .and_then(|v| u32::try_from(v).ok()),
+                doc.get_i64(&["widgets", &key, "rows"])
+                    .and_then(|v| u32::try_from(v).ok()),
+            ) {
+                self.resize_widget(id, WidgetSize::new(cols, rows));
+            }
+            if doc.get_bool(&["widgets", &key, "visible"]) == Some(false)
+                && let Some(w) = self.get_mut(id)
+            {
+                w.visible = false;
+            }
+        }
     }
 
     /// Tick all widgets (update those that need it).

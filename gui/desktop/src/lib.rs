@@ -950,6 +950,13 @@ pub struct DesktopShell {
     /// The offset is what stops a drag snapping the widget's corner to the
     /// pointer on the first pixel of movement.
     widget_drag: Option<(WidgetInstanceId, f32, f32)>,
+    /// Whether the widget layout has changed since it was last written.
+    ///
+    /// Set only where a change is *committed* -- a menu action, a drag that
+    /// ended -- and deliberately not on every step of a drag. A flag set per
+    /// pointer move would be a file write per frame while the user is still
+    /// deciding where to put the thing.
+    widgets_dirty: bool,
     /// Watches `appearance.yaml` so a change made in another process reaches
     /// this one without a restart.
     ///
@@ -1367,6 +1374,7 @@ impl DesktopShell {
             widgets: DesktopWidgetManager::new(),
             menu_widget: None,
             widget_drag: None,
+            widgets_dirty: false,
             appearance_watch: config::Watcher::new(appearance_settings::CONFIG_NAME),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
@@ -2046,8 +2054,14 @@ impl DesktopShell {
                     return ShellAction::Consumed;
                 }
                 MouseEventKind::Release(_) => {
+                    // Marked dirty on release whether or not this last step
+                    // moved it: the widget may have been carried across three
+                    // cells and dropped back where the final `Move` already
+                    // put it, and that is still a layout that differs from the
+                    // one on disk.
                     self.drag_widget_to(event.x, event.y);
                     self.widget_drag = None;
+                    self.widgets_dirty = true;
                     return ShellAction::Consumed;
                 }
                 _ => return ShellAction::Consumed,
@@ -4575,6 +4589,44 @@ impl DesktopShell {
         ]
     }
 
+    /// Whether the widget layout needs writing, clearing the flag.
+    ///
+    /// Taken rather than read so a caller cannot ask twice and save twice.
+    pub fn take_widgets_dirty(&mut self) -> bool {
+        core::mem::replace(&mut self.widgets_dirty, false)
+    }
+
+    /// The settings group the widget layout lives in.
+    pub const WIDGETS_CONFIG_NAME: &'static str = "widgets";
+
+    /// Read the saved widget layout.
+    ///
+    /// Kept out of [`new`](Self::new) for the reason
+    /// [`load_appearance`](Self::load_appearance) is: a constructor that reads
+    /// the user's home directory gives every test a machine-dependent result.
+    ///
+    /// A missing or unreadable file is not an error -- it is a desktop with no
+    /// widgets, which is what a fresh install has.
+    pub fn load_widgets(&mut self) {
+        self.widgets
+            .read_from(&config::load(Self::WIDGETS_CONFIG_NAME));
+    }
+
+    /// Write the widget layout back.
+    ///
+    /// Splices into the document that was on disk rather than replacing it, so
+    /// comments and any key a different version of the desktop wrote survive --
+    /// the same contract every other settings group here has.
+    ///
+    /// # Errors
+    ///
+    /// If there is no configuration directory, or the file cannot be written.
+    pub fn save_widgets(&self) -> std::io::Result<()> {
+        let mut doc = config::load(Self::WIDGETS_CONFIG_NAME);
+        self.widgets.write_into(&mut doc);
+        config::store(Self::WIDGETS_CONFIG_NAME, &doc)
+    }
+
     /// Open the desktop menu at a point, closing whatever else was open.
     ///
     /// The item list depends on what is under the pointer: a widget gets a menu
@@ -4639,6 +4691,12 @@ impl DesktopShell {
     /// ids are constants — a position is only meaningful next to the item list
     /// it indexes.
     pub fn activate_desktop_menu_item(&mut self, id: MenuItemId) -> bool {
+        let changed = self.activate_desktop_menu_item_inner(id);
+        self.widgets_dirty |= changed;
+        changed
+    }
+
+    fn activate_desktop_menu_item_inner(&mut self, id: MenuItemId) -> bool {
         let kind = match id {
             Self::MENU_ADD_CLOCK => Some(WidgetKind::Clock),
             Self::MENU_ADD_CALENDAR => Some(WidgetKind::Calendar),

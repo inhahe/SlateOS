@@ -1318,59 +1318,77 @@ fn escape_closes_the_desktop_menu() {
 
 #[test]
 fn adding_a_widget_from_the_menu_puts_it_on_the_desktop() {
-    // The whole chain. Both halves were islands with no caller until now --
-    // `guitk::menu`'s `ContextMenu` and `widgets::DesktopWidgetManager` -- so
-    // this is the test that says they are joined and that the result is drawn.
-    let (mut session, _desktop) = session();
-    assert_eq!(session.shell().widgets.count(), 0, "starts empty");
-    let before = session.shell().render_widgets().len();
+    // Inside a scratch configuration directory because this test
+    // mutates widgets, and `pump` now writes the layout to disk --
+    // without it the write lands in whatever `XDG_CONFIG_HOME` happens
+    // to be, which is another test's sandbox or the real home.
+    settingsfile::testing::with_scratch_config("adding_a_widget_from_the_men", |_root| {
+        // The whole chain. Both halves were islands with no caller until now --
+        // `guitk::menu`'s `ContextMenu` and `widgets::DesktopWidgetManager` -- so
+        // this is the test that says they are joined and that the result is drawn.
+        let (mut session, _desktop) = session();
+        assert_eq!(session.shell().widgets.count(), 0, "starts empty");
+        let before = session.shell().render_widgets().len();
 
-    let added = session
-        .shell_mut()
-        .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+        let added = session
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
 
-    assert!(added, "the menu item reported no change");
-    assert_eq!(session.shell().widgets.count(), 1);
-    assert!(
-        session.shell().render_widgets().len() > before,
-        "the widget layer drew nothing new"
-    );
+        assert!(added, "the menu item reported no change");
+        assert_eq!(session.shell().widgets.count(), 1);
+        assert!(
+            session.shell().render_widgets().len() > before,
+            "the widget layer drew nothing new"
+        );
+    });
 }
 
 #[test]
 fn remove_all_widgets_empties_the_desktop() {
-    let (mut session, _desktop) = session();
-    let shell = session.shell_mut();
-    shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
-    shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
-    assert_eq!(shell.widgets.count(), 2);
+    // Inside a scratch configuration directory because this test
+    // mutates widgets, and `pump` now writes the layout to disk --
+    // without it the write lands in whatever `XDG_CONFIG_HOME` happens
+    // to be, which is another test's sandbox or the real home.
+    settingsfile::testing::with_scratch_config("remove_all_widgets_empties_t", |_root| {
+        let (mut session, _desktop) = session();
+        let shell = session.shell_mut();
+        shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+        shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
+        assert_eq!(shell.widgets.count(), 2);
 
-    assert!(shell.activate_desktop_menu_item(DesktopShell::MENU_REMOVE_WIDGETS));
-    assert_eq!(shell.widgets.count(), 0);
-    assert!(shell.render_widgets().is_empty());
+        assert!(shell.activate_desktop_menu_item(DesktopShell::MENU_REMOVE_WIDGETS));
+        assert_eq!(shell.widgets.count(), 0);
+        assert!(shell.render_widgets().is_empty());
 
-    // And again on an empty desktop reports no change, so a caller that
-    // repaints on `true` does not repaint for nothing.
-    assert!(!shell.activate_desktop_menu_item(DesktopShell::MENU_REMOVE_WIDGETS));
+        // And again on an empty desktop reports no change, so a caller that
+        // repaints on `true` does not repaint for nothing.
+        assert!(!shell.activate_desktop_menu_item(DesktopShell::MENU_REMOVE_WIDGETS));
+    });
 }
 
 #[test]
 fn two_added_widgets_do_not_land_on_top_of_each_other() {
-    // `find_free_position` is why the click point is not used as the position:
-    // a widget dropped where the pointer was would overlap whatever is there.
-    let (mut session, _desktop) = session();
-    let shell = session.shell_mut();
-    shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
-    shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+    // Inside a scratch configuration directory because this test
+    // mutates widgets, and `pump` now writes the layout to disk --
+    // without it the write lands in whatever `XDG_CONFIG_HOME` happens
+    // to be, which is another test's sandbox or the real home.
+    settingsfile::testing::with_scratch_config("two_added_widgets_do_not_lan", |_root| {
+        // `find_free_position` is why the click point is not used as the position:
+        // a widget dropped where the pointer was would overlap whatever is there.
+        let (mut session, _desktop) = session();
+        let shell = session.shell_mut();
+        shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+        shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
 
-    let positions: Vec<_> = shell
-        .widgets
-        .all_widgets()
-        .iter()
-        .map(|w| w.position)
-        .collect();
-    assert_eq!(positions.len(), 2);
-    assert_ne!(positions[0], positions[1], "two widgets in one cell");
+        let positions: Vec<_> = shell
+            .widgets
+            .all_widgets()
+            .iter()
+            .map(|w| w.position)
+            .collect();
+        assert_eq!(positions.len(), 2);
+        assert_ne!(positions[0], positions[1], "two widgets in one cell");
+    });
 }
 
 #[test]
@@ -1419,118 +1437,247 @@ fn drag(desktop: &Desktop, surface: Surface, from: (f32, f32), to: (f32, f32)) {
 
 #[test]
 fn a_widget_can_be_dragged_to_another_cell() {
-    let (mut session, desktop) = session();
-    session
-        .shell_mut()
-        .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
-    let id = session.shell().widgets.all_widgets()[0].id;
-    let before = session.shell().widgets.get(id).expect("widget").position;
-    let (wx, wy) = widget_origin(session.shell(), id);
+    // Inside a scratch configuration directory because this test
+    // mutates widgets, and `pump` now writes the layout to disk --
+    // without it the write lands in whatever `XDG_CONFIG_HOME` happens
+    // to be, which is another test's sandbox or the real home.
+    settingsfile::testing::with_scratch_config("a_widget_can_be_dragged_to_a", |_root| {
+        let (mut session, desktop) = session();
+        session
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+        let id = session.shell().widgets.all_widgets()[0].id;
+        let before = session.shell().widgets.get(id).expect("widget").position;
+        let (wx, wy) = widget_origin(session.shell(), id);
 
-    // Grab near the widget's top-left and drop it three cells right and two
-    // down, so the target cell is unambiguous.
-    let g = &session.shell().widgets.grid;
-    let (dx, dy) = (3.0 * (g.cell_width + g.gap), 2.0 * (g.cell_height + g.gap));
-    drag(
-        &desktop,
-        session.background(),
-        (wx + 8.0, wy + 8.0),
-        (wx + 8.0 + dx, wy + 8.0 + dy),
-    );
-    session.pump().expect("pump");
+        // Grab near the widget's top-left and drop it three cells right and two
+        // down, so the target cell is unambiguous.
+        let g = &session.shell().widgets.grid;
+        let (dx, dy) = (3.0 * (g.cell_width + g.gap), 2.0 * (g.cell_height + g.gap));
+        drag(
+            &desktop,
+            session.background(),
+            (wx + 8.0, wy + 8.0),
+            (wx + 8.0 + dx, wy + 8.0 + dy),
+        );
+        session.pump().expect("pump");
 
-    let after = session.shell().widgets.get(id).expect("widget").position;
-    assert_ne!(before, after, "the widget did not move");
-    assert_eq!(after.col, before.col + 3);
-    assert_eq!(after.row, before.row + 2);
+        let after = session.shell().widgets.get(id).expect("widget").position;
+        assert_ne!(before, after, "the widget did not move");
+        assert_eq!(after.col, before.col + 3);
+        assert_eq!(after.row, before.row + 2);
+    });
 }
 
 #[test]
 fn the_grab_offset_is_kept_so_a_widget_does_not_jump_on_the_first_pixel() {
-    // Grabbing a widget near its *far* edge and moving by less than one cell
-    // must not move it at all. Without the offset the cell is computed from the
-    // pointer, so a grab at the right-hand edge would teleport the widget a
-    // column left before the user had moved anywhere.
-    // A *Calendar*, which is two cells wide, and grabbed in its second
-    // column. A one-cell widget cannot distinguish the two behaviours: every
-    // point inside it is in the same cell, so ignoring the offset gives the
-    // same answer and the test passes either way. That is what a first version
-    // of this test did -- it used a Clock, and the mutation survived it.
-    let (mut session, desktop) = session();
-    session
-        .shell_mut()
-        .activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
-    let id = session.shell().widgets.all_widgets()[0].id;
-    let before = session.shell().widgets.get(id).expect("widget").position;
-    let (wx, wy) = widget_origin(session.shell(), id);
-    let g = &session.shell().widgets.grid;
-    let grab = (wx + g.cell_width + g.gap + 4.0, wy + 6.0);
+    // Inside a scratch configuration directory because this test
+    // mutates widgets, and `pump` now writes the layout to disk --
+    // without it the write lands in whatever `XDG_CONFIG_HOME` happens
+    // to be, which is another test's sandbox or the real home.
+    settingsfile::testing::with_scratch_config("the_grab_offset_is_kept_so_a", |_root| {
+        // Grabbing a widget near its *far* edge and moving by less than one cell
+        // must not move it at all. Without the offset the cell is computed from the
+        // pointer, so a grab at the right-hand edge would teleport the widget a
+        // column left before the user had moved anywhere.
+        // A *Calendar*, which is two cells wide, and grabbed in its second
+        // column. A one-cell widget cannot distinguish the two behaviours: every
+        // point inside it is in the same cell, so ignoring the offset gives the
+        // same answer and the test passes either way. That is what a first version
+        // of this test did -- it used a Clock, and the mutation survived it.
+        let (mut session, desktop) = session();
+        session
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
+        let id = session.shell().widgets.all_widgets()[0].id;
+        let before = session.shell().widgets.get(id).expect("widget").position;
+        let (wx, wy) = widget_origin(session.shell(), id);
+        let g = &session.shell().widgets.grid;
+        let grab = (wx + g.cell_width + g.gap + 4.0, wy + 6.0);
 
-    drag(
-        &desktop,
-        session.background(),
-        grab,
-        (grab.0 + 2.0, grab.1 + 2.0),
-    );
-    session.pump().expect("pump");
+        drag(
+            &desktop,
+            session.background(),
+            grab,
+            (grab.0 + 2.0, grab.1 + 2.0),
+        );
+        session.pump().expect("pump");
 
-    assert_eq!(
-        session.shell().widgets.get(id).expect("widget").position,
-        before,
-        "a two-pixel drag moved the widget to another cell"
-    );
+        assert_eq!(
+            session.shell().widgets.get(id).expect("widget").position,
+            before,
+            "a two-pixel drag moved the widget to another cell"
+        );
+    });
 }
 
 #[test]
 fn right_clicking_a_widget_offers_to_remove_that_widget() {
-    // The menu is contextual: over a widget it is about that widget, over bare
-    // desktop it is about the desktop. Asserted through the *effect* -- one
-    // widget gone and the other still there -- rather than by reading the item
-    // list, because the list is only interesting if choosing from it works.
-    let (mut session, desktop) = session();
-    let shell = session.shell_mut();
-    shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
-    shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
-    let target = shell.widgets.all_widgets()[0].id;
-    let survivor = shell.widgets.all_widgets()[1].id;
-    let (wx, wy) = widget_origin(session.shell(), target);
+    // Inside a scratch configuration directory because this test
+    // mutates widgets, and `pump` now writes the layout to disk --
+    // without it the write lands in whatever `XDG_CONFIG_HOME` happens
+    // to be, which is another test's sandbox or the real home.
+    settingsfile::testing::with_scratch_config("right_clicking_a_widget_offe", |_root| {
+        // The menu is contextual: over a widget it is about that widget, over bare
+        // desktop it is about the desktop. Asserted through the *effect* -- one
+        // widget gone and the other still there -- rather than by reading the item
+        // list, because the list is only interesting if choosing from it works.
+        let (mut session, desktop) = session();
+        let shell = session.shell_mut();
+        shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+        shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
+        let target = shell.widgets.all_widgets()[0].id;
+        let survivor = shell.widgets.all_widgets()[1].id;
+        let (wx, wy) = widget_origin(session.shell(), target);
 
-    right_click_at(&desktop, session.background(), wx + 8.0, wy + 8.0);
-    session.pump().expect("pump");
-    assert!(session.shell().desktop_menu.is_visible());
+        right_click_at(&desktop, session.background(), wx + 8.0, wy + 8.0);
+        session.pump().expect("pump");
+        assert!(session.shell().desktop_menu.is_visible());
 
-    session
-        .shell_mut()
-        .activate_desktop_menu_item(DesktopShell::MENU_REMOVE_ONE_WIDGET);
+        session
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_REMOVE_ONE_WIDGET);
 
-    assert!(
-        session.shell().widgets.get(target).is_none(),
-        "the widget under the pointer was not removed"
-    );
-    assert!(
-        session.shell().widgets.get(survivor).is_some(),
-        "the wrong widget was removed"
-    );
+        assert!(
+            session.shell().widgets.get(target).is_none(),
+            "the widget under the pointer was not removed"
+        );
+        assert!(
+            session.shell().widgets.get(survivor).is_some(),
+            "the wrong widget was removed"
+        );
+    });
 }
 
 #[test]
 fn remove_this_widget_does_nothing_when_the_menu_was_not_about_one() {
-    // Opening over bare desktop leaves no target, so the item -- which is not
-    // even in that menu -- must not remove somebody else's widget if it is
-    // somehow activated.
-    let (mut session, desktop) = session();
-    session
-        .shell_mut()
-        .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+    // Inside a scratch configuration directory because this test
+    // mutates widgets, and `pump` now writes the layout to disk --
+    // without it the write lands in whatever `XDG_CONFIG_HOME` happens
+    // to be, which is another test's sandbox or the real home.
+    settingsfile::testing::with_scratch_config("remove_this_widget_does_noth", |_root| {
+        // Opening over bare desktop leaves no target, so the item -- which is not
+        // even in that menu -- must not remove somebody else's widget if it is
+        // somehow activated.
+        let (mut session, desktop) = session();
+        session
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
 
-    right_click_at(&desktop, session.background(), 20.0, 20.0);
-    session.pump().expect("pump");
+        right_click_at(&desktop, session.background(), 20.0, 20.0);
+        session.pump().expect("pump");
 
-    let removed = session
-        .shell_mut()
-        .activate_desktop_menu_item(DesktopShell::MENU_REMOVE_ONE_WIDGET);
-    assert!(!removed);
-    assert_eq!(session.shell().widgets.count(), 1);
+        let removed = session
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_REMOVE_ONE_WIDGET);
+        assert!(!removed);
+        assert_eq!(session.shell().widgets.count(), 1);
+    });
+}
+
+// ---- the widget layout survives a restart ----
+
+#[test]
+fn a_widget_layout_survives_a_restart() {
+    // The point of the whole persistence half: arrange the desktop, close it,
+    // open it again, and find it as you left it.
+    settingsfile::testing::with_scratch_config("first-widgets-persist", |_root| {
+        let (mut first, desktop) = session();
+        first.load_appearance();
+        first
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+        first
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
+        // The save happens in `pump`, not at the mutation, so the layout is
+        // written once per batch rather than once per event.
+        first.pump().expect("pump");
+        let before: Vec<_> = first
+            .shell()
+            .widgets
+            .all_widgets()
+            .iter()
+            .map(|w| (w.kind.clone(), w.position, w.size))
+            .collect();
+        assert_eq!(before.len(), 2);
+
+        drop(desktop);
+        drop(first);
+
+        // A second first over the same configuration directory.
+        let (mut next, _desktop) = session();
+        next.load_appearance();
+        let after: Vec<_> = next
+            .shell()
+            .widgets
+            .all_widgets()
+            .iter()
+            .map(|w| (w.kind.clone(), w.position, w.size))
+            .collect();
+        assert_eq!(after, before, "the layout did not come back");
+    });
+}
+
+#[test]
+fn a_moved_widget_is_saved_where_it_was_dropped() {
+    settingsfile::testing::with_scratch_config("first-widgets-move", |_root| {
+        let (mut first, desktop) = session();
+        first.load_appearance();
+        first
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+        first.pump().expect("pump");
+        let id = first.shell().widgets.all_widgets()[0].id;
+        let (wx, wy) = widget_origin(first.shell(), id);
+        let g = &first.shell().widgets.grid;
+        let (dx, dy) = (2.0 * (g.cell_width + g.gap), 1.0 * (g.cell_height + g.gap));
+
+        drag(
+            &desktop,
+            first.background(),
+            (wx + 6.0, wy + 6.0),
+            (wx + 6.0 + dx, wy + 6.0 + dy),
+        );
+        first.pump().expect("pump");
+        let moved = first.shell().widgets.get(id).expect("widget").position;
+
+        drop(desktop);
+        drop(first);
+        let (mut next, _d) = session();
+        next.load_appearance();
+        assert_eq!(next.shell().widgets.count(), 1);
+        assert_eq!(
+            next.shell().widgets.all_widgets()[0].position,
+            moved,
+            "the widget came back where it started, not where it was dropped"
+        );
+    });
+}
+
+#[test]
+fn a_removed_widget_stays_removed() {
+    settingsfile::testing::with_scratch_config("first-widgets-remove", |_root| {
+        let (mut first, _desktop) = session();
+        first.load_appearance();
+        first
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+        first.pump().expect("pump");
+        first
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_REMOVE_WIDGETS);
+        first.pump().expect("pump");
+        drop(first);
+
+        let (mut next, _d) = session();
+        next.load_appearance();
+        assert_eq!(
+            next.shell().widgets.count(),
+            0,
+            "a removed widget came back"
+        );
+    });
 }
 
 // ---- following the display ----

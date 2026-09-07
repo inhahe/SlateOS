@@ -884,6 +884,13 @@ impl<T: Transport> ShellSession<T> {
             worked = true;
         }
 
+        // After the events, before the paint: a drag that ended in this batch
+        // has committed by now, and coalescing here means one write per pump
+        // rather than one per event.
+        if self.shell.take_widgets_dirty() {
+            self.save_widgets();
+        }
+
         if self.dirty {
             self.dirty = false;
             self.paint_chrome()?;
@@ -978,6 +985,27 @@ impl<T: Transport> ShellSession<T> {
         self.shell.load_appearance();
         self.sync_animation_speed();
         self.sync_autohide();
+        // The widget layout comes in on the same call. It is not an appearance
+        // setting, but it is the same question -- "what did this user leave the
+        // desktop looking like?" -- and a second door the caller has to
+        // remember is a door somebody forgets, which is exactly how the
+        // animation speed stayed inert.
+        self.shell.load_widgets();
+    }
+
+    /// Persist the widget layout, reporting a failure rather than hiding it.
+    ///
+    /// Called after a change rather than on a timer: the layout changes when a
+    /// person adds, moves or removes a widget, which is rare and always the
+    /// result of an event this session already handled.
+    fn save_widgets(&mut self) {
+        if let Err(err) = self.shell.save_widgets() {
+            // Not fatal: a desktop whose layout cannot be written is still a
+            // working desktop, and refusing to run would be a worse answer than
+            // forgetting where a clock was. Reported, because silently losing a
+            // user's arrangement every time is a bug they cannot see.
+            self.set_wallpaper_error(Some(format!("widget layout not saved: {err}")));
+        }
     }
 
     /// Push the shell's animation speed into the manager that obeys it.

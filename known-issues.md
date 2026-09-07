@@ -91089,7 +91089,47 @@ minimum:
 Until then the renderer is dead code that passes its tests, which is the state
 this project has repeatedly found to be worse than absent code: it looks done.
 
-## `TD-C-THE-SHORTCUT-CARD-IS-READ-ONLY` (lane C, 2026-08-26)
+## `TD-C-THE-SHORTCUT-CARD-IS-READ-ONLY` (lane C, 2026-08-26) -- **partly fixed 2026-09-07**
+
+**Two of the three missing parts are done.** The card's rows can be walked with
+the arrow keys, Enter starts recording, and the next chord becomes the binding.
+
+The part the entry called "the real work" is the one that landed: while
+recording, the keystroke is **data**. The check sits at the very top of
+`handle_hotkey_inner`, before every modal surface, because a user rebinding
+"show the desktop" presses Super+D -- and if the shell ran it, the desktop
+would be shown while they were trying to say what those keys mean. Escape
+means "cancel the rebind" there rather than "close the card", and a bare
+modifier does not end the recording, so reaching for Ctrl on the way to Ctrl+F9
+does not bind the shortcut to Ctrl.
+
+A chord already in use is refused and the refusal *names the holder*
+("PrintScreen is already Screenshot"), because "already in use" leaves the user
+hunting. A refused rebind leaves the original binding untouched, and a rebind
+that fails to register puts the old chord back rather than leaving the action
+with no chord at all.
+
+7 tests. Mutation-checked: removing the capture gate -- which is exactly the
+old behaviour -- fails four of them.
+
+**Still missing, and it is the row this entry listed last:** nowhere to save
+to. The rebind lives for the session only. `HotkeyConfig::save()` returns a
+`String` and `load()` parses one, so the format is done and tested; what is
+absent is a config name and the read/write around it. The shell now has that
+machinery -- `settingsfile`, a `config::Watcher`, and two files of its own
+already -- so this is wiring, not design.
+
+**Also still missing: re-grabbing.** The entry warns that the set of chords the
+shell holds globally is derived from the registry, so a rebind must ungrab the
+old chord and grab the new one, "the piece most likely to be forgotten". It is
+still forgotten: `rebind_row` changes the registry and nothing reconciles
+`global_chords`. Within one session that means a rebound *global* shortcut
+does not reach the shell until the session restarts. Local ones work now.
+
+Original entry follows.
+
+---
+
 
 **In short:** you can now open the card that lists every keyboard shortcut
 (`Super+/`), but you cannot change a shortcut from it. The shortcuts *are*

@@ -896,6 +896,24 @@ pub struct DesktopShell {
     /// registry says right now — a shortcut rebound while the card is up is
     /// redrawn under its new chord without anyone telling the card.
     pub shortcut_card_open: bool,
+    /// Which row of the shortcut card the keyboard is on.
+    ///
+    /// An index into `hotkeys.all_bindings()`, which is the order the card
+    /// draws. Kept even while the card is shut, so reopening it returns to the
+    /// row the user was looking at rather than to the top.
+    pub shortcut_selected: usize,
+    /// The row whose chord is being re-recorded, if any.
+    ///
+    /// While this is `Some`, the next chord the user presses is **data**: the
+    /// shell must not run it, and must not let it reach the global table --
+    /// including chords the shell holds globally, and including Escape, which
+    /// here means "cancel the rebind" rather than "close the card". That
+    /// inverts the shell's usual input rule, which is why the check sits at the
+    /// very top of `handle_hotkey_inner` rather than beside the other modal
+    /// surfaces.
+    shortcut_capture: Option<usize>,
+    /// What the last rebind attempt did, shown under the card.
+    shortcut_message: Option<String>,
     /// The programs this desktop can start, shared with the search launcher so
     /// that the two front ends cannot offer different applications.
     pub apps: Vec<AppEntry>,
@@ -1364,6 +1382,9 @@ impl DesktopShell {
             start_menu_wheel: wheel::Accumulator::default(),
             power_menu_open: false,
             shortcut_card_open: false,
+            shortcut_selected: 0,
+            shortcut_capture: None,
+            shortcut_message: None,
             apps: launcher::builtin_app_database(),
             alt_tab_active: false,
             alt_tab_index: 0,
@@ -3036,6 +3057,26 @@ impl DesktopShell {
             return HotkeyOutcome::ignored();
         }
 
+        // Before everything, including the modal surfaces below. While a chord
+        // is being recorded the keystroke is data, and the one thing that must
+        // not happen is the shell running it -- a user rebinding "close window"
+        // would otherwise close a window while trying to say which keys mean
+        // it.
+        if self.shortcut_capture.is_some() {
+            self.capture_chord(key);
+            // Always consumed: while recording, every keystroke belongs to the
+            // recording, including the ones that are not part of a chord yet.
+            return HotkeyOutcome::ignored();
+        }
+
+        // The card, when it is open and not recording: arrows walk its rows,
+        // Enter starts recording, Escape shuts it.
+        if self.shortcut_card_open
+            && let Some(outcome) = self.shortcut_card_key(key)
+        {
+            return outcome;
+        }
+
         // The desktop menu owns the keyboard while it is up, for the reason
         // every modal surface here does: arrows walk its rows, Enter chooses,
         // Escape closes, and none of those should also do whatever the global
@@ -4368,6 +4409,127 @@ impl DesktopShell {
     /// are full-screen surfaces driven by their own chords, and a user who
     /// opens the card to find out what the overview's chord is should not have
     /// the overview shut in the act of looking it up.
+    /// How many rows the card has.
+    fn shortcut_row_count(&self) -> usize {
+        self.hotkeys.len()
+    }
+
+    /// Handle a key while the card is open and no chord is being recorded.
+    ///
+    /// `None` means "not one of the card's keys", which lets the global table
+    /// still run: the card is a sheet, not a mode, and a shortcut pressed with
+    /// it open should still work.
+    fn shortcut_card_key(&mut self, key: &KeyEvent) -> Option<HotkeyOutcome> {
+        let rows = self.shortcut_row_count();
+        match key.key {
+            Key::Up => {
+                self.shortcut_selected = self.shortcut_selected.saturating_sub(1);
+                self.shortcut_message = None;
+                Some(HotkeyOutcome::ignored())
+            }
+            Key::Down => {
+                // Clamped rather than wrapping, matching every other list in
+                // this shell: holding Down should stop at the last row.
+                let last = rows.saturating_sub(1);
+                self.shortcut_selected = self.shortcut_selected.saturating_add(1).min(last);
+                self.shortcut_message = None;
+                Some(HotkeyOutcome::ignored())
+            }
+            Key::Enter => {
+                if rows == 0 {
+                    return Some(HotkeyOutcome::ignored());
+                }
+                self.shortcut_capture = Some(self.shortcut_selected.min(rows.saturating_sub(1)));
+                self.shortcut_message = Some("Press the new keys, or Escape to cancel".to_string());
+                Some(HotkeyOutcome::ignored())
+            }
+            Key::Escape => {
+                self.shortcut_card_open = false;
+                self.shortcut_message = None;
+                Some(HotkeyOutcome::ignored())
+            }
+            _ => None,
+        }
+    }
+
+    /// Read one keystroke as the new chord for the row being recorded.
+    ///
+    /// Returns whether the keystroke was consumed. A bare modifier is *not*:
+    /// the user is still assembling the chord, and taking `Super` alone as an
+    /// answer would bind the shortcut the instant they reached for it.
+    fn capture_chord(&mut self, key: &KeyEvent) -> bool {
+        let Some(row) = self.shortcut_capture else {
+            return false;
+        };
+
+        if matches!(
+            key.key,
+            Key::LeftCtrl
+                | Key::RightCtrl
+                | Key::LeftAlt
+                | Key::RightAlt
+                | Key::LeftShift
+                | Key::RightShift
+                | Key::LeftSuper
+                | Key::RightSuper
+        ) {
+            return true;
+        }
+
+        if key.key == Key::Escape {
+            self.shortcut_capture = None;
+            self.shortcut_message = Some("Unchanged".to_string());
+            return true;
+        }
+
+        self.shortcut_capture = None;
+        self.rebind_row(row, hotkeys::Hotkey::new(key.key, key.modifiers));
+        true
+    }
+
+    /// Move row `row`'s action onto `chord`, or refuse and say why.
+    fn rebind_row(&mut self, row: usize, chord: hotkeys::Hotkey) {
+        let Some((old, action)) = self
+            .hotkeys
+            .all_bindings()
+            .nth(row)
+            .map(|(h, a)| (*h, a.clone()))
+        else {
+            self.shortcut_message = Some("That row is gone".to_string());
+            return;
+        };
+
+        if old == chord {
+            self.shortcut_message = Some("Unchanged".to_string());
+            return;
+        }
+
+        if let Some(taken) = self.hotkeys.conflicts_with(&chord) {
+            // Named, not merely refused: "already in use" leaves the user
+            // hunting for which one.
+            self.shortcut_message = Some(format!(
+                "{} is already {}",
+                chord.display_name(),
+                taken.display_label()
+            ));
+            return;
+        }
+
+        let label = action.display_label().to_string();
+        self.hotkeys.unregister(&old);
+        match self.hotkeys.register(chord, action.clone()) {
+            Ok(()) => {
+                self.shortcut_message = Some(format!("{} is now {label}", chord.display_name()));
+            }
+            Err(e) => {
+                // Put the old one back rather than leaving the action with no
+                // chord at all: a failed rebind must not lose the binding.
+                drop(self.hotkeys.register(old, action));
+                self.shortcut_message = Some(format!("Could not rebind: {e}"));
+            }
+        }
+    }
+
     pub fn toggle_shortcut_card(&mut self) {
         if self.shortcut_card_open {
             self.shortcut_card_open = false;
@@ -5052,7 +5214,14 @@ impl DesktopShell {
             &Palette::from_settings(&self.appearance),
             x,
             y,
-            None,
+            // The row the keyboard is on. Clamped rather than trusted: the
+            // registry can shrink under a stored index if an action is
+            // unregistered while the card is shut, and a highlight drawn past
+            // the last row is a highlight on nothing.
+            Some(
+                self.shortcut_selected
+                    .min(self.hotkeys.len().saturating_sub(1)),
+            ),
             budget,
         ));
         Some(tree)
@@ -9034,5 +9203,208 @@ mod run_box_wiring_tests {
         assert!(!s.any_popup_open());
         s.toggle_run_dialog();
         assert!(s.any_popup_open(), "the open box is not a popup");
+    }
+
+    // ------------------------------------------------------------------
+    // Rebinding a shortcut from the card
+    //
+    // The card could be opened and read and nothing else; the only way to
+    // move a shortcut was to edit a file by hand. These cover the two halves:
+    // walking the rows, and recording a chord -- where the hard part is that
+    // the keystroke must *not* do what it normally does.
+    // ------------------------------------------------------------------
+
+    fn card_shell() -> DesktopShell {
+        let mut shell = DesktopShell::new(1920, 1080);
+        shell.toggle_shortcut_card();
+        assert!(shell.shortcut_card_open, "the card must be open");
+        shell
+    }
+
+    fn tap(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    fn tap_with(key: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_arrow_keys_walk_the_card_and_stop_at_the_ends() {
+        let mut shell = card_shell();
+        assert_eq!(shell.shortcut_selected, 0);
+
+        drop(shell.handle_hotkey(&tap(Key::Down)));
+        assert_eq!(shell.shortcut_selected, 1);
+        drop(shell.handle_hotkey(&tap(Key::Up)));
+        assert_eq!(shell.shortcut_selected, 0);
+
+        // Clamped at the top, as every other list in this shell is.
+        drop(shell.handle_hotkey(&tap(Key::Up)));
+        assert_eq!(shell.shortcut_selected, 0, "no wrap to the last row");
+
+        let last = shell.hotkeys.len().saturating_sub(1);
+        for _ in 0..shell.hotkeys.len().saturating_add(5) {
+            drop(shell.handle_hotkey(&tap(Key::Down)));
+        }
+        assert_eq!(shell.shortcut_selected, last, "and none off the bottom");
+    }
+
+    /// The whole point: while recording, the keystroke is data.
+    ///
+    /// A user rebinding a shortcut presses chords that *are* shortcuts. If the
+    /// shell ran them, rebinding "show the desktop" would show the desktop.
+    #[test]
+    fn a_chord_pressed_while_recording_does_not_also_run() {
+        let mut shell = card_shell();
+        drop(shell.handle_hotkey(&tap(Key::Enter)));
+        assert!(shell.shortcut_capture.is_some(), "recording");
+
+        // Super+D is Show Desktop by default: run, it asks the compositor to
+        // minimise every window on the glass. Pressed as data it must ask for
+        // nothing at all.
+        let outcome = shell.handle_hotkey(&tap_with(Key::D, Modifiers::super_key()));
+
+        assert!(
+            outcome.requests.is_empty(),
+            "the chord being recorded must not also be obeyed, got {:?}",
+            outcome.requests
+        );
+        assert!(outcome.launches.is_empty(), "and must start nothing");
+        assert!(shell.shortcut_capture.is_none(), "and recording ends");
+    }
+
+    #[test]
+    fn recording_moves_the_action_onto_the_new_chord() {
+        let mut shell = card_shell();
+        let (old, action) = shell
+            .hotkeys
+            .all_bindings()
+            .next()
+            .map(|(h, a)| (*h, a.clone()))
+            .expect("a first binding");
+
+        drop(shell.handle_hotkey(&tap(Key::Enter)));
+        let chord = crate::hotkeys::Hotkey::new(Key::F9, Modifiers::ctrl());
+        drop(shell.handle_hotkey(&tap_with(Key::F9, Modifiers::ctrl())));
+
+        assert_eq!(
+            shell.hotkeys.conflicts_with(&chord),
+            Some(&action),
+            "the new chord must run what the row named"
+        );
+        assert!(
+            shell.hotkeys.conflicts_with(&old).is_none(),
+            "and the old chord must stop doing it"
+        );
+    }
+
+    /// A chord already in use is refused, and the refusal names the holder.
+    #[test]
+    fn a_chord_that_is_taken_is_refused_and_says_by_what() {
+        let mut shell = card_shell();
+        let mut bindings = shell.hotkeys.all_bindings();
+        let (first, first_action) = bindings
+            .next()
+            .map(|(h, a)| (*h, a.clone()))
+            .expect("first");
+        // Skips any binding on a bare modifier. There is no such binding in
+        // the default table -- the first two rows are Escape and PrintScreen --
+        // so this currently skips nothing; it is here because `capture_chord`
+        // ignores bare modifiers by design, and a future default bound to one
+        // would otherwise make this test assert on a rebind that never
+        // happened, and pass for the wrong reason.
+        let second = bindings
+            .map(|(h, _)| *h)
+            .find(|h| {
+                !matches!(
+                    h.key,
+                    Key::LeftCtrl
+                        | Key::RightCtrl
+                        | Key::LeftAlt
+                        | Key::RightAlt
+                        | Key::LeftShift
+                        | Key::RightShift
+                        | Key::LeftSuper
+                        | Key::RightSuper
+                )
+            })
+            .expect("a second binding on a real key");
+
+        // Row 0 is `first`; try to give it `second`'s chord.
+        drop(shell.handle_hotkey(&tap(Key::Enter)));
+        let ev = KeyEvent {
+            key: second.key,
+            pressed: true,
+            modifiers: second.modifiers(),
+            text: String::new(),
+        };
+        drop(shell.handle_hotkey(&ev));
+
+        assert_eq!(
+            shell.hotkeys.conflicts_with(&first),
+            Some(&first_action),
+            "a refused rebind must leave the original binding alone"
+        );
+        let msg = shell.shortcut_message.clone().unwrap_or_default();
+        assert!(msg.contains("already"), "and must say so, got {msg:?}");
+    }
+
+    /// Escape cancels the recording rather than closing the card.
+    #[test]
+    fn escape_while_recording_cancels_the_rebind() {
+        let mut shell = card_shell();
+        let before: Vec<_> = shell
+            .hotkeys
+            .all_bindings()
+            .map(|(h, a)| (*h, a.clone()))
+            .collect();
+
+        drop(shell.handle_hotkey(&tap(Key::Enter)));
+        drop(shell.handle_hotkey(&tap(Key::Escape)));
+
+        assert!(shell.shortcut_capture.is_none(), "recording stopped");
+        assert!(shell.shortcut_card_open, "but the card stays open");
+        let after: Vec<_> = shell
+            .hotkeys
+            .all_bindings()
+            .map(|(h, a)| (*h, a.clone()))
+            .collect();
+        assert_eq!(before, after, "and nothing was rebound");
+    }
+
+    /// A bare modifier is not a chord.
+    ///
+    /// Reaching for Ctrl on the way to Ctrl+F9 must not bind the shortcut to
+    /// Ctrl the instant the finger lands.
+    #[test]
+    fn a_modifier_on_its_own_does_not_end_the_recording() {
+        let mut shell = card_shell();
+        drop(shell.handle_hotkey(&tap(Key::Enter)));
+
+        for key in [Key::LeftCtrl, Key::LeftAlt, Key::LeftShift, Key::LeftSuper] {
+            drop(shell.handle_hotkey(&tap(key)));
+            assert!(
+                shell.shortcut_capture.is_some(),
+                "{key:?} alone must not be taken as the answer"
+            );
+        }
+    }
+
+    #[test]
+    fn escape_with_the_card_open_shuts_it() {
+        let mut shell = card_shell();
+        drop(shell.handle_hotkey(&tap(Key::Escape)));
+        assert!(!shell.shortcut_card_open);
     }
 }

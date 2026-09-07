@@ -11556,6 +11556,8 @@ dependencies = [
 name = "newgrp"
 version = "0.1.0"
 dependencies = [
+ "authlib",
+ "posix",
  "quoting",
 ]
 

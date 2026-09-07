@@ -3541,7 +3541,16 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] parted/partprobe/partx: disk partition editor (GPT + MBR parsing, CRC32, type GUIDs, 4802 lines)
   - [x] getfacl/setfacl/chacl: POSIX ACL management (user/group/mask/other/default entries, recursive, tabular/compact/long output)
   - [x] getfattr/setfattr/attr: extended attribute operations (user/system/security/trusted namespaces, hex/text value format)
-  - [x] newgrp/sg: group switching (group DB parsing, membership check, password auth, login shell)
+  - [-] newgrp/sg: group DB parsing, membership check, real `/etc/gshadow`
+    password auth (2026-09-07). **Does not actually switch groups**: there is no
+    `SYS_SETGROUPS`, so `exec_with_group` prints what it would do and exits 0 —
+    see `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
+    This line said "password auth" while `_verify_group_password` returned
+    `!password.is_empty()`, i.e. accepted **any** non-empty string as any
+    group's password. Inert only because the exec is a stub, and it would have
+    been armed by the very syscall the request asks for. Now
+    `authlib::check_stored` against the group's `/etc/gshadow` entry, with
+    absent/empty/locked all closed.
   - [x] fuser/lsof: process-file identification (/proc scanning, cwd/exe/fd/mmap detection, socket matching)
   - [x] eject/volname: removable media control (tray open/close/toggle, lock/unlock, ISO 9660 volume name, speed control)
   - [x] sar/iostat/mpstat/pidstat/cifsiostat/tapestat: system activity monitoring (CPU/memory/disk/network/per-process, 3526 lines, 153 tests)

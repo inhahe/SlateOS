@@ -7,3 +7,15 @@ description = "SlateOS newgrp utility"
 # newgrp names the group it is switching to. It runs setuid, so a word an
 # unprivileged caller chooses is reaching a privileged program's output.
 quoting = { path = "../quoting" }
+# The one definition of "is this the password?". A group password in
+# `/etc/gshadow` is a `crypt(3)` entry exactly as an account's is, so it is
+# checked with the same function `login`, `su`, `doas` and `passwd` ask --
+# including its rules for a locked entry and for one nothing can recompute.
+# Before this dependency existed, `_verify_group_password` accepted **any**
+# non-empty string. See `design-decisions.md` §329 and §341.
+authlib = { path = "../authlib" }
+
+[dev-dependencies]
+# The tests build a real `crypt(3)` entry rather than pasting one, so they
+# cannot drift from the hasher the check actually uses.
+posix = { path = "../../posix" }

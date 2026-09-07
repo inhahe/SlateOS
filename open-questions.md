@@ -3238,17 +3238,79 @@ from-cold figure would be off by two minutes.
 recommendation should turn on (see Hole 2). Lane B is taking it during lane A's
 boot test.
 
-**One comparison that is *not* yet valid.** It is tempting to read my 39 s
-(158 `apps/` + `gui/` packages, named as `-p` flags) against this 14 s and
-conclude that scoping the gate buys nothing. That inference does not hold yet:
-my 39 s was **cold** for ~156 of those crates, and the 14 s is **warm
-incremental**. Cold-scoped versus warm-incremental compares two different
-things. The question needs warm-incremental scoped against warm-incremental
-whole-workspace, and nobody has taken the first. My expectation is that the
-enumerated form still loses — 158 `-p` flags makes cargo do work proportional
-to the set *named* rather than the set that *changed* — but that is a
-prediction, and this entry is a monument to predictions of that shape being
-wrong.
+### Scoped versus whole, measured — and my prediction was wrong
+
+The comparison above (39 s scoped against 14 s whole) was invalid: mine was
+**cold** for ~156 crates, lane B's was **warm incremental**. Lane B then took
+the missing measurement, both sides warm-incremental and **both under identical
+contention** (during lane A's boot test):
+
+| | one app file touched | no-op |
+|---|---|---|
+| **scoped** (158 `-p` flags) | **8 s** | 7 s |
+| **whole** (`--workspace`) | **15 s** | 16 s |
+
+I predicted the enumerated form would lose, because naming 158 packages makes
+cargo do work proportional to the set *named* rather than the set that
+*changed*. It wins, about 2:1. Recorded because this entry has a running theme
+and I am not exempt from it.
+
+**Why, and it is worth knowing independently of the gate.** Neither lane B nor I
+had checked what `--workspace` actually enumerates before reasoning about it.
+Both of us pictured "the 158 apps, plus the kernel". Counted from the manifest
+globs:
+
+| glob | crates |
+|---|---|
+| `apps/*` | 143 |
+| `gui/*` | 15 |
+| `init/*`, `net/*` | 4 |
+| **`userspace/*`** | **2,759** |
+
+So `--workspace` is roughly **2,900 members**, not 160. Scoped checks 158
+things and whole checks about 2,900; the subset being cheaper is not a
+surprise once the number is in front of you. It was in front of neither of us.
+
+### What that means: cost is not the axis, coverage is
+
+At 8 s against 15 s, **both under contention**, cost cannot decide this. Seven
+seconds is inside the noise of a merge. So the scope should be chosen for what
+it *covers*, and there the two differ sharply (lane B's argument, and I think it
+is right):
+
+- A gate scoped to `apps/` + `gui/` catches a breakage whose **victim** lives in
+  those trees. It would have caught my `guitk::Event` one.
+- It would **not** have caught the `authlib` → `init/login` one, because
+  `init/` is outside the scope — and that is the same commit that started this
+  entry.
+
+Victims can be anywhere, so only whole-workspace covers cross-lane API changes,
+which is the case C-Q11 exists for. **Do not scope for cost.** If a scope is
+ever wanted, it must be justified by coverage, and this one cannot be.
+
+That also disposes of the `include_bytes!` prerequisite as a scoping argument:
+it is a real bug and worth fixing on its own merits, but it is not a reason to
+reduce the gate's coverage, and 15 s says the coverage need not be traded for
+cost.
+
+### The scenario nobody has measured yet, and it is the realistic one
+
+Every figure above is **"one file touched"**. That is not when a gate fires.
+
+`CLAUDE.md` step 1 requires `git fetch origin && git merge origin/main` before a
+lane starts work, and the merge-up happens at the end. So the gate runs on a
+tree that has just absorbed *another lane's* commits — which on a bad day means
+a shared crate (`guitk`, `guiremote`, `authlib`) changed, and everything
+downstream of it rebuilds. Downstream of `guitk` is 158 crates; downstream of
+`authlib` is most of `userspace/`.
+
+So the honest range for the gate is somewhere between the 15 s measured here
+and the 139 s cold figure, and **which end depends on what the merge brought
+in** — the cheap case being the common one and the expensive case being exactly
+the one where the gate earns its keep, since a shared-crate change is what
+breaks other lanes. Nobody has measured it. It is the number I would want before
+calling this settled, and it is measurable: merge a real `origin/main` that
+touches a shared crate, then time the check.
 
 ### Recommendation
 
@@ -3333,9 +3395,12 @@ the answer follows from lane B's measurement instead of from my instinct:
 | under ~1 minute | **A** — a fair price for "the tree compiles", and the only option that *stops* a breakage rather than shortening its life |
 | a few minutes, with the other lanes degraded throughout | **B** — the nightly sweep. The guarantee is no longer cheap, and a standing tax on every merge stops being worth it |
 
-**Idle, that number is 14 seconds** — comfortably inside the first row. The
-contended figure is the one still outstanding, and it is the only thing between
-this entry and a recommendation I would defend without hedging.
+**Both figures are now in: 14 s idle, 15 s contended**, whole-workspace,
+warm-incremental — comfortably inside the first row, and contention turns out
+to cost almost nothing on this axis. What is left outstanding is not the
+contended number but the *merge* number: see "the scenario nobody has measured
+yet" above. Every figure quoted here is one-file-touched, and a gate fires on a
+tree that has just merged another lane's work.
 
 I lean A, and more strongly than when this entry first said so, because the two
 things that changed both point the same way: the idle price is 14 seconds rather

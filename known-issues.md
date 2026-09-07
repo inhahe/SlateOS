@@ -122147,10 +122147,41 @@ machine idle, workspace green, target `x86_64-pc-windows-gnu`):**
 | after touching one lane-B source file | **14 s** | inherits the previous run's cache -- **this is the gate's realistic cost** |
 
 Cold-to-warm is 139 -> 15, so quoting 14 s as a from-cold figure is off by two
-minutes. For comparison, lane C measured 39 s for the 158 `apps/` and `gui/`
-packages named explicitly as `-p` flags -- so the *whole* workspace including the
-kernel is cheaper incrementally than the scoped subset was when enumerated,
-which may dissolve the scoping question rather than answer it.
+minutes.
+
+**Contended, same tree, load = lane A's boot test in its gate phase** (hundreds
+of short-lived Python processes reading the whole tree -- the load a merge
+collides with more often than a build): no-op **28 s**, one lane-B file touched
+**18 s**. So contention roughly doubles it and it stays under half a minute.
+
+**Scoped vs whole, both warm-incremental, both under that same contention** --
+the comparison the scoping question actually needs, and which nobody had taken:
+
+| | one file touched | no-op |
+|---|---|---|
+| scoped: 158 `apps/`+`gui/` packages as `-p` flags | **8 s** | **7 s** |
+| whole: `--workspace` | **15 s** | **16 s** |
+
+**This inverted two predictions, including both of the ones in this file's
+earlier drafts.** Lane C expected the enumerated form to lose, on the reasoning
+that 158 `-p` flags make cargo do resolution work proportional to the set named;
+lane B claimed the whole workspace was *cheaper* than the subset, having compared
+lane C's **cold-scoped** 39 s against a **warm-incremental** whole-workspace 14 s
+-- two different kinds of measurement, which is the same category error this file
+documents elsewhere. Scoped wins about 2:1 once both are warm-incremental.
+
+The reason is plain once looked at: `--workspace` is not "the apps plus the
+kernel", it is *every member*, including `userspace/*` -- some thousands of
+crates. Both mental models had it as apps + kernel. Neither party read the
+manifest before reasoning about the difference.
+
+**What the numbers do and do not decide.** At 15 s warm-incremental under
+contention, cost cannot decide the policy: the gap between 8 s and 15 s is
+inside the noise of a merge. Scope should therefore be chosen for **coverage**,
+where the two differ sharply -- a gate scoped to `apps/`+`gui/` would have caught
+the `guitk::Event` breakage and would *not* have caught the `authlib` one, whose
+callers are all under `userspace/`. Whole-workspace is the only scope covering
+cross-lane API changes, which is the case that raised the question.
 
 **The run that mattered was the one that failed.** The first attempt returned
 `rc=101`: non-exhaustive `match` on `guitk::Event::SettingsChanged` in

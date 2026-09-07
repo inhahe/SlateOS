@@ -2081,11 +2081,21 @@ impl ExplorerState {
             // nothing new to draw, and saying so is what stops the loop
             // repainting the whole window sixty times a second for no reason.
             Event::Tick { .. } => self.pump_thumbnails_default() > 0,
+            // `SettingsChanged` is a different kind of "no" from its
+            // neighbours here, and is grouped with them only because the
+            // answer happens to coincide. The others are events this window
+            // has nothing to *do* about; this one is an announcement that the
+            // user's settings were rewritten, which this program ignores
+            // because it reads no settings file at all -- it draws in its own
+            // palette and takes no preference from disk. If that ever stops
+            // being true, this arm is where the re-read belongs, and moving it
+            // out of this group is part of the change.
             Event::CloseRequested
             | Event::Moved { .. }
             | Event::FocusIn
             | Event::FocusOut
-            | Event::ScaleChanged { .. } => false,
+            | Event::ScaleChanged { .. }
+            | Event::SettingsChanged { .. } => false,
         }
     }
 

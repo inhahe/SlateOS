@@ -3456,6 +3456,15 @@ impl StickyNotesApp {
                     Action::None
                 }
             }
+            // The user rewrote a settings group. Not this program's business,
+            // and worth an arm of its own rather than a shared one because the
+            // obvious reading is wrong: stickynotes *does* depend on
+            // `settingsfile`, but only for `config_dir()`, to find its own
+            // `stickynotes.txt`. Its notes are not a settings group and no
+            // announcement is ever about them. Nothing here reads
+            // `appearance.yaml` or `input.yaml`, so there is nothing to
+            // re-read.
+            Event::SettingsChanged { .. } => Action::None,
             Event::CloseRequested => {
                 self.commit_focus();
                 self.persist();

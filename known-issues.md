@@ -89278,7 +89278,40 @@ view: they show the plain green rectangle rather than a preview, while the
 
 ---
 
-## `TD-C-EXPLORER-DOES-ARITHMETIC-ON-UNCHECKED-VALUES` (lane C, 2026-08-26)
+## `TD-C-EXPLORER-DOES-ARITHMETIC-ON-UNCHECKED-VALUES` (lane C, 2026-08-26) -- **CLOSED; entry was stale**
+
+**Closed 2026-09-07 (lane C), on verifying it rather than on doing the work.**
+`cargo clippy -p explorer --all-targets` reports **zero** arithmetic warnings,
+against the 33 this entry describes.
+
+**The check that matters is that they were fixed and not silenced**, because
+this entry's own last paragraph warns that "a blanket `#![allow]` is what turns
+33 known sites into an unknown number". They were fixed:
+
+- No `arithmetic_side_effects` allow exists anywhere in `apps/explorer/src/` or
+  its `Cargo.toml`; the crate takes `[lints] workspace = true`, and the
+  workspace table sets the lint to `warn`.
+- The lint is demonstrably live in this crate. Adding `fn _lint_canary(a:
+  usize, b: usize) -> usize { a + b }` to `columns.rs` produces the warning;
+  removing it returns the count to zero. (It also fired on my own code earlier
+  today, on six `restored += 1` sites in `fileops.rs`.)
+
+**The site this entry called the one that mattered is properly hardened.**
+`parse_jpeg_dimensions` walks the marker chain with `checked_add` and
+`saturating_add`, reads every byte through `data.get(..)?`, and takes segment
+lengths through `byteread::u16_be_at` -- which is exactly the fix the entry
+prescribed ("prefer `byteread`'s bounded accessors ... over hand-rolled offset
+arithmetic"). The overflow that could have turned `pos + 7 > data.len()` into a
+check that passes cannot occur: there is no unchecked `+` left in it.
+
+**Nothing was done to the code for this closure.** Third stale entry closed
+today, after `C-FILEDIALOG-IS-KEYBOARD-ONLY` and `C-ALARMCLOCK-SCROLLS-BY-CLIP-ALONE`
+-- see the note in `todo.txt` about what that pattern is costing.
+
+Original entry follows.
+
+---
+
 
 **In short:** the file manager has 33 places where it adds, multiplies or
 subtracts without checking for overflow, and the project's own lint
@@ -89399,7 +89432,28 @@ nothing says why.
 
 ---
 
-## `TD-C-EXPLORER-DOES-NOT-SCROLL` (lane C, 2026-08-26)
+## `TD-C-EXPLORER-DOES-NOT-SCROLL` (lane C, 2026-08-26) -- **CLOSED 2026-09-07**
+
+**Closed 2026-09-07 (lane C).** All three views scroll. The narrowing below
+says the icon grid did not yet; it does now, and the narrowing is the stale
+part.
+
+`render_icon_view` reads `viewport.first_visible()`, rounds it down to a whole
+row of icons (starting mid-row would put the first cell in the middle of the
+pane with a gap beside it), takes `scroll_window::capacity` rows' worth of
+cells, clips to the pane so a partial bottom row is cut mid-cell rather than
+vanishing, and lays each cell out by its *visible* position while identifying
+it by its *absolute* index -- so drop zones land on the file that was drawn.
+
+Four tests cover it: `the_icon_grid_scrolls_and_reaches_the_last_file`,
+`a_scrolled_icon_cell_names_the_file_that_is_drawn_in_it`,
+`a_wheel_notch_in_the_grid_moves_a_whole_row_of_icons`, and
+`the_icon_grid_wraps_and_survives_a_pane_narrower_than_a_cell`.
+
+Original entry and its narrowing follow.
+
+---
+
 
 **Narrowed 2026-09-07: the two list views scroll; the icon grid does not yet.**
 `ExplorerState` holds a `ListViewport`, the details and list renderers draw the

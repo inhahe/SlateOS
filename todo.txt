@@ -55836,3 +55836,54 @@ opposite of, so a boot test is the first thing that would catch a mistake in it.
 **Operator decisions outstanding:** C-Q11 (lanes B and C both vote A,
 whole-workspace unscoped — on coverage, not cost: a scoped gate would have
 caught lane C's breakage and missed lane B's), and whether to retire `D:`.
+
+---
+
+## known-issues.md describes defects that were fixed and never marked (lane C, 2026-09-07)
+
+**Four entries closed in one session, none of which needed any code written.**
+`C-FILEDIALOG-IS-KEYBOARD-ONLY-SO-EVERY-PICKER-IN-THE-OS-IGNORES-CLICKS`,
+`C-ALARMCLOCK-SCROLLS-BY-CLIP-ALONE`,
+`TD-C-EXPLORER-DOES-ARITHMETIC-ON-UNCHECKED-VALUES` and
+`TD-C-EXPLORER-DOES-NOT-SCROLL` all described defects that had been repaired,
+in one case by me the day before. Three more entries in the same session --
+`TD-C-EXPLORER-HAS-NO-EDITING-KEYS`, the C-Q10 tool path,
+`TD-C-TWO-BYTE-ORDERS`' "touches every upload site at once" -- carried claims
+that were true when written and false when read.
+
+**What it costs.** Each one is a full investigation before any work can start:
+read the entry, find the code, establish that the claim is false, and only then
+decide what to do. That is most of a tick, repeatedly, and it falls on whoever
+picks the item -- which with three lanes is not necessarily the person who
+fixed it.
+
+**Why it happens, and it is not carelessness.** A fix and its entry live in
+different files, and the fix is the part with tests and a compiler behind it.
+Nothing fails when the entry is not updated. The rule in `CLAUDE.md` is to log
+bugs; there is no matching rule that closing one is part of finishing the work,
+and no gate that would notice.
+
+**Two things that would help, neither of which I have done:**
+
+1. **A checkable status line.** Every entry already opens `## <ID>` and most
+   carry a status somewhere in the first few lines, but the *form* varies --
+   `**Status:** FIXED`, `-- **CLOSED 2026-09-07**`, `-- **open**, missing
+   backend`, or nothing at all. A single required field would let a script
+   list the genuinely-open ones. I scanned for open items by filtering heading
+   lines this session and got a wrong list, because several entries carry
+   their status on a later line.
+2. **A closing convention in the finishing checklist.** `CLAUDE.md`'s "When You
+   Finish a Task" lists ten steps and none of them is "close the entry this
+   fixed". Adding it would catch the common case, which is the author of the
+   fix knowing exactly which entry it closes and having no prompt to say so.
+
+Both touch shared documents that all three lanes read, and (2) touches
+`CLAUDE.md`, which this lane may not edit on its own initiative. So this is a
+report, not a change. **Raised for the operator and the other lanes rather than
+acted on.**
+
+**What I did instead, for now:** each of the four closures records what was
+checked and how, so the next reader can see the evidence rather than repeat
+the investigation. That is a mitigation and not a fix -- it only helps entries
+somebody has already re-checked.
+

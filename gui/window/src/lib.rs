@@ -569,7 +569,7 @@ impl<T: Transport> WindowHandle<'_, T> {
         height: u32,
         stride: u32,
         format: BufferFormat,
-        bytes: Vec<u8>,
+        bytes: guitk::canvas::WireBytes,
     ) -> Result<(), Error<T>> {
         self.events.confirm(RequestBody::UploadImage {
             window: self.id,
@@ -578,7 +578,10 @@ impl<T: Transport> WindowHandle<'_, T> {
             height,
             stride,
             format,
-            bytes,
+            // Unwrapped here and only here: this is the encoder, the last
+            // point before the bytes go on the wire, and past it there is no
+            // other order they could be mistaken for.
+            bytes: bytes.into_vec(),
         })
     }
 

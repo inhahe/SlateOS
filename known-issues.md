@@ -89499,7 +89499,50 @@ bottom and the listing never moves.
 
 ---
 
-## `TD-C-TWO-BYTE-ORDERS-ARE-BOTH-CALLED-ARGB` (lane C, 2026-08-26)
+## `TD-C-TWO-BYTE-ORDERS-ARE-BOTH-CALLED-ARGB` (lane C, 2026-08-26) -- **CLOSED 2026-09-07**
+
+**Closed 2026-09-07 (lane C).** The proper fix this entry specified is done:
+the byte order is part of the *type*. `guitk::canvas::WireBytes` has a private
+field and exactly one constructor -- `Canvas::to_argb8888` -- and the upload
+path takes nothing else. `ImageChange::Upload::bytes` and
+`oswindow::Window::upload_image` both require it, so
+`upload_image(.., canvas.to_argb())` is a compile error rather than a picture
+with red and blue exchanged.
+
+**One type covers both wire formats**, and that is not a shortcut:
+`BufferFormat::Xrgb8888` has the same byte order as `Argb8888` and differs only
+in whether the alpha byte is honoured, so the layout question this type answers
+has one answer for both.
+
+**Extraction is allowed and construction is not**, which is the whole design.
+`into_vec` hands the bytes to the encoder that puts them on the wire, at the
+one point past which no other order could be mistaken for them. Making that
+cost a copy of a whole picture per upload would have been a real price for no
+safety -- what needs guarding is what goes *in*.
+
+**Two test fixtures were building wire bytes by hand** and had to stop, which
+is the change working as intended. One of them asserted an upload's contents
+against `vec![1, 2, 3, 4, 5, 6, 7, 8]` -- a literal encoding the test's own
+guess at the byte order, in the one area of this tree where nobody should be
+guessing. It now derives the expectation from the same canvas the fixture
+uploads.
+
+The naming, the cross-referencing tables and
+`the_compositors_argb_is_the_byte_reverse_of_the_other_argb` all stay. They
+were not wrong, they were just not *load-bearing*: nothing stopped the next
+caller. See design-decisions.md §561.
+
+**Still open, and named in the entry below:** the disk-cache order has not had
+the same treatment. `Canvas::from_argb`/`to_argb` remain plain `Vec<u8>`, so
+explorer's on-disk thumbnail cache can still be read with the wrong pair. That
+is a smaller blast radius -- one app, one file format, and a wrong read there
+produces visibly wrong thumbnails rather than a wrong picture on someone
+else's screen -- but it is the same shape of bug.
+
+Original entry follows.
+
+---
+
 
 **In short:** "ARGB" names two *opposite* arrangements of the same four bytes in
 this tree, and both are spelled the same way in code. `Canvas::to_argb` writes
@@ -114657,7 +114700,44 @@ many crates exist, and that number only goes up.
 
 ---
 
-## C-FILEDIALOG-IS-KEYBOARD-ONLY-SO-EVERY-PICKER-IN-THE-OS-IGNORES-CLICKS (lane C, 2026-09-02)
+## C-FILEDIALOG-IS-KEYBOARD-ONLY-SO-EVERY-PICKER-IN-THE-OS-IGNORES-CLICKS (lane C, 2026-09-02) -- **CLOSED; entry was stale**
+
+**Closed 2026-09-07 (lane C), on finding it had already been fixed and never
+marked.** `FileDialog::frame(width, height) -> Frame<DialogTarget>` and
+`FileDialog::handle_mouse` both exist, and the conversion went further than
+this entry asked for:
+
+- Every control the entry listed is a hit target -- back/forward/up,
+  sidebar shortcuts, sort headers, rows, the confirm and cancel pair.
+- Both rules the entry said the conversion must not break are kept, and
+  visibly: a double-click on a row activates where a single click selects
+  (`MouseEventKind::DoubleClick` acts only on `Entry`, with a comment on why
+  every other control must not act twice), and `DialogTarget::Chrome` exists
+  precisely so a host can tell a click *on* the dialog from a click past its
+  edge -- "the click a modal must not let through".
+- Two controls are recorded but inert on purpose: `AddressBar` and
+  `FilenameInput` swallow a click rather than letting it fall through to the
+  list behind, which is what a user expects of a control they can see.
+- The scrollbar got a draggable thumb and a wheel path with it.
+
+24 click/mouse/drag tests in `dialog.rs`; 110 dialog tests pass.
+
+**The dependents named in the entry have also moved on.**
+`C-VPNMANAGER-IMPORT-EXPORT-HAVE-NO-FILE-PICKER` is marked fixed 2026-09-03,
+and `apps/archivemanager` has a test called `the_pickers_rows_can_be_clicked`.
+Its table of "three reasons `FileDialog` cannot serve as a picker" led with
+"keyboard-only; it records no hit targets" -- that row is no longer true, and
+is left in place as the record of why the fixed path was chosen at the time.
+
+**Nothing was done to the code for this closure.** It is a documentation
+correction: the entry described a defect that had been repaired, and an entry
+that overstates what is broken costs the next reader the same investigation it
+cost me.
+
+Original entry follows.
+
+---
+
 
 **In short:** every Open / Save / Choose-folder dialog in SlateOS can only be
 driven with the keyboard. The dialog draws a list of files, a sidebar of

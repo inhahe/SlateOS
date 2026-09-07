@@ -4897,7 +4897,8 @@ mod tests {
 
         // The pixel a decoder would read back out of these bytes is the pixel
         // the thumbnail holds, channel for channel.
-        let from_wire = guitk::canvas::Canvas::from_argb8888(width, height, bytes).expect("wire");
+        let from_wire =
+            guitk::canvas::Canvas::from_argb8888(width, height, bytes.as_slice()).expect("wire");
         let from_store =
             guitk::canvas::Canvas::from_argb(stored.width, stored.height, &stored.pixels)
                 .expect("stored");
@@ -4906,7 +4907,8 @@ mod tests {
         // And they are genuinely different bytes: passing the stored buffer
         // through unconverted is the bug this guards.
         assert_ne!(
-            *bytes, stored.pixels,
+            bytes.as_slice(),
+            stored.pixels.as_slice(),
             "an opaque grey thumbnail must not serialise identically in both \
              orders, or this test proves nothing"
         );

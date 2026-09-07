@@ -136,7 +136,7 @@ impl Thumbnail {
     /// would be a third statement of the same fact, free to drift from both.
     /// It also gets the length check for nothing.
     #[must_use]
-    pub fn to_wire_bytes(&self) -> Option<Vec<u8>> {
+    pub fn to_wire_bytes(&self) -> Option<guitk::canvas::WireBytes> {
         Canvas::from_argb(self.width, self.height, &self.pixels).map(|c| c.to_argb8888())
     }
 }

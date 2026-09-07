@@ -79,6 +79,69 @@ pub struct Canvas {
     px: Vec<Color>,
 }
 
+/// Pixels in the compositor's wire byte order, and nothing else.
+///
+/// # Why this is a type and not a `Vec<u8>`
+///
+/// "ARGB" names two *opposite* arrangements of the same four bytes in this
+/// tree. [`Canvas::to_argb`] writes `A, R, G, B`; the wire format
+/// `BufferFormat::Argb8888` wants `B, G, R, A`. Both are `Vec<u8>`, both are
+/// correct for their own reader, and handing one to the other's reader is not
+/// a compile error and does not panic -- the picture simply draws with red and
+/// blue exchanged and its transparency read out of the blue channel. The file
+/// manager shipped exactly that bug, and it was caught by reading two
+/// definitions side by side rather than by any test.
+///
+/// Naming, documentation and a cross-referencing test were tried first and are
+/// still in place. They were not enough, because nothing *stopped* the next
+/// caller writing `canvas.to_argb()` into an upload. This does: only
+/// [`Canvas::to_argb8888`] can produce one of these, and the upload path takes
+/// nothing else.
+///
+/// One type covers both wire formats on purpose: `BufferFormat::Xrgb8888` has
+/// the same byte order as `Argb8888` and differs only in whether the alpha
+/// byte is honoured, so the *layout* question -- which this type answers -- has
+/// one answer for both.
+///
+/// The disk-cache order deserves the same treatment and has not had it yet --
+/// see `known-issues.md` `TD-C-TWO-BYTE-ORDERS-ARE-BOTH-CALLED-ARGB`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WireBytes(Vec<u8>);
+
+impl WireBytes {
+    /// The bytes, borrowed.
+    #[must_use]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// The bytes, owned, for the encoder that puts them on the wire.
+    ///
+    /// Consuming rather than copying. What this type protects is the
+    /// *constructor* -- only [`Canvas::to_argb8888`] can make one, so bytes in
+    /// the other order cannot become a `WireBytes` at all. Getting them out
+    /// again at the point they are serialised is not the dangerous direction,
+    /// and making it cost a copy of a whole picture per upload would be a real
+    /// price for no safety.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<u8> {
+        self.0
+    }
+
+    /// How many bytes there are, so a caller can check a stride without
+    /// unwrapping the type.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether there are no bytes at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 impl Canvas {
     /// The number of pixels in a `width × height` image, or `None` if that
     /// many pixels could not be allocated on this machine.
@@ -232,8 +295,8 @@ impl Canvas {
     /// Alpha is straight, not premultiplied, matching what the compositor's
     /// `blend_pixel` expects and what `imagecodec` produces.
     #[must_use]
-    pub fn to_argb8888(&self) -> Vec<u8> {
-        self.to_bytes(|c| [c.b, c.g, c.r, c.a])
+    pub fn to_argb8888(&self) -> WireBytes {
+        WireBytes(self.to_bytes(|c| [c.b, c.g, c.r, c.a]))
     }
 
     /// Serialise to `R, G, B, A` bytes, four per pixel, row-major.
@@ -654,14 +717,46 @@ mod tests {
     /// though both are called ARGB. Handing the compositor the wrong one is
     /// neither a compile error nor a panic; red simply arrives as blue and
     /// opaque as transparent.
+    /// The other order cannot be turned into wire bytes.
+    ///
+    /// A compile-fail check, written as documentation rather than as a
+    /// `compile_fail` doctest because this crate's doctests do not run on the
+    /// cross target. What it records is the invariant: `WireBytes` has a
+    /// private field and exactly one constructor, so
+    ///
+    /// ```text
+    ///     let wrong = WireBytes(canvas.to_argb());   // private field
+    ///     upload_image(.., canvas.to_argb());        // wrong type
+    /// ```
+    ///
+    /// both fail to compile, where before the change both were `Vec<u8>` and
+    /// the second was the bug that shipped.
+    #[test]
+    fn wire_bytes_come_from_exactly_one_place() {
+        let c = Canvas::filled(1, 1, Color::rgba(1, 2, 3, 4));
+
+        // The only constructor, and it produces the wire order.
+        assert_eq!(c.to_argb8888().as_slice(), [3, 2, 1, 4]);
+
+        // The other order is still available, still correct for its own
+        // reader, and is a plain `Vec<u8>` that no upload will accept.
+        let other: Vec<u8> = c.to_argb();
+        assert_eq!(other, [4, 1, 2, 3]);
+        assert_ne!(
+            other.as_slice(),
+            c.to_argb8888().as_slice(),
+            "if the two orders ever coincide this whole distinction is moot"
+        );
+    }
+
     #[test]
     fn the_compositors_argb_is_the_byte_reverse_of_the_other_argb() {
         let c = Canvas::filled(1, 1, Color::rgba(1, 2, 3, 4));
-        assert_eq!(c.to_argb8888(), [3, 2, 1, 4]);
+        assert_eq!(c.to_argb8888().as_slice(), [3, 2, 1, 4]);
 
         let mut reversed = c.to_argb();
         reversed.reverse();
-        assert_eq!(c.to_argb8888(), reversed);
+        assert_eq!(c.to_argb8888().as_slice(), reversed);
 
         // And it really is the little-endian u32 the wire documents.
         let px = u32::from_le_bytes([3, 2, 1, 4]);
@@ -674,7 +769,7 @@ mod tests {
         assert_eq!(Canvas::from_argb(2, 3, &c.to_argb()), Some(c.clone()));
         assert_eq!(Canvas::from_rgba(2, 3, &c.to_rgba()), Some(c.clone()));
         assert_eq!(
-            Canvas::from_argb8888(2, 3, &c.to_argb8888()),
+            Canvas::from_argb8888(2, 3, c.to_argb8888().as_slice()),
             Some(c.clone())
         );
         // Reading with one order and writing with the other is the conversion

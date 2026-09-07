@@ -187,8 +187,10 @@ pub enum ImageChange {
         stride: u32,
         /// How to read the bytes.
         format: PixelFormat,
-        /// `stride * height` bytes of picture.
-        bytes: Vec<u8>,
+        /// `stride * height` bytes of picture, in the compositor's wire byte
+        /// order -- which is the *reverse* of the other layout this tree calls
+        /// ARGB, and why the type says so rather than the doc comment.
+        bytes: guitk::canvas::WireBytes,
     },
     /// Give the pixels under `id` back to the link's image budget.
     ///
@@ -871,7 +873,11 @@ mod tests {
             height: 1,
             stride: 4,
             format: PixelFormat::Argb8888,
-            bytes: vec![0xFF, 0x00, 0x00, 0xFF],
+            // Through a Canvas, because that is now the only way to make
+            // wire bytes -- which is the point of the type. A hand-written
+            // `vec![..]` was how the wrong byte order got into an upload.
+            bytes: guitk::canvas::Canvas::filled(1, 1, guitk::color::Color::rgba(0, 0, 255, 255))
+                .to_argb8888(),
         }
     }
 
@@ -1626,7 +1632,8 @@ mod tests {
             height: 1,
             stride: 8,
             format: PixelFormat::Argb8888,
-            bytes: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            bytes: guitk::canvas::Canvas::filled(2, 1, guitk::color::Color::rgba(1, 2, 3, 4))
+                .to_argb8888(),
         }]);
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");
@@ -1651,7 +1658,17 @@ mod tests {
                 _ => None,
             })
             .expect("the picture never went out");
-        assert_eq!(upload, (window, 3, 2, 1, 8, vec![1, 2, 3, 4, 5, 6, 7, 8]));
+        // Compared against the same canvas the fixture uploads rather than
+        // against a literal: the literal used to encode this test's guess at
+        // the byte order, which is the one thing in this area nobody should be
+        // guessing.
+        // `.into_vec()` because by this point the bytes are on the wire and
+        // the type has already done its work -- it guards what goes *into* an
+        // upload, not what comes out of the encoder.
+        let expected = guitk::canvas::Canvas::filled(2, 1, guitk::color::Color::rgba(1, 2, 3, 4))
+            .to_argb8888()
+            .into_vec();
+        assert_eq!(upload, (window, 3, 2, 1, 8, expected));
     }
 
     /// The reason [`ImageChange`] is one ordered list and not two methods.

@@ -3215,11 +3215,40 @@ That distinction is the same one lane A's case for the SSD migration turned on
 failed to apply it to the thing I was proposing. An idle measurement is the
 optimistic half of any question about a machine three agents share.
 
-**So the honest state is: the cost of option A is unmeasured.** Lane B has
-offered to take it — `cargo check --workspace` for the host target, on a
-bootstrapped tree, stating whether the machine was idle or contended when the
-number was taken. Until that exists, anyone recommending A or B on cost is
-guessing, including me an hour ago.
+### The measurement, taken properly (lane B, 2026-09-06)
+
+`cargo check --workspace` for the host target, on `E:/os-lane-b` at
+`b9b7c61df`, machine **idle**:
+
+| | |
+|---|---|
+| **139 s** | full check from cold — the kernel had never been checked in that tree |
+| **15 s** | immediate re-run, nothing changed — the no-op cost |
+| **14 s** | after touching one source file — **the number this entry should quote** |
+
+The gate's cost is the third row: a merge is warm, because the lane just built
+and tested the thing it is merging, and something has changed. **Fourteen
+seconds.**
+
+Lane B stated the cold/warm spread explicitly — 139 → 15 — for the reason that
+my 58 s was misread for want of exactly that context. Quoting 14 s as a
+from-cold figure would be off by two minutes.
+
+**Still to come:** the same measurement under contention, which is the one the
+recommendation should turn on (see Hole 2). Lane B is taking it during lane A's
+boot test.
+
+**One comparison that is *not* yet valid.** It is tempting to read my 39 s
+(158 `apps/` + `gui/` packages, named as `-p` flags) against this 14 s and
+conclude that scoping the gate buys nothing. That inference does not hold yet:
+my 39 s was **cold** for ~156 of those crates, and the 14 s is **warm
+incremental**. Cold-scoped versus warm-incremental compares two different
+things. The question needs warm-incremental scoped against warm-incremental
+whole-workspace, and nobody has taken the first. My expectation is that the
+enumerated form still loses — 158 `-p` flags makes cargo do work proportional
+to the set *named* rather than the set that *changed* — but that is a
+prediction, and this entry is a monument to predictions of that shape being
+wrong.
 
 ### Recommendation
 
@@ -3245,41 +3274,76 @@ it costs nothing to keep, and it will catch the cases where the author pauses to
 think. It will not catch the cases where the author is confident — which are the
 same cases, because confidence is what stops you grepping.
 
-### The three breakages, all one shape
+### The four breakages, all one shape
 
 | # | Change | Consumer missed | Found by | Author's state |
 |---|---|---|---|---|
 | 1 | `authlib` drops `with_stores`'s second argument (§353) | `init/login` | lane B, later | believed the caller list complete; had grepped `userspace/*/Cargo.toml`, which covers neither `apps/` nor `init/` |
 | 2 | the same change | `apps/lockscreen` | lane C, by accident, a day later | same commit, same belief — its message says "no caller changes" |
 | 3 | `guitk::Event` gains `SettingsChanged` | `apps/stickynotes`, `apps/explorer` | lane A's boot test, 30 min in | lane C — me — hours after writing this entry |
+| 4 | the same variant, unmerged in lane B's tree | the same two crates | lane B's own C-Q11 measurement run, rc=101 | lane B, *while measuring the cost of the gate that catches it* |
 
 A type or a signature changes, some consumers are updated, others are not, and
 nothing notices until a boot test half an hour in or a person happens to look.
-Three times in one day, by two different lanes, in three different subsystems.
+**Four times in one day, by all three lanes, in three different subsystems** --
+and the last two by the two people who at that moment were most alive to the
+risk.
+
+**Numbers 3 and 4 are the same failure by the two people least able to make
+it, and together they say more than any timing here.** Number 3 was the author
+of this proposal committing the failure hours after writing the argument for a
+gate. Number 4 was the person pricing that gate committing it during the
+measurement. Neither of us failed for want of knowing — we had the failure mode
+in mind more firmly than anyone in this project ever has.
+
+The mechanism that refutes is *priming*, not memory. The grep in option C is a
+step you take when you doubt yourself, and neither of us doubted. A convention
+that fires on doubt cannot cover the confident case, and the confident case is
+most of them. That is why C is kept below as free-and-worth-having rather than
+as a control anyone should rely on.
 
 **Number 3 carries one extra piece of evidence the others do not**, and it bears
 on what a gate is worth. The two crates that broke were the two matching their
 events *exhaustively* — `explorer` names every event it declines, `stickynotes`
-matches every variant. Roughly 140 other apps end with a wildcard arm and
+matches every variant. Roughly 140 other apps end with a catch-all arm and
 accepted the new variant in silence. So adding to a shared enum punishes exactly
 the consumers that opted into being told, and rewards the ones that opted out.
 Compiler exhaustiveness is the closest thing to a free gate this codebase has,
 and it only fires where someone chose to leave it armed.
+
+**The dangerous property is discarding, not catching** (lane B and lane A, and
+this corrects my first statement of it). A catch-all that *forwards* the value —
+`Err(e) => report(e)` — still surfaces a new variant as its own text, without
+the crate being recompiled against the new definition. It is
+`_ => {}` that swallows it. So "140 crates end in a wildcard" is the wrong
+count and would condemn arms that are fine; the count that matters is
+catch-alls that *drop* the value, which is not a thing grep can tell you.
+
+That has a direct consequence for what a gate is worth: **a compiling workspace
+is a floor on correctness, never a proof.** A check cannot distinguish a
+forwarding catch-all from a discarding one without reading it, so the gate
+guarantees only that every crate still builds — which is exactly the guarantee
+being priced here, and worth not overselling.
 
 **Between A and B, here is the decision rule rather than a verdict**, so that
 the answer follows from lane B's measurement instead of from my instinct:
 
 | If the contended workspace check costs… | Then |
 |---|---|
-| under ~1 minute | **A** — a minute per merge is a fair price for "the tree compiles", and it is the only option that *stops* a breakage rather than shortening its life |
-| a few minutes, with the other lanes degraded throughout | **B** — the nightly sweep. The guarantee is no longer cheap, and the rarity of the failure (one crate in 143, found by accident, in a tree nobody had ever compiled whole) stops justifying the standing tax |
+| under ~1 minute | **A** — a fair price for "the tree compiles", and the only option that *stops* a breakage rather than shortening its life |
+| a few minutes, with the other lanes degraded throughout | **B** — the nightly sweep. The guarantee is no longer cheap, and a standing tax on every merge stops being worth it |
 
-I lean A, and I want to be clear that this is a *lean* and not the measured
-conclusion I previously presented: the failure is real and recurring — the same
-`authlib` change broke two callers in two different lanes on one day — and a
-guarantee that fires at the moment of breakage is worth paying for if the price
-is a minute. But I have been wrong twice on this entry's cost figures, in the
-same direction both times, and the operator should weight that.
+**Idle, that number is 14 seconds** — comfortably inside the first row. The
+contended figure is the one still outstanding, and it is the only thing between
+this entry and a recommendation I would defend without hedging.
+
+I lean A, and more strongly than when this entry first said so, because the two
+things that changed both point the same way: the idle price is 14 seconds rather
+than the minute I guessed, and the failure rate went from "found one, by
+accident" to four in a day across all three lanes. What has *not* changed is
+that I have been wrong on this entry's cost figures twice, in the same direction
+both times, and the operator should weight that against my lean rather than
+with it.
 
 **The objection to A, restated in the better form lane B gave it.** I had
 written it as "the gate lets one lane block another's merge", and answered that
@@ -3307,11 +3371,12 @@ from you.
 
 What stays open is the gap. Every shared-library change is another chance for a
 breakage that nothing reports and that is found weeks later by somebody who did
-not cause it. **On the day this was raised it happened three
+not cause it. **On the day this was raised it happened four
 times** — twice from `authlib`'s single-store change (`apps/lockscreen` and
 `init/login`, two lanes, neither caught by anything but a person looking), and
 once from my own `guitk::Event` addition, which a boot test caught thirty
-minutes in. All three are fixed; the mechanism that let them through is
-untouched.
+minutes in, and once again from that same variant in lane B's tree, found by
+the run measuring what a gate would cost. All four are fixed; the mechanism
+that let them through is untouched.
 
 The cost grows with the number of app crates, which is growing.

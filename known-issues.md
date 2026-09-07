@@ -122928,10 +122928,24 @@ load-bearing rather than incidental.
   (2,037 lines) still models contrast a third way, and the keyboard-
   accessibility halves of both modules still overlap. Neither is reachable.
   Both are lane C, so this needs no cross-lane agreement.
-- **There is still no control.** The setting exists, is honoured and
-  round-trips, but nothing in the Settings UI sets it, so a user cannot turn
-  it on without editing the config file by hand. That is the next piece, and
-  it belongs with the C-Q6 §815 split (settings pages move to the app).
+- ~~**There is still no control.**~~ **Done 2026-09-07.** Settings ->
+  Accessibility -> Visual has a High Contrast row. It turned out a row was
+  already *there* -- a switch bound to `ToggleId::HighContrast`, writing to a
+  `high_contrast: bool` on the settings app's own state that nothing read.
+  The control and the reader both existed and were not connected.
+
+  It is now a list of five (Off, plus the four schemes) rather than a switch
+  plus a scheme picker. A switch over a setting with four values has to answer
+  "on to what?", and either forgets the user's scheme or hides it in state
+  they cannot see -- which is the argument this same page already made for
+  Transparency, in a comment: "a switch that meant 'Off or whatever it was'
+  would forget a user's choice of Full every time they turned it off and on
+  again." The dead bool and `ToggleId::HighContrast` are gone.
+
+  Seven tests, ending with one that carries the choice all the way into
+  `Palette` rather than stopping at `AppearanceSettings` -- a setting that
+  round-trips and is never consumed is exactly the defect this row had for its
+  whole life.
 - **The orphan ratchet is still one short** -- `accessibility_settings.rs` is
   an island and is not on the baseline.
 

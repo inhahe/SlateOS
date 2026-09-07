@@ -332,31 +332,6 @@ pub enum AccentColor {
 }
 
 impl AccentColor {
-    /// Every accent that has a fixed colour, in the order a settings page
-    /// shows them.
-    ///
-    /// `Custom` is deliberately absent: it has no colour of its own, it has
-    /// whatever `custom_accent` holds, so a sweep over "every accent" that
-    /// included it would be asking a swatch what colour it is before the user
-    /// has said. Named `PRESETS` rather than `ALL` for that reason -- the
-    /// sibling enums' `ALL` really is all of them.
-    pub const PRESETS: [Self; 14] = [
-        Self::Blue,
-        Self::Lavender,
-        Self::Teal,
-        Self::Green,
-        Self::Yellow,
-        Self::Peach,
-        Self::Pink,
-        Self::Mauve,
-        Self::Red,
-        Self::Rosewater,
-        Self::Flamingo,
-        Self::Maroon,
-        Self::Sky,
-        Self::Sapphire,
-    ];
-
     pub fn label(self) -> &'static str {
         match self {
             Self::Blue => "Blue",
@@ -3516,7 +3491,7 @@ mod tests {
         let mut worst_case = String::new();
 
         for scheme in HighContrastScheme::ALL {
-            for accent in AccentColor::PRESETS {
+            for accent in AccentColor::presets().iter().copied() {
                 let mut s = hc_settings(scheme);
                 s.accent_color = accent;
                 let p = Palette::from_settings(&s);
@@ -3544,7 +3519,7 @@ mod tests {
     fn choosing_the_better_variant_is_what_keeps_the_accent_legible() {
         let mut worst_fixed = f32::INFINITY;
         for scheme in HighContrastScheme::ALL {
-            for accent in AccentColor::PRESETS {
+            for accent in AccentColor::presets().iter().copied() {
                 worst_fixed = worst_fixed.min(contrast_ratio(accent.color(), scheme.background()));
             }
         }

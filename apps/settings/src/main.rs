@@ -10,7 +10,9 @@ mod associations;
 mod remote;
 mod snapshots;
 
-use appearance::{AccentColor, AnimationSpeed, AppearanceFile, ThemeMode, TransparencyLevel};
+use appearance::{
+    AccentColor, AnimationSpeed, AppearanceFile, HighContrastScheme, ThemeMode, TransparencyLevel,
+};
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
@@ -728,7 +730,6 @@ pub struct SettingsState {
     // Accessibility settings
     /// Range stated by [`SliderId::range`], not repeated here.
     pub text_size_percent: u16,
-    pub high_contrast: bool,
     pub cursor_size: CursorSize,
     pub reduce_animations: bool,
     pub color_filter: ColorFilter,
@@ -877,6 +878,7 @@ pub enum DropdownId {
     ColorFilter,
     CursorSize,
     NarratorVerbosity,
+    HighContrast,
 }
 
 impl DropdownId {
@@ -1213,7 +1215,6 @@ impl SettingsState {
 
             // Accessibility defaults
             text_size_percent: 100,
-            high_contrast: false,
             cursor_size: CursorSize::Small,
             reduce_animations: false,
             color_filter: ColorFilter::None,
@@ -1853,6 +1854,19 @@ fn render_swatch(tree: &mut RenderTree, x: f32, y: f32, color: Color, selected: 
 /// — toggles, dropdown buttons, sliders, pill rows — are drawn in.
 const CONTROL_COLUMN_DX: f32 = 350.0;
 
+/// What the High Contrast row reads when no scheme is in force.
+///
+/// A named constant because the dropdown's first item and the row's own text
+/// must be the same string -- they are drawn by different functions, and a
+/// row reading "Off" above a list whose first entry read "None" would look
+/// like two settings.
+const HIGH_CONTRAST_OFF: &str = "Off";
+
+/// The label for the High Contrast row: the scheme's name, or "Off".
+fn high_contrast_label(scheme: Option<HighContrastScheme>) -> &'static str {
+    scheme.map_or(HIGH_CONTRAST_OFF, HighContrastScheme::label)
+}
+
 /// How far a row's click band reaches left of the content column. Matches the
 /// inset of the selection highlight the list rows paint, so the band and the
 /// visible row start at the same place.
@@ -1906,7 +1920,6 @@ enum ToggleId {
     ToggleKeys,
     OnscreenKeyboard,
     MouseKeys,
-    HighContrast,
     ReduceAnimations,
     ReduceTransparency,
     AutoUpdate,
@@ -3571,7 +3584,19 @@ impl SettingsState {
         });
         s.advance(8.0);
 
-        s.toggle_row("High Contrast", ToggleId::HighContrast, self.high_contrast);
+        // A list of five, not a switch plus a scheme picker. The switch this
+        // row used to be wrote to a bool that nothing read; but even wired, a
+        // switch over a setting with four values has to answer "on to what?"
+        // and either forgets the user's scheme or hides it in state nobody
+        // can see. This page already made that argument once, for
+        // Transparency: "a switch that meant 'Off or whatever it was' would
+        // forget a user's choice of Full every time they turned it off and on
+        // again."
+        s.dropdown_row(
+            "High Contrast",
+            DropdownId::HighContrast,
+            high_contrast_label(self.appearance.settings.high_contrast),
+        );
         s.dropdown_row(
             "Cursor Size",
             DropdownId::CursorSize,
@@ -3924,6 +3949,22 @@ impl SettingsState {
                     .iter()
                     .position(|f| *f == self.color_filter)
                     .unwrap_or(0);
+                (items, sel)
+            }
+            DropdownId::HighContrast => {
+                let mut items = vec![HIGH_CONTRAST_OFF.to_string()];
+                items.extend(
+                    HighContrastScheme::ALL
+                        .iter()
+                        .map(|s| s.label().to_string()),
+                );
+                // Off is index 0, so a scheme's index is its position + 1.
+                let sel = self.appearance.settings.high_contrast.map_or(0, |chosen| {
+                    HighContrastScheme::ALL
+                        .iter()
+                        .position(|s| *s == chosen)
+                        .map_or(0, |i| i.saturating_add(1))
+                });
                 (items, sel)
             }
             DropdownId::CursorSize => {
@@ -4536,7 +4577,6 @@ impl SettingsState {
             ToggleId::ToggleKeys => &mut self.toggle_keys,
             ToggleId::OnscreenKeyboard => &mut self.onscreen_keyboard,
             ToggleId::MouseKeys => &mut self.mouse_keys,
-            ToggleId::HighContrast => &mut self.high_contrast,
             ToggleId::ReduceAnimations => &mut self.reduce_animations,
             ToggleId::ReduceTransparency => &mut self.reduce_transparency,
             ToggleId::AutoUpdate => &mut self.auto_update_enabled,
@@ -4647,6 +4687,19 @@ impl SettingsState {
                 if let Some(size) = CursorSize::ALL.get(index) {
                     self.cursor_size = *size;
                 }
+            }
+            DropdownId::HighContrast => {
+                // Index 0 is Off; every other index is a scheme, offset by it.
+                // An index past the end leaves the setting alone rather than
+                // falling back to Off, which would turn a stray click into a
+                // silent change of theme.
+                self.appearance.settings.high_contrast = match index.checked_sub(1) {
+                    None => None,
+                    Some(i) => match HighContrastScheme::ALL.get(i) {
+                        Some(scheme) => Some(*scheme),
+                        None => self.appearance.settings.high_contrast,
+                    },
+                };
             }
             DropdownId::NarratorVerbosity => {
                 if let Some(verbosity) = NarratorVerbosity::ALL.get(index) {
@@ -7341,6 +7394,157 @@ mod tests {
         assert!(layout.item_at(layout.x + 20.0, y).is_none());
         click(&mut state, layout.x + 20.0, y);
         assert_eq!(state.resolution_index, 1);
+    }
+
+    // ------------------------------------------------------------------
+    // High contrast
+    //
+    // The row existed before any of this and was a switch over a bool that
+    // nothing read -- the fifth control in this tree found writing to a field
+    // with no reader. What these check is the whole path: the list offers
+    // every scheme, choosing one lands in `AppearanceSettings`, and what
+    // lands there is what the shell's palette consumes.
+    // ------------------------------------------------------------------
+
+    /// Pick item `index` from the High Contrast list, the way a click does.
+    ///
+    /// Opening it first is not ceremony: `apply_dropdown_selection` acts on
+    /// whichever dropdown is open, so a test that skipped the open would be
+    /// selecting from whatever the previous one left behind.
+    fn choose_hc(state: &mut SettingsState, index: usize) {
+        state.current_page = SettingsPage::Visual;
+        state.show_dropdown(DropdownId::HighContrast);
+        state.apply_dropdown_selection(index);
+    }
+
+    /// Open the High Contrast list and return its items and selected index.
+    ///
+    /// Through `show_dropdown` + `dropdown_layout` rather than a private
+    /// accessor, because that is the pair the renderer and the click handler
+    /// both use -- a test that read the items another way could pass while
+    /// the list a user sees was empty.
+    fn hc_list(state: &mut SettingsState) -> (Vec<String>, usize) {
+        state.current_page = SettingsPage::Visual;
+        state.show_dropdown(DropdownId::HighContrast);
+        let layout = state
+            .dropdown_layout()
+            .expect("the High Contrast dropdown must have a layout");
+        (layout.items, layout.selected)
+    }
+
+    #[test]
+    fn the_list_offers_off_and_every_scheme() {
+        let mut state = SettingsState::new();
+        let (items, _) = hc_list(&mut state);
+
+        assert_eq!(
+            items.len(),
+            HighContrastScheme::ALL.len() + 1,
+            "every scheme, plus Off: {items:?}"
+        );
+        assert_eq!(items.first().map(String::as_str), Some(HIGH_CONTRAST_OFF));
+        for scheme in HighContrastScheme::ALL {
+            assert!(
+                items.iter().any(|i| i == scheme.label()),
+                "{} is missing from {items:?}",
+                scheme.label()
+            );
+        }
+    }
+
+    #[test]
+    fn choosing_a_scheme_sets_it_and_choosing_off_clears_it() {
+        let mut state = SettingsState::new();
+        assert_eq!(state.appearance.settings.high_contrast, None, "off first");
+
+        // Index 1 is the first scheme, because index 0 is Off.
+        choose_hc(&mut state, 1);
+        assert_eq!(
+            state.appearance.settings.high_contrast,
+            HighContrastScheme::ALL.first().copied(),
+            "the first scheme sits at index 1"
+        );
+
+        choose_hc(&mut state, 0);
+        assert_eq!(state.appearance.settings.high_contrast, None);
+    }
+
+    #[test]
+    fn every_scheme_in_the_list_can_be_chosen() {
+        for (idx, scheme) in HighContrastScheme::ALL.iter().enumerate() {
+            let mut state = SettingsState::new();
+            choose_hc(&mut state, idx + 1);
+            assert_eq!(
+                state.appearance.settings.high_contrast,
+                Some(*scheme),
+                "index {} should be {}",
+                idx + 1,
+                scheme.label()
+            );
+        }
+    }
+
+    /// The row's own text and the list's first entry must agree.
+    #[test]
+    fn the_row_reads_back_what_was_chosen() {
+        let mut state = SettingsState::new();
+        assert_eq!(
+            high_contrast_label(state.appearance.settings.high_contrast),
+            HIGH_CONTRAST_OFF
+        );
+
+        choose_hc(&mut state, 2);
+        let chosen = state.appearance.settings.high_contrast.expect("set");
+        assert_eq!(
+            high_contrast_label(state.appearance.settings.high_contrast),
+            chosen.label()
+        );
+    }
+
+    #[test]
+    fn the_selected_index_follows_the_setting() {
+        let mut state = SettingsState::new();
+        let (_, sel) = hc_list(&mut state);
+        assert_eq!(sel, 0, "Off is selected when nothing is set");
+
+        choose_hc(&mut state, 3);
+        let (_, sel) = hc_list(&mut state);
+        assert_eq!(sel, 3, "and the list reopens on what is in force");
+    }
+
+    /// A stray index leaves the setting alone rather than falling back to Off.
+    ///
+    /// Falling back would turn an out-of-range click into a silent theme
+    /// change, which is the wrong direction for a mode someone turned on
+    /// because they cannot read the other one.
+    #[test]
+    fn an_index_past_the_end_changes_nothing() {
+        let mut state = SettingsState::new();
+        choose_hc(&mut state, 2);
+        let before = state.appearance.settings.high_contrast;
+
+        choose_hc(&mut state, 99);
+        assert_eq!(state.appearance.settings.high_contrast, before);
+    }
+
+    /// The end of the path: what this control writes is what the shell draws.
+    ///
+    /// Every other test here stops at `AppearanceSettings`. This one carries
+    /// it into `Palette`, because a setting that round-trips and is never
+    /// consumed is exactly the defect this row had for its whole life.
+    #[test]
+    fn the_choice_reaches_the_palette_the_shell_draws_with() {
+        let mut state = SettingsState::new();
+        let ordinary = appearance::Palette::from_settings(&state.appearance.settings);
+
+        choose_hc(&mut state, 1);
+        let contrasted = appearance::Palette::from_settings(&state.appearance.settings);
+
+        assert_ne!(ordinary.base, contrasted.base, "the background must change");
+        assert_eq!(
+            contrasted.overlay0, contrasted.text,
+            "and the faint role must stop being faint"
+        );
     }
 }
 

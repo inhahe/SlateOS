@@ -3226,11 +3226,45 @@ guessing, including me an hour ago.
 **Adopt C now, regardless. Defer the A-versus-B choice to one number that does
 not exist yet.**
 
-**C is free and would have caught this.** A commit message may not claim "no
-caller changes" about a shared library until `grep -rl <symbol> apps/ gui/ net/`
-has been run. It costs nothing, it needs no infrastructure, and it addresses the
-actual failure mode — a change whose callers live in a lane the author cannot
-see. Adopt it whichever way the rest goes.
+**C is free, and weaker than I claimed. Adopt it anyway, but do not count on
+it.** The convention: a commit message may not claim "no caller changes" about a
+shared library until `grep -rl <symbol> apps/ gui/ net/` has been run. It costs
+nothing and needs no infrastructure.
+
+What I originally wrote here was that it "would have caught this". That is true
+of the first two breakages and **not** of the third, which I caused myself a few
+hours after writing this entry — see the third row below. I added a variant to a
+shared enum in `guitk`, updated the three consumers I was thinking about, and
+did not grep for the rest. At that moment I had the failure mode more firmly in
+mind than anyone in this project has ever had it: I had just written up two
+other lanes' instances of it, in this file, arguing for a gate to catch it.
+
+So the honest assessment of C is that it is a *discipline*, and this project now
+has one clean experiment on whether discipline is sufficient here. It is free,
+it costs nothing to keep, and it will catch the cases where the author pauses to
+think. It will not catch the cases where the author is confident — which are the
+same cases, because confidence is what stops you grepping.
+
+### The three breakages, all one shape
+
+| # | Change | Consumer missed | Found by | Author's state |
+|---|---|---|---|---|
+| 1 | `authlib` drops `with_stores`'s second argument (§353) | `init/login` | lane B, later | believed the caller list complete; had grepped `userspace/*/Cargo.toml`, which covers neither `apps/` nor `init/` |
+| 2 | the same change | `apps/lockscreen` | lane C, by accident, a day later | same commit, same belief — its message says "no caller changes" |
+| 3 | `guitk::Event` gains `SettingsChanged` | `apps/stickynotes`, `apps/explorer` | lane A's boot test, 30 min in | lane C — me — hours after writing this entry |
+
+A type or a signature changes, some consumers are updated, others are not, and
+nothing notices until a boot test half an hour in or a person happens to look.
+Three times in one day, by two different lanes, in three different subsystems.
+
+**Number 3 carries one extra piece of evidence the others do not**, and it bears
+on what a gate is worth. The two crates that broke were the two matching their
+events *exhaustively* — `explorer` names every event it declines, `stickynotes`
+matches every variant. Roughly 140 other apps end with a wildcard arm and
+accepted the new variant in silence. So adding to a shared enum punishes exactly
+the consumers that opted into being told, and rewards the ones that opted out.
+Compiler exhaustiveness is the closest thing to a free gate this codebase has,
+and it only fires where someone chose to leave it armed.
 
 **Between A and B, here is the decision rule rather than a verdict**, so that
 the answer follows from lane B's measurement instead of from my instinct:
@@ -3273,10 +3307,11 @@ from you.
 
 What stays open is the gap. Every shared-library change is another chance for a
 breakage that nothing reports and that is found weeks later by somebody who did
-not cause it. **On the day this was raised that happened twice, from one
-commit** — `authlib`'s single-store change broke `apps/lockscreen` and
-`init/login`, in two different lanes, and neither was caught by anything except
-a person happening to look. Both are fixed; the mechanism that let them through
-is untouched.
+not cause it. **On the day this was raised it happened three
+times** — twice from `authlib`'s single-store change (`apps/lockscreen` and
+`init/login`, two lanes, neither caught by anything but a person looking), and
+once from my own `guitk::Event` addition, which a boot test caught thirty
+minutes in. All three are fixed; the mechanism that let them through is
+untouched.
 
 The cost grows with the number of app crates, which is growing.

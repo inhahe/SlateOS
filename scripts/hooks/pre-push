@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fourteen gates at the push boundary. Any one of them aborts the push.
+# Fifteen gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -17,6 +17,7 @@
 #  13. Refuse to publish a `design-decisions.md` section outside its lane's
 #      numbering band, or missing the `**Lane:**` field that declares it.
 #  14. Refuse to publish a Markdown `---` that renders as a heading.
+#  15. Refuse to publish when the release-profile boot test is stale.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented, and it was wrong again the moment gate 13 was written --
@@ -2486,7 +2487,7 @@ fi
 # metric regardless of what *this* push touches.  A docs-only push does not
 # get a free pass on staleness.
 # ---------------------------------------------------------------------------
-staleness="$PROJECT_ROOT/scripts/check-release-staleness.py"
+staleness="${repo_root:-.}/scripts/check-release-staleness.py"
 skip_staleness=0
 [ -f "$staleness" ] || skip_staleness=1
 note_gate release-staleness "$skip_staleness"
@@ -2508,7 +2509,7 @@ To push anyway (e.g. you are about to run the release boot test):
     ALLOW_STALE_RELEASE=1 git push ...
 
 EOF
-        if [ "${ALLOW_STALE_RELEASE:-}" = "1" ]; then
+        if [ "${ALLOW_STALE_RELEASE:-0}" = "1" ]; then
             echo "pre-push: ALLOW_STALE_RELEASE=1 — pushing despite stale release baseline." >&2
         else
             exit 1
@@ -2536,8 +2537,9 @@ fi
 #
 #     grep -o '^[[:space:]]*note_gate [a-z0-9-]*' "$0" | awk '{print $2}' | sort -u | wc -l
 #
-# Gate 13 (`bands`) made it 13 on 2026-09-05, and gate 14 (`headings`) made it
-# 14 the same day; if you add a gate, bump both.
+# Gate 13 (`bands`) made it 13 on 2026-09-05, gate 14 (`headings`) made it
+# 14 the same day, and gate 15 (`release-staleness`) made it 15 on
+# 2026-09-07; if you add a gate, bump both.
 #
 # A refusing gate exits before this, so the tally is not a claim that the push
 # passed — only a record of what was asked.
@@ -2573,8 +2575,8 @@ echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
 #
 # Deliberately not counted in the tally above, and deliberately not given a
 # `note_gate` call. The tally records what judged the push; this judges nothing
-# and cannot fail. Counting it would report a fifteenth gate that always
-# passes, which is worse than not reporting it at all. The gate total stays 14.
+# and cannot fail. Counting it would report a sixteenth gate that always
+# passes, which is worse than not reporting it at all. The gate total stays 15.
 #
 # Placed after the tally so that "allowed through" is true whenever it prints: a
 # refusing gate exits earlier, and a lane whose push was just refused has a more

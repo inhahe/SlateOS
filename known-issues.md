@@ -122137,6 +122137,75 @@ pre-merge gate is `open-questions.md` -> **C-Q11**, raised by lane C. The real
 objection is that it lets one lane's red crate block another lane's merge --
 which is exactly what happened here, in both directions.
 
+**Measured for C-Q11 (2026-09-07, lane B, `E:/…/os-lane-b` at `b9b7c61df`,
+machine idle, workspace green, target `x86_64-pc-windows-gnu`):**
+
+| Run | Elapsed | What it is |
+|---|---|---|
+| full check, kernel never checked in this tree | **139 s** | honest cold cost; *not* the gate's number, since nobody merges from a cold tree |
+| immediate re-run, nothing changed | **15 s** | the no-op cost |
+| after touching one lane-B source file | **14 s** | inherits the previous run's cache -- **this is the gate's realistic cost** |
+
+Cold-to-warm is 139 -> 15, so quoting 14 s as a from-cold figure is off by two
+minutes.
+
+**Contended, same tree, load = lane A's boot test in its gate phase** (hundreds
+of short-lived Python processes reading the whole tree -- the load a merge
+collides with more often than a build): no-op **28 s**, one lane-B file touched
+**18 s**. So contention roughly doubles it and it stays under half a minute.
+
+**Scoped vs whole, both warm-incremental, both under that same contention** --
+the comparison the scoping question actually needs, and which nobody had taken:
+
+| | one file touched | no-op |
+|---|---|---|
+| scoped: 158 `apps/`+`gui/` packages as `-p` flags | **8 s** | **7 s** |
+| whole: `--workspace` | **15 s** | **16 s** |
+
+**This inverted two predictions, including both of the ones in this file's
+earlier drafts.** Lane C expected the enumerated form to lose, on the reasoning
+that 158 `-p` flags make cargo do resolution work proportional to the set named;
+lane B claimed the whole workspace was *cheaper* than the subset, having compared
+lane C's **cold-scoped** 39 s against a **warm-incremental** whole-workspace 14 s
+-- two different kinds of measurement, which is the same category error this file
+documents elsewhere. Scoped wins about 2:1 once both are warm-incremental.
+
+The reason is plain once looked at: `--workspace` is not "the apps plus the
+kernel", it is *every member*, including `userspace/*` -- some thousands of
+crates. Both mental models had it as apps + kernel. Neither party read the
+manifest before reasoning about the difference.
+
+**What the numbers do and do not decide.** At 15 s warm-incremental under
+contention, cost cannot decide the policy: the gap between 8 s and 15 s is
+inside the noise of a merge. Scope should therefore be chosen for **coverage**,
+where the two differ sharply -- a gate scoped to `apps/`+`gui/` would have caught
+the `guitk::Event` breakage and would *not* have caught the `authlib` one, whose
+callers are all under `userspace/`. Whole-workspace is the only scope covering
+cross-lane API changes, which is the case that raised the question.
+
+**The run that mattered was the one that failed.** The first attempt returned
+`rc=101`: non-exhaustive `match` on `guitk::Event::SettingsChanged` in
+`apps/stickynotes` and `apps/explorer` -- the exact two crates, and the exact
+failure mode, that prompted C-Q11. Both were already fixed on `origin/main`; the
+tree taking the measurement was nine commits behind. So this is a **fourth**
+instance of the stale-tree error described above, committed by the person
+measuring the cure, during the measurement. Together with lane C's third
+instance -- committed by the proposal's author, the same day they wrote the
+argument, having just documented two other lanes' -- the pair is stronger
+evidence than any timing in the question: two people maximally primed to avoid
+it, both failing within hours.
+
+**What a green workspace check does and does not prove.** It catches the crates
+that *fail to compile*. Lane C's diagnosis is that the two which broke were the
+two matching exhaustively, while roughly 140 others end in a catch-all. Lane A's
+refinement narrows that usefully: a catch-all that *forwards* the value
+(`Err(e) => report(e)`) still surfaces a new variant as its own text, while one
+that *discards* it (`_ => {}`) cannot. The hazard is discarding, not failing to
+enumerate. But a gate cannot tell the two apart without reading them -- so a
+green check is a floor on correctness, not a proof of it, and every "only N
+crates broke" count in this file understates the blast radius, including the
+ones written above.
+
 ## A-A-REBUILT-SERVICE-DOES-NOT-INVALIDATE-THE-KERNEL-THAT-EMBEDS-IT (lane A's tree, found by lane B 2026-09-07)
 
 **In short:** the kernel compiles six small ring-3 programs *into itself* by

@@ -11,7 +11,8 @@ mod remote;
 mod snapshots;
 
 use appearance::{
-    AccentColor, AnimationSpeed, AppearanceFile, HighContrastScheme, ThemeMode, TransparencyLevel,
+    AccentColor, AnimationSpeed, AppearanceFile, ColorFilter, HighContrastScheme, ThemeMode,
+    TransparencyLevel,
 };
 #[allow(unused_imports)]
 use guitk::color::Color;
@@ -513,36 +514,6 @@ impl DiagnosticLevel {
 // ============================================================================
 // Accessibility types
 // ============================================================================
-
-/// Color filter mode for visual accessibility.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ColorFilter {
-    None,
-    Grayscale,
-    Deuteranopia,
-    Protanopia,
-    Tritanopia,
-}
-
-impl ColorFilter {
-    const ALL: &[Self] = &[
-        Self::None,
-        Self::Grayscale,
-        Self::Deuteranopia,
-        Self::Protanopia,
-        Self::Tritanopia,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Grayscale => "Grayscale",
-            Self::Deuteranopia => "Deuteranopia",
-            Self::Protanopia => "Protanopia",
-            Self::Tritanopia => "Tritanopia",
-        }
-    }
-}
 
 /// Cursor size option.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

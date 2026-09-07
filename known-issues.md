@@ -122946,8 +122946,18 @@ load-bearing rather than incidental.
   `Palette` rather than stopping at `AppearanceSettings` -- a setting that
   round-trips and is never consumed is exactly the defect this row had for its
   whole life.
-- **The orphan ratchet is still one short** -- `accessibility_settings.rs` is
-  an island and is not on the baseline.
+- **The orphan ratchet claim needs qualifying.** I wrote that
+  `accessibility_settings.rs` is an island missing from the baseline.
+  `scan-orphan-modules.py` counts a module as reached if any of its item
+  names is mentioned elsewhere, and this module's names -- `ColorFilter`,
+  `MagnifierConfig`, `InputSettings` -- were all mentioned elsewhere. They
+  were **homonyms**: separately-defined types of the same name in other
+  files, not references to these. So the scanner was not simply wrong, it was
+  defeated by four enums sharing a name, which is itself the defect (see
+  `TD-C-THE-COLOUR-FILTER-CONTROL-DOES-NOTHING`). With `ColorFilter` now
+  defined once, one of the three homonyms is gone. Whether the module is
+  flagged now has not been re-checked, and the scanner is lane A's file, so
+  this is a report rather than a fix.
 
 Original entry follows.
 
@@ -123033,4 +123043,75 @@ the system silently overriding a user's explicit choice.
 
 **How you would notice.** Look for high contrast in Appearance settings. There
 is no control, and there is no setting behind it if there were.
+
+---
+
+## `TD-C-THE-COLOUR-FILTER-CONTROL-DOES-NOTHING` (lane C, 2026-09-07)
+
+**In short:** Settings -> Accessibility -> Visual has a "Color Filter" list
+offering Grayscale and the three colour-blindness filters. Choosing one
+changes nothing on screen. The value is kept in a variable belonging to the
+Settings window and is read by nothing else, so a colourblind user selects
+"Deuteranopia" and the display carries on exactly as before.
+
+**Found while checking a claim I had made about something else** -- that the
+orphan-module ratchet was one island short. Chasing why the scanner thought
+`accessibility_settings.rs` was reachable turned up the names it shares with
+other files, and those names turned out to be four *different* enums.
+
+**The duplication, now fixed.** `ColorFilter` was defined four times and the
+four disagreed:
+
+| Where | Variants | Null variant | Transform? |
+|---|---|---|---|
+| `gui/desktop/src/a11y.rs` | 6, incl. `Inverted` | `None` | **yes** -- channel matrices and `apply` |
+| `gui/desktop/src/accessibility_settings.rs` | 5 | `Off` | no |
+| `apps/settings/src/main.rs` | 5 | `None` | no |
+| `apps/magnifier/src/main.rs` | 9 | `None` | its own |
+
+They disagreed on the null variant's name, on membership, and on the spelling
+of grayscale (`Grayscale` against magnifier's `Greyscale`). Only one of them
+could actually transform a colour, and it was in a module nothing calls; the
+one the user's dropdown was bound to was a list of labels.
+
+The definition now lives once, in `gui/appearance` beside the palette, with
+its matrix machinery and its fourteen tests. `a11y.rs` and
+`accessibility_settings.rs` re-export it; `apps/settings` imports it.
+
+**`apps/magnifier` deliberately still has its own**, and this is the one place
+a rename would have been the wrong fix: its nine variants glue two concepts
+together. `Inverted`, `Protanopia`, `Deuteranopia`, `Tritanopia` and
+`Greyscale` are colour-vision filters, but `YellowOnBlack`, `WhiteOnBlack` and
+`GreenOnBlack` are high-contrast *schemes* -- the same three that
+`HighContrastScheme` now names. Folding all nine into the shared enum would
+put display schemes into a colour-filter type; folding only the five would
+leave the magnifier with two enums to consult. Unpicking it is a change to
+that app's model, not a substitution, so it is left and recorded here.
+
+**What is still not done: nothing applies the filter.** This entry is not
+closed by the de-duplication. A colour filter is a per-pixel transform of the
+finished frame, so unlike the high-contrast palette it cannot be delivered by
+`Palette::from_settings` -- and it must not be half-delivered by filtering
+palette colours alone, because then the window chrome would shift and the
+photographs would not, which is worse than doing nothing.
+
+**The proper fix**, in order:
+
+1. Apply it at **present** time, over the whole buffer, rather than during
+   composition. The compositor composes damaged rectangles only; a filter
+   applied per-rect is correct but must be applied to every pixel written,
+   and doing it once at the hand-off to the display is simpler to reason
+   about and impossible to apply inconsistently.
+2. **Skip the pass entirely when the filter is `None`**, which is nearly
+   every user, so the cost of the feature is zero for them. A full-buffer
+   matrix multiply at 1920x1080 and 60 Hz is not free and should not be paid
+   by people who have not asked for it.
+3. Only then add `color_filter` to `AppearanceSettings` and point the
+   dropdown at it. **Not before** -- the setting and the code that reads it
+   should land together. This tree has six controls that were wired to fields
+   nothing read; five were found in the last two days, and adding a seventh
+   while fixing the sixth would be a poor joke.
+
+**How you would notice.** Settings -> Accessibility -> Visual -> Color
+Filter, choose Deuteranopia. The label changes; the screen does not.
 

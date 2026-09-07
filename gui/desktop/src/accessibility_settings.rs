@@ -67,27 +67,13 @@ impl ContrastMode {
     }
 }
 
-/// Color vision filter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ColorFilter {
-    Off,
-    Grayscale,
-    Deuteranopia,
-    Protanopia,
-    Tritanopia,
-}
-
-impl ColorFilter {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Off => "Off",
-            Self::Grayscale => "Grayscale",
-            Self::Deuteranopia => "Red-Green (Deuteranopia)",
-            Self::Protanopia => "Red-Green (Protanopia)",
-            Self::Tritanopia => "Blue-Yellow (Tritanopia)",
-        }
-    }
-}
+/// The colour-vision filters.
+///
+/// Re-exported. This module carried a fourth copy of the enum -- labels only,
+/// no transform, and with `Off` where the others say `None` -- while the one
+/// implementation that could actually filter a colour sat in `a11y.rs`. The
+/// definition is now `appearance::ColorFilter`.
+pub use appearance::ColorFilter;
 
 /// Text size scaling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,7 +143,7 @@ impl Default for VisualSettings {
     fn default() -> Self {
         Self {
             contrast_mode: ContrastMode::Off,
-            color_filter: ColorFilter::Off,
+            color_filter: ColorFilter::None,
             text_scale: TextScale::Normal,
             cursor_indicator: CursorIndicator::Off,
             cursor_size_multiplier: 1.0,
@@ -470,7 +456,7 @@ impl AccessibilitySettings {
     pub const fn is_active(&self, feature: A11yFeature) -> bool {
         match feature {
             A11yFeature::HighContrast => !matches!(self.visual.contrast_mode, ContrastMode::Off),
-            A11yFeature::ColorFilter => !matches!(self.visual.color_filter, ColorFilter::Off),
+            A11yFeature::ColorFilter => !matches!(self.visual.color_filter, ColorFilter::None),
             A11yFeature::ReduceMotion => self.visual.reduce_motion,
             A11yFeature::ReduceTransparency => self.visual.reduce_transparency,
             A11yFeature::CursorIndicator => {
@@ -1343,14 +1329,10 @@ mod tests {
         assert_eq!(ContrastMode::HighContrast.label(), "High Contrast");
     }
 
-    #[test]
-    fn test_color_filter_labels() {
-        assert_eq!(ColorFilter::Off.label(), "Off");
-        assert_eq!(
-            ColorFilter::Deuteranopia.label(),
-            "Red-Green (Deuteranopia)"
-        );
-    }
+    // `test_color_filter_labels` was here. It asserted this module's own
+    // wording -- "Off" and "Red-Green (Deuteranopia)" -- for an enum that had
+    // no transform behind it. The labels now come from the one shared
+    // `ColorFilter`, and are tested beside it in `appearance`.
 
     #[test]
     fn test_text_scale_factor() {
@@ -1368,7 +1350,7 @@ mod tests {
     fn test_visual_defaults() {
         let v = VisualSettings::default();
         assert_eq!(v.contrast_mode, ContrastMode::Off);
-        assert_eq!(v.color_filter, ColorFilter::Off);
+        assert_eq!(v.color_filter, ColorFilter::None);
         assert!(!v.reduce_motion);
     }
 

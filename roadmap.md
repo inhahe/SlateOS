@@ -1049,6 +1049,15 @@ Roadmap:
   - `[x]` **4. The generated files are read-only in intent** — landed with
     item 2; `generated_header` names the source file in both of them, and says
     what happens to an edit rather than merely that the file is generated.
+  - **Verified 2026-09-07:** a search of `userspace/`, `init/` and `services/`
+    for direct writes to `/etc/passwd`, `/etc/shadow`, `/etc/group` and
+    `/etc/gshadow` -- both literal paths and the usual constant-and-helper
+    forms -- returns nothing. `userdb::UserDb::save` is the only writer left,
+    which is what item 1 was for. Stated with its method rather than as a bare
+    claim: this is a targeted pattern search, not a proof, and a writer using a
+    construct the patterns miss would not appear. Also confirmed that no
+    `chsh`, `chfn`, `gpasswd` or `vipw` crate exists in this tree -- the four
+    obvious tools that would edit those files and were never part of the sweep.
   - **Fallout, done in the same sweep (2026-09-06):** `login` authenticated out
     of the two generated files, and its account-expiry check only treated the
     single value `expire_date == 1` as expired — so every account with a real

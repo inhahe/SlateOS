@@ -55727,3 +55727,104 @@ means any test that reaches the real config path silently depends on this
 machine's state, which is how the `pump()` experiment above was caught. Worth a
 sweep for `AppearanceFile::load`/`config::load` calls in test and demo code that
 are not inside a scratch directory.
+
+
+================================================================================
+[A] TRIM os/CLAUDE.md — deferred, not forgotten (2026-09-06)
+================================================================================
+
+**Task.** `os/CLAUDE.md` is 601 lines / ~50 KB / ~12,500 tokens, and it is
+resident in every lane's context on every turn of every session. Roughly 40-50%
+can move behind pointers with nothing lost. Operator has approved the change;
+it is deferred only because the boot test kept holding the tree.
+
+**The test for what may move:** *would the agent know to go and look?* If a
+pointer ("before touching MSVC builds, read `build-env.md`") is enough, it can
+move — the need announces itself. If the rule would be violated *without the
+agent knowing to check*, it must stay resident.
+
+**Safe to move behind a pointer** (measured section sizes):
+  - "Three Sessions" — 154 lines, of which the *rule* is ~5 (run which-lane.py,
+    work only your lane, use worktrees). The rest is the incident history of
+    the `git checkout` that moved every lane's HEAD. Valuable, not resident;
+    belongs in `design-decisions.md`.
+  - "Performance — Benchmark Everything Critical" — 68 lines of target tables,
+    needed only when touching a perf-critical subsystem.
+  - "Build Environment Notes" — 30 lines of vcvarsall/cl.exe paths, needed only
+    when compiling a C dependency.
+  - "Studying Existing Implementations" — 26 lines, needed at subsystem-design
+    time.
+  - `run-timeout.py` usage detail — ~36 lines. The *rule* ("always use it for
+    anything that can hang") stays; the usage is `--help`.
+
+**Must stay resident** — these are violated without the agent knowing to check:
+lane ownership, never-blanket-kill-by-name, never-force-push, never-merge-red,
+the effort/duration calibration (it changes every estimate), and "optimise for
+the end result".
+
+**Already done, for reference:** the sibling `visual studio projects/CLAUDE.md`
+was trimmed 198 -> 112 lines the same day (~2,640 tokens/session) by moving
+per-project architecture into each project's own `design.md` or `CLAUDE.md`,
+which load only when working there. Backups at `D:/tmp/CLAUDE.md.bak{,2}`.
+
+**Caution.** `os/CLAUDE.md` is operator-only by its own terms. This is
+authorised; do not extend it into unrelated edits of that file.
+
+
+================================================================================
+[A] STATE AT 2026-09-06 HUB RESTART — lane-a is pushed but UNVALIDATED
+================================================================================
+
+**Read this before merging lane-a to main.** `lane-a` is at `1f045e4ee`, clean,
+fully pushed, and has had **no green boot test**. Do not merge it up on the
+strength of "it was pushed".
+
+**Eight boot tests were attempted. None reached the kernel build.** That is a
+statement about the harness, the machine and the shared tree — not about the
+code under test. Each died on something different:
+
+| # | died on |
+|---|---|
+| 1-3 | host commit exhaustion; killed before the build (D:, pre-migration) |
+| 4 | `target/` excluded by the migration, so `services/*` binaries were absent |
+| 5 | `open-questions.md` structure — lane B's entry filed below `# Resolved` |
+| 6 | stale merge base: `authlib::with_stores` in `init/login` (lane B, fixed) |
+| 7 | `guitk::Event::SettingsChanged` unhandled in two apps (lane C, fixed) |
+| 8 | **stopped, not failed** — 21 gates in, zero failures, ended for the hub restart |
+
+Attempt 7 also exposed a defect in `check-boot-test-reexec.sh` itself: it fired
+its editor on a fixed 1 s sleep and so accused `boot-test.sh`'s re-exec guard of
+not isolating, when the guard was fine and the harness had raced. Fixed in
+`8f09124fd`; it now synchronises on a signal from the payload. Verified idle,
+under deliberate process/IO churn, and in situ during attempt 8.
+
+**Therefore still unexecuted, and the reason this matters:** the `EXDEV`
+cross-mount rename change (with its inverted self-test), the two new `udp`
+self-tests, multiwait phases 9/10/11, epoll step 8, and kshell rung 122. All
+compile; none has run in QEMU. The `EXDEV` change in particular alters
+`Vfs::rename`'s return for a case its own self-test previously asserted the
+opposite of, so a boot test is the first thing that would catch a mistake in it.
+
+**Queued, designed, not started:**
+
+1. `kernel/build.rs` — the kernel `include_bytes!`s **six** service binaries at
+   15 sites and declares none as build inputs, so rebuilding a service does not
+   invalidate the kernel and it silently embeds the stale copy. Design settled
+   over four rounds with lanes B and C: derive the list by scanning `kernel/src`
+   (as `bootstrap-worktree.sh` already does, failing closed on zero) → check each
+   exists and hard-fail naming the specific missing artifacts and
+   `bootstrap-worktree.sh` → *only then* emit `rerun-if-changed`. That order is
+   load-bearing: measured on cargo 1.95.0, a `rerun-if-changed` naming a missing
+   path re-runs the build script on **every** build (1,2,3 across three no-op
+   builds vs 1,1,1 for a present path), so declaring before checking would trade
+   a silent-stale bug for one whose only symptom is that the kernel never caches.
+   Do **not** have `build.rs` build the services: the root `Cargo.toml` excludes
+   `services` deliberately to keep it outside the build-std blast radius.
+2. A `known-issues.md` entry for the lying gate (currently only in `8f09124fd`).
+3. The pre-push halt gate — `check-lane-signals` runs only in the boot test, so
+   lane B ran cargo and `git push` through a live halt dozens of times without
+   seeing it. Awaiting the operator; `scripts/hooks/pre-push` is not lane A's.
+
+**Operator decisions outstanding:** C-Q11 (lanes B and C both vote A,
+whole-workspace unscoped — on coverage, not cost: a scoped gate would have
+caught lane C's breakage and missed lane B's), and whether to retire `D:`.

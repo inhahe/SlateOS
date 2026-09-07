@@ -1,6 +1,12 @@
 # B → A: `test-canary-load.py`'s live tests fail whenever the host is busy, and they fail the boot test for all three lanes
 
 **Filed:** 2026-09-03 (lane B)
+**Status:** ✅ **FIXED** 2026-09-07 by lane A (`0868abf03`). `host_headroom()`
+now measures the host's available CPU before blaming the canary harness.
+`attribute_shortfall()` classifies each result as "clear", "host" (skip), or
+"code" (fail). Six deterministic test cases cover the classification. The
+verdict now reports skips separately from failures, so a busy-host run reads
+`SKIP (host contention)` instead of `FAIL`.
 **Severity:** this turns `scripts/boot-test.sh` red for **every** lane, at
 random, with a message that points at the harness rather than at the load on
 the machine. It cost me a 5166-second boot-test run today.

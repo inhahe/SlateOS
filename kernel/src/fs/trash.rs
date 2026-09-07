@@ -8,9 +8,10 @@
 //! ## Design
 //!
 //! Per the design spec:
-//! - **Per-filesystem recycle bins** — each mounted filesystem has its own
-//!   `/_TRASH/` directory.  Moving a file to trash never crosses filesystem
-//!   boundaries (no slow copy+delete).
+//! - **Per-filesystem recycle bins** — the design calls for each mounted
+//!   filesystem to have its own trash directory.  Currently there is a single
+//!   `/_TRASH/` on the root fs; when the file being trashed is on a different
+//!   mount (e.g. `/tmp`), the move falls back to copy+delete.
 //! - **Two delete modes**: trash-capable delete (default for shell/explorer)
 //!   and permanent delete (for temp files, compilers, etc.).
 //! - **Auto-prune**: when disk space is low, delete oldest trash items first.
@@ -135,9 +136,13 @@ pub fn trash(path: impl AsRef<Path>) -> KernelResult<()> {
     let trash_name = unique_trash_name(filename)?;
     let trash_path = format_trash_path(&trash_name);
 
-    // Move the file to trash via rename.
-    // This is O(1) on the same filesystem — only directory entries change.
-    Vfs::rename(path, &trash_path)?;
+    // Move the file to trash.  rename is O(1) on the same filesystem, but
+    // when the source and trash live on different mounts (e.g. /tmp → /_TRASH)
+    // it returns CrossDevice.  Fall back to copy+delete in that case — the
+    // design prefers per-fs trash dirs (which would avoid this), but the
+    // current single /_TRASH layout makes cross-mount trashing inevitable for
+    // files on tmpfs or secondary mounts.
+    move_cross_device(path, &trash_path)?;
 
     // Update the index file with the mapping.
     index_add(&trash_name, path)?;
@@ -205,8 +210,10 @@ pub fn restore(trash_name: impl AsRef<Path>) -> KernelResult<PathBuf> {
     let index = index_load();
     let original = index_lookup(&index, trash_name).ok_or(KernelError::NotFound)?;
 
-    // Move the file back to its original location.
-    Vfs::rename(&trash_path, &original)?;
+    // Move the file back to its original location.  Like trash(), this can
+    // cross mount points (/_TRASH on ext4 → /tmp on tmpfs), so it needs the
+    // same cross-device fallback.
+    move_cross_device(&trash_path, &original)?;
 
     // Remove the entry from the index.
     index_remove(trash_name)?;
@@ -367,6 +374,37 @@ pub fn auto_prune() -> KernelResult<usize> {
     }
 
     Ok(pruned)
+}
+
+// ---------------------------------------------------------------------------
+// Cross-device move
+// ---------------------------------------------------------------------------
+
+/// Move a file, falling back to copy+delete when the source and destination
+/// are on different mount points.
+///
+/// `Vfs::rename` returns `CrossDevice` (EXDEV) when the two paths live on
+/// different filesystems.  The caller (trash / restore) must handle this
+/// because `/_TRASH` is on the root fs while the file may be on `/tmp`
+/// (tmpfs) or any secondary mount.
+///
+/// For regular files the fallback is `read_file` + `write_file` + `remove`.
+/// Directories would need `copy_recursive` + `recursive_delete`, but the
+/// trash directory is flat (no subdirectories are trashed as-is — the design
+/// does not nest), so hitting `CrossDevice` on a directory is left as an
+/// error until a real caller needs it.
+fn move_cross_device(src: &Path, dst: &Path) -> KernelResult<()> {
+    match Vfs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(KernelError::CrossDevice) => {
+            // Cross-mount: fall back to copy + delete.
+            let data = Vfs::read_file(src)?;
+            Vfs::write_file(dst, &data)?;
+            Vfs::remove(src)?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ---------------------------------------------------------------------------

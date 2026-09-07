@@ -122754,34 +122754,61 @@ state `Running` for the remaining ~1400s of the QEMU timeout.
 The forked child (tid 166, `"forked"`) reached state `Dead` blocked at
 `kernel/src/ipc/waiters.rs:166`, so it exited — the parent did not.
 
-**Two bugs, both in lane A's territory (kernel):**
+**Root cause identified (symbol lookup):**
 
-1. **A pty/tty syscall path busy-loops in kernel space.**  The fixture
-   calls `openpty` → `forkpty` → writes `0x03` to the master.  One of
-   those syscall paths enters a loop that the hardware never breaks out
-   of.  The constant RIP (`0xffffffff819dc695`, all 16 NMI samples) is
-   the smoking gun — need to map it to a symbol to find the exact loop.
-2. **The scheduler does not preempt a kernel-space busy-loop** even with
-   preemption nominally enabled.  The liveness monitor prints "zero
-   context switches" while useful-work ticks keep advancing.  This means
-   the timer ISR increments the tick counter but never sets
-   `need_reschedule` (or the flag is ignored on the interrupt-return
-   path).  This is independent of the pty bug: *any* kernel code that
-   busy-loops today would monopolise the CPU the same way.
+The RIP `0xffffffff819dc695` is `kernel::cpu::hlt` — the popq after `hlt`.
+The full backtrace (resolved from the kernel ELF):
+
+```
+syscall_entry
+  → syscall_handler_inner
+    → syscall::dispatch::dispatch
+      → syscall::handlers::sys_tty_read
+        → tty::read
+          → tty::canonical_read
+            → tty::backend_read_char
+              → keyboard::read_char_interruptible
+                → keyboard::read_char_inner     ← HLT here
+```
+
+**The process is doing a blocking read from the keyboard TTY, not the
+pty.**  The fixture reads from fd `s` (the pty slave), but the kernel's
+`sys_tty_read` dispatches through the keyboard backend — meaning the pty
+slave fd is routed to the console/keyboard rather than the pty line
+discipline.  `read_char_inner` HLTs waiting for a keyboard interrupt
+that never comes (QEMU serial boot, no keyboard input).
+
+This is **not** a scheduler preemption bug.  The CPU is legitimately
+halted inside the syscall path waiting for keyboard input.  The scheduler
+entered HLT through the `keyboard::read_char_inner` function (which does
+its own `cli;hlt` loop), not through the idle fallback.  The "zero context
+switches" are because the CPU is stopped at HLT, not because the scheduler
+fails to preempt.
+
+The BSP/boot thread (tid=0, "idle", prio=31) is in state `Ready` but at
+IDLE_PRIORITY, so the scheduler prefers ctest-pty (prio=16) which is
+"Running" (inside its syscall).  When `read_char_inner` returns from HLT
+on a timer interrupt, the scheduler's check finds ctest-pty is still the
+highest-priority Running task and returns to it, which re-enters HLT.
+
+**The bug is a TTY dispatch mismatch:**  a `read()` on a pty slave fd
+should go through the pty's line discipline, not the keyboard backend.
+Possible causes:
+- `openpty()` returns an fd whose TTY number maps to the console, not a
+  pty device.
+- `tty::read`'s backend dispatch does not distinguish pty slaves from
+  the console — all TTY reads fall through to the keyboard.
+- The pty slave's `backend_read_char` function pointer is not overridden
+  from the default (keyboard) when the pty is created.
+
+**This is likely lane B's territory** (the pty layer is in `posix/`,
+and the pty kernel support is in `kernel/src/tty/pty.rs`), but the TTY
+dispatch in `kernel/src/tty/` is lane A's.  Both may need changes.
 
 **Workaround:** the ctest-pty rung is disabled in `kernel/src/main.rs`
-(the function still exists in `spawn.rs`).  Re-enable once both bugs are
-fixed.
+(the function still exists in `spawn.rs`).  Re-enable once the TTY
+dispatch bug is fixed.
 
 **Reproducer:** rebuild fixtures with `PYTHONPATH="D:/visual studio
 projects/fastpy"`, rebuild rootfs, enable the rung, boot.  The liveness
 monitor will report the hang within ~15s of the fixture starting.
-
-**What needs investigation:**
-- Map `0xffffffff819dc695` to a function (symbol table from the build).
-  That identifies the spinning syscall.
-- Check why `schedule_tick()` (or equivalent) does not set
-  `need_reschedule` when the current task's quantum expires in kernel
-  mode.  Hypothesis: the timer ISR only decrements the timeslice for
-  userspace tasks (checks `cs == USER_CS`) and skips tasks in syscall
-  context.

@@ -684,7 +684,9 @@ impl ViewerState {
                 // double the viewer's footprint for a reader that does not
                 // exist. The compositor is where the pixels live once they are
                 // sent, and re-reading the file is how they would come back.
-                bytes: image.to_argb_bytes(),
+                // Typed rather than `Image::to_argb_bytes`'s bare `Vec<u8>`:
+                // the other ARGB byte order cannot reach an upload.
+                bytes: guitk::canvas::WireBytes::from_le_argb(&image.pixels),
             });
 
         self.image_info = info;

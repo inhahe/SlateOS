@@ -777,306 +777,46 @@ match), `kernel/src/cap/mod.rs:194-360` (types 16–30), `kernel/src/cap/request
 (the broker itself).
 
 
-## C-Q6 — [C] We have written the Settings screens twice, in two different places, and neither copy is finished. Which one is the real one? — Status: OPEN
-
-**In short:** There are two separate, independently-written sets of Settings
-pages in this tree — one inside the desktop shell, one inside a standalone
-Settings application — covering mostly the same ground (sound, display, mouse,
-power, network, wallpaper, accounts, updates…). Neither knows the other exists.
-The shell's copy is better tested but **nothing can display it**; the app's copy
-is the one that would actually open if a user clicked "Settings". I need to know
-which one to keep, because everything I do to one I currently have to do twice.
-
-**Glossary:** the *shell* is the always-on desktop furniture — taskbar, start
-menu, wallpaper, the volume popup. An *application* is a separate program the
-user launches. A *panel* or *page* here means one screen of settings.
-
-**Where:**
-
-| | |
-|---|---|
-| Copy 1 | `gui/desktop/src/*_settings.rs` and friends — about 50 modules |
-| Copy 2 | `apps/settings/src/main.rs` — 8,227 lines, its own page list and its own data types |
-| What connects them | nothing (`apps/settings` does not depend on the `desktop` crate at all) |
-
-Copy 1 has one further problem on its own: the shell paints exactly **four** of
-its fifty-seven modules (`wallpaper`, `calendar`, `snap`, `overview`). Every
-other panel it contains — including a few with no counterpart in copy 2, such as
-the on-screen volume overlay, the print manager and the login screen — is drawn
-only by its own unit tests. Full detail is in `known-issues.md` →
-`TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`.
-
-**Measured 2026-08-25, and it is worse than "two copies".** A new scan
-(`scripts/scan-orphan-modules.py`) asks, for every module in my tree, whether
-*any* other file in the repository so much as names one of the things it
-defines. **Fifty-seven modules — 113,132 lines — are named by nothing, and
-thirty-nine of them are in the shell**, a crate that declares fifty-nine. (The
-scan first reported 21; three separate ways of accidentally crediting a module
-with a caller it does not have were found and fixed the same day, each by
-hand-checking a module the scan had cleared. 57 is the corrected figure.)
-
-That the shell has 39 modules with no caller, arrived at mechanically, and
-"the shell paints four of its fifty-seven modules", arrived at by hand two
-days earlier, are the same fact counted two ways.
-
-Three findings in that list change what this question is asking:
-
-- **The shell duplicates itself, not just the app.**
-  `gui/desktop/src/a11y.rs` (2,292 lines: a screen magnifier, four
-  high-contrast schemes, sticky/filter/mouse keys, a colourblind filter) and
-  `gui/desktop/src/accessibility_settings.rs` are two models of the same
-  settings, six type names apart, in the same crate. `a11y.rs` is the copy
-  nobody calls. Same shape for notifications: `notif_pane.rs` and
-  `focus_assist.rs` share two types, and `gui/notifications/src/main.rs` says
-  in its own comment that it shows the same notifications — a **third** copy.
-  *(Update 2026-08-26: the first two are no longer unreached — the shell now
-  owns and drives both, and they were reconciled to each other in the process:
-  `design-decisions.md` §563–§564. That removes them from the island list but
-  **not** from this question: the third copy, `gui/notifications`, is still a
-  separate program modelling the same notifications on a third priority scale,
-  and nothing has decided which of the two is the one a user gets.)*
-- **Option A does not by itself de-duplicate.** File-type associations are
-  modelled in `gui/desktop/src/default_apps.rs` (2,314 lines) *and*
-  `apps/settings/src/associations.rs` (1,748) — and **neither is reachable**.
-  Deleting the shell's copy would leave an unreachable one behind.
-- **Only the app copy has ever been connected to storage.** `gui/desktop`
-  contains no file write of any kind; it reads `appearance.yaml` and stops.
-  `apps/settings` already saves two settings families through
-  `gui/settingsfile`. Meanwhile six shell modules (`a11y`, `power`,
-  `display_settings`, `input_method`, `tray_dnd`, `user_accounts`) hand-write
-  their settings into a string — four of them with a matching parser and a
-  passing round-trip test, two with no parser at all — and nothing calls any
-  of it. What they emit is **`key=value` and pipe-delimited text, not YAML**,
-  which `design.txt` requires for configuration.
-
-None of this decides the question, and it does not change my recommendation.
-It sharpens two things: whichever copy survives, **de-duplication has to
-happen inside the survivor too**; and if the deciding factor is "which copy is
-closer to working for a user", that is the app, on the evidence that it is the
-only one that has ever written a settings file.
-
-### The options
-
-**A. The standalone app is the real one; delete the shell's settings panels.**
-*What changes:* the desktop crate loses tens of thousands of lines; nothing a
-user can see changes today. Cheapest, and it deletes the copy nobody can open.
-Against: it throws away the better-tested implementation, and it does not
-account for the shell-only surfaces (volume overlay, login screen, print
-manager, security dialog) that are not settings pages at all and have nowhere
-else to go.
-
-**B. The shell's panels are the real ones; the app becomes a thin window that
-displays them.**
-*What changes:* the Settings app starts showing the shell's pages instead of its
-own; the duplicate data types in `apps/settings/src/main.rs` go. Keeps the
-tested code. Against: a Settings *application* that has to link the desktop
-shell to draw itself is a backwards dependency, and the shell crate is already
-sixty files.
-
-**C. Split by kind — shell surfaces stay in the shell and get wired up; settings
-pages move to the app and the shell copies are deleted.**
-*What changes:* the volume overlay and the login screen actually appear on
-screen for the first time; the Settings app gains the shell's better-tested
-pages; each page exists once. Most work, and I think it is right — the dividing
-line ("is this something the desktop shows you, or a screen you open?") is a
-real one rather than a compromise.
-
-**If it is never answered:** nothing breaks and nothing gets worse on its own.
-The concrete cost is that every crate-wide change is paid for twice. The one in
-flight is the palette conversion — 549 hardcoded colours in the shell's copy,
-2,258 in the app's — and I am partway through the shell's. I will keep going
-either way, because a converted module is converted once and leaving a module
-frozen guarantees the bug comes back when it is finally wired up. But I would
-rather not start the app's 2,258 without knowing whether half of them are about
-to be deleted.
-
-**Recommendation:** C. B is the tempting middle and I would push back on it: the
-dependency direction is wrong and it papers over the fact that four modules of
-fifty-seven are reachable. A is defensible if the answer is simply "the shell's
-settings pages were a mistake" — and if that is the answer, say so plainly and I
-will delete them rather than convert them.
-
-
-## C-Q7 — [C] In the "green on black" high-contrast scheme, the highlight colour is three times dimmer than in the other three. Change it? — Status: OPEN
-
-**In short:** SlateOS has a "high contrast" setting for people who cannot read
-the normal theme. It offers four fixed colour schemes. In three of them the
-highlight colour — the one used to show which thing is selected — is bright and
-jumps off the background. In the fourth, "green on black", the highlight is
-magenta, which is much darker than the others: about a third as visible. So the
-one scheme aimed at the most strain-sensitive users is the one where "this is
-selected" is hardest to see. The question is whether to change that colour, and
-if so to what — because the current choice is dim *on purpose*, for a reason
-that is also good.
-
-Glossary, once:
-
-- **Contrast ratio** — a single number for "how different in brightness are
-  these two colours", from 1:1 (identical, invisible) to 21:1 (black on white).
-  The web accessibility standard (**WCAG**) asks for at least 4.5:1 for normal
-  text and 7:1 for its strictest level.
-- **Highlight / accent colour** — the colour used for the selected item, the
-  focus ring, the progress bar: not the words themselves, but the marker
-  showing where you are.
-- **Hue** — which colour it is (red, green, blue), as opposed to how bright it
-  is. Two colours can be equally bright and still easy to tell apart by hue —
-  unless the viewer is red-green colour blind, in which case they may not be.
-
-### What is actually there
-
-The four schemes, measured against their own background:
-
-| Scheme | Background | Text | Text contrast | Highlight | Highlight contrast |
-|---|---|---|---|---|---|
-| Black background | black | white | 21.00:1 | yellow `#FFFF00` | **19.56:1** |
-| White background | white | black | 21.00:1 | blue `#0000FF` | **8.59:1** |
-| Yellow on black | black | yellow | 19.56:1 | cyan `#00FFFF` | **16.75:1** |
-| Green on black | black | green | 15.30:1 | magenta `#FF00FF` | **6.70:1** |
-
-Magenta is the outlier, and it cannot simply be "turned up": `#FF00FF` is
-already the brightest magenta that exists. 6.70:1 clears the ordinary WCAG bar
-(4.5:1) and misses the strict one (7:1) — in the mode whose entire purpose is
-to be easier to see than the default.
-
-### Why the dim colour is not obviously wrong
-
-Magenta is the *opposite* of green. That makes it the one highlight in the list
-that stays distinguishable from this scheme's green text under red-green colour
-blindness, and it is the most different in hue from the text of any candidate.
-The brighter alternatives are brighter precisely because they are closer to
-green:
-
-| Candidate highlight | Contrast vs black | Contrast vs the green text |
-|---|---|---|
-| magenta `#FF00FF` (today) | 6.70:1 | 2.29:1 |
-| pale magenta `#FF80FF` | 9.78:1 | 1.56:1 |
-| cyan `#00FFFF` | 16.75:1 | 1.09:1 |
-| white `#FFFFFF` | 21.00:1 | 1.37:1 |
-
-So the trade is real: *visible against the background* and *distinguishable
-from the text* pull in opposite directions here, and today's colour is at one
-end of it.
-
-### Options
-
-**A — Leave it at magenta `#FF00FF`.**
-*What changes:* nothing; the selection marker in "green on black" stays about a
-third as bright as in the other three schemes, and is documented as deliberate.
-
-**B — Pale magenta `#FF80FF`.**
-*What changes:* the selection marker in "green on black" becomes noticeably
-brighter (6.70:1 → 9.78:1, clearing the strict 7:1 bar) while staying pink /
-magenta, so it remains the colour furthest from green.
-
-**C — Cyan `#00FFFF`.**
-*What changes:* the selection marker becomes as bright as in the other schemes
-(16.75:1), but it is now nearly the same brightness as the green text (1.09:1),
-so text and highlight are told apart *only* by hue — which is exactly what a
-red-green colour blind user cannot do. It would also make two of the four
-schemes use the same highlight colour.
-
-**D — White `#FFFFFF`.**
-*What changes:* the selection marker becomes the brightest thing on screen
-(21.00:1) and the scheme becomes two-colour-plus-white. Simple and maximally
-visible; loses the idea that the highlight is a *colour* at all.
-
-### My recommendation
-
-**B.** It is the only option that fixes the thing being complained about
-without giving up the reason the current colour was chosen: it stays a magenta,
-so it stays the hue furthest from the text, and it stops being the dim one. C
-and D are brighter still, but each pays for it — C by collapsing under the
-colour blindness this mode exists to accommodate, D by dropping the colour.
-
-### If this is never answered
-
-Safe, and it does not get worse with time. The current colour is usable and
-above the ordinary accessibility bar; nothing is blocked on this. The one live
-consequence is that the regression test which pins these twelve colours
-(`every_high_contrast_scheme_is_legible_with_itself` in
-`gui/desktop/src/a11y.rs`) has its highlight floor set to **4.5:1** rather than
-7:1, specifically so this scheme passes — so the floor is currently set by the
-outlier rather than by the standard. Answering B, C or D would let that floor
-rise to 7:1 and hold every future scheme to it.
-
-## C-Q8 — [C] You decided in June that we ship the world's timezone data. Nobody can write it, because the lane map hands the job to a directory that does not exist. Who does it? — Status: OPEN
-
-**In short:** if you set your clock to New York, SlateOS quietly gives you
-London's time instead — and says nothing. The fix needs a *package* (a bundle of
-files the system installs, like an app-store download) containing the world's
-timezone rules, which you already approved shipping back in June. It cannot be
-written, because the rule saying which of the three AI sessions owns the package
-manager points at a folder that was never created; the real package manager
-lives in a folder that session is forbidden to touch. This has been stuck since
-2026-08-16 and needs you to say which session writes it.
-
-**Where it bites:** `requests/b-c-tzdata-package.md` (lane B's ask, lane C's
-answer at the foot), `userspace/pkg/src/main.rs` (the real package manager,
-5 004 lines), `roadmap.md`'s ownership map and `scripts/which-lane.py` (both of
-which grant lane C `pkg/**`).
-
-### What is actually wrong
-
-You answered B-Q1 on 2026-08-15 (`design-decisions.md` §311): ship the **full**
-IANA timezone database, vendored as prebuilt binaries, distributed as a package.
-Everything that *reads* that data is already written and tested — the C library
-and the shell both resolve `TZ` through real binary zoneinfo files, matching
-glibc's search order exactly.
-
-There is nothing on disk for them to read. So `TZ=America/New_York` resolves to
-nothing and falls back to **UTC**, with no error. The user believes they picked
-Eastern and gets UTC. Two tests currently *assert* that wrong answer, on purpose,
-and are named to say so — they go red the day the data lands, which is the
-signal that it worked.
-
-The ownership map says lane C owns "the package manager (`pkg/**`)". **There is
-no top-level `pkg/` directory.** The package manager is `userspace/pkg/` — and
-`userspace/**` is on lane C's never-write list. So the lane assigned the work is
-the one lane forbidden to do it, and the lane that owns the files was never
-assigned the work.
-
-### The options
-
-**A — Move the package manager to a top-level `pkg/`, and lane C writes it.**
-*What changes:* nothing user-visible on its own; the ownership map becomes true
-as written, and lane C can start immediately. Costs a tree-wide move of 5 134
-lines plus every path that cites it — exactly the sort of change that conflicts
-across three lanes working in parallel.
-
-**B — Give the tzdata package to lane B, where the package manager already
-lives.** *What changes:* nothing user-visible on its own; the work starts in the
-lane that owns the code, with no move. Costs a standing inconsistency — the map
-keeps saying lane C owns `pkg/**` while lane B owns the package manager — unless
-the map is corrected in the same breath.
-
-**C — Correct the map to say `userspace/pkg/` belongs to lane C, and leave the
-files where they are.** *What changes:* nothing user-visible; lane C gains write
-access to two directories inside lane B's tree. Costs a hole in the otherwise
-clean "lane C never writes `userspace/`" rule, which is the rule that makes the
-three-lane split safe to reason about.
-
-**D — Leave it. Write down that the clock lies.** *What changes:* nothing;
-`TZ=America/New_York` keeps meaning UTC indefinitely.
-
-### My recommendation
-
-**B, with the map corrected in the same change.** The package manager is 5 004
-lines of lane B's code that lane C has never touched; the tzdata package is a
-small addition to it, and asking the lane that wrote it to add one package is far
-cheaper than moving the whole thing or carving an exception. A is the tidiest end
-state and the most expensive to reach — and its cost is paid in merge conflicts
-across three parallel lanes, which is the one currency this project is short of.
-C is the smallest edit and the worst rule.
-
-### If this is never answered
-
-It does not get worse, and nothing else is blocked on it — but it does not get
-better either, and the failure it leaves in place is the quiet kind: a clock that
-is confidently wrong. It has already been stuck nine days for want of one
-sentence from you. Everything else about the feature is finished.
-
-
 ## C-Q9 — [C] The backup tool and the search tools read the same-looking patterns by different rules. Should they be made the same? — Status: OPEN
+
+> ### Update 2026-09-07 — you asked two questions back, and the answers point the other way
+>
+> **In short:** you said you were inclined to make the two agree by taking
+> character classes *out* of file search, and asked (A) what is normal, and
+> (B) whether a user would really benefit. The answers are: (A) character
+> classes are standard in **both** traditions — git, rsync, tar and POSIX
+> `fnmatch` all have them, so "no classes" is normal for neither, and the
+> backup tool is the odd one out even within its own family; and (B) users
+> rarely use them, but the *cost of not having them is not symmetric*.
+>
+> **What a character class is**, since the term has not been glossed here:
+> `[a-z]` in a pattern, meaning "any one character in this set". `[Tt]humbs.db`
+> matches both `Thumbs.db` and `thumbs.db`.
+>
+> **The asymmetry is the whole argument.** When a pattern containing `[` is
+> written, the two behaviours differ *silently*. `[Tt]humbs.db` either excludes
+> two filenames or excludes nothing at all, and neither tool reports anything.
+> The single most likely way such a pattern arrives is somebody copying a
+> `.gitignore` into the backup tool — and today that produces a backup that
+> quietly includes files they meant to leave out.
+>
+> **So the recommendation is now the opposite of your leaning:** add classes to
+> the backup matcher rather than remove them from search. It is the smaller
+> change (one matcher, not two), it moves *toward* both upstream traditions
+> instead of away from both, and it removes a silent-wrong-answer case rather
+> than creating a second one. Removing them from search would make this the
+> only place in the system where `[a-z]` means five literal characters.
+>
+> *What changes if you take it:* a `.gitignore` pasted into the backup tool
+> excludes what it says it excludes.
+>
+> **If you would still rather not add the feature**, the fallback is not
+> "remove it from search" but "make the backup tool **reject** a pattern
+> containing an unescaped `[`" — which turns the silent wrong answer into a
+> loud one, and is a third of the work.
+>
+> *(Analysis by lane B, relayed in
+> `requests/b-c-operator-answered-seven-lane-c-questions-2026-09-07.md`.)*
 
 **In short:** when you tell the backup program which folders to skip, you type a
 pattern like `*.tmp` or `build/**`. When you search for a file, you type a
@@ -1409,90 +1149,6 @@ Background: `known-issues.md` →
 
 ---
 
-## An account with no password: should the lock screen let it through, or refuse forever? (lane C, 2026-08-24)
-
-**In short:** Some accounts have no password set at all. Today, if such an
-account's screen locks, pressing Enter dismisses it — no password is asked for,
-because there is none to ask for. That means anyone who walks up to that
-machine while it is locked gets straight into the session. The obvious fix is to
-refuse: a lock screen with nothing to check should let nobody in. But then the
-*real* user is locked out too, permanently, with no way back to their own
-desktop short of a reboot. I need you to pick which of those two you would
-rather ship.
-
-### Where it bites
-
-`apps/lockscreen/src/main.rs`, `LockScreen::unlocks_for` — one function, written
-specifically so that this is a one-line change once you decide. It is called by
-`submit_password` on every attempt.
-
-The verdict now comes back as one of six values borrowed from lane B's
-`userspace/authlib` (`Accepted`, `Rejected`, `Locked`, `NoPassword`, `Unusable`,
-`RateLimited`). Five of them decide themselves. `NoPassword` — meaning "the
-stored entry for this account is empty" — deliberately does not, because lane B
-made it the *caller's* policy: a console login may reasonably let an empty entry
-through, and a lock screen may not. So each caller must state its own rule, and
-this is ours to state.
-
-### Why it is not obvious
-
-The security argument is clean and lane B makes it: an empty-password account
-means anyone who closes the lid owns the machine.
-
-The counter-argument is that the hole was already open. If the account has no
-password, an attacker standing at that machine can log in as that user from the
-*login* screen without typing anything. Refusing at the lock screen protects an
-already-running session and nothing else — while creating a failure mode that
-is arguably worse than the hole: a desktop that cannot be got back into by the
-person it belongs to.
-
-### Options
-
-**A — accept it (what it does today).**
-*What changes:* nothing. A passwordless account's lock screen is dismissed by
-pressing Enter, as now.
-
-**B — refuse it.**
-*What changes:* a passwordless account that locks can never be unlocked. The
-screen says "This account has no password" and stays up until the machine is
-restarted.
-
-**C — never lock a passwordless account in the first place.**
-*What changes:* auto-lock is suppressed and the manual lock command is refused
-for an account with no password, so the trap in B cannot be entered. If the
-screen is somehow reached anyway it dismisses on any key, as in A. Costs a
-little more code: the suppression has to live wherever locking is triggered,
-not only in the screen.
-
-**D — accept it, but require the account to have been passwordless *before* the
-session started**, so that clearing a password while locked cannot open the
-screen.
-*What changes:* nothing a user would notice; closes a narrow race that only
-matters once `passwd` can be run by something other than the session owner.
-
-### My recommendation
-
-**C.** It is the only one of the four that is neither a hole nor a trap: it
-declines to offer a security boundary that does not exist, rather than
-pretending to enforce one (B) or pretending to have enforced one (A). B's
-failure mode is the one I would least like to explain to a user, because it
-takes a working desktop and makes it unusable through no action of theirs.
-
-If C is more machinery than you want here, **A** — the status quo — is the safer
-of the two remaining, for the reason above: it does not create a new way to lose
-a session, and the exposure it leaves is one the login screen already has.
-
-### If this is never answered
-
-Safe, and it does not get worse. The screen keeps behaving as it always has
-(option A) and the policy is isolated in one function, so answering later costs
-one line plus a test. Nothing is blocked on it. The reason it is worth asking at
-all is that the *refactor that surfaced it* deliberately did not change it —
-altering who can unlock a machine is not something to slip into a commit about
-interface shape.
-
----
-
 ## A-Q4 — [A] Should `oci run` refuse to start when an option cannot be applied? — Status: OPEN
 
 **In short:** `oci run` starts a container. If you ask it for something extra —
@@ -1694,94 +1350,6 @@ against the current defaults is one more thing to check.
 
 ---
 
-## SlateOS has no way to encrypt anything. Which cipher do we add, and who owns it? (lane C, 2026-08-26)
-
-**In short:** The whole operating system can *scramble* data so it can be
-checked (SHA-256, MD5, SHA-1, CRC32 — those are all one-way fingerprints), but
-it cannot **encrypt** anything: there is no code anywhere in the tree that turns
-readable data into unreadable data and back again with a key. So the password
-manager I just wired to a real window cannot save your passwords — not because
-nobody has written the save code, but because there is nothing to lock the file
-with. Adding a cipher is a few hours' work, but *which* one is a decision that
-sticks, because every file written under it has to stay readable forever.
-
-### Where it bites
-
-Anything that needs to store a secret on disk, which is at least:
-
-| Wants it | For | Status |
-|---|---|---|
-| `apps/credmanager` | the password vault | wired to a window, stores nothing — `known-issues.md` → `C-CREDMANAGER-HAS-NO-VAULT-ON-DISK` |
-| `gui/credentials` | saved Wi-Fi and site logins | same gap |
-| `apps/archivemanager` | encrypted zip members | can't read them either — `C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT` |
-| whole-disk encryption | the roadmap's storage section | not started |
-
-`pwkdf` already turns a master password into a 256-bit key correctly, with salt
-and a tunable cost. That half is done and tested. The missing half is what to
-*do* with the key.
-
-### The terms, since two of them do the work
-
-- **AEAD** — "authenticated encryption": a cipher that both hides the data and
-  detects tampering. The alternative (encrypt-only) lets an attacker flip bits
-  in your vault and have it decrypt to different, valid-looking garbage. Nobody
-  should ship encrypt-only in 2026; treat AEAD as settled and read the options
-  below as "which AEAD".
-- **AES-NI** — a CPU instruction that makes AES fast. Without it, a careful
-  software AES is ~5-10× slower *and* much harder to write without leaking the
-  key through timing. Every x86-64 chip since ~2010 has it, but we would be
-  choosing to depend on it.
-
-### Options
-
-**A — ChaCha20-Poly1305, written here.**
-*What changes:* one new `no_std` crate at the workspace root, ~400 lines, no CPU
-feature required. Fast and constant-time in plain Rust on any machine.
-This is what WireGuard and TLS 1.3 use on hardware without AES-NI.
-
-**B — AES-256-GCM, written here.**
-*What changes:* the same shape, but the software fallback is the part that is
-easy to get subtly wrong (timing leaks through table lookups), and doing it
-*properly* means writing the AES-NI path too — so it is really two
-implementations, and the interesting one is x86-only.
-
-**C — port a vetted C implementation instead of writing Rust.**
-*What changes:* no new hand-written crypto, but a C dependency in the build for
-every app that stores a secret, and `design.txt` already says C is for porting
-existing code — which this would be. Slower to land, harder to audit in-tree.
-
-**D — decide later; ship the apps without persistence.**
-*What changes:* nothing. credmanager keeps opening an empty vault every launch,
-`gui/credentials` keeps forgetting Wi-Fi passwords, and the gap spreads to
-whatever gets built next.
-
-### The part that is not mine to decide
-
-Even given a choice, **which lane owns it** is open. The hash crates (`sha2`,
-`sha1`, `md5`) live at the workspace root and are shared by all three lanes, so
-a cipher belongs there too — but that is outside every lane's write glob. If
-you pick A or B, say whether lane C should write it at the root, or whether I
-should file a request to lane A and pick up something else.
-
-### My recommendation
-
-**A, written by whichever lane you say.** ChaCha20-Poly1305 has no CPU
-dependency, so there is one implementation rather than a fast path and a
-dangerous fallback; it is the easiest of the three to write correctly and the
-easiest to test against published vectors. The reason I am asking rather than
-doing it is not the cipher — it is that hand-written crypto in an OS is exactly
-the kind of thing you may want to overrule on principle, and the file format it
-implies is permanent.
-
-### If this is never answered
-
-Nothing breaks and nothing gets worse on its own — but a growing number of
-finished, tested applications stay unable to do the one thing they exist for.
-credmanager is the third app now waiting on this. It is not blocking my current
-work; I am carrying on down the roadmap.
-
----
-
 ## A-Q6 — [A] Two commits that appear to delete the whole OS, and 33 commits signed by a fake name, are permanently in the published history. Leave them, or rewrite? — Status: OPEN (raised 2026-08-29)
 
 **In short:** on 2026-08-29 a safety check that runs just before uploading code
@@ -1945,6 +1513,42 @@ matches lane A's: **A**.
 ---
 
 ## C-Q10 — [C] In the light theme, small grey text on a shaded card is too faint to meet the readability standard, in about 850 places. Fixing it changes how the whole light theme looks. Which way? — Status: OPEN
+
+> ### Update 2026-09-07 — the tool you asked for is built, and it rules out one of the options
+>
+> **In short:** you asked for a web page that shows a shaded card with main,
+> secondary and accent text, lets you try the current colours against two
+> proposed sets, lets you pick arbitrary colours, and shows the contrast
+> number for each one live. Lane B built it. Open it in a browser — no install,
+> no network:
+>
+>     E:\visual studio projects\contrast-explorer.html
+>
+> Whatever you pick there is the answer to this question.
+>
+> **Note on that path.** Lane B published it as
+> `os\tools\contrast-explorer.html`, inside the repository. It is not there --
+> it is one directory *above* `os`, and it is not tracked by git in any
+> branch, so it is not backed up and a clean checkout will not have it. The
+> path above is where the file actually is today, verified by opening it. Lane
+> B has been asked to commit it where they meant to.
+>
+> **Two things fell out of building it, and one of them removes an option:**
+>
+> 1. **The measurements in this entry are confirmed independently.** The
+>    "Current" preset reproduces the published numbers exactly — 7.06 / 4.64 /
+>    4.63 on the page, and 3.69 / 2.42 / 2.42 on the greyest card.
+>
+> 2. **Option B cannot work on its own.** It fixes the main text and nothing
+>    else. With today's greys, the secondary and accent text would need a card
+>    *lighter than the page behind it* to become readable; even on the lightest
+>    card the palette has, they reach 4.31 against a required 4.5. Option A is
+>    reachable, but only with genuinely dark ink — the greyest card tops out at
+>    9.71 : 1 even against pure black, so the three text colours have to be
+>    dark enough that the preset uses near-black values to clear the bar.
+>
+> *(Tool and findings by lane B, relayed in
+> `requests/b-c-operator-answered-seven-lane-c-questions-2026-09-07.md`.)*
 
 **In short:** The desktop has a light theme and a dark theme. In the light one,
 the smaller grey text — the second line of a list row, a caption under a
@@ -2732,6 +2336,45 @@ answered question left in the body is pure cost — and, being older, it sorts
   and updated as a `pkg/` package.
 
 ## Resolved — lane C
+
+- C-Q6 We have written the Settings screens twice — which copy is the real
+  one? — answered 2026-09-07 by the operator, **C**; written up §815: split by
+  kind. What the desktop *shows* you (volume overlay, login screen) stays in
+  the shell and gets wired up; screens you *open* move to the Settings app and
+  the shell's copies go. The operator added a styling mandate that was not part
+  of the question: both follow `Aero Desktop (offline).html`, themeable parts
+  read from current settings, and the demo's look is the default theme —
+  recorded in `roadmap-detailed.md` as instructed.
+
+- C-Q7 The high-contrast scheme's highlight is three times dimmer than the
+  others — change it? — answered 2026-09-07; written up §816: **white**, and
+  the highlight colour becomes user-configurable in every scheme. The
+  configurability is the operator's requirement and binding; the white-over-cyan
+  default was delegated to lane C. The operator's colour-vision reasoning was
+  correct, but the stronger point was their own first sentence — a highlight
+  need not carry meaning in hue at all, and luminance contrast is read
+  identically by every form of colour vision.
+
+- C-Q8 The world's timezone data cannot be written because the lane map hands
+  the job to a directory that does not exist — who does it? — answered
+  2026-09-07 by the operator, **B**; written up §817: lane B, which already
+  owns the package manager, with the map corrected in the same change. The
+  map's error was the cause of the stall, not a missing decision.
+
+- An account with no password: should the lock screen let it through? —
+  answered 2026-09-07 by the operator, **C**; written up §818: such an account
+  is never locked at all, so nothing appears that pretends to be protecting
+  anything. Setting a password is what turns locking on.
+
+- Which cipher, and who owns it? — answered 2026-09-07; written up §819:
+  **ChaCha20-Poly1305**. The operator's rule was "fastest with AES-NI unless
+  the bottleneck is the disk anyway"; for a kilobyte vault dominated by key
+  derivation, neither cipher is measurable, so the exception applies. The one
+  condition that would have flipped it — this becoming the full-disk cipher —
+  does not hold: disk encryption already exists in `kernel/src/fs/diskencrypt.rs`
+  with AES-256-XTS, a mode not interchangeable with an authenticated-message
+  cipher. The entry's unglossed jargon, which the operator called out, is
+  glossed in §819.
 
 - C-Q1 Should normalization consult font coverage? — resolved 2026-08-15
   (§428): **no** — normalization stays font-blind, and the font-fitting stage

@@ -68470,3 +68470,198 @@ request (roadmap 2.3) specifies for lane C "the file manager asking in the same
 dialog that reports the failure". There was no such dialog. There is now, and
 the deferral prompt has somewhere to go.
 
+## 815. The Settings screens split by kind: what the desktop shows you stays in the shell, what you open lives in the app -- and both follow the Aero demo's look
+
+**Date:** 2026-09-07
+**Lane:** C
+**Decided by:** Operator (Claude recommended C; the operator chose C and added the styling mandate, which was not part of the question)
+
+**In short:** the settings screens exist twice -- once inside the desktop
+shell, once in a standalone Settings app -- and neither copy was finished, so
+every change had to be made in two places. From now on the dividing line is
+"is this something the desktop shows you, or a screen you open?". The volume
+overlay and the login screen are the desktop showing you something, so they
+stay in the shell and get wired up. Everything you open from a menu moves to
+the Settings app, and the shell's copies are deleted. Separately, the operator
+wants both to *look* like the `Aero Desktop (offline).html` demo.
+
+**The question.** `open-questions.md` -> C-Q6. Four options: delete the
+shell's panels, delete the app's, split by kind, or leave it.
+
+**The answer: C, split by kind.** The dividing line is a real one rather than
+a compromise between two half-finished copies. It is also the most work, which
+is why it was worth asking rather than assuming.
+
+**The styling mandate, which the operator added unprompted.** The shell and
+the settings pages are to follow `.\Aero Desktop (offline).html`. The split
+the operator specified:
+
+- whatever is *themeable* reads from the current settings, so the OS can carry
+  different themes;
+- everything else follows the demo;
+- and the demo's look is the **default theme**.
+
+The operator's closing sentence -- "If this isn't already in
+roadmap-detailed.md, it should be" -- is an instruction, carried out in the
+same change as this entry.
+
+**What this settles that was in flight.** The palette conversion. The shell's
+549 hardcoded colours are worth converting because those modules survive; the
+app's 2,258 are worth converting because the app is where the settings pages
+are going. Neither half is wasted, which was the thing C-Q6 was blocking.
+
+## 816. The high-contrast scheme's highlight is white by default, and every scheme's highlight is user-configurable
+
+**Date:** 2026-09-07
+**Lane:** C
+**Decided by:** Operator for the configurability requirement, which was theirs and is binding; Claude for the white-over-cyan default, on the operator's explicit invitation to decide it
+
+**In short:** in the "green on black" high-contrast scheme the highlight was
+about three times dimmer than in the other schemes, so the selected item was
+hard to pick out. It becomes white. Separately, and regardless of that pick,
+the highlight colour becomes something the user can change in any scheme.
+
+**The question.** `open-questions.md` -> C-Q7. Whether to brighten it, and to
+what.
+
+**What the operator said.** That they have no problem with a white highlight
+and asked why it has to be a colour at all; that cyan should survive red-green
+colour-blindness because its blue component is the distinguishing one, as it
+is for magenta; that another option might be equally good; that this is
+theory and I may know the practice better; and -- the part that is a
+requirement rather than a preference -- that whatever the default is, **the
+user should be able to configure it.**
+
+**The operator's colour-vision reasoning is correct.** Protanopia and
+deuteranopia (jointly around 8% of men) confuse red against green while the
+blue channel stays intact, which is exactly why cyan and magenta remain
+distinguishable from both. Nothing to correct.
+
+**But the first sentence is the stronger argument, and it decides it.** A
+highlight does not have to carry its meaning in hue at all. *Luminance*
+contrast is read identically by every form of colour vision including
+monochromacy, and by anyone on a failing panel or in direct sunlight. White on
+black is the maximum available and is hue-free. Cyan is defensible; white is
+unimprovable -- and "high contrast" is what the scheme is called.
+
+**The one real argument against white**, and the reason the configurability
+requirement matters more than the default: a user who picks "green on black"
+may want it to *look* like a green terminal, and a white highlight breaks that
+identity. That is a taste the system should not be legislating, which is
+precisely what a setting is for. Cyan stays available.
+
+## 817. The timezone database is packaged by lane B, and the lane map is corrected to say where the package manager actually lives
+
+**Date:** 2026-09-07
+**Lane:** C
+**Decided by:** Operator (Claude recommended B)
+
+**In short:** set your clock to New York and SlateOS quietly gives you UTC,
+because the world's timezone rules were never packaged. Nobody had written
+them because the document saying who owns that job pointed at a directory that
+does not exist. Lane B, which already has the package manager, does the work,
+and the map is corrected in the same change so the next reader is not sent to
+the same empty directory.
+
+**The question.** `open-questions.md` -> C-Q8. Four options: move the package
+manager to a top-level `pkg/` and have lane C write it; give the job to lane
+B; correct the map to point at `userspace/pkg/` and leave ownership with lane
+C; or leave it and write down that the clock lies.
+
+**The answer: B**, which was also the recommendation. The package manager is
+already lane B's and already exists; moving 5,004 lines across a lane boundary
+to make an ownership document true is the tail wagging the dog.
+
+**The correction travels with it.** The map's error is the actual cause of the
+stall -- not a missing decision but a document that named a path nobody could
+find. Fixing the ownership without fixing the map would leave the trap set for
+the next question.
+
+## 818. A passwordless account is never locked, rather than being lockable and then let through
+
+**Date:** 2026-09-07
+**Lane:** C
+**Decided by:** Operator (Claude recommended C)
+
+**In short:** if an account has no password, the lock screen had nothing to
+check, so locking the screen produced a screen that anybody could dismiss --
+security theatre, and worse than none, because it looks locked. From now on an
+account with no password is simply never locked in the first place. The screen
+does not appear, so nothing pretends to be protecting anything.
+
+**The question.** `open-questions.md` -> the lock-screen entry of 2026-08-24.
+Four options: accept the empty password (today's behaviour), refuse it (which
+locks the user out of their own machine forever), never lock such an account
+at all, or accept it only if the account was passwordless before the lock.
+
+**The answer: C**, which was also the recommendation. It is the only one of
+the four that is neither a hole nor a trap. Refusing strands the user;
+accepting is a lock that does not lock; the fourth option is the third with a
+race condition attached.
+
+**What a user sees.** Setting a password on the account is what turns locking
+on. That is a discoverable relationship and a true one, which the previous
+behaviour was not.
+
+## 819. The vault cipher is ChaCha20-Poly1305, and it will not become the disk cipher because that one already exists
+
+**Date:** 2026-09-07
+**Lane:** C
+**Decided by:** Operator (the criterion and its exception were the operator's; lane B established that the exception applies, and Claude confirmed the one condition that would have overridden it does not hold)
+
+**In short:** SlateOS had no way to encrypt a saved password. The choice was
+between two standard ciphers: AES-256-GCM, which is far faster on any modern
+processor because the hardware implements it directly, and ChaCha20-Poly1305,
+which is uniformly fast everywhere without hardware help. The operator's rule
+was "pick whichever is fastest with the hardware acceleration, unless the real
+bottleneck is the disk anyway". For what is actually being encrypted here, the
+speed of neither is measurable -- so the rule's own exception applies, and the
+choice falls to the simpler one to get right: ChaCha20-Poly1305.
+
+**Glossary, because the original question did not gloss these and the operator
+said so.** *AES-NI* -- instructions built into the processor that do AES
+directly, making it several times faster than software. *In-tree* -- the code
+lives in this repository and is compiled with it, as opposed to being fetched
+from an external package registry. *Audit* -- someone reading the code
+deliberately looking for flaws.
+
+**Why crypto needs auditing at all**, which the operator also asked. Because
+it fails silently. A bug in a renderer is a wrong pixel; a bug in a cipher
+produces output that still decrypts correctly with your own code and still
+passes a round-trip test, and is simply readable by someone else. Two classes
+are invisible to ordinary testing: a construction error (a reused nonce, a
+truncated tag, a counter that wraps), and a **timing side-channel**, where the
+code takes measurably longer depending on the secret. The second is invisible
+to *every* functional test by definition, because all the outputs are correct.
+The only defence is someone reading it with intent.
+
+**Why in-tree C is harder to audit**, the third thing asked. Not because C is
+unreadable. Because of who reads it here: this tree is Rust with a strict
+unsafe policy, so the reviewer reads Rust constantly and C rarely, and a
+subtle change lands with less scrutiny. A port also carries provenance to
+track by hand -- which upstream version, which local patches, what changed on
+a re-sync. The claim is about the review pipeline, not the language.
+
+**Why the speed argument does not decide it.** With AES-NI plus PCLMULQDQ,
+AES-256-GCM is decisively faster -- around a cycle per byte, typically two to
+three times a portable ChaCha20. But what is being encrypted is credmanager's
+vault and saved Wi-Fi passwords: kilobytes, written when something changes. At
+that size the cipher is not measurable next to the syscalls, and both are
+dwarfed by the password-to-key derivation, which is *deliberately* slow --
+tens to hundreds of milliseconds. The operator's exception was written for
+exactly this shape of case.
+
+**The one thing that would have flipped it, and why it does not.** Lane B
+noted that if this cipher were to become the basis for full-disk encryption
+later, throughput would be the whole point and AES-NI the reason it is
+feasible. It will not: disk encryption **already exists** in this tree --
+`kernel/src/fs/diskencrypt.rs`, with AES-256-XTS, key slots, TPM sealing and
+LUKS tooling on top. XTS is a mode for block devices and is not
+interchangeable with an authenticated-message cipher in either direction, so
+the vault cipher and the disk cipher are separate choices and always were.
+Checking that was cheaper than asking, and it removes the condition.
+
+**What this means in practice.** One implementation rather than a fast path
+plus a portable fallback, which is the correctness argument the size of the
+data leaves standing on its own.
+

@@ -12,6 +12,7 @@ use crate::color::Color;
 use crate::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::row_strip::RowStrip;
+use crate::scrollbar;
 use crate::step;
 use crate::style::CornerRadii;
 
@@ -1794,16 +1795,20 @@ fn render_scrollbar(cmds: &mut Vec<RenderCommand>, panel: &DropdownPanel) {
     } else {
         1.0
     };
-    let thumb_height = (track_height * visible_fraction)
-        .max(SCROLLBAR_MIN_THUMB)
-        .min(track_height);
-    let thumb_y =
-        panel.viewport_top() + (track_height - thumb_height) * (panel.scroll / max_scroll);
+    // `scrollbar`'s arithmetic, shared with the file dialog, `menu`, the shell
+    // and `apps/dictionary`. The 16 px floor stays this menu's own; see the
+    // module's note on why the floor is an argument.
+    let thumb = scrollbar::thumb_of(
+        crate::frame::Rect::new(track_x, panel.viewport_top(), SCROLLBAR_WIDTH, track_height),
+        visible_fraction,
+        panel.scroll / max_scroll,
+        SCROLLBAR_MIN_THUMB,
+    );
     cmds.push(RenderCommand::FillRect {
-        x: track_x,
-        y: thumb_y,
-        width: SCROLLBAR_WIDTH,
-        height: thumb_height,
+        x: thumb.x,
+        y: thumb.y,
+        width: thumb.w,
+        height: thumb.h,
         color: SCROLLBAR_THUMB_COLOR,
         corner_radii: radii,
     });

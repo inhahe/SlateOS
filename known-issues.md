@@ -89292,7 +89292,54 @@ directory made the file manager read the wrong bytes. As a developer, every
 
 ---
 
-## `TD-C-EXPLORER-HAS-NO-EDITING-KEYS` (lane C, 2026-08-26)
+## `TD-C-EXPLORER-HAS-NO-EDITING-KEYS` (lane C, 2026-08-26) -- **CLOSED 2026-09-07**
+
+**Closed 2026-09-07 (lane C).** Delete, Shift+Delete, F2, Ctrl+Z and
+Ctrl+C/X/V are bound. Delete and Shift+Delete raise a confirmation before
+acting; F2 opens a rename box holding the current name; Ctrl+Z restores.
+
+**Two of the three blockers below were already gone, and I did not check
+before writing them down.** `gui/toolkit`'s `AlertDialog::destructive` --
+affirmative button carrying the verb, drawn in the error colour, focus
+starting on Cancel -- is precisely the confirmation the `Delete` row asks
+for, and `InputDialog` is a text entry that returns what was typed. Both
+predate this entry. The entry asserted they were missing, and the assertion
+was never re-tested; the work turned out to be wiring, not building.
+
+The `Ctrl+C`/`Ctrl+V` row was wrong in a different way. It said the file
+manager had no clipboard. It has had `copy_selected`, `cut_selected`,
+`paste` and a `clipboard` field the whole time -- what it lacks is a
+*system* clipboard, so a file copied here cannot be pasted into another
+application. That is a real limitation and a narrower one, and it is now
+recorded as its own entry rather than as "no clipboard".
+
+What genuinely did not exist was the *inline* rename field, and it still
+does not. A rename dialog is the other standard shape for the same
+operation, so F2 works today without it.
+
+**A latent bug fell out of wiring Ctrl+Z, and it was the reason to do this
+work carefully.** `delete_selected` recorded each recycled file as
+`(path, None)`, because the bin owns the data and restore is by entry id.
+`execute_undo` only acted `if let Some(d) = dest`, so it skipped every
+recycled file and returned `Ok(())` -- an undo that reported success and
+restored nothing. It was invisible because nothing called it on a recycle
+record. The cause was that `Option<PathBuf>` had to mean two opposite
+things: a permanent delete also recorded `None`, for "nothing to reverse",
+and skipping *that* is correct. `UndoTarget` (`Path` / `Recycled` /
+`Nothing`) names the three cases, and `execute_undo` now takes the bin and
+returns how many items it actually put back, so a caller cannot report a
+restore that did not happen. See `0ffb599de`.
+
+**One test was passing vacuously and mutation-checking caught it.** The
+render test asserted that "notes.txt" appeared among the drawn text -- true
+with the dialog entirely absent, because the listing row draws the same
+name. It now asserts the whole sentence, joined across the word wrap, which
+no listing row can produce.
+
+Original entry follows.
+
+---
+
 
 **In short:** the file manager is now a real window you can click and type in,
 but only the keys that *look* at files work — arrows, Home/End, Enter,
@@ -89328,6 +89375,49 @@ nothing says why.
 ---
 
 ## `TD-C-EXPLORER-DOES-NOT-SCROLL` (lane C, 2026-08-26)
+
+**Narrowed 2026-09-07: the two list views scroll; the icon grid does not yet.**
+`ExplorerState` holds a `ListViewport`, the details and list renderers draw the
+rows `scroll_window::visible` names, the wheel routes through
+`wheel::Accumulator`, and `move_selection_to` syncs the cursor row into the
+viewport so the arrow keys drag the view with them. `ListViewport` gained
+`scroll_by`, which is the one operation there that leaves the selection alone --
+a wheel that revealed the selection could not scroll at all, because the view
+would snap back on the next call.
+
+**The icon grid scrolls too, as of the commit after that one.** The offset
+stays in *entries* -- one number for all three views, so changing view mode
+lands you where you were rather than at the top -- and the grid rounds it down
+to a whole row of icons, because starting mid-row would put the first cell in
+the middle of the pane. The wheel multiplies its row step by the column count
+there: a notch is three rows, and in a grid a row is `cols` entries, so
+stepping by entries would move three files and look unresponsive.
+
+**CLOSED 2026-09-07.** The scrollbar landed with the commit after that one:
+a track and a draggable thumb in all three views, a page jump for a click on
+the track either side of it, and no bar at all when the listing fits.
+
+It is drawn from a new shared `guitk::scrollbar`, not a seventh private copy.
+Six places in the tree already had one, each with its own version of the same
+formula. Five now share this module -- the file dialog, `menu`, `menubar`, the
+desktop shell and `apps/dictionary`; the sixth, `apps/spreadsheet`, is
+deliberately left because its bar is generic over the axis and this module is
+vertical-only. (The commit named `window_peek` as one of the six. That file has
+no scrollbar: the grep had matched `max_thumb_height`, which sizes a window
+preview. See the module doc.) The extraction took the file dialog's, which
+was the best documented and the only one with a test for the end-of-list case,
+and `dialog.rs` was converted first so its own tests prove the shared module
+says what its copy did.
+
+**Follow-up worth doing, not done here:** the other five copies. They are
+independent of explorer and each is a small, separately-testable conversion;
+folding them into this change would have made a scrolling fix into a
+five-file refactor. `move_selection` also still exists
+rather than deferring to `ListViewport::select_prev`/`select_next` as the plan
+below suggests -- explorer's multi-selection means the viewport is used for
+scrolling only, and folding the two together is the part that needs the
+anchor/extend decision the "one genuine mismatch" section describes.
+
 
 **In short:** the file manager draws as many entries as fit in the window and
 then stops. There is no scrollbar, no mouse wheel, no Page Up/Page Down — so in
@@ -122819,3 +122909,38 @@ dispatch bug is fixed.
 **Reproducer:** rebuild fixtures with `PYTHONPATH="D:/visual studio
 projects/fastpy"`, rebuild rootfs, enable the rung, boot.  The liveness
 monitor will report the hang within ~15s of the fixture starting.
+
+---
+
+## `TD-C-THE-FILE-MANAGER-CLIPBOARD-STOPS-AT-ITS-OWN-WINDOW` (lane C, 2026-09-07)
+
+**In short:** copying a file in the file manager and pasting it in the file
+manager works. Copying a file there and pasting it *anywhere else* does not,
+because the file manager keeps its copied-files list in a variable of its own
+rather than handing it to the system. Nothing tells the user that; Ctrl+C looks
+identical either way, and the paste simply does not happen in the other window.
+
+**Where it lives.** `apps/explorer/src/main.rs` -> the `clipboard` field, and
+`copy_selected` / `cut_selected` / `paste` around it. The field is an
+`Option<ClipboardOp>` holding `Copy(Vec<PathBuf>)` or `Cut(Vec<PathBuf>)`, and
+it is private to the one running `ExplorerState`.
+
+**Why this entry exists.** It replaces a wrong claim.
+`TD-C-EXPLORER-HAS-NO-EDITING-KEYS` said the file manager had *no* clipboard
+and that Ctrl+C could not be wired until one was built. It has had one all
+along -- what it lacks is a *shared* one. Wiring the keys was therefore
+correct, and the residue is this narrower thing.
+
+**What the proper fix is.** A clipboard owned outside the app, holding a
+*typed* payload rather than text: a file reference is a list of paths plus
+whether it was a copy or a cut, and flattening it to a newline-joined string
+loses the cut/copy distinction and breaks on any path containing a newline
+(our paths allow every byte except `/` and NUL). `gui/toolkit` has a clipboard
+for text only. Whether the system clipboard belongs in the toolkit, the
+compositor or a service is the open part -- text and files want the same
+ownership rules and different payloads, and a text-only clipboard grown a
+files case by accident is how the two end up disagreeing about which one is
+authoritative.
+
+**How you would notice.** Copy a file in the file manager, switch to any other
+window, press Ctrl+V. Nothing arrives, and nothing says why.

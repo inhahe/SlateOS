@@ -53998,6 +53998,14 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 
 ## ############################################################################
 ## Lane B — POSIX & userland
+- Randomness distributions (operator asked, 2026-09-07, alongside §1007): the
+  entropy syscall stays uniform-bytes-only -- that is the security boundary, and
+  every distribution is derived from it, so putting a `normal`/`poisson` option
+  on the syscall would invite someone to draw a key from a non-uniform source.
+  Provide the distributions one layer up, in a userspace crate over the uniform
+  source (the shape Rust's `rand` / `rand_distr` split uses): normal via
+  Box-Muller or ziggurat, exponential, Poisson, and a seeded deterministic
+  variant for tests. Wanted by anything that simulates rather than secures.
 ## ############################################################################
 ## OPEN (2026-08-14, operator decision — design-decisions.md §305):
 ## osh's bash-fidelity scope is FROZEN. READ §305 BEFORE ANY osh PARITY WORK.

@@ -30,8 +30,13 @@ mod fileops;
 mod thumbs;
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::listview::ListViewport;
+use guitk::modal::{AlertDialog, DialogResult, InputDialog};
 use guitk::render::RenderTree;
+use guitk::scroll_window;
+use guitk::scrollbar;
+use guitk::wheel::Accumulator as WheelAccumulator;
 
 use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
 use dropzone::{
@@ -39,7 +44,7 @@ use dropzone::{
 };
 use fileops::{
     ConflictPolicy, ErrorPolicy, FileOpEvent, FileOperation, OperationExecutor, OperationPlan,
-    OperationSummary, RecycleBin, UndoStack,
+    OperationSummary, RecycleBin, UndoStack, UndoTarget,
 };
 use thumbs::{
     ThumbCategory, ThumbConfig, Thumbnail, ThumbnailCache, ThumbnailGenerator, ThumbnailRequest,
@@ -240,6 +245,42 @@ pub enum SortDir {
 // Clipboard
 // ============================================================================
 
+/// A modal the file manager is waiting on, and what to do when it answers.
+///
+/// One field rather than one `Option` per dialog kind: only one modal can be
+/// up at a time -- that is what modal means -- and separate fields would make
+/// "a delete confirmation and a rename box, both open" a representable state
+/// that every reader has to rule out by hand.
+enum Modal {
+    /// A destructive action the user has been asked to confirm.
+    Confirm {
+        dialog: AlertDialog,
+        action: PendingAction,
+    },
+    /// A rename in progress, awaiting the new name.
+    Rename {
+        dialog: InputDialog,
+        /// The file being renamed, by path rather than by row index.
+        ///
+        /// A row index is only meaningful against the listing that produced
+        /// it, and the listing is reloaded on every operation; an index held
+        /// across a modal names whatever has since moved into that row. The
+        /// path is the stable identifier, and it is looked up when the dialog
+        /// answers.
+        target: PathBuf,
+    },
+}
+
+/// What a confirmation carries out if it is confirmed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingAction {
+    /// Move the selection to the recycle bin, where it can be restored.
+    Recycle,
+    /// Erase the selection outright. There is no undo for this one, which is
+    /// why its dialog says so.
+    DeletePermanently,
+}
+
 /// File operation pending in clipboard.
 #[derive(Clone, Debug)]
 pub enum ClipboardOp {
@@ -307,6 +348,24 @@ pub struct ExplorerState {
     pub current_path: PathBuf,
     /// Entries in current directory.
     pub entries: Vec<FileEntry>,
+    /// Which rows are on screen, and the cursor row the keyboard drags with it.
+    ///
+    /// Explorer keeps its own `selected_indices` for the multi-selection --
+    /// Ctrl+A picks everything, and a viewport has one `selected` -- so this is
+    /// used for *scrolling*, with the cursor row synced into it. A viewport
+    /// that also owned the selection would need an anchor/extend notion, which
+    /// is a file-manager concern rather than a list-widget one.
+    pub viewport: ListViewport,
+    /// Fractional wheel notches not yet spent on a row.
+    ///
+    /// Without it a trackpad, which sends many small deltas, scrolls not at
+    /// all: each one truncates to zero rows on its own.
+    wheel: WheelAccumulator,
+    /// How far below the thumb's own top the pointer took hold, while dragging.
+    ///
+    /// Kept so the thumb follows the grab point rather than jumping its top to
+    /// the pointer on the first move.
+    thumb_grab: Option<f32>,
     /// Navigation history (back stack).
     pub history_back: VecDeque<PathBuf>,
     /// Navigation history (forward stack).
@@ -352,6 +411,12 @@ pub struct ExplorerState {
     pub undo: UndoStack,
     /// Recycle bin used by non-permanent delete.
     pub recycle: RecycleBin,
+    /// The dialog currently taking the window's input, if any.
+    ///
+    /// While this is `Some`, every event goes to it and none reaches the
+    /// listing: a confirmation that also let Delete move the selection would
+    /// act on a different file than the one it named.
+    modal: Option<Modal>,
     /// The detail view's column set: which columns are shown, in what order,
     /// at what widths, and which one carries the sort arrow.
     ///
@@ -410,6 +475,9 @@ impl ExplorerState {
         let mut state = Self {
             current_path: start_path.to_path_buf(),
             entries: Vec::new(),
+            viewport: ListViewport::new(0),
+            wheel: WheelAccumulator::default(),
+            thumb_grab: None,
             history_back: VecDeque::new(),
             history_forward: VecDeque::new(),
             view_mode: ViewMode::Details,
@@ -428,6 +496,7 @@ impl ExplorerState {
             sidebar_width: 200.0,
             undo: UndoStack::new(),
             recycle: RecycleBin::default_location(),
+            modal: None,
             columns: ColumnManager::with_defaults(),
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
@@ -987,9 +1056,11 @@ impl ExplorerState {
             let mut first_error = None;
             for path in &paths {
                 match self.recycle.recycle(path) {
-                    // The recycle bin owns the moved data, so there is no new
-                    // location to record here; restore is by entry id.
-                    Ok(_) => recycled.push((path.clone(), None)),
+                    // The bin owns the moved data, so the undo record names the
+                    // bin entry rather than a path. Recording `None` here --
+                    // which is what this did -- was indistinguishable from a
+                    // permanent delete, and undo skipped it silently.
+                    Ok(id) => recycled.push((path.clone(), UndoTarget::Recycled(id))),
                     Err(e) => {
                         if first_error.is_none() {
                             first_error = Some(format!("{}: {e}", path.display()));
@@ -1391,6 +1462,16 @@ impl ExplorerState {
         // rather than under it.
         self.render_drop_feedback(&mut tree);
 
+        // The modal after even that, so it draws over the listing it is
+        // asking about -- the drop feedback is the only other thing here that
+        // floats above the window's own furniture, and a confirmation must
+        // sit above it too.
+        match self.modal.as_mut() {
+            Some(Modal::Confirm { dialog, .. }) => dialog.render(w, h, &mut tree),
+            Some(Modal::Rename { dialog, .. }) => dialog.render(w, h, &mut tree),
+            None => {}
+        }
+
         tree
     }
 
@@ -1512,6 +1593,172 @@ impl ExplorerState {
             ViewMode::Icons => self.render_icons(tree, zones, list_x, list_y, list_w, list_h),
             ViewMode::List => self.render_list(tree, zones, list_x, list_y, list_w, list_h),
         }
+        // After the view, so the bar sits over the rows rather than under them.
+        self.render_scrollbar(tree);
+    }
+
+    /// The file pane's rectangle: below the toolbar, right of the sidebar.
+    ///
+    /// The renderer and the hit test both come here rather than each computing
+    /// it, because a scrollbar drawn in one place and hit-tested in another is
+    /// the class of bug nobody sees until they try to drag it.
+    fn pane_rect(&self) -> Rect {
+        Rect::new(
+            self.sidebar_width,
+            64.0,
+            (self.window_width as f32 - self.sidebar_width).max(0.0),
+            (self.window_height as f32 - 64.0 - 24.0).max(0.0),
+        )
+    }
+
+    /// How many rows of the current view fit in the pane.
+    ///
+    /// In the grid a "row" is a row of icons, so this counts *entries* -- the
+    /// unit the viewport offset is in -- by multiplying by the column count.
+    fn visible_capacity(&self) -> usize {
+        let pane = self.pane_rect();
+        match self.view_mode {
+            ViewMode::List => scroll_window::capacity(LIST_ROW_H, pane.height),
+            ViewMode::Details => scroll_window::capacity(ROW_H, (pane.height - HEADER_H).max(0.0)),
+            ViewMode::Icons => scroll_window::capacity(ICON_CELL_H, pane.height)
+                .saturating_mul(self.icon_columns()),
+        }
+    }
+
+    /// The scrollbar's track, when the listing is long enough to have one.
+    fn scrollbar_track(&self) -> Option<Rect> {
+        let capacity = self.visible_capacity();
+        if !scrollbar::needed(self.entries.len(), capacity) {
+            return None;
+        }
+        let pane = self.pane_rect();
+        // The detail view's header is not part of the scrollable region, so the
+        // track starts below it -- a thumb that ran up behind the column
+        // headings would claim rows that are never drawn there.
+        let top = match self.view_mode {
+            ViewMode::Details => pane.y + HEADER_H,
+            ViewMode::List | ViewMode::Icons => pane.y,
+        };
+        Some(Rect::new(
+            pane.x + pane.width - scrollbar::WIDTH,
+            top,
+            scrollbar::WIDTH,
+            (pane.y + pane.height - top).max(0.0),
+        ))
+    }
+
+    /// The thumb's rectangle, in the toolkit's coordinates.
+    fn scrollbar_thumb(&self) -> Option<guitk::frame::Rect> {
+        let track = self.scrollbar_track()?;
+        Some(scrollbar::thumb(
+            guitk::frame::Rect::new(track.x, track.y, track.width, track.height),
+            self.entries.len(),
+            self.visible_capacity(),
+            self.viewport.first_visible(),
+        ))
+    }
+
+    /// Take hold of the thumb, if the press landed on it. A press elsewhere on
+    /// the track pages towards it, which is what every scrollbar does and what
+    /// makes the track worth drawing at all.
+    fn press_scrollbar(&mut self, x: f32, y: f32) -> bool {
+        let (Some(track), Some(thumb)) = (self.scrollbar_track(), self.scrollbar_thumb()) else {
+            return false;
+        };
+        if x < track.x || x >= track.x + track.width {
+            return false;
+        }
+        if y < track.y || y >= track.y + track.height {
+            return false;
+        }
+        if y >= thumb.y && y < thumb.y + thumb.h {
+            self.thumb_grab = Some(y - thumb.y);
+        } else {
+            // A page, in the direction of the click. `checked_neg` rather than
+            // `-page`: a capacity that did not fit in an `isize` would be a
+            // window taller than nine quintillion rows, but the negation is
+            // still the one operation here that can fail, and paging by zero
+            // is a better answer than wrapping to the far end of the list.
+            let page = isize::try_from(self.visible_capacity()).unwrap_or(isize::MAX);
+            let delta = if y < thumb.y {
+                page.checked_neg().unwrap_or(0)
+            } else {
+                page
+            };
+            self.viewport.scroll_by(delta, self.entries.len());
+        }
+        true
+    }
+
+    /// Continue a thumb drag. Returns whether the view moved.
+    fn drag_scrollbar(&mut self, y: f32) -> bool {
+        let (Some(grab), Some(track), Some(thumb)) = (
+            self.thumb_grab,
+            self.scrollbar_track(),
+            self.scrollbar_thumb(),
+        ) else {
+            // The listing got short enough to lose its scrollbar mid-drag.
+            self.thumb_grab = None;
+            return false;
+        };
+        let Some(first) = scrollbar::first_from_drag(
+            guitk::frame::Rect::new(track.x, track.y, track.width, track.height),
+            thumb.h,
+            grab,
+            y,
+            self.entries.len(),
+            self.visible_capacity(),
+        ) else {
+            return false;
+        };
+        if first == self.viewport.first_visible() {
+            return false;
+        }
+        self.viewport.scroll_to(first, self.entries.len());
+        true
+    }
+
+    /// Draw the scrollbar, if there is one.
+    fn render_scrollbar(&self, tree: &mut RenderTree) {
+        let Some(track) = self.scrollbar_track() else {
+            return;
+        };
+        // The toolkit's `Rect` names its sides `w`/`h` where explorer's names
+        // them `width`/`height`; converted here, at the one call that crosses.
+        let track_gui = guitk::frame::Rect::new(track.x, track.y, track.width, track.height);
+        let thumb = scrollbar::thumb(
+            track_gui,
+            self.entries.len(),
+            self.visible_capacity(),
+            self.viewport.first_visible(),
+        );
+        tree.fill_rect(
+            track.x,
+            track.y,
+            track.width,
+            track.height,
+            Color::from_hex(0xF0F0F0),
+        );
+        tree.fill_rounded_rect(
+            thumb.x + 1.0,
+            thumb.y,
+            thumb.w - 2.0,
+            thumb.h,
+            Color::from_hex(0xB0B0B0),
+            guitk::style::CornerRadii::all(4.0),
+        );
+    }
+
+    /// How many icon cells fit across the file pane.
+    ///
+    /// At least one, however narrow: a zero would make the row index a
+    /// division by zero, and a pane too narrow for a cell should clip one
+    /// rather than draw none. Shared by the renderer and the wheel, because a
+    /// wheel stepping by a different column count than the grid is laid out in
+    /// would move by a fraction of a row and feel stuck.
+    fn icon_columns(&self) -> usize {
+        let pane_w = (self.window_width as f32 - self.sidebar_width).max(0.0);
+        ((pane_w / ICON_CELL_W) as usize).max(1)
     }
 
     /// The icon view: a grid of thumbnail cells, each captioned with its name.
@@ -1538,8 +1785,19 @@ impl ExplorerState {
         // the row index a division by zero, and a pane too narrow for a cell
         // should clip one cell rather than draw none.
         let cols = ((w / ICON_CELL_W) as usize).max(1);
-        let visible_rows = (h / ICON_CELL_H).max(0.0) as usize;
-        let visible_cells = visible_rows.saturating_mul(cols);
+        // The offset is kept in *entries*, one number for all three views, so
+        // changing view mode lands you at roughly the same place rather than
+        // back at the top. The grid rounds it down to a whole row of icons:
+        // starting mid-row would put the first cell in the middle of the pane
+        // with a gap beside it.
+        let first = self
+            .viewport
+            .first_visible()
+            .checked_div(cols)
+            .unwrap_or(0)
+            .saturating_mul(cols);
+        let icon_rows = scroll_window::capacity(ICON_CELL_H, h);
+        let visible_cells = icon_rows.saturating_mul(cols);
 
         tree.translate(x, y);
         // The grid is clipped to the pane, not merely truncated to whole rows:
@@ -1547,13 +1805,24 @@ impl ExplorerState {
         // list is, rather than vanish.
         tree.clip(0.0, 0.0, w, h);
 
-        for (i, entry) in self.entries.iter().take(visible_cells).enumerate() {
+        for (cell, entry) in self
+            .entries
+            .iter()
+            .skip(first)
+            .take(visible_cells)
+            .enumerate()
+        {
+            // Laid out by the *visible* cell, identified by the *absolute*
+            // index. Using one number for both would push the first row off
+            // the top the moment the grid scrolled, and would register drop
+            // zones under the wrong files.
+            let i = first.saturating_add(cell);
             // `cols` is at least 1 by the `max` above, so neither `None` arm
             // is reachable — but writing the division as fallible keeps the
             // loop free of an operation whose safety the reader has to prove
             // from a line thirty above it.
-            let cx = i.checked_rem(cols).unwrap_or(0) as f32 * ICON_CELL_W;
-            let cy = i.checked_div(cols).unwrap_or(0) as f32 * ICON_CELL_H;
+            let cx = cell.checked_rem(cols).unwrap_or(0) as f32 * ICON_CELL_W;
+            let cy = cell.checked_div(cols).unwrap_or(0) as f32 * ICON_CELL_H;
 
             // Registered in window coordinates, not the pane-local ones the
             // commands are emitted in: the pointer position a drop arrives
@@ -1623,14 +1892,28 @@ impl ExplorerState {
         w: f32,
         h: f32,
     ) {
-        let visible_rows = (h / LIST_ROW_H).max(0.0) as usize;
+        // Computed from the pixel height rather than read off the viewport,
+        // because a renderer has only `&self` and the window may have been
+        // resized since the last event. `visible` also clamps a stale offset to
+        // the last page instead of drawing blank space.
+        let rows = scroll_window::visible(
+            self.entries.len(),
+            LIST_ROW_H,
+            h,
+            self.viewport.first_visible(),
+        );
 
         tree.translate(x, y);
         tree.clip(0.0, 0.0, w, h);
 
-        for (i, entry) in self.entries.iter().take(visible_rows).enumerate() {
-            let ry = i as f32 * LIST_ROW_H;
+        for (row, i) in (rows.start..rows.end()).enumerate() {
+            let Some(entry) = self.entries.get(i) else {
+                break;
+            };
+            let ry = row as f32 * LIST_ROW_H;
 
+            // The *absolute* index, so a click on the third visible row names
+            // the third visible file rather than the third file in the folder.
             zones.register_file_row(
                 i,
                 &entry.path,
@@ -1700,7 +1983,13 @@ impl ExplorerState {
         h: f32,
     ) {
         let table_w = (w - ICON_GUTTER).max(0.0);
-        let visible_rows = ((h - HEADER_H) / ROW_H).max(0.0) as usize;
+        // The header eats its own height before the rows get any.
+        let rows = scroll_window::visible(
+            self.entries.len(),
+            ROW_H,
+            (h - HEADER_H).max(0.0),
+            self.viewport.first_visible(),
+        );
 
         tree.translate(x, y);
 
@@ -1711,13 +2000,21 @@ impl ExplorerState {
         }
         tree.untranslate();
 
-        for (i, entry) in self.entries.iter().take(visible_rows).enumerate() {
-            let ey = HEADER_H + i as f32 * ROW_H;
+        for (row, i) in (rows.start..rows.end()).enumerate() {
+            let Some(entry) = self.entries.get(i) else {
+                break;
+            };
+            let ey = HEADER_H + row as f32 * ROW_H;
 
+            // The absolute index, so a click names the file under the pointer
+            // rather than the one that many rows from the top of the folder.
             zones.register_file_row(i, &entry.path, Rect::new(x, y + ey, w, ROW_H), entry.is_dir);
 
             if entry.selected {
                 tree.fill_rect(0.0, ey, w, ROW_H, Color::from_hex(0xCCE8FF));
+            // Striped by *absolute* row, so the banding does not crawl as the
+            // view scrolls -- a stripe that follows the screen position rather
+            // than the file makes a scrolling list shimmer.
             } else if i % 2 == 1 {
                 tree.fill_rect(0.0, ey, w, ROW_H, Color::from_hex(0xFAFAFA));
             }
@@ -2066,6 +2363,13 @@ impl ExplorerState {
     /// disagreed, the user would click one file and open another.
     #[must_use]
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // A modal owns the input while it is up. Falling through to the
+        // listing as well is how a Delete confirmation also moves the
+        // selection, so that confirming it acts on a different file than the
+        // one the dialog named.
+        if self.modal.is_some() {
+            return self.handle_modal_event(event);
+        }
         match event {
             Event::Mouse(m) => self.handle_mouse(m),
             Event::Key(k) => k.pressed && self.handle_key(k),
@@ -2101,12 +2405,45 @@ impl ExplorerState {
 
     fn handle_mouse(&mut self, m: &MouseEvent) -> bool {
         match m.kind {
-            MouseEventKind::Press(MouseButton::Left) => self.click_at(m.x, m.y),
+            // The scrollbar first: it is drawn over the rows, so a press on it
+            // is not a press on the file underneath.
+            MouseEventKind::Press(MouseButton::Left) => {
+                self.press_scrollbar(m.x, m.y) || self.click_at(m.x, m.y)
+            }
+            MouseEventKind::Release(MouseButton::Left) => {
+                let was = self.thumb_grab.take();
+                was.is_some()
+            }
+            MouseEventKind::Move if self.thumb_grab.is_some() => self.drag_scrollbar(m.y),
             MouseEventKind::DoubleClick(MouseButton::Left) => self.open_at(m.x, m.y),
             // A file manager's back/forward thumb buttons are the one mouse
             // gesture users expect to work without a toolbar.
             MouseEventKind::Press(MouseButton::Back) => self.go_back_if_possible(),
             MouseEventKind::Press(MouseButton::Forward) => self.go_forward_if_possible(),
+            // Accumulated because a trackpad sends many fractional notches and
+            // each would truncate to zero rows on its own.
+            //
+            // Not negated here: `Accumulator::rows` has already done it. `dy`
+            // is positive away from the user, and the accumulator returns rows
+            // *towards the end of the list*, which is the direction a row index
+            // grows. Negating again scrolled up from the top and therefore
+            // nowhere -- the failure this test caught.
+            MouseEventKind::Scroll { dy, .. } => {
+                let rows = self.wheel.rows(dy);
+                if rows == 0 {
+                    return false;
+                }
+                // In the grid a "row" is a row of icons, which is `cols`
+                // entries. Without this a notch moves three entries -- less
+                // than one visible row on any pane wider than three cells --
+                // and the view appears not to respond.
+                let step = match self.view_mode {
+                    ViewMode::Icons => rows.saturating_mul(self.icon_columns() as isize),
+                    ViewMode::Details | ViewMode::List => rows,
+                };
+                self.viewport.scroll_by(step, self.entries.len());
+                true
+            }
             _ => false,
         }
     }
@@ -2199,12 +2536,192 @@ impl ExplorerState {
                 self.load_directory();
                 true
             }
+            // Shift+Delete is the permanent one, by long convention. It is
+            // matched first because `Key::Delete` below would otherwise take
+            // it and quietly recycle instead.
+            Key::Delete if k.modifiers.shift => self.ask_delete(PendingAction::DeletePermanently),
+            Key::Delete => self.ask_delete(PendingAction::Recycle),
+            Key::F2 => self.ask_rename(),
+            Key::Z if ctrl => {
+                self.undo_last();
+                true
+            }
+            Key::C if ctrl => {
+                self.copy_selected();
+                true
+            }
+            Key::X if ctrl => {
+                self.cut_selected();
+                true
+            }
+            Key::V if ctrl => {
+                self.paste();
+                true
+            }
             Key::H if ctrl => {
                 self.toggle_hidden();
                 true
             }
             _ => false,
         }
+    }
+
+    /// Count and name the selection, for a dialog that has to be specific.
+    ///
+    /// "Delete 3 items?" and "Delete 'notes.txt'?" are different questions,
+    /// and the second is the one that lets a user notice they selected the
+    /// wrong file. A dialog that always said "the selected items" would be
+    /// exactly as true and no use at all.
+    fn selection_summary(&self) -> Option<(usize, String)> {
+        let mut selected = self.entries.iter().filter(|e| e.selected);
+        let first = selected.next()?;
+        let rest = selected.count();
+        let name = first.path.file_name().map_or_else(
+            || first.path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        Some((rest.saturating_add(1), name))
+    }
+
+    /// Put up the confirmation for a delete, or refuse if nothing is selected.
+    fn ask_delete(&mut self, action: PendingAction) -> bool {
+        let Some((count, name)) = self.selection_summary() else {
+            self.status_message = "Nothing selected".to_string();
+            return true;
+        };
+
+        let subject = if count == 1 {
+            format!("\"{name}\"")
+        } else {
+            format!("{count} items")
+        };
+
+        let dialog = match action {
+            PendingAction::Recycle => AlertDialog::destructive(
+                "Delete",
+                &format!("Move {subject} to the recycle bin?"),
+                "Delete",
+            )
+            .with_detail("You can put it back from the recycle bin, or with Ctrl+Z."),
+            PendingAction::DeletePermanently => AlertDialog::destructive(
+                "Delete permanently",
+                &format!("Permanently delete {subject}?"),
+                "Delete permanently",
+            )
+            .with_detail("This cannot be undone. The data is erased, not recycled."),
+        };
+
+        let mut dialog = dialog;
+        dialog.show();
+        self.modal = Some(Modal::Confirm { dialog, action });
+        true
+    }
+
+    /// Put up the rename box for the first selected entry.
+    ///
+    /// A dialog rather than an edit field drawn into the row: the row editor
+    /// is the nicer of the two and it does not exist, and a rename that works
+    /// through a plain box is worth more than a rename that is still absent
+    /// because the nicer version was a bigger job.
+    fn ask_rename(&mut self) -> bool {
+        let Some(&index) = self.selected_indices.first() else {
+            self.status_message = "Nothing selected".to_string();
+            return true;
+        };
+        let Some(entry) = self.entries.get(index) else {
+            return false;
+        };
+        let target = entry.path.clone();
+        let current = target
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+
+        let mut dialog =
+            InputDialog::prompt("Rename", "New name:", &current).with_initial_text(&current);
+        dialog.show();
+        self.modal = Some(Modal::Rename { dialog, target });
+        true
+    }
+
+    /// Feed one event to the open modal, and act if it has answered.
+    fn handle_modal_event(&mut self, event: &Event) -> bool {
+        let Some(modal) = self.modal.as_mut() else {
+            return false;
+        };
+
+        let consumed = match modal {
+            Modal::Confirm { dialog, .. } => dialog.handle_event(event),
+            Modal::Rename { dialog, .. } => dialog.handle_event(event),
+        } == EventResult::Consumed;
+
+        let answer = match modal {
+            Modal::Confirm { dialog, .. } => dialog.result().cloned(),
+            Modal::Rename { dialog, .. } => dialog.result().cloned(),
+        };
+
+        let Some(answer) = answer else {
+            return consumed;
+        };
+
+        // Taken before acting: the action reloads the directory and sets a
+        // status message, and doing that with the dialog still up would leave
+        // it drawn over a listing that no longer matches what it asked about.
+        let modal = self.modal.take();
+        self.apply_modal_answer(modal, answer);
+        true
+    }
+
+    /// Carry out what the answered modal was asking about.
+    fn apply_modal_answer(&mut self, modal: Option<Modal>, answer: DialogResult) {
+        match modal {
+            Some(Modal::Confirm { action, .. }) => {
+                // Only the affirmative acts. `Dismissed` covers Escape and a
+                // click outside, and both mean no.
+                if matches!(answer, DialogResult::Ok | DialogResult::Yes) {
+                    self.delete_selected(action == PendingAction::DeletePermanently);
+                } else {
+                    self.status_message = "Delete cancelled".to_string();
+                }
+            }
+            Some(Modal::Rename { target, .. }) => match answer {
+                DialogResult::Text(name) => self.rename_path(&target, &name),
+                _ => self.status_message = "Rename cancelled".to_string(),
+            },
+            None => {}
+        }
+    }
+
+    /// Rename the entry currently holding `target`.
+    ///
+    /// Looks the row up by path rather than trusting an index captured when
+    /// the dialog opened; if the file has gone in the meantime, that is
+    /// reported rather than renaming whatever now sits in that row.
+    fn rename_path(&mut self, target: &Path, new_name: &str) {
+        match self.entries.iter().position(|e| e.path == target) {
+            Some(index) => self.rename_entry(index, new_name),
+            None => {
+                self.status_message = "Rename failed: the file is no longer there".to_string();
+            }
+        }
+    }
+
+    /// Reverse the most recent operation, and say what actually came back.
+    ///
+    /// The count matters: a record can be legitimately un-undoable (a
+    /// permanent delete leaves nothing to restore), and reporting "Undone"
+    /// for that is the same lie the undo journal used to tell itself.
+    fn undo_last(&mut self) {
+        let Some(record) = self.undo.pop() else {
+            self.status_message = "Nothing to undo".to_string();
+            return;
+        };
+
+        self.status_message = match fileops::execute_undo(&record, Some(&self.recycle)) {
+            Ok(0) => "Nothing to undo: those items were deleted permanently".to_string(),
+            Ok(n) => format!("Undone: {n} item(s) restored"),
+            Err(e) => format!("Undo failed: {e}"),
+        };
+        self.load_directory();
     }
 
     fn go_up_if_possible(&mut self) -> bool {
@@ -2249,6 +2766,11 @@ impl ExplorerState {
             return false;
         }
         self.select_single(index);
+        // The viewport follows the cursor row, which is what stops the arrow
+        // keys walking the selection off the bottom of the window -- the
+        // symptom that made this look like a *lost* selection rather than an
+        // invisible one.
+        self.viewport.select(Some(index), self.entries.len());
         true
     }
 }
@@ -2327,6 +2849,348 @@ mod tests {
             ThumbnailGenerator::with_disk_cache(thumbs::DiskCache::new(dir.join(".thumbs")));
         state.queue_thumbnails();
         state
+    }
+
+    /// A directory holding `n` files, so a listing can be longer than a window.
+    fn dir_with_files(dir: &Path, n: usize) {
+        for i in 0..n {
+            std::fs::write(dir.join(format!("file{i:03}.txt")), b"x").expect("write");
+        }
+    }
+
+    /// The rows a details-view render actually drew, by name.
+    fn drawn_rows(state: &ExplorerState, h: f32) -> Vec<String> {
+        let rows = scroll_window::visible(
+            state.entries.len(),
+            ROW_H,
+            (h - HEADER_H).max(0.0),
+            state.viewport.first_visible(),
+        );
+        (rows.start..rows.end())
+            .filter_map(|i| state.entries.get(i).map(|e| e.name.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_listing_longer_than_the_window_can_be_scrolled_to_its_end() {
+        // The defect: the renderer drew as many rows as fit and stopped, so
+        // every file past the bottom edge was unreachable -- not merely
+        // awkward to reach, but not drawn and not clickable at any point.
+        let dir = ScratchDir::new("explorer-scroll");
+        dir_with_files(&dir.path(""), 60);
+        let mut state = state_at(&dir.path(""));
+        let window_h = HEADER_H + 10.0 * ROW_H;
+
+        let first_page = drawn_rows(&state, window_h);
+        assert_eq!(first_page.len(), 10, "ten rows should fit");
+        assert!(!first_page.iter().any(|n| n == "file059.txt"));
+
+        state.viewport.scroll_by(60, state.entries.len());
+        let last_page = drawn_rows(&state, window_h);
+        assert!(
+            last_page.iter().any(|n| n == "file059.txt"),
+            "the last file is still unreachable: {last_page:?}"
+        );
+    }
+
+    #[test]
+    fn the_wheel_scrolls_and_a_trackpads_fractions_are_not_lost() {
+        let dir = ScratchDir::new("explorer-wheel");
+        dir_with_files(&dir.path(""), 60);
+        let mut state = state_at(&dir.path(""));
+
+        let wheel = |dy: f32| MouseEvent {
+            x: 0.0,
+            y: 0.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        };
+        // One full notch away from the user moves down the list.
+        state.handle_mouse(&wheel(-1.0));
+        let after_one = state.viewport.first_visible();
+        assert!(after_one > 0, "a whole notch scrolled nothing");
+
+        // Ten tenth-notches are one notch. Each on its own truncates to zero
+        // rows, so without the accumulator a trackpad would be dead.
+        let before = state.viewport.first_visible();
+        for _ in 0..10 {
+            state.handle_mouse(&wheel(-0.1));
+        }
+        assert!(
+            state.viewport.first_visible() > before,
+            "ten tenth-notches scrolled nothing, so a trackpad is dead"
+        );
+    }
+
+    #[test]
+    fn the_wheel_does_not_scroll_past_either_end() {
+        let dir = ScratchDir::new("explorer-wheel-ends");
+        dir_with_files(&dir.path(""), 12);
+        let mut state = state_at(&dir.path(""));
+        state.viewport.set_height(10, state.entries.len());
+
+        state.viewport.scroll_by(1_000, state.entries.len());
+        let bottom = state.viewport.first_visible();
+        assert!(
+            bottom <= state.entries.len().saturating_sub(10),
+            "scrolled past the last page to {bottom}"
+        );
+
+        state.viewport.scroll_by(-1_000, state.entries.len());
+        assert_eq!(state.viewport.first_visible(), 0, "scrolled above the top");
+    }
+
+    #[test]
+    fn arrowing_down_past_the_fold_brings_the_view_with_it() {
+        // The symptom that made this read as a *lost* selection: the arrow
+        // keys moved an index into the full listing, the renderer drew only
+        // the first screenful, and the highlighted row was off screen.
+        let dir = ScratchDir::new("explorer-follow");
+        dir_with_files(&dir.path(""), 60);
+        let mut state = state_at(&dir.path(""));
+        state.viewport.set_height(10, state.entries.len());
+
+        for _ in 0..20 {
+            state.move_selection(1);
+        }
+        let cursor = state
+            .selected_indices
+            .first()
+            .copied()
+            .expect("a selection");
+        let range = state.viewport.visible_range(state.entries.len());
+        assert!(
+            range.contains(&cursor),
+            "the selected row {cursor} is outside the drawn range {range:?}"
+        );
+    }
+
+    #[test]
+    fn the_icon_grid_scrolls_and_reaches_the_last_file() {
+        let dir = ScratchDir::new("explorer-icons-scroll");
+        dir_with_files(&dir.path(""), 60);
+        let mut state = state_at(&dir.path(""));
+        state.view_mode = ViewMode::Icons;
+
+        let cols = state.icon_columns();
+        assert!(cols >= 1);
+        state.viewport.scroll_by(60, state.entries.len());
+        assert!(
+            state.viewport.first_visible() > 0,
+            "the grid did not scroll at all"
+        );
+    }
+
+    #[test]
+    fn a_wheel_notch_in_the_grid_moves_a_whole_row_of_icons() {
+        // A notch is three rows, and in the grid a row is `cols` entries. If
+        // the step were counted in entries, a notch would move three files --
+        // less than one visible row on any pane wider than three cells -- and
+        // the grid would look unresponsive.
+        let dir = ScratchDir::new("explorer-icons-wheel");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        state.view_mode = ViewMode::Icons;
+        let cols = state.icon_columns();
+
+        state.handle_mouse(&MouseEvent {
+            x: 0.0,
+            y: 0.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+
+        assert!(
+            state.viewport.first_visible() >= cols,
+            "a notch moved {} entries, less than one row of {cols}",
+            state.viewport.first_visible()
+        );
+    }
+
+    #[test]
+    fn a_scrolled_icon_cell_names_the_file_that_is_drawn_in_it() {
+        // The sharpest thing that can go wrong in a scrolled grid: the cell is
+        // laid out by its position on screen and identified by its index in
+        // the listing, and using one number for both means the first cell
+        // after a scroll claims to be the first file in the folder. A click
+        // would then open the wrong file, silently.
+        let dir = ScratchDir::new("explorer-icons-zones");
+        dir_with_files(&dir.path(""), 60);
+        let mut state = state_at(&dir.path(""));
+        state.view_mode = ViewMode::Icons;
+        let cols = state.icon_columns();
+        state.viewport.scroll_by(cols as isize, state.entries.len());
+
+        // Through the real path: render to register the zones, then click
+        // the top-left cell and see which file the program thinks was hit.
+        drop(state.render());
+        let first_drawn = (state.viewport.first_visible() / cols) * cols;
+        assert_ne!(
+            first_drawn, 0,
+            "the grid did not scroll, so this proves nothing"
+        );
+
+        let clicked = state.click_at(state.sidebar_width + 10.0, 64.0 + 10.0);
+        assert!(clicked, "the top-left cell was not clickable");
+        assert_eq!(
+            state.selected_indices.as_slice(),
+            [first_drawn],
+            "the top-left cell named file {:?} instead of the one drawn in it",
+            state.selected_indices
+        );
+    }
+
+    fn press(state: &mut ExplorerState, x: f32, y: f32) -> bool {
+        state.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    #[test]
+    fn a_short_listing_has_no_scrollbar() {
+        // A permanent grey stripe beside a three-item folder reads as broken.
+        let dir = ScratchDir::new("explorer-sb-short");
+        dir_with_files(&dir.path(""), 3);
+        let state = state_at(&dir.path(""));
+        assert!(state.scrollbar_track().is_none());
+    }
+
+    #[test]
+    fn a_long_listing_has_one_and_the_thumb_tracks_the_view() {
+        let dir = ScratchDir::new("explorer-sb-long");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        let track = state.scrollbar_track().expect("a long listing needs a bar");
+        let top = state.scrollbar_thumb().expect("and a thumb").y;
+
+        state.viewport.scroll_by(200, state.entries.len());
+        let bottom = state.scrollbar_thumb().expect("still a thumb").y;
+
+        assert!(bottom > top, "the thumb did not move with the view");
+        assert!(
+            bottom + state.scrollbar_thumb().unwrap().h <= track.y + track.height + 0.01,
+            "the thumb ran past the end of its track"
+        );
+    }
+
+    #[test]
+    fn dragging_the_thumb_scrolls_the_listing() {
+        let dir = ScratchDir::new("explorer-sb-drag");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        let track = state.scrollbar_track().expect("a bar");
+        let thumb = state.scrollbar_thumb().expect("a thumb");
+
+        // Take hold of the thumb, then drag to the bottom of the track.
+        assert!(press(&mut state, track.x + 2.0, thumb.y + 2.0));
+        state.handle_mouse(&MouseEvent {
+            x: track.x + 2.0,
+            y: track.y + track.height,
+            kind: MouseEventKind::Move,
+        });
+
+        assert!(
+            state.viewport.first_visible() > 0,
+            "dragging the thumb to the bottom scrolled nothing"
+        );
+    }
+
+    #[test]
+    fn a_press_on_the_scrollbar_is_not_a_press_on_the_file_behind_it() {
+        // The bar is drawn *over* the rows, so without the check the click
+        // falls through and selects whatever file the thumb happens to cover --
+        // the kind of wrong that looks like a misclick and is not.
+        let dir = ScratchDir::new("explorer-sb-steal");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        state.selected_indices.clear();
+        let track = state.scrollbar_track().expect("a bar");
+        let thumb = state.scrollbar_thumb().expect("a thumb");
+
+        press(&mut state, track.x + 2.0, thumb.y + 2.0);
+
+        assert!(
+            state.selected_indices.is_empty(),
+            "pressing the scrollbar selected a file: {:?}",
+            state.selected_indices
+        );
+        assert!(
+            state.thumb_grab.is_some(),
+            "the press did not take the thumb"
+        );
+    }
+
+    #[test]
+    fn grabbing_the_thumb_low_and_not_moving_does_not_jump_the_view() {
+        // The wiring the toolkit's own test cannot reach: `scrollbar` proves
+        // the arithmetic honours a grab offset, but explorer has to *pass*
+        // one. Passing zero compiles, drags smoothly, and jumps the view the
+        // instant you take hold anywhere but the thumb's very top -- a defect
+        // that looks like a twitchy scrollbar rather than a bug.
+        let dir = ScratchDir::new("explorer-sb-grab");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        state.viewport.scroll_by(80, state.entries.len());
+        let before = state.viewport.first_visible();
+        let track = state.scrollbar_track().expect("a bar");
+        let thumb = state.scrollbar_thumb().expect("a thumb");
+
+        // Take hold near the thumb's bottom, then move to exactly where the
+        // pointer already is. Nothing has moved, so nothing should scroll.
+        let grab_y = thumb.y + thumb.h - 2.0;
+        press(&mut state, track.x + 2.0, grab_y);
+        state.handle_mouse(&MouseEvent {
+            x: track.x + 2.0,
+            y: grab_y,
+            kind: MouseEventKind::Move,
+        });
+
+        assert_eq!(
+            state.viewport.first_visible(),
+            before,
+            "taking hold of the thumb moved the view without the pointer moving"
+        );
+    }
+
+    #[test]
+    fn a_release_lets_go_of_the_thumb() {
+        let dir = ScratchDir::new("explorer-sb-release");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        let track = state.scrollbar_track().expect("a bar");
+        let thumb = state.scrollbar_thumb().expect("a thumb");
+        press(&mut state, track.x + 2.0, thumb.y + 2.0);
+        assert!(state.thumb_grab.is_some());
+
+        state.handle_mouse(&MouseEvent {
+            x: track.x + 2.0,
+            y: thumb.y + 2.0,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        });
+        assert!(
+            state.thumb_grab.is_none(),
+            "the thumb is still held after the button came up"
+        );
+    }
+
+    #[test]
+    fn clicking_the_track_below_the_thumb_pages_down() {
+        let dir = ScratchDir::new("explorer-sb-page");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        let track = state.scrollbar_track().expect("a bar");
+        let thumb = state.scrollbar_thumb().expect("a thumb");
+
+        press(&mut state, track.x + 2.0, thumb.y + thumb.h + 4.0);
+
+        assert!(
+            state.viewport.first_visible() > 0,
+            "clicking below the thumb did not page down"
+        );
+        assert!(
+            state.thumb_grab.is_none(),
+            "a click on the track should not grab the thumb"
+        );
     }
 
     fn select_named(state: &mut ExplorerState, name: &str) {
@@ -2453,6 +3317,38 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("notes.txt")).expect("restored"),
             "keep me"
+        );
+    }
+
+    /// The undo stack's record of a recycle must actually undo it.
+    ///
+    /// This is the undo that a Delete key's confirmation implicitly promises,
+    /// and until this test it was never exercised: the only restore test goes
+    /// through the bin's own listing and takes the id from there, which works
+    /// and says nothing about the undo stack.
+    #[test]
+    fn the_undo_record_for_a_recycle_can_actually_be_undone() {
+        let root_scratch = temp_dir("undo_recycle");
+        let root = root_scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        state.delete_selected(false);
+        assert!(!root.join("notes.txt").exists(), "the file should be gone");
+
+        let record = state
+            .undo
+            .pop()
+            .expect("a recycle must leave an undo record");
+        let restored = fileops::execute_undo(&record, Some(&state.recycle))
+            .expect("undoing a recycle must not error");
+        assert_eq!(restored, 1, "undo must report the one file it put back");
+
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).expect("the file must be back"),
+            "keep me",
+            "undo reported success, so the file must actually be restored"
         );
     }
 
@@ -3596,6 +4492,15 @@ mod tests {
         })
     }
 
+    fn shift_key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::shift(),
+            text: String::new(),
+        })
+    }
+
     fn ctrl_key(k: Key) -> Event {
         Event::Key(KeyEvent {
             key: k,
@@ -3992,6 +4897,353 @@ mod tests {
             state.title().starts_with("Pictures"),
             "got {:?}",
             state.title()
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Editing keys
+    //
+    // Delete, F2 and Ctrl+Z were bound to nothing at all: pressing them was
+    // silent, which is indistinguishable from a broken window. Every piece
+    // they needed already existed and was tested -- `delete_selected`,
+    // `rename_entry`, the undo journal, `AlertDialog`, `InputDialog` -- so
+    // what these tests cover is the wiring, and above all that the
+    // destructive ones ask first.
+    // ------------------------------------------------------------------
+
+    /// Deliver an event and drop the redraw flag.
+    ///
+    /// `handle_event` returns "something changed, repaint me", which is not
+    /// what these tests are about -- they assert on the file on disk and on
+    /// the dialog's own state. Discarding it once here beats a `let _ =` on
+    /// every line, and keeps the flag `#[must_use]` where it matters.
+    fn send(state: &mut ExplorerState, event: &Event) {
+        let _ = state.handle_event(event);
+    }
+
+    /// Confirm a dialog by focusing its affirmative button and pressing it.
+    ///
+    /// Tab rather than Enter alone: `destructive_cancel` starts focus on
+    /// Cancel on purpose, so Enter by itself is a refusal. That is the
+    /// behaviour, and a test that reached past it would be testing a dialog
+    /// this app does not use.
+    fn confirm_modal(state: &mut ExplorerState) {
+        send(state, &key(Key::Tab));
+        send(state, &key(Key::Enter));
+    }
+
+    #[test]
+    fn pressing_delete_asks_before_it_deletes() {
+        let scratch = temp_dir("del_asks");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        assert!(
+            state.handle_event(&key(Key::Delete)),
+            "the key must be reported as handled, or the window will not repaint"
+        );
+
+        assert!(
+            root.join("notes.txt").exists(),
+            "Delete must ask first, not act and then ask"
+        );
+        assert!(state.modal.is_some(), "a confirmation must be up");
+    }
+
+    #[test]
+    fn confirming_a_delete_recycles_the_file() {
+        let scratch = temp_dir("del_confirm");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &key(Key::Delete));
+        confirm_modal(&mut state);
+
+        assert!(state.modal.is_none(), "the dialog must close once answered");
+        assert!(!root.join("notes.txt").exists(), "confirmed, so it goes");
+        assert_eq!(
+            state.recycle.list().expect("bin").len(),
+            1,
+            "the plain Delete key recycles rather than erases"
+        );
+    }
+
+    #[test]
+    fn cancelling_a_delete_keeps_the_file() {
+        let scratch = temp_dir("del_cancel");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &key(Key::Delete));
+        send(&mut state, &key(Key::Escape));
+
+        assert!(state.modal.is_none(), "Escape must close the dialog");
+        assert!(
+            root.join("notes.txt").exists(),
+            "a cancelled delete must not delete"
+        );
+        assert_eq!(state.recycle.list().expect("bin").len(), 0);
+    }
+
+    /// Enter alone is a refusal, because focus starts on Cancel.
+    ///
+    /// This is what stops a user dismissing a surprise dialog with the key
+    /// they were already pressing, and losing a file to it.
+    #[test]
+    fn enter_alone_on_a_delete_confirmation_cancels() {
+        let scratch = temp_dir("del_enter");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &key(Key::Delete));
+        send(&mut state, &key(Key::Enter));
+
+        assert!(
+            root.join("notes.txt").exists(),
+            "Enter must land on Cancel, not on Delete"
+        );
+    }
+
+    #[test]
+    fn shift_delete_erases_instead_of_recycling_and_says_so() {
+        let scratch = temp_dir("del_perm");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &shift_key(Key::Delete));
+
+        let detail = match state.modal.as_ref() {
+            Some(Modal::Confirm { dialog, action }) => {
+                assert_eq!(*action, PendingAction::DeletePermanently);
+                dialog.detail().unwrap_or_default().to_string()
+            }
+            _ => panic!("Shift+Delete must raise a confirmation"),
+        };
+        assert!(
+            detail.contains("cannot be undone"),
+            "the permanent one must say it is permanent, got {detail:?}"
+        );
+
+        confirm_modal(&mut state);
+        assert!(!root.join("notes.txt").exists());
+        assert_eq!(
+            state.recycle.list().expect("bin").len(),
+            0,
+            "a permanent delete must not leave a recoverable copy in the bin"
+        );
+    }
+
+    /// While a dialog is up, the listing underneath must not also act.
+    ///
+    /// Otherwise the keys used to reach the buttons drag the selection along
+    /// with them, and confirming deletes a file other than the one named.
+    #[test]
+    fn a_modal_takes_the_keys_the_listing_would_have_used() {
+        let scratch = temp_dir("modal_keys");
+        let root = scratch.dir().to_path_buf();
+        dir_with_files(&root, 5);
+
+        let mut state = state_at(&root);
+        state.move_selection_to(0);
+        send(&mut state, &key(Key::Delete));
+        let before = state.selected_indices.clone();
+
+        send(&mut state, &key(Key::Down));
+        send(&mut state, &key(Key::Down));
+
+        assert_eq!(
+            state.selected_indices, before,
+            "the listing must not move under an open dialog"
+        );
+    }
+
+    #[test]
+    fn the_confirmation_is_actually_drawn() {
+        let scratch = temp_dir("modal_draw");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &key(Key::Delete));
+
+        let drawn = texts(&state.render());
+        // The whole sentence, deliberately. Asserting only that "notes.txt"
+        // was drawn somewhere passes with the dialog entirely absent, because
+        // the listing row behind it draws the same name -- which is what this
+        // test did until it was mutation-checked.
+        //
+        // Joined because the dialog word-wraps its message into one text
+        // command per line, so the phrase is split across two of them. Any
+        // wrap point rejoins with the space it broke on.
+        let joined = drawn.join(" ");
+        assert!(
+            joined.contains("Move \"notes.txt\" to the recycle bin?"),
+            "the dialog must name the file and where it is going, got {drawn:?}"
+        );
+        assert!(
+            drawn.iter().any(|t| t == "Cancel"),
+            "and draw the buttons, or there is nothing to click, got {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn f2_opens_a_rename_box_holding_the_current_name() {
+        let scratch = temp_dir("rename_open");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        state.move_selection_to(0);
+        send(&mut state, &key(Key::F2));
+
+        match state.modal.as_ref() {
+            Some(Modal::Rename { dialog, target }) => {
+                assert_eq!(dialog.input_text(), "notes.txt", "prefilled, not empty");
+                assert_eq!(target, &root.join("notes.txt"));
+            }
+            _ => panic!("F2 must open a rename box"),
+        }
+    }
+
+    #[test]
+    fn renaming_through_the_box_renames_the_file() {
+        let scratch = temp_dir("rename_do");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        state.move_selection_to(0);
+        send(&mut state, &key(Key::F2));
+        match state.modal.as_mut() {
+            Some(Modal::Rename { dialog, .. }) => dialog.set_input_text("renamed.txt"),
+            _ => panic!("no rename box"),
+        }
+        send(&mut state, &key(Key::Enter));
+
+        assert!(state.modal.is_none());
+        assert!(!root.join("notes.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("renamed.txt")).expect("renamed"),
+            "keep me"
+        );
+    }
+
+    /// The rename box holds a path, not a row number.
+    ///
+    /// A row index captured when the dialog opened names whatever has since
+    /// moved into that row. Here the original is removed while the box is
+    /// open, so an index-based rename would rename its neighbour instead.
+    #[test]
+    fn a_rename_whose_target_vanished_is_refused_not_misapplied() {
+        let scratch = temp_dir("rename_stale");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "first");
+        write(&root.join("b.txt"), "second");
+
+        let mut state = state_at(&root);
+        state.move_selection_to(0);
+        send(&mut state, &key(Key::F2));
+
+        fs::remove_file(root.join("a.txt")).expect("remove");
+        state.load_directory();
+
+        match state.modal.as_mut() {
+            Some(Modal::Rename { dialog, .. }) => dialog.set_input_text("c.txt"),
+            _ => panic!("no rename box"),
+        }
+        send(&mut state, &key(Key::Enter));
+
+        assert!(
+            root.join("b.txt").exists(),
+            "the surviving file must keep its name"
+        );
+        assert!(
+            !root.join("c.txt").exists(),
+            "and nothing takes the new one"
+        );
+        assert!(
+            state.status_message.contains("no longer there"),
+            "and it must say why, got {:?}",
+            state.status_message
+        );
+    }
+
+    #[test]
+    fn ctrl_z_after_a_delete_puts_the_file_back() {
+        let scratch = temp_dir("undo_key");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &key(Key::Delete));
+        confirm_modal(&mut state);
+        assert!(!root.join("notes.txt").exists());
+
+        send(&mut state, &ctrl_key(Key::Z));
+
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).expect("restored"),
+            "keep me",
+            "Ctrl+Z is the undo the confirmation promises"
+        );
+    }
+
+    /// Undo must not claim to have restored a permanent delete.
+    #[test]
+    fn ctrl_z_after_a_permanent_delete_says_nothing_came_back() {
+        let scratch = temp_dir("undo_key_perm");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &shift_key(Key::Delete));
+        confirm_modal(&mut state);
+
+        send(&mut state, &ctrl_key(Key::Z));
+
+        assert!(
+            state.status_message.contains("Nothing to undo"),
+            "an erased file cannot come back, and undo must not pretend, got {:?}",
+            state.status_message
+        );
+        assert!(!root.join("notes.txt").exists());
+    }
+
+    #[test]
+    fn ctrl_c_then_ctrl_v_copies_within_the_window() {
+        let scratch = temp_dir("clip_keys");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("notes.txt"), "keep me");
+        fs::create_dir(root.join("sub")).expect("mkdir");
+
+        let mut state = state_at(&root);
+        select_named(&mut state, "notes.txt");
+        send(&mut state, &ctrl_key(Key::C));
+        assert!(state.clipboard.is_some(), "Ctrl+C must fill the clipboard");
+
+        state.navigate_to(&root.join("sub"));
+        send(&mut state, &ctrl_key(Key::V));
+
+        assert_eq!(
+            fs::read_to_string(root.join("sub/notes.txt")).expect("pasted"),
+            "keep me"
+        );
+        assert!(
+            root.join("notes.txt").exists(),
+            "a copy leaves the original"
         );
     }
 }

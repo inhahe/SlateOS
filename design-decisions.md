@@ -68276,3 +68276,127 @@ disappears without any of the above needing revisiting.
 **If it is never revisited:** nothing degrades, and the failure is loud. The
 standing cost is that supplementary-group manipulation remains unavailable to
 native binaries -- which was already true, and was merely unsaid.
+
+---
+
+## 1005. `coreutils` is the one home for the command-line tools; the better half of each duplicate pair survives inside it
+
+**Date:** 2026-09-07
+**Lane:** B
+**Decided by:** Operator (answering `open-questions.md` B-Q7)
+
+Supersedes §8, and un-suspends §359.
+
+June's §8 made "one tool = one project = one file" canonical and retired the
+bundle. Its stated reason -- that a per-tool crate is a smaller blast radius
+than a multi-call binary -- turned out to be false of this tree: the four
+BusyBox-shaped projects it preferred are themselves multi-call, and 41 names
+were being built by *both* homes, so which implementation a user got depended
+on build order. That cost a day of chasing a bug in the copy nobody was
+editing.
+
+**The decision is option B: `coreutils` is the single home.** For each of the
+41 overlapping pairs the better implementation wins and moves into
+`coreutils`; the duplicate crate is deleted. The 45 names that exist only in
+the bundle stay where they are rather than being exploded into 45 new crates.
+
+The operator's own reasoning is worth recording, because it corrects a
+misreading this entry invited: the argument "it would create a dependency
+shape that exists nowhere in the tree yet" reads like an argument about
+*effort*, and effort is explicitly not a reason to choose a worse design here
+(`E:\visual studio projects\CLAUDE.md`). It is not an effort argument. A
+standalone `userspace/bc` would have to import the `coreutils` *library* --
+the per-tool crate depending on the bundle is precisely the shape §8 set out
+to retire, so option A cannot be reached without building the thing it was
+trying to avoid. B is right on the security argument, the shared library, the
+45 non-duplicated tools and the test harnesses independently of it.
+
+**What changes for a user:** nothing visible, except that each of the 41 tools
+stops alternating non-deterministically between two implementations. The
+better one wins permanently.
+
+**Follow-through:** merge the 41 pairs by hand -- the survey
+(`scripts/dup-bins-survey.py`) is a triage aid, not a verdict, and every pair
+is read before it is merged. `coreutils-canonical-answer.md` carries the false
+premise and is corrected as part of this. `known-issues.md` ->
+`B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES` closes when the last pair
+lands.
+
+---
+
+## 1006. A command that does not work is deleted, not kept as a refusing stub
+
+**Date:** 2026-09-07
+**Lane:** B
+**Decided by:** Operator (answering `open-questions.md` "2,288 of the 2,756
+commands in `userspace/` report success for work they never did")
+
+The audit counts a crate as *fabricating* when it performs no I/O of any kind
+and nonetheless states a fact -- a measurement, a count, a `PASS`. 2,288 of
+2,756 userspace crates qualify: 2,023 named `*-cli`, and 265 with plain tool
+names (`bzip2`, `cal`, `docker`, `cmake`, `borg`) which are the more dangerous
+group, because those are names a person actually types.
+
+I proposed option A: delete the ~2,000 that can never work here (someone
+else's proprietary product, or a cloud service we do not talk to), and keep
+the rest as stubs that refuse and exit non-zero. **The operator went further,
+and the stricter rule is the decision: delete every fabricating command, not
+only the impossible ones.** A name that could genuinely be ported one day --
+`pandoc-cli`, `sqlmap-cli`, `cal` -- is added back *when it is implemented*,
+not before.
+
+The reasoning is the same one this entry used to argue for refusing stubs, and
+it turns out to point the other way: **a command's existence is itself a
+claim.** It is a claim to the user who sees it in `PATH` or in completion, and
+it is a claim to every script and installer that probes with `command -v`
+before deciding what to run. A refusing stub answers "yes, that exists" to the
+probe and then fails at the point of use, which is strictly worse than
+answering "no" up front. The stub only helps if the failure message is read by
+a human, and probes are not humans.
+
+**What changes for a user:** ~2,288 names stop existing. Typing one gives the
+shell's `command not found`, which is true. The workspace loses those crates
+and builds faster.
+
+**The ratchet, which follows from the answer:** once the deletion has landed,
+`scripts/audit-cli-fabrication.py` is pinned the way
+`scripts/scan-orphan-modules.py` is -- the count is fixed at its new floor and
+the gate fails if it ever rises. Pinning before the deletion would have pinned
+a number about to change by two thousand; pinning after is what stops the next
+bulk generation from putting it all back.
+
+---
+
+## 1007. The test machine produces real randomness, and the tests that asserted otherwise are rewritten
+
+**Date:** 2026-09-07
+**Lane:** B
+**Decided by:** Operator (answering `open-questions.md` "The test machine
+cannot produce random numbers, on purpose, and about eighteen tests in the
+apps now depend on that")
+
+The test platform's randomness source was deliberately inert, so every part of
+the OS that needs an unpredictable number got a predictable one. Four tests in
+`userspace/ssh` were permanently red because of it, and the "what happens when
+the kernel says no" branch was only ever exercised on the platform we do not
+ship. Eighteen tests in `apps/` and `gui/` had come to depend on the inertness
+-- they assert that two draws are *equal*, which is true only of a machine
+that cannot produce randomness.
+
+**Option A: land it.** The test machine produces real randomness; lane C
+rewrites its eighteen tests into the `assert_ne!` form, in its own tree. Lane
+B files the request and the list. `main` is red in between unless lane C moves
+first -- which was the cost the operator accepted rather than have lane B
+write eighteen tests inside lane C's globs (option C), because that is exactly
+what the lane split exists to prevent.
+
+**What changes:** four red `userspace/ssh` tests go green, the
+client-against-server test becomes possible, and eighteen tests in `apps/` and
+`gui/` go red until lane C converts them.
+
+**Independent of the answer** (and already done): `SshSession` and
+`ConnectionState` take their randomness as an injected byte source, so the
+handshake can be made deterministic for a test without weakening it in
+production. That is a better design regardless and it is what un-redded the
+four SSH tests; this decision is about whether the rest of the tree gets the
+same honest platform.

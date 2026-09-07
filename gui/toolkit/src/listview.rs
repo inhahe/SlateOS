@@ -119,6 +119,33 @@ impl ListViewport {
         rows.start..rows.end()
     }
 
+    /// Scrolls by `delta` rows **without** moving the selection.
+    ///
+    /// This is the wheel's door, and it is deliberately the one operation here
+    /// that leaves `selected` alone. Every other method reveals the selection
+    /// as a consequence; a wheel that did so could not scroll at all, because
+    /// the view would snap back to the picked row on the next call. Scrolling
+    /// the selection off screen is what a file manager does and what a user
+    /// expects -- the picked row is still picked, and any key that moves it
+    /// brings the view back with it.
+    ///
+    /// Clamped through [`scroll_window::shift`], so a delta past either end
+    /// stops at the end rather than wrapping or saturating into a blank view.
+    pub fn scroll_by(&mut self, delta: isize, len: usize) {
+        let last_page = len.saturating_sub(self.height);
+        self.first_visible = scroll_window::shift(self.first_visible, delta).min(last_page);
+    }
+
+    /// Scrolls so `first` is the top row, without moving the selection.
+    ///
+    /// The absolute companion to [`scroll_by`](Self::scroll_by), and the one a
+    /// dragged scrollbar thumb needs: a drag names a position outright rather
+    /// than a delta, and turning it into a delta would accumulate the rounding
+    /// of every intermediate frame.
+    pub fn scroll_to(&mut self, first: usize, len: usize) {
+        self.first_visible = first.min(len.saturating_sub(self.height));
+    }
+
     /// Picks `index`, clamped into the list, and scrolls to show it.
     ///
     /// `None` picks nothing but leaves the scroll position alone, which is what

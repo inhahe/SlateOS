@@ -538,13 +538,37 @@ impl OperationJournal {
 // Undo journal
 // ============================================================================
 
+/// Where an operation left the thing it acted on -- what an undo needs in
+/// order to put it back.
+///
+/// This was an `Option<PathBuf>`, and the `None` meant two opposite things.
+/// A permanent delete recorded `None` for "gone, nothing to reverse", and a
+/// recycle recorded `None` too, for "the bin owns it now, restore is by id".
+/// [`execute_undo`] skipped both, so undoing a recycle silently reported
+/// success and restored nothing. Naming the three cases separately is what
+/// makes that state unrepresentable rather than merely fixed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UndoTarget {
+    /// The item now sits at this path; undo moves it back to the source.
+    Path(PathBuf),
+    /// The item became this recycle-bin entry. Undo must go back *through the
+    /// bin*, by id, so that the bin's metadata and its data stay in step --
+    /// renaming the file out from under the bin would leave a listed entry
+    /// whose data is gone.
+    Recycled(String),
+    /// The operation left nothing to reverse: a permanent delete, or an action
+    /// that was skipped. Undoing it is a no-op, and saying so is the point --
+    /// the caller needs to be able to tell the user nothing came back.
+    Nothing,
+}
+
 /// Records what an operation did so it can be undone.
 #[derive(Clone, Debug)]
 pub struct UndoRecord {
     pub id: u64,
     pub operation: FileOperation,
-    /// (source, destination) pairs that were acted on.
-    pub entries: Vec<(PathBuf, Option<PathBuf>)>,
+    /// (source, where-it-went) pairs that were acted on.
+    pub entries: Vec<(PathBuf, UndoTarget)>,
     pub timestamp: SystemTime,
 }
 
@@ -563,11 +587,7 @@ impl UndoStack {
     }
 
     /// Push a new undo record and return its id.
-    pub fn push(
-        &mut self,
-        operation: FileOperation,
-        entries: Vec<(PathBuf, Option<PathBuf>)>,
-    ) -> u64 {
+    pub fn push(&mut self, operation: FileOperation, entries: Vec<(PathBuf, UndoTarget)>) -> u64 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.records.push(UndoRecord {
@@ -672,7 +692,7 @@ pub struct ExecutorConfig {
 pub struct OperationExecutor {
     plan: OperationPlan,
     progress: OperationProgress,
-    undo_entries: Vec<(PathBuf, Option<PathBuf>)>,
+    undo_entries: Vec<(PathBuf, UndoTarget)>,
     errors: Vec<FileOpError>,
     events: Vec<FileOpEvent>,
     skipped: u32,
@@ -724,7 +744,7 @@ impl OperationExecutor {
     }
 
     /// Build undo entries from what was done.
-    pub fn into_undo_entries(self) -> (FileOperation, Vec<(PathBuf, Option<PathBuf>)>) {
+    pub fn into_undo_entries(self) -> (FileOperation, Vec<(PathBuf, UndoTarget)>) {
         (self.plan.operation, self.undo_entries)
     }
 
@@ -1025,7 +1045,7 @@ impl OperationExecutor {
                 fs::create_dir_all(dest)?;
             }
             self.undo_entries
-                .push((action.src.clone(), Some(dest.clone())));
+                .push((action.src.clone(), UndoTarget::Path(dest.clone())));
             return Ok(ActionOutcome::Done);
         }
 
@@ -1042,7 +1062,8 @@ impl OperationExecutor {
                 ConflictPolicy::Rename => {
                     let renamed = resolve_rename(dest);
                     self.atomic_copy_file(&action.src, &renamed)?;
-                    self.undo_entries.push((action.src.clone(), Some(renamed)));
+                    self.undo_entries
+                        .push((action.src.clone(), UndoTarget::Path(renamed)));
                     return Ok(ActionOutcome::Done);
                 }
                 ConflictPolicy::Ask => {
@@ -1060,7 +1081,7 @@ impl OperationExecutor {
 
         self.atomic_copy_file(&action.src, dest)?;
         self.undo_entries
-            .push((action.src.clone(), Some(dest.clone())));
+            .push((action.src.clone(), UndoTarget::Path(dest.clone())));
         Ok(ActionOutcome::Done)
     }
 
@@ -1070,7 +1091,10 @@ impl OperationExecutor {
         } else {
             fs::remove_file(&action.src)?;
         }
-        self.undo_entries.push((action.src.clone(), None));
+        // A permanent delete really is unrecoverable, and this is the record
+        // that says so rather than the one that looks like a recycle.
+        self.undo_entries
+            .push((action.src.clone(), UndoTarget::Nothing));
         Ok(ActionOutcome::Done)
     }
 
@@ -1092,7 +1116,7 @@ impl OperationExecutor {
             fs::rename(&action.src, dest)?;
         }
         self.undo_entries
-            .push((action.src.clone(), Some(dest.clone())));
+            .push((action.src.clone(), UndoTarget::Path(dest.clone())));
         Ok(ActionOutcome::Done)
     }
 
@@ -1114,7 +1138,7 @@ impl OperationExecutor {
             fs::rename(&action.src, dest)?;
         }
         self.undo_entries
-            .push((action.src.clone(), Some(dest.clone())));
+            .push((action.src.clone(), UndoTarget::Path(dest.clone())));
         Ok(ActionOutcome::Done)
     }
 
@@ -1703,66 +1727,130 @@ impl RecycleBin {
 // Convenience: execute an undo
 // ============================================================================
 
-/// Undo a previously completed operation.
+/// Undo a previously completed operation, returning how many items were put
+/// back.
 ///
 /// - Copy undo: delete the copied files.
 /// - Move undo: move files back to their original locations.
-/// - Delete/Recycle undo: restore from recycle bin (if entries are present).
-pub fn execute_undo(record: &UndoRecord) -> io::Result<()> {
+/// - Recycle undo: restore through `bin`, by entry id.
+/// - Permanent-delete undo: nothing, and the count says so.
+///
+/// # Why it returns a count
+///
+/// Some records are legitimately un-undoable -- a permanent delete leaves
+/// [`UndoTarget::Nothing`], and there is no file to bring back. Returning
+/// `Ok(())` for that case told the caller the same thing as a successful
+/// restore, so a UI could only report "Undone". The count lets it tell the
+/// truth: zero means nothing came back, and the user needs to know that.
+///
+/// # Errors
+///
+/// Propagates the underlying filesystem error. Also fails if a record holds a
+/// [`UndoTarget::Recycled`] and `bin` is `None`, or if a recycled target turns
+/// up under an operation that cannot produce one -- both mean the record and
+/// the operation disagree, and guessing which is right would be how a wrong
+/// file gets moved.
+pub fn execute_undo(record: &UndoRecord, bin: Option<&RecycleBin>) -> io::Result<usize> {
+    let mismatch = |op: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("undo record for a {op} names a recycle-bin entry"),
+        )
+    };
+    let mut restored = 0usize;
+
     match record.operation {
         FileOperation::Copy => {
-            // Delete all destination files that were created.
-            for (_src, dest) in record.entries.iter().rev() {
-                if let Some(d) = dest {
-                    if d.is_dir() {
-                        let _ = fs::remove_dir(d);
-                    } else if d.exists() {
-                        fs::remove_file(d)?;
+            // Reverse order: a copied directory can only be removed once the
+            // files copied into it are gone.
+            for (_src, target) in record.entries.iter().rev() {
+                match target {
+                    UndoTarget::Path(d) => {
+                        if d.is_dir() {
+                            // A directory that is not empty is one the user has
+                            // since put something in; leaving it is safer than
+                            // recursing, and `remove_dir` refuses on its own.
+                            if fs::remove_dir(d).is_ok() {
+                                restored = restored.saturating_add(1);
+                            }
+                        } else if d.exists() {
+                            fs::remove_file(d)?;
+                            restored = restored.saturating_add(1);
+                        }
                     }
+                    UndoTarget::Recycled(_) => return Err(mismatch("copy")),
+                    UndoTarget::Nothing => {}
                 }
             }
         }
         FileOperation::Move => {
-            // Move files back from destination to source.
-            for (src, dest) in &record.entries {
-                if let Some(d) = dest
-                    && d.exists()
-                {
-                    if let Some(parent) = src.parent() {
-                        fs::create_dir_all(parent)?;
+            for (src, target) in &record.entries {
+                match target {
+                    UndoTarget::Path(d) => {
+                        if d.exists() {
+                            move_back(src, d)?;
+                            restored = restored.saturating_add(1);
+                        }
                     }
-                    fs::rename(d, src)?;
+                    UndoTarget::Recycled(_) => return Err(mismatch("move")),
+                    UndoTarget::Nothing => {}
                 }
             }
         }
         FileOperation::Delete | FileOperation::Recycle => {
-            // Restore: entries are (original_path, recycle_dest).
-            for (src, dest) in &record.entries {
-                if let Some(d) = dest
-                    && d.exists()
-                {
-                    if let Some(parent) = src.parent() {
-                        fs::create_dir_all(parent)?;
+            for (src, target) in &record.entries {
+                match target {
+                    UndoTarget::Path(d) => {
+                        if d.exists() {
+                            move_back(src, d)?;
+                            restored = restored.saturating_add(1);
+                        }
                     }
-                    fs::rename(d, src)?;
+                    UndoTarget::Recycled(id) => {
+                        let Some(bin) = bin else {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "undoing a recycle needs the bin it went into",
+                            ));
+                        };
+                        bin.restore(id)?;
+                        restored = restored.saturating_add(1);
+                    }
+                    // A permanent delete. Nothing to bring back, and the
+                    // caller must not be told otherwise.
+                    UndoTarget::Nothing => {}
                 }
             }
         }
         FileOperation::Restore => {
-            // Undo restore = recycle again: move from original back to bin.
-            for (src, dest) in &record.entries {
-                if let Some(d) = dest
-                    && src.exists()
-                {
-                    if let Some(parent) = d.parent() {
-                        fs::create_dir_all(parent)?;
+            // Undo restore = recycle again: move from original back to the bin.
+            for (src, target) in &record.entries {
+                match target {
+                    UndoTarget::Path(d) => {
+                        if src.exists() {
+                            move_back(d, src)?;
+                            restored = restored.saturating_add(1);
+                        }
                     }
-                    fs::rename(src, d)?;
+                    UndoTarget::Recycled(_) => return Err(mismatch("restore")),
+                    UndoTarget::Nothing => {}
                 }
             }
         }
     }
-    Ok(())
+    Ok(restored)
+}
+
+/// Move `from` back to `to`, creating the parent it used to live in.
+///
+/// Shared by every arm above so that "put it back" means one thing; the four
+/// hand-written copies of this loop body were identical apart from which way
+/// round the pair was read.
+fn move_back(to: &Path, from: &Path) -> io::Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(from, to)
 }
 
 // ============================================================================
@@ -2770,11 +2858,11 @@ mod tests {
         let record = UndoRecord {
             id: 1,
             operation: FileOperation::Copy,
-            entries: vec![(src.clone(), Some(dst.clone()))],
+            entries: vec![(src.clone(), UndoTarget::Path(dst.clone()))],
             timestamp: SystemTime::now(),
         };
 
-        execute_undo(&record).unwrap();
+        execute_undo(&record, None).unwrap();
         assert!(!dst.exists());
         // Source should still exist (copy undo only removes the destination).
         assert!(src.exists());
@@ -2791,14 +2879,60 @@ mod tests {
         let record = UndoRecord {
             id: 1,
             operation: FileOperation::Move,
-            entries: vec![(src.clone(), Some(dst.clone()))],
+            entries: vec![(src.clone(), UndoTarget::Path(dst.clone()))],
             timestamp: SystemTime::now(),
         };
 
-        execute_undo(&record).unwrap();
+        execute_undo(&record, None).unwrap();
         assert!(src.exists());
         assert!(!dst.exists());
         assert_eq!(read_file(&src), "moved data");
+    }
+
+    /// A permanent delete is honestly un-undoable, and the count is how the
+    /// caller finds that out. Before `UndoTarget`, this case and a recycle
+    /// were both `None` and both returned `Ok(())`, so a UI could only say
+    /// "Undone" to each -- true of one and a lie about the other.
+    #[test]
+    fn undoing_a_permanent_delete_puts_nothing_back_and_reports_zero() {
+        let scratch = temp_dir("undo_permanent");
+        let dir = scratch.dir().to_path_buf();
+        let gone = dir.join("gone.txt");
+
+        let record = UndoRecord {
+            id: 1,
+            operation: FileOperation::Delete,
+            entries: vec![(gone.clone(), UndoTarget::Nothing)],
+            timestamp: SystemTime::now(),
+        };
+
+        let restored = execute_undo(&record, None).expect("a no-op undo is not an error");
+        assert_eq!(restored, 0, "nothing was restored, and it must say so");
+        assert!(
+            !gone.exists(),
+            "a permanently deleted file cannot come back"
+        );
+    }
+
+    /// Undoing a recycle without the bin is refused rather than skipped.
+    ///
+    /// The skip is the original defect in miniature: there is a file to
+    /// restore and no way to reach it, which is a caller error, not a
+    /// successful undo of nothing.
+    #[test]
+    fn undoing_a_recycle_without_the_bin_is_an_error() {
+        let record = UndoRecord {
+            id: 1,
+            operation: FileOperation::Recycle,
+            entries: vec![(
+                PathBuf::from("/notes.txt"),
+                UndoTarget::Recycled("e1".into()),
+            )],
+            timestamp: SystemTime::now(),
+        };
+
+        let err = execute_undo(&record, None).expect_err("no bin means it cannot be done");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     // ----------------------------------------------------------------

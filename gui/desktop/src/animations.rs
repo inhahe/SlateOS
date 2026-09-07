@@ -541,6 +541,27 @@ pub struct AnimationManager {
     /// Default animation duration in milliseconds. This is the value the Tier 3
     /// `animation-duration-ms` theme setting will set.
     pub default_duration_ms: u32,
+    /// How long animations take relative to the duration each one asked for.
+    ///
+    /// `1.0` is unchanged; `1.5` makes everything take half again as long;
+    /// `0.75` makes it quicker. Zero or less means "do not animate at all",
+    /// which is [`AnimationSpeed::Off`]'s multiplier and is handled by the same
+    /// gate as [`reduced_motion`](Self::reduced_motion) rather than by dividing
+    /// by it.
+    ///
+    /// Private, with [`set_duration_scale`](Self::set_duration_scale) as the
+    /// door, because it is validated: a caller reading a percentage out of a
+    /// configuration file could otherwise store a NaN here and stall every
+    /// animation in the shell.
+    duration_scale: f32,
+    /// Fractional milliseconds owed to the animations but not yet delivered.
+    ///
+    /// Scaling an integer millisecond count by a non-integer factor loses the
+    /// remainder, and losing it *every frame* is a systematic drift rather than
+    /// noise: at 1.5x on a 16 ms frame it is 0.67 ms lost per frame, about 4%,
+    /// so every "slow" animation would quietly run 4% fast. The remainder is
+    /// carried into the next tick instead.
+    carry_ms: f32,
 }
 
 /// Default animation length. Long enough to read as a transition rather than a
@@ -556,13 +577,83 @@ impl AnimationManager {
             desktop_transition: None,
             reduced_motion: false,
             default_duration_ms: DEFAULT_DURATION_MS,
+            duration_scale: 1.0,
+            carry_ms: 0.0,
         }
+    }
+
+    /// Set how long animations take, relative to the duration each asked for.
+    ///
+    /// This is `AnimationSpeed::multiplier()` from the user's appearance
+    /// settings: 0.75 for Fast, 1.0 for Normal, 1.5 for Slow, 0.0 for Off.
+    /// Applied to *elapsed time* rather than to each animation's stated
+    /// duration, because durations are chosen by whoever constructs the
+    /// animation -- there are five such call sites and a sixth would be easy to
+    /// add without knowing about this -- whereas every animation in the shell
+    /// passes through one `tick`.
+    ///
+    /// A non-finite or negative scale is read as `Off`; that is not defensive
+    /// programming for its own sake, since the value comes from a file the user
+    /// can hand-edit and a NaN here would compare false against every bound and
+    /// stall the shell's animations permanently.
+    pub fn set_duration_scale(&mut self, scale: f32) {
+        self.duration_scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            0.0
+        };
+        // A scale change invalidates the fraction owed under the old one.
+        self.carry_ms = 0.0;
+    }
+
+    /// How long animations currently take relative to their stated duration.
+    #[must_use]
+    pub const fn duration_scale(&self) -> f32 {
+        self.duration_scale
+    }
+
+    /// Whether anything should animate at all.
+    ///
+    /// Two independent reasons, deliberately sharing one answer: the
+    /// accessibility setting, and an appearance speed of `Off`. They mean the
+    /// same thing to everything downstream, and a caller that had to ask about
+    /// both would eventually ask about only one.
+    #[must_use]
+    pub fn animations_suppressed(&self) -> bool {
+        self.reduced_motion || self.duration_scale <= 0.0
+    }
+
+    /// Wall-clock `dt_ms` converted to the animation time it buys.
+    ///
+    /// Divides rather than multiplies: `duration_scale` says how much *longer*
+    /// an animation should take, so a larger scale must advance it by less.
+    fn animation_dt(&mut self, dt_ms: u32) -> u32 {
+        if (self.duration_scale - 1.0).abs() < f32::EPSILON {
+            return dt_ms;
+        }
+        if self.duration_scale <= 0.0 {
+            return 0;
+        }
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a frame's milliseconds are far inside f32's exact range"
+        )]
+        let wanted = dt_ms as f32 / self.duration_scale + self.carry_ms;
+        let whole = wanted.floor().max(0.0);
+        self.carry_ms = wanted - whole;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "floored, non-negative, and bounded by dt_ms / scale"
+        )]
+        let out = whole as u32;
+        out
     }
 
     /// Start a window animation.
     pub fn animate_window(&mut self, anim: WindowAnimation) {
-        if self.reduced_motion {
-            return; // Skip animations when reduced motion is on.
+        if self.animations_suppressed() {
+            return; // Reduced motion, or an appearance speed of Off.
         }
         // Remove any existing animation for this window.
         self.window_anims.retain(|a| a.window_id != anim.window_id);
@@ -571,7 +662,7 @@ impl AnimationManager {
 
     /// Start a desktop transition.
     pub fn animate_desktop_switch(&mut self, direction: f32, screen_width: f32) {
-        if self.reduced_motion {
+        if self.animations_suppressed() {
             return;
         }
         self.desktop_transition = Some(DesktopTransition::new(
@@ -588,6 +679,10 @@ impl AnimationManager {
     /// frame is the one that puts the window at its destination, so dropping it
     /// would leave every animation ending one frame short of where it was going.
     pub fn tick(&mut self, dt_ms: u32) -> Vec<(u64, AnimatedRect)> {
+        // Converted once, not per animation: two animations stepped by
+        // separately-rounded halves of the same frame would drift apart, and
+        // the carry only makes sense against a single clock.
+        let dt_ms = self.animation_dt(dt_ms);
         let mut results = Vec::with_capacity(self.window_anims.len());
 
         for anim in &mut self.window_anims {
@@ -741,9 +836,6 @@ impl FadeOverlay {
 
 #[cfg(test)]
 mod tests {
-    // A test module's job is to fail loudly the instant the code under test is
-    // wrong, so the defensive lints that forbid exactly that in production code
-    // are off here — as `CLAUDE.md` prescribes.
     #![allow(
         clippy::unwrap_used,
         clippy::expect_used,
@@ -751,6 +843,133 @@ mod tests {
         clippy::indexing_slicing,
         clippy::arithmetic_side_effects
     )]
+
+    // -- Animation speed, from the user's appearance settings ---------------
+
+    /// A manager holding one 200 ms window animation for window 1.
+    fn with_one_animation(scale: f32) -> AnimationManager {
+        let mut m = AnimationManager::new();
+        m.set_duration_scale(scale);
+        m.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 200));
+        m
+    }
+
+    /// Milliseconds of wall time before the animation finishes, stepped in
+    /// 16 ms frames.
+    fn ms_to_finish(m: &mut AnimationManager) -> u32 {
+        let mut elapsed = 0;
+        for _ in 0..1000 {
+            if !m.has_active() {
+                break;
+            }
+            m.tick(16);
+            elapsed += 16;
+        }
+        elapsed
+    }
+
+    #[test]
+    fn the_default_scale_leaves_durations_alone() {
+        let mut m = with_one_animation(1.0);
+        let taken = ms_to_finish(&mut m);
+        // 200 ms of animation, stepped in 16 ms frames: finishes on the 13th.
+        assert_eq!(taken, 208, "an unscaled animation should take its duration");
+    }
+
+    #[test]
+    fn slow_takes_half_again_as_long_and_fast_takes_less() {
+        // The whole point of the setting. `Slow` is 1.5 and `Fast` is 0.75, so
+        // the same 200 ms animation should take about 300 ms and about 150 ms.
+        let mut slow = with_one_animation(1.5);
+        let mut fast = with_one_animation(0.75);
+        let slow_ms = ms_to_finish(&mut slow);
+        let fast_ms = ms_to_finish(&mut fast);
+
+        assert!(
+            (288..=320).contains(&slow_ms),
+            "1.5x should take about 300 ms, took {slow_ms}"
+        );
+        assert!(
+            (144..=160).contains(&fast_ms),
+            "0.75x should take about 150 ms, took {fast_ms}"
+        );
+        assert!(fast_ms < slow_ms);
+    }
+
+    #[test]
+    fn the_carry_stops_a_slow_animation_running_late() {
+        // The failure this exists to prevent, and it is systematic rather than
+        // noise. At 1.5x a 16 ms frame buys 10.67 ms of animation; truncating
+        // that to 10 loses 0.67 ms *every* frame, so a 200 ms animation would
+        // need 20 frames instead of 19 and every "slow" animation would run
+        // consistently late.
+        //
+        // Measured through the finish time rather than an accessor added for
+        // the purpose: 200 / 10.667 = 18.75, so 19 frames, so 304 ms of wall
+        // clock. Truncation gives exactly 20 frames and 320 ms, and the two
+        // numbers are far enough apart to tell apart.
+        let mut m = with_one_animation(1.5);
+        let taken = ms_to_finish(&mut m);
+        assert_eq!(taken, 304, "expected 19 frames of 16 ms");
+        assert_ne!(taken, 320, "320 means the fractional remainder is dropped");
+    }
+
+    #[test]
+    fn off_suppresses_animations_exactly_as_reduced_motion_does() {
+        // `AnimationSpeed::Off`'s multiplier is 0.0. It must not reach the
+        // divide -- it is routed to the same gate reduced motion uses, because
+        // the two mean the same thing downstream.
+        let mut off = AnimationManager::new();
+        off.set_duration_scale(0.0);
+        assert!(off.animations_suppressed());
+        off.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 200));
+        assert!(!off.has_active(), "Off should start no animation at all");
+
+        let mut reduced = AnimationManager::new();
+        reduced.reduced_motion = true;
+        reduced.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 200));
+        assert!(!reduced.has_active());
+    }
+
+    #[test]
+    fn a_hand_edited_scale_cannot_stall_the_shell() {
+        // The value comes from a YAML file the user may edit. A NaN compares
+        // false against every bound, so an unvalidated one would sit in the
+        // divide forever and no animation would ever finish.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0, -0.0] {
+            let mut m = AnimationManager::new();
+            m.set_duration_scale(bad);
+            assert!(
+                m.animations_suppressed(),
+                "{bad} should read as Off, not as a divisor"
+            );
+            m.animate_window(WindowAnimation::open(1, 0.0, 0.0, 10.0, 10.0, 200));
+            assert!(!m.has_active(), "{bad} started an animation");
+        }
+    }
+
+    #[test]
+    fn changing_the_scale_does_not_carry_a_stale_fraction() {
+        // A fraction owed under 1.5x must not be handed to an animation
+        // running at 1.0x, which would make its first frame longer than the
+        // frame actually was and finish it early.
+        let mut m = AnimationManager::new();
+        m.set_duration_scale(1.5);
+        m.animate_window(WindowAnimation::open(1, 0.0, 0.0, 10.0, 10.0, 200));
+        m.tick(16); // leaves 0.67 ms owed
+        m.cancel_all();
+
+        m.set_duration_scale(1.0);
+        m.animate_window(WindowAnimation::open(2, 0.0, 0.0, 10.0, 10.0, 200));
+        assert_eq!(
+            ms_to_finish(&mut m),
+            208,
+            "an unscaled animation should take its own duration"
+        );
+    }
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
 
     use super::*;
 

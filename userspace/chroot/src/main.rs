@@ -34,19 +34,35 @@ const DEFAULT_SHELL: &str = "/bin/sh";
 // DESIGN GAP -- chroot/chdir/setuid/setgid/setgroups have no kernel ABI yet
 // ============================================================================
 //
-// The Slate OS kernel does **not** currently expose syscalls for changing the
-// process root directory, working directory, or supplementary group set.
-// There is no SYS_CHROOT, SYS_CHDIR or SYS_SETGROUPS in the syscall table.
+// This block has been wrong twice, in opposite directions, and the current
+// text is what survived measuring rather than asserting. Measured 2026-09-07:
 //
-// It *does* expose SYS_PROCESS_SET_CREDENTIALS (530), which sets uid and gid,
-// and `posix::unistd::setuid`/`setgid` are live on it -- so two of the five
-// operations this block used to list as missing are not. This tool still
-// refuses all five, and that is the point rather than an oversight: dropping
-// privileges without changing the root would leave the caller believing they
-// were sandboxed when they were not, which is a worse failure than refusing.
-// The privilege drop goes in after the root change, not before, and not
-// alone. Asked for in
+//   operation   kernel (Linux-ABI table)   native libc (`posix`)
+//   chroot      real, linux.rs:3216        validates + CAP_SYS_CHROOT, ENOSYS
+//   chdir       real, linux.rs:3438        REAL -- resolves and stats the path
+//   setgroups   real, linux.rs:15729       returns 0 WITHOUT ACTING (see below)
+//   setuid      real                       real, via SYS_PROCESS_SET_CREDENTIALS
+//   setgid      real                       real, likewise
+//
+// So the kernel implements all five. What is missing is a *native* syscall
+// number for `chroot` and `setgroups` -- the implementations live in the
+// Linux-ABI table, which serves binaries running under `AbiMode::Linux`, and
+// `posix/src/syscall.rs` has no constant to reach them with. Asked for in
 // `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
+//
+// `posix::setgroups` is worse than absent: it checks CAP_SETGID, validates its
+// arguments, and returns success having changed nothing. A caller that drops
+// groups and trusts the result keeps them all. See `known-issues.md` ->
+// `B-POSIX-SETGROUPS-REPORTS-SUCCESS-WITHOUT-CHANGING-ANY-GROUPS`. That is
+// this lane's bug, not the kernel's.
+//
+// This tool still refuses every privilege operation, and that remains the
+// point rather than an oversight: `chdir` works and `setuid`/`setgid` work, so
+// a partial implementation is *available* -- and dropping privileges without
+// changing the root would leave the caller believing they were sandboxed when
+// they were not, which is a worse failure than refusing. The order is chroot,
+// chdir, setgroups, setgid, setuid, and it is not safe to start it until the
+// first and third can actually happen.
 //
 // An earlier version of this file hardcoded fake syscall numbers
 // (SYS_CHROOT=61, SYS_CHDIR=49, SYS_SETUID=105, SYS_SETGID=106,
@@ -61,7 +77,8 @@ const DEFAULT_SHELL: &str = "/bin/sh";
 //   * SYS_SETUID=105 / SYS_SETGID=106 / SYS_SETGROUPS=116 were unassigned
 //     (only 100..103 in that range are wired up), so those calls hit the
 //     kernel's unknown-syscall path -- benign but undetectable from here.
-//     The first two have a real home now (530, above); the third does not.
+//     The first two have a real home now (530); the third still has no
+//     native number, though the kernel implements it for the Linux ABI.
 //
 // The safe and correct interim behavior is for `chroot` to fail with a
 // clear "not implemented" error rather than execute any syscall. The

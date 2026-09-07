@@ -20198,7 +20198,8 @@ the first attempt at this fix went wrong.
 
 **In short:** Open Settings, choose "Slow" animations, and the setting is
 saved, survives a restart, and changes nothing — because nothing in the system
-reads it. The same is true of desktop icon size and cursor scheme. Cursor
+reads it. The same is true of desktop icon size and cursor scheme.
+(**Animation speed is fixed as of 2026-09-06**; the other three stand.) Cursor
 *size* is worse: it exists as four separate settings in four places, and the
 program that draws the cursor reads none of them. These are controls that work
 perfectly and do nothing, which is the most expensive kind of broken, because
@@ -20229,7 +20230,7 @@ read by the panel that edits it is not a consumer.
 | `window_corners`, `drop_shadows` | compositor | **works** |
 | `scaling_percent` | `guitk::scaling` via `set_appearance` | **works** |
 | `fonts` | — | out of scope here; see §400 and C-Q1 |
-| **`animation_speed`** | **none** | **dead** |
+| ~~`animation_speed`~~ | `AnimationManager`, via `ShellSession` | **fixed 2026-09-06** |
 | **`icon_size`** | **none** | **dead** |
 | **`cursor_scheme`** | **none** | **dead** |
 | **`cursor_size`** | **none** — and three rival copies | **dead, four ways** |
@@ -20289,10 +20290,16 @@ heatmap whose legend advertised a gradient the graph did not draw
 
 Per setting, and they are not equal:
 
-1. **`animation_speed`** — give `AnimationManager` a speed multiplier applied
-   where elapsed time enters an animation, and feed it from
-   `DesktopShell::set_appearance`. This is the one with real user value and it
-   is self-contained.
+1. ~~**`animation_speed`**~~ — **done 2026-09-06.** `AnimationManager` gained
+   `set_duration_scale`, applied where elapsed time enters `tick` rather than to
+   each animation's stated duration, so a new animation kind cannot forget to
+   obey it. Two things the plan above did not anticipate: the fractional
+   millisecond has to be *carried* (at 1.5x, truncating 10.67 to 10 loses 4%
+   every frame, so every slow animation would run consistently late), and the
+   feed is **not** `DesktopShell::set_appearance` — the manager lives on
+   `ShellSession`, not on the shell, so `session.shell_mut().load_appearance()`
+   adopts the settings and leaves the speed inert. `ShellSession::load_appearance`
+   is the door that does both.
 2. **`icon_size`** — the desktop-icon renderer is the consumer; it should take
    the size from the setting rather than a constant.
 3. **`cursor_scheme`** and **`cursor_size`** — do *not* wire these until the

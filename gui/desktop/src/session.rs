@@ -492,6 +492,10 @@ impl<T: Transport> ShellSession<T> {
         let mut tree = RenderTree::new();
         tree.commands
             .extend(self.wallpaper.get_render_commands(&p, width, height, day));
+        // After the wallpaper, because they sit on it. This is the *background*
+        // surface, so windows cover the widgets -- which is what makes them
+        // desktop widgets rather than an always-on-top overlay.
+        tree.commands.extend(self.shell.render_widgets());
         self.events
             .submit(self.background.window, &self.background.localize(&tree))
     }
@@ -757,6 +761,12 @@ impl<T: Transport> ShellSession<T> {
                 // rather than an invariant. Under Alt-Tab for the same reason
                 // the menus are: Alt+Tab leaves the card open, and the switcher
                 // is modal while it is up.
+                // Over the menus and under Alt-Tab, with the rest of the
+                // popups. It cannot be on screen beside any of them --
+                // `open_desktop_menu` dismisses everything first, and any other
+                // popup opening dismisses it -- so this position states that
+                // invariant rather than resolving a case.
+                self.shell.render_desktop_menu(),
                 self.shell.render_shortcut_card(),
                 self.shell.render_alt_tab(),
                 // Last of all, over Alt-Tab too, and for the opposite reason to
@@ -825,6 +835,7 @@ impl<T: Transport> ShellSession<T> {
             || self.shell.overview.visible
             || self.shell.run_dialog.is_visible()
             || self.shell.shortcut_card_open
+            || self.shell.desktop_menu.is_visible()
     }
 
     /// Handle everything waiting, without blocking. Reports whether anything

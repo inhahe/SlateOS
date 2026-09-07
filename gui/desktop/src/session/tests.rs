@@ -1244,6 +1244,149 @@ fn turning_auto_hide_off_puts_the_taskbar_back() {
     });
 }
 
+// ---- the desktop context menu, and the widgets it adds ----
+
+/// Right-click at a point in screen coordinates, through the surface that
+/// would really have received it.
+fn right_click_at(desktop: &Desktop, surface: Surface, x: f32, y: f32) {
+    let (ox, oy) = surface.origin;
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        surface.window(),
+        guitk::event::Event::Mouse(guitk::event::MouseEvent {
+            x: x - ox,
+            y: y - oy,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }),
+    )]);
+}
+
+#[test]
+fn a_right_click_on_bare_desktop_opens_a_menu() {
+    let (mut session, desktop) = session();
+    assert!(!session.shell().desktop_menu.is_visible());
+
+    right_click_at(&desktop, session.background(), 400.0, 300.0);
+    session.pump().expect("pump");
+
+    assert!(
+        session.shell().desktop_menu.is_visible(),
+        "right-clicking bare desktop should open the menu"
+    );
+    // And that it is *drawn*. Deleting the render call left every other
+    // assertion here green: "visible" is a flag, and a flag is not a picture.
+    let tree = session
+        .shell()
+        .render_desktop_menu()
+        .expect("an open menu should render");
+    assert!(!tree.commands.is_empty(), "the open menu drew nothing");
+}
+
+#[test]
+fn a_right_click_on_the_taskbar_does_not_open_the_desktop_menu() {
+    // The menu is the *desktop's*. The taskbar will grow its own; opening this
+    // one over it would take that press away, and the failure would be silent,
+    // because a menu appears and it looks like it worked.
+    let (mut session, desktop) = session();
+    let bar = session.shell().taskbar_rect();
+
+    right_click_at(&desktop, session.panel(), bar.x + 20.0, bar.y + 8.0);
+    session.pump().expect("pump");
+
+    assert!(!session.shell().desktop_menu.is_visible());
+}
+
+#[test]
+fn escape_closes_the_desktop_menu() {
+    // Without the keyboard path the menu could be opened and then only
+    // dismissed with the mouse, which is a trap on a surface that covers what
+    // the user was aiming at.
+    let (mut session, desktop) = session();
+    right_click_at(&desktop, session.background(), 400.0, 300.0);
+    session.pump().expect("pump");
+    assert!(session.shell().desktop_menu.is_visible());
+
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(session.panel().window(), key(Key::Escape))]);
+    session.pump().expect("pump");
+
+    assert!(
+        !session.shell().desktop_menu.is_visible(),
+        "Escape did nothing"
+    );
+}
+
+#[test]
+fn adding_a_widget_from_the_menu_puts_it_on_the_desktop() {
+    // The whole chain. Both halves were islands with no caller until now --
+    // `guitk::menu`'s `ContextMenu` and `widgets::DesktopWidgetManager` -- so
+    // this is the test that says they are joined and that the result is drawn.
+    let (mut session, _desktop) = session();
+    assert_eq!(session.shell().widgets.count(), 0, "starts empty");
+    let before = session.shell().render_widgets().len();
+
+    let added = session
+        .shell_mut()
+        .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+
+    assert!(added, "the menu item reported no change");
+    assert_eq!(session.shell().widgets.count(), 1);
+    assert!(
+        session.shell().render_widgets().len() > before,
+        "the widget layer drew nothing new"
+    );
+}
+
+#[test]
+fn remove_all_widgets_empties_the_desktop() {
+    let (mut session, _desktop) = session();
+    let shell = session.shell_mut();
+    shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+    shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
+    assert_eq!(shell.widgets.count(), 2);
+
+    assert!(shell.activate_desktop_menu_item(DesktopShell::MENU_REMOVE_WIDGETS));
+    assert_eq!(shell.widgets.count(), 0);
+    assert!(shell.render_widgets().is_empty());
+
+    // And again on an empty desktop reports no change, so a caller that
+    // repaints on `true` does not repaint for nothing.
+    assert!(!shell.activate_desktop_menu_item(DesktopShell::MENU_REMOVE_WIDGETS));
+}
+
+#[test]
+fn two_added_widgets_do_not_land_on_top_of_each_other() {
+    // `find_free_position` is why the click point is not used as the position:
+    // a widget dropped where the pointer was would overlap whatever is there.
+    let (mut session, _desktop) = session();
+    let shell = session.shell_mut();
+    shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+    shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+
+    let positions: Vec<_> = shell
+        .widgets
+        .all_widgets()
+        .iter()
+        .map(|w| w.position)
+        .collect();
+    assert_eq!(positions.len(), 2);
+    assert_ne!(positions[0], positions[1], "two widgets in one cell");
+}
+
+#[test]
+fn a_desktop_with_no_widgets_still_parks() {
+    // Widgets tick, so a desktop that had them would keep asking for frames.
+    // One with none must not: adding the widget layer cannot cost an untouched
+    // desktop its unbounded park (design-decisions 812).
+    let (mut session, desktop) = session();
+    run_frames(&mut session, &desktop, 2_000);
+    assert_eq!(session.shell().widgets.count(), 0);
+    assert!(
+        !session.anything_moving(),
+        "an empty widget layer is asking for frames"
+    );
+}
+
 // ---- following the display ----
 
 #[test]

@@ -73,7 +73,7 @@ and on two entries sharing an identifier while one is still open. It only
 duplicate numbers in the archive, both of which are another lane's text to fix
 or history's to keep. Reasoning: `design-decisions.md` §903.
 
-## Q46 — [A] Every benchmark ever recorded measured an `opt-level = 0` kernel. Should the *non-bench* boot test also switch to release, or only the bench path? — Status: OPEN (costs now measured 2026-08-21; recommendation moved A → C)
+## Q46 — [A] Every benchmark ever recorded measured an `opt-level = 0` kernel. Should the *non-bench* boot test also switch to release, or only the bench path? — Status: ANSWERED C, with instruction to design a concrete trigger for "periodic" re-measurement (not just "never in practice") — needs implementation design from lane A
 
 **Background.** `scripts/boot-test.sh:602` runs a bare `cargo build` and stages
 `target/x86_64-unknown-none/debug/kernel`. The bench suite is compiled in
@@ -222,7 +222,7 @@ alone is real, and this entry exists partly to stop that.
 
 ---
 
-## Q47 — [A] The `D:` drive filled to 0 bytes free and destroyed a source file. Should the three lanes share one build-output directory? — Status: OPEN (narrowed — C is done; the question is now only A vs B)
+## Q47 — [A] The `D:` drive filled to 0 bytes free and destroyed a source file. Should the three lanes share one build-output directory? — Status: OPERATOR INPUT RECEIVED — no option chosen; tree now on E: with ~300 GB free, serialisation cost may be near zero, pruning buys little. Needs re-evaluation on E: before deciding.
 
 **In short:** The drive the project lives on ran completely out of space today.
 An edit that was half-written when the space ran out left one kernel source
@@ -502,7 +502,7 @@ degrade is throughput and trust in timings: every boot test either takes 4-8×
 longer than it should or has to be re-run with a bigger budget, and no benchmark
 taken while another lane builds is worth recording.
 
-## Q56 — [A] A program compiled for Linux is exempt from the file-permission checks our own programs must pass. Close the gap, or write it down as the price of running Linux software? — Status: OPEN
+## Q56 — [A] A program compiled for Linux is exempt from the file-permission checks our own programs must pass. Close the gap, or write it down as the price of running Linux software? — Status: ANSWERED A (suspend and prompt, or ahead-of-time grant; per-account default-grant policy for both Linux and native programs) — operator asked follow-up questions back, needs lane A response
 
 **In short:** When a program asks this system a question about a file — "how big
 is it?", "when was it changed?" — our own programs are required to hold a
@@ -706,7 +706,7 @@ that says the tables were measured against bash);
 
 ---
 
-## Q57 — [A] Should a program be able to pop up a prompt asking you for permission to read the keyboard, the microphone or the camera? — Status: OPEN
+## Q57 — [A] Should a program be able to pop up a prompt asking you for permission to read the keyboard, the microphone or the camera? — Status: RESOLVED → §918 (operator chose A: yes, and fix the error message)
 
 **In short:** SlateOS has a mechanism where a program that lacks permission for
 something can ask *you* for it — the system shows the program's stated reason and
@@ -1157,7 +1157,7 @@ Nothing is blocked and nothing degrades. The two dialects are documented in
 a recorded decision rather than an accident. The only ongoing cost is that a user
 who learns one pattern language may assume the other works the same way.
 
-## A-Q1 — [A] `find . -size 100` finds 100-byte files here and 50 KiB files everywhere else. Match the rest of the world, or refuse the ambiguous spelling? — Status: OPEN
+## A-Q1 — [A] `find . -size 100` finds 100-byte files here and 50 KiB files everywhere else. Match the rest of the world, or refuse the ambiguous spelling? — Status: RESOLVED → §916 (operator chose C: match POSIX, bare number means 512-byte blocks)
 
 **In short:** `find` is the command that searches a folder for files matching
 some description. One of the things you can ask about is size. If you write
@@ -1243,7 +1243,7 @@ Tracked in `known-issues.md` as
 
 ---
 
-## A-Q2 — [A] Our C-test programs are built against a library nobody can identify, because the compiler that builds them cannot see the folder it is run from. The fix is in a different project. Who changes it? — Status: OPEN
+## A-Q2 — [A] Our C-test programs are built against a library nobody can identify, because the compiler that builds them cannot see the folder it is run from. The fix is in a different project. Who changes it? — Status: RESOLVED → §915 (operator chose A: fix fastpy directly)
 
 **In short:** part of our test suite compiles small C programs and runs them
 inside the OS. To build them, the compiler (**fastpy** — a separate project of
@@ -1321,7 +1321,7 @@ different offsets and the merge is automatic. Newest first within each lane.
 
 ---
 
-## A-Q3 — [A] Should the kernel run its own test suite on a user's boot, and stop the machine when one fails? — Status: OPEN (raised 2026-08-22)
+## A-Q3 — [A] Should the kernel run its own test suite on a user's boot, and stop the machine when one fails? — Status: RESOLVED → §914 (operator chose D: halt on integrity failures, log-and-continue for the rest)
 
 **In short:** Right now, every time this OS starts, the kernel runs several
 hundred of its own built-in tests before handing the machine to the user —
@@ -1493,7 +1493,7 @@ interface shape.
 
 ---
 
-## A-Q4 — [A] Should `oci run` refuse to start when an option cannot be applied? — Status: OPEN
+## A-Q4 — [A] Should `oci run` refuse to start when an option cannot be applied? — Status: RESOLVED → §917 (operator chose A: refuse to start)
 
 **In short:** `oci run` starts a container. If you ask it for something extra —
 a shared folder (`-v`), a published port (`-p`), a file of labels or
@@ -1571,7 +1571,7 @@ is a place that would need revisiting if the contract later changes.
 
 ---
 
-## A-Q5 — [A] The shell's `grep` ignores case and numbers lines by default, unlike every other Unix — Status: OPEN (raised 2026-08-24)
+## A-Q5 — [A] The shell's `grep` ignores case and numbers lines by default, unlike every other Unix — Status: RESOLVED → §919 (operator chose A: match standard defaults; also integrate operator's custom grep features)
 
 **In short:** In our shell, typing `grep Error mylog.txt` also finds `error`
 and `ERROR`, and prints each result with a line number in front of it, like
@@ -1782,7 +1782,7 @@ work; I am carrying on down the roadmap.
 
 ---
 
-## A-Q6 — [A] Two commits that appear to delete the whole OS, and 33 commits signed by a fake name, are permanently in the published history. Leave them, or rewrite? — Status: OPEN (raised 2026-08-29)
+## A-Q6 — [A] Two commits that appear to delete the whole OS, and 33 commits signed by a fake name, are permanently in the published history. Leave them, or rewrite? — Status: RESOLVED → §920 (operator chose A: leave the history as-is)
 
 **In short:** on 2026-08-29 a safety check that runs just before uploading code
 accidentally committed to the real project instead of to the scratch copy it
@@ -2023,7 +2023,7 @@ accent be (i) adjusted for the mode like the presets are, (ii) accepted but
 warned about in the picker, or (iii) left exactly as chosen on the grounds that
 the user asked for it? I lean (i), matching what the presets already do.
 
-## A-Q7 — [A] Every build and check on this machine is paying about 70 milliseconds per file opened, and the likely cause is the antivirus. Should the project folder be excluded from real-time scanning? — Status: OPEN (raised 2026-09-03)
+## A-Q7 — [A] Every build and check on this machine is paying about 70 milliseconds per file opened, and the likely cause is the antivirus. Should the project folder be excluded from real-time scanning? — Status: RESOLVED → §921 (operator: D: was already excluded; 70ms likely CPU saturation + 4 backup jobs, not AV; re-measure on E:)
 
 **In short:** opening a file on the `D:` drive on this machine costs roughly 70
 milliseconds — about five times what the same file costs on `C:`, and about a

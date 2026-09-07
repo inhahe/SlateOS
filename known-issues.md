@@ -122569,3 +122569,78 @@ commits behind, and carries the rule both instances point at: fetch before
 **reading** to draw a conclusion, not only before writing. Two independent
 sessions reached the same wrong conclusion by the same route on the same day,
 which suggests the hazard is structural rather than careless.
+
+
+## B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING (lane B, 2026-09-07)
+
+**In short:** the functions a program calls to ask for "wake me in 5 seconds"
+(`timer_create`, `timer_settime`) check their arguments, report success, and set
+no timer. Nothing ever fires. A program that schedules a timeout and waits for
+it waits forever.
+
+**Where.** `posix/src/time.rs`, the "POSIX per-process timers" section.
+
+**Why it is being logged now, having been true for a long time.** The reason
+recorded next to the code was *"our OS does not deliver Unix signals"*, and
+while that was true this was not a bug but an honest consequence of the
+architecture -- there was no mechanism a timer could have used. That reason has
+stopped being true. `posix/src/signal.rs` registers `__signal_trampoline` with
+the kernel in `__libc_start_main` (`crt.rs:700`), the kernel delivers pending
+unblocked signals through it, and handlers registered by `signal`/`sigaction`
+really run. So the delivery half exists and the gap is now narrow and specific:
+**nothing asks the kernel for a timer.** `SIGALRM` has a way to arrive and no
+one to send it.
+
+That changes its character. It was a documented architectural limit; it is now
+a function that reports it did something it did not do -- the same family as
+`B-POSIX-SETGROUPS-REPORTS-SUCCESS-WITHOUT-CHANGING-ANY-GROUPS`, fixed earlier
+the same day.
+
+**Why it is not simply flipped to `ENOSYS` the way `setgroups` was.** The
+audit that made `setgroups` easy does not come out the same way here. That one
+had *no callers anywhere in the tree, in any language*, so nothing could break.
+These have a plausible caller population -- the comment names the case, programs
+that create a timer at startup for profiling or a heartbeat and would fail at
+startup if the call errored -- and CPython, this tree's largest libc consumer,
+exposes them through `signal.setitimer` and `time`. That population has **not**
+been audited, and this entry deliberately does not recommend a direction until
+it has been, because "nobody has audited it" is a statement about the auditing
+and not about the hazard. Doing the audit is the next step, not the decision.
+
+**The two honest options, for when it is:** arm a real kernel timer (the kernel
+already has the delivery path -- `kernel/src/proc/signal.rs` mentions
+`ITIMER_REAL`), or fail loudly so callers can choose a fallback. Succeeding
+silently is the one option that is wrong in every case.
+
+
+## B-NO-ALTERNATE-SIGNAL-STACK-SO-A-STACK-OVERFLOW-HANDLER-CANNOT-RUN (lane B, 2026-09-07)
+
+**In short:** a program can ask that its crash handler run on a separate, small,
+private stack, so that it still works when the crash *is* the main stack running
+out. We accept the request, report it disabled, and run every handler on the
+ordinary stack. For most handlers this is invisible. For the one case the
+feature exists to serve -- a stack overflow -- the handler cannot run at all.
+
+**Where.** `posix/src/signal.rs`, `sigaltstack` (reports `SS_DISABLE`) and
+`__signal_trampoline`, which pushes the saved-context pointer and calls
+`__signal_dispatch` with no stack switch anywhere in the path. `SA_ONSTACK` is
+a defined constant that nothing reads.
+
+**Severity is genuinely low, and the reason is worth stating** so nobody
+promotes this on the strength of the title. `sigaltstack` reporting `SS_DISABLE`
+is *honest* -- it is not the `setgroups` shape, because it declines rather than
+pretending. A caller that checks gets a true answer. What is lost is only the
+overflow case: an ordinary `SIGSEGV`, `SIGFPE` or `SIGINT` handler runs
+perfectly well on the interrupted stack.
+
+**Who trips it.** CPython's `faulthandler` installs `SIGSEGV` on an alternate
+stack precisely to survive recursion-depth crashes; it will get the disposition
+recorded and no alternate stack behind it, so a genuine Python stack overflow
+faults without the traceback that module exists to print. Relevant to the
+interactive-CPython work, which is why it was found.
+
+**The proper fix** is for the kernel's `deliver_pending_signal` to honour
+`SA_ONSTACK` by switching to the registered stack before entering the
+trampoline, which makes it partly lane A's. Not filed as a request yet: the
+libc half (actually storing the alternate stack rather than discarding it) has
+to exist first, and that is this lane's and not written.

@@ -179,8 +179,21 @@ process_global! {
 
 /// Install a signal handler.
 ///
-/// Stores the handler and returns the previous one.  Handlers are
-/// never actually invoked since our OS doesn't deliver Unix signals.
+/// Stores the handler and returns the previous one.  The handler **is**
+/// invoked: at startup `init_signals()` registers `__signal_trampoline`
+/// with the kernel, and a pending unblocked signal is delivered
+/// asynchronously through it -- see this module's "Asynchronous
+/// delivery" section, which describes the mechanism in full.
+///
+/// Until 2026-09-07 this paragraph read "Handlers are never actually
+/// invoked since our OS doesn't deliver Unix signals".  That was true
+/// when written, and was contradicted by this module's own header for
+/// as long as the trampoline has existed.  It is corrected rather than
+/// quietly deleted because the claim was load-bearing in the wrong
+/// direction: a reader who believes signals are never delivered designs
+/// around an obstacle that is not there, and `^C` arriving as `SIGINT`
+/// is exactly what an interactive interpreter needs in order to raise
+/// `KeyboardInterrupt`.
 ///
 /// POSIX: `signal()` is equivalent to `sigaction()` with
 /// implementation-defined `sa_flags`.  We reset `sa_mask` and
@@ -338,8 +351,10 @@ pub const SA_RESETHAND: u64 = 0x8000_0000;
 /// Examine and change a signal action.
 ///
 /// Stores the new action (if provided) and returns the old action
-/// (including `sa_mask`, `sa_flags`, and `sa_restorer`).
-/// Handlers are never actually invoked.
+/// (including `sa_mask`, `sa_flags`, and `sa_restorer`).  The handler is
+/// invoked on asynchronous delivery through `__signal_trampoline`; see
+/// [`signal`] and this module's "Asynchronous delivery" section.  (This
+/// line also used to claim handlers were never invoked.)
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigaction(
     signum: i32,
@@ -1517,9 +1532,23 @@ pub struct StackT {
 
 /// Set and/or get the alternate signal stack.
 ///
-/// Stub: our OS doesn't deliver Unix signals, so there is no signal
-/// stack to configure.  If `oss` is non-null, we report SS_DISABLE.
-/// If `ss` is non-null, we accept the configuration silently.
+/// Reports `SS_DISABLE`, and accepts any configuration silently.
+///
+/// The behaviour is right; the reason previously given for it was not.
+/// This used to read "our OS doesn't deliver Unix signals, so there is
+/// no signal stack to configure".  Signals *are* delivered -- see
+/// [`signal`].  The real reason is narrower and outlives the
+/// correction: `SA_ONSTACK` is a defined constant that nothing reads,
+/// and `__signal_trampoline` runs the handler on the interrupted
+/// thread's own stack, pushing the context pointer and calling with no
+/// stack switch anywhere in the path.  There is genuinely no alternate
+/// stack in play, so reporting one would be the lie.
+///
+/// The consequence worth knowing: a handler for a stack-overflow fault
+/// cannot run, since it would need the very stack that just overflowed.
+/// A program installing a `SIGSEGV` handler on an alternate stack --
+/// CPython's `faulthandler` among them -- gets the disposition recorded
+/// and no alternate stack behind it.  Tracked in `known-issues.md`.
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]

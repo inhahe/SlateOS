@@ -21,10 +21,16 @@
 //!
 //! ## POSIX Timers
 //!
-//! Timer functions (`timer_create`, etc.) are stubs because our OS
-//! does not deliver Unix signals.  Programs that create timers will
-//! not get callbacks, but the API succeeds so programs that probe
-//! for timer support don't fail at startup.
+//! Timer functions (`timer_create`, etc.) are stubs: they validate their
+//! arguments, succeed, and arm nothing, so no expiration callback ever
+//! fires.  Programs that probe for timer support at startup link and run.
+//!
+//! **Not because signals are undeliverable.**  That was the reason given
+//! here until 2026-09-07 and it stopped being true: `signal.rs` registers
+//! a trampoline at startup and the kernel delivers pending signals
+//! through it.  The remaining gap is narrower and entirely on this side
+//! -- nothing arms a kernel timer to raise `SIGALRM` on expiry.  Tracked
+//! in `known-issues.md`.
 
 use crate::errno;
 use crate::stat::Timespec;
@@ -2450,9 +2456,13 @@ fn ci_match(buf: *const u8, off: usize, pattern: &[u8]) -> bool {
 // POSIX per-process timers (stubs)
 // ---------------------------------------------------------------------------
 //
-// Our OS does not deliver Unix signals, so timer expiration callbacks
-// never fire.  These stubs allow programs that create timers at
-// startup (e.g., for profiling or heartbeat) to link and run.
+// These validate and succeed without arming anything, so expiration
+// callbacks never fire.  That lets programs which create timers at
+// startup (profiling, heartbeats) link and run.
+//
+// The reason is *not* that signals are undeliverable -- they are, through
+// `signal.rs`'s trampoline.  It is that nothing here asks the kernel for
+// a timer.  See the module doc and `known-issues.md`.
 
 /// Timer ID type.
 pub type TimerT = i32;

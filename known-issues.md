@@ -122891,3 +122891,87 @@ authoritative.
 **How you would notice.** Copy a file in the file manager, switch to any other
 window, press Ctrl+V. Nothing arrives, and nothing says why.
 
+---
+
+## `TD-C-HIGH-CONTRAST-MODE-IS-NOT-CONNECTED-TO-ANYTHING` (lane C, 2026-09-07)
+
+**In short:** SlateOS has four high-contrast colour schemes for users who
+cannot read ordinary ones, and there is no way to turn any of them on. The
+code that defines them is complete and tested and is called by nothing. There
+is also a *second*, separate accessibility module that models the same feature
+differently, and it is equally unconnected. A user who needs high contrast
+gets the ordinary theme.
+
+**How this was found.** Acting on `design-decisions.md` §816, which says the
+green-on-black scheme's highlight becomes white and that the highlight must be
+user-configurable. Both halves turned out to mean something other than what
+they appear to:
+
+- **The configurability half is already satisfied**, for everything actually
+  on screen. The live highlight is `Palette::highlight_fill`, which is
+  `with_alpha(self.accent, ...)` -- derived from the accent, which the user
+  already picks in Appearance settings. Nothing needed building.
+- **The white half lands in code nobody runs.** `HighContrastTheme::accent` in
+  `gui/desktop/src/a11y.rs` has no caller outside its own tests.
+
+The colour was changed anyway, because the decision is recorded and the value
+will be right when it *is* wired -- but on its own it changes nothing a user
+sees, and saying so is the point of this entry.
+
+**Where it lives, and the duplication.**
+
+| Module | Lines | Models | Reachable |
+|---|---|---|---|
+| `gui/desktop/src/a11y.rs` | 2,291 | `HighContrastTheme` (4 schemes), colour filters, magnifier, sticky/filter/mouse keys, `AccessibilityConfig` | no -- pinned island #53 |
+| `gui/desktop/src/accessibility_settings.rs` | 2,037 | `ContrastMode` (`HighContrast`, `HighContrastInverse`), sticky/filter/mouse key configs | no -- `pub mod`, no callers |
+
+Both are `pub mod` in `gui/desktop/src/lib.rs` and neither is referenced
+anywhere else. **Both are in lane C**, so unlike the desktop-icon duplication
+(`requests/c-a-two-desktop-icon-models-...`) this one needs no cross-lane
+agreement -- it is mine to settle.
+
+**A side finding about the ratchet.** `a11y.rs` is on
+`scripts/orphan-modules-baseline.txt`; `accessibility_settings.rs` is not,
+although by the same test it is equally an island. `scan-orphan-modules.py`
+reports "no new islands (45 pinned)" and does not flag it. The scanner's
+reachability appears to be name-based -- it reports `a11y.rs` as "also spelled
+in" three files that do not import it -- so a module whose *item names* occur
+elsewhere reads as reached. Not chased further; noted because the baseline is
+used as evidence that nothing new has been stranded, and here it is one short.
+
+**What the proper fix is**, and it is not "wire up `a11y.rs`":
+
+1. **Pick one model and delete the other.** `accessibility_settings.rs`'s
+   `ContrastMode` is the smaller and more honest shape (an enum of modes, not
+   a palette), but `a11y.rs`'s four named schemes are what the operator's
+   question C-Q7 was about and what §816 decides. Neither is obviously right.
+2. **Put high contrast where the palette is built.**
+   `Palette::from_settings` is a four-line function and the *single*
+   construction point every shell surface goes through. A
+   `high_contrast: Option<...>` field on `AppearanceSettings`, branched on
+   there, makes the feature apply everywhere at once. Wiring the island
+   instead would mean teaching every caller about a second palette.
+3. **High contrast collapses the palette's gradations rather than shifting
+   them.** `crust`/`mantle`/`base`/`surface0..2` all become the background and
+   structure is carried by borders, which is what Windows' high contrast does
+   and why it works; `overlay0`, documented as "the faintest legible mark" at
+   3.4:1, must become the text colour, since a deliberately faint role is
+   exactly the thing the mode exists to remove. `panel_alpha` goes to opaque.
+4. **The categorical hues should not collapse.** "Red means failed" has to
+   survive, so those fields come from whichever mode's palette suits the
+   scheme's background rather than being flattened to the text colour.
+
+**The one open design point**, which is why this is written down rather than
+already done: **in high contrast, does the accent follow the user's Appearance
+setting, or the scheme?** Following the setting satisfies §816's
+configurability requirement directly and needs no new machinery, but lets a
+user pick a highlight with poor contrast against the scheme's background --
+in the mode where that matters most. Following the scheme guarantees contrast
+and makes §816's white the visible default, but means the highlight is the one
+colour high contrast does *not* let you change. A third option is to follow the
+setting only while it clears a contrast bar, which is defensible and is also
+the system silently overriding a user's explicit choice.
+
+**How you would notice.** Look for high contrast in Appearance settings. There
+is no control, and there is no setting behind it if there were.
+

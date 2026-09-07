@@ -95,12 +95,25 @@ impl HighContrastTheme {
     }
 
     /// Get the accent/highlight color.
+    ///
+    /// Green-on-black's is **white**, not the magenta it used to be, per
+    /// `design-decisions.md` §816. Magenta on black measures 6.7:1 where the
+    /// other three schemes' highlights measure 16.7:1 and 19.6:1 -- about
+    /// three times less contrast, in the scheme a user picks *because* they
+    /// need contrast. White is 21:1, the maximum available.
+    ///
+    /// The operator's argument for it is the one worth keeping: a highlight
+    /// does not have to carry its meaning in hue at all. Luminance contrast
+    /// is read identically by every form of colour vision including
+    /// monochromacy, and by anyone on a failing panel or in sunlight. Cyan is
+    /// defensible -- its blue component survives red-green colour-blindness,
+    /// which is also why magenta does -- but white is unimprovable.
     pub fn accent(&self) -> Color {
         match self {
             Self::BlackOnWhite => Color::from_hex(0xFFFF00),
             Self::WhiteOnBlack => Color::from_hex(0x0000FF),
             Self::YellowOnBlack => Color::from_hex(0x00FFFF),
-            Self::GreenOnBlack => Color::from_hex(0xFF00FF),
+            Self::GreenOnBlack => Color::from_hex(0xFFFFFF),
         }
     }
 
@@ -1273,6 +1286,59 @@ mod tests {
         assert_eq!(hc.accent(), Color::from_hex(0xFFFF00));
     }
 
+    /// Every scheme's highlight must be readable against that scheme's own
+    /// background.
+    ///
+    /// Stated as the property rather than as four literal colours, because a
+    /// literal-colour test passes for whatever value is written in it -- the
+    /// existing `test_high_contrast_colors` checks one scheme's three colours
+    /// and would have gone on passing while green-on-black's highlight sat at
+    /// 6.7:1, which is what it did.
+    ///
+    /// The bar is 7:1, WCAG's AAA level for normal-size text. These schemes
+    /// exist for users who need more contrast than ordinary themes give, so
+    /// the ordinary 4.5:1 is the wrong bar: it is the one the *default* theme
+    /// already has to clear.
+    #[test]
+    fn every_high_contrast_highlight_is_readable_on_its_own_background() {
+        use guitk::theme::contrast_ratio;
+
+        for scheme in [
+            HighContrastTheme::BlackOnWhite,
+            HighContrastTheme::WhiteOnBlack,
+            HighContrastTheme::YellowOnBlack,
+            HighContrastTheme::GreenOnBlack,
+        ] {
+            let ratio = contrast_ratio(scheme.accent(), scheme.background());
+            assert!(
+                ratio >= 7.0,
+                "{}: highlight measures {ratio:.2}:1 against its background, \
+                 below the 7:1 these schemes exist to provide",
+                scheme.label()
+            );
+        }
+    }
+
+    /// The text colour has to clear the same bar, for the same reason.
+    #[test]
+    fn every_high_contrast_text_is_readable_on_its_own_background() {
+        use guitk::theme::contrast_ratio;
+
+        for scheme in [
+            HighContrastTheme::BlackOnWhite,
+            HighContrastTheme::WhiteOnBlack,
+            HighContrastTheme::YellowOnBlack,
+            HighContrastTheme::GreenOnBlack,
+        ] {
+            let ratio = contrast_ratio(scheme.text(), scheme.background());
+            assert!(
+                ratio >= 7.0,
+                "{}: text measures {ratio:.2}:1 against its background",
+                scheme.label()
+            );
+        }
+    }
+
     #[test]
     fn test_high_contrast_labels() {
         assert!(!HighContrastTheme::YellowOnBlack.label().is_empty());
@@ -2162,11 +2228,15 @@ mod tests {
                 0xFFFF00,
                 0x00FFFF,
             ),
+            // White, not magenta: design-decisions.md 816. Magenta measured
+            // 6.7:1 against this scheme's own black, against 16.7 and 19.6
+            // for its neighbours -- the dimmest highlight in the set, in the
+            // scheme a user picks because they need contrast.
             (
                 HighContrastTheme::GreenOnBlack,
                 0x000000,
                 0x00FF00,
-                0xFF00FF,
+                0xFFFFFF,
             ),
         ];
         for (scheme, bg, text, accent) in table {

@@ -68544,6 +68544,26 @@ monochromacy, and by anyone on a failing panel or in direct sunlight. White on
 black is the maximum available and is hue-free. Cyan is defensible; white is
 unimprovable -- and "high contrast" is what the scheme is called.
 
+**Amended the same day, on trying to implement it.** Both halves of this
+decision meant something other than they appear to, and the entry would be
+misleading without saying so.
+
+The **configurability requirement is already satisfied** for everything on
+screen: the live highlight is `Palette::highlight_fill`, which is the user's
+accent with an alpha applied, and the accent is already an Appearance setting.
+Nothing had to be built for it.
+
+The **white** half lands in a module nothing calls. `HighContrastTheme` in
+`gui/desktop/src/a11y.rs` is a pinned orphan island, and there is a second,
+equally unreferenced accessibility module beside it modelling the same feature
+differently. So high contrast cannot be switched on at all, and this entry
+changes no pixel until that is fixed. The colour was changed regardless -- the
+decision stands and the value should be right when the feature is wired -- and
+the gap is written up as `TD-C-HIGH-CONTRAST-MODE-IS-NOT-CONNECTED-TO-ANYTHING`,
+which also carries the one design point this decision does *not* settle:
+whether, in high contrast, the accent follows the user's setting or the
+scheme's.
+
 **The one real argument against white**, and the reason the configurability
 requirement matters more than the default: a user who picks "green on black"
 may want it to *look* like a green terminal, and a white highlight breaks that

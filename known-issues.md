@@ -122021,103 +122021,97 @@ pre-merge gate is `open-questions.md` -> **C-Q11**, raised by lane C. The real
 objection is that it lets one lane's red crate block another lane's merge --
 which is exactly what happened here, in both directions.
 
-## A-THE-KERNEL-EMBEDS-THREE-BUILD-ARTIFACTS-NOTHING-BUILDS-AND-NOTHING-TRACKS (lane A's tree, found by lane B 2026-09-07)
+## A-A-REBUILT-SERVICE-DOES-NOT-INVALIDATE-THE-KERNEL-THAT-EMBEDS-IT (lane A's tree, found by lane B 2026-09-07)
 
-**In short:** the kernel compiles three small programs *into itself* by reading
-their compiled output off disk. Nothing in the build ever produces that output,
-and nothing tells the build system it depends on it. So on a tree where the
-files happen to be absent the kernel does not compile at all, with an error that
-reads like a corrupt checkout; and on a tree where they are present but stale,
-the kernel silently embeds the old versions. One of the three is the init
+**In short:** the kernel compiles six small ring-3 programs *into itself* by
+reading their compiled output off disk. There is a script that builds them and
+it works well. What is missing is the other half: nothing tells cargo the kernel
+*depends* on those files, so rebuilding one of them does not rebuild the kernel.
+The kernel keeps the old copy and says nothing. One of the six is the init
 process.
 
-**Where.** Nine `include_bytes!` sites across `kernel/src/main.rs` and
-`kernel/src/container.rs`, naming three artifacts:
+**This entry replaces a wrong one.** Its first two versions claimed "nothing
+builds them" and counted first one artifact, then three. All of that was wrong,
+and the retraction is below because how it was wrong is more useful than the
+finding.
 
-| Artifact | Embed sites | Size |
-|---|---|---|
-| `services/hello/target/x86_64-unknown-none/release/hello` | 7 (`container.rs`, and `main.rs:7516`) | 4,976 |
-| `services/init/target/x86_64-unknown-none/release/init` | 1 (`main.rs:7514`) | 76,704 |
-| `services/ticker/target/x86_64-unknown-none/release/ticker` | 1 (`main.rs:7518`) | 5,848 |
+### What is actually true
 
-Enumerate them with:
+`kernel/src/main.rs` and `kernel/src/container.rs` carry nine `include_bytes!`
+sites naming **six** distinct artifacts:
 
-```
-grep -rhoE 'include_bytes!\("[^"]+"\)' kernel/src/*.rs | sort | uniq -c
-```
+| Artifact | Path references |
+|---|---|
+| `services/hello` | 7 |
+| `services/netstack` | 3 |
+| `services/udpget` | 2 |
+| `services/init`, `services/httpget`, `services/ticker` | 1 each |
 
-`kernel/build.rs` sets the linker script and compiles the Ada components, and
-declares `cargo:rerun-if-changed` for exactly three things -- `linker.ld`,
-`ada/{f}` and `ada/prebuilt/stamp.txt`. It contains **no reference to any
-`services/` path at all**: it neither builds these three nor tracks them.
+**`scripts/bootstrap-worktree.sh` builds all six**, and is a good piece of work:
+it *derives* the list by grepping the `include_bytes!` calls rather than
+hardcoding it, so it cannot fall out of step with the kernel; it explains in its
+header why these services cannot simply be workspace members (they are
+`no_std`/`no_main` with their own linker script, static relocation and large code
+model, and cargo's config hierarchy is CWD-based, so the only reliable way to get
+a service's flags is to invoke cargo from inside its directory); `--check`
+reports what is missing with an exit status `boot-test.sh` reads; and it is
+safe to re-run. On a fresh or freshly-migrated worktree, running it once fixes
+the loud failure entirely.
 
-**Two defects, not one.**
+### The finding that survives
 
-1. **Nothing builds them.** Searching the scripts and the kernel for these
-   paths finds only the `include_bytes!` sites themselves. Each is a workspace
-   member, but its artifact is produced only by someone running
-   `cargo build --release` inside that crate's directory, whose
-   `.cargo/config.toml` pins `x86_64-unknown-none`. On a tree where that has
-   never happened, building the kernel fails with:
+`kernel/build.rs` emits `cargo:rerun-if-changed` for exactly three things --
+`linker.ld`, `ada/{f}` and `ada/prebuilt/stamp.txt` -- and contains **no
+reference to any `services/` path**. Bootstrap is a one-time provisioning step;
+it does not create a dependency edge. So after provisioning:
 
-   ```
-   error: couldn't read `kernel\src\../../services/hello/target/x86_64-unknown-none/release/hello`:
-          The system cannot find the path specified. (os error 3)
-   ```
+    edit services/init -> cargo build --release in services/init -> rebuild kernel
+    -> the kernel still embeds the previous init.
 
-   which names a path and looks like damage rather than a missing bootstrap step.
+Lane C, checking independently in its own tree, confirmed this from the file
+rather than from the shape of the bug, and put the consequence better than I
+did: a missing file fails loudly and immediately, but a *stale embed* produces a
+kernel that builds clean, boots, and runs last week's binary -- so the symptom is
+"my change to that program did nothing", which is indistinguishable from a change
+that genuinely does nothing. Someone debugs the program, not the build. And it is
+worse on a long-lived machine than a fresh one, which inverts the usual order in
+which people suspect their toolchain.
 
-2. **Nothing tracks them — and this is the worse half.** With no
-   `cargo:rerun-if-changed` on those paths, rebuilding any of the three does not
-   invalidate the kernel. The kernel keeps the previously embedded copy and says
-   nothing. A change that appears to have no effect is indistinguishable from a
-   change that genuinely has none. This applies to `services/init` too, which is
-   not a test program but the init process: iterate on init, rebuild, boot, and
-   you may be watching the previous init run.
+**A `rerun-if-changed` line alone is not the fix,** also lane C's point: the
+artifact would still be the output of a build cargo does not run, so the ordering
+stays undeclared and a fresh clone still fails. It converts a silent-stale bug
+into one that sometimes notices. The fix is either a build script that builds the
+six as a real step (from inside each service's directory, as bootstrap does), or
+tracking the binaries in-tree behind a staleness gate.
 
-**How it surfaced.** The D:->E: migration copied every worktree but excluded
-directories named `target`, on the sound reasoning that cargo bakes absolute
-paths into its fingerprints so a moved `target/` is rebuilt anyway. The files
-are untracked, so git did not carry them either. Measured across all four E:
-trees, only `os-lane-a` had any of them -- which is why none had been noticed:
+**Owner:** `kernel/**`, so lane A -- specifically the *live* lane A session, which
+during this exchange was not the one that answered to the name.
 
-| Tree | hello | init | ticker |
+### The retraction, which is the useful part
+
+This entry was wrong twice before being right, and each time in the same way:
+**I reported the first place I looked as though it were the whole picture.**
+
+| Pass | Claim | Method | Wrong because |
 |---|---|---|---|
-| `os` | absent | absent | absent |
-| `os-lane-a` | 4,976 | 76,704 | (not measured) |
-| `os-lane-b` | rebuilt | rebuilt | rebuilt |
-| `os-lane-c` | absent | absent | absent |
+| 1 (me) | one artifact | grepped `container.rs` | stopped at one file |
+| 2 (lane A) | two artifacts | grepped `main.rs`, found `init` | stopped at one more |
+| 3 (me) | three artifacts | `grep kernel/src/*.rs` | glob does not recurse |
+| 4 (lane C) | six embed sites | `grep -c` on `container.rs` | counted one file's sites, not artifacts |
+| 5 (me) | six artifacts, and a script already builds them | `grep -r` all of `kernel/src`, then **read the script** | -- |
 
-Lane A's framing is the right one and worth keeping: *an artifact that source
-code embeds is a build **input** wearing an output's clothes, and the directory
-it lives under is not a reliable guide to which it is.*
+Four sessions, five passes, one afternoon, on a defect whose full extent one
+recursive grep would have given at any point. And the thing that actually
+corrected it was not a better grep: it was reading `bootstrap-worktree.sh`, which
+had documented the whole problem, its cause, and why the obvious fix does not
+work -- before any of us started. The tool that finds a fact and the document
+that already contains it are different instruments, and I reached for the first
+four times before the second.
 
-**It took three passes to count them, which is itself the lesson.** I reported
-one (grepped `container.rs`, stopped). Lane A corrected it to two (grepped
-`main.rs`, found `init`, stopped). It is three: `ticker` sits at `main.rs:7518`,
-between the other two. Each of us generalised from the first place we looked,
-three times in a row on the same defect in one afternoon -- which is the same
-error as reading a stale worktree, in a different costume. The `uniq -c` command
-above is the cheap answer: enumerate, then count, rather than find-and-stop.
-
-**It is not migration damage.** The same failure hits a fresh `git clone`, which
-makes it the first thing a new contributor would meet.
-
-**The remedy, verified 2026-09-07 on `os-lane-b`** (all three, 10.5 s total):
-
-```
-for a in hello init ticker; do (cd "services/$a" && cargo build --release); done
-# hello 2.75 s -> 4,976   init 5.05 s -> 76,704   ticker 2.71 s -> 5,848
-```
-
-That is a workaround, not the fix. **The fix is to declare the edges** -- have
-`kernel/build.rs` build all three (as it already shells out to GNAT for the Ada
-objects) and emit `cargo:rerun-if-changed` for each artifact, or make them
-proper artifact dependencies. A gate exclusion would remove the symptom and
-leave both defects standing; lane C made this point when the same file broke a
-proposed whole-workspace check gate, and it is the reason this entry exists
-separately from that discussion (`open-questions.md` -> C-Q11).
-
-**Owner:** `kernel/**` is lane A's, so the fix is lane A's. Filed here rather
-than as a `requests/` entry because lane A found the artifact asymmetry itself
-in the same exchange and is already recording the migration-script half.
+Lane C's habit is the cheap general fix and is worth adopting tree-wide: **state
+which tree you measured, in the same sentence as the measurement.** All of
+today's errors -- this one, and separately a lockscreen bug reported from a
+worktree 54 commits behind -- were a session reading its own worktree and
+reporting it as the state of the project. That is what worktrees do: the
+isolation that stops three lanes clobbering each other also stops them seeing
+each other.

@@ -560,232 +560,6 @@ sites), `kernel/src/syscall/handlers.rs:8365+` (the native gates),
 `kernel/src/cap/rights.rs` (`Rights::METADATA`).
 
 
-## B-Q7 — [B] You decided in June which copy of our command-line tools is the real one. The fact that decision rested on turns out to be false. Does the decision stand? — Status: OPEN
-
-**In short:** We have two copies of about forty small command-line programs
-(`sort`, `cut`, `stat`, …) — one set inside a bundle called `coreutils`, one set
-as separate little projects. In June you were asked which set was the real one
-and you picked the separate projects, on the strength of a security argument I
-gave you. **That argument was wrong about a plain matter of fact**, and it was
-wrong in the direction that flipped the answer: the property I said the bundle
-had (and that made it insecure) is one the *separate projects* actually have,
-and the bundle does not. Nothing was ever built on the June decision, so
-reversing it costs nothing but the decision itself. I need to know whether it
-stands, is reversed, or is replaced.
-
-### What I told you in June, and what is actually true
-
-The June decision is `design-decisions.md` §8. Its deciding argument was
-capability-based least privilege — the rule that a program should be granted
-only the permissions it actually needs. I told you `coreutils` was a
-**multi-call binary**: one single executable file that looks at the name it was
-invoked under and behaves as a different tool accordingly (this is how BusyBox
-on Linux works — one file, seventy names pointing at it). That shape is bad for
-least privilege, because the operating system grants permissions per *file*, so
-one file serving seventy tools must be granted the union of all seventy tools'
-permissions. `rm` would inherit whatever `mount` needs. That argument is sound,
-and on that basis you retired the bundle.
-
-`coreutils` is not that, and never was:
-
-| Claim in §8 | Measured, 2026-08-22 |
-|---|---|
-| `coreutils` is one multi-call executable | It builds **86 separate executables** (`cargo metadata` → 86 bin targets). One tool = one file, already. |
-| …that dispatches on its own invocation name | No such dispatch exists anywhere in it. |
-| …and always did | First commit (`d469e23bb`, 2026-05-17) already had `src/bin/*.rs`. There has never been a `src/main.rs`. |
-| §8's remedy: "extract a shared library, `coreutils-common`" | The crate already has one — `src/lib.rs` plus eleven shared modules (`quote`, `getopt`, `human`, `xnum`, …). `coreutils-common` was never created; the thing it was supposed to create already existed. |
-
-And the shape §8 condemned does exist in this tree — on the **other** side:
-
-| Separate project | One executable, serving |
-|---|---|
-| `userspace/stat` | `stat`, `touch`, `ln`, `readlink`, `realpath`, `mkfifo` |
-| `userspace/sha256sum` | `md5sum`, `sha1sum`, `sha256sum`, `sha512sum` |
-| `userspace/chown` | `chown`, `chmod` |
-| `userspace/who` | `who`, `w` |
-
-Each of those declares exactly one executable and switches on its invocation
-name — precisely the BusyBox shape. So §8's own security rationale, applied to
-the real code, argues for the bundle and against the separate projects.
-
-**And it is not four crates — it is at least nineteen, and it has already cost
-us working commands.** Surveyed 2026-08-22: **50–70 command names** are
-implemented as extra personalities of some other separate project, and **no
-build produces an executable for any of them**, because creating the links that
-would select the personality is a step nobody ever wrote. `e2fsck`, `mke2fs`,
-`tune2fs`, `resize2fs`, `strip`, `ranlib`, `xxd`, `killall`, `shred`, `visudo`,
-`lpr`, `mpstat`, `finger` and dozens more exist as finished code that cannot be
-run. `e2fsck` and `mke2fs` are the check and create tools for **ext4, our only
-filesystem**. Filed as `known-issues.md` →
-`B-DOZENS-OF-COMMANDS-EXIST-IN-SOURCE-AND-CAN-NEVER-BE-RUN`.
-
-This bears on the choice directly. §8's rule is *"one tool = one crate = one
-binary = one identity"*, and the side §8 declared canonical is where that rule
-is broken — not occasionally, but as the house style, in at least 19 crates.
-`coreutils`, the side §8 retires, is the only part of the tree where the rule
-actually holds today.
-
-**Nothing was built on §8.** Ten weeks on, not one part of it was carried out:
-no `coreutils-common`, no retirement, no build repointing. Both sets are still
-compiled, and both still write executables to the same filenames — whichever
-happens to build last wins, silently. That collision has already cost a full
-day: a test harness spent it reporting 105 differences against a `bc` that was
-not the `bc` anyone thought it was measuring
-(`known-issues.md` → `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`).
-
-**It cost a second session on 2026-08-30, and the shape was different.** The
-`bc` incident was a harness measuring the wrong binary. This one was *me*
-improving the wrong source file: five commits of GNU-parity work went into
-`userspace/tar` — which nothing outside the workspace glob references — while
-the `tar` that ships and that `scripts/tar-diff.sh` certifies (178 cases) is
-`coreutils/src/bin/tar.rs`, now 7189 lines to the standalone's 2724. The
-duplication is not merely a build hazard, then; it also silently misdirects
-work, and it does so in the direction that wastes the most of it.
-
-The `tar` pair matters for the choice below because it is the clearest case yet
-of the two sides diverging *after* the survey was taken. On 2026-08-22 the
-standalone `tar` was the better one and the table said so; eight days later the
-bundle's is more than twice its size and holds the old-option style, the
-160-entry long-option refusal table and the delayed-symlink traversal defence.
-Under option A, `tar` is one of the pairs where §8 would retire the
-implementation that passes 178 differential cases in favour of the one no
-harness measures. That is not an argument against A by itself — A allows moving
-the better code into the surviving crate — but it does mean the per-pair reading
-A and B both require cannot be done from the 2026-08-22 survey, which is now
-stale in at least this one row and was believed for eight days after it stopped
-being true.
-
-### The scale, so the options can be priced
-
-- 86 tool names live in `coreutils`; **41** of them also exist as separate
-  projects; **45** exist *only* in `coreutils` (`ls`, `cp`, `rm`, `grep`,
-  `find`, `sh`, `printf`, …).
-- 3 names (`sha1sum`, `sha512sum`, `w`) exist *only* as separate projects.
-- Of the 41 overlapping pairs, a rough survey (`scripts/dup-bins-survey.py`)
-  puts the separate project ahead on features for ~25 and `coreutils` ahead for
-  ~9, the rest level. **Neither side is uniformly better** — which is why no
-  option below should delete a whole side sight-unseen.
-- One thing that is *not* a differentiator, though it looks like it should be:
-  automated code-quality checking. `coreutils` opts out of the project-wide
-  checks (no `[lints]` in its manifest — 86 unchecked programs), but so do
-  **all 41** of the separate projects. Whichever side wins has to be opted in
-  afterwards either way; this is tracked separately as
-  `TD-B-USERSPACE-CRATES-DO-NOT-INHERIT-THE-WORKSPACE-LINTS`.
-
-### Options
-
-**A — §8 stands: the separate projects are canonical, the bundle is retired.**
-*What changes:* nothing a user sees; internally, 45 new one-tool projects get
-created for the names that only exist in the bundle, and the four BusyBox-shaped
-projects above get split so the "one tool, one file" rule they were chosen for is
-actually true of them.
-*Pro:* it is your standing decision; "one tool = one project = one file" is a
-clean rule that reads well from the outside.
-*Con:* the stated reason for it is false, so it would now be being kept for
-reasons other than the ones it was decided on. It is also the most work by a
-wide margin — 45 new projects plus four splits — and the work is pure
-rearrangement: no user-visible improvement at the end of it.
-
-**B — Reverse it: `coreutils` is the one home; for each overlapping pair the
-better implementation is the one that survives, moved into `coreutils`.**
-*What changes:* nothing a user sees, except that each tool stops
-non-deterministically alternating between two implementations depending on build
-order; the better of the two wins, permanently.
-*Pro:* the least-privilege argument that decided §8 actually points here.
-`coreutils` already has the shared library, already has 45 tools no one
-duplicated, and is the side the comparison harnesses test against. Least work
-of the three, and every step is a merge rather than a rewrite.
-*Con:* it overturns a decision you made. Merging 41 pairs by hand is careful
-work, and a careless merge loses features (the survey is only a triage aid —
-every pair still has to be read).
-
-**C — Split the difference: keep both projects, but assign every name to exactly
-one of them and enforce it.**
-*What changes:* same as B from outside; internally the tools stay where they
-already are and only the duplicates are resolved, either way per name.
-*Pro:* least code movement of all; keeps whichever copy is better without
-relocating it.
-*Con:* this is the current situation with a rule bolted on, and it is the option
-my own June analysis rejected as "the drift-generating status quo". Two homes
-means the next tool added has an ambiguous home, and the collision returns the
-first time someone forgets.
-
-### If never answered
-
-**It gets worse, slowly, and it is already not safe.** Both copies are still
-built, still overwrite each other's executables, and which one you get depends
-on build order. Any test, any measurement, any bug report about one of these 41
-tools may be about the other copy — that is not hypothetical, it cost a day
-already. It does not block other work, but every week adds edits to whichever
-copy the editor happened to open.
-
-### Claude's recommendation
-
-**B**, and it is not close on the merits — the security argument, the shared
-library, the 45 non-duplicated tools and the test harnesses all point the same
-way. But **A is your decision and I have not acted against it.** I had begun B
-autonomously (recorded as §359, and I had already merged `bc`) before finding
-§8; on finding it I stopped and marked §359 suspended.
-
-**One correction to what this entry said yesterday.** It said I was reverting
-the `bc` move so the tree would match your standing decision while this is open.
-**I have not, and on reflection I think reverting it would be the wrong call.**
-Saying so plainly is the point — what I will not do is quietly leave that
-sentence standing while the tree says otherwise.
-
-The reasoning, so you can overrule it in one line if you disagree:
-
-- **Reverting `bc` would not make the tree match §8; it would make 1 name out of
-  86 match it.** 45 command names exist *only* in `coreutils`, and four of the
-  standalone crates are the multi-call shape §8 was chosen to avoid. The tree
-  has never complied with §8 in any respect. Moving `bc` alone is a token that
-  buys no actual compliance.
-- **It would cost a real safety net.** `bc` now lives under
-  `coreutils/src/bin/`, which is the only directory the
-  `diagnostics_quote_names` test reads — and that test caught a genuine bug in
-  `bc` this week. Standalone crates are outside it. Widening the test is not a
-  cheap fix I could bundle into the move: measured 2026-08-22 with
-  `scripts/quote-names-scope.py`, a tree-wide version would flag **1796 call
-  sites across 777 crates**.
-
-  *Update 2026-08-23 — this argument is now weaker, and you should discount it
-  accordingly.* `scripts/quote-names.py` runs the same two detectors over the
-  whole of lane B's tree from pre-push gate 8, against a baseline of the 1798
-  sites that exist today; it fails only on a **new** one. So a standalone crate
-  is no longer unchecked — it is held at "no worse than today" rather than at
-  "zero", which is the only remaining difference. The 1798 are still unrepaired,
-  so a `bc` moved out of `coreutils/src/bin` would go from *must be clean* to
-  *must not get dirtier*. That is a smaller loss than this bullet described when
-  it was written, and it shrinks further with every crate the burn-down clears.
-- **It would create a dependency shape that exists nowhere in the tree yet.**
-  `bc` now uses `coreutils`'s `getopt`, `quote` and `errmsg`. A standalone
-  `userspace/bc` would have to depend on the `coreutils` *library* — a per-tool
-  crate importing the bundle §8 retires — or fork three modules and restart the
-  drift §359 was about.
-- **Nothing is unsafe in the meantime.** The duplication that cost a day is
-  *gone* for `bc`: `userspace/bc` is deleted, there is exactly one `bc`, it is
-  the better of the two implementations, `scripts/calc-diff.sh` names its
-  package explicitly rather than picking up whatever built last, and it passes
-  200/200 against GNU bc.
-
-So `bc` sits in `coreutils` today. **If you answer A, I move it out** — one file
-move, one dependency line, one edit to `calc-diff.sh` — and it is a rounding
-error inside the much larger A-shaped job of creating 45 new crates. Nothing is
-lost either way; that part of yesterday's promise still holds.
-
-### Where it bites
-
-`design-decisions.md` §8 (the June decision) and §359 (mine, now suspended);
-`coreutils-canonical-answer.md` (the June analysis carrying the false premise —
-worth correcting whichever way this goes); `userspace/coreutils/` (86 bins,
-`src/lib.rs`); the 41 duplicate crates under `userspace/`;
-`known-issues.md` → `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`;
-`scripts/dup-bins-survey.py` (the triage); `scripts/quote-names.py` and
-`known-issues.md` → `TD-B-THE-QUOTE-NAMES-TEST-READS-ONE-DIRECTORY-OF-EIGHTY`
-(the lint-coverage half of the cost).
-
----
-
 ## B-Q8 — [B] Two of the programs we copy disagree about how wide 626 characters are. Which one do we copy? — Status: OPEN
 
 **In short:** Text on a terminal is laid out in fixed cells, and every program
@@ -797,6 +571,26 @@ copy from — the shell **bash** and the **GNU command-line tools** — disagree
 with each other about 626 characters, and we can only match one of them. Today
 we match bash. Matching bash means our `ls` puts a filename in the wrong column
 for those characters; matching the GNU tools means our shell's menus do.
+
+**Why we cannot just measure what we draw (the operator's question, 2026-09-07,
+and it turned out to be the good one).** The natural answer is "have the table
+report how wide *we* actually print each character, and have every program ask
+it" — and that is half-true already: our programs do all ask one table. Two
+things stop it from settling the question, and the second is a genuine gap
+nobody had written down:
+
+1. **A program cannot ask the terminal.** There is no query for "how wide will
+   you draw this?" The only way to find out is to print it and ask where the
+   cursor ended up — a round-trip per character, over a link that may be a
+   network, and impossible when the output is a file or a pipe, which is where
+   `ls` and `wc -L` also decide their columns. So every implementation
+   everywhere embeds a static table and hopes it matches the terminal.
+2. **Our own terminal does not consult our table.** `userspace/charwidth` is
+   depended on by exactly two crates — `userspace/coreutils` and
+   `userspace/oils`. The GUI terminal that actually draws the glyphs (lane C)
+   is not one of them. So "how wide we actually print" is currently decided by
+   the renderer's font advance, independently of the table that every layout
+   decision is made from. They have never been checked against each other.
 
 ### The question
 
@@ -860,6 +654,28 @@ cell about the same filename on the same screen.
 - **Con:** this is precisely the thing `charwidth` exists to prevent, and the
   symptom (a menu and a listing that do not line up) is the one a user actually
   sees. I do not recommend it.
+
+**(d) Make the table describe our own renderer, and pin both to one source.**
+Derive `charwidth` from the width the GUI terminal actually advances by, so the
+table is a *description* of what we draw rather than a *prediction* of what
+someone else draws; both upstream harnesses then show the 626 as deliberate
+differences from *both* references.
+*What changes:* our screens are internally correct by construction — the shell
+menu and `ls` line up with each other and with the glyphs, which is the only
+thing a user of SlateOS can actually see. Both byte-diff harnesses gain
+permanent expected-difference lists.
+- **Pro:** it is the only option whose correctness does not depend on a third
+  party. bash and gnulib are both *guessing* at the terminal; we do not have to.
+- **Pro:** it answers the question the other three cannot — which of the two is
+  right *here* — because on SlateOS neither is authoritative.
+- **Con:** it is cross-lane. The renderer is lane C's; the table is lane B's.
+  It needs an agreed interface (a shared width source, or a generated table
+  checked by a gate on both sides) rather than one lane editing the other.
+- **Con:** it gives up byte-fidelity to *both* upstreams on those 626, so
+  neither harness can be read as pass/fail on them again.
+- **Unknown until measured:** whether the renderer and the table agree today.
+  Nobody has compared them; the answer decides whether (d) is a change or
+  merely a written-down invariant.
 
 ### If never answered
 
@@ -2128,171 +1944,6 @@ matches lane A's: **A**.
 
 ---
 
-## 2,288 of the 2,756 commands in `userspace/` report success for work they never did. Which ones do we keep? (lane B, 2026-09-02)
-
-**In short:** Most of the commands this OS ships are props. They print a
-convincing-looking answer — a file's duration, a disk's size, `PASS` — and then
-report *success*, while containing no code that could have looked at a file, a
-disk or a network. A script cannot tell them apart from the real thing, so
-`ffmpeg -i in.mov out.mp4 && rm in.mov` deletes your video and creates nothing.
-Making them fail honestly instead is my job and I am doing it; I do not need an
-answer for that. What I need an answer for is the other half: **2,023 of these
-are front-ends for other companies' software** — `photoshop-cli`, `oracle-cli`,
-`kaspersky-cli`, `ableton-cli` — which will never run on this OS. Do we delete
-them, or keep them as commands that exist only to say "no"?
-
-Lane C found and measured this
-(`requests/c-b-2288-userspace-tools-report-success-for-work-they-never-did.md`);
-the tree is mine, so the decision is mine to bring to you.
-
-### What a "fabricating" command is, precisely
-
-The audit (`scripts/audit-cli-fabrication.py`, run by hand) counts a crate only
-when **both** are true: it contains no way of observing anything — no file
-access, no network, no subprocess, no hardware call of any kind — **and** it
-nonetheless prints a statement of fact, such as a measurement, a three-digit
-count, or `PASS`. Commands that only print their own `--help` are not counted,
-because that is a report about the program itself, which the program does know.
-Neither are `echo`, `basename`, `seq` and friends, whose correct output really
-is a pure function of their arguments.
-
-```
-$ python scripts/audit-cli-fabrication.py
-userspace crates with sources : 2756
-assert a fact, do no I/O      : 2288      (83.0%)
-```
-
-### The numbers, since the split is the decision
-
-| Group | Count | Examples |
-|---|---|---|
-| Fabricating, named `*-cli` | **2,023** | `photoshop-cli`, `oracle-cli`, `kaspersky-cli`, `ableton-cli`, `netlify-cli`, `vulkan-cli` |
-| Fabricating, plain tool name | **265** | `bzip2`, `cal`, `docker`, `bat`, `age`, `ab`, `acpid`, `cmake`, `borg` |
-| Honest (or genuinely implemented) | 468 | `cp`, `mv`, `ls`, `chroot`, the coreutils |
-
-The `-cli` suffix turns out to be very nearly a marker for "generated in bulk
-and never implemented" — but not perfectly. `sqlmap-cli`, `arping-cli` and
-`pandoc-cli` are free software that could genuinely be ported one day, while
-`photoshop-cli` cannot be, ever. And the 265 plain-named ones are the more
-dangerous group day-to-day, because those are names a person actually types:
-someone who runs `bzip2 big.log` and sees it succeed has every reason to
-believe the file was compressed.
-
-### What I am doing regardless of your answer
-
-Not asking about this half — it is unambiguous and it is already under way:
-
-> A command that did not do the thing must not report success.
-
-- **Done, committed (`20908d27a`):** `userspace/age` shipped a **private
-  encryption key as a string literal in this public repository** — the same
-  identity handed to every caller on every machine, so anything encrypted to it
-  was readable by anyone with a checkout. Deleted. It also claimed
-  `key written to <path>` and `(binary encrypted data written to <path>)` and
-  exited 0 while containing no filesystem call at all. Both now refuse and exit
-  non-zero. Its test asserted the hardcoded key started with `age1` — a
-  property a constant satisfies forever, so the test certified the bug rather
-  than catching it; replaced with tests that fail against the old code.
-- **Next:** the same treatment for every command whose canned text claims a
-  *write*, because those are the ones that cause data loss rather than merely
-  a wrong answer.
-
-### The question: what happens to the 2,023
-
-**A — Delete the ones that can never work here; make the rest refuse.**
-*What changes:* `photoshop`, `oracle`, `ableton` and ~2,000 similar names stop
-existing as commands. Typing one gives you the shell's "command not found",
-which is true. The tree loses ~2,000 crates and the workspace builds faster.
-Whether a given name "can never work here" needs a judgement call per crate,
-which I would make by hand against a rule you approve, not by regex.
-
-**B — Keep all of them; make every one refuse and exit non-zero.**
-*What changes:* `photoshop` remains a command; running it prints
-`photoshop: not implemented on SlateOS` and fails. Nothing is lost, and the
-name is reserved should someone ever write it. The workspace keeps ~2,000
-crates that will never do anything.
-
-**C — Keep them, print the sample output marked `SIMULATED:`, exit non-zero.**
-*What changes:* same safety as B, and the canned text survives for
-documentation and screenshots. This is lane C's suggestion for the pure
-reporters (`vulkaninfo`, `acpi`, `ab`), where the fabricated text is inert and
-the exit code carries the whole warning.
-
-I would not mix A with C: the same tree should not both delete a name and
-keep a fake demo of it.
-
-### A second, smaller decision that comes with it
-
-`scripts/audit-cli-fabrication.py` currently just prints a number. It could
-become a **ratchet** — a check that pins today's count and fails if the count
-ever rises, the way `scripts/scan-orphan-modules.py` works — which is what
-stops the next bulk generation from putting all of this back. Lane C offered to
-convert it and said the pinning decision is mine because the number is mine. I
-think it should be pinned, but only *after* A/B/C lands, because the answer
-changes the number by two thousand.
-
-### My recommendation
-
-**A**, with the rule "delete it if the thing it drives is somebody else's
-proprietary product, or a cloud service we do not talk to; keep and refuse it
-if it is free software that could genuinely be ported." That deletes
-`photoshop-cli` and `oracle-cli`, keeps `sqlmap-cli` and `pandoc-cli` as
-refusing stubs, and keeps every plain-named tool. Lane C reached the same
-conclusion independently: *"Deleting them is strictly better than making them
-honest."*
-
-The reason I lean to deletion rather than B is that a command's *existence* is
-itself a claim. `command -v photoshop` succeeding is a fact scripts and
-installers test, and it will be wrong forever. B leaves 2,000 permanent wrong
-answers to that question in exchange for reserving names nobody asked us to
-reserve.
-
-But it is your call, because it is a statement about what this OS is for, it
-deletes a visible fraction of the tree, and reversing it a year from now means
-resurrecting 2,000 crates from history rather than editing a file.
-
-### If this is never answered
-
-The dangerous half gets fixed anyway — I will keep working down the
-write-claiming commands, so the data-loss shape goes away on its own schedule.
-What persists without an answer is 2,000-odd commands that exist and refuse,
-which is safe but permanently misleading about the OS's scope, and a fabricated
-`[x]` in `roadmap.md` for each of them (lines 3872, 4882 and 4887 mark
-`vulkan-cli`, `vkbasalt-cli` and `dxvk-cli` complete; lane C left those ticks
-alone as mine to re-scope). It does not get worse with time as long as the
-ratchet lands, and it cannot cause data loss once the write-claiming sweep is
-done. So this is a "decide when you have a moment", not a "decide today".
-
-### Addendum 2026-09-05 (lane B) — they are no longer free to keep
-
-The paragraph above says this "does not get worse with time". That was measured
-on correctness alone, and it was wrong about cost: the crates are charging every
-lane a large, compounding tax on *every single compile*, and I only found it by
-debugging what looked like a hung build.
-
-What happens is mechanical. Every one of those crates produces build artifacts
-into one flat directory — `target/x86_64-pc-windows-gnu/debug/deps` — which now
-holds **69,161 files and 63.9 GB**. Before `rustc` compiles anything at all it
-lists that directory once, to learn which libraries it may link against. Listing
-it takes minutes: a bare `dir` of it did not finish in 90 seconds, and a single
-`cargo build -p sshd` sat for **9 minutes with 0.6 seconds of CPU**, blocked in
-the filesystem call that walks it. I confirmed the stall with a debugger — the
-stack was `rustc` → `SearchPath::new` → `FindNextFileW` — rather than inferring
-it. That cost lands on every `cargo build`, every `cargo test`, every `cargo
-clippy`, and so on every pre-push gate, for all three lanes.
-
-*What changes if they are deleted:* a compile starts immediately instead of
-several minutes later. Nothing else about the OS changes.
-
-I am not asking you to re-decide on the strength of this; the question is still
-the same question. It is a correction to the last paragraph: the honest summary
-is now "decide when you have a moment, and know that until you do, every build
-in the project pays for it."
-
-**Status:** OPEN
-
----
-
 ## C-Q10 — [C] In the light theme, small grey text on a shaded card is too faint to meet the readability standard, in about 850 places. Fixing it changes how the whole light theme looks. Which way? — Status: OPEN
 
 **In short:** The desktop has a light theme and a dark theme. In the light one,
@@ -2548,138 +2199,6 @@ undo.
 that a single-crate compile can block for nine minutes on directory listing
 alone. I have not changed any setting or moved anything.
 
-## The test machine cannot produce random numbers, on purpose, and about eighteen tests in the apps now depend on that. Should it start? (lane B, 2026-09-05)
-
-**In short:** Every part of this OS that needs an unpredictable number — a
-password, an encryption key, which card comes next — asks one small library,
-`randrange`. On SlateOS it asks the kernel and gets real randomness. On the
-Windows machine we run the tests on, it has always refused to produce any, and
-that refusal was deliberate: with no randomness available, a test can watch the
-security code *decline to invent a fake secret*, which is the single most
-important thing it does. I have a working change that gives the test machine
-real randomness (Windows has offered it since Vista) and reproduces that
-refusal a better way, by handing the code a stand-in that says no — which then
-also gets tested on SlateOS itself, where it never was before. The change is
-finished, tested and parked on a branch; I have not landed it. **The problem is
-that "the test machine has no randomness" turned out to be load-bearing in
-somebody else's tree:** roughly eighteen tests across seventeen of lane C's
-apps are written to check for it, and they go red. They are in a folder I am
-forbidden to write to, and the convention is a documented one rather than an
-accident, so I am not willing to overturn it by myself.
-
-**Nothing about the shipped OS changes either way.** The new code is compiled
-only for the Windows test host; the SlateOS build is byte-for-byte what it was.
-This is entirely a question about what our tests are allowed to assume.
-
-### Why I wanted the change
-
-- **`userspace/ssh` has four tests that fail on every single run** — the
-  Diffie-Hellman private exponent and the KEXINIT cookie (both just "an
-  unpredictable number the handshake needs") cannot be drawn on the host, so
-  four tests of genuinely real properties fail for one irrelevant reason. A
-  suite with four permanently-red tests is a suite in which nobody notices the
-  fifth.
-- **The SSH client-against-server test cannot be written at all.** We have the
-  same wire protocol implemented twice, in `userspace/ssh` and
-  `userspace/sshd`, and nothing checks that the two copies agree. Nine places
-  where they had silently drifted apart have been found so far — *every one of
-  them by reading the code, none by a test*. The fix is a test that runs the
-  real client against the real server in one process; a handshake needs an
-  unpredictable exponent; with no randomness there is no exponent and no
-  handshake.
-- **The no-randomness branch was being tested on the one platform SlateOS is
-  not.** The code that decides what a game does when the kernel's randomness
-  call fails ran only in the Windows suite and never on the target. That is the
-  same accident wearing the other hat.
-
-### What it breaks
-
-These tests assert, in one form or another, "asking the system for randomness
-here produces the fallback constant, because this machine has none." That
-sentence stops being true.
-
-| Where | Shape |
-|---|---|
-| `apps/dots`, `apps/flashcards` | assert a fresh game's seed **equals** the named fallback constant |
-| `apps/wordle`, `apps/videoplayer`, `apps/radio`, `apps/memory`, `apps/lightsout`, `apps/match3`, `apps/pipes`, `apps/tetris`, `apps/musicplayer`, `apps/hangman`, `apps/speedtest` | a `#[cfg(not(unix))]` test — i.e. one that exists *only* on the Windows host — whose subject is that the host declines |
-| `gui/desktop` (wallpaper, ×2), `gui/credentials` (×2) | same shape; `gui/credentials` asserts the password generator refuses when the kernel is out of reach |
-| `apps/battleship`, `apps/freecell` | still **pass** (they assert *inequality*), but their comments and their mutation-testing harnesses (`mutate.py`) now describe something false |
-
-Every one of them has a strictly better replacement that works on both
-platforms — assert the fresh value differs from a named seed
-(`assert_ne!(fresh, with_seed(42))`) rather than that it equals the fallback —
-so this is rework, not loss. But it is roughly eighteen edits in `apps/**` and
-`gui/**`, which lane B may never write to.
-
-`apps/battleship` is worth singling out because its own history says this
-plainly. `roadmap.md` records fault (15) of its window-wiring pass as:
-`randrange`'s fallback *was* the very constant the bug used, "so on any machine
-with no kernel randomness to open the ships still stood exactly where the bug
-put them — the fault moved rather than fixed, and invisible to every test run
-off Slate OS." A test that passes only because the host cannot produce
-randomness is testing the host.
-
-### The options
-
-**A — Land it; lane C rewrites its eighteen tests.**
-*What changes:* the test machine produces real randomness; four red tests in
-`userspace/ssh` go green; the client-against-server test becomes possible;
-eighteen tests in `apps/` and `gui/` go red until lane C converts them to the
-`assert_ne!` form. I would file the request and the list; lane C does the work
-in its own tree. `main` stays red in between unless lane C moves first.
-
-**B — Put it back; the test machine stays unable to produce randomness.**
-*What changes:* nothing moves. `userspace/ssh` keeps four permanently-failing
-tests, the two-copies-of-SSH problem keeps being found by reading rather than
-by testing, and the "what happens when the kernel says no" branch keeps being
-tested only on the platform we do not ship.
-
-**C — Land it, and lane B fixes lane C's tests itself, then tells lane C.**
-*What changes:* same as A, but `main` never goes red, at the cost of lane B
-writing eighteen tests inside lane C's forbidden globs. There is a precedent
-(`requests/a-b-i-edited-two-of-your-diff-harnesses-to-unred-main.md`, lane A
-editing lane B's files to un-red `main`), but that was a two-token fix in a
-shared script; this is eighteen tests deep inside another lane's tree, which is
-exactly what the lane split exists to prevent.
-
-### What I am doing regardless of your answer
-
-**Not waiting on this.** The SSH interoperability test does not actually need
-the host to have randomness — it needs *the SSH code* to accept a
-randomness source as a parameter, which is a better design anyway and is
-entirely inside lane B. I am threading an injectable byte source through
-`SshSession` and `ConnectionState` (three uses: the DH exponent, the KEXINIT
-cookie, the per-packet padding). That fixes the four red `userspace/ssh` tests
-*and* makes the handshake deterministic, so the interop test can assert the
-exact session identifier both ends derive rather than merely that they agree.
-So this question gates nothing; it is about whether the rest of the tree gets
-the same benefit.
-
-### My recommendation
-
-**A.** The eighteen tests assert something that is false about the machine we
-actually ship to, and they cost us the ability to test anything that consumes a
-secret. The replacement assertion is better on its own terms — it works on both
-platforms and it is what those tests were reaching for anyway. C is A with the
-lane rule bent to save lane C a chore, and I would rather not set that
-precedent for eighteen files.
-
-**If this is never answered:** nothing degrades and nothing is at risk — the
-change stays on branch `lane-b-randrange-entropy`, unmerged, and `lane-b` and
-`main` are unaffected. The cost is ongoing rather than sudden: every future test
-of anything that needs a secret has to work around a host that cannot produce
-one, and the SSH duplication keeps being caught by reading.
-
-# Resolved
-
-**The body above holds OPEN questions only.** When the operator answers one,
-write it up in `design-decisions.md` as a `Decided by: Operator` entry,
-**delete the entry from the body**, and add one line here. That is the whole
-point of the file: it is scanned for what still needs a decision, so an
-answered question left in the body is pure cost — and, being older, it sorts
-*first*, right where it is most in the way. (Why this is not append-only:
-`design-decisions.md` §437.)
-
 ## Which group is a user in? Two files answer, and nothing keeps them agreeing. (lane B, 2026-09-06)
 
 **In short:** "Alice is in the `audio` group" is written down in two separate
@@ -2757,6 +2276,31 @@ not generated".
 
 ## Resolved — lane B
 
+- B-Q7 Which copy of the command-line tools is canonical, after the premise
+  behind June's §8 turned out to be false? — resolved 2026-09-07 (§1005,
+  `Decided by: Operator`): **B, `coreutils` is the one home.** The better half
+  of each of the 41 duplicate pairs survives inside it; the duplicate crate is
+  deleted; the 45 bundle-only names stay put rather than becoming 45 crates.
+  The operator noted that the "dependency shape that exists nowhere in the tree
+  yet" bullet reads like an effort argument and would carry no weight if it
+  were one — it is an architectural argument (option A cannot be reached
+  without a per-tool crate importing the bundle, the shape §8 set out to
+  retire), and B wins on the other reasons regardless. §8 superseded, §359
+  un-suspended.
+- 2,288 of the 2,756 commands in `userspace/` report success for work they
+  never did — which ones do we keep? — resolved 2026-09-07 (§1006,
+  `Decided by: Operator`): **stricter than my option A — delete every
+  fabricating command, not only the ones that can never work.** A name that
+  could be ported one day is added back when it is implemented, not before,
+  because a command's existence is a claim made to `command -v` probes as well
+  as to people, and a refusing stub answers "yes" to the probe and fails later.
+  The audit script is pinned as a ratchet once the deletion lands.
+- The test machine cannot produce random numbers, on purpose, and eighteen
+  tests in the apps depend on that — should it start? — resolved 2026-09-07
+  (§1007, `Decided by: Operator`): **A, land it.** Lane C rewrites its eighteen
+  `assert_eq!`-on-two-draws tests in its own tree; lane B files the request and
+  the list rather than editing inside lane C's globs. `main` may be red in
+  between, which was accepted as the lesser cost.
 - B-Q5 70 compiled programs are stored in git and go stale without git
   noticing — keep storing them, or rebuild on demand? — resolved 2026-08-21
   (§355, `Decided by: Claude (autonomous)`): **B, build on demand**, against my

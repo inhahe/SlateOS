@@ -931,19 +931,62 @@ pub extern "C" fn getgroups(size: i32, _list: *mut GidT) -> i32 {
 ///   2. `size > NGROUPS_MAX` (65536) → `-1` with `EINVAL`.
 ///   3. `size > 0 && list == NULL` → `-1` with `EFAULT` (Linux:
 ///      `groups_from_user`'s `copy_from_user` on a NULL grouplist).
-///   4. `size == 0` succeeds regardless of `list` (drops all
-///      supplementary groups; Linux explicitly permits a NULL `list`
-///      when `size == 0`).
-///   5. Otherwise: accepted as a no-op success.  No per-gid validation
-///      (Linux accepts any gid_t value here; range/policy enforcement
-///      happens at the LSM layer which we don't model).
+///   4. `size == 0` passes validation regardless of `list` (Linux
+///      explicitly permits a NULL `list` when `size == 0`).
+///   5. Validation having passed, the call fails with `ENOSYS` -- see
+///      below.  No per-gid validation (Linux accepts any gid_t value
+///      here; range/policy enforcement happens at the LSM layer, which
+///      we do not model), and none would mean anything, because
+///      nothing consumes the list.
 ///
 /// Note: our `_SC_NGROUPS_MAX` advertises 32 (the POSIX minimum
 /// guarantee), but Linux's kernel ceiling is 65536 and we accept up
 /// to that for binary-compat parity with programs probing the kernel
 /// limit directly.
 ///
-/// Returns 0 on success, -1 on error.
+/// # Why this fails rather than succeeding
+///
+/// Until 2026-09-07 the last line of this function was `0`: every
+/// well-formed call was told its supplementary groups had been set, and
+/// none had.  That is not a stub in the ordinary sense.  A stub that
+/// returns an empty answer understates what it knows; this one asserted
+/// that a mutation had occurred, which is the one claim a
+/// privilege-dropping caller most needs to be true.
+///
+/// The idiom named above -- `setgroups(0, NULL)` before `setgid`/
+/// `setuid`, as container runtimes, `su`/`sudo` and sshd all do -- is
+/// exactly the one that breaks worst under a false success.  A caller
+/// that dutifully checks the return value is told the drop happened,
+/// retains every supplementary group, and goes on to lower its uid.
+/// The check it wrote is the reason it stops looking.
+///
+/// `ENOSYS` is accurate, and is what [`chroot`] in this file already
+/// returns for the identical reason: the kernel implements `setgroups`
+/// for real, but only in the Linux-ABI table
+/// (`kernel/src/syscall/linux.rs`), and `posix/src/syscall.rs` has no
+/// native `SYS_SETGROUPS` constant for native libc to call.  Filed as
+/// `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
+/// When that number exists this body becomes a real syscall and the
+/// `ENOSYS` goes away.
+///
+/// Failing closed is also the useful pressure: privilege-dropping code
+/// written against this libc can no longer ship believing it dropped
+/// something, which is the outcome the false success was quietly
+/// arranging for.
+///
+/// # Why [`getgroups`] still succeeds with zero groups
+///
+/// That asymmetry is deliberate, not an oversight.  `getgroups` reports
+/// *state*, and "no supplementary groups" is a coherent state this libc
+/// can honestly report; `id(1)` is written against exactly that reading,
+/// synthesising a list only when `getgroups` fails with `ENOSYS` and
+/// never when it succeeds with none (see
+/// `userspace/coreutils/src/bin/id.rs`, which follows gnulib here).  A
+/// function that reports state may report an empty one.  A function that
+/// performs an action may not report having performed it.
+///
+/// Returns -1 with `ENOSYS`, or -1 with `EPERM`, `EINVAL` or `EFAULT`
+/// if the corresponding validation fails first.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setgroups(size: usize, list: *const GidT) -> i32 {
     const NGROUPS_KERNEL_MAX: usize = 65536;
@@ -964,7 +1007,11 @@ pub extern "C" fn setgroups(size: usize, list: *const GidT) -> i32 {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    0
+    // Validation has passed and there is nothing behind it. Reporting
+    // success here would assert a mutation that did not happen; see the
+    // doc comment above.
+    errno::set_errno(errno::ENOSYS);
+    -1
 }
 
 /// Check if the process is running setuid or setgid.
@@ -5940,42 +5987,61 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // setgroups — stub success
+    // setgroups — fails with ENOSYS rather than claiming a mutation
+    //
+    // Every assertion below that reads ENOSYS read 0 until 2026-09-07,
+    // when this function reported success without setting any groups.
     // ------------------------------------------------------------------
+
+    /// Assert the return value *and* the errno.
+    ///
+    /// Both, because the defect these tests exist to prevent returned a
+    /// perfectly plausible value with nothing behind it: checking only
+    /// that the call "failed" would pass against a function that failed
+    /// for the wrong reason, which is how the original stub survived a
+    /// suite of thirteen tests.
+    fn assert_enosys(ret: i32) {
+        assert_eq!(ret, -1, "setgroups must not report success");
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
 
     #[test]
     fn test_setgroups_empty() {
-        assert_eq!(setgroups(0, core::ptr::null()), 0);
+        errno::set_errno(0);
+        assert_enosys(setgroups(0, core::ptr::null()));
     }
 
     #[test]
     fn test_setgroups_non_empty() {
         let groups: [GidT; 3] = [100, 200, 300];
-        assert_eq!(setgroups(3, groups.as_ptr()), 0);
+        errno::set_errno(0);
+        assert_enosys(setgroups(3, groups.as_ptr()));
     }
 
     // ------------------------------------------------------------------
     // Phase 85 — setgroups argument-domain validation
     //
-    // Linux semantics being validated:
+    // The validation order is unchanged and is still Linux's; only the
+    // outcome once validation passes has changed.
     //   - size > 65536 → -1, EINVAL
     //   - size > 0 && list NULL → -1, EFAULT
-    //   - size == 0 → 0 regardless of list
-    //   - Well-formed call → 0 (single-user, no EPERM path)
+    //   - size == 0 → validation passes regardless of list
+    //   - validation passed → -1, ENOSYS (was: 0)
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_setgroups_phase85_zero_size_null_list_ok() {
+    fn test_setgroups_phase85_zero_size_null_list_passes_validation() {
         errno::set_errno(0);
-        assert_eq!(setgroups(0, core::ptr::null()), 0);
+        assert_enosys(setgroups(0, core::ptr::null()));
     }
 
     #[test]
-    fn test_setgroups_phase85_zero_size_with_nonnull_list_ok() {
-        // Linux: size==0 means "drop all", list pointer is ignored.
+    fn test_setgroups_phase85_zero_size_with_nonnull_list_passes_validation() {
+        // Linux: size==0 means "drop all", list pointer is ignored. The
+        // pointer being ignored is still true; what follows is ENOSYS.
         let groups: [GidT; 1] = [42];
         errno::set_errno(0);
-        assert_eq!(setgroups(0, groups.as_ptr()), 0);
+        assert_enosys(setgroups(0, groups.as_ptr()));
     }
 
     #[test]
@@ -6015,38 +6081,40 @@ mod tests {
     }
 
     #[test]
-    fn test_setgroups_phase85_size_at_max_ok() {
+    fn test_setgroups_phase85_size_at_max_passes_validation() {
         // size == 65536 is the maximum permitted by Linux.  We can't
         // actually allocate a 65536-element array on the test stack,
         // but a non-NULL pointer is what the validator needs.
         let groups: [GidT; 1] = [0];
         errno::set_errno(0);
-        let ret = setgroups(65536, groups.as_ptr());
-        assert_eq!(ret, 0);
+        assert_enosys(setgroups(65536, groups.as_ptr()));
     }
 
     #[test]
-    fn test_setgroups_phase85_size_one_below_max_ok() {
+    fn test_setgroups_phase85_size_one_below_max_passes_validation() {
         let groups: [GidT; 1] = [0];
         errno::set_errno(0);
-        let ret = setgroups(65535, groups.as_ptr());
-        assert_eq!(ret, 0);
+        assert_enosys(setgroups(65535, groups.as_ptr()));
     }
 
     #[test]
-    fn test_setgroups_phase85_typical_group_set_ok() {
+    fn test_setgroups_phase85_typical_group_set_passes_validation() {
         let groups: [GidT; 5] = [0, 10, 100, 1000, 65534];
         errno::set_errno(0);
-        let ret = setgroups(5, groups.as_ptr());
-        assert_eq!(ret, 0);
+        assert_enosys(setgroups(5, groups.as_ptr()));
     }
 
     #[test]
-    fn test_setgroups_phase85_drop_all_groups_idiom() {
-        // The classic privilege-drop idiom: setgroups(0, NULL).
+    fn test_setgroups_phase85_drop_all_groups_idiom_does_not_claim_success() {
+        // The classic privilege-drop idiom: setgroups(0, NULL), as run by
+        // container runtimes, su/sudo and sshd before lowering uid.
+        //
+        // This is the assertion that matters most in the file. Until
+        // 2026-09-07 it read `assert_eq!(ret, 0)` -- it asserted, and
+        // therefore locked in, the exact behaviour that would hand a
+        // caller a successful privilege drop it had not performed.
         errno::set_errno(0);
-        let ret = setgroups(0, core::ptr::null());
-        assert_eq!(ret, 0);
+        assert_enosys(setgroups(0, core::ptr::null()));
     }
 
     #[test]
@@ -6057,7 +6125,7 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
         errno::set_errno(0);
-        assert_eq!(setgroups(0, core::ptr::null()), 0);
+        assert_enosys(setgroups(0, core::ptr::null()));
     }
 
     #[test]
@@ -6069,7 +6137,7 @@ mod tests {
 
         let groups: [GidT; 1] = [1];
         errno::set_errno(0);
-        assert_eq!(setgroups(1, groups.as_ptr()), 0);
+        assert_enosys(setgroups(1, groups.as_ptr()));
     }
 
     #[test]
@@ -6078,16 +6146,15 @@ mod tests {
         let groups: [GidT; 2] = [50, 60];
         for _ in 0..4 {
             errno::set_errno(0);
-            assert_eq!(setgroups(2, groups.as_ptr()), 0);
+            assert_enosys(setgroups(2, groups.as_ptr()));
         }
     }
 
     #[test]
-    fn test_setgroups_phase85_size_one_with_valid_list_ok() {
+    fn test_setgroups_phase85_size_one_with_valid_list_passes_validation() {
         let groups: [GidT; 1] = [12345];
         errno::set_errno(0);
-        let ret = setgroups(1, groups.as_ptr());
-        assert_eq!(ret, 0);
+        assert_enosys(setgroups(1, groups.as_ptr()));
     }
 
     #[test]
@@ -6124,7 +6191,15 @@ mod tests {
     // Cap check beats EINVAL beats EFAULT.  Host test build holds
     // CAP_SETGID by default (DEFAULT_CAPS_LOW = u32::MAX includes bit
     // 6), so all 14 pre-existing Phase 85 setgroups tests reach the
-    // EINVAL / EFAULT / success paths unchanged.
+    // EINVAL / EFAULT / ENOSYS paths unchanged.
+    //
+    // These tests use "gets past the cap gate" as the negative control
+    // for the gate itself.  Until 2026-09-07 that outcome was spelled
+    // `0`; it is now ENOSYS (see the function's doc comment and
+    // design-decisions.md §1004).  What each test asserts is unchanged
+    // — with the cap you do *not* get EPERM, without it you do — and
+    // ENOSYS-vs-EPERM distinguishes those two as sharply as 0-vs-EPERM
+    // did.
     //
     // These tests must run with `--test-threads=1` because they
     // manipulate process-wide capability state.
@@ -6286,9 +6361,9 @@ mod tests {
         #[test]
         fn test_setgroups_phase187_drop_then_restore_workflow() {
             let _g = CapGuard::snapshot();
-            // 1. Cap held → succeed.
+            // 1. Cap held → past the gate (ENOSYS, notably not EPERM).
             errno::set_errno(0);
-            assert_eq!(setgroups(0, core::ptr::null()), 0);
+            assert_enosys(setgroups(0, core::ptr::null()));
             // 2. Drop cap → fail with EPERM.
             drop_cap_setgid();
             errno::set_errno(0);
@@ -6315,7 +6390,12 @@ mod tests {
             ];
             assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             errno::set_errno(0);
-            assert_eq!(setgroups(0, core::ptr::null()), 0);
+            assert_enosys(setgroups(0, core::ptr::null()));
+            assert_ne!(
+                errno::get_errno(),
+                errno::EPERM,
+                "cap was restored, so the gate must no longer be what stops the call"
+            );
         }
 
         // -- Buggy-caller ----------------------------------------------------
@@ -6362,19 +6442,25 @@ mod tests {
                 assert_eq!(setgroups(0, core::ptr::null()), -1);
                 assert_eq!(errno::get_errno(), errno::EPERM);
             } // _g dropped here; cap restored.
-            // Errno is still EPERM (the function does not clear it on
-            // success) but a fresh call succeeds again.
+            // With the cap back, a fresh call gets past the gate again:
+            // it fails further down with ENOSYS rather than at the gate
+            // with EPERM. That difference is the entire assertion — it
+            // is what proves CapGuard's Drop actually restored the cap.
             errno::set_errno(0);
-            assert_eq!(setgroups(0, core::ptr::null()), 0);
-            // Success path leaves errno untouched (0 from our reset).
-            assert_eq!(errno::get_errno(), 0);
+            assert_enosys(setgroups(0, core::ptr::null()));
+            assert_ne!(
+                errno::get_errno(),
+                errno::EPERM,
+                "CapGuard::drop must have restored CAP_SETGID"
+            );
         }
 
         // -- No-side-effect --------------------------------------------------
 
         /// A failed (EPERM) call must not change any observable state.
-        /// `setgroups` is a no-op-on-success in our stub, so the only
-        /// observable is errno — which the test above confirms.  Here
+        /// `setgroups` never mutates anything on any path — that is the
+        /// defect §1004 records — so the only observable is errno, which
+        /// the test above confirms.  Here
         /// we additionally verify that *repeated* failed calls all
         /// return the same EPERM and don't drift.
         #[test]
@@ -6421,13 +6507,20 @@ mod tests {
             );
         }
 
-        /// With CAP_SETGID held, valid call still succeeds.
+        /// With CAP_SETGID held, a well-formed call still gets past the
+        /// gate — confirming the gate is *gated* on the cap rather than
+        /// being an unconditional EPERM.
         #[test]
-        fn test_setgroups_phase187_with_cap_valid_call_succeeds() {
+        fn test_setgroups_phase187_with_cap_valid_call_passes_the_gate() {
             let _g = CapGuard::snapshot();
             errno::set_errno(0);
             let groups: [GidT; 4] = [100, 200, 300, 400];
-            assert_eq!(setgroups(4, groups.as_ptr()), 0);
+            assert_enosys(setgroups(4, groups.as_ptr()));
+            assert_ne!(
+                errno::get_errno(),
+                errno::EPERM,
+                "cap is held, so EPERM would mean the gate probes the wrong thing"
+            );
         }
 
         // -- Cross-check -----------------------------------------------------
@@ -6460,10 +6553,16 @@ mod tests {
                 },
             ];
             assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
-            // setgroups still works.
+            // setgroups still gets past its own gate: dropping the
+            // *wrong* cap must not produce EPERM here.
             errno::set_errno(0);
             let groups: [GidT; 2] = [50, 60];
-            assert_eq!(setgroups(2, groups.as_ptr()), 0);
+            assert_enosys(setgroups(2, groups.as_ptr()));
+            assert_ne!(
+                errno::get_errno(),
+                errno::EPERM,
+                "setgroups gates on CAP_SETGID, not CAP_SETUID"
+            );
         }
 
         /// Phase 187 errno is EPERM (the `capable()` convention),

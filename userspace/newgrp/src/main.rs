@@ -36,12 +36,29 @@ struct UserInfo {
     groups: Vec<u32>,
 }
 
+/// One line of `/etc/gshadow`: `name:password:admins:members`.
+///
+/// The password field is a `crypt(3)` entry, or `!`/`*` for a group nobody may
+/// join by password, or empty for one that has none. It is not decoration: it
+/// is the only thing standing between a non-member and the group.
 #[derive(Clone, Debug)]
-struct _GshadowEntry {
+struct GshadowEntry {
     name: String,
-    _password: String,
-    _admins: Vec<String>,
-    _members: Vec<String>,
+    password: String,
+    /// Who may change this group's password. Parsed because it is the format's
+    /// third field and a parser that skipped it would silently accept a line
+    /// whose fields had shifted; not consulted, because nothing here changes a
+    /// group password yet. `gpasswd` is what would read it.
+    #[allow(dead_code)]
+    admins: Vec<String>,
+    /// The group's members, as `/etc/gshadow` records them -- a second copy of
+    /// what `/etc/group` already says. Deliberately *not* consulted for
+    /// membership: `user_is_member` asks `/etc/group`, which is the file every
+    /// other tool asks, and reading a second copy here would mean this program
+    /// could admit someone the rest of the system does not consider a member.
+    /// See `open-questions.md` on group membership being stored twice.
+    #[allow(dead_code)]
+    members: Vec<String>,
 }
 
 // ============================================================================
@@ -72,20 +89,20 @@ fn read_group_db() -> Vec<GroupEntry> {
     content.lines().filter_map(parse_group_line).collect()
 }
 
-fn _parse_gshadow_line(line: &str) -> Option<_GshadowEntry> {
+fn parse_gshadow_line(line: &str) -> Option<GshadowEntry> {
     let parts: Vec<&str> = line.splitn(4, ':').collect();
     if parts.len() < 4 {
         return None;
     }
-    Some(_GshadowEntry {
+    Some(GshadowEntry {
         name: parts[0].to_string(),
-        _password: parts[1].to_string(),
-        _admins: parts[2]
+        password: parts[1].to_string(),
+        admins: parts[2]
             .split(',')
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .collect(),
-        _members: parts[3]
+        members: parts[3]
             .split(',')
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
@@ -93,9 +110,15 @@ fn _parse_gshadow_line(line: &str) -> Option<_GshadowEntry> {
     })
 }
 
-fn _read_gshadow_db() -> Vec<_GshadowEntry> {
+/// Read `/etc/gshadow`.
+///
+/// An unreadable file is an empty list, and an empty list refuses everyone --
+/// see [`verify_group_password`]. `newgrp` runs setuid root precisely so that
+/// it *can* read this file; a caller that cannot is not a reason to admit
+/// anyone.
+fn read_gshadow_db() -> Vec<GshadowEntry> {
     let content = std::fs::read_to_string("/etc/gshadow").unwrap_or_default();
-    content.lines().filter_map(_parse_gshadow_line).collect()
+    content.lines().filter_map(parse_gshadow_line).collect()
 }
 
 // ============================================================================
@@ -168,10 +191,57 @@ fn find_group_by_gid(groups: &[GroupEntry], gid: u32) -> Option<GroupEntry> {
 // Password verification (stub — real impl would use crypt(3))
 // ============================================================================
 
-fn _verify_group_password(_group: &str, _password: &str) -> bool {
-    // In a real system, read /etc/gshadow, hash the input, compare.
-    // For now, accept any non-empty password for groups that have one set.
-    !_password.is_empty()
+/// Is `password` the password of `group`?
+///
+/// # What this replaced
+///
+/// ```text
+/// // For now, accept any non-empty password for groups that have one set.
+/// !_password.is_empty()
+/// ```
+///
+/// That accepted **any** non-empty string as any group's password. It was inert
+/// only because [`exec_with_group`] cannot yet change the process's groups, so
+/// passing the check gained nothing -- but the whole point of
+/// `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`
+/// is to make that exec real, and the check would have been armed by the very
+/// change that was asked for. A stub that says yes is not a smaller version of
+/// a check; it is the absence of one, wearing the shape.
+///
+/// # The rules, which are `/etc/gshadow`'s and not this program's
+///
+/// * **No entry for the group** -- no password is set, so there is none to
+///   match, and a non-member cannot join. Refused.
+/// * **An empty password field** -- likewise: `newgrp(1)` treats a group with
+///   no password as closed to non-members, *not* as open to everyone. This is
+///   the case the old stub inverted.
+/// * **`!` or `*`** -- the group is locked. [`authlib::check_stored`] reports
+///   these as unrecomputable, so they match nothing, which is the answer.
+/// * **A `crypt(3)` entry** -- checked by [`authlib::check_stored`], the same
+///   function `login`, `su`, `doas` and `passwd` ask. This program states
+///   nothing of its own about what a stored entry means; that was the defect
+///   §341 exists to prevent.
+fn verify_group_password(group: &str, password: &str) -> bool {
+    let db = read_gshadow_db();
+    password_opens(db.iter().find(|e| e.name == group), password)
+}
+
+/// The rule itself, separated from the file so it can be tested.
+///
+/// `entry` is `None` for a group with no `/etc/gshadow` line at all. Taking the
+/// lookup's *result* rather than the group name is what makes every branch
+/// reachable from a test: the caller reads a fixed path, and a rule that can
+/// only be exercised through `/etc/gshadow` is a rule that is never exercised
+/// on a development host that has none -- which is exactly how a stub that
+/// accepted any password survived here.
+fn password_opens(entry: Option<&GshadowEntry>, password: &str) -> bool {
+    let Some(entry) = entry else {
+        return false;
+    };
+    if entry.password.is_empty() {
+        return false;
+    }
+    authlib::check_stored(password.as_bytes(), entry.password.as_bytes()).is_accepted()
 }
 
 fn prompt_password() -> String {
@@ -301,7 +371,7 @@ fn newgrp_main(args: &[OsString]) -> i32 {
     if !user_is_member(&user, &target_group) {
         // Not a member — need password.
         let password = prompt_password();
-        if !_verify_group_password(&target_group.name, &password) {
+        if !verify_group_password(&target_group.name, &password) {
             eprintln!("newgrp: permission denied");
             return 1;
         }
@@ -399,7 +469,7 @@ fn sg_main(args: &[OsString]) -> i32 {
 
     if !user_is_member(&user, &target_group) {
         let password = prompt_password();
-        if !_verify_group_password(&target_group.name, &password) {
+        if !verify_group_password(&target_group.name, &password) {
             eprintln!("sg: permission denied");
             return 1;
         }
@@ -461,6 +531,102 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `crypt(3)` entry for `password`, as `/etc/gshadow` would hold one.
+    fn entry_for(password: &str) -> String {
+        let mut sb = posix::crypt::buf();
+        let setting =
+            posix::crypt::setting_into(posix::crypt::Method::Sha512, b"grouptest", &mut sb)
+                .expect("setting")
+                .to_string();
+        let mut hb = posix::crypt::buf();
+        posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hb)
+            .expect("hash")
+            .to_string()
+    }
+
+    /// The check the old stub could not make.
+    ///
+    /// `_verify_group_password` returned `!password.is_empty()`, so every
+    /// assertion below that expects `false` would have been `true` -- any
+    /// single character admitted a non-member to any group. These go through
+    /// `authlib::check_stored` directly, because `verify_group_password` reads
+    /// `/etc/gshadow` and this host has none; what is asserted is the rule the
+    /// function applies to the entry once it has it.
+    #[test]
+    fn a_group_password_is_checked_and_not_merely_non_empty() {
+        let stored = entry_for("hunter2");
+        assert!(authlib::check_stored(b"hunter2", stored.as_bytes()).is_accepted());
+        assert!(!authlib::check_stored(b"x", stored.as_bytes()).is_accepted());
+        assert!(!authlib::check_stored(b"wrong", stored.as_bytes()).is_accepted());
+        assert!(!authlib::check_stored(b"", stored.as_bytes()).is_accepted());
+    }
+
+    /// A locked group admits nobody, with the right password or any other.
+    /// The old stub admitted anyone who typed a character.
+    #[test]
+    fn a_locked_group_admits_nobody() {
+        for locked in ["!", "*", "!!"] {
+            assert!(
+                !authlib::check_stored(b"anything", locked.as_bytes()).is_accepted(),
+                "{locked}"
+            );
+        }
+    }
+
+    /// A `/etc/gshadow` entry with the given password field.
+    fn group_with(password: &str) -> GshadowEntry {
+        GshadowEntry {
+            name: "audio".to_string(),
+            password: password.to_string(),
+            admins: Vec::new(),
+            members: Vec::new(),
+        }
+    }
+
+    /// The whole rule, driven through the function that decides it.
+    ///
+    /// Every `false` below was `true` under the old stub, which returned
+    /// `!password.is_empty()`: any single character opened any group.
+    #[test]
+    fn only_the_right_password_opens_a_group() {
+        let stored = entry_for("hunter2");
+        let audio = group_with(&stored);
+
+        assert!(password_opens(Some(&audio), "hunter2"));
+        assert!(!password_opens(Some(&audio), "x"));
+        assert!(!password_opens(Some(&audio), "wrong"));
+        assert!(!password_opens(Some(&audio), ""));
+    }
+
+    /// A group whose password field is empty has no password, and `newgrp(1)`
+    /// treats that as closed to non-members rather than open to everyone --
+    /// the case the old stub inverted exactly, since `""` was the one input it
+    /// refused and every other input it accepted.
+    #[test]
+    fn a_group_with_no_password_is_closed_not_open() {
+        let audio = group_with("");
+        assert!(!password_opens(Some(&audio), ""));
+        assert!(!password_opens(Some(&audio), "anything"));
+    }
+
+    /// A group absent from `/etc/gshadow` has no password to match, so nothing
+    /// opens it -- including an unreadable file, which reads as absent.
+    #[test]
+    fn a_group_with_no_gshadow_entry_admits_nobody() {
+        assert!(!password_opens(None, "anything"));
+        assert!(!password_opens(None, ""));
+    }
+
+    /// A locked group, through the same function rather than through
+    /// `authlib` directly.
+    #[test]
+    fn a_locked_group_is_closed_through_the_rule_too() {
+        for locked in ["!", "*", "!!"] {
+            let audio = group_with(locked);
+            assert!(!password_opens(Some(&audio), "anything"), "{locked}");
+        }
+    }
 
     /// An argument that a `String` cannot hold. The development host is
     /// Windows, where argv arrives as UTF-16 and the unrepresentable case is
@@ -544,12 +710,12 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_gshadow_line() {
-        let entry = _parse_gshadow_line("wheel:!:root:alice,bob").unwrap();
+    fn testparse_gshadow_line() {
+        let entry = parse_gshadow_line("wheel:!:root:alice,bob").unwrap();
         assert_eq!(entry.name, "wheel");
-        assert_eq!(entry._password, "!");
-        assert_eq!(entry._admins, vec!["root"]);
-        assert_eq!(entry._members, vec!["alice", "bob"]);
+        assert_eq!(entry.password, "!");
+        assert_eq!(entry.admins, vec!["root"]);
+        assert_eq!(entry.members, vec!["alice", "bob"]);
     }
 
     #[test]

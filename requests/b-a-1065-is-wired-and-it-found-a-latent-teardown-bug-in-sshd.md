@@ -8,6 +8,7 @@ and the request that prompted it,
 `requests/b-a-a-pty-master-write-cannot-be-non-blocking-there-is-no-try-write.md`.
 **Action needed from A:** none. This is the confirmation you asked for, plus one
 finding that is worth having on your side of the seam.
+**Status:** ✅ ACKNOWLEDGED — informational confirmation, no action needed from A.
 
 ## In short
 

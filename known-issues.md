@@ -21108,6 +21108,36 @@ behind a newly added field the way the hand-written check did.
    `drop_shadows`, `animation_speed`, `icon_size`, `cursor_size`,
    `cursor_scheme`, and `scaling_percent` — all now reachable on
    `DesktopShell::appearance`, none consulted.
+1a. **A running desktop now notices a change, but only when asked
+   (2026-09-06).** `settingsfile::Watcher` compares the file's *contents* --
+   not its modification time, which here both misses changes and invents them
+   (see design-decisions 812) -- and `DesktopShell::poll_appearance` applies
+   one, returning whether any *setting* actually differed. So the desktop and
+   the Settings app no longer agree only across a restart.
+
+   **Closed 2026-09-06 (same day): the shell is now told.** The compositor
+   relays `ReloadAppearance`/`ReloadInput` to every window as
+   `Event::SettingsChanged { group }` (wire tag `0x0A`, `INPUT_VERSION` 3),
+   and `ShellSession` answers the appearance one by calling
+   `poll_appearance`. So the chain runs end to end: the Settings app writes
+   the file and sends the request, the compositor re-reads and announces, the
+   shell re-reads and repaints. No timer anywhere. The paragraph below is kept
+   because it is the argument for why there is no timer, which is still the
+   live constraint on anything added here later.
+
+   **What is deliberately *not* here is a cadence.** Nothing
+   calls `poll_appearance` on a timer, because `ShellSession::animations`
+   records that an empty animation set means no wake-up is registered and the
+   loop parks unbounded -- which is what keeps an idle desktop idle. A
+   once-a-second check would end that to notice a setting nobody is changing.
+   Polling on wake-ups that already happen was tried and backed out: a `$HOME`
+   read inside `pump()` makes every session test machine-dependent, and it
+   broke two of the shell's own tests against the developer's real
+   `appearance.yaml`. The finished shape is the `ReloadAppearance`
+   notification the compositor already receives, relayed to shell clients --
+   immediate *and* idle-preserving, which no poll can be at once. See
+   `todo.txt`.
+
 2. **The compositor still cannot see the setting**, so driving `ui_font`
    through `guitk::text::set_font_family` remains wrong for the reason above:
    the desktop would measure in the chosen family while the compositor drew in
@@ -21143,6 +21173,24 @@ Still open, as the end of this entry already noted: a running app has no way to
 learn the file changed, so a live desktop and a live Settings application agree
 only across a restart. That half belongs with the change-notification channel
 design-decisions.md §400 wants.
+
+**Update 2026-09-06 — both halves are built; this part is closed.**
+The telling half landed the same day: `Compositor::announce_settings_change`
+sends `Event::SettingsChanged { group }` to every window whenever it handles a
+reload request, and the shell acts on the appearance one. A live desktop and a
+live Settings app now agree without a restart. What follows is the record of
+the noticing half, which came first.
+
+**The noticing half.**
+`settingsfile::Watcher` plus `DesktopShell::poll_appearance` mean a running
+shell *can* pick up a change without a restart, and does so correctly: the
+watcher compares contents rather than timestamps (which would both miss a
+slider drag and repaint on every no-op re-save), and `poll_appearance` reports
+a change only when a setting actually differs, not merely when the file did.
+What is not built is anything that tells the shell *when* to look. That is on
+purpose -- a timer would end the idle desktop's unbounded park -- and the
+answer is the `ReloadAppearance` notification relayed from the compositor.
+See design-decisions 812 and `todo.txt`.
 
 **Superseded 2026-09-03 — step 3, and the third row of the table below.** Step 3
 said to leave `gui/toolkit`'s `ThemeMode` and `Theme` alone, and that the shared
@@ -39931,6 +39979,37 @@ still stands. **It is lane A's call, and it is now a smaller one**, because with
 every worktree at 0 the "every lane's CRLF working copies convert on their next
 checkout" side-effect that made it risky no longer has anything to convert.
 That window will not stay open on its own.
+
+**[A] 2026-09-06 — first recurrence since the close, and the gate caught it.**
+Four tracked files came back CRLF in the lane-A worktree, and the boot test
+refused to build on `check-eol` after 424s of gates. Recorded because the close
+above rests on the gate being the mitigation, and this is the evidence it works:
+the condition recurred within a day and was stopped before it reached a build.
+
+The cause is the one §911 and the gate's own message name — **a tool rewriting a
+tracked file through Python's default text mode**, which on Windows turns
+every newline into a carriage-return/newline pair. Here it was an agent
+using `pathlib.Path.write_text()` to patch files in place. The four affected
+were exactly the four written that way;
+files edited through other means in the same session stayed LF, and the two
+written later with `newline=""` were also clean. So the discriminator is the
+call, not the file type: `write_text(s)` corrupts, `write_text(s, newline="")`
+and `write_bytes(...)` do not.
+
+**Nothing was committed wrong.** The clean filter normalises on `git add`, so
+every blob stayed LF and the repair produced a zero-byte diff — which is the
+entry's own point restated: `git status` called the tree modified, `git diff`
+showed nothing, and `git add` staged nothing.
+
+Worth naming the trap for whoever hits it next, because it defeats the obvious
+check: a shell `grep` for a carriage return does **not** reliably detect one
+here. When the shell leaves the escape uninterpreted, grep receives an
+*empty pattern*, which matches every line — so a CRLF file and an LF file
+both report a count equal to
+the file's line count, and the LF file looks corrupt. That false positive was
+read here as "CRLF is repo-wide and pre-existing, therefore harmless", which
+delayed the fix until the gate found it. Detect it with `git ls-files --eol`
+(`w/crlf` is unambiguous) or a binary read, never with `grep`.
 
 ---
 
@@ -110865,6 +110944,129 @@ run reported `Clippy OK (debug profile, 38s, ...)`. The build cache was warm
 throughout. The 50 minutes were entirely pre-build static analysis — so a run
 lost this way has not lost any compilation work, only wall clock.
 
+### Addendum 2026-09-06: 7200s is no longer a floor, it is a *failing* budget — the gate phase alone measured 7402s
+
+The advice above ("budget 7200s when another lane is building") has now been
+overtaken by the gate phase's own growth. A lane-A boot test on 2026-09-06,
+with lane B running `cargo test -p posix` alongside it, printed:
+
+```
+=== Gates OK (7402s) ===
+=== Slowest gates (of 219 timed, 3717s of the 7402s phase) ===
+    3685s of the phase was NOT in a run_checker gate
+    (the tooling test-suite sweep, shellcheck and clippy are not routed
+     through run_checker, so they are in the remainder, not the table).
+```
+
+**7402s of gates, before a single line of kernel was compiled.** A 7200s
+budget cannot reach QEMU under these conditions — not "might not", cannot. An
+earlier run that same night was killed at exactly that point: it was 92 minutes
+in, still inside `test-checkers-honour-head.py`, with the tooling sweep,
+shellcheck, clippy, the build and the whole QEMU window still ahead of it.
+
+Three things worth carrying forward:
+
+1. **Budget 21600s (6h) for a full boot test, not 7200s.** That is what the
+   successful run used. It is not a generous number; it is roughly 2× the
+   measured gate phase, which is the smallest multiple that leaves room for the
+   build and the boot.
+   **→ Superseded the same day by "Correction" below: 21600 was still derived
+   from one observation, and the history file had eight. Use 28800.**
+2. **The split has moved.** The 2026-09-02 measurement above put >3000s in
+   `run_checker` gates. Today the *timed* gates are 3717s and the untimed
+   remainder — the `scripts/test-*.py` sweep, shellcheck, clippy — is 3685s,
+   i.e. very nearly half the phase is in work the slowest-gates table does not
+   show. Reading that table and concluding "the gates cost 3717s" understates
+   the phase by a factor of two. The harness says so itself, in the note quoted
+   above; the note is easy to skim past.
+3. **This is growth, not contention.** The 2026-09-02 entry correctly diagnosed
+   a saturated disk. That is not the story here: the competing load was one
+   `cargo test`, the free-space and toolchain-temp checks both passed with
+   large margins, and the phase is simply doing more than it was — 219 timed
+   gates plus a tooling sweep that now has its own several-hundred-case
+   suites. Sizing the budget from a 2026-09-02 measurement is what produced the
+   failed run.
+
+**Not proposing a fix here, deliberately.** The obvious lever — let the boot
+test skip gates — is one `boot-test.sh` already refuses on purpose
+("people are tempted to skip, which is worse than no gate", line ~3592), and
+that judgment is right. The honest response is a bigger budget and the
+knowledge that a full boot test is now a ~2.5h operation, which is what this
+addendum records.
+
+#### Correction, same day: 28800s, and I made the same mistake I was documenting
+
+Point 1 above says 21600 "because that is what the successful run used". That
+is one observation — exactly the error the entry it corrects was written about.
+`bench/boot-history.jsonl` has carried `script_seconds`, `gates_seconds` and
+`build_seconds` on every row since 2026-09-04 precisely so nobody has to do
+this, and `boot-test.sh`'s own header says to query it. I did not, until the
+run above failed a second time. Querying it (`python scripts/boot-history.py
+--list`, plus the raw rows for the phase columns) gives eight rows:
+
+| when | script | gates | build | qemu | verdict |
+|---|---|---|---|---|---|
+| 2026-09-04T13:44 | 5278 | 4229 | 553 | 115 | PANIC |
+| 2026-09-04T16:11 | 6710 | 5067 | 790 | 449 | PANIC |
+| 2026-09-04T18:41 | 8118 | 5427 | 941 | 909 | PANIC |
+| 2026-09-04T23:23 | 4373 | 3560 | 44 | 454 | PASS |
+| 2026-09-05T02:32 | 5881 | 5027 | 36 | 490 | PASS |
+| 2026-09-05T12:56 | 10712 | 8732 | 1032 | 466 | PASS |
+| 2026-09-05T16:46 | **12760** | **10435** | 1299 | 513 | PASS |
+| 2026-09-05T23:30 | 11608 | 10000 | 107 | 806 | PASS |
+
+Median `script_seconds` **7414**, max **12760**. So 7200 was not merely tight,
+it was *below the median run* and would have killed four of the eight; and the
+7402 in this addendum's title is unremarkable rather than exceptional — it is
+the middle of the distribution. Two further things the table shows that a
+single observation could not:
+
+- **QEMU is now the small half by a wide margin.** 115–909s of runs lasting
+  4373–12760s. Any budget reasoned from boot time is off by an order of
+  magnitude, which is the 2026-08-31 failure mode still lying in wait.
+- **`build_seconds` tops out at 1299**, and is often ~40s on a warm cache. This
+  is what sizes the *commit-headroom* wait, below — the thing being waited for
+  is a sibling lane's build, so a 900s wait was shorter than the event it
+  existed to wait out.
+
+`scripts/boot-test.sh` now says 28800 (max 12760 + the adaptive commit wait +
+rounding), with the derivation and the query in the header so the next person
+does not repeat this.
+
+#### The related bug this run actually died of: exit 5 after 8754s
+
+The re-run with the larger budget did not time out. It failed at
+`check_commit_headroom`:
+
+```
+ERROR: gave up after 900s waiting for commit headroom (6742 MiB free,
+floor 12288 MiB, before building).
+NOTHING WAS BUILT AND NOTHING WAS BOOTED — this says nothing about the code
+under test.
+```
+
+8754s elapsed, **7402s of which was a gate phase that had passed**. The gate
+threw all of it away rather than wait past fifteen minutes for a sibling
+lane's `cargo` to finish. The script's own error text — "Refusing now costs
+seconds instead" — was written for a check that runs before any investment,
+and is simply false at the point the check actually runs.
+
+Fixed in `943381d7b`: the wait budget is now the run's own elapsed time,
+floored at 3600 (above the 1299s worst-case build in the table), recomputed
+per call, uncapped, with an explicit `BOOT_TEST_COMMIT_WAIT` still honoured
+verbatim. The rule is *never abandon an investment over a wait shorter than
+the investment*. `scripts/test-boot-test.py` asserts the property rather than
+the constant, and was checked against three mutants (flat 900, capped growth,
+ignored env knob) to confirm it fails on each.
+
+**Lesson, and it is the same one twice.** Both halves of this entry are a
+number that outlived its evidence: 7200 was derived in August from ~3000s of
+pre-QEMU, 900 was derived from a build that no longer takes 900s. Neither was
+wrong when written. The defence is not a better constant — it is deriving the
+number from `bench/boot-history.jsonl` at the moment of use, which is what the
+adaptive wait does structurally and what the header now tells a reader to do
+manually.
+
 ---
 
 ### A-FASTPY-SYSROOT-SEARCH-CANNOT-SEE-A-LANE-WORKTREE. The Path-Z attribution warning fires on every lane boot, always, because the search never looks at the tree being tested — 2026-09-01 — **Status: OPEN**
@@ -112842,10 +113044,10 @@ For a backgrounded run, redirect instead, and read the status explicitly:
 
 ```bash
 # WRONG — notification reports tail's status, not the build's
-python scripts/run-timeout.py 7200 ./scripts/boot-test.sh 2>&1 | tail -80
+python scripts/run-timeout.py 28800 ./scripts/boot-test.sh 2>&1 | tail -80
 
 # RIGHT — full output kept, status preserved and printed
-python scripts/run-timeout.py 7200 ./scripts/boot-test.sh > /tmp/boot.log 2>&1
+python scripts/run-timeout.py 28800 ./scripts/boot-test.sh > /tmp/boot.log 2>&1
 echo "EXIT=$?"
 ```
 
@@ -116514,6 +116716,50 @@ The practical consequence for anyone reading a self-test: **a rung's existence
 is not evidence, and neither is a green boot from before it was written.** The
 only thing that counts is a boot whose tree contained the rung, which
 `bench/boot-history.jsonl` can answer by commit.
+
+**[A] 2026-09-06 — step 1 is done in `968f55327`, and it is not in the three
+parsers this entry told it to go in. The entry named the wrong location.**
+
+Step 1 above says the fix is *"three parsers (`parse_cut_args`,
+`parse_fold_args`, `parse_base64_args`)"*. That would have been a bug, for the
+reason §910 exists: GNU attempts **every** operand and reports the **worst**
+status. `fold a '' b` prints `a`, reports `''`, prints `b`, and exits 1 — three
+outputs from a list containing one bad element. A parser that rejected the list
+would abort before `a` was ever printed, so the fix as specified would have
+turned one wrong error message into one missing file's worth of output.
+
+All three commands already have the correct GNU-shaped run loop. The guard went
+next to the existing `path == "-"` case in each:
+
+| Command | Location | Shape |
+|---|---|---|
+| `cut` | `cut_run`, before `resolve_path` | print, `worst = worst.max(1)`, `continue` |
+| `fold` | `fold_run`, same position | print, `worst = worst.max(1)`, `continue` |
+| `base64` | `base64_run`, a `Some("") =>` arm placed after `None \| Some("-")` and before `Some(path)` | print, `set_exit(1)`, `return` |
+
+`base64` is the exception that proves the rule rather than a departure from it:
+it takes **at most one** FILE, so there is no list to keep processing and its
+guard is correctly terminal.
+
+**The generalisable mistake.** This entry located the fix by asking *where is
+the empty string created?* and answering "the parser". The right question is
+*where is the empty string given its meaning?* — which is the run loop, because
+that is the only place that knows an operand list has other members waiting.
+When a write-up proposes a location, treat it as a hypothesis about the code and
+re-derive it; the entry was written by someone who had just finished reading
+`split_words`, and it shows.
+
+Rung 122 covers all of it (`fold ''`, `fold FILE '' FILE`, the exit status not
+leaking into the next command, `cut -d, -f1 ''`, `base64 ''`, and a bare
+`base64` still meaning stdin). Per the addendum immediately above, **that rung
+has not executed yet** — no boot has been run against a tree containing it. It
+is written, gated by `check-selftest-rung-numbers`, and unproven, which is
+exactly the state that addendum warns against reading as evidence.
+
+**Step 2 is untouched and still open**: `resolve_path("") == "/"` remains a
+documented property, and the ~257 `resolve_path(args)` call sites still express
+"no argument was given" as the empty string. This entry stays open for it.
+
 ## TD-B-SIX-TRACKED-FILES-HELD-CRLF-IN-THE-LANE-B-WORKTREE-AND-THE-WRITER-IS-UNIDENTIFIED (lane B, 2026-09-04)
 
 **In short:** the boot test refused to build because six files declared
@@ -121465,6 +121711,215 @@ source defect — most likely two `cargo` invocations against the same
 overlap. If it recurs and is *not* transient, the thing to check first is
 whether a `.rlib` in `target/x86_64-pc-windows-gnu/debug/deps/` was written
 for a different target.
+## TD-A-DF-IS-THE-SEVENTH-COPY-OF-THE-FATAL-FAULT-GUARD (lane A)
+
+**Found 2026-09-05** while extending `begin_fatal_kernel_fault` to `#TS`/`#NP`/
+`#SS`. Not fixed in that commit on purpose: `#DF`'s guard is subtly different
+from its siblings' and changing it is a separate judgement, not a rename.
+
+**What.** `handle_double_fault` (`kernel/src/idt.rs`, vector 8) does not call
+`begin_fatal_kernel_fault`. It open-codes the second half of it —
+`FATAL_FAULT_IN_PROGRESS.swap(true, Relaxed)` with its own `NESTED #DF …`
+one-liner and `halt_loop()` — and omits the first half, the `cpu::cli()`.
+
+With `#TS`/`#NP`/`#SS` now routed through the shared function, vector 8 is the
+**only** fatal handler still carrying its own copy, which is precisely the
+shape `begin_fatal_kernel_fault`'s own doc comment argues against ("a shared
+entry point is what stops the fourth handler from having to learn it a fourth
+time").
+
+**Why it was not simply folded in.**
+
+1. *The message differs, and the difference is load-bearing.* `#DF`'s nested
+   line carries `err={:#x}`; the shared one prints only `rip`/`rsp`. On a
+   double fault the error code is architecturally always zero, so this is
+   probably droppable — but "probably" is not a thing to establish in a commit
+   about three other vectors.
+2. *The ordering differs.* `#DF` takes the guard **before** `log_exception(8,…)`;
+   the siblings log first and guard after. That is arguably correct here — a
+   `#DF` arriving during fatal diagnostics is the death spiral the guard exists
+   for, and the cheapest possible response is right — but it means the call
+   cannot simply be substituted at the top.
+3. *The missing `cli()` looks harmless and is not obviously so.* Every entry in
+   this IDT is a 64-bit **interrupt** gate (`IdtEntry::new`, `type_attr =
+   0x80 | dpl<<5 | 0x0E`), and an interrupt gate clears `IF` on entry, so
+   interrupts are already masked when `handle_double_fault` starts. That would
+   make the `cli()` pure belt-and-braces — except that the shared function's doc
+   records it being added *because* the fatal path was observed running
+   interruptible on 2026-07-16 ("a timer tick faulted mid-report, tripped the
+   guard, and halted us before the diagnostics printed"). Those two facts do not
+   sit comfortably together, and the discrepancy is the actual open question
+   here: something re-enables interrupts between gate entry and the fatal branch,
+   and until it is known what, "the gate already did it" is not a safe reason to
+   keep omitting the `cli()`.
+
+**Proper fix.** Resolve (3) first — find what re-enabled `IF` on 2026-07-16, or
+establish that the lesson was mis-attributed and the real fix was something
+else. Then either give `begin_fatal_kernel_fault` an optional error-code
+argument and call it from `#DF` too, or record in `#DF` why it is deliberately
+the exception. Either outcome removes the seventh copy; leaving it undecided is
+what this entry is against.
+
+**Severity.** Low. `#DF` today is correct in the case that matters (it halts,
+and its guard does stop the recursion). This is a maintenance/consistency debt
+plus one genuinely unresolved question about interrupt state on the fatal path.
+
+## A-DNS-PICKS-A-PORT-WITHOUT-ASKING-WHETHER-IT-IS-FREE (lane A, 2026-09-06)
+
+**In short:** the kernel's DNS resolver picks its own random source port and
+then asks the UDP layer to bind exactly that port. If some other socket already
+holds it, the bind is refused and **the whole name lookup fails immediately** —
+it does not pick another port and it does not retry. So a small percentage of
+DNS lookups can fail for a reason that has nothing to do with the network, at
+random, and a repeat of the same lookup will usually work. That is the hardest
+possible shape of bug to report or reproduce.
+
+**Found** 2026-09-06 while researching lane B's request
+`requests/b-a-ephemeral-udp-ports-are-predictable.md`, which is about a
+different property of the same two functions. Not a bug lane B reported — they
+had no reason to look here.
+
+### The mechanism
+
+`dns_query_raw` (`kernel/src/net/dns.rs:1201`) opens its socket with an
+**explicit** port that `next_dns_port()` chose without consulting anything:
+
+```rust
+let sock = super::udp::bind(crate::netns::ROOT_NS, local_port)?;
+```
+
+`udp::bind` (`kernel/src/net/udp.rs:357`) treats a non-zero port as a request
+for that specific port, and refuses a duplicate within the namespace:
+
+```rust
+for sock in sockets.iter() {
+    if sock.active && sock.ns_id == ns_id && sock.port == port {
+        return Err(KernelError::AlreadyExists);
+    }
+}
+```
+
+The `?` propagates `AlreadyExists` out of the resolver to the caller. The
+`MAX_DNS_ATTEMPTS` retry loop does exist — but it is *inside* `dns_query_raw`,
+**after** the bind, so it retries timeouts and never touches this path.
+
+### Why it is rare, and why that is the problem
+
+The draw is over 16384 ports and `MAX_SOCKETS` is 32, so the collision rate is
+at most ~0.2% and in practice far lower. It is rare enough never to show up in
+a boot test and common enough to happen in the field, which is the combination
+that produces a bug report nobody can act on. It also gets monotonically worse
+if `MAX_SOCKETS` is ever raised.
+
+### The proper fix, which is also lane B's request
+
+Delete `next_dns_port` and have DNS take an ephemeral port the same way every
+other client does — `udp::bind(ns, 0)`, reading the assigned port back with the
+existing `udp::local_port(handle)`. That is a strict improvement on three axes
+at once:
+
+* **the collision disappears**, because the allocator is the thing holding the
+  socket table and skips ports that are in use;
+* **there is one implementation instead of two**, which is what lane B asked
+  for;
+* **the randomness gets stronger**, because the allocator can reach
+  `rng::next_bounded` (a real CSPRNG with rejection sampling and accumulated
+  interrupt entropy), whereas `next_dns_port` mixes a counter with folded
+  `rdtsc`.
+
+It depends on `allocate_ephemeral_port` being randomised first — today it scans
+linearly from 49152 and would hand DNS a predictable port, which is the
+regression lane B's request exists to prevent. So the order is: randomise the
+allocator, then move DNS onto it.
+
+**Correction to an assumption made while writing this up.** `next_dns_port`
+looked like it also had modulo bias (`mixed % EPHEMERAL_PORT_RANGE`). It does
+not: `mixed` is a `u16`, so it spans 65536 values, and 16384 divides that
+exactly. The mapping is uniform. The objection to `next_dns_port` is the
+*quality* of its entropy, not its distribution — worth stating because "it has
+modulo bias" is the kind of plausible-sounding claim that gets copied into a
+commit message and then into someone's mental model.
+
+**[A] 2026-09-06 — FIXED in `79efcbcfa`, on the plan above and in the order it
+predicted.** `d28c91908` randomised `allocate_ephemeral_port` first (drawn from
+`rng::next_bounded`, circular scan); `79efcbcfa` then deleted `next_dns_port`
+and moved `dns_query_raw` onto `udp::bind(ns, 0)` + `udp::local_port`. All three
+predicted improvements landed together, which is what made the ordering
+constraint worth writing down rather than discovering.
+
+Two things found in the course of fixing it that the entry above did not
+anticipate:
+
+* **The randomised scan had to become *circular*, not merely random-start.** A
+  random start with the old top-stopping scan would return `OutOfMemory` while
+  thousands of ports sat free below the start — a worse bug than the one being
+  fixed, and one that would have been rare in exactly the same
+  hard-to-reproduce way. `test_ephemeral_scan_wraps` pins the wraparound case
+  specifically, driven against a synthetic socket table so it does not depend
+  on where the CSPRNG happens to land.
+* **The same weakness was in the transaction ID, the other half of RFC 5452.**
+  `next_query_id` was also counter⊕`rdtsc`; fixed in the follow-up commit, which
+  also closed a latent hole in its "never zero" guarantee (the fallback was
+  `counter.wrapping_add(1)`, which is itself 0 when the counter sits at
+  `u16::MAX`). Worth noting the pattern: the port and the ID were written by
+  the same hand at the same time with the same reasoning, so finding one
+  hand-rolled entropy source is good grounds to grep for its siblings rather
+  than to fix it and move on.
+
+Not yet exercised on hardware: the new `udp` self-tests have not run in QEMU
+yet, because the boot test has not been run since. The entry stays closed on
+the strength of the fix being structural (the allocator cannot return a port it
+has not checked), but the self-test evidence is still outstanding.
+
+## `apps/**` is not built by anything, so an app can be broken for a day without anyone noticing
+
+**In short:** The lock screen — the program that decides who gets into the
+machine — did not compile, and had not compiled for a day. Nothing noticed,
+because nothing builds the `apps/` directory. A change in a shared library on
+another lane broke it, that lane's own tests stayed green, and the breakage was
+found only because an unrelated tidy-up happened to run `cargo clippy` on that
+one app.
+
+Found 2026-09-06 while sweeping blanket `#![allow(dead_code)]` out of
+`apps/**`. `apps/lockscreen` failed to compile at `HEAD` with two errors:
+
+- `authlib::Authenticator::with_stores` takes one path, not two
+- `authlib::shadow` does not exist
+
+Both come from `5264cba7a` ("authlib: one account store, and the /etc/shadow
+branch deleted", design-decisions §353), which states in its message that "no
+caller changes". That was true of the callers that commit could see: `login`,
+in `userspace/`, lane B's own tree. `apps/lockscreen` is lane C's, is a caller,
+and was not updated. Repaired in the commit that follows this entry.
+
+**The bug is not the missed caller — it is that a missed caller costs nothing.**
+`apps/*` is a workspace *member* (`Cargo.toml` line 5), so a
+`cargo build --workspace` for the host target would have failed. Nothing runs
+one:
+
+- the boot test builds for `x86_64-unknown-none` and `apps/*` are not in
+  `default-members` for it
+- each lane builds the packages it touched, and no lane touches all of `apps/`
+- there is no CI
+
+So the compile error was reachable by one command that nobody has reason to run.
+All 143 app crates were then checked in one go: this is the only broken one,
+and the check took 58 seconds warm. The breakage is rare and the guarantee is
+cheap — see open question C-Q11, where that measurement changed the
+recommendation.
+
+**The proper fix** is a check that builds every workspace member for the host
+target and fails on error, run the way `scripts/check-window-wiring.py` and
+`scripts/check-gates-are-wired.py` are. It is a cross-lane concern (it would
+gate all three lanes' merges), and it is slow — a cold `cargo check --workspace
+--target x86_64-pc-windows-gnu` is minutes, not seconds — so the shape of it
+(pre-push hook? a nightly sweep? `cargo check` rather than `build`?) is worth
+agreeing on rather than one lane imposing. Filed as an open question rather than
+done unilaterally.
+
+Until then, the cheap partial mitigation is what found this one: any lane
+touching a shared library under `userspace/` or `gui/` should
+`grep -rl '<the changed symbol>' apps/` before concluding "no caller changes".
 
 ## B-A-BREAKING-API-CHANGE-WAS-VERIFIED-BY-GREPPING-ONE-DIRECTORY (lane B, 2026-09-07)
 

@@ -40,9 +40,9 @@
 # as an ordinary failure.  A status a caller cannot know about is a status the
 # caller cannot handle.
 #
-# IF YOU WRAP THIS IN scripts/run-timeout.py, GIVE IT AT LEAST 7200 SECONDS:
+# IF YOU WRAP THIS IN scripts/run-timeout.py, GIVE IT AT LEAST 28800 SECONDS:
 #
-#   python scripts/run-timeout.py --poll 60 7200 ./scripts/boot-test.sh
+#   python scripts/run-timeout.py --poll 300 28800 ./scripts/boot-test.sh
 #
 # This script runs QEMU under its *own* timeout, 2400s by default (--timeout).
 # An outer budget also has to cover the pre-build gates and the kernel build,
@@ -65,13 +65,29 @@
 # the pre-QEMU phase is now the *larger* of the two and swings widely with host
 # load -- an outer budget derived from the boot time alone will be wrong.
 #
-# Budget the outer as gates+build+inner, then round up: 7200 = ~3000 observed
-# pre-QEMU + 2400 inner + headroom.  Being generous costs nothing here:
-# run-timeout's real job is tearing down the whole process tree, grandchildren
-# included, and that is independent of the budget.  An outer budget that is too
-# tight does not merely delay the answer, it destroys the diagnostic -- which is
-# what happened twice on 2026-08-31 before this comment was rewritten.
-# See known-issues.md -> Lesson 50.
+# Budget the outer as gates+build+inner, then round up.  Being generous costs
+# nothing here: run-timeout exits when the child does, so the budget is a
+# ceiling and not a duration -- its real job is tearing down the whole process
+# tree, grandchildren included, and that is independent of the number.  An
+# outer budget that is too tight does not merely delay the answer, it destroys
+# the diagnostic -- which is what happened twice on 2026-08-31 before this
+# comment was rewritten.  See known-issues.md -> Lesson 50.
+#
+# 28800 is derived (2026-09-06) from the eight rows that carry phase columns,
+# NOT from a remembered console watch -- `python scripts/boot-history.py --list`
+# and the `script_seconds` field:
+#
+#   script_seconds: median 7414, max 12760 (2026-09-05T16:46, gates 10435)
+#
+# The 7200 this paragraph used to recommend was therefore below the *median*
+# run: it would have killed four of those eight.  It was set when ~3000s of
+# pre-QEMU was current, and the gate phase has since tripled -- which is the
+# failure mode the paragraph below warns about, caught in the act.
+#
+# The headroom over 12760 is not slack, it is `check_commit_headroom`: that
+# gate now waits proportionally to what the run has already spent (see
+# `commit_wait_budget`), so a contended host can legitimately add most of a
+# gate phase again rather than discard one.  12760 + ~10400 + rounding = 28800.
 #
 # STOP HAND-MEASURING THIS.  Both numbers above were obtained by watching a
 # console, because bench/boot-history.jsonl -- hundreds of rows, and the obvious
@@ -82,8 +98,10 @@
 #
 #   python scripts/boot-history.py --list      # per-run phase columns
 #
-# Re-derive the 7200 above from those rows rather than trusting this paragraph;
+# Re-derive the 28800 above from those rows rather than trusting this paragraph;
 # the gate phase grows every time a lane adds a checker, and a comment does not.
+# That is not hypothetical advice -- following it on 2026-09-06 is what showed
+# the previous number had fallen below the median run.
 #
 # Usage:
 #   ./scripts/boot-test.sh              # full build + test (waits for BOOT_OK)
@@ -228,14 +246,22 @@ set -euo pipefail
 # 501 for a run that took about ninety minutes, and every phase before the
 # emulator started is *absent* from the file rather than small in it.
 #
-# That gap has already cost real work twice.  The header above budgets
+# That gap has already cost real work three times.  The header above budgeted
 # run-timeout.py at 7200s on the strength of "~3000s observed pre-QEMU", and
 # that number came from watching a console on 2026-08-31 -- because the history
-# file, which has hundreds of rows and is the obvious place to ask, does not
+# file, which has hundreds of rows and is the obvious place to ask, did not
 # know.  Before that, the same header budgeted 900s from the boot half alone
 # and killed two healthy guests mid-diagnostics.  A phase nothing measures is a
 # phase every estimate has to guess at, and the guesses were wrong in the
 # direction that destroys the evidence.
+#
+# The third: 7200 outlived its own evidence.  By 2026-09-06 the eight rows that
+# do carry `script_seconds` had a median of 7414 -- the recommended budget had
+# quietly fallen below the *typical* run, and nobody noticed, because noticing
+# required exactly the query this field was added to make possible.  The fix
+# was to run it (see the header).  The lesson is that adding the measurement is
+# only half the job; a budget derived from it still ages, so re-derive rather
+# than trust either this paragraph or that one.
 #
 # Stamped here rather than after the re-exec below so it covers the snapshot
 # copy too, and threaded through that re-exec explicitly: the child re-runs
@@ -2171,7 +2197,54 @@ check_free_space() {
 # still too low and the evidence for raising it is that run -- record the
 # reading in known-issues.md rather than adjusting by feel.
 MIN_COMMIT_FREE_MB="${BOOT_TEST_MIN_COMMIT_FREE_MB:-12288}"
-COMMIT_WAIT="${BOOT_TEST_COMMIT_WAIT:-900}"
+
+# How long to wait for the host to recover before giving up -- a floor, not the
+# budget.  The budget is computed per call by `commit_wait_budget` below.
+#
+# This was a flat 900 until 2026-09-06, when a run spent 7402 seconds passing
+# every gate, reached the pre-build check, found another lane building, waited
+# its quarter of an hour and threw all 7402 seconds away.  That trade is upside
+# down: the thing being economised (fifteen minutes of *sleeping*) was an order
+# of magnitude cheaper than the thing being discarded, and the discarded work
+# then had to be redone on the same contended host.
+#
+# 3600 rather than 900 as the floor because the blocker this gate exists for is
+# another lane's cargo build, and `build_seconds` in bench/boot-history.jsonl
+# tops out at 1299 -- so an hour covers the realistic transient, plus a second
+# build starting as the first ends, with margin.  A wait shorter than the thing
+# being waited for is not a wait, it is a delayed refusal.
+COMMIT_WAIT_FLOOR=3600
+
+# Seconds this call is willing to wait, on stdout.
+#
+# Scales with the run's own elapsed time: never abandon an investment over a
+# wait shorter than the investment.  The worst case is that the run takes twice
+# what it has already spent; the best case is that a gate phase measured in
+# hours is not repeated.  Recomputed per call rather than once, which is the
+# point -- the same fifteen minutes is a fine deal 60 seconds into a run and an
+# absurd one 7402 seconds in, and this gate is called at both.
+#
+# An explicitly-set BOOT_TEST_COMMIT_WAIT is honoured verbatim and is NOT
+# floored, for the same reason the nap below never overshoots it: it is the
+# knob a test, or an operator in a hurry, reaches for first, and a knob that
+# silently rounds its own value up does not mean what it says.
+#
+# Deliberately uncapped.  The backstop is the caller's outer run-timeout
+# budget, and this file's header asks for one (28800s) sized to accommodate it.
+# A cap here would be a number with nothing anchoring it, which is precisely
+# the failure the MIN_COMMIT_FREE_MB comment above is at pains to avoid.
+commit_wait_budget() {
+    if [ -n "${BOOT_TEST_COMMIT_WAIT:-}" ]; then
+        echo "$BOOT_TEST_COMMIT_WAIT"
+        return 0
+    fi
+    local elapsed=$(( $(date +%s) - BOOT_TEST_START_EPOCH ))
+    if [ "$elapsed" -gt "$COMMIT_WAIT_FLOOR" ]; then
+        echo "$elapsed"
+    else
+        echo "$COMMIT_WAIT_FLOOR"
+    fi
+}
 
 # Free commit charge in MiB on stdout, or a non-zero status if it cannot be had.
 #
@@ -2216,8 +2289,17 @@ check_commit_headroom() {
         return 0
     fi
 
+    # Read once and held for the whole wait, so the "of Ns" in the progress
+    # line does not creep upward under the reader as the run's elapsed time
+    # grows.  A budget that moves while it is being counted down against is
+    # not a budget.
+    local COMMIT_WAIT
+    COMMIT_WAIT="$(commit_wait_budget)"
+
     echo "=== Waiting for commit headroom (${free_mb} MiB free, need ${MIN_COMMIT_FREE_MB} MiB, ${phase}) ==="
     echo "    Another lane is probably building.  This clears on its own; nothing is wrong with the tree."
+    echo "    Willing to wait ${COMMIT_WAIT}s: this run has already spent" \
+         "$(( $(date +%s) - BOOT_TEST_START_EPOCH ))s, and giving up throws all of it away."
     local waited=0
     local nap
     while [ "$waited" -lt "$COMMIT_WAIT" ]; do
@@ -2253,7 +2335,11 @@ check_commit_headroom() {
     echo "Windows' commit limit is RAM plus pagefile.  At the limit, no process can start:" >&2
     echo "fork() returns STATUS_COMMIT_LIMIT (0xC000012D) and the run dies wherever it happens" >&2
     echo "to be, which on 2026-09-02 was 395 seconds into a boot whose build had already cost" >&2
-    echo "twenty minutes.  Refusing now costs seconds instead." >&2
+    echo "twenty minutes.  Refusing here is the cheaper of the two failures, but it is not a" >&2
+    echo "cheap one: this run spent $(( $(date +%s) - BOOT_TEST_START_EPOCH ))s getting here and that time is gone." >&2
+    echo "It waited ${COMMIT_WAIT}s before concluding the host was not going to recover, which is" >&2
+    echo "longer than any build this host has recorded — so suspect something other than a" >&2
+    echo "sibling lane: a leaked QEMU, a runaway rustc, or a pagefile smaller than it was." >&2
     echo "" >&2
     echo "The usual cause is another lane's cargo build.  Do NOT kill it — it is another" >&2
     echo "agent's in-flight work.  Wait for it, or do work that does not need to boot." >&2
@@ -3112,16 +3198,83 @@ check_prerequisites() {
 check_prerequisites
 
 # --- The gate phase starts here ----------------------------------------------
+
+# Before anything expensive: has another lane asked everyone to stop?
+#
+# This is deliberately the FIRST thing the gate phase does. A boot test is two
+# to three hours on this hardware, and the whole value of a halt is that it is
+# seen *before* one starts rather than discovered after. Every other gate here
+# grades the tree; this one grades whether the tree should be being graded at
+# all right now.
+#
+# The signal lives in the git *common* directory, which every worktree shares,
+# so it needs no fetch, no merge and no branch -- unlike `requests/`, which is
+# per-branch and therefore invisible to its addressee until they merge. That
+# gap is why this exists: on 2026-09-06 lane A had to stop lanes B and C for a
+# drive migration and had no channel to do it with, and the operator carried
+# the message by hand.
+check_lane_signals() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== lane-signal check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # Its own cases first, for this family's usual reason: a reader that has
+    # stopped finding signals reports an empty directory, which is spelled
+    # exactly like a tree with nothing pending.
+    if ! run_checker check-lane-signals-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-lane-signals.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The lane-signal reader fails its own" >&2
+        echo "cases, so 'nothing pending' cannot be distinguished from 'not" >&2
+        echo "reading', and a halt raised by another lane could pass unseen." >&2
+        return 1
+    fi
+
+    echo "=== Checking whether another lane has asked everyone to stop ==="
+    if run_checker check-lane-signals "$py" \
+            "$PROJECT_ROOT/scripts/check-lane-signals.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "STOPPING: another lane has raised a halt (details above)." >&2
+    echo "" >&2
+    echo "This is not a failure of your tree.  Someone needs every lane at a" >&2
+    echo "clean point -- a drive migration, a shared-file repair, something" >&2
+    echo "that cannot be done while three agents are writing." >&2
+    echo "" >&2
+    echo "Commit and push what you have, then stop.  Do not start another task." >&2
+    echo "When the reason has passed, whoever raised it lifts it with:" >&2
+    echo "    python scripts/check-lane-signals.py --clear-halt" >&2
+    exit 1
+}
+
+check_lane_signals
 #
 # Everything from this line to `check_cfg_unix` is a gate: thirty-odd static
 # checkers, the whole tooling test-suite sweep, shellcheck, and a full clippy
 # pass over the kernel.  The phase is recorded as `gates_seconds`.
 #
-# Whether it is bigger than the build is an open question, and deliberately
-# left open here.  The only measurement in the header above -- "~3000s before
-# QEMU was even started" -- is of gates *and* clippy *and* build together, so it
-# cannot answer it, and writing a guess into this comment would put the same
-# unsourced number back in circulation that this stamp exists to replace.
+# Whether it is bigger than the build was an open question when this stamp was
+# added, and `gates_seconds` has now answered it, decisively and in the
+# direction nobody expected.  Boot20 (2026-09-05, `6f21db1b5`, a PASS):
+#
+#     script 11608s = gates 10000s (86%) + qemu 806s (7%) + build 107s (1%)
+#
+# The gates are not merely bigger than the build, they are two orders of
+# magnitude bigger, and bigger than everything else in the run combined.  The
+# header's old "~3000s before QEMU was even started" measured gates *and* clippy
+# *and* build together and so could not attribute it; this can.
+#
+# That reframes the next question from "is it the gates?" to "*which* gate?",
+# which no phase stamp can answer -- so the gates are individually timed via
+# CHECKER_TIMING_LOG below.
 #
 # Stamped AFTER check_prerequisites, and matching the reason `BUILD_START_EPOCH`
 # does not use `SECONDS`: locating a toolchain is not a gate, and folding it in
@@ -3136,6 +3289,21 @@ check_prerequisites
 # like an expensive checker.  It shows up in `script_seconds` minus the three
 # phases, which is where an unexplained wait belongs.
 GATES_START_EPOCH="$(date +%s)"
+
+# Per-gate wall-clock, appended by `run_checker` (scripts/run-checker.sh) as one
+# `<label>\t<seconds>\t<exit>` row per gate.  Read back at the end of the phase.
+#
+# In CHECKER_LOGDIR, which is the worktree's own git dir, so three lanes running
+# at once do not share one file -- and with `$$` in the name so two overlapping
+# runs *within* one lane do not either.  That is the same pair of hazards, and
+# the same fix, as the checker logs beside it.
+#
+# Truncated rather than appended-to at the start of each run: this answers
+# "where did THIS run's 10000s go", and a file that accumulated across runs
+# would silently average a cold first run with warm later ones.
+CHECKER_TIMING_LOG="$CHECKER_LOGDIR/boot-test-gate-timing.$$.tsv"
+export CHECKER_TIMING_LOG
+: >"$CHECKER_TIMING_LOG" 2>/dev/null || CHECKER_TIMING_LOG=""
 
 # A landed request is stamped, not deleted (roadmap.md rule 2, §315).
 #
@@ -3545,6 +3713,46 @@ check_gates_are_wired() {
 }
 
 check_gates_are_wired
+
+# The harness's own first act, checked before anything trusts a run of it.
+#
+# boot-test.sh copies itself to a snapshot and re-execs, so that an edit
+# landing mid-run is not executed as though it had always been there --
+# bash reads a script incrementally, so editing a running one splices new
+# text into the middle of the old.  With three lanes editing this tree
+# while a ninety-minute run is in flight, that is a routine event, not a
+# hypothetical.
+#
+# The checker does not run boot-test.sh.  It lifts the re-exec preamble out
+# of this file with a `sed` range and runs it around a two-second payload,
+# with a control that carries no preamble and MUST be corrupted by the same
+# edit -- without that control a passing guarded run would prove only that
+# nothing happened.  ~21s.
+#
+# Wired 2026-09-06.  It had existed unwired since it was written, and it
+# was red the first time anything ran it: the `sed` range was still exact,
+# but the preamble had grown a reference to BOOT_TEST_START_EPOCH, which is
+# set far above the block and so is not part of what the range lifts.  The
+# extraction stayed faithful while the extracted script stopped running.
+# That is the argument for wiring it rather than pinning it -- an unwired
+# gate does not hold still, it rots, and this one had.
+check_boot_test_reexec() {
+    echo "=== Checking that a mid-run edit cannot corrupt this run ==="
+    if run_checker check-boot-test-reexec \
+            bash "$PROJECT_ROOT/scripts/check-boot-test-reexec.sh"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  The re-exec guard at the top of this" >&2
+    echo "script no longer isolates a run from edits made while it runs," >&2
+    echo "or the check that proves it can no longer run the preamble." >&2
+    echo "The output above says which: a stale harness names the variable" >&2
+    echo "it is missing, a real failure says the snapshot did not isolate." >&2
+    exit 1
+}
+
+check_boot_test_reexec
 
 # The third arm of the same family, one level in.  The two above ask whether a
 # gate *can* refuse and whether anything *asks* it to; this asks whether the
@@ -6261,6 +6469,45 @@ check_cfg_unix
 # what this number is evidence for.
 GATES_SECONDS=$(( $(date +%s) - GATES_START_EPOCH ))
 echo "=== Gates OK (${GATES_SECONDS}s) ==="
+
+# Where those seconds went, per gate.
+#
+# The phase total above says the gates cost 86% of a passing run (see the
+# comment at GATES_START_EPOCH); this says which of them to look at first.
+# Without it the only way to act on the total is to instrument sixty call sites
+# by hand, which is why the total sat unattributed for the whole life of the
+# stamp.
+#
+# Printed as a top-N rather than the full table on purpose: sixty rows is a
+# scroll, and the actionable claim -- "these few are the phase" -- is exactly
+# what a long table buries.  The unaccounted remainder is stated rather than
+# left to subtraction, because it is the number that says whether the top-N is
+# the story or a distraction: gates are not the only thing in the phase (the
+# tooling test-suite sweep, shellcheck and clippy do not go through
+# `run_checker`), so a small top-N over a large remainder means the expensive
+# work is somewhere this instrument cannot see, and that is worth knowing
+# immediately rather than concluding after optimising the wrong thing.
+if [ -n "${CHECKER_TIMING_LOG:-}" ] && [ -s "$CHECKER_TIMING_LOG" ]; then
+    _gt_n=$(wc -l <"$CHECKER_TIMING_LOG" | tr -d ' ')
+    _gt_sum=$(awk -F'\t' '{s += $2} END {print s + 0}' "$CHECKER_TIMING_LOG")
+    echo "=== Slowest gates (of ${_gt_n} timed, ${_gt_sum}s of the ${GATES_SECONDS}s phase) ==="
+    sort -t"$(printf '\t')" -k2,2nr "$CHECKER_TIMING_LOG" | head -12 |
+        while IFS="$(printf '\t')" read -r _gt_label _gt_secs _gt_rc; do
+            # The exit code is carried through rather than dropped: a gate that
+            # skipped (2 at a --may-skip site) or found something (1) did not do
+            # the same amount of work as one that passed, and a bare seconds
+            # column would present those as comparable.
+            case "$_gt_rc" in
+            0) _gt_note="" ;;
+            *) _gt_note="  (exit $_gt_rc)" ;;
+            esac
+            printf '    %6ss  %s%s\n' "$_gt_secs" "$_gt_label" "$_gt_note"
+        done
+    echo "    ---"
+    echo "    $(( GATES_SECONDS - _gt_sum ))s of the phase was NOT in a run_checker gate"
+    echo "    (the tooling test-suite sweep, shellcheck and clippy are not routed"
+    echo "     through run_checker, so they are in the remainder, not the table)."
+fi
 
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then

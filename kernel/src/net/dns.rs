@@ -21,9 +21,13 @@
 //! the domain name and record type.  The server responds with answer
 //! records containing the resolved IP addresses.
 //!
-//! Each query uses a unique transaction ID (monotonically incrementing
-//! AtomicU16) and a unique ephemeral source port (from the 49152–65535
-//! range) to prevent spoofed responses and port collisions.
+//! Each query carries a transaction ID and is sent from an ephemeral
+//! source port (49152–65535).  An off-path attacker forging a response
+//! has to guess both, so both are drawn from the kernel CSPRNG, giving
+//! the ~30 bits RFC 5452 §9 asks for; a value that merely does not repeat
+//! — a counter, say — is not the same as one he cannot predict.  The port
+//! is assigned by `udp::bind`, which because it holds the socket table
+//! also guarantees it is free rather than merely unlikely to collide.
 //!
 //! ## CNAME chasing
 //!
@@ -77,7 +81,7 @@
 use crate::sync::Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
@@ -143,59 +147,54 @@ const CLASS_IN: u16 = 1;
 /// DNS flags: standard query, recursion desired.
 const FLAGS_QUERY_RD: u16 = 0x0100;
 
-/// Counter mixed with TSC for query ID generation.
-///
-/// Combined with TSC jitter to produce unpredictable 16-bit transaction
-/// IDs.  Monotonic predictability is a classic DNS cache poisoning vector
-/// (CVE-2008-1447 / Kaminsky attack).
-static QUERY_ID_COUNTER: AtomicU16 = AtomicU16::new(1);
-
 /// Generate a randomized DNS transaction ID.
 ///
-/// Mixes a monotonic counter with the TSC (timestamp counter) to produce
-/// IDs that are:
-/// - Unique (counter prevents collisions within ~65K queries)
-/// - Unpredictable (TSC timing jitter varies per call)
-/// - Never zero (some resolvers treat 0 as invalid)
+/// Drawn from the kernel CSPRNG.  The transaction ID is one of the two
+/// values an off-path attacker must guess to forge a response — the source
+/// port is the other — so predicting it is the classic cache-poisoning
+/// vector (CVE-2008-1447 / Kaminsky).  Together with the random source
+/// port from `udp::bind` this gives the ~30 bits RFC 5452 §9 asks for.
+///
+/// This previously mixed a monotonic counter with `rdtsc`.  That is not a
+/// CSPRNG: the counter contributes no entropy at all, and `rdtsc` is a
+/// value an attacker who can run code on the machine — or merely time it
+/// well — can narrow considerably.  Using the real generator costs
+/// nothing here, since resolution already blocks on the network and the
+/// RNG is callable from any thread context.
+///
+/// Never returns 0, which some resolvers treat as invalid.  The old
+/// version tried to guarantee this by falling back to `counter + 1`, but
+/// that is itself 0 when the counter sits at `u16::MAX`; redrawing has no
+/// such edge, and terminates with probability 1.
 fn next_query_id() -> u16 {
-    let counter = QUERY_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    // SAFETY: rdtsc reads the hardware timestamp counter, always
-    // available on x86_64 CPUs.
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    // Mix lower TSC bits (high jitter) with the counter.
-    // Rotate the TSC bits to spread entropy across all 16 bits.
-    let tsc16 = (tsc as u16) ^ ((tsc >> 16) as u16) ^ ((tsc >> 5) as u16);
-    let id = counter ^ tsc16;
-    // Skip 0 on collision.
-    if id == 0 { counter.wrapping_add(1) } else { id }
+    /// Size of the 16-bit transaction ID space, i.e. one past `u16::MAX`.
+    const ID_SPACE: u64 = 1 << 16;
+
+    loop {
+        // Drawn in the range 1..=u16::MAX by rejecting 0 rather than by
+        // biasing it away (e.g. `1 + rand % 65535`), so every valid ID
+        // stays equally likely.
+        let id = crate::rng::next_bounded(ID_SPACE);
+        if id != 0 {
+            // Fits by construction: the bound is 65536.
+            return u16::try_from(id).unwrap_or(1);
+        }
+    }
 }
 
-/// Counter mixed with TSC for ephemeral port allocation.
-///
-/// Each query binds a unique local port to avoid collisions when
-/// multiple resolutions are in flight (e.g., during CNAME chasing).
-/// Range: 49152–65535 (IANA dynamic/private port range, 16384 ports).
-///
-/// Random port selection prevents an attacker from predicting the source
-/// port of a DNS query, which is essential for cache poisoning resistance
-/// alongside random query IDs.
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
-
-/// Ephemeral port range start (IANA dynamic/private range).
-const EPHEMERAL_PORT_START: u16 = 49152;
-/// Ephemeral port range size.
-const EPHEMERAL_PORT_RANGE: u16 = 16384; // 65535 - 49152 + 1
-
-/// Allocate a randomized ephemeral port for DNS.
-fn next_dns_port() -> u16 {
-    let counter = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    // SAFETY: rdtsc is always available on x86_64.
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    let tsc16 = (tsc as u16) ^ ((tsc >> 11) as u16) ^ ((tsc >> 23) as u16);
-    let mixed = counter ^ tsc16;
-    // Map to ephemeral range [49152, 65535].
-    EPHEMERAL_PORT_START.wrapping_add(mixed % EPHEMERAL_PORT_RANGE)
-}
+// The source port for a query is no longer chosen here.  `dns_query_raw`
+// asks `udp::bind` for an ephemeral port and reads back what it was given;
+// see the note on `udp::random_ephemeral_offset` for why the allocator now
+// draws its start from the CSPRNG.
+//
+// This module used to pick its own port and bind it explicitly, because
+// the allocator handed out 49152, 49153, ... in order and a predictable
+// source port defeats cache-poisoning resistance.  That workaround had a
+// defect of its own: an explicitly-bound port that is already taken makes
+// `bind` return `AlreadyExists`, which failed the whole lookup, and the
+// retry loop sits after the bind so it could not recover.  Asking the
+// allocator instead removes the collision by construction -- it holds the
+// socket table, so it only ever returns a port it has checked is free.
 
 /// Maximum CNAME hops to follow before giving up.
 const MAX_CNAME_HOPS: usize = 8;
@@ -1195,16 +1194,25 @@ fn pick_dns_server() -> KernelResult<DnsServer> {
 /// address family.  The DNS query format is identical regardless of
 /// transport — only the UDP send/receive changes.
 ///
+/// The source port is assigned by `udp::bind` rather than chosen here, so
+/// it is both unpredictable and guaranteed free; see the note where
+/// `next_dns_port` used to live.
+///
 /// Returns the raw DNS response payload on success, or `TimedOut` after
 /// exhausting all retry attempts.
 #[allow(clippy::arithmetic_side_effects)]
-fn dns_query_raw(
-    server: &DnsServer,
-    local_port: u16,
-    query: &[u8],
-    name: &str,
-) -> KernelResult<Vec<u8>> {
-    let sock = super::udp::bind(crate::netns::ROOT_NS, local_port)?;
+fn dns_query_raw(server: &DnsServer, query: &[u8], name: &str) -> KernelResult<Vec<u8>> {
+    // Port 0 means "any free port", which the allocator draws from the
+    // CSPRNG.  Reading it back is necessary because `udp::send` is keyed by
+    // port rather than by socket handle.
+    let sock = super::udp::bind(crate::netns::ROOT_NS, 0)?;
+    let Some(local_port) = super::udp::local_port(sock) else {
+        // Unreachable: the handle was just returned by a successful bind.
+        // Closed rather than leaked, since an early return here would
+        // otherwise strand the socket slot for the life of the system.
+        super::udp::close(sock);
+        return Err(KernelError::InternalError);
+    };
 
     for attempt in 0..MAX_DNS_ATTEMPTS {
         // Send (or re-send) the query via the appropriate transport.
@@ -1305,10 +1313,9 @@ fn resolve_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<Ip
     *cname_out = None;
 
     let query_id = next_query_id();
-    let local_port = next_dns_port();
     let query = build_query(name, query_id);
 
-    let response_data = dns_query_raw(&server, local_port, &query, name)?;
+    let response_data = dns_query_raw(&server, &query, name)?;
 
     match parse_response(&response_data, query_id, cname_out) {
         Ok(result) => {
@@ -1381,11 +1388,10 @@ pub fn reverse_resolve(ip: Ipv4Addr) -> KernelResult<String> {
     crate::serial_println!("[dns] Reverse resolving {} via {}...", ip, server);
 
     let query_id = next_query_id();
-    let local_port = next_dns_port();
     let query = build_ptr_query(ip, query_id);
     let arpa_name = alloc::format!("{}", ip); // For timeout logging.
 
-    let response_data = dns_query_raw(&server, local_port, &query, &arpa_name)?;
+    let response_data = dns_query_raw(&server, &query, &arpa_name)?;
 
     match parse_ptr_response(&response_data, query_id) {
         Ok(name) => {
@@ -1629,10 +1635,9 @@ fn resolve6_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<I
     *cname_out = None;
 
     let query_id = next_query_id();
-    let local_port = next_dns_port();
     let query = build_aaaa_query(name, query_id);
 
-    let response_data = dns_query_raw(&server, local_port, &query, name)?;
+    let response_data = dns_query_raw(&server, &query, name)?;
 
     match parse_aaaa_response(&response_data, query_id, cname_out) {
         Ok(result) => {
@@ -1690,11 +1695,10 @@ pub fn reverse_resolve6(ip: &Ipv6Addr) -> KernelResult<String> {
     crate::serial_println!("[dns] Reverse resolving {} via {}...", ip, server);
 
     let query_id = next_query_id();
-    let local_port = next_dns_port();
     let query = build_ptr6_query(ip, query_id);
     let name_for_log = alloc::format!("{}", ip);
 
-    let response_data = dns_query_raw(&server, local_port, &query, &name_for_log)?;
+    let response_data = dns_query_raw(&server, &query, &name_for_log)?;
 
     match parse_ptr_response(&response_data, query_id) {
         Ok(name) => {

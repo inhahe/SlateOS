@@ -45,7 +45,7 @@ use super::waiters::{
     WaiterSet, current_user_pid, deliverable_signal_pending, park_interruptible, wake_all,
 };
 use crate::error::{KernelError, KernelResult};
-use crate::sched;
+use crate::sched::{self, task::TaskId};
 use crate::serial_println;
 use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::BTreeMap;
@@ -896,6 +896,46 @@ pub fn poll_status(handle: StreamSocketHandle) -> u16 {
     }
 
     flags
+}
+
+/// Park `task` on this endpoint so that any state change wakes it.
+///
+/// The multi-object (`ipc::multiwait`) counterpart to the registration the
+/// blocking `send`/`recv` loops do inline — see
+/// [`super::pipe::register_waiter`] for why this registers in *both* sets
+/// irrespective of the caller's event mask, and why a stale handle is a silent
+/// no-op rather than an error.
+///
+/// Both sets belong to **this** endpoint, which is where its blocked readers
+/// and writers park: a sender on one endpoint wakes the *peer* endpoint's
+/// `reader_waiters`, so a receiver's own entry is the one that gets woken.
+///
+/// Must be paired with [`deregister_waiter`] on every exit path.
+#[allow(clippy::indexing_slicing)]
+pub fn register_waiter(handle: StreamSocketHandle, task: TaskId) {
+    let e = handle.endpoint();
+    let mut table = PAIRS.lock();
+    let Some(pair) = table.get_mut(&handle.pair_id()) else {
+        return;
+    };
+    pair.ep[e].reader_waiters.insert(task);
+    pair.ep[e].writer_waiters.insert(task);
+}
+
+/// Undo [`register_waiter`]: remove `task` from both of this endpoint's waiter
+/// sets.
+///
+/// Idempotent and stale-handle-safe, so it can be called unconditionally from a
+/// `Drop`. See [`super::pipe::deregister_waiter`] for what a leaked entry does.
+#[allow(clippy::indexing_slicing)]
+pub fn deregister_waiter(handle: StreamSocketHandle, task: TaskId) {
+    let e = handle.endpoint();
+    let mut table = PAIRS.lock();
+    let Some(pair) = table.get_mut(&handle.pair_id()) else {
+        return;
+    };
+    pair.ep[e].reader_waiters.remove(task);
+    pair.ep[e].writer_waiters.remove(task);
 }
 
 /// Return the number of bytes available to receive on this endpoint.

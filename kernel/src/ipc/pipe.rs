@@ -161,6 +161,7 @@ impl PipeEnd {
 use super::waiters::{
     WaiterSet, current_user_pid, deliverable_signal_pending, park_interruptible, wake_all,
 };
+use crate::sched::task::TaskId;
 
 /// A kernel pipe: a ring buffer with reader/writer state.
 struct Pipe {
@@ -1091,6 +1092,61 @@ pub fn writable(handle: PipeHandle) -> bool {
     };
     // Writable if there's space, or if reader closed (broken pipe).
     (pipe.buf.len() - pipe.len) > 0 || pipe.read_closed
+}
+
+/// Park `task` on this pipe so that any state change wakes it.
+///
+/// This is the multi-object (`ipc::multiwait`) counterpart to the
+/// registration the blocking `read`/`write` loops above do inline: a task
+/// waiting on *several* objects at once cannot use any one object's park loop,
+/// so it registers on each of them, tests them all, and parks once.
+///
+/// Two properties, both deliberate:
+///
+/// - **Both sets, regardless of which end the handle names or what the caller
+///   asked for.** A reader-only waiter still wants the writer-set wakes,
+///   because the interesting transitions are not symmetric with the interesting
+///   events: `close()` on the read end wakes *writers* with what a poller sees
+///   as `POLLERR`, and the write-end-closed EOF that makes a reader ready is
+///   delivered by [`close`] to whichever set it happens to hold. Filtering by
+///   the requested event mask could therefore drop the very wake the caller is
+///   waiting for, and cannot buy anything in exchange: [`WaiterSet`] is
+///   wake-all, so an over-broad registration costs one re-check of a condition
+///   that is about to be re-checked anyway.
+/// - **A stale handle is a no-op**, not an error. The object may be closed
+///   between the caller resolving the handle and this call; the readiness test
+///   that follows reports hangup for exactly that case (see [`poll_status`]),
+///   which is the answer POSIX wants, so there is nothing useful to report
+///   here.
+///
+/// The caller **must** pair this with [`deregister_waiter`] on every exit path
+/// — see that function for what a leaked entry does.
+pub fn register_waiter(handle: PipeHandle, task: TaskId) {
+    let mut table = PIPES.lock();
+    let Some(pipe) = table.get_mut(&handle.pipe_id()) else {
+        return;
+    };
+    pipe.reader_waiters.insert(task);
+    pipe.writer_waiters.insert(task);
+}
+
+/// Undo [`register_waiter`]: remove `task` from both of this pipe's waiter
+/// sets.
+///
+/// Idempotent, and a no-op for a task that was never registered or a handle
+/// whose pipe is gone, so it is safe to call unconditionally from a `Drop`.
+/// It has to be: a leaked entry names a task that is no longer parked, which
+/// wakes an unrelated task once task ids recycle, and — sooner and without
+/// needing any recycling — sets that still-live task's sticky `pending_wake`,
+/// making its *next*, unrelated `block_current()` return early from a wait
+/// nothing satisfied.
+pub fn deregister_waiter(handle: PipeHandle, task: TaskId) {
+    let mut table = PIPES.lock();
+    let Some(pipe) = table.get_mut(&handle.pipe_id()) else {
+        return;
+    };
+    pipe.reader_waiters.remove(task);
+    pipe.writer_waiters.remove(task);
 }
 
 /// Poll a pipe handle for readiness (used by SYS_PIPE_POLL).

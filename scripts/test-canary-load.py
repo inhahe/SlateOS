@@ -28,6 +28,7 @@ strictly worse than the real thing.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import ctypes
 import io
@@ -110,6 +111,128 @@ def check_true(label, cond, detail=""):
         print(f"  FAIL {label}: {detail}")
     else:
         print(f"  ok   {label}")
+
+
+#: Cases declined because the host could not answer them, not because the code
+#: under test is wrong.  Reported apart from FAILURES and do not fail the run.
+SKIPS: list[str] = []
+
+
+def skip(label, why):
+    """Decline a case the host is not in a state to answer.
+
+    A contended host cannot be asked whether the spinners each got a core:
+    they demonstrably did not, and no property of this repository is the
+    reason.  Reporting that as a failure blames the harness for a fact about
+    the machine, which is what cost lane B a 5166 s boot test on 2026-09-03
+    and this lane a 7783 s one on 2026-09-06.
+
+    A skip is not a pass.  It prints where it happens and again in the
+    verdict, because a check that declines quietly is worse than one that
+    fails wrongly -- the wrong failure at least gets investigated.
+    """
+    SKIPS.append(f"{label}: {why}")
+    print(f"  SKIP {label}: {why}")
+
+
+#: Wall window for `host_headroom`: long enough that the ~15.6 ms scheduler
+#: grid is noise, short enough to be worth paying on a failure path.
+HEADROOM_WINDOW_S = 0.6
+
+
+def host_headroom(n, seconds=HEADROOM_WINDOW_S):
+    """Occupancy that `n` plain spinners actually obtain on this host, now.
+
+    Deliberately independent of `canary-load.py`: this measures the *machine*,
+    in order to decide whether a shortfall in the code under test is
+    attributable to the host.  Sharing an instrument with the thing being
+    judged would let a broken instrument agree with itself.
+
+    Two choices that matter:
+
+    * **Subprocesses, not `multiprocessing`.**  This suite runs its cases at
+      module scope and Windows spawns rather than forks, so a `Process` here
+      would re-import this file and run the entire suite again inside every
+      worker.
+    * **Each child times its own window** and reports its own `cpu / wall`,
+      rather than dividing every child by one shared window.  Process startup
+      on Windows costs tens of milliseconds and the children do not begin
+      together; against a shared window that skew reads as missing CPU, biasing
+      the probe toward "busy" and skipping cases on an idle host.  Self-timing
+      cancels it.
+
+    Returns mean per-spinner occupancy in 0.0..~1.0, or `None` if the probe
+    could not be run -- in which case the caller must not use it to excuse
+    anything.
+    """
+    lines = [
+        "import time, sys",
+        "c0 = time.process_time(); w0 = time.monotonic()",
+        "end = w0 + " + repr(float(seconds)),
+        "while time.monotonic() < end: pass",
+        "sys.stdout.write(repr((time.process_time() - c0,"
+        " time.monotonic() - w0)))",
+    ]
+    code = chr(10).join(lines)
+    try:
+        procs = [
+            subprocess.Popen([sys.executable, "-c", code],
+                             stdout=subprocess.PIPE, text=True)
+            for _ in range(n)
+        ]
+    except OSError:
+        return None
+    ratios = []
+    for proc in procs:
+        try:
+            out, _ = proc.communicate(timeout=seconds * 20 + 30)
+            cpu, wall = ast.literal_eval(out.strip())
+        except Exception:  # noqa: BLE001 - a probe that fails excuses nothing
+            with contextlib.suppress(Exception):
+                proc.kill()
+            continue
+        if wall > 0:
+            ratios.append(cpu / wall)
+    if not ratios:
+        return None
+    return sum(ratios) / len(ratios)
+
+
+def attribute_shortfall(occupancy, headroom, floor):
+    """Who is responsible for `occupancy` falling below `floor`?
+
+    Split out from the live cases so the *decision* can be tested without
+    reproducing the host conditions that provoke it.  The measurement half
+    (`host_headroom`) was verified against a real machine -- 0.977 idle, 0.306
+    under twelve CPU hogs, against a boot-test failure at 0.297 -- but a
+    measurement that is right and a rule that is wrong still produce a wrong
+    verdict, and only one of the two can be checked cheaply and repeatably.
+
+    Returns:
+        ``"clear"``   -- no shortfall; `occupancy` is at or above the floor.
+        ``"host"``    -- plain spinners cannot clear the floor here either, so
+                         the load is the machine's and the case cannot be
+                         answered.
+        ``"code"``    -- the host has headroom, so the shortfall is real.
+
+    An unmeasurable host (`headroom is None`) is deliberately ``"code"``: a
+    probe that failed is not evidence of load, and treating it as such would
+    convert every probe failure into a silent excuse.
+
+    The rule is deliberately conservative, and one residual case is left
+    failing on purpose: a marginal shortfall on a host that probes healthy --
+    occupancy 0.488 against a probe of 0.9 -- is reported as a failure, because
+    the probe and the run measure at different instants and the safe direction
+    for the part of the canary that checks the canary is to complain.  What it
+    removes is the case that actually recurs: sustained contention from a
+    sibling lane's build, which measured 0.306 against a 0.5 floor and is
+    excused with room to spare.
+    """
+    if occupancy >= floor:
+        return "clear"
+    if headroom is not None and headroom < floor:
+        return "host"
+    return "code"
 
 
 def result_line(name, ns=100):
@@ -885,15 +1008,72 @@ with tempfile.TemporaryDirectory() as tmpdir:
         wait_for=start_replay7, delay=0.3, spinners=2)
 
     occ = record["host_occupancy"]
-    check_true("a loaded run measures spinner occupancy", occ is not None,
-               f"record problem={record.get('problem')!r}")
+
+    # Whether this host was in a state to answer the live cases at all.
+    #
+    # The three assertions below ask a physical question -- did two spinners
+    # each get most of a core? -- and on a contended machine the answer is no
+    # for reasons that have nothing to do with this repository.  Three agents
+    # share this host by design and the boot test is the longest thing any of
+    # them runs, so "do not run anything else for 5000 s" is not a rule anyone
+    # can keep.  Failing here blames the harness for the machine: it cost lane
+    # B a 5166 s boot test on 2026-09-03 and this lane a 7783 s one on
+    # 2026-09-06, both with a message accusing the instrument.
+    #
+    # So a shortfall is *attributed* before it is judged.  `host_headroom`
+    # measures what plain spinners can obtain right now; if they cannot clear
+    # the same floor, the host is the cause and the case is declined rather
+    # than failed.  On an idle host nothing changes and the floor keeps all of
+    # its power -- which is the requirement, because the live cases are the
+    # part of the canary that checks the canary.
+    #
+    # Measured while writing this: 0.977 idle, 0.306 under twelve CPU hogs.
+    # The boot test that prompted it reported 0.297.
+    #
+    # Probed only when a case is about to fail, not up front: it costs a
+    # subprocess round per spinner, the passing path should not pay it, and
+    # measuring next to the failure attributes it better than measuring
+    # earlier would.
+    contended = False
+
+    def host_is_contended():
+        """True if the host cannot give this run's spinners a core each."""
+        global contended
+        if contended:
+            return True
+        headroom = host_headroom(record.get("spinners") or 2)
+        # Judged by `attribute_shortfall`, which is unit-tested below against
+        # the real numbers.  An occupancy of 0.0 is passed because the question
+        # here is only "can this host clear the floor at all".
+        contended = attribute_shortfall(0.0, headroom,
+                                        cl.OCCUPANCY_FLOOR) == "host"
+        return contended
+
+    if occ is None and record.get("problem") == "until-never-matched" \
+            and host_is_contended():
+        # The same cause at greater starvation: the spinners never reached the
+        # state `--until` waits for, so there is no occupancy record at all.
+        skip("a loaded run measures spinner occupancy",
+             "host too busy for the spinners to reach the --until predicate")
+    else:
+        check_true("a loaded run measures spinner occupancy", occ is not None,
+                   f"record problem={record.get('problem')!r}")
     if occ is not None:
         check("one CPU figure per spinner",
               len(occ["cpu_seconds"]), record["spinners"])
         check("no spinner was starved", occ["idle_spinners"], 0)
-        check_true("occupancy clears the floor",
-                   occ["occupancy"] >= cl.OCCUPANCY_FLOOR,
-                   f"occupancy {occ['occupancy']}")
+        if occ["occupancy"] >= cl.OCCUPANCY_FLOOR:
+            check_true("occupancy clears the floor", True)
+        elif host_is_contended():
+            skip("occupancy clears the floor",
+                 f"occupancy {occ['occupancy']} is below the "
+                 f"{cl.OCCUPANCY_FLOOR} floor, and plain spinners cannot "
+                 f"clear it on this host either -- the load is the host's, "
+                 f"not this code's")
+        else:
+            check_true("occupancy clears the floor", False,
+                       f"occupancy {occ['occupancy']} (host has headroom, "
+                       f"so this is not contention)")
         # Upper bound too -- but on `occupancy_measured`, not `occupancy`.
         #
         # This assertion used to read `occupancy <= 2.0`, and on 2026-08-31 it
@@ -924,8 +1104,15 @@ with tempfile.TemporaryDirectory() as tmpdir:
         # would silently restore the bug this check exists to catch.
         check_true("the measured span is recorded, not assumed",
                    occ["span_s"] is not None, occ)
-    check_true("a correctly-loaded run is not flagged as unapplied",
-               record.get("problem") is None, record.get("problem"))
+    if record.get("problem") == "load-not-applied" and host_is_contended():
+        # Same root cause as the floor case above: the controller sets this
+        # problem *because* occupancy fell short, so on a contended host it is
+        # a restatement of the host's load, not a second finding.
+        skip("a correctly-loaded run is not flagged as unapplied",
+             "the run was flagged load-not-applied because the host is busy")
+    else:
+        check_true("a correctly-loaded run is not flagged as unapplied",
+                   record.get("problem") is None, record.get("problem"))
     check_true("the summary states the occupancy in words",
                "spinner occupancy" in out, out[-400:])
 
@@ -1257,10 +1444,46 @@ if NAMES is not None:
                    f"rc={rc} out={out[-300:]}")
 
 
+
 print()
+print("shortfall attribution")
+
+# The decision the live cases rest on, exercised without needing a busy host.
+# Numbers are the real ones: 0.297 is what failed a 7783 s boot test on
+# 2026-09-06, 0.306 is what plain spinners measured under twelve CPU hogs, and
+# 0.977 is what they measured idle.
+for label, occupancy, headroom, want in [
+    ("an idle host that clears the floor is not attributed at all",
+     0.98, None, "clear"),
+    ("exactly at the floor is clear, not a shortfall",
+     cl.OCCUPANCY_FLOOR, 0.306, "clear"),
+    ("the real boot-test failure, on a host that cannot clear it either",
+     0.297, 0.306, "host"),
+    ("the same shortfall on a host with headroom is the code's",
+     0.297, 0.977, "code"),
+    ("a headroom exactly at the floor does not excuse it",
+     0.297, cl.OCCUPANCY_FLOOR, "code"),
+    ("an unmeasurable host excuses nothing",
+     0.297, None, "code"),
+]:
+    check(label, attribute_shortfall(occupancy, headroom, cl.OCCUPANCY_FLOOR),
+          want)
+
+print()
+if SKIPS:
+    # Printed before the verdict and named individually, so a green run that
+    # declined something never reads as a green run that checked everything.
+    print(f"{len(SKIPS)} case(s) DECLINED -- the host could not answer them:")
+    for declined in SKIPS:
+        print(f"  - {declined}")
+    print("  (this is not a pass for those cases; re-run on an idle host to "
+          "get a verdict)")
 if FAILURES:
     print(f"{len(FAILURES)} FAILURE(S)")
     for failure in FAILURES:
         print(f"  - {failure}")
     sys.exit(1)
-print("all canary-load tests passed")
+if SKIPS:
+    print(f"all canary-load tests passed ({len(SKIPS)} declined)")
+else:
+    print("all canary-load tests passed")

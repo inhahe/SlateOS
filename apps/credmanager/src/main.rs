@@ -44,7 +44,6 @@
 // too, so that what is left under this allow is only the not-yet-wired.
 // Narrowing it per-item is
 // `known-issues.md` → `C-CREDMANAGER-ALLOWS-DEAD-CODE-CRATE-WIDE`.
-#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 use std::process::ExitCode;
@@ -156,6 +155,19 @@ enum Target {
     MasterInput,
     /// Lock screen: the Unlock button.
     Unlock,
+    /// New-entry form: the type chooser, indexing [`EntryType::all`].
+    NewKind(usize),
+    /// New-entry form: field `n`, indexing [`fields_for`].
+    NewField(usize),
+    /// New-entry form: save.
+    NewSave,
+    /// New-entry form: discard.
+    NewCancel,
+    /// Entry detail: copy field `n` to the clipboard.
+    ///
+    /// The index is into [`copyable_fields`], which is what the detail view
+    /// draws a button beside, so the row and the target cannot disagree.
+    CopyField(usize),
 }
 
 type Frame = guitk::frame::Frame<Target>;
@@ -247,27 +259,6 @@ impl Layout {
             list_rows,
             detail,
         }
-    }
-}
-
-// =============================================================================
-// Unique ID generation
-// =============================================================================
-
-/// Monotonically increasing ID generator for entries and folders.
-struct IdGen {
-    next: u64,
-}
-
-impl IdGen {
-    fn new() -> Self {
-        Self { next: 1 }
-    }
-
-    fn next_id(&mut self) -> u64 {
-        let id = self.next;
-        self.next = self.next.saturating_add(1);
-        id
     }
 }
 
@@ -592,6 +583,11 @@ impl Entry {
 
 /// A folder for organizing entries.
 #[derive(Clone, Debug)]
+/// A folder in the sidebar.
+///
+/// `SidebarSelection::Folder` can filter by one and nothing can create one, so
+/// no folder is ever constructed. See `todo.txt`.
+#[allow(dead_code, reason = "no control creates a folder yet -- see todo.txt")]
 struct Folder {
     id: u64,
     name: String,
@@ -599,6 +595,7 @@ struct Folder {
 }
 
 impl Folder {
+    #[allow(dead_code, reason = "no control creates a folder yet -- see todo.txt")]
     fn new(id: u64, name: &str) -> Self {
         Self {
             id,
@@ -703,6 +700,15 @@ impl Vault {
     /// store that keeps the verifier and loses the salt has locked the owner
     /// out permanently, and the symptom ("correct password refused") does not
     /// point at the cause.
+    /// Reopen a vault whose verifier was written down somewhere.
+    ///
+    /// Unused because this crate has no persistence layer: every launch opens
+    /// an empty vault, as the module doc says. This is the door a loader would
+    /// come in through. See `todo.txt`.
+    #[allow(
+        dead_code,
+        reason = "the persistence layer that would call it does not exist yet"
+    )]
     fn from_stored(name: &str, params: KdfParams, verifier: [u8; 32]) -> Self {
         Self::with_verifier(
             name,
@@ -793,6 +799,12 @@ impl Vault {
         id
     }
 
+    /// Delete an entry.
+    ///
+    /// No caller yet: adding a credential is wired up as of this change and
+    /// deleting one is not, so there is no control that reaches this. See
+    /// `todo.txt`.
+    #[allow(dead_code, reason = "no delete control yet -- see todo.txt")]
     fn remove_entry(&mut self, entry_id: u64) -> bool {
         let before = self.entries.len();
         self.entries.retain(|e| e.id != entry_id);
@@ -803,10 +815,16 @@ impl Vault {
         self.entries.iter().find(|e| e.id == entry_id)
     }
 
+    /// An entry that can be changed. No caller yet, for the same reason as
+    /// `remove_entry`: the detail view shows a credential and cannot edit one.
+    #[allow(dead_code, reason = "no edit control yet -- see todo.txt")]
     fn get_entry_mut(&mut self, entry_id: u64) -> Option<&mut Entry> {
         self.entries.iter_mut().find(|e| e.id == entry_id)
     }
 
+    /// Replace an entry's payload. No caller: the detail view shows a
+    /// credential and cannot edit one. See `todo.txt`.
+    #[allow(dead_code, reason = "no edit control yet -- see todo.txt")]
     fn update_entry(&mut self, entry_id: u64, data: EntryData, now: u64) -> bool {
         if let Some(entry) = self.get_entry_mut(entry_id) {
             entry.data = data;
@@ -817,6 +835,9 @@ impl Vault {
         }
     }
 
+    /// Mark an entry a favourite. The sidebar can filter by favourites and
+    /// nothing can set one, so the filter is always empty. See `todo.txt`.
+    #[allow(dead_code, reason = "no favourite control yet -- see todo.txt")]
     fn toggle_star(&mut self, entry_id: u64) -> bool {
         if let Some(entry) = self.get_entry_mut(entry_id) {
             entry.starred = !entry.starred;
@@ -826,6 +847,9 @@ impl Vault {
         }
     }
 
+    /// Flag a credential as known-breached. Nothing calls it: there is no
+    /// breach feed to learn it from and no control to set it by hand.
+    #[allow(dead_code, reason = "no breach feed and no control -- see todo.txt")]
     fn set_compromised(&mut self, entry_id: u64, compromised: bool) -> bool {
         if let Some(entry) = self.get_entry_mut(entry_id) {
             entry.compromised = compromised;
@@ -835,6 +859,10 @@ impl Vault {
         }
     }
 
+    /// Tag an entry. The sidebar lists every tag in the vault and filters by
+    /// them, and nothing can put one on an entry, so the list is always empty.
+    /// See `todo.txt`.
+    #[allow(dead_code, reason = "no tag control yet -- see todo.txt")]
     fn add_tag(&mut self, entry_id: u64, tag: &str) -> bool {
         if let Some(entry) = self.get_entry_mut(entry_id) {
             let tag_str = tag.to_string();
@@ -847,6 +875,7 @@ impl Vault {
         }
     }
 
+    #[allow(dead_code, reason = "no tag control yet -- see todo.txt")]
     fn remove_tag(&mut self, entry_id: u64, tag: &str) -> bool {
         if let Some(entry) = self.get_entry_mut(entry_id) {
             let before = entry.tags.len();
@@ -857,6 +886,9 @@ impl Vault {
         }
     }
 
+    /// Move an entry into a folder. Nothing creates a folder, so there is
+    /// nowhere to move one to. See `Folder` and `todo.txt`.
+    #[allow(dead_code, reason = "no folder control yet -- see todo.txt")]
     fn set_folder(&mut self, entry_id: u64, folder_id: Option<u64>) -> bool {
         if let Some(entry) = self.get_entry_mut(entry_id) {
             entry.folder_id = folder_id;
@@ -868,12 +900,16 @@ impl Vault {
 
     // -- Folder CRUD --------------------------------------------------------
 
+    /// Make a folder. Nothing calls it, which is why the sidebar's folder
+    /// section is always empty. See `Folder` and `todo.txt`.
+    #[allow(dead_code, reason = "no folder control yet -- see todo.txt")]
     fn add_folder(&mut self, name: &str) -> u64 {
         let id = self.next_id();
         self.folders.push(Folder::new(id, name));
         id
     }
 
+    #[allow(dead_code, reason = "no folder control yet -- see todo.txt")]
     fn remove_folder(&mut self, folder_id: u64) -> bool {
         let before = self.folders.len();
         self.folders.retain(|f| f.id != folder_id);
@@ -890,6 +926,7 @@ impl Vault {
         self.folders.iter().find(|f| f.id == folder_id)
     }
 
+    #[allow(dead_code, reason = "no folder control yet -- see todo.txt")]
     fn rename_folder(&mut self, folder_id: u64, new_name: &str) -> bool {
         if let Some(folder) = self.folders.iter_mut().find(|f| f.id == folder_id) {
             folder.name = new_name.to_string();
@@ -926,6 +963,13 @@ impl Vault {
             .collect()
     }
 
+    /// Full-text search across a vault. The toolbar's search box filters
+    /// through `refresh_filter` instead, so this second search has no caller;
+    /// one of the two should go once it is clear which the UI wants.
+    #[allow(
+        dead_code,
+        reason = "the toolbar filters through refresh_filter -- see todo.txt"
+    )]
     fn search_entries(&self, query: &str) -> Vec<&Entry> {
         if query.is_empty() {
             return self.entries.iter().collect();
@@ -1165,6 +1209,11 @@ impl PasswordGenerator {
         }
     }
 
+    /// Set the generated password's length.
+    ///
+    /// The generator panel shows the length and offers no way to change it, so
+    /// nothing calls this. See `todo.txt`.
+    #[allow(dead_code, reason = "the generator panel has no length control yet")]
     fn set_length(&mut self, len: usize) {
         self.length = len.clamp(8, 128);
     }
@@ -2233,6 +2282,11 @@ fn is_common_pattern(password: &str) -> bool {
 /// Result of auditing a single entry.
 #[derive(Clone, Debug)]
 struct AuditIssue {
+    /// Which entry the issue is about.
+    ///
+    /// The audit panel names the entry in its text and does not yet let you
+    /// jump to it, which is what would read this. See `todo.txt`.
+    #[allow(dead_code, reason = "the audit list is not clickable yet")]
     entry_id: u64,
     entry_name: String,
     issue: AuditIssueKind,
@@ -2357,6 +2411,12 @@ fn audit_vault(vault: &Vault, now: u64) -> Vec<AuditIssue> {
 // =============================================================================
 
 /// Export vault entries to CSV format.
+/// The vault as CSV, for moving it to another password manager.
+///
+/// Advertised in the module doc and reachable from nothing: there is no
+/// control that calls it, and no filesystem to write the result to. See
+/// `todo.txt` -- the clipboard is the sink this can have today.
+#[allow(dead_code, reason = "no export control yet -- see todo.txt")]
 fn export_csv(vault: &Vault) -> String {
     let mut csv = String::from("type,name,username,password,url,notes,tags,folder,starred\n");
     for entry in &vault.entries {
@@ -2403,11 +2463,18 @@ fn export_csv(vault: &Vault) -> String {
 /// CSV writers again. The local version this replaced omitted `\r` from its
 /// trigger set; since RFC 4180 records are CRLF-terminated, a bare CR in an
 /// unquoted field splits the record for most readers.
+#[allow(
+    dead_code,
+    reason = "only `export_csv` calls it, and that has no caller yet"
+)]
 fn escape_csv(s: &str) -> String {
     guitk::csv::field(s)
 }
 
 /// Serialize vault to a backup string (simplified JSON-like format).
+/// The vault in a form that could be written out and read back. Same story as
+/// `export_csv`: advertised, and nothing calls it.
+#[allow(dead_code, reason = "no backup control yet -- see todo.txt")]
 fn serialize_backup(vault: &Vault) -> String {
     let mut out = String::from("{\n  \"vault_name\": ");
     // Every string below is user-chosen (vault/entry/folder/tag names). None
@@ -2619,6 +2686,154 @@ enum DetailView {
     PasswordGenerator,
     Settings,
     AuditReport,
+    /// The form for a credential that does not exist yet.
+    NewEntry,
+}
+
+// =============================================================================
+// New-entry form
+// =============================================================================
+
+/// The fields one kind of credential is made of, in the order they are shown.
+///
+/// Derived from the payload structs rather than written out beside them: a
+/// second list of a type's fields is a second thing to forget to update when
+/// a field is added, and the form would silently stop offering it.
+fn fields_for(kind: EntryType) -> &'static [&'static str] {
+    match kind {
+        EntryType::Login => &["Site", "Username", "Password", "URL", "Notes"],
+        EntryType::SecureNote => &["Title", "Content"],
+        EntryType::CreditCard => &["Name", "Number", "Expiry", "Cardholder", "Notes"],
+        EntryType::Identity => &["Name", "Email", "Phone", "Address"],
+        EntryType::SshKey => &["Name", "Fingerprint", "Public key"],
+    }
+}
+
+/// Which fields hold a secret, and so are drawn masked and never shown by
+/// default.
+fn field_is_secret(kind: EntryType, index: usize) -> bool {
+    matches!(
+        (kind, index),
+        // Login: Password. CreditCard: Number.
+        (EntryType::Login, 2) | (EntryType::CreditCard, 1)
+    )
+}
+
+/// A credential being written, before it is a credential.
+#[derive(Clone, Debug)]
+struct NewEntryForm {
+    kind: EntryType,
+    /// One string per entry in `fields_for(kind)`.
+    values: Vec<String>,
+    /// Which field the keyboard is in.
+    focused: usize,
+}
+
+impl NewEntryForm {
+    fn new(kind: EntryType) -> Self {
+        Self {
+            kind,
+            values: vec![String::new(); fields_for(kind).len()],
+            focused: 0,
+        }
+    }
+
+    /// Switch the form to another kind of credential.
+    ///
+    /// The values are not carried across: "Fingerprint" and "Password" are not
+    /// the same field because they happen to sit at the same index, and moving
+    /// a typed secret into a field that is drawn in the clear would be the
+    /// worst possible way to find that out.
+    fn set_kind(&mut self, kind: EntryType) {
+        if self.kind == kind {
+            return;
+        }
+        *self = Self::new(kind);
+    }
+
+    fn labels(&self) -> &'static [&'static str] {
+        fields_for(self.kind)
+    }
+
+    fn value(&self, index: usize) -> &str {
+        self.values.get(index).map_or("", String::as_str)
+    }
+
+    fn focus(&mut self, index: usize) {
+        if index < self.values.len() {
+            self.focused = index;
+        }
+    }
+
+    /// Move to the next field, wrapping -- Tab in a form is expected to cycle.
+    fn focus_next(&mut self) {
+        let len = self.values.len().max(1);
+        self.focused = self.focused.saturating_add(1).checked_rem(len).unwrap_or(0);
+    }
+
+    fn type_text(&mut self, text: &str) {
+        if let Some(v) = self.values.get_mut(self.focused) {
+            v.push_str(text);
+        }
+    }
+
+    fn backspace(&mut self) -> bool {
+        self.values
+            .get_mut(self.focused)
+            .and_then(String::pop)
+            .is_some()
+    }
+
+    /// The first field, which every kind uses as its display name.
+    ///
+    /// A credential with no name is one the list cannot show and the user
+    /// cannot find again, so it is what `is_complete` insists on.
+    fn name(&self) -> &str {
+        self.value(0).trim()
+    }
+
+    /// Can this be saved?
+    fn is_complete(&self) -> bool {
+        !self.name().is_empty()
+    }
+
+    /// Build the payload, or `None` if the form is not complete.
+    fn build(&self) -> Option<EntryData> {
+        if !self.is_complete() {
+            return None;
+        }
+        // Through each type's own constructor rather than a struct literal
+        // beside it: `LoginData::new` is where `totp_secret` starts as `None`,
+        // and a literal here would be a second place deciding that.
+        let f = |i: usize| self.value(i).trim().to_string();
+        Some(match self.kind {
+            EntryType::Login => {
+                let mut d = LoginData::new(&f(0), &f(1), self.value(2));
+                d.url = f(3);
+                d.notes = f(4);
+                EntryData::Login(d)
+            }
+            EntryType::SecureNote => {
+                EntryData::SecureNote(SecureNoteData::new(&f(0), self.value(1)))
+            }
+            EntryType::CreditCard => {
+                // Masked on the way in, not on the way out: the vault should
+                // never hold the digits it does not need, and `mask_number` is
+                // the one place that decides what "masked" means.
+                let masked = CreditCardData::mask_number(self.value(1));
+                let mut d = CreditCardData::new(&f(0), &masked, &f(2), &f(3));
+                d.notes = f(4);
+                EntryData::CreditCard(d)
+            }
+            EntryType::Identity => {
+                let mut d = IdentityData::new(&f(0), &f(1));
+                d.phone = f(2);
+                d.address = f(3);
+                EntryData::Identity(d)
+            }
+            EntryType::SshKey => EntryData::SshKey(SshKeyData::new(&f(0), &f(1), self.value(2))),
+        })
+    }
 }
 
 // =============================================================================
@@ -2709,6 +2924,14 @@ struct AppState {
     height: f32,
     /// Settings: auto-lock minutes.
     settings_auto_lock: u32,
+    /// The credential being written, while [`DetailView::NewEntry`] is up.
+    ///
+    /// `None` at every other moment rather than a form kept warm between
+    /// visits: a half-typed password left in memory after the user cancelled
+    /// is a thing a credential manager should not be holding.
+    new_entry: Option<NewEntryForm>,
+    /// What the last copy put on the clipboard, for the status line.
+    last_copied: Option<String>,
 }
 
 impl AppState {
@@ -2745,6 +2968,8 @@ impl AppState {
             width: DEFAULT_WINDOW_WIDTH,
             height: DEFAULT_WINDOW_HEIGHT,
             settings_auto_lock: DEFAULT_AUTO_LOCK_MINUTES,
+            new_entry: None,
+            last_copied: None,
         };
         state.refresh_filter();
         state
@@ -3705,6 +3930,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 "Site",
                 &login.site,
                 false,
+                Target::CopyField(0),
             );
             y += row_spacing;
 
@@ -3719,6 +3945,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 "Username",
                 &login.username,
                 false,
+                Target::CopyField(1),
             );
             y += row_spacing;
 
@@ -3738,6 +3965,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 "Password",
                 &pw_display,
                 true,
+                Target::CopyField(2),
             );
 
             // Password strength
@@ -3792,6 +4020,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                     "URL",
                     &login.url,
                     false,
+                    Target::CopyField(3),
                 );
                 y += row_spacing;
             }
@@ -3808,6 +4037,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                     "TOTP",
                     totp,
                     false,
+                    Target::CopyField(4),
                 );
                 y += row_spacing;
             } else {
@@ -3911,6 +4141,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 "Card Name",
                 &card.name,
                 false,
+                Target::CopyField(0),
             );
             y += row_spacing;
 
@@ -3924,6 +4155,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 "Number",
                 &card.number_masked,
                 false,
+                Target::CopyField(1),
             );
             y += row_spacing;
 
@@ -3937,6 +4169,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 "Expiry",
                 &card.expiry,
                 false,
+                Target::CopyField(2),
             );
             y += row_spacing;
 
@@ -3950,6 +4183,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 "Cardholder",
                 &card.cardholder,
                 false,
+                Target::CopyField(3),
             );
             y += row_spacing;
 
@@ -3991,6 +4225,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 "Name",
                 &ident.name,
                 false,
+                Target::CopyField(0),
             );
             y += row_spacing;
 
@@ -4004,6 +4239,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 "Email",
                 &ident.email,
                 false,
+                Target::CopyField(1),
             );
             y += row_spacing;
 
@@ -4018,6 +4254,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                     "Phone",
                     &ident.phone,
                     false,
+                    Target::CopyField(2),
                 );
                 y += row_spacing;
             }
@@ -4033,6 +4270,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                     "Address",
                     &ident.address,
                     false,
+                    Target::CopyField(3),
                 );
                 y += row_spacing;
             }
@@ -4048,6 +4286,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 "Key Name",
                 &key.name,
                 false,
+                Target::CopyField(0),
             );
             y += row_spacing;
 
@@ -4061,6 +4300,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 "Fingerprint",
                 &key.fingerprint,
                 false,
+                Target::CopyField(1),
             );
             y += row_spacing;
 
@@ -4209,6 +4449,7 @@ fn render_detail_field(
     label: &str,
     value: &str,
     is_password: bool,
+    copy: Target,
 ) -> f32 {
     draw_text(
         frame,
@@ -4233,7 +4474,9 @@ fn render_detail_field(
         Some(copy_x - value_x - 8.0),
     );
 
-    // Copy button
+    // Copy button. `draw_button` paints; the hit box is registered here,
+    // because until it was every one of these was a button that could be seen
+    // and not pressed.
     draw_button(
         frame,
         copy_x,
@@ -4245,6 +4488,7 @@ fn render_detail_field(
         SUBTEXT0,
         false,
     );
+    frame.hit(copy, Rect::new(copy_x, y - 4.0, 44.0, 24.0));
 
     y
 }
@@ -4252,6 +4496,203 @@ fn render_detail_field(
 // =============================================================================
 // Render: password generator panel
 // =============================================================================
+
+/// The new-entry form.
+///
+/// Every control it draws registers its own hit box, so a chooser, a field or
+/// a button that is drawn is one that can be pressed -- the defect this whole
+/// change is about was a button that was drawn, hit-tested, and answered with
+/// `Ignored`.
+fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, height: f32) {
+    let x_start = SIDEBAR_WIDTH + ENTRY_LIST_WIDTH;
+    let y_start = TOOLBAR_HEIGHT;
+    let panel_width = width - x_start;
+    let panel_height = height - y_start;
+
+    draw_rect(
+        frame,
+        x_start,
+        y_start,
+        panel_width,
+        panel_height,
+        BASE,
+        0.0,
+    );
+
+    let Some(form) = state.new_entry.as_ref() else {
+        return;
+    };
+
+    let pad = 24.0;
+    let inner = (panel_width - pad * 2.0).max(0.0);
+    let mut y = y_start + pad;
+
+    draw_text(
+        frame,
+        x_start + pad,
+        y,
+        "New Entry",
+        TEXT_COLOR,
+        HEADING_FONT_SIZE,
+        FontWeightHint::Bold,
+        None,
+    );
+    y += 36.0;
+
+    // Type chooser: one pill per kind, the chosen one filled.
+    let mut chooser_x = x_start + pad;
+    for (index, kind) in EntryType::all().iter().enumerate() {
+        let label = kind.label();
+        let w = text::padded_width(label, 10.0, SMALL_FONT_SIZE, FontWeightHint::Regular);
+        if chooser_x + w > x_start + pad + inner {
+            break;
+        }
+        let chosen = *kind == form.kind;
+        let rect = Rect::new(chooser_x, y, w, 26.0);
+        draw_rect(
+            frame,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            if chosen { kind.badge_color() } else { SURFACE0 },
+            CORNER_RADIUS,
+        );
+        draw_text(
+            frame,
+            chooser_x + 10.0,
+            y + 6.0,
+            label,
+            if chosen { BASE } else { SUBTEXT0 },
+            SMALL_FONT_SIZE,
+            if chosen {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            },
+            Some(w),
+        );
+        frame.hit(Target::NewKind(index), rect);
+        chooser_x += w + 6.0;
+    }
+    y += 40.0;
+
+    // One row per field of the chosen kind.
+    for (index, label) in form.labels().iter().enumerate() {
+        draw_text(
+            frame,
+            x_start + pad,
+            y,
+            label,
+            SUBTEXT0,
+            SMALL_FONT_SIZE,
+            FontWeightHint::Regular,
+            Some(inner),
+        );
+        y += 18.0;
+
+        let focused = index == form.focused;
+        let rect = Rect::new(x_start + pad, y, inner, 30.0);
+        draw_rect(
+            frame,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            if focused { SURFACE1 } else { SURFACE0 },
+            CORNER_RADIUS,
+        );
+
+        // A secret is drawn masked while it is typed, because a password
+        // manager is used in front of other people.
+        let raw = form.value(index);
+        let shown = if field_is_secret(form.kind, index) && !state.show_password {
+            "*".repeat(raw.chars().count())
+        } else {
+            raw.to_string()
+        };
+        let text_color = if raw.is_empty() { OVERLAY0 } else { TEXT_COLOR };
+        draw_text(
+            frame,
+            rect.x + 10.0,
+            rect.y + 8.0,
+            if shown.is_empty() {
+                "-"
+            } else {
+                shown.as_str()
+            },
+            text_color,
+            DEFAULT_FONT_SIZE,
+            FontWeightHint::Regular,
+            Some(inner - 20.0),
+        );
+        frame.hit(Target::NewField(index), rect);
+        y += 38.0;
+    }
+
+    y += 8.0;
+
+    // Save is refused rather than hidden when the form has no name: a button
+    // that vanishes leaves the user with nothing to press and no reason why.
+    let can_save = form.is_complete();
+    let save = Rect::new(x_start + pad, y, 96.0, 32.0);
+    draw_rect(
+        frame,
+        save.x,
+        save.y,
+        save.w,
+        save.h,
+        if can_save { GREEN } else { SURFACE0 },
+        CORNER_RADIUS,
+    );
+    draw_text(
+        frame,
+        save.x + 28.0,
+        save.y + 8.0,
+        "Save",
+        if can_save { BASE } else { OVERLAY0 },
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Bold,
+        Some(save.w),
+    );
+    frame.hit(Target::NewSave, save);
+
+    let cancel = Rect::new(save.x + save.w + 12.0, y, 96.0, 32.0);
+    draw_rect(
+        frame,
+        cancel.x,
+        cancel.y,
+        cancel.w,
+        cancel.h,
+        SURFACE0,
+        CORNER_RADIUS,
+    );
+    draw_text(
+        frame,
+        cancel.x + 22.0,
+        cancel.y + 8.0,
+        "Cancel",
+        SUBTEXT0,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        Some(cancel.w),
+    );
+    frame.hit(Target::NewCancel, cancel);
+
+    if !can_save {
+        y += 44.0;
+        draw_text(
+            frame,
+            x_start + pad,
+            y,
+            "A name is needed before this can be saved.",
+            OVERLAY0,
+            SMALL_FONT_SIZE,
+            FontWeightHint::Regular,
+            Some(inner),
+        );
+    }
+}
 
 fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, height: f32) {
     let x_start = SIDEBAR_WIDTH + ENTRY_LIST_WIDTH;
@@ -5138,6 +5579,7 @@ impl AppState {
             DetailView::PasswordGenerator => render_generator_panel(&mut frame, self, w, h),
             DetailView::Settings => render_settings_panel(&mut frame, self, w, h),
             DetailView::AuditReport => render_audit_panel(&mut frame, self, w, h),
+            DetailView::NewEntry => render_new_entry_panel(&mut frame, self, w, h),
         }
 
         debug_assert!(frame.is_balanced(), "a clip was pushed and not popped");
@@ -5164,6 +5606,163 @@ fn build_render_tree(state: &AppState) -> RenderTree {
 // =============================================================================
 // Event handling
 // =============================================================================
+
+/// Keys while the new-entry form is up.
+fn handle_new_entry_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
+    match key.key {
+        Key::Escape => {
+            cancel_new_entry(state);
+            EventResult::Consumed
+        }
+        Key::Enter => {
+            // Enter saves rather than adding a newline: none of these fields is
+            // more than a line, and a form that cannot be finished from the
+            // keyboard is one that needs the mouse for its last step.
+            if save_new_entry(state) {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            }
+        }
+        Key::Tab | Key::Down => {
+            if let Some(form) = state.new_entry.as_mut() {
+                form.focus_next();
+            }
+            EventResult::Consumed
+        }
+        Key::Backspace => {
+            let changed = state
+                .new_entry
+                .as_mut()
+                .is_some_and(NewEntryForm::backspace);
+            if changed {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            }
+        }
+        _ => {
+            if !key.types_text() {
+                return EventResult::Ignored;
+            }
+            let typed: String = key.typed().collect();
+            if typed.is_empty() {
+                return EventResult::Ignored;
+            }
+            if let Some(form) = state.new_entry.as_mut() {
+                form.type_text(&typed);
+            }
+            EventResult::Consumed
+        }
+    }
+}
+
+/// Open the new-entry form.
+///
+/// The kind it opens on is the one the sidebar is filtering by when that is a
+/// type filter, because a user who has just narrowed the list to Logins and
+/// pressed Add is asking for a Login.
+fn open_new_entry(state: &mut AppState) {
+    let kind = match state.sidebar_selection {
+        SidebarSelection::TypeFilter(kind) => kind,
+        _ => EntryType::Login,
+    };
+    state.new_entry = Some(NewEntryForm::new(kind));
+    state.detail_view = DetailView::NewEntry;
+    state.detail_scroll = 0.0;
+}
+
+/// Put the form's credential in the vault and show it.
+///
+/// Returns whether anything was saved: a form with no name is not saved, and
+/// the caller keeps it open rather than discarding what was typed.
+fn save_new_entry(state: &mut AppState) -> bool {
+    let Some(form) = state.new_entry.as_ref() else {
+        return false;
+    };
+    let Some(data) = form.build() else {
+        return false;
+    };
+    let id = state.vault.add_entry(data, state.now);
+    state.new_entry = None;
+    state.selected_entry_id = Some(id);
+    state.detail_view = DetailView::EntryDetail;
+    state.detail_scroll = 0.0;
+    state.refresh_filter();
+    state.run_audit();
+    state.clamp_scroll();
+    true
+}
+
+/// Throw the form away.
+fn cancel_new_entry(state: &mut AppState) {
+    state.new_entry = None;
+    state.detail_view = DetailView::EntryDetail;
+    state.detail_scroll = 0.0;
+}
+
+/// The fields of the selected entry that are worth copying, in the order the
+/// detail view lists them: a label, and the text a copy would put on the
+/// clipboard.
+fn copyable_fields(state: &AppState) -> Vec<(&'static str, String)> {
+    let Some(id) = state.selected_entry_id else {
+        return Vec::new();
+    };
+    let Some(entry) = state.vault.get_entry(id) else {
+        return Vec::new();
+    };
+    // The same fields the detail view draws, in the same order and with the
+    // empties left in: the view passes `CopyField(n)` counted down its own
+    // rows, so a list filtered here would shift every index below the first
+    // blank field and copy the wrong secret.
+    match &entry.data {
+        EntryData::Login(d) => vec![
+            ("Site", d.site.clone()),
+            ("Username", d.username.clone()),
+            ("Password", d.password.clone()),
+            ("URL", d.url.clone()),
+            ("TOTP", d.totp_secret.clone().unwrap_or_default()),
+        ],
+        EntryData::SecureNote(d) => vec![("Title", d.title.clone())],
+        EntryData::CreditCard(d) => vec![
+            ("Card Name", d.name.clone()),
+            ("Number", d.number_masked.clone()),
+            ("Expiry", d.expiry.clone()),
+            ("Cardholder", d.cardholder.clone()),
+        ],
+        EntryData::Identity(d) => vec![
+            ("Name", d.name.clone()),
+            ("Email", d.email.clone()),
+            ("Phone", d.phone.clone()),
+            ("Address", d.address.clone()),
+        ],
+        EntryData::SshKey(d) => vec![
+            ("Key Name", d.name.clone()),
+            ("Fingerprint", d.fingerprint.clone()),
+        ],
+    }
+}
+
+/// Copy field `index` of the selected entry. Returns whether anything moved.
+///
+/// `ClipboardState` has had a `copy` and a thirty-second `tick` that clears it
+/// since this file was written, and nothing ever called `copy` -- so the one
+/// operation a credential manager exists for was the one it could not do.
+fn copy_field(state: &mut AppState, index: usize) -> bool {
+    let fields = copyable_fields(state);
+    let Some((label, value)) = fields.get(index) else {
+        return false;
+    };
+    if value.is_empty() {
+        // Nothing to put on the clipboard, and clearing what is already there
+        // because a blank row was pressed would lose the thing the user copied
+        // a moment ago.
+        return false;
+    }
+    state.clipboard.copy(value, state.now);
+    state.last_copied = Some((*label).to_string());
+    true
+}
 
 fn handle_event(state: &mut AppState, event: &Event) -> EventResult {
     match event {
@@ -5207,6 +5806,12 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
             }
         }
         return EventResult::Consumed;
+    }
+
+    // The new-entry form takes the keyboard while it is up: every printable
+    // key goes into a field rather than into the search box behind it.
+    if state.detail_view == DetailView::NewEntry && state.new_entry.is_some() {
+        return handle_new_entry_key(state, key);
     }
 
     // Main app key handling
@@ -5328,7 +5933,16 @@ fn handle_click(state: &mut AppState, x: f32, y: f32) -> EventResult {
     let Some(target) = state.target_at(x, y) else {
         return EventResult::Ignored;
     };
+    act_on(state, target)
+}
 
+/// What pressing a target does.
+///
+/// Split from `handle_click` so that what a control *does* can be stated
+/// without going through where it happens to be drawn: a test that has to hit
+/// a pixel to press a button is a test of the layout as much as the behaviour,
+/// and it goes red when the layout moves for unrelated reasons.
+fn act_on(state: &mut AppState, target: Target) -> EventResult {
     // While the vault is locked the only two live targets are the lock
     // screen's own, and nothing else is drawn -- so this is a statement about
     // what the renderer emits, not a second guard that could disagree with it.
@@ -5340,7 +5954,51 @@ fn handle_click(state: &mut AppState, x: f32, y: f32) -> EventResult {
         // The field is where typing already goes; clicking it is a no-op that
         // still has to be claimed, or the click falls through to the scrim.
         Target::MasterInput => EventResult::Consumed,
-        Target::Add | Target::Search => EventResult::Ignored,
+        Target::Add => {
+            // Until this arm existed the toolbar's Add button was drawn, was
+            // hit-tested, and was answered with `Ignored` -- so the vault had
+            // no way to gain an entry, and everything downstream of having one
+            // (`Vault::add_entry`, `IdGen`, every `EntryData` variant, the
+            // clipboard, the CSV export) was dead code the compiler had been
+            // reporting all along.
+            open_new_entry(state);
+            EventResult::Consumed
+        }
+        // The field is where typing already goes; clicking it is claimed so it
+        // does not fall through.
+        Target::Search => EventResult::Consumed,
+        Target::NewKind(index) => {
+            let Some(&kind) = EntryType::all().get(index) else {
+                return EventResult::Ignored;
+            };
+            let Some(form) = state.new_entry.as_mut() else {
+                return EventResult::Ignored;
+            };
+            form.set_kind(kind);
+            EventResult::Consumed
+        }
+        Target::NewField(index) => {
+            let Some(form) = state.new_entry.as_mut() else {
+                return EventResult::Ignored;
+            };
+            form.focus(index);
+            EventResult::Consumed
+        }
+        Target::NewSave => {
+            save_new_entry(state);
+            EventResult::Consumed
+        }
+        Target::NewCancel => {
+            cancel_new_entry(state);
+            EventResult::Consumed
+        }
+        Target::CopyField(index) => {
+            if copy_field(state, index) {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            }
+        }
         Target::Sort => {
             state.sort_order = state.sort_order.next();
             state.refresh_filter();
@@ -5537,24 +6195,40 @@ mod tests {
 
     use super::*;
 
-    // == IdGen tests ===========================================================
+    /// A vault that can be written to, built the cheap way tests use.
+    fn unlocked_vault() -> Vault {
+        let mut vault = Vault::for_test("Test Vault", TEST_MASTER_PASSWORD);
+        assert!(vault.unlock(TEST_MASTER_PASSWORD, 0));
+        vault
+    }
+
+    // == Entry id allocation ===================================================
+    //
+    // These used to drive a free-standing `IdGen`, which was the only thing
+    // keeping it alive: the vault allocates from its own `id_gen` field and
+    // never touched the other one. Pointed at the allocator that is actually
+    // used, the same two properties still hold and now say something about
+    // the program.
 
     #[test]
-    fn test_id_gen_sequential() {
-        let mut id_gen = IdGen::new();
-        assert_eq!(id_gen.next_id(), 1);
-        assert_eq!(id_gen.next_id(), 2);
-        assert_eq!(id_gen.next_id(), 3);
+    fn entry_ids_are_handed_out_in_order() {
+        let mut vault = unlocked_vault();
+        let a = vault.add_entry(EntryData::SecureNote(SecureNoteData::new("a", "")), 0);
+        let b = vault.add_entry(EntryData::SecureNote(SecureNoteData::new("b", "")), 0);
+        let c = vault.add_entry(EntryData::SecureNote(SecureNoteData::new("c", "")), 0);
+        assert!(a < b && b < c, "ids must increase: {a}, {b}, {c}");
     }
 
     #[test]
-    fn test_id_gen_no_overflow() {
-        let mut id_gen = IdGen { next: u64::MAX };
-        let id = id_gen.next_id();
-        assert_eq!(id, u64::MAX);
-        // saturating_add prevents overflow
-        let id2 = id_gen.next_id();
-        assert_eq!(id2, u64::MAX);
+    fn entry_ids_saturate_rather_than_wrap() {
+        // Wrapping would hand a new entry the id of an existing one, and the
+        // vault looks entries up by id.
+        let mut vault = unlocked_vault();
+        vault.id_gen = u64::MAX;
+        let first = vault.add_entry(EntryData::SecureNote(SecureNoteData::new("a", "")), 0);
+        let second = vault.add_entry(EntryData::SecureNote(SecureNoteData::new("b", "")), 0);
+        assert_eq!(first, u64::MAX);
+        assert_eq!(second, u64::MAX, "saturating, not wrapping to zero");
     }
 
     // == EntryType tests =======================================================
@@ -7893,5 +8567,470 @@ mod tests {
         assert_eq!(state.selected_entry_id, before.0);
         assert_eq!(state.detail_view, before.1);
         assert_eq!(state.sidebar_selection, before.2);
+    }
+
+    // == Adding a credential ===================================================
+    //
+    // The toolbar's Add button was drawn, was hit-tested, and was answered
+    // with `EventResult::Ignored`, so the vault had no way to gain an entry --
+    // and every feature downstream of having one was dead code the compiler
+    // had been reporting all along.
+
+    /// An app past the lock screen, which is where all of this lives.
+    fn unlocked_app() -> AppState {
+        let mut state = AppState::for_test();
+        assert!(
+            state.vault.unlock(TEST_MASTER_PASSWORD, state.now),
+            "the test vault should open with the test password"
+        );
+        state
+    }
+
+    fn press(state: &mut AppState, target: Target) -> EventResult {
+        act_on(state, target)
+    }
+
+    fn type_str(state: &mut AppState, text: &str) {
+        for ch in text.chars() {
+            let ev = KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: ch.to_string(),
+            };
+            handle_key(state, &ev);
+        }
+    }
+
+    fn key_of(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_add_button_opens_a_form() {
+        let mut state = unlocked_app();
+        assert_eq!(press(&mut state, Target::Add), EventResult::Consumed);
+        assert_eq!(state.detail_view, DetailView::NewEntry);
+        assert!(state.new_entry.is_some());
+    }
+
+    #[test]
+    fn a_credential_typed_into_the_form_reaches_the_vault() {
+        let mut state = unlocked_app();
+        let before = state.vault.entries.len();
+        press(&mut state, Target::Add);
+        type_str(&mut state, "example.com");
+        handle_key(&mut state, &key_of(Key::Tab));
+        type_str(&mut state, "alice");
+        handle_key(&mut state, &key_of(Key::Tab));
+        type_str(&mut state, "hunter2");
+        assert_eq!(press(&mut state, Target::NewSave), EventResult::Consumed);
+
+        assert_eq!(state.vault.entries.len(), before + 1);
+        let id = state.selected_entry_id.expect("the new entry is selected");
+        let entry = state.vault.get_entry(id).expect("it is in the vault");
+        match &entry.data {
+            EntryData::Login(d) => {
+                assert_eq!(d.site, "example.com");
+                assert_eq!(d.username, "alice");
+                assert_eq!(d.password, "hunter2");
+            }
+            other => panic!("expected a login, got {other:?}"),
+        }
+        assert_eq!(state.detail_view, DetailView::EntryDetail);
+        assert!(state.new_entry.is_none(), "the form is put away once saved");
+    }
+
+    #[test]
+    fn a_form_with_no_name_is_not_saved() {
+        let mut state = unlocked_app();
+        let before = state.vault.entries.len();
+        press(&mut state, Target::Add);
+        // Straight to the password, leaving the site blank.
+        handle_key(&mut state, &key_of(Key::Tab));
+        handle_key(&mut state, &key_of(Key::Tab));
+        type_str(&mut state, "secret");
+        press(&mut state, Target::NewSave);
+        assert_eq!(state.vault.entries.len(), before);
+        assert!(
+            state.new_entry.is_some(),
+            "the form stays open rather than discarding what was typed"
+        );
+    }
+
+    #[test]
+    fn cancelling_throws_the_form_away() {
+        let mut state = unlocked_app();
+        let before = state.vault.entries.len();
+        press(&mut state, Target::Add);
+        type_str(&mut state, "something");
+        assert_eq!(press(&mut state, Target::NewCancel), EventResult::Consumed);
+        assert!(state.new_entry.is_none());
+        assert_eq!(state.vault.entries.len(), before);
+        assert_eq!(state.detail_view, DetailView::EntryDetail);
+    }
+
+    #[test]
+    fn escape_cancels_the_form() {
+        let mut state = unlocked_app();
+        press(&mut state, Target::Add);
+        type_str(&mut state, "half typed");
+        handle_key(&mut state, &key_of(Key::Escape));
+        assert!(
+            state.new_entry.is_none(),
+            "a half-typed password should not be left in memory"
+        );
+    }
+
+    #[test]
+    fn every_kind_of_credential_can_be_created() {
+        for (index, kind) in EntryType::all().iter().enumerate() {
+            let mut state = unlocked_app();
+            press(&mut state, Target::Add);
+            press(&mut state, Target::NewKind(index));
+            type_str(&mut state, "a name");
+            assert!(
+                press(&mut state, Target::NewSave) == EventResult::Consumed,
+                "{kind:?} could not be saved"
+            );
+            let id = state.selected_entry_id.expect("selected");
+            let entry = state.vault.get_entry(id).expect("in the vault");
+            assert_eq!(
+                entry.data.entry_type(),
+                *kind,
+                "the form saved the wrong kind"
+            );
+        }
+    }
+
+    #[test]
+    fn changing_kind_does_not_carry_typed_values_across() {
+        let mut state = unlocked_app();
+        press(&mut state, Target::Add);
+        // Field 2 of a Login is the password; field 2 of an SSH key is the
+        // public key, which is drawn in the clear.
+        handle_key(&mut state, &key_of(Key::Tab));
+        handle_key(&mut state, &key_of(Key::Tab));
+        type_str(&mut state, "hunter2");
+        let ssh = EntryType::all()
+            .iter()
+            .position(|k| *k == EntryType::SshKey)
+            .expect("SshKey is one of the kinds");
+        press(&mut state, Target::NewKind(ssh));
+        let form = state.new_entry.as_ref().expect("still open");
+        assert!(
+            form.values.iter().all(|v| v.is_empty()),
+            "a secret typed under one kind must not reappear in a field that \
+             another kind draws in the clear"
+        );
+    }
+
+    #[test]
+    fn the_form_opens_on_the_kind_the_sidebar_is_filtering_by() {
+        let mut state = unlocked_app();
+        state.sidebar_selection = SidebarSelection::TypeFilter(EntryType::CreditCard);
+        press(&mut state, Target::Add);
+        assert_eq!(
+            state.new_entry.as_ref().map(|f| f.kind),
+            Some(EntryType::CreditCard),
+            "someone who has just narrowed the list to cards and pressed Add \
+             is asking for a card"
+        );
+    }
+
+    #[test]
+    fn a_card_number_is_masked_on_the_way_in() {
+        let mut state = unlocked_app();
+        press(&mut state, Target::Add);
+        let card = EntryType::all()
+            .iter()
+            .position(|k| *k == EntryType::CreditCard)
+            .expect("CreditCard is one of the kinds");
+        press(&mut state, Target::NewKind(card));
+        type_str(&mut state, "Everyday");
+        handle_key(&mut state, &key_of(Key::Tab));
+        type_str(&mut state, "4111111111111111");
+        press(&mut state, Target::NewSave);
+        let id = state.selected_entry_id.expect("selected");
+        match &state.vault.get_entry(id).expect("in the vault").data {
+            EntryData::CreditCard(d) => {
+                assert!(
+                    d.number_masked.ends_with("1111") && d.number_masked.contains('*'),
+                    "the vault should never hold the digits it does not need: \
+                     {:?}",
+                    d.number_masked
+                );
+                assert!(!d.number_masked.contains("4111111111111111"));
+            }
+            other => panic!("expected a card, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tab_cycles_the_fields() {
+        let mut state = unlocked_app();
+        press(&mut state, Target::Add);
+        let count = state.new_entry.as_ref().expect("open").values.len();
+        for _ in 0..count {
+            handle_key(&mut state, &key_of(Key::Tab));
+        }
+        assert_eq!(
+            state.new_entry.as_ref().map(|f| f.focused),
+            Some(0),
+            "a full circle of Tab comes back to the first field"
+        );
+    }
+
+    #[test]
+    fn clicking_a_field_focuses_it() {
+        let mut state = unlocked_app();
+        press(&mut state, Target::Add);
+        press(&mut state, Target::NewField(2));
+        type_str(&mut state, "typed here");
+        let form = state.new_entry.as_ref().expect("open");
+        assert_eq!(form.value(2), "typed here");
+        assert_eq!(form.value(0), "");
+    }
+
+    #[test]
+    fn typing_goes_to_the_form_and_not_the_search_box_behind_it() {
+        let mut state = unlocked_app();
+        press(&mut state, Target::Add);
+        type_str(&mut state, "abc");
+        assert_eq!(state.search_query, "");
+        assert_eq!(state.new_entry.as_ref().map(|f| f.value(0)), Some("abc"));
+    }
+
+    // == Copying a credential ==================================================
+
+    /// A vault with one login in it, selected.
+    fn state_with_login() -> AppState {
+        let mut state = unlocked_app();
+        press(&mut state, Target::Add);
+        type_str(&mut state, "example.com");
+        handle_key(&mut state, &key_of(Key::Tab));
+        type_str(&mut state, "alice");
+        handle_key(&mut state, &key_of(Key::Tab));
+        type_str(&mut state, "hunter2");
+        press(&mut state, Target::NewSave);
+        state
+    }
+
+    #[test]
+    fn a_copy_button_puts_the_field_on_the_clipboard() {
+        let mut state = state_with_login();
+        assert_eq!(state.clipboard.content, None);
+        // Field 2 of a login is the password.
+        assert_eq!(
+            press(&mut state, Target::CopyField(2)),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            state.clipboard.content.as_deref(),
+            Some("hunter2"),
+            "`ClipboardState::copy` had no caller at all: the one operation a \
+             credential manager exists for was the one it could not do"
+        );
+        assert_eq!(state.last_copied.as_deref(), Some("Password"));
+    }
+
+    #[test]
+    fn each_copy_button_copies_its_own_field() {
+        let mut state = state_with_login();
+        press(&mut state, Target::CopyField(0));
+        assert_eq!(state.clipboard.content.as_deref(), Some("example.com"));
+        press(&mut state, Target::CopyField(1));
+        assert_eq!(state.clipboard.content.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn copying_an_empty_field_leaves_the_clipboard_alone() {
+        let mut state = state_with_login();
+        press(&mut state, Target::CopyField(2));
+        assert_eq!(state.clipboard.content.as_deref(), Some("hunter2"));
+        // Field 3 is the URL, which was never filled in.
+        assert_eq!(
+            press(&mut state, Target::CopyField(3)),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            state.clipboard.content.as_deref(),
+            Some("hunter2"),
+            "pressing a blank row must not throw away what was copied a \
+             moment ago"
+        );
+    }
+
+    #[test]
+    fn a_copy_target_past_the_last_field_does_nothing() {
+        let mut state = state_with_login();
+        assert_eq!(
+            press(&mut state, Target::CopyField(99)),
+            EventResult::Ignored
+        );
+        assert_eq!(state.clipboard.content, None);
+    }
+
+    #[test]
+    fn copying_with_nothing_selected_does_nothing() {
+        let mut state = unlocked_app();
+        state.selected_entry_id = None;
+        assert_eq!(
+            press(&mut state, Target::CopyField(0)),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn the_clipboard_clears_itself_after_the_timeout() {
+        let mut state = state_with_login();
+        press(&mut state, Target::CopyField(2));
+        assert!(state.clipboard.content.is_some());
+        state.tick(u64::from(CLIPBOARD_CLEAR_SECONDS).saturating_mul(1000));
+        state.tick(1000);
+        assert_eq!(
+            state.clipboard.content, None,
+            "the auto-clear was written and could never run, because nothing \
+             ever put anything on the clipboard to clear"
+        );
+    }
+
+    #[test]
+    fn the_copyable_fields_match_what_the_detail_view_draws() {
+        // The view passes `CopyField(n)` counted down its own rows, so the two
+        // lists have to agree on what row n is -- including the blank ones.
+        let state = state_with_login();
+        let fields = copyable_fields(&state);
+        let labels: Vec<&str> = fields.iter().map(|(l, _)| *l).collect();
+        assert_eq!(labels, vec!["Site", "Username", "Password", "URL", "TOTP"]);
+    }
+
+    #[test]
+    fn a_name_of_only_spaces_is_not_a_name() {
+        let mut state = unlocked_app();
+        let before = state.vault.entries.len();
+        press(&mut state, Target::Add);
+        type_str(&mut state, "   ");
+        press(&mut state, Target::NewSave);
+        assert_eq!(
+            state.vault.entries.len(),
+            before,
+            "a credential whose name is blank is one the list cannot show and              the user cannot find again"
+        );
+    }
+
+    #[test]
+    fn a_saved_credential_appears_in_the_list() {
+        let mut state = unlocked_app();
+        press(&mut state, Target::Add);
+        type_str(&mut state, "example.com");
+        press(&mut state, Target::NewSave);
+        let id = state.selected_entry_id.expect("selected");
+        assert!(
+            state.filtered_ids.contains(&id),
+            "the list is rebuilt from the vault, so it has to be rebuilt when              the vault gains an entry"
+        );
+    }
+
+    #[test]
+    fn focusing_a_field_that_is_not_there_leaves_the_focus_alone() {
+        let mut state = unlocked_app();
+        press(&mut state, Target::Add);
+        press(&mut state, Target::NewField(99));
+        type_str(&mut state, "typed");
+        assert_eq!(
+            state.new_entry.as_ref().map(|f| f.value(0)),
+            Some("typed"),
+            "an out-of-range focus must not move the cursor somewhere there              is no field to receive it"
+        );
+    }
+
+    #[test]
+    fn backspace_on_an_empty_field_asks_for_no_frame() {
+        let mut state = unlocked_app();
+        press(&mut state, Target::Add);
+        assert_eq!(
+            handle_key(&mut state, &key_of(Key::Backspace)),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn enter_saves_the_form() {
+        let mut state = unlocked_app();
+        let before = state.vault.entries.len();
+        press(&mut state, Target::Add);
+        type_str(&mut state, "example.com");
+        assert_eq!(
+            handle_key(&mut state, &key_of(Key::Enter)),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            state.vault.entries.len(),
+            before + 1,
+            "a form that cannot be finished from the keyboard needs the mouse              for its last step"
+        );
+    }
+
+    #[test]
+    fn the_copy_buttons_are_where_the_pointer_can_reach_them() {
+        // Through `target_at`, not `act_on`: the defect was a button that was
+        // drawn and registered no hit box, which only a hit test can see.
+        let state = state_with_login();
+        let frame = state.frame(state.width, state.height);
+        let copies: Vec<&Target> = frame
+            .hits()
+            .iter()
+            .map(|(target, _)| target)
+            .filter(|t| matches!(t, Target::CopyField(_)))
+            .collect();
+        assert!(
+            !copies.is_empty(),
+            "every field's Copy button was painted and none of them              registered a hit box"
+        );
+        // And each one is reachable at its own rectangle.
+        for (target, rect) in frame.hits() {
+            if matches!(target, Target::CopyField(_)) {
+                assert_eq!(
+                    state.target_at(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
+                    Some(*target)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_copy_is_stamped_with_the_time_it_happened() {
+        let mut state = state_with_login();
+        state.now = 10_000;
+        press(&mut state, Target::CopyField(2));
+        // One second later it is still there; the clear is thirty seconds off,
+        // not thirty seconds after the epoch.
+        state.tick(1000);
+        assert_eq!(
+            state.clipboard.content.as_deref(),
+            Some("hunter2"),
+            "a copy stamped with zero is one the auto-clear thinks is already              ancient"
+        );
+    }
+
+    #[test]
+    fn copying_with_the_selection_cleared_does_nothing() {
+        let mut state = state_with_login();
+        assert!(!copyable_fields(&state).is_empty());
+        state.selected_entry_id = None;
+        assert!(
+            copyable_fields(&state).is_empty(),
+            "with nothing selected there is no field to copy, whatever ids              happen to exist in the vault"
+        );
+        assert_eq!(
+            press(&mut state, Target::CopyField(0)),
+            EventResult::Ignored
+        );
     }
 }

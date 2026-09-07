@@ -38,8 +38,6 @@
 //! sidebar rows that clicked to nothing; see `known-issues.md` ->
 //! `C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY`.
 
-#![allow(dead_code)]
-
 use std::process::ExitCode;
 
 use guitk::color::Color;
@@ -70,6 +68,11 @@ use std::collections::BTreeMap;
 const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
 const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
 const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
+// Part of the complete Catppuccin Mocha palette, kept whole even though no
+// widget currently paints with these three: a named palette with a hole in it is
+// not the palette it is named after, and the next widget to want one would
+// otherwise re-derive the hex by hand.
+#[allow(dead_code, reason = "the palette is kept complete")]
 const COLOR_SURFACE2: Color = Color::from_hex(0x585B70);
 const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
 const COLOR_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
@@ -81,7 +84,9 @@ const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
 const COLOR_GREEN: Color = Color::from_hex(0xA6E3A1);
 const COLOR_RED: Color = Color::from_hex(0xF38BA8);
 const COLOR_YELLOW: Color = Color::from_hex(0xF9E2AF);
+#[allow(dead_code, reason = "the palette is kept complete")]
 const COLOR_PEACH: Color = Color::from_hex(0xFAB387);
+#[allow(dead_code, reason = "the palette is kept complete")]
 const COLOR_LAVENDER: Color = Color::from_hex(0xB4BEFE);
 
 // ============================================================================
@@ -1314,6 +1319,7 @@ fn format_percent(pct: f32) -> String {
 // ============================================================================
 
 /// Lighten a color by adding `amount` to each channel (clamped).
+#[allow(dead_code, reason = "no widget shades a block yet -- see todo.txt")]
 fn lighten_color(color: Color, amount: u8) -> Color {
     Color::rgba(
         color.r.saturating_add(amount),
@@ -1324,6 +1330,7 @@ fn lighten_color(color: Color, amount: u8) -> Color {
 }
 
 /// Darken a color by subtracting `amount` from each channel (clamped).
+#[allow(dead_code, reason = "no widget shades a block yet -- see todo.txt")]
 fn darken_color(color: Color, amount: u8) -> Color {
     Color::rgba(
         color.r.saturating_sub(amount),

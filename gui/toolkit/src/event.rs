@@ -36,6 +36,38 @@ pub enum Event {
     Tick { elapsed_ms: u64 },
     /// DPI/scale factor changed.
     ScaleChanged { scale: f32 },
+    /// A settings group the user can change has been rewritten, and whatever
+    /// this program read out of it is now stale.
+    ///
+    /// Carries no settings. That is the same choice
+    /// `guiremote::control::RequestBody::ReloadAppearance` makes and for the
+    /// same reason: a settings group is one document with one owner, and a
+    /// copy of it in an event would be a second definition free to drift from
+    /// the crate that defines it. The receiver re-reads the user's own file,
+    /// which also means a notification confers no ability to *say* what the
+    /// settings are -- the worst it can do is cause a redundant re-read.
+    ///
+    /// It names the group so that a program which reads one file does not have
+    /// to re-read all of them. See [`SettingsGroup`].
+    SettingsChanged { group: SettingsGroup },
+}
+
+/// Which settings group a [`Event::SettingsChanged`] is about.
+///
+/// Deliberately a short closed list rather than a string. A file name on the
+/// wire would let a sender name any file and would make the set of groups a
+/// thing every receiver has to parse rather than match; the enum makes an
+/// unknown group a decode error at the boundary, where it can be reported,
+/// instead of an unrecognised string in the middle of a `match`.
+///
+/// It lives here, in the toolkit, only because [`Event`] does. Nothing about
+/// the toolkit knows what is *in* either file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SettingsGroup {
+    /// `appearance.yaml` — theme, accent, wallpaper, fonts, window corners.
+    Appearance,
+    /// `input.yaml` — pointer speed, double-click window, key repeat.
+    Input,
 }
 
 /// Mouse button identifier.

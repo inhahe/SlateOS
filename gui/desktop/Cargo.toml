@@ -87,3 +87,11 @@ keylayout = { path = "../keylayout" }
 
 [lints]
 workspace = true
+
+# `settingsfile::testing` -- reached here as `appearance::config::testing` --
+# for the test that a save made by another process reaches a *running* shell.
+# It needs a scratch configuration directory so it can exercise the real
+# `store`/`Watcher` pair without touching the developer's own
+# `~/.config/slateos`.
+[dev-dependencies]
+settingsfile = { path = "../settingsfile", features = ["testing"] }

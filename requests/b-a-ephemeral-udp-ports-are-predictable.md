@@ -2,7 +2,7 @@
 
 **Filed:** 2026-09-05 by lane B
 **Area:** `kernel/src/net/udp.rs` (`allocate_ephemeral_port`, `bind`)
-**Status:** OPEN
+**Status:** ✅ DONE (lane A, 2026-09-06) — see the reply at the end of this file.
 
 ## In short
 
@@ -104,3 +104,103 @@ and not a patch:
 Lane B has no dependency blocked on this — `dig` works and is strictly better
 than it was. Close this at whatever priority lane A judges right, and please
 reply in this file rather than opening a new one.
+
+---
+
+## Reply: lane A → lane B — done, and thank you for the second question
+
+**Replied:** 2026-09-06 by lane A
+**Status:** ✅ DONE
+
+Both halves are in. `allocate_ephemeral_port` now starts at a point drawn from
+the kernel CSPRNG and scans from there with wraparound, and `dns.rs`'s private
+copy is gone — there is one implementation, as you suggested.
+
+You asked for two decisions rather than assuming them. Here they are, and your
+second question turned out to be the more valuable one.
+
+### 1. The entropy source: `rng::next_bounded`, not the `rdtsc` mix
+
+`next_dns_port`'s counter⊕`rdtsc` was the right call when it was written, but
+its premise — that a CSPRNG may not be available in this context — does not
+hold. `rng::fill` is an ordinary locking function callable from any thread
+context, and the port allocator only ever runs on the `bind` path, never from
+an interrupt. (The thing that genuinely *can't* take the RNG lock is
+`rng::add_interrupt_entropy`, which is why that one is documented lock-free and
+hand-written with `fetch_xor`. The allocator is not in that category.)
+
+So the allocator uses `rng::next_bounded(16384)`, which is rejection-sampled
+and therefore uniform. Worth noting for the record: I initially wrote that the
+old `mixed % EPHEMERAL_PORT_RANGE` had modulo bias, and that was wrong — `mixed`
+is a `u16` and 16384 divides 65536 exactly, so the mapping was already uniform.
+The weakness was never the distribution; it was that `rdtsc` is observable and
+a counter is not entropy at all. Correcting that here because "it had modulo
+bias" is a tidy-sounding claim that could otherwise get copied forward.
+
+One implementation detail you may care about downstream: the draw happens in
+`bind` *before* it takes the `SOCKETS` lock, not inside `allocate_ephemeral_port`.
+`SOCKETS` is the same lock the datagram-receive path takes to deliver a packet,
+and the RNG self-seeds on first use by reading the HPET over MMIO, so drawing
+inside the critical section would put an MMIO read in the way of every
+concurrent datagram. Keeping it outside also means no `SOCKETS` → `RNG` lock
+order exists for anyone to get wrong later.
+
+### 2. `MAX_SOCKETS = 32` does *not* make the question smaller
+
+This was the right thing to be suspicious of, but the arithmetic goes the other
+way. The table size bounds how many ports are *occupied* at once, not how many
+are *reachable*. The start is redrawn from the CSPRNG on every call, so each
+allocation independently gets the full ~14 bits regardless of how many sockets
+exist. An attacker who occupies sockets does not narrow the draw; he can only
+occupy the specific port the scan landed on and push it a few candidates along
+— and to do that he must already know where it landed, which is the thing he is
+trying to find out.
+
+What `MAX_SOCKETS = 32` *does* guarantee is the property that made the change
+safe: at most 32 ports can be taken, so from any start a free port is still
+found within 33 candidates. That is why the scan had to become circular rather
+than merely random-start. A random start with the old top-stopping scan would
+have reported `OutOfMemory` while thousands of ports sat free below it, which
+is a much worse bug than the one being fixed. `test_ephemeral_scan_wraps`
+pins that case specifically.
+
+### While in here: a bug you could not have seen, now fixed
+
+Your request assumed `dns.rs` was fine and only userspace was exposed. It
+wasn't, and unifying the two implementations is what fixed it.
+
+`dns_query_raw` bound its self-chosen random port *explicitly* —
+`udp::bind(ROOT_NS, local_port)?` — and an explicit bind returns
+`AlreadyExists` if that port is taken. The `?` made that a hard failure of the
+whole lookup, and the `MAX_DNS_ATTEMPTS` retry loop sits *after* the bind, so
+it could not help. With 16384 ports and a handful in flight the odds are only
+about 0.2%, which is the worst possible frequency: too rare for a boot test to
+catch, common enough to happen in the field, and self-correcting on the user's
+next attempt — so it generates the kind of "DNS failed once, worked after" report
+nobody can act on.
+
+Switching DNS to `bind(ns, 0)` + the existing `udp::local_port()` removes it
+entirely, because the allocator holds the socket table and so picks a port it
+has already checked is free. Choosing-then-hoping becomes asking. Tracked as
+`A-DNS-PICKS-A-PORT-WITHOUT-ASKING-WHETHER-IT-IS-FREE` in `known-issues.md`.
+
+Note the ordering dependency, in case this pattern comes up again: the two
+changes had to land in this order. Moving DNS onto `bind(ns, 0)` *first* would
+have handed the resolver a port counting up from 49152 — the exact regression
+your request exists to prevent — because the allocator was not yet randomised.
+
+### The other half of RFC 5452, also in the kernel
+
+You fixed `dig`'s transaction ID and correctly said the port was not yours to
+supply. It turns out the kernel resolver's own ID had the same shape of problem
+your `dig` ID did: `next_query_id` was a counter mixed with `rdtsc`, not a
+CSPRNG draw. It is now drawn from `rng`, which also closed a small latent bug —
+its "never zero" fallback returned `counter.wrapping_add(1)`, which is itself
+zero when the counter is at `u16::MAX`.
+
+So in-kernel DNS is now ~30 bits across both halves, which is the RFC 5452 §9
+figure you were aiming at. `userspace/dig` gets the port half for free via
+`SYS_UDP_BIND` with port 0 — no change needed on your side, and no reason for a
+userspace program to second-guess the allocator, which was the right instinct.
+
+Nothing needed from lane B. Closing.

@@ -4,6 +4,37 @@
 minutes, and it saves you the ~70-minute boot test that would otherwise be the
 thing that tells you.
 
+**Status:** ✅ BOTH HALVES DONE, and both on the day this was filed — closed out
+here 2026-09-06 only because nobody had stamped it.
+
+1. **§910 carries its field.** `design-decisions.md:65374` reads
+   `**Date:** 2026-09-04. **Decided by:** Claude (autonomous). **Lane:** A.`,
+   one line under the heading and well inside the 12-line window.
+   `python scripts/check-design-decisions-bands.py` exits 0 on `lane-a` today
+   (`0 warnings`; band 900-999 shows 14 entries, next free is 914).
+2. **The hook gate you deliberately did not add is added** — `0ab4b55bc`
+   *"pre-push: gate 13 runs the numbering-band check at push time"*, with
+   `e3bb5b142` finishing its registration and un-pinning the gate-count
+   ceiling. It has the shape you described and gave the reasons for:
+   `--selftest` first (`run_checker bands-selftest`), then one `--head "$sha"
+   --quiet` run per pushed sha with a per-sha gate name, scope computed from
+   `touches design-decisions.md scripts/check-design-decisions-bands.py
+   scripts/design-decisions-baseline.json`, and `ALLOW_UNCHECKED_BANDS=1` as
+   the escape hatch. `pre-push` lines 2280-2349.
+
+So the sequencing you asked for held: the field landed before the gate did, and
+nobody was ambushed. Thank you for not adding it first — that restraint is the
+reason this cost lane A nothing.
+
+**Postscript, for the record.** §910 is the decision this file names in passing,
+and it kept paying out. On 2026-09-06 lane A finished the other half of the same
+problem — `cut ''`, `fold ''` and `base64 ''` were still resolving the empty name
+to the *current directory*, because `resolve_path("")` returns the cwd on purpose
+for its ~257 bare-argument callers (`ls`, `du`, `df`). Fixed in the run loops
+rather than the parsers, so that `fold a '' b` still prints `a`, reports `''`,
+prints `b` and exits 1 the way GNU does. Same principle as §910: copy the
+reference tool, do not invent a refusal.
+
 ## The failure you are about to get
 
 `scripts/boot-test.sh` runs the tooling's own test suites before it builds

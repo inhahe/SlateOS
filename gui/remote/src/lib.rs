@@ -417,6 +417,14 @@ pub enum DecodeError {
     TooManyEvents(u32),
     /// A [`Key`](guitk::event::Key) code byte is not in this decoder's table.
     BadKey(u8),
+    /// A [`SettingsGroup`](guitk::event::SettingsGroup) code byte was unknown.
+    ///
+    /// A peer naming a settings group this build does not have -- a newer
+    /// compositor telling an older client that a file it never reads changed.
+    /// Reported rather than skipped, on the same terms as every other unknown
+    /// tag here: an input frame is decoded whole or not at all, so silently
+    /// dropping one event would leave the rest of the batch misaligned.
+    BadSettingsGroup(u8),
     /// A [`MouseButton`](guitk::event::MouseButton) code byte was unknown.
     BadMouseButton(u8),
     /// A [`MouseEventKind`](guitk::event::MouseEventKind) tag byte was unknown.
@@ -486,6 +494,7 @@ impl core::fmt::Display for DecodeError {
                 )
             }
             Self::BadKey(b) => write!(f, "unknown key code {b:#04x}"),
+            Self::BadSettingsGroup(b) => write!(f, "unknown settings group {b:#04x}"),
             Self::BadMouseButton(b) => write!(f, "unknown mouse button {b:#04x}"),
             Self::BadMouseKind(b) => write!(f, "unknown mouse event kind {b:#04x}"),
             Self::TooManyMessages(n) => {

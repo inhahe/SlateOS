@@ -663,13 +663,26 @@ def _run_clippy_gate(probe_body, commit_wait, timeout=60):
                 # Above anything the stub probe reports as "low", so a crash
                 # looks memory-explained and takes the branch that retries.
                 "MIN_COMMIT_FREE_MB=12288\n"
-                f"COMMIT_WAIT={commit_wait}\n"
+                # Via the documented env knob, not by assigning `COMMIT_WAIT`
+                # directly. That used to work because the budget was a global;
+                # since 2026-09-06 `check_commit_headroom` computes its own
+                # `local COMMIT_WAIT` from `commit_wait_budget`, which would
+                # shadow an injected global and silently restore the waiting
+                # this harness needs suppressed. Driving the gate through the
+                # same interface an operator has is what stops the harness
+                # depending on which variables happen to be locals today.
+                f"BOOT_TEST_COMMIT_WAIT={commit_wait}\n"
+                # Only read when BOOT_TEST_COMMIT_WAIT is unset, but defined so
+                # the extracted function is runnable rather than runnable-so-far:
+                # a later test that omits the knob must not fail on `set -u`.
+                "BOOT_TEST_START_EPOCH=$(date +%s)\n"
                 "SERIAL_FILE=\n"
                 "_COMMIT_PROBE_WARNED=0\n"
                 # The probe is stubbed rather than the host read, so nothing
                 # here depends on how much memory the machine running the suite
                 # happens to have.
                 + probe_body + "\n"
+                + extract_commit_wait_budget() + "\n\n"
                 + extract_shell_function("check_commit_headroom") + "\n\n"
                 + extract_shell_function("check_kernel_clippy") + "\n\n"
                 "check_kernel_clippy\n"
@@ -1075,6 +1088,124 @@ def test_a_suite_that_exits_nonzero_to_report_a_skip_is_a_failure():
     ok &= check("...naming the suite", "test-fake-unrunnable.py" in out, True)
     ok &= check("...and showing why", "no bash interpreter" in out, True)
     _dump_on_failure(ok, out)
+
+
+def extract_commit_wait_budget(source=None):
+    """`commit_wait_budget` and its floor, lifted verbatim out of `boot-test.sh`.
+
+    Extracted rather than restated, for the reason `extract_dirty_check` gives:
+    a copy here would be a copy this file tests and the script does not run.
+
+    Returns a shell fragment defining `COMMIT_WAIT_FLOOR` and the function, so
+    a caller can source it, set `BOOT_TEST_START_EPOCH` to whatever elapsed
+    time it wants to simulate, and ask what the budget would be.
+    """
+    if source is None:
+        with open(BOOT_TEST, "r", encoding="utf-8") as handle:
+            source = handle.read()
+    lines = source.splitlines()
+    try:
+        floor = next(i for i, line in enumerate(lines)
+                     if line.startswith("COMMIT_WAIT_FLOOR="))
+        start = next(i for i, line in enumerate(lines)
+                     if line.strip() == "commit_wait_budget() {")
+        end = next(i for i, line in enumerate(lines[start:], start)
+                   if line == "}")
+    except StopIteration:
+        raise RuntimeError(
+            "boot-test.sh no longer defines COMMIT_WAIT_FLOOR and "
+            "commit_wait_budget(). The pre-build commit-headroom gate still "
+            "gives up after some number of seconds, so the budget is decided "
+            "somewhere -- update extract_commit_wait_budget() to find it "
+            "rather than deleting this test. Without it, nothing stops the "
+            "budget reverting to a constant, which on 2026-09-06 threw away a "
+            "7402-second gate phase to avoid a 900-second wait.")
+    return "\n".join([lines[floor]] + lines[start:end + 1])
+
+
+def _budget(fragment, elapsed, bash="bash", env_override=None):
+    """What the extracted function returns for a run `elapsed` seconds old."""
+    now = int(time.time())
+    script = (
+        f"{fragment}\n"
+        f"BOOT_TEST_START_EPOCH={now - elapsed}\n"
+        "commit_wait_budget\n"
+    )
+    env = dict(os.environ)
+    # Popped, not left alone: this suite's own shell may well have one set --
+    # the operator's workaround for the very bug being tested is to export it --
+    # and inheriting it would make every case below return the same number and
+    # pass for the wrong reason.
+    env.pop("BOOT_TEST_COMMIT_WAIT", None)
+    if env_override is not None:
+        env["BOOT_TEST_COMMIT_WAIT"] = env_override
+    proc = subprocess.run([bash, "-c", script], capture_output=True,
+                          text=True, timeout=60, env=env)
+    if proc.returncode != 0:
+        return f"exit {proc.returncode}: {proc.stderr.strip()}"
+    return int(proc.stdout.strip())
+
+
+def test_the_commit_wait_never_costs_more_than_it_saves():
+    """Giving up must not be cheaper to trigger than the work it discards.
+
+    On 2026-09-06 a run passed all 219 gates in 7402 seconds, reached the
+    pre-build commit-headroom check, found another lane building, waited the
+    flat 900 seconds it was configured for, and exited 5 -- discarding two and
+    a half hours of passing gates to avoid a quarter of an hour of *sleeping*,
+    and leaving the work to be redone on the same contended host.
+
+    The property that prevents a recurrence is that the budget scales with what
+    the run has already spent: never abandon an investment over a wait shorter
+    than the investment. So the assertions below are about the relationship
+    between elapsed time and budget, not about any particular constant -- the
+    floor is free to move, and a test pinned to `3600` would fail for a change
+    that is not a regression while passing for one that is.
+    """
+    fragment = extract_commit_wait_budget()
+    bashes = available_bashes()
+    if not bashes:
+        check("a bash exists to run the extracted budget function", False, True)
+        return
+    bash = bashes[0]
+
+    # The regression itself, stated as the value that used to ship. 900 is not
+    # a threshold the function knows about; it is the number that produced the
+    # failure, and the test is that no amount of elapsed time yields it.
+    check("a run 7402s deep does not settle for the 900s that lost that run",
+          _budget(fragment, 7402, bash) > 900, True)
+
+    # The invariant, checked across the range the gate is actually called in:
+    # 60s (a fast host reaching the build early) through 10435s (the longest
+    # gate phase in bench/boot-history.jsonl as of 2026-09-06).
+    for elapsed in (0, 60, 900, 3599, 3600, 3601, 7402, 10435):
+        got = _budget(fragment, elapsed, bash)
+        check(f"...{elapsed}s spent buys at least {elapsed}s of waiting",
+              isinstance(got, int) and got >= elapsed, True)
+
+    # Monotonic, and unbounded above the floor. A budget that stopped growing
+    # would reintroduce the bug at whatever value it stopped at -- which is the
+    # shape a "reasonable cap" takes, and why there is not one.
+    deep, deeper = _budget(fragment, 7402, bash), _budget(fragment, 14804, bash)
+    check("the budget keeps growing with the run, with no ceiling to cap it",
+          isinstance(deeper, int) and deeper > deep, True)
+
+    # Below the floor it is flat, because there the sunk cost is not what sets
+    # the wait -- the length of the blocker is, and the blocker is another
+    # lane's cargo build.
+    check("a run only 60s deep still waits out a build, not 60 seconds",
+          _budget(fragment, 60, bash) == _budget(fragment, 0, bash), True)
+    check("...and that floor is longer than the longest build on record (1299s)",
+          isinstance(_budget(fragment, 0, bash), int)
+          and _budget(fragment, 0, bash) > 1299, True)
+
+    # The knob means what it says. An operator in a hurry who asks for 5 seconds
+    # must get 5, not the floor: a knob that silently rounds its own value up is
+    # a knob whose documentation is wrong.
+    check("an explicit BOOT_TEST_COMMIT_WAIT is honoured verbatim, not floored",
+          _budget(fragment, 10435, bash, env_override="5"), 5)
+    check("...including one larger than the adaptive budget would have been",
+          _budget(fragment, 60, bash, env_override="99999"), 99999)
 
 
 def _sq(text):

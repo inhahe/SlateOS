@@ -3194,10 +3194,11 @@ impl Vfs {
     /// common same-mount case the destination-existence check is performed
     /// under the *same* `VFS` lock that guards the underlying filesystem
     /// rename, so there is no TOCTOU window: no concurrent creator can slip a
-    /// file into `to` between the check and the rename. (The cross-mount
-    /// copy+delete path — itself a SlateOS convenience that Linux rejects with
-    /// EXDEV — cannot be made atomic and keeps a documented best-effort
-    /// pre-check; see the comment in the cross-mount branch.)
+    /// file into `to` between the check and the rename.  The guarantee is now
+    /// unconditional: a cross-mount rename is refused with
+    /// [`KernelError::CrossDevice`] before anything is examined, so there is no
+    /// second path with a weaker promise.  (There used to be — a copy+delete
+    /// convenience that could not be atomic and kept a best-effort pre-check.)
     pub fn rename_noreplace(from: impl AsRef<Path>, to: impl AsRef<Path>) -> KernelResult<()> {
         let from = from.as_ref();
         let to = to.as_ref();
@@ -3260,40 +3261,42 @@ impl Vfs {
                 crate::mm::page_cache::invalidate_identity(fs_id, ino);
             }
         } else {
-            // Cross-mount rename: copy + delete.  This is the only way to
-            // "move" files between different filesystems (like Linux's mv).
-            // We first stat the source to verify it exists and check type.
-            let stat = Self::stat(&from)?;
-
-            if noreplace {
-                // Best-effort: the cross-mount copy+delete is inherently
-                // non-atomic (multiple lock acquisitions), so a documented
-                // TOCTOU remains here regardless. Linux itself returns EXDEV
-                // for cross-mount rename; this branch is a SlateOS convenience.
-                match Self::stat(&to) {
-                    Ok(_) => return Err(KernelError::AlreadyExists),
-                    Err(KernelError::NotFound) => {}
-                    Err(e) => return Err(e),
-                }
-            }
-
-            if stat.entry_type == EntryType::Directory {
-                // Cross-mount directory rename is not supported (would need
-                // recursive copy).  Use cp -r + rm -r manually.
-                return Err(KernelError::NotSupported);
-            }
-
-            // Copy file data from source to destination.
-            Self::copy(&from, &to)?;
-
-            // Copy metadata if the source filesystem supports it.
-            if let Ok(meta) = Self::metadata(&from) {
-                let _ = Self::set_permissions(&to, meta.permissions);
-                let _ = Self::set_owner(&to, meta.uid, meta.gid);
-            }
-
-            // Remove the original file.
-            Self::remove(&from)?;
+            // Cross-mount: refuse with `CrossDevice` (-> `EXDEV`), which is
+            // what POSIX defines and every other Unix returns.
+            //
+            // This branch used to copy the bytes, delete the original and
+            // report success. That was a deliberate convenience, and it was
+            // wrong in a way that got worse the more of userland existed:
+            //
+            // * It made `mv`'s cross-filesystem path dead code on the target.
+            //   Several hundred lines of `userspace/coreutils` exist precisely
+            //   to handle this case and are certified against GNU coreutils on
+            //   every harness run, but on SlateOS itself they never ran -- the
+            //   kernel had already done something `mv` never saw.
+            // * It could not be atomic. The sequence is a `stat`, a `copy`, a
+            //   `set_permissions`, a `set_owner` and a `remove`, each taking
+            //   and releasing its own lock, so `rename_noreplace`'s guarantee
+            //   degraded silently to best-effort here while holding on the
+            //   same-mount path.
+            // * It was already refused by the neighbours. `rename_exchange`
+            //   returns `CrossDevice`, `link` returns `CrossDevice`, and
+            //   `SYS_FS_RENAMEAT_PINNED` returns `CrossDevice` for exactly
+            //   this reason (`design-decisions.md` sec 666: a pin cannot span
+            //   a copy). The stricter call was the honest one and the ordinary
+            //   call was the one quietly doing something else.
+            //
+            // Requested by lane B in
+            // `requests/b-a-rename-across-a-mount-copies-instead-of-answering-exdev.md`,
+            // which was filed blocked and unblocked first: making the kernel
+            // correct while `mv` still refused hard-linked sets and directory
+            // trees would have turned working moves into failures. Both gaps
+            // closed 2026-09-01 and 2026-09-03, so `mv` now handles every
+            // shape across a boundary that it handles within one.
+            //
+            // Note this also *widens* what succeeds, via `mv`: a cross-mount
+            // directory move used to be `NotSupported` outright, because the
+            // kernel would have had to recurse. `mv` recurses.
+            return Err(KernelError::CrossDevice);
         }
 
         // Rename invalidates paths under both old and new locations.
@@ -4227,7 +4230,7 @@ impl Vfs {
     /// merely by a pre-pass — this is the strongest guarantee any member of the
     /// family offers, and it comes for free from what rename already is.
     ///
-    /// ## Cross-mount is refused, where the path route copies
+    /// ## Cross-mount is refused, as it now is on the path route too
     ///
     /// [`rename_inner`](Self::rename_inner) falls back to copy+delete when the
     /// two paths are on different mounts.  This does not, and returns
@@ -6968,70 +6971,85 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[vfs]     recursive copy/remove test PASSED");
     }
 
-    // --- Cross-mount rename test ---
-    // This tests rename across /tmp (memfs) and / (ext4/fat).
-    // Only runs if both root and /tmp are available as separate mounts.
+    // --- Cross-mount rename is refused, not performed ---
+    // `/tmp` (memfs) and `/` (ext4/fat) are different mounts, so this is the
+    // cross-device case POSIX defines `EXDEV` for.
+    //
+    // This test used to assert the opposite: that the bytes arrived at the
+    // destination and the source was gone. The kernel copied across the
+    // boundary and reported success, which made `mv`'s cross-filesystem path
+    // -- the several hundred lines that exist precisely for this -- dead code
+    // on the target. Inverted with the fix, in the same commit, because a
+    // behaviour change that leaves its own test asserting the old behaviour
+    // fails two hours later in a boot test rather than at the edit.
+    //
+    // The two assertions after the error code are the ones that matter: a
+    // refusal must leave the source where it was and must not leave a partial
+    // destination behind. A refusal that consumed either would be worse than
+    // the copy it replaced.
     if has_tmp {
-        serial_println!("[vfs]   Testing cross-mount rename...");
+        serial_println!("[vfs]   Testing cross-mount rename refusal...");
 
         let src_path = "/tmp/_vfs_xmv_src.txt";
         let dst_path = "/_vfs_xmv_dst.txt";
         Vfs::write_file(src_path, b"cross mount data")?;
 
-        // Rename from /tmp to / — this is cross-mount.
         match Vfs::rename(src_path, dst_path) {
-            Ok(()) => {
-                // Verify destination has the data.
-                match Vfs::read_file(dst_path) {
-                    Ok(data) if data == b"cross mount data" => {
-                        serial_println!("[vfs]     cross-mount rename: data verified OK");
-                    }
-                    Ok(data) => {
-                        serial_println!(
-                            "[vfs]   FAIL: cross-mount rename data mismatch ({} bytes)",
-                            data.len()
-                        );
-                        let _ = Vfs::remove(dst_path);
-                        return Err(KernelError::InternalError);
-                    }
-                    Err(e) => {
-                        serial_println!("[vfs]   FAIL: read after cross-mount rename: {:?}", e);
-                        let _ = Vfs::remove(dst_path);
-                        return Err(KernelError::InternalError);
-                    }
-                }
-
-                // Verify source is gone.
-                match Vfs::stat(src_path) {
-                    Err(KernelError::NotFound) => {
-                        serial_println!("[vfs]     cross-mount rename: source removed OK");
-                    }
-                    _ => {
-                        serial_println!(
-                            "[vfs]   FAIL: source still exists after cross-mount rename"
-                        );
-                        let _ = Vfs::remove(src_path);
-                        let _ = Vfs::remove(dst_path);
-                        return Err(KernelError::InternalError);
-                    }
-                }
-
-                let _ = Vfs::remove(dst_path);
-                serial_println!("[vfs]     cross-mount rename test PASSED");
+            Err(KernelError::CrossDevice) => {
+                serial_println!("[vfs]     cross-mount rename: refused with CrossDevice");
             }
-            Err(KernelError::NotSupported) => {
-                // Root filesystem may not support write operations.
-                serial_println!("[vfs]     cross-mount rename: root FS is read-only, skipping");
+            Ok(()) => {
+                serial_println!(
+                    "[vfs]   FAIL: cross-mount rename succeeded; it must answer CrossDevice"
+                );
                 let _ = Vfs::remove(src_path);
+                let _ = Vfs::remove(dst_path);
+                return Err(KernelError::InternalError);
             }
             Err(e) => {
                 serial_println!(
-                    "[vfs]     cross-mount rename failed: {:?} (may be expected)",
+                    "[vfs]   FAIL: cross-mount rename -> {:?}, expected CrossDevice",
                     e
                 );
                 let _ = Vfs::remove(src_path);
+                return Err(KernelError::InternalError);
             }
         }
+
+        // The source must survive a refusal, with its contents intact.
+        match Vfs::read_file(src_path) {
+            Ok(data) if data == b"cross mount data" => {
+                serial_println!("[vfs]     cross-mount rename: source left intact");
+            }
+            Ok(data) => {
+                serial_println!(
+                    "[vfs]   FAIL: source damaged by a refused rename ({} bytes)",
+                    data.len()
+                );
+                let _ = Vfs::remove(src_path);
+                return Err(KernelError::InternalError);
+            }
+            Err(e) => {
+                serial_println!("[vfs]   FAIL: source gone after a refused rename: {:?}", e);
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // And nothing may have been created at the destination.
+        match Vfs::stat(dst_path) {
+            Err(KernelError::NotFound) => {
+                serial_println!("[vfs]     cross-mount rename: no partial destination");
+            }
+            _ => {
+                serial_println!("[vfs]   FAIL: refused rename still created {}", dst_path);
+                let _ = Vfs::remove(src_path);
+                let _ = Vfs::remove(dst_path);
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        let _ = Vfs::remove(src_path);
+        serial_println!("[vfs]     cross-mount rename refusal test PASSED");
     }
 
     // --- Paginated readdir_at test ---

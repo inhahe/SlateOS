@@ -55,7 +55,7 @@ use crate::ipc::waiters::{
     WaiterSet, current_user_pid, deliverable_signal_pending, park_interruptible, wake_all,
 };
 use crate::proc::pcb::ProcessId;
-use crate::sched;
+use crate::sched::{self, task::TaskId};
 use crate::sync::PreemptSpinMutex as Mutex;
 use crate::tty::{self, Input, TtyId};
 use alloc::boxed::Box;
@@ -987,6 +987,53 @@ pub fn writable(handle: PtyHandle) -> bool {
 #[must_use]
 pub fn exists(handle: PtyHandle) -> bool {
     PTYS.lock().contains_key(&handle.id())
+}
+
+// ---------------------------------------------------------------------------
+// Multi-object waiting
+// ---------------------------------------------------------------------------
+
+/// Park `task` on this pty so that any state change wakes it.
+///
+/// The multi-object (`ipc::multiwait`) counterpart to the registration
+/// the blocking read/write paths above do inline: a task waiting on several
+/// objects at once cannot use any one object's park loop, so it registers on
+/// each of them, tests them all, and parks once.
+///
+/// **Both sets, whichever end the handle names.** A pty's two waiter sets are
+/// named for the *rings* rather than the ends — a master reader and a slave
+/// writer both park in `output_waiters` — so which set carries the wake a given
+/// caller wants depends on the end *and* on the direction, and hangup
+/// ([`close`]) wakes both. Registering in both cannot lose a wake, and costs
+/// only a re-check of a condition the caller is about to re-check anyway.
+///
+/// A stale handle is a silent no-op: the pty may be closed between the caller
+/// resolving the handle and this call, and the readiness queries above already
+/// report a vanished pty as ready ([`readable`], [`writable`]), which is the
+/// answer a poller needs.
+///
+/// Must be paired with [`deregister_waiter`] on every exit path — see
+/// [`crate::ipc::pipe::deregister_waiter`] for what a leaked entry does.
+pub fn register_waiter(handle: PtyHandle, task: TaskId) {
+    let mut table = PTYS.lock();
+    let Some(pty) = table.get_mut(&handle.id()) else {
+        return;
+    };
+    pty.input_waiters.insert(task);
+    pty.output_waiters.insert(task);
+}
+
+/// Undo [`register_waiter`]: remove `task` from both of this pty's waiter sets.
+///
+/// Idempotent and stale-handle-safe, so it can be called unconditionally from a
+/// `Drop`.
+pub fn deregister_waiter(handle: PtyHandle, task: TaskId) {
+    let mut table = PTYS.lock();
+    let Some(pty) = table.get_mut(&handle.id()) else {
+        return;
+    };
+    pty.input_waiters.remove(task);
+    pty.output_waiters.remove(task);
 }
 
 // ---------------------------------------------------------------------------

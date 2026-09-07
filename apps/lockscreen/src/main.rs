@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Slate OS Lock Screen
 //!
 //! Graphical lock screen application providing:
@@ -57,8 +56,10 @@ mod theme {
     /// Red — error/warning color.
     pub const RED: Color = Color::from_hex(0xF38BA8);
     /// Green — success color.
+    #[allow(dead_code, reason = "the palette is kept complete")]
     pub const GREEN: Color = Color::from_hex(0xA6E3A1);
     /// Overlay — for tinted wallpaper backdrop.
+    #[allow(dead_code, reason = "the palette is kept complete")]
     pub const OVERLAY: Color = Color::rgba(0, 0, 0, 140);
     /// Avatar background — muted blue.
     pub const AVATAR_BG: Color = Color::from_hex(0x585B70);
@@ -983,29 +984,6 @@ impl LockScreen {
             submit_hovered: false,
             password_focused: false,
         }
-    }
-
-    /// A lock screen with a known password, for tests.
-    ///
-    /// `#[cfg(test)]` rather than `pub`, which is what it used to be. It has
-    /// never had a caller outside this file, and a public constructor that
-    /// silently installs the password `password123` on the screen guarding a
-    /// user's session is the kind of thing that acquires one by accident.
-    ///
-    /// It names its salt and uses [`TEST_ROUNDS`] instead of drawing a fresh
-    /// salt at full cost: a test must be reproducible and must not spend
-    /// ~130 ms per construction. Production enrolment is
-    /// [`PasswordValidator::enrol`], which does neither of those things.
-    #[cfg(test)]
-    fn default_single_user() -> Self {
-        let user = UserInfo::new("admin", "Administrator", true)
-            .with_hint("It's the name of your first pet");
-        let validator = PasswordValidator::for_test("password123");
-        Self::new(
-            vec![user],
-            LockScreenConfig::default(),
-            Some(Box::new(validator)),
-        )
     }
 
     /// Get the currently active/selected user.
@@ -2009,14 +1987,21 @@ impl SystemAuthority {
         }
     }
 
-    /// A verifier over stores at given paths, counting failures in memory only.
+    /// A verifier over the account database at a given path, counting failures
+    /// in memory only.
     ///
     /// For tests, and for a chroot. Deliberately does *not* share the system
     /// tally: a test must not be able to delay a real user by running.
+    ///
+    /// Took a `shadow` path too until `authlib` deleted its `/etc/shadow`
+    /// branch (design-decisions section 353: the YAML database is the truth and
+    /// the flat files are generated from it, so a fallback that fired would
+    /// mean the generation had broken -- and admitting someone on a stale
+    /// account file is worse than refusing them).
     #[must_use]
-    pub fn with_stores(users_yaml: &Path, shadow: &Path) -> Self {
+    pub fn with_stores(users_yaml: &Path) -> Self {
         Self {
-            inner: authlib::Authenticator::with_stores(users_yaml, shadow),
+            inner: authlib::Authenticator::with_stores(users_yaml),
         }
     }
 
@@ -2081,12 +2066,18 @@ const HUMAN_UIDS: core::ops::RangeInclusive<u32> = 1000..=60_000;
 /// it is a decision about who gets in.
 ///
 /// That is a live hazard rather than a theoretical one, because the natural
-/// implementation gets it exactly backwards. `/etc/shadow` is owned by root and
-/// readable by nobody else, and this screen runs as the logged-in user — so the
-/// obvious `shadow::lookup(...).is_some_and(|e| !e.password_hash.is_empty())`
-/// answers `false` on every correctly-configured machine, and the lock screen
-/// opens on the first Enter. Absence of evidence about a password must never be
-/// read as evidence of absence.
+/// implementation gets it exactly backwards. The account database holds
+/// password hashes, so it is owned by root and readable by nobody else, and
+/// this screen runs as the logged-in user — so the obvious
+/// `load(..).find(user).is_some_and(|r| !r.hash().is_empty())` answers `false`
+/// on every correctly-configured machine, and the lock screen opens on the
+/// first Enter. Absence of evidence about a password must never be read as
+/// evidence of absence.
+///
+/// (The hazard predates design-decisions section 353 and survived it unchanged:
+/// it used to be `/etc/shadow` that this screen could not read, and is now
+/// `users.yaml`. Deleting the second store removed a fallback, not the reason
+/// the first store comes back empty.)
 ///
 /// So the store is consulted, and *only a positive reading that the entry is
 /// empty* returns `false`. Anything else — unreadable file, unknown user,
@@ -2096,21 +2087,29 @@ const HUMAN_UIDS: core::ops::RangeInclusive<u32> = 1000..=60_000;
 /// actually knows: `authlib` returns its own `NoPassword` for a genuinely empty
 /// entry, from a process that can read the file.
 ///
-/// The store precedence mirrors `authlib`'s private `resolve` on purpose —
-/// native database first, `shadow(5)` second — so that the account this screen
-/// says has no password is the same account `authlib` would say that about. The
-/// one deliberate divergence is the final `None`, where `resolve` says "unknown
-/// user" and this says "assume a password".
-fn account_has_password(users_yaml: &Path, shadow: &Path, username: &str) -> bool {
+/// The single store consulted here mirrors `authlib`'s private `resolve` on
+/// purpose, so that the account this screen says has no password is the same
+/// account `authlib` would say that about. Both used to fall through to
+/// `shadow(5)` when the database did not have the user; design-decisions
+/// section 353 deleted that branch from `authlib`, and this followed it. The
+/// one deliberate divergence from `resolve` remains: where `resolve` says
+/// "unknown user", this says "assume a password", per the fail-closed rule
+/// above.
+///
+/// No caller today, deliberately kept. [`system_users`] answers this from a
+/// record it already holds, through [`record_has_password`]. This wrapper is
+/// for the caller that does not start from a record -- a typed username, which
+/// this screen does not yet accept. See `todo.txt`.
+#[allow(dead_code, reason = "no typed-username path yet -- see todo.txt")]
+fn account_has_password(users_yaml: &Path, username: &str) -> bool {
     if let Ok(db) = userdb::UserDb::load(users_yaml)
         && let Some(record) = db.find(username)
     {
         return record_has_password(record);
     }
-    match authlib::shadow::lookup(shadow, username) {
-        Some(entry) => !entry.password_hash.is_empty(),
-        None => true,
-    }
+    // Unreadable store, missing store, or unknown user. Fail closed: assume a
+    // password and let the authority be the one to say otherwise.
+    true
 }
 
 /// The native-database half of [`account_has_password`], for a caller that has
@@ -2153,9 +2152,10 @@ fn record_has_password(record: &userdb::Record) -> bool {
 /// an open door.
 fn system_users(users_yaml: &Path) -> Vec<UserInfo> {
     let Ok(db) = userdb::UserDb::load(users_yaml) else {
-        // No native database to enumerate. `shadow(5)` is not a substitute:
-        // it is the *password* store, so listing it would put every system
-        // account on the screen with nothing to filter them by.
+        // No account database to enumerate, and nothing else to enumerate
+        // from: `/etc/passwd` and `/etc/shadow` are generated from this file
+        // (design-decisions section 353), so a machine where it cannot be read
+        // has no account list at all.
         return Vec::new();
     };
     db.records()
@@ -2164,11 +2164,9 @@ fn system_users(users_yaml: &Path) -> Vec<UserInfo> {
         .filter_map(|record| {
             let username = record.username()?;
             let display = record.display_name().unwrap_or_else(|| username.clone());
-            // The record is in hand, so the answer comes from it directly.
-            // There is no `shadow` fallback here and there must not be:
-            // `authlib`'s `resolve` stops at the native database once it finds
-            // the user, so a record found here is a record `shadow(5)` will
-            // never be consulted about.
+            // The record is in hand, so the answer comes from it directly --
+            // which is now the only way to answer, `authlib` having deleted
+            // its second store (design-decisions section 353).
             Some(UserInfo::new(
                 &username,
                 &display,
@@ -2273,8 +2271,8 @@ impl oswindow::app::App for LockScreen {
 // ============================================================================
 
 fn main() -> ExitCode {
-    // Only the native database is enumerated; `SystemAuthority` still consults
-    // `/etc/shadow` when it answers, because `authlib` does. See `system_users`.
+    // One store, enumerated here and asked by `SystemAuthority`, because
+    // `authlib` has one too (design-decisions section 353). See `system_users`.
     let users_yaml = Path::new(authlib::DEFAULT_USERS_YAML);
 
     let mut screen = LockScreen::new(
@@ -3596,14 +3594,12 @@ mod tests {
             .to_string()
     }
 
-    /// A scratch directory holding a `users.yaml` with the given body, and a
-    /// path to a shadow file that deliberately does not exist.
-    fn store_with(body: &str) -> (scratchdir::ScratchDir, PathBuf, PathBuf) {
+    /// A scratch directory holding a `users.yaml` with the given body.
+    fn store_with(body: &str) -> (scratchdir::ScratchDir, PathBuf) {
         let dir = scratchdir::ScratchDir::new("lockscreen");
         let users_yaml = dir.path("users.yaml");
         std::fs::write(&users_yaml, format!("users:\n{body}")).expect("write users.yaml");
-        let shadow = dir.path("shadow-does-not-exist");
-        (dir, users_yaml, shadow)
+        (dir, users_yaml)
     }
 
     #[test]
@@ -3632,7 +3628,7 @@ mod tests {
     #[test]
     fn the_real_authority_opens_the_screen_for_the_real_password() {
         let entry = stored_entry("correct horse");
-        let (_dir, users_yaml, shadow) = store_with(&format!(
+        let (_dir, users_yaml) = store_with(&format!(
             "  - uid: 1000\n    username: alice\n    display_name: Alice\n    \
              password_hash: {entry}\n"
         ));
@@ -3646,7 +3642,7 @@ mod tests {
         let mut ls = LockScreen::new(
             users,
             LockScreenConfig::default(),
-            Some(Box::new(SystemAuthority::with_stores(&users_yaml, &shadow))),
+            Some(Box::new(SystemAuthority::with_stores(&users_yaml))),
         );
         ls.state = LockScreenState::PasswordEntry;
         type_password(&mut ls, "nope");
@@ -3661,7 +3657,7 @@ mod tests {
     #[test]
     fn a_locked_account_is_listed_and_refused() {
         let entry = stored_entry("correct horse");
-        let (_dir, users_yaml, shadow) = store_with(&format!(
+        let (_dir, users_yaml) = store_with(&format!(
             "  - uid: 1000\n    username: alice\n    locked: true\n    \
              password_hash: {entry}\n"
         ));
@@ -3676,7 +3672,7 @@ mod tests {
         let mut ls = LockScreen::new(
             users,
             LockScreenConfig::default(),
-            Some(Box::new(SystemAuthority::with_stores(&users_yaml, &shadow))),
+            Some(Box::new(SystemAuthority::with_stores(&users_yaml))),
         );
         ls.state = LockScreenState::PasswordEntry;
         type_password(&mut ls, "correct horse");
@@ -3686,7 +3682,7 @@ mod tests {
 
     #[test]
     fn system_accounts_are_not_offered() {
-        let (_dir, users_yaml, _shadow) = store_with(
+        let (_dir, users_yaml) = store_with(
             "  - uid: 1\n    username: daemon\n\
              \x20 - uid: 65534\n    username: nobody\n\
              \x20 - uid: 1000\n    username: alice\n",
@@ -3705,8 +3701,7 @@ mod tests {
         // A hand-edited `users.yaml` that omits the field describes a person
         // far more often than a daemon, and dropping the machine's only
         // account is a worse failure than listing one extra.
-        let (_dir, users_yaml, _shadow) =
-            store_with("  - username: alice\n    display_name: Alice\n");
+        let (_dir, users_yaml) = store_with("  - username: alice\n    display_name: Alice\n");
         let users = system_users(&users_yaml);
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].username, "alice");
@@ -3714,7 +3709,7 @@ mod tests {
 
     #[test]
     fn a_display_name_falls_back_to_the_username() {
-        let (_dir, users_yaml, _shadow) = store_with("  - uid: 1000\n    username: alice\n");
+        let (_dir, users_yaml) = store_with("  - uid: 1000\n    username: alice\n");
         let users = system_users(&users_yaml);
         assert_eq!(users[0].display_name, "alice");
         assert_eq!(users[0].initials, "A");
@@ -3724,18 +3719,17 @@ mod tests {
 
     #[test]
     fn an_unreadable_store_does_not_mean_there_is_no_password() {
-        // This is the one that matters. `/etc/shadow` is root-owned and this
-        // screen runs as the logged-in user, so "cannot read the store" is
-        // the *normal* case on a correctly-configured machine -- and
+        // This is the one that matters. The account database is root-owned
+        // and this screen runs as the logged-in user, so "cannot read the
+        // store" is the *normal* case on a correct machine -- and
         // `submit_password` short-circuits `!has_password` straight to
         // `NoPassword`, which `unlocks_for` accepts. Reading an unreadable
         // store as "no password" opens the lock screen on the first Enter.
         let dir = scratchdir::ScratchDir::new("lockscreen");
         let users_yaml = dir.path("no-such-users.yaml");
-        let shadow = dir.path("no-such-shadow");
-        assert!(!users_yaml.exists() && !shadow.exists());
+        assert!(!users_yaml.exists());
 
-        assert!(account_has_password(&users_yaml, &shadow, "alice"));
+        assert!(account_has_password(&users_yaml, "alice"));
 
         // End to end, through the screen: a machine whose stores cannot be
         // read must refuse, not admit.
@@ -3743,10 +3737,10 @@ mod tests {
             vec![UserInfo::new(
                 "alice",
                 "Alice",
-                account_has_password(&users_yaml, &shadow, "alice"),
+                account_has_password(&users_yaml, "alice"),
             )],
             LockScreenConfig::default(),
-            Some(Box::new(SystemAuthority::with_stores(&users_yaml, &shadow))),
+            Some(Box::new(SystemAuthority::with_stores(&users_yaml))),
         );
         ls.state = LockScreenState::PasswordEntry;
         type_password(&mut ls, "anything at all");
@@ -3756,43 +3750,23 @@ mod tests {
 
     #[test]
     fn an_unknown_user_is_assumed_to_have_a_password() {
-        let (_dir, users_yaml, shadow) = store_with("  - uid: 1000\n    username: alice\n");
-        assert!(account_has_password(&users_yaml, &shadow, "bob"));
+        let (_dir, users_yaml) = store_with("  - uid: 1000\n    username: alice\n");
+        assert!(account_has_password(&users_yaml, "bob"));
     }
 
     #[test]
     fn an_empty_stored_entry_is_the_one_way_to_read_no_password() {
-        let (_dir, users_yaml, shadow) =
+        let (_dir, users_yaml) =
             store_with("  - uid: 1000\n    username: alice\n    password_hash:\n");
-        assert!(!account_has_password(&users_yaml, &shadow, "alice"));
+        assert!(!account_has_password(&users_yaml, "alice"));
     }
 
-    #[test]
-    fn the_shadow_file_answers_when_the_native_store_does_not() {
-        let dir = scratchdir::ScratchDir::new("lockscreen");
-        let users_yaml = dir.path("no-such-users.yaml");
-        let shadow = dir.path("shadow");
-        let entry = stored_entry("correct horse");
-        std::fs::write(&shadow, format!("alice:{entry}:19000:0:99999:7:::\n")).expect("write");
-
-        assert!(account_has_password(&users_yaml, &shadow, "alice"));
-
-        let mut ls = LockScreen::new(
-            vec![UserInfo::new("alice", "Alice", true)],
-            LockScreenConfig::default(),
-            Some(Box::new(SystemAuthority::with_stores(&users_yaml, &shadow))),
-        );
-        ls.state = LockScreenState::PasswordEntry;
-        type_password(&mut ls, "correct horse");
-        assert_eq!(ls.submit_password(), AuthOutcome::Accepted);
-    }
-
-    #[test]
-    fn an_empty_shadow_password_field_reads_as_no_password() {
-        let dir = scratchdir::ScratchDir::new("lockscreen");
-        let users_yaml = dir.path("no-such-users.yaml");
-        let shadow = dir.path("shadow");
-        std::fs::write(&shadow, "alice::19000:0:99999:7:::\n").expect("write");
-        assert!(!account_has_password(&users_yaml, &shadow, "alice"));
-    }
+    // Two tests stood here -- one that a `/etc/shadow` entry answered when the
+    // database did not have the user, one that an empty field there read as
+    // "no password". Both asserted the fallback design-decisions section 353
+    // deleted, about a user this screen can now neither list nor admit. What
+    // replaced them is upstream, in `authlib`'s own suite: a generated
+    // `/etc/shadow` beside the database, holding a different password and an
+    // account the database does not have, and neither honoured. There is
+    // nothing left for this screen to assert about a file it no longer opens.
 }

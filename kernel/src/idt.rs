@@ -2107,6 +2107,19 @@ static FATAL_FAULT_IN_PROGRESS: core::sync::atomic::AtomicBool =
 /// two-frame backtrace of the fault handler's own frames and nothing that named
 /// the caller.  A shared entry point is what stops the fourth handler from
 /// having to learn it a fourth time.
+///
+/// # All six vectors now call this
+///
+/// 2026-09-05: `#TS` (10), `#NP` (11) and `#SS` (12) were the three that had
+/// not learned it.  They are the same accident of addressing as the rest — a
+/// wild jump or a corrupted descriptor table sorts into one of six handlers by
+/// what the garbage happens to be — and each was two lines, a `serial_println!`
+/// and a `halt_loop()`, with no guard, no register context and no stack scan.
+/// Extending the guard alone would have repeated the mistake this doc names:
+/// B-KNULLJUMP's lesson was not "a guard was missing" but that a hijack reached
+/// a handler with *none* of the hardening, and a guard by itself buys an orderly
+/// halt and still no caller.  So all three got the guard, the `CS/RFLAGS/RSP/SS`
+/// line, `dump_stack_scan` and `log_exception`, in `#GP`'s order.
 fn begin_fatal_kernel_fault(what: &str, frame: &InterruptStackFrame) {
     // SAFETY: every caller is on a path that ends in `halt_loop()`.  Masking
     // interrupts cannot lose state we still need (any error code and CR2 are
@@ -2122,6 +2135,57 @@ fn begin_fatal_kernel_fault(what: &str, frame: &InterruptStackFrame) {
             frame.rsp
         );
         cpu::halt_loop();
+    }
+}
+
+/// Decode and print a segment-selector error code — the format `#TS`, `#NP`,
+/// `#SS` and `#GP` all push.
+///
+/// Bits [15:3] are the selector index, [2] is TI (0 = GDT, 1 = LDT), [1] is the
+/// IDT flag and [0] is EXT (the fault was triggered by an external event).
+///
+/// # Why `no_selector_hint` is a parameter and not a constant
+///
+/// The `error != 0` arm is architectural, so it is genuinely the same code on
+/// all four vectors and belongs in one body. **The zero arm is not.** A zero
+/// error code means something different on each vector, and a shared function
+/// with `#GP`'s reading baked in would print a confident falsehood on the other
+/// three:
+///
+/// * `#GP` — common. A non-canonical address, or a privilege violation with no
+///   descriptor involved.
+/// * `#SS` — not a descriptor fault at all: a stack-limit violation, or a
+///   non-canonical `RSP`.
+/// * `#NP` / `#TS` — should not occur. These vectors are *defined* by the
+///   segment they name, so a zero here is itself the anomaly worth reporting.
+///
+/// So the caller supplies that one line. This also keeps `#GP`'s output
+/// byte-for-byte what it was before the decode was lifted out of it, which
+/// matters because `#GP` is the only one of the four with boot-test history
+/// behind its exact text.
+fn log_selector_error(error: u64, no_selector_hint: &str) {
+    if error != 0 {
+        // The shift cannot overflow (it narrows), and the mask keeps the index
+        // in the 13 bits the architecture gives it.
+        #[allow(clippy::arithmetic_side_effects)]
+        let selector_idx = (error >> 3) & 0x1FFF;
+        let is_idt = error & 0x2 != 0;
+        let is_ext = error & 0x1 != 0;
+        let table = if is_idt {
+            "IDT"
+        } else if error & 0x4 != 0 {
+            "LDT"
+        } else {
+            "GDT"
+        };
+        serial_println!(
+            "  Error decode: {} index={}, ext={}",
+            table,
+            selector_idx,
+            is_ext
+        );
+    } else {
+        serial_println!("  Error decode: no selector ({no_selector_hint})");
     }
 }
 
@@ -3146,14 +3210,59 @@ extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
 }
 
 /// Handle #TS (Invalid TSS, vector 10).  Always fatal — broken task state.
+///
+/// # Why this has no ring-3 branch, unlike vectors 11, 12 and 13
+///
+/// Its three siblings all route a userspace fault to `dispatch_or_kill_userspace`
+/// so the process dies instead of the machine, and the absence of that here
+/// reads as an oversight.  It is not, and this comment exists because the
+/// asymmetry has already attracted the investigation twice.
+///
+/// **Ring 3 cannot raise `#TS`.** Long mode has no hardware task switching, so
+/// the TSS survives only as a stack-pointer / IST table, and the instructions
+/// that can fault on a malformed TSS descriptor — `LTR` above all — are ring-0
+/// only.  A `#TS` is therefore a kernel bug by construction, and halting is the
+/// correct response rather than a missing branch.
+///
+/// Giving it a ring-3 path would also mean appending a twelfth value to
+/// `proc::exception::ExceptionCode`, which is a contiguous *userspace ABI*
+/// (`DivideError = 1` … `SimdFloatingPoint = 11`) with no `InvalidTss` variant.
+/// Appending is safe in that it renumbers nothing, but it is an ABI change made
+/// on the strength of symmetry alone, for a case the hardware cannot produce.
+/// **Do not add `ExceptionCode::InvalidTss`.**
+///
+/// The corollary is that this vector needs the fatal-fault hardening *more*
+/// unambiguously than its siblings, not less: every `#TS` is by the above a
+/// fatal kernel fault, so the guard and the stack scan below are unconditional.
 #[unsafe(no_mangle)]
 extern "C" fn handle_invalid_tss(frame: &InterruptStackFrame, error: u64) {
     count_vector(10);
+    log_exception(10, frame.rip, error);
+    // No `is_userspace_exception` early return — see the doc comment.
+    begin_fatal_kernel_fault("#TS", frame);
+
     serial_println!(
         "EXCEPTION: Invalid TSS (#TS) at {:#x}, error={:#x}",
         frame.rip,
         error
     );
+    serial_println!(
+        "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
+        frame.cs,
+        frame.rflags,
+        frame.rsp,
+        frame.ss
+    );
+
+    // Before anything that dereferences possibly-corrupted state, per lesson 3
+    // in `begin_fatal_kernel_fault`.
+    crate::backtrace::dump_stack_scan(frame.rsp, 64);
+
+    log_selector_error(
+        error,
+        "unexpected — #TS is defined by the TSS descriptor it names",
+    );
+
     cpu::halt_loop();
 }
 
@@ -3163,6 +3272,11 @@ extern "C" fn handle_invalid_tss(frame: &InterruptStackFrame, error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_seg_not_present(frame: &InterruptStackFrame, error: u64) {
     count_vector(11);
+    // Above the ring-3 return, as `#GP` does: the value of this ring buffer is
+    // as a record of what came *before* whatever finally killed the machine,
+    // and a ring-3 fault the SEH path handled successfully is exactly the kind
+    // of antecedent worth having.
+    log_exception(11, frame.rip, error);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace(
@@ -3173,11 +3287,31 @@ extern "C" fn handle_seg_not_present(frame: &InterruptStackFrame, error: u64) {
         );
         return;
     }
+    begin_fatal_kernel_fault("#NP", frame);
+
     serial_println!(
         "EXCEPTION: Segment Not Present (#NP) at {:#x}, selector={:#x}",
         frame.rip,
         error
     );
+    serial_println!(
+        "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
+        frame.cs,
+        frame.rflags,
+        frame.rsp,
+        frame.ss
+    );
+
+    // Before anything that dereferences possibly-corrupted state, per lesson 3
+    // in `begin_fatal_kernel_fault`.  This is the diagnostic that names the
+    // caller once the RBP chain is broken.
+    crate::backtrace::dump_stack_scan(frame.rsp, 64);
+
+    log_selector_error(
+        error,
+        "unexpected — #NP is defined by the absent segment it names",
+    );
+
     cpu::halt_loop();
 }
 
@@ -3187,6 +3321,8 @@ extern "C" fn handle_seg_not_present(frame: &InterruptStackFrame, error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_stack_segment(frame: &InterruptStackFrame, error: u64) {
     count_vector(12);
+    // Above the ring-3 return — see the same call in `handle_seg_not_present`.
+    log_exception(12, frame.rip, error);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace(
@@ -3197,11 +3333,38 @@ extern "C" fn handle_stack_segment(frame: &InterruptStackFrame, error: u64) {
         );
         return;
     }
+    begin_fatal_kernel_fault("#SS", frame);
+
     serial_println!(
         "EXCEPTION: Stack-Segment Fault (#SS) at {:#x}, error={:#x}",
         frame.rip,
         error
     );
+    // `frame.rsp` and `frame.ss` are not context here, they are the subject:
+    // this vector exists to report a fault in the stack segment itself.
+    serial_println!(
+        "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
+        frame.cs,
+        frame.rflags,
+        frame.rsp,
+        frame.ss
+    );
+
+    // Before anything that dereferences possibly-corrupted state, per lesson 3
+    // in `begin_fatal_kernel_fault`.
+    //
+    // Worth noting that on this vector the scan is the least trustworthy of the
+    // four, and still the most valuable: a `#SS` says the stack pointer it is
+    // scanning from is itself suspect.  It is run anyway because a scan of a bad
+    // stack prints garbage that is visibly garbage, whereas skipping it leaves
+    // the same two-frame RBP walk that cost the 2026-09-04 capture.
+    crate::backtrace::dump_stack_scan(frame.rsp, 64);
+
+    log_selector_error(
+        error,
+        "not a descriptor fault — a stack-limit violation or non-canonical RSP",
+    );
+
     cpu::halt_loop();
 }
 
@@ -3246,32 +3409,10 @@ extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64)
     // the caller once the RBP chain is broken.
     crate::backtrace::dump_stack_scan(frame.rsp, 64);
 
-    // Decode the error code: for #GP, it's a selector index.
-    // Bits [15:3] = selector index, bit [2] = TI (0=GDT, 1=LDT/IDT),
-    // bit [1] = IDT flag, bit [0] = EXT (external event).
-    if error != 0 {
-        #[allow(clippy::arithmetic_side_effects)]
-        let selector_idx = (error >> 3) & 0x1FFF;
-        let is_idt = error & 0x2 != 0;
-        let is_ext = error & 0x1 != 0;
-        let table = if is_idt {
-            "IDT"
-        } else if error & 0x4 != 0 {
-            "LDT"
-        } else {
-            "GDT"
-        };
-        serial_println!(
-            "  Error decode: {} index={}, ext={}",
-            table,
-            selector_idx,
-            is_ext
-        );
-    } else {
-        serial_println!(
-            "  Error decode: no selector (likely non-canonical address or privilege violation)"
-        );
-    }
+    // Decode the error code: for #GP, it's a selector index.  Shared with
+    // `#TS`/`#NP`/`#SS`, which push the identical format — see
+    // `log_selector_error` for why the zero-case reading is passed in.
+    log_selector_error(error, "likely non-canonical address or privilege violation");
 
     // Try to read the faulting instruction bytes for diagnosis.
     // SAFETY: RIP points to kernel text (we checked this isn't userspace).

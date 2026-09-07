@@ -923,6 +923,14 @@ pub struct DesktopShell {
     /// and corner radius all live here, and each is read by a different part
     /// of the shell.
     pub appearance: AppearanceSettings,
+    /// Watches `appearance.yaml` so a change made in another process reaches
+    /// this one without a restart.
+    ///
+    /// Private, and the shell's *only* reader of that file: the startup load
+    /// and the reloads go through the same watcher, so there is no window
+    /// between "read once at startup" and "start watching" for a save to fall
+    /// into. See [`poll_appearance`](Self::poll_appearance).
+    appearance_watch: config::Watcher,
     /// Theme configuration, derived from [`appearance`](Self::appearance).
     ///
     /// Never assign to this directly: it would disagree with `appearance` at
@@ -1328,6 +1336,7 @@ impl DesktopShell {
             overview: overview::OverviewState::new(),
             overview_config: overview::OverviewConfig::default(),
             appearance: AppearanceSettings::default(),
+            appearance_watch: config::Watcher::new(appearance_settings::CONFIG_NAME),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
@@ -1419,11 +1428,79 @@ impl DesktopShell {
     /// about a particular look call [`set_appearance`](Self::set_appearance)
     /// with settings they built themselves.
     ///
-    /// A missing or unreadable file is not an error: [`config::load`] yields
-    /// an empty document, which reads back as the defaults.
+    /// A missing or unreadable file is not an error: the watcher yields an
+    /// empty document, which reads back as the defaults.
+    ///
+    /// Goes through the same watcher as
+    /// [`poll_appearance`](Self::poll_appearance) rather than reading the file
+    /// itself, so the shell has one reader of `appearance.yaml` instead of
+    /// two. Reading it here and *then* constructing a watcher would leave a
+    /// gap: a save landing between the two would be recorded as already-seen
+    /// and never reported, and the desktop would sit on stale settings until
+    /// the next unrelated change.
     pub fn load_appearance(&mut self) {
-        let doc = config::load(appearance_settings::CONFIG_NAME);
-        self.set_appearance(AppearanceSettings::read_from(&doc));
+        let settings = match self.appearance_watch.poll() {
+            Some(doc) => AppearanceSettings::read_from(&doc),
+            // Already seen, which on this path means the caller loaded twice.
+            // Re-apply what is held rather than doing nothing, so that the
+            // scale is published either way.
+            None => self.appearance.clone(),
+        };
+        self.set_appearance(settings);
+    }
+
+    /// Look once for an appearance change made by another process, and apply
+    /// it. Returns whether anything changed.
+    ///
+    /// This is what makes a setting take effect while the desktop is running.
+    /// The Settings application writes `appearance.yaml`; nothing tells the
+    /// shell, so the shell looks. Until then the two agreed only across a
+    /// restart -- change your accent colour and the desktop kept the old one.
+    ///
+    /// # How often to call it
+    ///
+    /// That is the caller's decision, not this method's: it looks exactly once
+    /// per call and holds no clock, for the same reason
+    /// [`advance_osd`](Self::advance_osd) takes its own elapsed time. A
+    /// once-a-second cadence from whatever already drives the frame loop is
+    /// ample -- this is a person moving a slider in another window, not a
+    /// stream. Calling it every frame is *safe* but wasteful: an unchanged
+    /// file costs one small read, and `Watcher` is careful to answer `None`
+    /// so that no parsing or repaint follows.
+    ///
+    /// # What it deliberately does not do
+    ///
+    /// It does not merge. The file is the authority, so a change on disk
+    /// replaces what the shell holds -- which is right because the shell has
+    /// no appearance editor of its own to lose work from. When the settings
+    /// *window* is finally hosted here, this becomes a question with a real
+    /// answer (whose copy wins while a panel is open with unsaved edits?) and
+    /// this method is where it will have to be answered. See `todo.txt`.
+    pub fn poll_appearance(&mut self) -> bool {
+        let Some(doc) = self.appearance_watch.poll() else {
+            return false;
+        };
+        let settings = AppearanceSettings::read_from(&doc);
+        // A *file* change is not a *settings* change, and this is the
+        // difference that matters to a caller who repaints on `true`.
+        //
+        // Two ways they come apart, one of which is on every startup path.
+        // The watcher's first look always reports, having seen nothing yet --
+        // so a session whose caller never called `load_appearance` would
+        // repaint on its first pump for no reason, which is exactly what the
+        // shell's own "a press it does not want repaints nothing" and "an idle
+        // park is bounded" tests caught when this method compared nothing. And
+        // a file can change without any setting changing: somebody adds a
+        // comment, or a newer desktop writes a key this one does not read.
+        //
+        // `AppearanceSettings` derives `PartialEq` over the whole struct
+        // precisely so this cannot fall behind a field, the way the
+        // hand-written `is_dirty` field list it replaced did.
+        if settings == self.appearance {
+            return false;
+        }
+        self.set_appearance(settings);
+        true
     }
 
     /// Usable area for windows (excluding taskbar).
@@ -4956,6 +5033,109 @@ mod theme_tests {
         assert_eq!(theme.taskbar_active_bg.a, 255);
         assert_eq!(theme.overlay_fg.a, 255);
         assert_eq!(theme.start_menu_fg.a, 255);
+    }
+
+    #[test]
+    fn a_save_in_another_process_reaches_a_running_shell() {
+        // The half of `TD-APPEARANCE-SETTINGS-ARE-NEVER-WRITTEN-TO-DISK` and
+        // `TD-THREE-INDEPENDENT-APPEARANCE-MODELS` that was still open: the
+        // Settings application writes `appearance.yaml`, nothing tells the
+        // desktop, and the two agreed only across a restart. `apps/settings`
+        // already proves a click reaches the file
+        // (`test_a_click_that_changes_an_accent_reaches_the_file`); this is
+        // the other end of the same wire -- the file reaching a shell that is
+        // already running.
+        settingsfile::testing::with_scratch_config("desktop-appearance-live", |_root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            shell.load_appearance();
+            let before = shell.appearance.accent_color;
+            let before_theme = shell.theme.taskbar_accent;
+
+            // Another process saves a different accent. Written through the
+            // real `AppearanceFile::save`, so this is the same rename-over-the
+            // -target path the Settings app takes, not a hand-written file.
+            let mut file = appearance::AppearanceFile::load();
+            let after = if before == AccentColor::Teal {
+                AccentColor::Mauve
+            } else {
+                AccentColor::Teal
+            };
+            file.settings.accent_color = after;
+            file.save().expect("save");
+
+            assert!(shell.poll_appearance(), "the shell should notice the save");
+            assert_eq!(shell.appearance.accent_color, after);
+            assert_ne!(
+                shell.theme.taskbar_accent, before_theme,
+                "the derived palette must follow, not just the stored setting"
+            );
+
+            assert!(
+                !shell.poll_appearance(),
+                "and must not keep reporting the same change"
+            );
+        });
+    }
+
+    #[test]
+    fn a_shell_that_polls_without_a_save_does_not_repaint() {
+        // The cost side of the same feature. `poll_appearance` is meant to be
+        // safe to call on a timer, which it is only if a quiet file answers
+        // `false` -- otherwise every tick re-derives the palette and the
+        // desktop repaints once a second forever.
+        settingsfile::testing::with_scratch_config("desktop-appearance-quiet", |_root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            shell.load_appearance();
+            for _ in 0..5 {
+                assert!(!shell.poll_appearance());
+            }
+        });
+    }
+
+    #[test]
+    fn a_save_that_changes_nothing_does_not_disturb_the_shell() {
+        // Opening Settings and closing it re-saves the file: `store` renames a
+        // fresh temporary over the target, so the inode and its timestamp
+        // change even though the bytes do not. A watcher keyed on the
+        // timestamp would repaint the desktop every time somebody looked at
+        // their settings. This is the assertion that ours is not.
+        settingsfile::testing::with_scratch_config("desktop-appearance-resave", |_root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            shell.load_appearance();
+
+            let mut file = appearance::AppearanceFile::load();
+            file.save().expect("first save");
+            let _ = shell.poll_appearance();
+            file.save().expect("identical re-save");
+
+            assert!(
+                !shell.poll_appearance(),
+                "an identical re-save is not an appearance change"
+            );
+        });
+    }
+
+    #[test]
+    fn the_startup_load_and_the_reload_read_the_same_file() {
+        // `load_appearance` and `poll_appearance` go through one watcher on
+        // purpose. If startup read the file directly and *then* a watcher were
+        // constructed, a save landing between the two would be recorded as
+        // already-seen and never reported -- the desktop would sit on stale
+        // settings until some later, unrelated change. Asserting it by having
+        // the startup load itself pick up a file written beforehand.
+        settingsfile::testing::with_scratch_config("desktop-appearance-startup", |_root| {
+            let mut file = appearance::AppearanceFile::load();
+            file.settings.accent_color = AccentColor::Peach;
+            file.save().expect("save before the shell exists");
+
+            let mut shell = DesktopShell::new(1920, 1080);
+            shell.load_appearance();
+            assert_eq!(shell.appearance.accent_color, AccentColor::Peach);
+            assert!(
+                !shell.poll_appearance(),
+                "startup consumed it, so there is nothing left to report"
+            );
+        });
     }
 
     #[test]

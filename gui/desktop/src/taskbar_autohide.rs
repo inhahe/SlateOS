@@ -169,7 +169,15 @@ pub struct AutoHideManager {
     /// Whether the mouse is in the trigger zone (screen edge).
     pub mouse_in_trigger: bool,
     /// Timestamp when the mouse left the taskbar.
-    pub mouse_left_at: u64,
+    /// When the pointer last left the taskbar, if it has.
+    ///
+    /// An `Option` rather than a `0` sentinel, which is what this was. Zero is
+    /// a real time -- the session's clock starts there -- so "left at 0" and
+    /// "never left" were the same value, and a pointer leaving the bar in the
+    /// first millisecond of a session was silently ignored. Found by a test
+    /// that pressed before advancing the clock; the window is small but it is
+    /// the first frame every session has.
+    pub mouse_left_at: Option<u64>,
     /// Timestamp when current animation started.
     pub anim_start_ms: u64,
     /// Timestamp when peek started.
@@ -189,7 +197,7 @@ impl AutoHideManager {
             hide_progress: 0.0,
             mouse_in_taskbar: false,
             mouse_in_trigger: false,
-            mouse_left_at: 0,
+            mouse_left_at: None,
             anim_start_ms: 0,
             peek_start_ms: 0,
             locked: false,
@@ -260,7 +268,7 @@ impl AutoHideManager {
     /// Notify that the mouse left the taskbar area.
     pub fn on_mouse_leave_taskbar(&mut self, now_ms: u64) {
         self.mouse_in_taskbar = false;
-        self.mouse_left_at = now_ms;
+        self.mouse_left_at = Some(now_ms);
     }
 
     /// Notify that the mouse entered the trigger zone (screen edge).
@@ -315,6 +323,50 @@ impl AutoHideManager {
 
     /// Advance the state machine. Call each frame with the current timestamp.
     /// Returns true if a repaint is needed.
+    /// Replace the configuration, keeping the current visual state.
+    ///
+    /// The state is deliberately *not* reset. A user changing their taskbar
+    /// while it is mid-slide should see the slide finish, not the bar jump; and
+    /// switching auto-hide off leaves the manager in whatever state it was in,
+    /// which [`needs_tick`](Self::needs_tick) then reports as one tick owed to
+    /// put the bar back on screen. Resetting here would do that instantly and
+    /// invisibly, which is the same end without the animation.
+    pub fn set_config(&mut self, config: AutoHideConfig) {
+        self.config = config;
+    }
+
+    /// Whether [`tick`](Self::tick) has anything left to do.
+    ///
+    /// The session parks with no wake-up registered when nothing is moving --
+    /// that is what keeps an idle desktop idle (design-decisions 812) -- so it
+    /// needs to know when *this* is a reason to keep waking. Being wrong in the
+    /// generous direction wakes the machine for ever; being wrong in the mean
+    /// direction leaves a taskbar half-slid until the user moves the mouse.
+    ///
+    /// `Hidden` is deliberately not a reason. It is a resting state: what ends
+    /// it is the pointer entering the trigger zone, which arrives as an input
+    /// event and wakes the loop by itself.
+    #[must_use]
+    pub fn needs_tick(&self) -> bool {
+        if !self.config.enabled {
+            // One tick owed, to put a mid-slide taskbar back on screen after
+            // the setting is switched off.
+            return self.state != AutoHideState::Visible;
+        }
+        match self.state {
+            AutoHideState::SlidingOut | AutoHideState::SlidingIn | AutoHideState::Peeking => true,
+            AutoHideState::Hidden => false,
+            // Visible with the pointer away is a *pending* hide: the delay is
+            // measured by ticks, so without them the taskbar never hides at all.
+            AutoHideState::Visible => {
+                !self.mouse_in_taskbar
+                    && !self.mouse_in_trigger
+                    && !self.locked
+                    && self.mouse_left_at.is_some()
+            }
+        }
+    }
+
     pub fn tick(&mut self, now_ms: u64) -> bool {
         if !self.config.enabled {
             if self.state != AutoHideState::Visible {
@@ -331,9 +383,9 @@ impl AutoHideManager {
                 if !self.mouse_in_taskbar
                     && !self.mouse_in_trigger
                     && !self.locked
-                    && self.mouse_left_at > 0
+                    && let Some(left_at) = self.mouse_left_at
                 {
-                    let elapsed = now_ms.saturating_sub(self.mouse_left_at);
+                    let elapsed = now_ms.saturating_sub(left_at);
                     if elapsed >= self.config.hide_delay_ms {
                         self.state = AutoHideState::SlidingOut;
                         self.anim_start_ms = now_ms;
@@ -431,9 +483,6 @@ impl AutoHideManager {
 
 #[cfg(test)]
 mod tests {
-    // A test module's job is to fail loudly the instant the code under test is
-    // wrong, so the defensive lints that forbid exactly that in production code
-    // are off here — as `CLAUDE.md` prescribes.
     #![allow(
         clippy::unwrap_used,
         clippy::expect_used,
@@ -445,6 +494,139 @@ mod tests {
     // handed. That is the assertion meant: a tolerance would let a value that has
     // drifted pass as one that has not.
     #![allow(clippy::float_cmp)]
+
+    // -- needs_tick agrees with tick ---------------------------------------
+
+    /// Every state a manager can be in, built through its own API.
+    fn managers_in_every_state() -> Vec<(&'static str, AutoHideManager)> {
+        let cfg = AutoHideConfig {
+            enabled: true,
+            ..AutoHideConfig::default()
+        };
+        let mut out = Vec::new();
+
+        out.push(("fresh/visible", AutoHideManager::new(cfg.clone())));
+
+        let mut pending = AutoHideManager::new(cfg.clone());
+        pending.on_mouse_enter_taskbar(0);
+        pending.on_mouse_leave_taskbar(10);
+        out.push(("hide pending", pending));
+
+        let mut locked = AutoHideManager::new(cfg.clone());
+        locked.on_mouse_enter_taskbar(0);
+        locked.on_mouse_leave_taskbar(10);
+        locked.lock();
+        out.push(("hide pending but locked", locked));
+
+        let mut sliding = AutoHideManager::new(cfg.clone());
+        sliding.on_mouse_enter_taskbar(0);
+        sliding.on_mouse_leave_taskbar(10);
+        sliding.tick(10 + cfg.hide_delay_ms + 1);
+        out.push(("sliding out", sliding));
+
+        let done = 10 + cfg.hide_delay_ms + cfg.slide_duration_ms + 10;
+        let mut hidden = AutoHideManager::new(cfg.clone());
+        hidden.on_mouse_enter_taskbar(0);
+        hidden.on_mouse_leave_taskbar(10);
+        hidden.tick(10 + cfg.hide_delay_ms + 1);
+        hidden.tick(done);
+        out.push(("hidden", hidden));
+
+        // Reached from `Hidden`, not from `Visible`: `peek` on a taskbar that
+        // is already on screen only resets its timer, which is correct and was
+        // not what this fixture first assumed. And `peek` puts a hidden bar
+        // into `SlidingIn`; `Peeking` is where it lands once that finishes.
+        let mut peeking = AutoHideManager::new(cfg.clone());
+        peeking.on_mouse_enter_taskbar(0);
+        peeking.on_mouse_leave_taskbar(10);
+        peeking.tick(10 + cfg.hide_delay_ms + 1);
+        peeking.tick(done);
+        peeking.peek(done);
+        peeking.tick(done + cfg.slide_duration_ms + 1);
+        out.push(("peeking", peeking));
+
+        let mut off = AutoHideManager::new(AutoHideConfig {
+            enabled: false,
+            ..AutoHideConfig::default()
+        });
+        off.tick(0);
+        out.push(("disabled", off));
+
+        out
+    }
+
+    #[test]
+    fn saying_no_tick_is_needed_means_a_tick_would_change_nothing() {
+        // The invariant that stops `needs_tick` drifting from `tick`. It is
+        // written as two mirrored conditions and could fall out of step with
+        // the state machine it describes; what cannot fall out of step is
+        // asking the state machine itself.
+        //
+        // Being wrong the generous way wakes an idle desktop for ever. Being
+        // wrong the mean way -- which is what this checks -- strands a taskbar
+        // mid-slide until the user happens to move the mouse.
+        for (name, mut m) in managers_in_every_state() {
+            if m.needs_tick() {
+                continue;
+            }
+            let before = (
+                m.taskbar_offset(),
+                m.is_fully_visible(),
+                m.is_fully_hidden(),
+            );
+            // A long way into the future: anything time-driven would have
+            // fired by now.
+            let changed = m.tick(1_000_000);
+            assert!(
+                !changed,
+                "{name}: needs_tick() said no, but tick() reported a change"
+            );
+            assert_eq!(
+                (
+                    m.taskbar_offset(),
+                    m.is_fully_visible(),
+                    m.is_fully_hidden()
+                ),
+                before,
+                "{name}: needs_tick() said no, but the taskbar moved"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pending_hide_needs_ticks_and_a_locked_one_does_not() {
+        // The two halves of the `Visible` arm, which is the one that cannot be
+        // read off the state alone.
+        let states: std::collections::HashMap<_, _> = managers_in_every_state()
+            .into_iter()
+            .map(|(name, m)| (name, m.needs_tick()))
+            .collect();
+        assert_eq!(states.get("hide pending"), Some(&true));
+        assert_eq!(states.get("hide pending but locked"), Some(&false));
+        assert_eq!(states.get("fresh/visible"), Some(&false));
+        assert_eq!(states.get("sliding out"), Some(&true));
+        assert_eq!(
+            states.get("hidden"),
+            Some(&false),
+            "hidden is a resting state"
+        );
+        assert_eq!(states.get("peeking"), Some(&true));
+
+        // ...and that the fixture named "hidden" is actually hidden. Without
+        // this, the assertion above passes for a manager that merely has
+        // nothing pending, which is a weaker claim than its name makes -- and
+        // a mutation flipping the `Hidden` arm of `needs_tick` was caught only
+        // by the invariant test, which is what prompted the check.
+        let hidden = managers_in_every_state()
+            .into_iter()
+            .find(|(n, _)| *n == "hidden")
+            .map(|(_, m)| m)
+            .expect("the fixture list has a hidden manager");
+        assert!(hidden.is_fully_hidden(), "the hidden fixture is not hidden");
+    }
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
 
     use super::*;
 

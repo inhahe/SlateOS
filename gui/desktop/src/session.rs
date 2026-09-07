@@ -80,6 +80,7 @@ use oswindow::{
 
 use crate::animations::{AnimationManager, WindowAnimation};
 use crate::notif_pane;
+use crate::taskbar_autohide::{AutoHideConfig, AutoHideManager, ScreenEdge};
 use crate::wallpaper::WallpaperManager;
 use crate::{DesktopShell, ShellAction, ShellRequest, WindowRequest};
 
@@ -213,6 +214,18 @@ pub struct ShellSession<T: Transport> {
     /// the loop parks with no bound at all, which is what keeps an idle desktop
     /// idle.
     animations: AnimationManager,
+    /// Slides the taskbar out of the way when it is not in use.
+    ///
+    /// Off unless the user asked for it; see `taskbar_autohide` in
+    /// `appearance.yaml` and design-decisions 813.
+    autohide: AutoHideManager,
+    /// Milliseconds since this session started.
+    ///
+    /// `AutoHideManager` is *dated* rather than stepped -- it measures a hide
+    /// delay and an animation against absolute times -- while every other
+    /// clock here is a delta. This accumulates the one into the other, and is
+    /// the session's only absolute clock.
+    clock_ms: u64,
     /// The picture the background surface was last *asked* to hold, as the
     /// wallpaper's image id and the path it was read from.
     ///
@@ -363,6 +376,11 @@ impl<T: Transport> ShellSession<T> {
             running: false,
             launches: Vec::new(),
             animations: AnimationManager::new(),
+            autohide: AutoHideManager::new(AutoHideConfig {
+                enabled: false,
+                ..AutoHideConfig::default()
+            }),
+            clock_ms: 0,
             wallpaper_image: None,
             wallpaper_error: None,
         };
@@ -948,6 +966,7 @@ impl<T: Transport> ShellSession<T> {
     pub fn load_appearance(&mut self) {
         self.shell.load_appearance();
         self.sync_animation_speed();
+        self.sync_autohide();
     }
 
     /// Push the shell's animation speed into the manager that obeys it.
@@ -956,6 +975,87 @@ impl<T: Transport> ShellSession<T> {
     /// Fast, 1.5 for Slow, 0.0 for Off -- which is exactly what
     /// [`AnimationManager::set_duration_scale`] takes, so nothing is converted
     /// here and there is no second definition of what "slow" means.
+    /// Tell auto-hide where the pointer is.
+    ///
+    /// Tested against the *drawn* rectangle and the trigger strip, both of
+    /// which come from the manager, so a bar that has slid half out is entered
+    /// where it now is rather than where it started.
+    fn autohide_pointer(&mut self, event: &MouseEvent) {
+        let (tx, ty, tw, th) = self.autohide.taskbar_rect();
+        let inside = |x: f32, y: f32, r: (f32, f32, f32, f32)| {
+            x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
+        };
+        if inside(event.x, event.y, (tx, ty, tw, th)) {
+            self.autohide.on_mouse_enter_taskbar(self.clock_ms);
+        } else {
+            self.autohide.on_mouse_leave_taskbar(self.clock_ms);
+        }
+        if inside(event.x, event.y, self.autohide.trigger_zone()) {
+            self.autohide.on_mouse_enter_trigger(self.clock_ms);
+        } else {
+            self.autohide.on_mouse_leave_trigger();
+        }
+        // A pointer event is a wake-up the loop already had, but the *next*
+        // one is ours to ask for: entering the trigger zone starts a slide that
+        // nothing else would tick.
+        self.arm_next_frame();
+    }
+
+    /// Put the panel surface where the taskbar currently belongs.
+    ///
+    /// The taskbar's place is its drawn rectangle plus whatever auto-hide has
+    /// slid it by, and this is the only function that adds the two together --
+    /// the resize path and the auto-hide path both come here rather than each
+    /// computing an origin, because a taskbar drawn in one place and hit-tested
+    /// in another is the class of bug that is invisible until somebody clicks.
+    ///
+    /// The *surface* moves rather than the drawing inside it. Sliding the
+    /// contents within a stationary window would leave a strip of transparent
+    /// panel over the desktop swallowing clicks, and would still be there when
+    /// the bar was fully hidden.
+    fn place_panel(&mut self) -> Result<(), Error<T>> {
+        let bar = self.shell.taskbar_rect();
+        let (dx, dy) = self.autohide.taskbar_offset();
+        let (x, y) = (bar.x + dx, bar.y + dy);
+        self.panel.origin = (x, y);
+        if let Some(mut handle) = self.events.window_mut(self.panel.window) {
+            handle.set_position(pos(x), pos(y))?;
+        }
+        Ok(())
+    }
+
+    /// Rebuild the auto-hide configuration from the shell's own geometry and
+    /// the user's setting.
+    ///
+    /// The taskbar's size and the screen's are read back from
+    /// [`DesktopShell::taskbar_rect`] rather than tracked separately, so the
+    /// bar that slides is the bar that is drawn. `AutoHideConfig` carries its
+    /// own copies of both, which is a second place they could disagree; this
+    /// function is the reason they cannot.
+    fn sync_autohide(&mut self) {
+        let bar = self.shell.taskbar_rect();
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a screen dimension is far inside f32's exact range"
+        )]
+        let (sw, sh) = (
+            self.shell.screen_width as f32,
+            self.shell.screen_height as f32,
+        );
+        self.autohide.set_config(AutoHideConfig {
+            enabled: self.shell.appearance.taskbar_autohide,
+            // The shell draws its bar along the bottom and has no setting for
+            // any other edge. Named rather than defaulted so that whoever adds
+            // one finds this line.
+            edge: ScreenEdge::Bottom,
+            slide_distance: bar.h,
+            taskbar_size: bar.h,
+            screen_width: sw,
+            screen_height: sh,
+            ..AutoHideConfig::default()
+        });
+    }
+
     fn sync_animation_speed(&mut self) {
         self.animations
             .set_duration_scale(self.shell.appearance.animation_speed.multiplier());
@@ -1066,7 +1166,7 @@ impl<T: Transport> ShellSession<T> {
             // previous frame of this animation, not the interval that was
             // asked for, so a late frame steps further rather than slowing the
             // animation down.
-            Event::Tick { elapsed_ms } => self.step_frame(elapsed_ms),
+            Event::Tick { elapsed_ms } => self.step_frame(elapsed_ms)?,
             // Somebody rewrote `appearance.yaml` -- the Settings app, almost
             // always -- and the compositor has passed the word on. This is
             // what makes a theme change take effect while the desktop is
@@ -1093,6 +1193,7 @@ impl<T: Transport> ShellSession<T> {
                     // having changed: a guard would be a second place that has
                     // to know which fields matter.
                     self.sync_animation_speed();
+                    self.sync_autohide();
                     self.dirty = true;
                 }
             }
@@ -1210,7 +1311,7 @@ impl<T: Transport> ShellSession<T> {
     /// moving. Wake-ups are one-shot (`design-decisions.md` §521 §2), so
     /// "stop" is what happens by not doing this — a handler that returns early
     /// leaves the desktop idle rather than leaving a timer running for ever.
-    fn step_frame(&mut self, elapsed_ms: u64) {
+    fn step_frame(&mut self, elapsed_ms: u64) -> Result<(), Error<T>> {
         // A `u64` of milliseconds that does not fit in a `u32` is 49 days, so
         // this is the loop having been stopped in a debugger rather than a real
         // frame. Saturating puts every animation at its end, which is where a
@@ -1249,10 +1350,23 @@ impl<T: Transport> ShellSession<T> {
         // its own animation path, `animate_window` is for callers that render
         // the result themselves.
         drop(self.animations.tick(dt));
+
+        // Auto-hide is dated rather than stepped, so the session's only
+        // absolute clock is advanced here and nowhere else.
+        self.clock_ms = self.clock_ms.saturating_add(elapsed_ms);
+        if self.autohide.tick(self.clock_ms) {
+            // The error is deliberately not swallowed: failing to move the
+            // panel leaves the bar drawn where it is not, and a shell that
+            // cannot reach its own surface has bigger problems than this one.
+            self.place_panel()?;
+            self.dirty = true;
+        }
+
         if moved {
             self.dirty = true;
         }
         self.arm_next_frame();
+        Ok(())
     }
 
     /// Ask for the next frame if anything is still moving.
@@ -1278,10 +1392,16 @@ impl<T: Transport> ShellSession<T> {
             // towards. A term that only counted fades would leave a freshly
             // shown OSD on screen for ever on an otherwise idle desktop.
             || self.shell.osd.has_visible()
+            // Auto-hide only when it has something to do: a hide waiting on its
+            // delay, or a slide in progress. `Hidden` and `Visible`-at-rest are
+            // both false, so switching auto-hide on does not by itself cost the
+            // desktop its unbounded park.
+            || self.autohide.needs_tick()
     }
 
     /// One pointer event, already in screen coordinates.
     fn pointer(&mut self, event: &MouseEvent) -> Result<(), Error<T>> {
+        self.autohide_pointer(event);
         match self.shell.handle_mouse(event) {
             // Not the shell's, and nothing the shell drew has changed. The
             // compositor routes a press to the topmost window containing it, so
@@ -1335,11 +1455,10 @@ impl<T: Transport> ShellSession<T> {
         self.shell.screen_height = height;
 
         let bar = self.shell.taskbar_rect();
-        self.panel.origin = (bar.x, bar.y);
         if let Some(mut handle) = self.events.window_mut(self.panel.window) {
-            handle.set_position(pos(bar.x), pos(bar.y))?;
             handle.set_size(px(bar.w), px(bar.h))?;
         }
+        self.place_panel()?;
         if let Some(mut handle) = self.events.window_mut(self.popups.window) {
             handle.set_size(width, height)?;
         }

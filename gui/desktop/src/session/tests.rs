@@ -1095,6 +1095,155 @@ fn an_animation_speed_of_off_stops_the_shell_animating() {
     });
 }
 
+// ---- taskbar auto-hide ----
+
+/// A session whose saved settings have auto-hide set to `on`.
+fn session_with_autohide() -> (Session, Desktop) {
+    let mut file = appearance::AppearanceFile::load();
+    file.settings.taskbar_autohide = true;
+    file.save().expect("save");
+    let (mut session, desktop) = session();
+    session.load_appearance();
+    (session, desktop)
+}
+
+/// Step the frame clock by `ms` in 16 ms slices, through the real event path
+/// rather than by calling `step_frame` directly -- a tick arrives as an input
+/// event in a live session, and driving it any other way would skip `dispatch`.
+fn run_frames(session: &mut Session, desktop: &Desktop, ms: u64) {
+    let window = session.panel().window();
+    let mut left = ms;
+    while left > 0 {
+        let slice = left.min(16);
+        desktop.borrow_mut().send_input(&[InputEvent::new(
+            window,
+            guitk::event::Event::Tick { elapsed_ms: slice },
+        )]);
+        session.pump().expect("a frame should not fail");
+        left -= slice;
+    }
+}
+
+#[test]
+fn auto_hide_is_off_unless_the_user_asked_for_it() {
+    // The module's own `AutoHideConfig::default()` has `enabled: true`. A
+    // taskbar that vanishes on a machine nobody configured is a large,
+    // surprising change, so the shell must not inherit that default. See
+    // design-decisions 813.
+    settingsfile::testing::with_scratch_config("session-autohide-default", |_root| {
+        let (mut session, desktop) = session();
+        session.load_appearance();
+        let before = session.panel().origin;
+
+        // The pointer must *visit and leave* the bar, or nothing would hide
+        // even with auto-hide on and this test would pass on any default. That
+        // is what a first version of it did.
+        let bar = session.shell().taskbar_rect();
+        press_at(&desktop, session.panel(), bar.x + 4.0, bar.y + 4.0);
+        session.pump().expect("pump");
+        press_at(&desktop, session.background(), 10.0, 10.0);
+        session.pump().expect("pump");
+        run_frames(&mut session, &desktop, 5_000);
+
+        assert_eq!(
+            session.panel().origin,
+            before,
+            "the taskbar moved on a desktop that never asked for auto-hide"
+        );
+    });
+}
+
+#[test]
+fn an_idle_desktop_with_auto_hide_on_still_parks() {
+    // The property design-decisions 812 defends. Once the bar has finished
+    // hiding there is nothing left to animate and nothing measuring a delay,
+    // so the session must stop asking to be woken -- otherwise turning this
+    // setting on costs the machine its sleep for ever.
+    settingsfile::testing::with_scratch_config("session-autohide-idle", |_root| {
+        let (mut session, _desktop) = session_with_autohide();
+        // Long enough for the delay and the slide to finish several times over.
+        run_frames(&mut session, &_desktop, 10_000);
+        // Two statements of the same property: the mechanism says it wants no
+        // more ticks, and the bar has in fact stopped moving.
+        assert!(
+            !session.autohide.needs_tick(),
+            "an idle desktop with a fully hidden taskbar is still asking for frames"
+        );
+        let settled = session.panel().origin;
+        run_frames(&mut session, &_desktop, 1_000);
+        assert_eq!(session.panel().origin, settled, "still drifting when idle");
+    });
+}
+
+#[test]
+fn the_taskbar_slides_away_and_comes_back_to_the_edge() {
+    settingsfile::testing::with_scratch_config("session-autohide-slide", |_root| {
+        let (mut session, desktop) = session_with_autohide();
+        let resting = session.panel().origin;
+
+        // The pointer has never been near the bar, so nothing is pending yet.
+        run_frames(&mut session, &desktop, 100);
+        assert_eq!(session.panel().origin, resting, "hid without provocation");
+
+        // Touch the bar, then leave it: that starts the delay.
+        let bar = session.shell().taskbar_rect();
+        press_at(&desktop, session.panel(), bar.x + 4.0, bar.y + 4.0);
+        session.pump().expect("pump");
+        press_at(&desktop, session.background(), 10.0, 10.0);
+        session.pump().expect("pump");
+
+        run_frames(&mut session, &desktop, 2_000);
+        let hidden = session.panel().origin;
+        assert!(
+            hidden.1 > resting.1,
+            "the bar should have slid down off the bottom edge: {resting:?} -> {hidden:?}"
+        );
+
+        // Reaching the very bottom of the screen brings it back.
+        #[expect(clippy::cast_precision_loss, reason = "a screen height is small")]
+        let h = session.shell().screen_height as f32;
+        press_at(&desktop, session.background(), 100.0, h - 1.0);
+        session.pump().expect("pump");
+        run_frames(&mut session, &desktop, 2_000);
+        assert_eq!(
+            session.panel().origin,
+            resting,
+            "the bar did not come back when the pointer reached the edge"
+        );
+    });
+}
+
+#[test]
+fn turning_auto_hide_off_puts_the_taskbar_back() {
+    // Through the live announcement path, so a user who hides their taskbar,
+    // dislikes it, and switches it off gets the bar back without logging out.
+    settingsfile::testing::with_scratch_config("session-autohide-off", |_root| {
+        let (mut session, desktop) = session_with_autohide();
+        let resting = session.panel().origin;
+
+        let bar = session.shell().taskbar_rect();
+        press_at(&desktop, session.panel(), bar.x + 4.0, bar.y + 4.0);
+        session.pump().expect("pump");
+        press_at(&desktop, session.background(), 10.0, 10.0);
+        session.pump().expect("pump");
+        run_frames(&mut session, &desktop, 2_000);
+        assert_ne!(session.panel().origin, resting, "did not hide");
+
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.taskbar_autohide = false;
+        file.save().expect("save");
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+        run_frames(&mut session, &desktop, 1_000);
+
+        assert_eq!(
+            session.panel().origin,
+            resting,
+            "switching auto-hide off should return the taskbar"
+        );
+    });
+}
+
 // ---- following the display ----
 
 #[test]
@@ -2012,7 +2161,7 @@ fn the_slide_finishes_and_then_the_desktop_goes_quiet() {
 
     // Well past the pane's own animation length at any plausible frame rate.
     for _ in 0..200 {
-        session.step_frame(16);
+        session.step_frame(16).expect("a frame should not fail");
     }
 
     assert!(!session.anything_moving(), "the desktop never went quiet");
@@ -2032,7 +2181,7 @@ fn closing_the_pane_slides_it_out_and_it_stays_out() {
         .send_input(&[InputEvent::new(panel, super_n())]);
     session.pump().expect("the harness refused");
     for _ in 0..200 {
-        session.step_frame(16);
+        session.step_frame(16).expect("a frame should not fail");
     }
 
     desktop
@@ -2045,7 +2194,7 @@ fn closing_the_pane_slides_it_out_and_it_stays_out() {
     );
 
     for _ in 0..200 {
-        session.step_frame(16);
+        session.step_frame(16).expect("a frame should not fail");
     }
 
     assert_eq!(
@@ -2067,7 +2216,7 @@ fn a_frame_tick_does_not_restart_the_slide_it_just_finished() {
         .send_input(&[InputEvent::new(panel, super_n())]);
     session.pump().expect("the harness refused");
     for _ in 0..200 {
-        session.step_frame(16);
+        session.step_frame(16).expect("a frame should not fail");
     }
     // Close it, let the slide-out run to completion *through the event path*,
     // which is where the sampling lives.

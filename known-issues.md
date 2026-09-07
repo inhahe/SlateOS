@@ -20194,6 +20194,122 @@ the first attempt at this fix went wrong.
 
 ---
 
+## TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER
+
+**In short:** Open Settings, choose "Slow" animations, and the setting is
+saved, survives a restart, and changes nothing — because nothing in the system
+reads it. The same is true of desktop icon size and cursor scheme. Cursor
+*size* is worse: it exists as four separate settings in four places, and the
+program that draws the cursor reads none of them. These are controls that work
+perfectly and do nothing, which is the most expensive kind of broken, because
+the user has no way to tell it from a preference the system is ignoring on
+purpose.
+
+**Found** 2026-09-06 by lane C, auditing which of `AppearanceSettings`' fifteen
+fields have a consumer. This narrows the older observation in
+`TD-APPEARANCE-SETTINGS-ARE-NEVER-WRITTEN-TO-DISK` ("also unread by any
+renderer: `window_corners`, `drop_shadows`, `animation_speed`, `icon_size`,
+`cursor_size`, `cursor_scheme`, and `scaling_percent`"), which was written on
+2026-08-14 and is now half out of date — four of those seven have since been
+wired, and the remaining three plus the cursor-size tangle are what is left.
+
+### What was measured
+
+`grep` for each field across `gui/**` and `apps/**`, discounting the two
+settings *editors* (`gui/desktop/src/appearance_settings.rs` and
+`apps/settings/src/main.rs`) and the model crate itself, since a field being
+read by the panel that edits it is not a consumer.
+
+| Setting | Consumers outside the editors | State |
+|---|---|---|
+| `theme_mode`, `accent_color`, `custom_accent` | desktop palette | **works** |
+| `transparency` | `DesktopTheme` (`lib.rs:1283`, `:1311`) | **works** |
+| `taskbar_style` | `DesktopTheme` (`lib.rs:1308`) | **works** |
+| `accent_taskbar`, `accent_titlebars` | desktop chrome | **works** |
+| `window_corners`, `drop_shadows` | compositor | **works** |
+| `scaling_percent` | `guitk::scaling` via `set_appearance` | **works** |
+| `fonts` | — | out of scope here; see §400 and C-Q1 |
+| **`animation_speed`** | **none** | **dead** |
+| **`icon_size`** | **none** | **dead** |
+| **`cursor_scheme`** | **none** | **dead** |
+| **`cursor_size`** | **none** — and three rival copies | **dead, four ways** |
+
+Two of those need their evidence stated, because "grep found nothing" is a weak
+claim on its own:
+
+- **`animation_speed` has no possible consumer, not merely no actual one.** The
+  shell's `AnimationManager` (`gui/desktop/src/animations.rs`) has no speed,
+  multiplier or scale concept anywhere in it — the field it would multiply does
+  not exist. So this is not a missing call site; it is a missing feature, and
+  the setting was added to the model ahead of the thing it configures. The
+  panel even renders `{:.2}x` next to it, so the UI states a multiplier the
+  animation code cannot receive.
+- **`icon_size`'s only non-editor hits are a false positive.** They are
+  `guitk::scaling`'s own `icon_size()` method in that module's tests — a
+  scaling-context accessor with the same name, unrelated to this preference.
+
+### The cursor-size tangle
+
+One user-facing setting, four independent models, no reader:
+
+| Where | Name | Persisted to |
+|---|---|---|
+| `gui/appearance` | `cursor_size` | `appearance.yaml` |
+| `gui/inputsettings` | `cursor_size` (clamped 16–128) | `input.yaml` |
+| `gui/desktop/src/a11y.rs` | `cursor.size_scale` | the accessibility file |
+| `gui/desktop/src/accessibility_settings.rs` | `cursor_size_multiplier` | — |
+
+And `gui/compositor` — which owns `CursorShape`, tracks `cursor_shape`, and is
+the only thing positioned to draw a pointer at a size — has **no cursor size
+concept at all**. So the four settings do not merely disagree; there is nothing
+for them to disagree *at*.
+
+This is `TD-THREE-INDEPENDENT-APPEARANCE-MODELS` recurring with one more copy
+and, unlike that case, without even one working consumer to be the authority.
+
+**Caveat on this one.** I have verified that the compositor has no cursor size.
+I have *not* traced whether some lower layer (a DRM/KMS hardware cursor plane,
+or the input driver) sizes the pointer independently — if one does, the picture
+changes from "nothing reads it" to "something reads it and the settings cannot
+reach it", which is a different fix. That should be checked before work starts.
+
+### Why this matters more than the count suggests
+
+A setting that is missing is honest. A setting that is present, editable,
+persisted, and inert is a lie the system tells about itself, and it costs the
+user the time to change it, restart, decide they misremembered what it did, and
+change it back. It also costs *us*: `animation_speed` has a test in
+`apps/settings` asserting every speed can be picked
+(`test_every_animation_speed_can_be_picked`), which passes, and proves only
+that a control moves a value nothing consumes. That is the same shape as the
+heatmap whose legend advertised a gradient the graph did not draw
+(design-decisions 812's neighbours) — the test asserts the half that works.
+
+### Proper fix
+
+Per setting, and they are not equal:
+
+1. **`animation_speed`** — give `AnimationManager` a speed multiplier applied
+   where elapsed time enters an animation, and feed it from
+   `DesktopShell::set_appearance`. This is the one with real user value and it
+   is self-contained.
+2. **`icon_size`** — the desktop-icon renderer is the consumer; it should take
+   the size from the setting rather than a constant.
+3. **`cursor_scheme`** and **`cursor_size`** — do *not* wire these until the
+   caveat above is resolved and the four models are collapsed to one. Wiring one
+   of four rival copies to a renderer would make the other three permanently
+   wrong instead of uniformly inert, which is harder to notice and harder to
+   undo.
+
+### Where
+
+`gui/appearance/src/lib.rs` (the model); `gui/desktop/src/animations.rs` (no
+speed concept); `gui/desktop/src/lib.rs` (`set_appearance`, the natural feed);
+`gui/inputsettings/src/lib.rs`, `gui/desktop/src/a11y.rs`,
+`gui/desktop/src/accessibility_settings.rs` (the rival cursor models);
+`gui/compositor/src/lib.rs` (`CursorShape`, no size).
+
+
 ## TD-APPS-ESTIMATE-TEXT-WIDTH — apps still guess at text width instead of measuring it
 
 **Status.** **Closed for the original defect** as of 2026-08-14. `gui/**` was

@@ -122077,12 +122077,43 @@ that genuinely does nothing. Someone debugs the program, not the build. And it i
 worse on a long-lived machine than a fresh one, which inverts the usual order in
 which people suspect their toolchain.
 
-**A `rerun-if-changed` line alone is not the fix,** also lane C's point: the
-artifact would still be the output of a build cargo does not run, so the ordering
-stays undeclared and a fresh clone still fails. It converts a silent-stale bug
-into one that sometimes notices. The fix is either a build script that builds the
-six as a real step (from inside each service's directory, as bootstrap does), or
-tracking the binaries in-tree behind a staleness gate.
+**The fix does not need a new builder,** and an earlier draft of this entry said
+it did -- lane C's prescription, which lane C then withdrew for the same reason
+the rest of this entry was wrong: it assumed no build step existed. One does, and
+`bootstrap-worktree.sh` is better than the thing that draft proposed writing,
+because it derives its list from the `include_bytes!` calls and so cannot drift
+from the kernel, which a hand-maintained `build.rs` list would not give.
+
+What is wanted is the missing half only, in `kernel/build.rs`, **in this order**:
+
+1. derive the artifact list by scanning `kernel/src` for `include_bytes!` of
+   `services/*/target/*/release/*` -- the same derivation
+   `bootstrap-worktree.sh` uses, so the two halves of one invariant cannot
+   disagree when a seventh service is added. Fail closed if the scan finds
+   none: zero means the scanner broke, not that the kernel embeds nothing.
+2. check each artifact exists; if any is missing, **hard-fail naming
+   `scripts/bootstrap-worktree.sh`**.
+3. only then emit `cargo:rerun-if-changed` for each.
+
+**The order is load-bearing, and lane A measured why.** On cargo 1.95.0, a
+`rerun-if-changed` naming a path that does *not* exist makes the build script
+re-run on every build: a counter in `build.rs` gave 1, 2, 3 across three no-op
+builds for a missing path, against 1, 1, 1 for an existing one (and 2 after
+touching it). So emitting the directives before the existence check would trade
+this quiet bug for another one, whose only symptom is that the kernel never
+caches.
+
+A `rerun-if-changed` line *alone* is still not sufficient, but the reason is
+narrower than the earlier draft claimed. Not that cargo must be the thing that
+builds the artifact -- lane A's position, which is the better one, is that a
+fresh clone *should* fail, and what was wrong was failing as fifteen
+`include_bytes!` errors blaming the kernel rather than one error naming the
+script. Step 2 fixes that without pretending the artifact appeared by itself.
+What remains knowingly accepted is that `rerun-if-changed` declares invalidation,
+not production: driving the service builds from `build.rs` would re-couple what
+the root `Cargo.toml` deliberately excluded -- it keeps these crates outside the
+`build-std` blast radius -- and would hide that coupling somewhere the exclusion
+is not stated.
 
 **Owner:** `kernel/**`, so lane A -- specifically the *live* lane A session, which
 during this exchange was not the one that answered to the name.
@@ -122108,10 +122139,33 @@ work -- before any of us started. The tool that finds a fact and the document
 that already contains it are different instruments, and I reached for the first
 four times before the second.
 
-Lane C's habit is the cheap general fix and is worth adopting tree-wide: **state
-which tree you measured, in the same sentence as the measurement.** All of
-today's errors -- this one, and separately a lockscreen bug reported from a
-worktree 54 commits behind -- were a session reading its own worktree and
-reporting it as the state of the project. That is what worktrees do: the
-isolation that stops three lanes clobbering each other also stops them seeing
+The five passes were not five different mistakes. Every one was a command that
+answered a narrower question than the one being asked, and whose answer was then
+reported at the width of the question: `grep -c` on one file, a glob that does
+not recurse, a `head -3`, a process scan whose regex matched the scanning command
+itself. None of them was wrong; each was asked something small and answered it
+exactly.
+
+Three habits come out of it, all cheap and all general.
+
+**State which tree you measured, in the same sentence as the measurement**
+(lane C's). All of today's errors -- this one, and separately a lockscreen bug
+reported from a worktree 54 commits behind -- were a session reading its own
+worktree and reporting it as the state of the project. That is what worktrees do:
+the isolation that stops three lanes clobbering each other also stops them seeing
 each other.
+
+**When a tool exists for the exact problem you are diagnosing, its documentation
+is a primary source about the problem, not just instructions for the tool**
+(also lane C's, and the sharpest of the three). I reached for `grep` four times
+before reading `bootstrap-worktree.sh`. Lane C did something harder to notice: it
+*ran* the script, used its runtime and the artifact's byte count as evidence in
+three separate messages, and never read its header -- so the disproof of what it
+was about to recommend was in its own terminal output. A script is a text that
+happens to run, and both of us treated it as only the second thing.
+
+**Derive, do not enumerate.** The one artefact in this story that never went
+wrong is the script's list of services, precisely because it is computed from the
+kernel's own source at every run. Four sessions counted by hand and four got a
+different number; the derivation has been right the whole time and unattended.
+That is why `build.rs` should scan rather than hold a list of six.

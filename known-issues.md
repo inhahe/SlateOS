@@ -122740,3 +122740,48 @@ is not this project's tree to move), or the search learns the old `D:` location
 once in the environment for all lanes (operator's, and outside any lane's
 files). Lane B has no standing to pick among those, so it is written down with
 the workaround instead.
+
+## A-CTEST-PTY-HANGS-BOOT (lane A, 2026-09-07)
+
+**The `ctest-pty` ring-3 fixture hangs the boot.**  On its first
+execution (boot #633), process 198 (`ctest-pty`, tid 167) entered a
+kernel syscall at RIP `0xffffffff819dc695` (kernel text) and never
+returned.  The scheduler failed to preempt it: `preempt_disable_depth=0`,
+timer ticks advanced (heartbeat went from 2908 to 83535), but zero
+context switches fired after spawn.  The process monopolised cpu0 in
+state `Running` for the remaining ~1400s of the QEMU timeout.
+
+The forked child (tid 166, `"forked"`) reached state `Dead` blocked at
+`kernel/src/ipc/waiters.rs:166`, so it exited — the parent did not.
+
+**Two bugs, both in lane A's territory (kernel):**
+
+1. **A pty/tty syscall path busy-loops in kernel space.**  The fixture
+   calls `openpty` → `forkpty` → writes `0x03` to the master.  One of
+   those syscall paths enters a loop that the hardware never breaks out
+   of.  The constant RIP (`0xffffffff819dc695`, all 16 NMI samples) is
+   the smoking gun — need to map it to a symbol to find the exact loop.
+2. **The scheduler does not preempt a kernel-space busy-loop** even with
+   preemption nominally enabled.  The liveness monitor prints "zero
+   context switches" while useful-work ticks keep advancing.  This means
+   the timer ISR increments the tick counter but never sets
+   `need_reschedule` (or the flag is ignored on the interrupt-return
+   path).  This is independent of the pty bug: *any* kernel code that
+   busy-loops today would monopolise the CPU the same way.
+
+**Workaround:** the ctest-pty rung is disabled in `kernel/src/main.rs`
+(the function still exists in `spawn.rs`).  Re-enable once both bugs are
+fixed.
+
+**Reproducer:** rebuild fixtures with `PYTHONPATH="D:/visual studio
+projects/fastpy"`, rebuild rootfs, enable the rung, boot.  The liveness
+monitor will report the hang within ~15s of the fixture starting.
+
+**What needs investigation:**
+- Map `0xffffffff819dc695` to a function (symbol table from the build).
+  That identifies the spinning syscall.
+- Check why `schedule_tick()` (or equivalent) does not set
+  `need_reschedule` when the current task's quantum expires in kernel
+  mode.  Hypothesis: the timer ISR only decrements the timeslice for
+  userspace tasks (checks `cs == USER_CS`) and skips tasks in syscall
+  context.

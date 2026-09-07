@@ -35161,11 +35161,36 @@ lock held across composition, which is a worse design wearing a better name.
    lane C may not edit the workspace-root `Cargo.toml`, and because a
    dependency added for a build that exists to test another build is a poor
    trade.
-3. **Cheap mitigation available today:** back the tick rate off when there are
-   no clients *and* nothing composited — e.g. poll at 10 Hz while idle, snap
-   back to the frame interval on the first connection. This does not fix the
-   latency floor for connected clients and does fix the idle-battery half.
-   Worth doing if the hosted compositor is ever left running.
+3. ~~**Cheap mitigation available today:** back the tick rate off when there
+   are no clients *and* nothing composited.~~ **Done 2026-09-07 (lane C).**
+   `IdleBackoff` on `Server`: after `SETTLE_TICKS` (60, about a second)
+   consecutive ticks with no client connected, no input and no frame composed,
+   the wait becomes `IDLE_INTERVAL` (100 ms). Any one of the three signals
+   resets it, so the rate snaps back rather than easing up.
+
+   Three things worth knowing about the shape:
+
+   - **The condition is "no clients", not "nothing composed".** A desktop
+     sitting still with clients connected composes nothing either, and backing
+     off there would add up to 100 ms to every request those clients make. The
+     frame timer paces composition; polling at frame rate keeps request
+     latency under one frame. Only with no sockets at all does the second
+     reason disappear.
+   - **It settles rather than switching.** One quiet tick is normal; toggling
+     on it would make the interval jitter across every gap in activity.
+   - **The idle wait never goes below the frame interval**, so a display
+     slower than 10 Hz is not polled *faster* for being idle.
+
+   The latency floor in the first bullet of this entry is untouched, and steps
+   1 and 2 remain the fix for it. **This entry stays OPEN for those.**
+
+   The decision lives on `Server` rather than inside `run_with` specifically so
+   it can be tested: a loop that ends only when its window closes is not
+   something a unit test can drive, so `Server::settle` takes the tick's
+   findings and returns the wait, and the tests drive *that*. Nine tests. The
+   one that matters most is `a_connected_client_keeps_the_loop_at_frame_rate`,
+   because the client-count term is the one a pure `IdleBackoff` test cannot
+   reach; deleting that term fails it.
 
 **Severity.** Low. It is waste and a latency floor, not a defect: every
 request is answered, in order, within a frame. It is logged because the

@@ -40,6 +40,11 @@
 //! same delay its result would wait for anyway before being composited. It is
 //! still waste on a wholly idle desktop, and it is logged as such in
 //! `known-issues.md` → `TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING`.
+//!
+//! What the loop does do about it is stop polling at frame rate once there is
+//! demonstrably nothing to poll — see [`IdleBackoff`]. That does not shorten
+//! the latency floor for a connected client, and is not meant to; it is the
+//! half of the waste that can be removed without a readiness primitive.
 
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -59,6 +64,86 @@ use crate::{Compositor, Display, WindowId};
 /// connections in a loop hold the compositor there indefinitely, and the
 /// desktop would stop drawing. Whatever is left waits one frame.
 pub const MAX_ACCEPTS_PER_TICK: usize = 16;
+
+/// How long the loop waits between ticks, and when it stops waiting a whole
+/// frame for work that is not coming.
+///
+/// # What it is for
+///
+/// The loop is a poll: once per frame interval it asks the listener whether
+/// anyone is connecting and every socket whether it has bytes. With no clients
+/// and nothing on screen there is no one to ask, and asking sixty times a
+/// second is a wakeup source that keeps a laptop out of a deep idle state —
+/// battery spent to discover that nothing happened.
+///
+/// # Why the condition is "no clients" and not "nothing composed"
+///
+/// A desktop sitting still with clients connected composes nothing either, and
+/// backing off there would add up to [`IdleBackoff::IDLE_INTERVAL`] to every
+/// request those clients make. The point of the frame timer is to pace
+/// *composition*; the point of polling at frame rate is to keep the request
+/// latency under one frame. Only when there are no sockets at all does the
+/// second reason disappear, and then nothing can change except a new
+/// connection or local input — both of which are noticed on the next tick and
+/// snap the rate straight back.
+///
+/// # Why it settles rather than switching at once
+///
+/// A single quiet tick is normal. Dropping to a tenth of the rate on one and
+/// back up on the next would make the interval jitter across every gap in
+/// activity. [`IdleBackoff::SETTLE_TICKS`] of *consecutive* idleness is
+/// roughly a second, which no interactive gap reaches.
+#[derive(Debug, Default)]
+pub struct IdleBackoff {
+    /// Consecutive ticks that found nothing to do.
+    ticks: u32,
+}
+
+impl IdleBackoff {
+    /// Consecutive idle ticks before the loop slows down — about a second at
+    /// 60 Hz.
+    pub const SETTLE_TICKS: u32 = 60;
+
+    /// How often to look for work once settled. Long enough to matter to an
+    /// idle CPU, short enough that a program starting up does not notice it
+    /// waiting for its connection to be accepted.
+    pub const IDLE_INTERVAL: Duration = Duration::from_millis(100);
+
+    /// A loop that has just started, and is not idle until it proves it.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { ticks: 0 }
+    }
+
+    /// Whether the loop is currently running at the reduced rate.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        self.ticks >= Self::SETTLE_TICKS
+    }
+
+    /// Record what a tick found, and return how long to wait after it.
+    ///
+    /// `busy` is the tick's own answer to "was there anything here" — a
+    /// connected client, an input event, or a frame that composed. Any one of
+    /// them resets the count, so the rate snaps back on the first sign of
+    /// work rather than easing back up.
+    ///
+    /// The result never goes *below* `frame`: a display slower than
+    /// [`Self::IDLE_INTERVAL`] would otherwise be polled faster while idle
+    /// than while busy, which is the opposite of the point.
+    pub fn after_tick(&mut self, busy: bool, frame: Duration) -> Duration {
+        if busy {
+            self.ticks = 0;
+            return frame;
+        }
+        self.ticks = self.ticks.saturating_add(1);
+        if self.is_settled() {
+            Self::IDLE_INTERVAL.max(frame)
+        } else {
+            frame
+        }
+    }
+}
 
 /// How many undecodable bytes a client may have outstanding before it is
 /// dropped.
@@ -146,6 +231,13 @@ struct Client {
 pub struct Server {
     listener: Listener,
     clients: Vec<Client>,
+    /// How long the loop is currently waiting between ticks.
+    ///
+    /// On the server rather than local to [`Self::run_with`] so that the whole
+    /// rule -- including the client-count term, which is the part most likely
+    /// to be wrong -- can be driven and asserted on by a test. A loop that
+    /// only ends when its window closes is not a thing a unit test can run.
+    backoff: IdleBackoff,
     /// Stands in for a process id. A TCP peer cannot be asked what process it
     /// is — there is no `SO_PEERCRED` across a network, and a remote client has
     /// no pid in this machine's namespace at all — so the compositor is given a
@@ -185,6 +277,7 @@ impl Server {
         Self {
             listener,
             clients: Vec::new(),
+            backoff: IdleBackoff::new(),
             // Zero is left free as "no client", matching the convention the
             // rest of the compositor uses for ids that may be absent.
             next_client_id: 1,
@@ -204,6 +297,28 @@ impl Server {
     }
 
     /// How many clients are connected.
+    #[must_use]
+    /// Score the tick that has just run, and return how long to wait after it.
+    ///
+    /// `composed` and `had_input` are the tick's own findings; the third
+    /// signal, whether any client is connected, is the server's own and is
+    /// read here rather than passed in. It must be read *after* the tick, so
+    /// that a connection accepted during it counts as work -- scoring it
+    /// before would let a new client's very first tick be called idle.
+    ///
+    /// See [`IdleBackoff`] for why the condition is "no clients" rather than
+    /// "nothing composed".
+    pub fn settle(&mut self, composed: bool, had_input: bool, frame: Duration) -> Duration {
+        let busy = composed || had_input || self.client_count() > 0;
+        self.backoff.after_tick(busy, frame)
+    }
+
+    /// Whether the loop has backed off to the reduced polling rate.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.backoff.is_settled()
+    }
+
     #[must_use]
     pub fn client_count(&self) -> usize {
         self.clients.len()
@@ -600,17 +715,23 @@ impl Server {
             // pushing afterwards would spend one frame moving the pointer at
             // the old speed after the user let go of the slider.
             Self::reconcile_input(compositor, present, &mut pushed_input);
-            for event in present.input() {
+            let events = present.input();
+            let had_input = !events.is_empty();
+            for event in events {
                 compositor.handle_input(event);
             }
             self.tick(compositor)?;
-            if self.compose(compositor) {
+            let composed = self.compose(compositor);
+            if composed {
                 Self::show(compositor, present);
             }
-            // Whatever is left of the frame. Subtracting the work already done
-            // rather than sleeping a flat interval, so a tick that took eight
+
+            let wait = self.settle(composed, had_input, interval);
+
+            // Whatever is left of the interval. Subtracting the work already
+            // done rather than sleeping a flat one, so a tick that took eight
             // milliseconds does not push the next frame to twenty-four.
-            if let Some(rest) = interval.checked_sub(began.elapsed()) {
+            if let Some(rest) = wait.checked_sub(began.elapsed()) {
                 std::thread::sleep(rest);
             }
         }
@@ -1328,6 +1449,170 @@ mod tests {
             display.log,
             vec!["reload", "poll", "poll"],
             "the device was told after it had already answered"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Idle back-off
+    //
+    // The loop these serve runs until a window closes, which a unit test
+    // cannot drive, so the decision is a value rather than a branch buried
+    // in the loop, and these test the value.
+    // ------------------------------------------------------------------
+
+    const FRAME: Duration = Duration::from_micros(16_667);
+
+    /// Drive `n` consecutive idle ticks at `frame` and return the last wait.
+    fn idle_for(backoff: &mut IdleBackoff, n: u32, frame: Duration) -> Duration {
+        let mut wait = frame;
+        for _ in 0..n {
+            wait = backoff.after_tick(false, frame);
+        }
+        wait
+    }
+
+    #[test]
+    fn a_busy_loop_always_waits_one_frame() {
+        let mut backoff = IdleBackoff::new();
+        for _ in 0..1000 {
+            assert_eq!(backoff.after_tick(true, FRAME), FRAME);
+        }
+        assert!(!backoff.is_settled(), "work never lets it settle");
+    }
+
+    #[test]
+    fn one_quiet_tick_does_not_slow_the_loop() {
+        let mut backoff = IdleBackoff::new();
+        assert_eq!(
+            backoff.after_tick(false, FRAME),
+            FRAME,
+            "a single quiet tick is normal and must not change the rate"
+        );
+    }
+
+    /// Both sides of the threshold, deliberately. A test of only the far side
+    /// passes with `SETTLE_TICKS` set to one, which would reintroduce exactly
+    /// the jitter the settling exists to prevent.
+    #[test]
+    fn the_loop_slows_down_only_once_the_quiet_run_is_long_enough() {
+        let mut backoff = IdleBackoff::new();
+        assert_eq!(
+            idle_for(&mut backoff, IdleBackoff::SETTLE_TICKS - 1, FRAME),
+            FRAME,
+            "one tick short of the threshold is still frame rate"
+        );
+        assert!(!backoff.is_settled());
+
+        assert_eq!(
+            backoff.after_tick(false, FRAME),
+            IdleBackoff::IDLE_INTERVAL,
+            "the tick that reaches the threshold is the one that slows down"
+        );
+        assert!(backoff.is_settled());
+    }
+
+    #[test]
+    fn any_sign_of_work_snaps_the_rate_straight_back() {
+        let mut backoff = IdleBackoff::new();
+        idle_for(&mut backoff, IdleBackoff::SETTLE_TICKS, FRAME);
+        assert!(backoff.is_settled(), "settled first");
+
+        assert_eq!(
+            backoff.after_tick(true, FRAME),
+            FRAME,
+            "one busy tick returns to frame rate, without easing back up"
+        );
+        assert!(!backoff.is_settled());
+
+        // And the count restarted rather than resuming just under the
+        // threshold, which would settle again on the next quiet tick.
+        assert_eq!(
+            idle_for(&mut backoff, IdleBackoff::SETTLE_TICKS - 1, FRAME),
+            FRAME
+        );
+    }
+
+    /// A display slower than the idle interval must not be polled *faster*
+    /// for being idle, which is what an unguarded constant does at 5 Hz.
+    #[test]
+    fn a_slow_display_is_never_polled_faster_for_being_idle() {
+        let slow = Duration::from_millis(200);
+        assert!(slow > IdleBackoff::IDLE_INTERVAL, "the case being tested");
+
+        let mut backoff = IdleBackoff::new();
+        let wait = idle_for(&mut backoff, IdleBackoff::SETTLE_TICKS, slow);
+
+        assert!(backoff.is_settled());
+        assert_eq!(
+            wait, slow,
+            "the frame interval wins when it is the longer of the two"
+        );
+    }
+
+    /// A connected client keeps the loop at frame rate, however quiet it is.
+    ///
+    /// This is the term the tests above cannot reach: they drive `IdleBackoff`
+    /// directly and so can only assert what happens for a given `busy`, not
+    /// that the server computes `busy` correctly. A client that connects and
+    /// then says nothing composes no frames and sends no input, so every other
+    /// signal reads idle -- and backing off there would add up to
+    /// `IDLE_INTERVAL` to every request it goes on to make.
+    #[test]
+    fn a_connected_client_keeps_the_loop_at_frame_rate() {
+        let (mut server, mut compositor, addr) = server();
+        let _conn = dial(&mut server, &mut compositor, addr);
+        assert_eq!(server.client_count(), 1, "connected");
+
+        for _ in 0..IdleBackoff::SETTLE_TICKS * 2 {
+            assert_eq!(
+                server.settle(false, false, FRAME),
+                FRAME,
+                "a silent client is still a client"
+            );
+        }
+        assert!(!server.is_idle());
+    }
+
+    /// With nobody connected there is nothing to poll for, and the loop says
+    /// so.
+    #[test]
+    fn a_server_nobody_connects_to_backs_off() {
+        let (mut server, _compositor, _addr) = server();
+        assert_eq!(server.client_count(), 0);
+
+        let mut wait = FRAME;
+        for _ in 0..IdleBackoff::SETTLE_TICKS {
+            wait = server.settle(false, false, FRAME);
+        }
+
+        assert!(
+            server.is_idle(),
+            "nothing to poll, so stop polling at 60 Hz"
+        );
+        assert_eq!(wait, IdleBackoff::IDLE_INTERVAL);
+    }
+
+    /// Local input with no clients still snaps the rate back -- there is a
+    /// cursor on screen and it must not lag a tenth of a second behind.
+    #[test]
+    fn input_alone_is_enough_to_keep_the_rate_up() {
+        let (mut server, _compositor, _addr) = server();
+        let mut wait = FRAME;
+        for _ in 0..IdleBackoff::SETTLE_TICKS {
+            wait = server.settle(false, false, FRAME);
+        }
+        assert!(server.is_idle(), "settled first");
+        assert_eq!(wait, IdleBackoff::IDLE_INTERVAL);
+
+        assert_eq!(server.settle(false, true, FRAME), FRAME);
+        assert!(!server.is_idle(), "the pointer moved, so wake up");
+    }
+
+    #[test]
+    fn the_idle_interval_is_a_real_reduction() {
+        assert!(
+            IdleBackoff::IDLE_INTERVAL > FRAME,
+            "backing off to something faster than a frame would be pointless"
         );
     }
 }

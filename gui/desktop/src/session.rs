@@ -72,7 +72,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use appearance::Palette;
-use guitk::event::{Event, MouseEvent, SettingsGroup};
+use guitk::event::{Event, Key, Modifiers, MouseEvent, SettingsGroup};
 use guitk::render::RenderTree;
 use oswindow::{
     ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer, PixelFormat, Spec,
@@ -198,6 +198,15 @@ pub struct ShellSession<T: Transport> {
     /// Whether the overlay surface is currently mapped, tracked as
     /// `popups_shown` is and reconciled from `shell.osd.has_visible()`.
     osd_shown: bool,
+    /// The unconditional chords this session currently holds a grab on.
+    ///
+    /// Remembered rather than recomputed, because a rebind changes what
+    /// `shell.global_chords()` answers -- so afterwards the registry can no
+    /// longer say which chords were grabbed *before* it, and an ungrab needs
+    /// exactly that. Without this a rebound global shortcut kept working under
+    /// its old chord and did nothing under its new one until the session
+    /// restarted.
+    global_held: Vec<(Key, Modifiers)>,
     /// Whether the shell currently holds the Escape key.
     ///
     /// Tracked for the same reason `popups_shown` is, and reconciled by
@@ -349,12 +358,14 @@ impl<T: Transport> ShellSession<T> {
         // whatever is in the shell's hotkey registry, so a rebound shortcut is
         // grabbed under its new chord without anyone having to remember to edit
         // a second list.
-        for (key, modifiers) in shell.global_chords() {
-            events.grab_key(panel.window, key, modifiers)?;
+        let global_held = shell.global_chords();
+        for (key, modifiers) in &global_held {
+            events.grab_key(panel.window, *key, *modifiers)?;
         }
 
         let mut session = Self {
             events,
+            global_held,
             shell,
             wallpaper: WallpaperManager::new(),
             background,
@@ -907,6 +918,10 @@ impl<T: Transport> ShellSession<T> {
         // Escape means. One boolean compare per pump buys never having to ask
         // which of those paths was taken.
         self.reconcile_escape_grab()?;
+        // After it, not before: `reconcile_escape_grab` is about chords that
+        // come and go with popups; this is about the set changing shape under
+        // a rebind, and a rebind made in this pump should take effect in it.
+        self.reconcile_global_grabs()?;
         Ok(worked)
     }
 
@@ -1290,6 +1305,40 @@ impl<T: Transport> ShellSession<T> {
     ///
     /// `escape_held` makes this a round trip only when the answer *changes*, so
     /// an idle desktop with nothing open costs nothing per pump.
+    /// Bring the unconditional grabs back in line with the registry.
+    ///
+    /// On the same unconditional footing as
+    /// [`reconcile_escape_grab`](Self::reconcile_escape_grab) and for the same
+    /// reason: a rebind happens inside `handle_hotkey`, several layers down,
+    /// and threading a "the chords changed" flag back up would be one more
+    /// thing to forget at one more call site. Comparing two short lists once
+    /// per pump is cheaper than being wrong.
+    ///
+    /// The diff matters in both directions. Grabbing the new chord without
+    /// ungrabbing the old one leaves the shell holding a chord no shortcut
+    /// uses -- which is a key no application can ever see.
+    fn reconcile_global_grabs(&mut self) -> Result<(), Error<T>> {
+        let wanted = self.shell.global_chords();
+        if wanted == self.global_held {
+            return Ok(());
+        }
+
+        for chord in &self.global_held {
+            if !wanted.contains(chord) {
+                self.events
+                    .ungrab_key(self.panel.window, chord.0, chord.1)?;
+            }
+        }
+        for chord in &wanted {
+            if !self.global_held.contains(chord) {
+                self.events.grab_key(self.panel.window, chord.0, chord.1)?;
+            }
+        }
+
+        self.global_held = wanted;
+        Ok(())
+    }
+
     fn reconcile_escape_grab(&mut self) -> Result<(), Error<T>> {
         let wanted = self.shell.any_popup_open();
         if wanted == self.escape_held {

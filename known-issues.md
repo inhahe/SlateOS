@@ -91119,12 +91119,20 @@ absent is a config name and the read/write around it. The shell now has that
 machinery -- `settingsfile`, a `config::Watcher`, and two files of its own
 already -- so this is wiring, not design.
 
-**Also still missing: re-grabbing.** The entry warns that the set of chords the
-shell holds globally is derived from the registry, so a rebind must ungrab the
-old chord and grab the new one, "the piece most likely to be forgotten". It is
-still forgotten: `rebind_row` changes the registry and nothing reconciles
-`global_chords`. Within one session that means a rebound *global* shortcut
-does not reach the shell until the session restarts. Local ones work now.
+**Re-grabbing: done 2026-09-07.** `ShellSession::reconcile_global_grabs` runs
+once per pump, on the same unconditional footing as the existing
+`reconcile_escape_grab` and for the same reason -- a rebind happens several
+layers down inside `handle_hotkey`, and threading a "the chords changed" flag
+back up would be one more thing to forget at one more call site.
+
+The session now *remembers* which chords it holds rather than recomputing
+them, because after a rebind the registry can no longer say which chords were
+grabbed before it, and an ungrab needs exactly that.
+
+Both directions are tested. The quieter half is the ungrab: grabbing the new
+chord without releasing the old one leaves the shell holding a chord no
+shortcut uses, which is a key no application can ever see. Mutation-checked --
+deleting the ungrab loop fails the test.
 
 Original entry follows.
 

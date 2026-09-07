@@ -109,6 +109,26 @@ pub struct Canvas {
 pub struct WireBytes(Vec<u8>);
 
 impl WireBytes {
+    /// Wire bytes from `0xAARRGGBB` pixels, one `u32` each.
+    ///
+    /// The second constructor, and the reason there is one: `imagecodec`
+    /// decodes to `Vec<u32>` in exactly that layout and is a lean crate that
+    /// depends only on `deflate` -- making it depend on this whole toolkit so
+    /// it could name this type would be a far worse trade than giving the type
+    /// a constructor for the shape it produces. The wallpaper path uses this.
+    ///
+    /// Still closed in the sense that matters: the caller hands over *pixels*,
+    /// not bytes, so there is no opportunity to hand over bytes that are
+    /// already in the wrong order.
+    #[must_use]
+    pub fn from_le_argb(pixels: &[u32]) -> Self {
+        let mut out = Vec::with_capacity(pixels.len().saturating_mul(4));
+        for px in pixels {
+            out.extend_from_slice(&px.to_le_bytes());
+        }
+        Self(out)
+    }
+
     /// The bytes, borrowed.
     #[must_use]
     pub fn as_slice(&self) -> &[u8] {

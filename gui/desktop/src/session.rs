@@ -632,7 +632,10 @@ impl<T: Transport> ShellSession<T> {
         };
 
         let (width, height, stride) = (image.width, image.height, image.stride());
-        let bytes = image.to_argb_bytes();
+        // Through `WireBytes` rather than `Image::to_argb_bytes`, which returns
+        // a bare `Vec<u8>`: the upload takes the typed form so that the other
+        // ARGB byte order cannot arrive here. Same expansion, same cost.
+        let bytes = guitk::canvas::WireBytes::from_le_argb(&image.pixels);
         let Some(mut handle) = self.events.window_mut(self.background.window) else {
             // Unreachable in a live session: the background surface is created
             // in `start` and never closed. Handled rather than unwrapped

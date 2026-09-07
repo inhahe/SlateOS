@@ -214,6 +214,100 @@ impl ThemeMode {
 }
 
 // ============================================================================
+// High contrast schemes
+// ============================================================================
+
+/// A high-contrast colour scheme: one background, one text colour, no scale
+/// between them.
+///
+/// For users who cannot read an ordinary theme. The whole point is the absence
+/// of gradation -- an ordinary palette ranks text by *fading* it, and the
+/// faded end is precisely what is unreadable here, so a scheme carries two
+/// colours and [`Palette::high_contrast`] paints every neutral role with one
+/// or the other.
+///
+/// The accent is deliberately **not** part of a scheme. It follows the user's
+/// Appearance setting, which `design-decisions.md` §816 requires; see
+/// [`Palette::high_contrast`] for how its value is chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HighContrastScheme {
+    /// Black background, white text. The standard high-contrast look.
+    BlackOnWhite,
+    /// White background, black text. The inverse, for glare sensitivity.
+    WhiteOnBlack,
+    /// Yellow on black, which several low-vision guides prefer to white: the
+    /// reduced blue component is easier on light sensitivity.
+    YellowOnBlack,
+    /// Green on black, the terminal look, for minimal eye strain.
+    GreenOnBlack,
+}
+
+impl HighContrastScheme {
+    /// Every scheme, for a settings page that has to offer all of them.
+    pub const ALL: [Self; 4] = [
+        Self::BlackOnWhite,
+        Self::WhiteOnBlack,
+        Self::YellowOnBlack,
+        Self::GreenOnBlack,
+    ];
+
+    /// The colour behind everything.
+    #[must_use]
+    pub fn background(self) -> Color {
+        match self {
+            Self::WhiteOnBlack => Color::from_hex(0xFFFFFF),
+            Self::BlackOnWhite | Self::YellowOnBlack | Self::GreenOnBlack => {
+                Color::from_hex(0x000000)
+            }
+        }
+    }
+
+    /// The colour of every piece of text, at every weight.
+    #[must_use]
+    pub fn text(self) -> Color {
+        match self {
+            Self::BlackOnWhite => Color::from_hex(0xFFFFFF),
+            Self::WhiteOnBlack => Color::from_hex(0x000000),
+            Self::YellowOnBlack => Color::from_hex(0xFFFF00),
+            Self::GreenOnBlack => Color::from_hex(0x00FF00),
+        }
+    }
+
+    /// What to display this scheme as.
+    ///
+    /// Named for what the user sees rather than for the variant: the variant
+    /// names read backwards -- `BlackOnWhite` draws white text on black --
+    /// and they are kept only because they are what the schemes have always
+    /// been called in this tree.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BlackOnWhite => "White on black",
+            Self::WhiteOnBlack => "Black on white",
+            Self::YellowOnBlack => "Yellow on black",
+            Self::GreenOnBlack => "Green on black",
+        }
+    }
+
+    /// The name this scheme is stored under.
+    #[must_use]
+    pub fn yaml_name(self) -> &'static str {
+        match self {
+            Self::BlackOnWhite => "white_on_black",
+            Self::WhiteOnBlack => "black_on_white",
+            Self::YellowOnBlack => "yellow_on_black",
+            Self::GreenOnBlack => "green_on_black",
+        }
+    }
+
+    /// Read a stored name back, or `None` if it names no scheme.
+    #[must_use]
+    pub fn from_yaml_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.yaml_name() == name)
+    }
+}
+
+// ============================================================================
 // Accent colors
 // ============================================================================
 
@@ -238,6 +332,31 @@ pub enum AccentColor {
 }
 
 impl AccentColor {
+    /// Every accent that has a fixed colour, in the order a settings page
+    /// shows them.
+    ///
+    /// `Custom` is deliberately absent: it has no colour of its own, it has
+    /// whatever `custom_accent` holds, so a sweep over "every accent" that
+    /// included it would be asking a swatch what colour it is before the user
+    /// has said. Named `PRESETS` rather than `ALL` for that reason -- the
+    /// sibling enums' `ALL` really is all of them.
+    pub const PRESETS: [Self; 14] = [
+        Self::Blue,
+        Self::Lavender,
+        Self::Teal,
+        Self::Green,
+        Self::Yellow,
+        Self::Peach,
+        Self::Pink,
+        Self::Mauve,
+        Self::Red,
+        Self::Rosewater,
+        Self::Flamingo,
+        Self::Maroon,
+        Self::Sky,
+        Self::Sapphire,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Blue => "Blue",
@@ -635,6 +754,13 @@ impl TaskbarStyle {
 pub struct AppearanceSettings {
     /// Light/dark/system theme mode.
     pub theme_mode: ThemeMode,
+    /// The high-contrast scheme in force, or `None` for an ordinary theme.
+    ///
+    /// When set it *replaces* [`theme_mode`](Self::theme_mode) rather than
+    /// modifying it -- a high-contrast palette has no light and dark variant,
+    /// it has a background colour. The mode is left untouched so that turning
+    /// high contrast off returns the user to the theme they had.
+    pub high_contrast: Option<HighContrastScheme>,
     /// Accent color selection.
     pub accent_color: AccentColor,
     /// Custom accent color (used when accent_color is Custom).
@@ -680,6 +806,7 @@ impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
             theme_mode: ThemeMode::Dark,
+            high_contrast: None,
             accent_color: AccentColor::Blue,
             custom_accent: BLUE,
             transparency: TransparencyLevel::Moderate,
@@ -1043,10 +1170,94 @@ impl Palette {
     /// Resolve the whole palette from what the user chose.
     #[must_use]
     pub fn from_settings(settings: &AppearanceSettings) -> Self {
+        // Before the mode, not after: a high-contrast palette replaces the
+        // theme rather than adjusting it, so there is nothing from the
+        // light/dark branch to keep. Transparency is dropped with it -- see
+        // `high_contrast`.
+        if let Some(scheme) = settings.high_contrast {
+            return Self::high_contrast(scheme, settings);
+        }
         let mut palette = Self::for_mode(settings.theme_mode.is_light());
         palette.accent = settings.effective_accent();
         palette.panel_alpha = settings.transparency.panel_alpha();
         palette
+    }
+
+    /// The palette for a high-contrast scheme.
+    ///
+    /// # What it does to the neutrals, and why
+    ///
+    /// Every background role -- `crust`, `mantle`, `base`, `surface0..2` --
+    /// becomes the scheme's background, and every text role becomes its text
+    /// colour. That is not laziness; it is the feature. An ordinary palette
+    /// ranks surfaces by *raising* them a shade and text by *fading* it, and
+    /// both gradients are invisible to a user who needs this mode. Structure
+    /// is carried by borders instead, which is how every high-contrast
+    /// implementation works.
+    ///
+    /// `overlay0` matters most and is the clearest case. It is documented as
+    /// "the faintest legible mark", measuring about 3.4:1 in dark mode -- a
+    /// role defined by being hard to see, which is exactly what this mode
+    /// exists to abolish. It becomes the text colour.
+    ///
+    /// # What it does not flatten
+    ///
+    /// The categorical hues -- `red`, `green`, `yellow` and the rest -- keep
+    /// their meanings. "Red means this failed" is information, not decoration,
+    /// and collapsing it into the text colour would delete it. They are taken
+    /// from whichever ordinary mode suits the scheme's background, so they
+    /// stay bright on a dark scheme and dark on a light one.
+    ///
+    /// # The accent
+    ///
+    /// Follows the user's Appearance setting, because `design-decisions.md`
+    /// §816 requires the highlight to be configurable and a scheme-fixed
+    /// accent would make it the one colour this mode does not let you change.
+    ///
+    /// For a *named* accent the hue is kept and the better-contrasting of its
+    /// two values is used. That is not an override: both values are the same
+    /// hue, and choosing between them by background is what `for_mode` already
+    /// does for every other role. A `Custom` accent is used exactly as given,
+    /// because there is no second value to choose and an exact colour is an
+    /// exact request.
+    #[must_use]
+    pub fn high_contrast(scheme: HighContrastScheme, settings: &AppearanceSettings) -> Self {
+        let bg = scheme.background();
+        let fg = scheme.text();
+        let light = relative_luminance(bg) > 0.5;
+
+        let accent = if settings.accent_color == AccentColor::Custom {
+            settings.custom_accent
+        } else {
+            let dark_value = settings.accent_color.color();
+            let light_value = settings.accent_color.color_light();
+            if contrast_ratio(dark_value, bg) >= contrast_ratio(light_value, bg) {
+                dark_value
+            } else {
+                light_value
+            }
+        };
+
+        Self {
+            crust: bg,
+            mantle: bg,
+            base: bg,
+            surface0: bg,
+            surface1: bg,
+            surface2: bg,
+            overlay0: fg,
+            subtext0: fg,
+            subtext1: fg,
+            text: fg,
+            accent,
+            // Transparency blends a surface with whatever is behind it, which
+            // lowers contrast by construction. A mode whose entire purpose is
+            // contrast does not get to be see-through.
+            panel_alpha: 255,
+            light,
+            // The categorical hues, from the mode that suits this background.
+            ..Self::for_mode(light)
+        }
     }
 
     /// This palette's value for one of the accent presets.
@@ -1605,6 +1816,15 @@ impl AppearanceSettings {
             doc.get_str(&["theme", "mode"])
                 .and_then(|v| ThemeMode::from_yaml_name(&v))
         );
+        // Absent and "off" both mean no high contrast, and an unrecognised
+        // name does too. A scheme this build does not know is not a reason to
+        // refuse to draw, and falling back to the ordinary theme is the safe
+        // direction: it is legible to everyone, which a half-applied
+        // high-contrast palette would not be.
+        s.high_contrast = doc
+            .get_str(&["theme", "high_contrast"])
+            .and_then(|v| HighContrastScheme::from_yaml_name(&v));
+
         read_into!(
             s.accent_color,
             doc.get_str(&["theme", "accent"])
@@ -1697,6 +1917,11 @@ impl AppearanceSettings {
     /// comment, blank line and unrelated key in it exactly as it was.
     pub fn write_into(&self, doc: &mut Document) {
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
+        doc.set_str(
+            &["theme", "high_contrast"],
+            self.high_contrast
+                .map_or("off", HighContrastScheme::yaml_name),
+        );
         doc.set_str(&["theme", "accent"], self.accent_color.yaml_name());
         doc.set_str(
             &["theme", "custom_accent"],
@@ -2066,6 +2291,7 @@ mod tests {
     fn all_non_default() -> AppearanceSettings {
         AppearanceSettings {
             theme_mode: ThemeMode::Light,
+            high_contrast: Some(HighContrastScheme::YellowOnBlack),
             accent_color: AccentColor::Custom,
             custom_accent: Color::rgba(1, 2, 3, 4),
             transparency: TransparencyLevel::Full,
@@ -3142,5 +3368,260 @@ mod tests {
             assert_eq!(f.maximize_button, plain.maximize_button, "{accent:?}");
             assert_eq!(f.minimize_button, plain.minimize_button, "{accent:?}");
         }
+    }
+
+    // ------------------------------------------------------------------
+    // High contrast
+    //
+    // The scheme's own two colours contrasting is necessary and not
+    // sufficient: what a user reads is the *palette*, and a palette that kept
+    // one graded grey surface would put text on it at whatever ratio that
+    // grey happens to give. So these assert the built palette, every text
+    // role against every background role.
+    // ------------------------------------------------------------------
+
+    /// Text roles, which must all be legible on any background role.
+    fn hc_text_roles(p: &Palette) -> [(&'static str, Color); 4] {
+        [
+            ("text", p.text),
+            ("subtext1", p.subtext1),
+            ("subtext0", p.subtext0),
+            ("overlay0", p.overlay0),
+        ]
+    }
+
+    /// Background roles, which in this mode must all be the same colour.
+    fn hc_bg_roles(p: &Palette) -> [(&'static str, Color); 6] {
+        [
+            ("crust", p.crust),
+            ("mantle", p.mantle),
+            ("base", p.base),
+            ("surface0", p.surface0),
+            ("surface1", p.surface1),
+            ("surface2", p.surface2),
+        ]
+    }
+
+    fn hc_settings(scheme: HighContrastScheme) -> AppearanceSettings {
+        AppearanceSettings {
+            high_contrast: Some(scheme),
+            ..AppearanceSettings::default()
+        }
+    }
+
+    #[test]
+    fn every_text_role_clears_seven_to_one_on_every_surface() {
+        for scheme in HighContrastScheme::ALL {
+            let p = Palette::from_settings(&hc_settings(scheme));
+            for (tname, text) in hc_text_roles(&p) {
+                for (bname, bg) in hc_bg_roles(&p) {
+                    let ratio = contrast_ratio(text, bg);
+                    assert!(
+                        ratio >= 7.0,
+                        "{}: {tname} on {bname} is {ratio:.2}:1, below the 7:1 \
+                         this mode exists to provide",
+                        scheme.label()
+                    );
+                }
+            }
+        }
+    }
+
+    /// `overlay0` is the one this mode is really about.
+    ///
+    /// It is documented as "the faintest legible mark" and measures about
+    /// 3.4:1 in ordinary dark mode -- a role defined by being hard to see. In
+    /// high contrast it must not still be the faintest thing on screen.
+    #[test]
+    fn the_faintest_role_is_no_longer_faint() {
+        let ordinary = Palette::for_mode(false);
+        assert!(
+            contrast_ratio(ordinary.overlay0, ordinary.base) < 4.5,
+            "the premise: in an ordinary palette this role is below body-text \
+             contrast, which is why it needs replacing here"
+        );
+
+        for scheme in HighContrastScheme::ALL {
+            let p = Palette::from_settings(&hc_settings(scheme));
+            assert_eq!(
+                p.overlay0,
+                p.text,
+                "{}: the faint role must become the text colour",
+                scheme.label()
+            );
+        }
+    }
+
+    /// The surfaces collapse, deliberately. A raised surface is a gradient,
+    /// and the gradient is the thing that cannot be seen.
+    #[test]
+    fn every_surface_is_the_same_colour_in_high_contrast() {
+        for scheme in HighContrastScheme::ALL {
+            let p = Palette::from_settings(&hc_settings(scheme));
+            for (name, bg) in hc_bg_roles(&p) {
+                assert_eq!(bg, scheme.background(), "{}: {name}", scheme.label());
+            }
+        }
+    }
+
+    /// "Red means this failed" is information and must survive the mode.
+    #[test]
+    fn the_categorical_hues_do_not_collapse_into_the_text_colour() {
+        for scheme in HighContrastScheme::ALL {
+            let p = Palette::from_settings(&hc_settings(scheme));
+            let hues = [p.red, p.green, p.yellow, p.blue];
+            for hue in hues {
+                assert_ne!(
+                    hue,
+                    p.text,
+                    "{}: a categorical hue was flattened away",
+                    scheme.label()
+                );
+            }
+            assert_ne!(p.red, p.green, "{}: red and green", scheme.label());
+        }
+    }
+
+    /// The accent follows the user, which §816 requires.
+    #[test]
+    fn the_accent_follows_the_users_setting_not_the_scheme() {
+        let mut a = hc_settings(HighContrastScheme::GreenOnBlack);
+        a.accent_color = AccentColor::Red;
+        let mut b = hc_settings(HighContrastScheme::GreenOnBlack);
+        b.accent_color = AccentColor::Blue;
+
+        assert_ne!(
+            Palette::from_settings(&a).accent,
+            Palette::from_settings(&b).accent,
+            "two different accent settings must give two different highlights"
+        );
+    }
+
+    /// Letting the accent follow the user must not let a dim highlight into
+    /// the mode where contrast matters most.
+    ///
+    /// This is the guarantee that replaced a per-scheme one. When the accent
+    /// was a property of a scheme there were four values to check and a fixed
+    /// bar; now there are fourteen presets against four backgrounds, and what
+    /// holds the line is picking the better-contrasting of each hue's two
+    /// values (see [`Palette::high_contrast`]).
+    ///
+    /// The bar is 4.5:1, WCAG AA for body text -- the same bar the old
+    /// per-scheme check used, so this is not a relaxation. It is deliberately
+    /// lower than the 7:1 the *text* roles must clear: the accent marks
+    /// things, it does not have paragraphs set in it.
+    #[test]
+    fn the_worst_accent_on_the_worst_scheme_is_still_legible() {
+        let mut worst = f32::INFINITY;
+        let mut worst_case = String::new();
+
+        for scheme in HighContrastScheme::ALL {
+            for accent in AccentColor::PRESETS {
+                let mut s = hc_settings(scheme);
+                s.accent_color = accent;
+                let p = Palette::from_settings(&s);
+                let ratio = contrast_ratio(p.accent, p.base);
+                if ratio < worst {
+                    worst = ratio;
+                    worst_case = format!("{} on {}", accent.label(), scheme.label());
+                }
+            }
+        }
+
+        assert!(
+            worst >= 4.5,
+            "the worst accent/scheme pairing is {worst_case} at {worst:.2}:1"
+        );
+    }
+
+    /// And the variant choice is what does it -- the same sweep against the
+    /// dark value alone finds a pairing that fails.
+    ///
+    /// Without this, the test above passes and says nothing about *why*: a
+    /// build that ignored the light/dark choice entirely might still clear
+    /// 4.5 by luck, and this is what distinguishes luck from the mechanism.
+    #[test]
+    fn choosing_the_better_variant_is_what_keeps_the_accent_legible() {
+        let mut worst_fixed = f32::INFINITY;
+        for scheme in HighContrastScheme::ALL {
+            for accent in AccentColor::PRESETS {
+                worst_fixed = worst_fixed.min(contrast_ratio(accent.color(), scheme.background()));
+            }
+        }
+        assert!(
+            worst_fixed < 4.5,
+            "if the fixed dark value already cleared the bar at {worst_fixed:.2}:1, \
+             the variant choice would be decoration rather than the mechanism"
+        );
+    }
+
+    /// A custom accent is used exactly as given: an exact colour is an exact
+    /// request, and there is no second value of it to choose between.
+    #[test]
+    fn a_custom_accent_is_used_verbatim() {
+        let mut s = hc_settings(HighContrastScheme::BlackOnWhite);
+        s.accent_color = AccentColor::Custom;
+        s.custom_accent = Color::from_hex(0xAB12CD);
+
+        assert_eq!(Palette::from_settings(&s).accent, Color::from_hex(0xAB12CD));
+    }
+
+    /// Transparency is dropped, because blending lowers contrast by
+    /// construction.
+    #[test]
+    fn high_contrast_is_never_translucent() {
+        let mut s = hc_settings(HighContrastScheme::BlackOnWhite);
+        s.transparency = TransparencyLevel::Full;
+        assert_eq!(Palette::from_settings(&s).panel_alpha, 255);
+    }
+
+    /// The scheme replaces the light/dark choice rather than modifying it, so
+    /// a user in the light theme who turns on a dark scheme gets the dark
+    /// scheme.
+    #[test]
+    fn the_scheme_overrides_the_theme_mode() {
+        let mut s = hc_settings(HighContrastScheme::BlackOnWhite);
+        s.theme_mode = ThemeMode::Light;
+        let p = Palette::from_settings(&s);
+
+        assert_eq!(p.base, Color::from_hex(0x000000));
+        assert!(!p.light, "and the palette must say which it is");
+    }
+
+    #[test]
+    fn high_contrast_is_off_unless_asked_for() {
+        assert_eq!(AppearanceSettings::default().high_contrast, None);
+        let p = Palette::from_settings(&AppearanceSettings::default());
+        assert_ne!(p.overlay0, p.text, "an ordinary palette still grades");
+    }
+
+    #[test]
+    fn a_scheme_survives_being_written_and_read_back() {
+        for scheme in HighContrastScheme::ALL {
+            let mut doc = Document::new();
+            hc_settings(scheme).write_into(&mut doc);
+            assert_eq!(
+                AppearanceSettings::read_from(&doc).high_contrast,
+                Some(scheme),
+                "{}",
+                scheme.label()
+            );
+        }
+    }
+
+    #[test]
+    fn off_survives_the_round_trip_too() {
+        let mut doc = Document::new();
+        AppearanceSettings::default().write_into(&mut doc);
+        assert_eq!(AppearanceSettings::read_from(&doc).high_contrast, None);
+    }
+
+    /// An unknown scheme name reads as off rather than refusing to load.
+    #[test]
+    fn an_unrecognised_scheme_falls_back_to_the_ordinary_theme() {
+        let mut doc = Document::new();
+        AppearanceSettings::default().write_into(&mut doc);
+        doc.set_str(&["theme", "high_contrast"], "chartreuse_on_beige");
+        assert_eq!(AppearanceSettings::read_from(&doc).high_contrast, None);
     }
 }

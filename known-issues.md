@@ -122893,7 +122893,52 @@ window, press Ctrl+V. Nothing arrives, and nothing says why.
 
 ---
 
-## `TD-C-HIGH-CONTRAST-MODE-IS-NOT-CONNECTED-TO-ANYTHING` (lane C, 2026-09-07)
+## `TD-C-HIGH-CONTRAST-MODE-IS-NOT-CONNECTED-TO-ANYTHING` (lane C, 2026-09-07) -- **mostly CLOSED the same day**
+
+**Update 2026-09-07: high contrast now reaches the screen.** The scheme lives
+in `gui/appearance` as `HighContrastScheme`, `AppearanceSettings` carries
+`high_contrast: Option<HighContrastScheme>` with a YAML round-trip, and
+`Palette::from_settings` branches on it -- the single construction point every
+shell surface already goes through, so the mode applies everywhere at once
+rather than needing each caller taught about a second palette.
+`a11y.rs`'s copy of the enum is now a re-export of that one, so the two sets of
+colour values that could disagree are one set.
+
+**The open design point is settled: the accent follows the user's setting.**
+`design-decisions.md` §816 requires the highlight to be configurable, and a
+scheme-fixed accent would have made it the one colour this mode does not let
+you change. The contrast risk that argued for the scheme is handled without
+overriding anyone: for a named accent the *hue* is kept and the
+better-contrasting of its two existing values is used, which is what
+`for_mode` already does for every other role. A `Custom` accent is used
+verbatim -- an exact colour is an exact request, and there is no second value
+to choose between.
+
+Removing the accent from the scheme removed a guarantee (`accent >= 4.5:1`
+against its own background, four values checked). It is replaced by a wider
+one: `the_worst_accent_on_the_worst_scheme_is_still_legible` sweeps all
+fourteen presets against all four schemes. A second test asserts that the
+variant choice is what achieves it -- the same sweep against each hue's dark
+value alone finds a pairing that fails -- so the mechanism is shown to be
+load-bearing rather than incidental.
+
+**What still stands from the entry below:**
+
+- **The duplication is only half-resolved.** `accessibility_settings.rs`
+  (2,037 lines) still models contrast a third way, and the keyboard-
+  accessibility halves of both modules still overlap. Neither is reachable.
+  Both are lane C, so this needs no cross-lane agreement.
+- **There is still no control.** The setting exists, is honoured and
+  round-trips, but nothing in the Settings UI sets it, so a user cannot turn
+  it on without editing the config file by hand. That is the next piece, and
+  it belongs with the C-Q6 §815 split (settings pages move to the app).
+- **The orphan ratchet is still one short** -- `accessibility_settings.rs` is
+  an island and is not on the baseline.
+
+Original entry follows.
+
+---
+
 
 **In short:** SlateOS has four high-contrast colour schemes for users who
 cannot read ordinary ones, and there is no way to turn any of them on. The

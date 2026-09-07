@@ -60,78 +60,28 @@ use guitk::style::CornerRadii;
 // High contrast theme
 // ============================================================================
 
-/// High contrast color scheme (overrides theme when enabled).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HighContrastTheme {
-    /// Standard high contrast (black bg, white text, yellow highlights).
-    BlackOnWhite,
-    /// Inverted (white bg, black text).
-    WhiteOnBlack,
-    /// Yellow on black (good for low vision).
-    YellowOnBlack,
-    /// Green on black (terminal style, minimal strain).
-    GreenOnBlack,
-}
-
-impl HighContrastTheme {
-    /// Get the background color for this theme.
-    pub fn background(&self) -> Color {
-        match self {
-            Self::BlackOnWhite => Color::from_hex(0x000000),
-            Self::WhiteOnBlack => Color::from_hex(0xFFFFFF),
-            Self::YellowOnBlack => Color::from_hex(0x000000),
-            Self::GreenOnBlack => Color::from_hex(0x000000),
-        }
-    }
-
-    /// Get the primary text color.
-    pub fn text(&self) -> Color {
-        match self {
-            Self::BlackOnWhite => Color::from_hex(0xFFFFFF),
-            Self::WhiteOnBlack => Color::from_hex(0x000000),
-            Self::YellowOnBlack => Color::from_hex(0xFFFF00),
-            Self::GreenOnBlack => Color::from_hex(0x00FF00),
-        }
-    }
-
-    /// Get the accent/highlight color.
-    ///
-    /// Green-on-black's is **white**, not the magenta it used to be, per
-    /// `design-decisions.md` §816. Magenta on black measures 6.7:1 where the
-    /// other three schemes' highlights measure 16.7:1 and 19.6:1 -- about
-    /// three times less contrast, in the scheme a user picks *because* they
-    /// need contrast. White is 21:1, the maximum available.
-    ///
-    /// The operator's argument for it is the one worth keeping: a highlight
-    /// does not have to carry its meaning in hue at all. Luminance contrast
-    /// is read identically by every form of colour vision including
-    /// monochromacy, and by anyone on a failing panel or in sunlight. Cyan is
-    /// defensible -- its blue component survives red-green colour-blindness,
-    /// which is also why magenta does -- but white is unimprovable.
-    pub fn accent(&self) -> Color {
-        match self {
-            Self::BlackOnWhite => Color::from_hex(0xFFFF00),
-            Self::WhiteOnBlack => Color::from_hex(0x0000FF),
-            Self::YellowOnBlack => Color::from_hex(0x00FFFF),
-            Self::GreenOnBlack => Color::from_hex(0xFFFFFF),
-        }
-    }
-
-    /// Get the border color.
-    pub fn border(&self) -> Color {
-        self.text()
-    }
-
-    /// Label for display.
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::BlackOnWhite => "High Contrast (Black bg)",
-            Self::WhiteOnBlack => "High Contrast (White bg)",
-            Self::YellowOnBlack => "Yellow on Black",
-            Self::GreenOnBlack => "Green on Black",
-        }
-    }
-}
+/// The high-contrast schemes.
+///
+/// **Re-exported, not defined here.** This module used to carry its own copy
+/// of the four schemes, and that copy was reachable from nothing: the whole
+/// module is a pinned island, so a user could not turn high contrast on at
+/// all. The live definition is `appearance::HighContrastScheme`, which
+/// `Palette::from_settings` consumes -- the single point every shell surface
+/// already goes through, so the mode now applies everywhere at once.
+///
+/// The alias is kept because this module's own tests and any future caller
+/// refer to the schemes by this name. What is gone is the second set of
+/// colour values, which could disagree with the live one and, while both
+/// existed, did: green-on-black's highlight was changed here to white per
+/// `design-decisions.md` §816 while nothing was reading it.
+///
+/// See `known-issues.md`
+/// `TD-C-HIGH-CONTRAST-MODE-IS-NOT-CONNECTED-TO-ANYTHING`, which this
+/// half-closes: high contrast now reaches the palette. What remains open
+/// there is the *other* duplication -- `accessibility_settings.rs` models the
+/// same feature a third way, and the keyboard-accessibility halves of both
+/// modules still overlap.
+pub use appearance::HighContrastScheme as HighContrastTheme;
 
 // ============================================================================
 // Color filter (colorblind simulation/correction)
@@ -1283,40 +1233,10 @@ mod tests {
         let hc = HighContrastTheme::BlackOnWhite;
         assert_eq!(hc.background(), Color::from_hex(0x000000));
         assert_eq!(hc.text(), Color::from_hex(0xFFFFFF));
-        assert_eq!(hc.accent(), Color::from_hex(0xFFFF00));
-    }
-
-    /// Every scheme's highlight must be readable against that scheme's own
-    /// background.
-    ///
-    /// Stated as the property rather than as four literal colours, because a
-    /// literal-colour test passes for whatever value is written in it -- the
-    /// existing `test_high_contrast_colors` checks one scheme's three colours
-    /// and would have gone on passing while green-on-black's highlight sat at
-    /// 6.7:1, which is what it did.
-    ///
-    /// The bar is 7:1, WCAG's AAA level for normal-size text. These schemes
-    /// exist for users who need more contrast than ordinary themes give, so
-    /// the ordinary 4.5:1 is the wrong bar: it is the one the *default* theme
-    /// already has to clear.
-    #[test]
-    fn every_high_contrast_highlight_is_readable_on_its_own_background() {
-        use guitk::theme::contrast_ratio;
-
-        for scheme in [
-            HighContrastTheme::BlackOnWhite,
-            HighContrastTheme::WhiteOnBlack,
-            HighContrastTheme::YellowOnBlack,
-            HighContrastTheme::GreenOnBlack,
-        ] {
-            let ratio = contrast_ratio(scheme.accent(), scheme.background());
-            assert!(
-                ratio >= 7.0,
-                "{}: highlight measures {ratio:.2}:1 against its background, \
-                 below the 7:1 these schemes exist to provide",
-                scheme.label()
-            );
-        }
+        // The accent is no longer a property of a scheme: it follows the
+        // user's Appearance setting, per design-decisions.md 816. What
+        // guarantees its contrast now is
+        // `appearance::tests::the_worst_accent_on_the_worst_scheme_is_still_legible`.
     }
 
     /// The text colour has to clear the same bar, for the same reason.
@@ -2209,53 +2129,22 @@ mod tests {
     #[test]
     fn the_four_high_contrast_schemes_are_the_ones_the_module_was_written_with() {
         // (scheme, background, text, accent)
+        // Two columns, not four. The accent left this table when it stopped
+        // being a property of a scheme (design-decisions.md 816: it follows
+        // the user's setting), and `border` was always just `text` again.
         let table = [
-            (
-                HighContrastTheme::BlackOnWhite,
-                0x000000,
-                0xFFFFFF,
-                0xFFFF00,
-            ),
-            (
-                HighContrastTheme::WhiteOnBlack,
-                0xFFFFFF,
-                0x000000,
-                0x0000FF,
-            ),
-            (
-                HighContrastTheme::YellowOnBlack,
-                0x000000,
-                0xFFFF00,
-                0x00FFFF,
-            ),
-            // White, not magenta: design-decisions.md 816. Magenta measured
-            // 6.7:1 against this scheme's own black, against 16.7 and 19.6
-            // for its neighbours -- the dimmest highlight in the set, in the
-            // scheme a user picks because they need contrast.
-            (
-                HighContrastTheme::GreenOnBlack,
-                0x000000,
-                0x00FF00,
-                0xFFFFFF,
-            ),
+            (HighContrastTheme::BlackOnWhite, 0x000000, 0xFFFFFF),
+            (HighContrastTheme::WhiteOnBlack, 0xFFFFFF, 0x000000),
+            (HighContrastTheme::YellowOnBlack, 0x000000, 0xFFFF00),
+            (HighContrastTheme::GreenOnBlack, 0x000000, 0x00FF00),
         ];
-        for (scheme, bg, text, accent) in table {
+        for (scheme, bg, text) in table {
             assert_eq!(
                 scheme.background(),
                 Color::from_hex(bg),
                 "{scheme:?} background"
             );
             assert_eq!(scheme.text(), Color::from_hex(text), "{scheme:?} text");
-            assert_eq!(
-                scheme.accent(),
-                Color::from_hex(accent),
-                "{scheme:?} accent"
-            );
-            assert_eq!(
-                scheme.border(),
-                scheme.text(),
-                "{scheme:?} border follows text"
-            );
         }
     }
 
@@ -2276,11 +2165,7 @@ mod tests {
                 HighContrastTheme::YellowOnBlack,
                 HighContrastTheme::GreenOnBlack,
             ] {
-                for (what, c) in [
-                    ("background", scheme.background()),
-                    ("text", scheme.text()),
-                    ("accent", scheme.accent()),
-                ] {
+                for (what, c) in [("background", scheme.background()), ("text", scheme.text())] {
                     if let Some((role, _)) = p
                         .roles()
                         .iter()
@@ -2323,8 +2208,9 @@ mod tests {
             let bg = scheme.background();
             let t = contrast(bg, scheme.text());
             assert!(t >= 15.0, "{scheme:?} text on its background is {t:.2}:1");
-            let a = contrast(bg, scheme.accent());
-            assert!(a >= 4.5, "{scheme:?} accent on its background is {a:.2}:1");
+            // The accent's bar moved with the accent itself, to
+            // `appearance::tests::the_worst_accent_on_the_worst_scheme_is_still_legible`,
+            // which checks all fourteen presets rather than one per scheme.
         }
     }
 

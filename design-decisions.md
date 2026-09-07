@@ -68560,9 +68560,25 @@ differently. So high contrast cannot be switched on at all, and this entry
 changes no pixel until that is fixed. The colour was changed regardless -- the
 decision stands and the value should be right when the feature is wired -- and
 the gap is written up as `TD-C-HIGH-CONTRAST-MODE-IS-NOT-CONNECTED-TO-ANYTHING`,
-which also carries the one design point this decision does *not* settle:
+which also carried the one design point this decision did *not* settle:
 whether, in high contrast, the accent follows the user's setting or the
 scheme's.
+
+**Settled later the same day, and the mode is now wired.** The accent
+**follows the user's setting**, because a scheme-fixed accent would make the
+highlight the one colour this mode does not let you change -- which
+contradicts the requirement above. The contrast risk that argued the other way
+is handled without overriding anyone: for a named accent the *hue* is kept and
+the better-contrasting of its two existing values is used, which is exactly
+what `for_mode` already does for every other role, so it is a choice between
+two spellings of the user's colour rather than a substitution of it. A
+`Custom` accent is used verbatim -- an exact colour is an exact request, and
+there is no second value to choose between.
+
+The scheme now lives in `gui/appearance` as `HighContrastScheme`, and
+`Palette::from_settings` branches on an `AppearanceSettings` field, so the mode
+applies to every surface at once. What remains is that no Settings control
+sets it yet.
 
 **The one real argument against white**, and the reason the configurability
 requirement matters more than the default: a user who picks "green on black"

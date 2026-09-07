@@ -1387,6 +1387,152 @@ fn a_desktop_with_no_widgets_still_parks() {
     );
 }
 
+// ---- moving and removing a widget ----
+
+/// Where a widget currently sits, in screen pixels.
+fn widget_origin(shell: &DesktopShell, id: crate::widgets::WidgetInstanceId) -> (f32, f32) {
+    let w = shell.widgets.get(id).expect("the widget should exist");
+    let g = &shell.widgets.grid;
+    w.position
+        .pixels(g.origin_x, g.origin_y, g.cell_width, g.cell_height, g.gap)
+}
+
+/// Press, move and release on the background surface, in screen coordinates.
+fn drag(desktop: &Desktop, surface: Surface, from: (f32, f32), to: (f32, f32)) {
+    let (ox, oy) = surface.origin;
+    let ev = |x: f32, y: f32, kind| {
+        InputEvent::new(
+            surface.window(),
+            guitk::event::Event::Mouse(guitk::event::MouseEvent {
+                x: x - ox,
+                y: y - oy,
+                kind,
+            }),
+        )
+    };
+    desktop.borrow_mut().send_input(&[
+        ev(from.0, from.1, MouseEventKind::Press(MouseButton::Left)),
+        ev(to.0, to.1, MouseEventKind::Move),
+        ev(to.0, to.1, MouseEventKind::Release(MouseButton::Left)),
+    ]);
+}
+
+#[test]
+fn a_widget_can_be_dragged_to_another_cell() {
+    let (mut session, desktop) = session();
+    session
+        .shell_mut()
+        .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+    let id = session.shell().widgets.all_widgets()[0].id;
+    let before = session.shell().widgets.get(id).expect("widget").position;
+    let (wx, wy) = widget_origin(session.shell(), id);
+
+    // Grab near the widget's top-left and drop it three cells right and two
+    // down, so the target cell is unambiguous.
+    let g = &session.shell().widgets.grid;
+    let (dx, dy) = (3.0 * (g.cell_width + g.gap), 2.0 * (g.cell_height + g.gap));
+    drag(
+        &desktop,
+        session.background(),
+        (wx + 8.0, wy + 8.0),
+        (wx + 8.0 + dx, wy + 8.0 + dy),
+    );
+    session.pump().expect("pump");
+
+    let after = session.shell().widgets.get(id).expect("widget").position;
+    assert_ne!(before, after, "the widget did not move");
+    assert_eq!(after.col, before.col + 3);
+    assert_eq!(after.row, before.row + 2);
+}
+
+#[test]
+fn the_grab_offset_is_kept_so_a_widget_does_not_jump_on_the_first_pixel() {
+    // Grabbing a widget near its *far* edge and moving by less than one cell
+    // must not move it at all. Without the offset the cell is computed from the
+    // pointer, so a grab at the right-hand edge would teleport the widget a
+    // column left before the user had moved anywhere.
+    // A *Calendar*, which is two cells wide, and grabbed in its second
+    // column. A one-cell widget cannot distinguish the two behaviours: every
+    // point inside it is in the same cell, so ignoring the offset gives the
+    // same answer and the test passes either way. That is what a first version
+    // of this test did -- it used a Clock, and the mutation survived it.
+    let (mut session, desktop) = session();
+    session
+        .shell_mut()
+        .activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
+    let id = session.shell().widgets.all_widgets()[0].id;
+    let before = session.shell().widgets.get(id).expect("widget").position;
+    let (wx, wy) = widget_origin(session.shell(), id);
+    let g = &session.shell().widgets.grid;
+    let grab = (wx + g.cell_width + g.gap + 4.0, wy + 6.0);
+
+    drag(
+        &desktop,
+        session.background(),
+        grab,
+        (grab.0 + 2.0, grab.1 + 2.0),
+    );
+    session.pump().expect("pump");
+
+    assert_eq!(
+        session.shell().widgets.get(id).expect("widget").position,
+        before,
+        "a two-pixel drag moved the widget to another cell"
+    );
+}
+
+#[test]
+fn right_clicking_a_widget_offers_to_remove_that_widget() {
+    // The menu is contextual: over a widget it is about that widget, over bare
+    // desktop it is about the desktop. Asserted through the *effect* -- one
+    // widget gone and the other still there -- rather than by reading the item
+    // list, because the list is only interesting if choosing from it works.
+    let (mut session, desktop) = session();
+    let shell = session.shell_mut();
+    shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+    shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
+    let target = shell.widgets.all_widgets()[0].id;
+    let survivor = shell.widgets.all_widgets()[1].id;
+    let (wx, wy) = widget_origin(session.shell(), target);
+
+    right_click_at(&desktop, session.background(), wx + 8.0, wy + 8.0);
+    session.pump().expect("pump");
+    assert!(session.shell().desktop_menu.is_visible());
+
+    session
+        .shell_mut()
+        .activate_desktop_menu_item(DesktopShell::MENU_REMOVE_ONE_WIDGET);
+
+    assert!(
+        session.shell().widgets.get(target).is_none(),
+        "the widget under the pointer was not removed"
+    );
+    assert!(
+        session.shell().widgets.get(survivor).is_some(),
+        "the wrong widget was removed"
+    );
+}
+
+#[test]
+fn remove_this_widget_does_nothing_when_the_menu_was_not_about_one() {
+    // Opening over bare desktop leaves no target, so the item -- which is not
+    // even in that menu -- must not remove somebody else's widget if it is
+    // somehow activated.
+    let (mut session, desktop) = session();
+    session
+        .shell_mut()
+        .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+
+    right_click_at(&desktop, session.background(), 20.0, 20.0);
+    session.pump().expect("pump");
+
+    let removed = session
+        .shell_mut()
+        .activate_desktop_menu_item(DesktopShell::MENU_REMOVE_ONE_WIDGET);
+    assert!(!removed);
+    assert_eq!(session.shell().widgets.count(), 1);
+}
+
 // ---- following the display ----
 
 #[test]

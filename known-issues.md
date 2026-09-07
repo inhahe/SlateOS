@@ -20194,6 +20194,56 @@ the first attempt at this fix went wrong.
 
 ---
 
+## TD-C-THE-ORPHAN-LEDGER-IS-NOT-A-QUEUE-OF-READY-WORK
+
+**In short:** `scripts/orphan-modules-baseline.txt` lists 46 modules nothing
+calls, and it reads like a to-do list: plug each one in and the debt goes away.
+It is not. A large share of them are user interfaces for subsystems that **do
+not exist yet**, so "wiring" them would connect a control to nothing and produce
+a more convincing lie than leaving them alone. Before picking one off the list,
+check that the thing it talks to is real. Four were sampled on 2026-09-07 and
+four were blocked.
+
+### Verified blocked, with the reason
+
+| Module | Needs | State |
+|---|---|---|
+| `gui/desktop/src/icons.rs` | a desktop icon model | **Two** exist — this one, and `kernel/src/fs/deskicons.rs` (lane A, done). Wiring either entrenches a duplicate; asked in `requests/c-a-two-desktop-icon-models-and-mine-cannot-be-wired-until-we-pick.md` |
+| `gui/desktop/src/clipboard_viewer.rs` | a system clipboard | **None exists.** No clipboard in `gui/compositor`, none in the `guiremote` protocol; the only hits in `gui/toolkit` are `listview.rs`/`textview.rs` doing their own local selection. A history viewer for a clipboard nothing populates |
+| `gui/desktop/src/screen_capture.rs` | a video encoder | Screen *recording*, not screenshots. `roadmap.md` still lists "Video-encoded capture fallback (H.264/VP9)" as an unstarted `[C]` item. The compositor's `capture_stream_frame` gives frames; nothing turns them into a file |
+| `gui/desktop/src/blur.rs` | raw ARGB pixel buffers | **In the wrong crate for its consumer.** It is a software blur over pixel buffers, and the shell has no pixels — it sends `RenderCommand`s and the *compositor* owns the framebuffer. Either it moves to `gui/compositor` or the protocol grows a "blur behind this surface" flag; both are design questions, not wiring |
+
+`blur.rs` is the interesting one: it is not blocked on a missing subsystem but
+on being in the wrong place, which the baseline cannot express and which looks
+identical from the outside.
+
+### One chain that is genuinely ready
+
+`gui/desktop/src/widgets.rs` (2,275 lines) is self-contained in the way the
+others are not. `DesktopWidgetManager` offers `render(&Palette) ->
+Vec<RenderCommand>`, `tick(now_ms)`, `hit_test`, and add/remove/move/resize —
+and the shell already owns the background surface those commands would go to.
+Nothing external is missing.
+
+Its one gap is an *entry point*: there is no way to add a widget, because the
+shell has no desktop context menu. And `context_ext.rs` — in both
+`gui/desktop/` and `gui/toolkit/` — is **also** on the baseline. So two islands
+plug into each other: right-click the desktop → add a widget → it renders on
+the background surface and ticks itself.
+
+Doing widgets without the menu would repeat the mistake taskbar auto-hide
+avoided: a working feature with no way to reach it. The two go in together, or
+neither does.
+
+### Why this entry exists rather than a longer classification
+
+The remaining ~40 were not audited. Sampling four cost most of one working
+session, and a table of guesses about the other forty would be worse than no
+table — the failure mode this whole file keeps recording is a confident answer
+nobody checked. What is written above is what was verified. **Check before you
+wire; expect blocked more often than not.**
+
+
 ## TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER
 
 **In short:** Open Settings, choose "Slow" animations, and the setting is
@@ -89278,6 +89328,31 @@ nothing says why.
 ---
 
 ## `TD-C-EXPLORER-DOES-NOT-SCROLL` (lane C, 2026-08-26)
+
+**Narrowed 2026-09-07: the two list views scroll; the icon grid does not yet.**
+`ExplorerState` holds a `ListViewport`, the details and list renderers draw the
+rows `scroll_window::visible` names, the wheel routes through
+`wheel::Accumulator`, and `move_selection_to` syncs the cursor row into the
+viewport so the arrow keys drag the view with them. `ListViewport` gained
+`scroll_by`, which is the one operation there that leaves the selection alone --
+a wheel that revealed the selection could not scroll at all, because the view
+would snap back on the next call.
+
+**The icon grid scrolls too, as of the commit after that one.** The offset
+stays in *entries* -- one number for all three views, so changing view mode
+lands you where you were rather than at the top -- and the grid rounds it down
+to a whole row of icons, because starting mid-row would put the first cell in
+the middle of the pane. The wheel multiplies its row step by the column count
+there: a notch is three rows, and in a grid a row is `cols` entries, so
+stepping by entries would move three files and look unresponsive.
+
+**Still open:** a visible scrollbar. There is no way to see how far down a long
+listing you are, or to drag to a position -- only the wheel and the keyboard. `move_selection` also still exists
+rather than deferring to `ListViewport::select_prev`/`select_next` as the plan
+below suggests -- explorer's multi-selection means the viewport is used for
+scrolling only, and folding the two together is the part that needs the
+anchor/extend decision the "one genuine mismatch" section describes.
+
 
 **In short:** the file manager draws as many entries as fit in the window and
 then stops. There is no scrollbar, no mouse wheel, no Page Up/Page Down — so in

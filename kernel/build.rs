@@ -1,4 +1,5 @@
 // Kernel build script: linker script, and the SPARK/Ada components.
+
 //
 // This used to live in the workspace-root `.cargo/config.toml` as
 // `link-arg=-Tkernel/linker.ld`, but that flag is merged into every
@@ -75,6 +76,80 @@ fn main() {
     // services, which need their own linker scripts.
     println!("cargo:rustc-link-arg=-T{manifest}/linker.ld");
     println!("cargo:rerun-if-changed=linker.ld");
+
+    // --- Embedded service binaries: declare the edge, and refuse without it ---
+    //
+    // The kernel `include_bytes!`s compiled service binaries -- six of them, at
+    // fifteen sites across container.rs, main.rs and proc/spawn.rs. Nothing in
+    // this build script used to mention them, which is two bugs:
+    //
+    //   Loud:  on a tree without the artifacts the kernel cannot build, and it
+    //          fails as fifteen `include_bytes!` errors blaming the kernel for a
+    //          file the kernel is not missing. `boot-test.sh`'s own comment has
+    //          described that symptom for months without anyone connecting it
+    //          to a missing build-graph edge.
+    //   Quiet: with no `rerun-if-changed`, rebuilding a service does NOT
+    //          invalidate the kernel. It keeps embedding the previous copy and
+    //          says nothing, so a change to an embedded program appears to have
+    //          no effect -- indistinguishable from one that genuinely has none,
+    //          which sends the debugging to the program rather than the build.
+    //
+    // The list is DERIVED by scanning for the `include_bytes!` calls, not
+    // written out here. `scripts/bootstrap-worktree.sh` derives the same list
+    // the same way, and that is why it is the one artefact in this story that
+    // never drifted while four sessions counted by hand and got four different
+    // answers. A hardcoded list would be a fifth hand-count that runs on every
+    // build.
+    //
+    // ORDER IS LOAD-BEARING: check existence first, and only then emit the
+    // directives. Measured on cargo 1.95.0 -- a `rerun-if-changed` naming a
+    // path that does not exist makes this script re-run on EVERY build (a
+    // counter gave 1,2,3 across three no-op builds, against 1,1,1 for a path
+    // that exists). Declaring before checking would therefore trade the quiet
+    // bug above for a second one whose only symptom is that the kernel never
+    // caches -- which reads as "the kernel is slow to build" and would survive
+    // indefinitely.
+    //
+    // NOT built here. `services` is in the root manifest's `exclude` list
+    // deliberately -- its comment says that keeps those crates outside the
+    // `userspace/.cargo/config.toml` build-std blast radius -- so driving their
+    // builds from this script would re-couple what the manifest decouples, and
+    // hide the coupling in a build script rather than the manifest that states
+    // it. Provisioning stays in `bootstrap-worktree.sh`.
+    let embedded = embedded_service_artifacts(&manifest);
+    if embedded.is_empty() {
+        // Fail closed, mirroring bootstrap-worktree.sh: finding none means the
+        // scan broke, not that the kernel stopped embedding services.
+        panic!(
+            "kernel/build.rs: found no include_bytes! service artifacts under \
+             kernel/src. The kernel embeds several; finding none means this scan \
+             is broken, not that they are gone."
+        );
+    }
+    let missing: Vec<&String> = embedded.iter().filter(|p| !Path::new(p).exists()).collect();
+    if !missing.is_empty() {
+        let mut msg = String::from(
+            "kernel/build.rs: the kernel embeds service binaries that are not \
+             built in this checkout.\n\nMissing:\n",
+        );
+        for p in &missing {
+            msg.push_str("    ");
+            msg.push_str(p);
+            msg.push('\n');
+        }
+        msg.push_str(
+            "\nBuild them with:\n    ./scripts/bootstrap-worktree.sh\n\
+             or run the boot test with --bootstrap to provision and continue.\n\n\
+             If this tree was working a minute ago, the usual cause is a `cargo \
+             clean` in a service crate: these live under services/*/target/, \
+             which is gitignored, so cleaning one silently removes an input to \
+             the kernel build.\n",
+        );
+        panic!("{msg}");
+    }
+    for p in &embedded {
+        println!("cargo:rerun-if-changed={p}");
+    }
 
     // `kernel/src/layout_pad.rs` reads this with `option_env!`, so cargo has to
     // be told that changing it invalidates the build. Without this line a
@@ -384,3 +459,69 @@ fn find_ada_gcc() -> Option<PathBuf> {
 // all four FIPS 180-4 vectors plus every streaming split, and the stamp
 // comparison covers the integration.
 // ---------------------------------------------------------------------------
+
+/// Paths of the service binaries the kernel embeds with `include_bytes!`.
+///
+/// Derived by scanning `kernel/src` rather than listed, so this cannot fall out
+/// of step with the kernel the way a written-out list would. Mirrors the
+/// derivation in `scripts/bootstrap-worktree.sh`, which has stayed correct
+/// unattended while hand-counts of the same set disagreed four times.
+///
+/// Returns absolute paths, deduplicated and sorted so the emitted directives
+/// are stable across builds.
+fn embedded_service_artifacts(manifest: &str) -> Vec<String> {
+    let src = Path::new(manifest).join("src");
+    let mut found: Vec<String> = Vec::new();
+    let mut stack = vec![src];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for rest in text.split("include_bytes!(\"").skip(1) {
+                let Some(rel) = rest.split('"').next() else {
+                    continue;
+                };
+                if !rel.contains("/services/") {
+                    continue;
+                }
+                // `include_bytes!` paths are relative to the including FILE.
+                let Some(base) = path.parent() else { continue };
+                let joined = base.join(rel);
+                // Normalise `..` without touching the filesystem: the artifact
+                // may not exist yet, which is the case being reported on.
+                let mut parts: Vec<std::ffi::OsString> = Vec::new();
+                for comp in joined.components() {
+                    match comp {
+                        std::path::Component::ParentDir => {
+                            parts.pop();
+                        }
+                        std::path::Component::CurDir => {}
+                        other => parts.push(other.as_os_str().to_os_string()),
+                    }
+                }
+                let mut out = std::path::PathBuf::new();
+                for p in parts {
+                    out.push(p);
+                }
+                let s = out.to_string_lossy().replace('\\', "/");
+                if !found.contains(&s) {
+                    found.push(s);
+                }
+            }
+        }
+    }
+    found.sort();
+    found
+}

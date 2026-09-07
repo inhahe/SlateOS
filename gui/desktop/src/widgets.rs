@@ -13,6 +13,7 @@ use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use yamldoc::Document;
 
 // ============================================================================
 // Colour
@@ -251,6 +252,68 @@ pub enum WidgetKind {
 }
 
 impl WidgetKind {
+    /// The spelling this kind has in `widgets.yaml`.
+    ///
+    /// Deliberately *not* [`label`](Self::label). A label is UI text and is
+    /// free to change -- "System monitor" could become "Resources" tomorrow --
+    /// and if the file spoke labels, that rename would silently discard every
+    /// user's placed widget of that kind. The same separation `appearance`
+    /// keeps between `label()` and its yaml spelling, for the same reason.
+    ///
+    /// `Custom` has no spelling of its own: the app name *is* the spelling,
+    /// behind a `custom:` prefix so it cannot collide with a built-in.
+    #[must_use]
+    pub fn yaml_name(&self) -> String {
+        match self {
+            Self::Clock => "clock".to_string(),
+            Self::Weather => "weather".to_string(),
+            Self::SystemMonitor => "system_monitor".to_string(),
+            Self::Calendar => "calendar".to_string(),
+            Self::Notes => "notes".to_string(),
+            Self::RssFeed => "rss_feed".to_string(),
+            Self::MusicPlayer => "music_player".to_string(),
+            Self::PhotoFrame => "photo_frame".to_string(),
+            Self::WorldClock => "world_clock".to_string(),
+            Self::Reminders => "reminders".to_string(),
+            Self::DiskUsage => "disk_usage".to_string(),
+            Self::NetworkMonitor => "network_monitor".to_string(),
+            Self::BatteryStatus => "battery_status".to_string(),
+            Self::Custom { app_name } => format!("custom:{app_name}"),
+        }
+    }
+
+    /// The kind a `widgets.yaml` spelling names, if this build has it.
+    ///
+    /// `None` for a name this build does not know, which is how a file written
+    /// by a newer desktop degrades: that widget is skipped and the rest load.
+    /// Dropping one unknown entry is the right failure -- refusing the whole
+    /// file would lose the layout a user does have over one they cannot see.
+    #[must_use]
+    pub fn from_yaml_name(name: &str) -> Option<Self> {
+        if let Some(app) = name.strip_prefix("custom:") {
+            // An empty app name is not a widget anyone can draw.
+            return (!app.is_empty()).then(|| Self::Custom {
+                app_name: app.to_string(),
+            });
+        }
+        Some(match name {
+            "clock" => Self::Clock,
+            "weather" => Self::Weather,
+            "system_monitor" => Self::SystemMonitor,
+            "calendar" => Self::Calendar,
+            "notes" => Self::Notes,
+            "rss_feed" => Self::RssFeed,
+            "music_player" => Self::MusicPlayer,
+            "photo_frame" => Self::PhotoFrame,
+            "world_clock" => Self::WorldClock,
+            "reminders" => Self::Reminders,
+            "disk_usage" => Self::DiskUsage,
+            "network_monitor" => Self::NetworkMonitor,
+            "battery_status" => Self::BatteryStatus,
+            _ => return None,
+        })
+    }
+
     /// Human-readable label.
     pub fn label(&self) -> &str {
         match self {
@@ -452,6 +515,19 @@ impl Default for WidgetGridConfig {
     }
 }
 
+/// The readings a widget shows that the widget layer cannot derive.
+///
+/// Supplied by the caller each frame. Everything here is a *formatted string*
+/// rather than a number and a format, because the formatting is the part that
+/// has to agree with the rest of the desktop.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LiveReadings {
+    /// The time of day, as the taskbar clock would read it.
+    pub clock_time: String,
+    /// The date beneath it, in the same zone.
+    pub clock_date: String,
+}
+
 /// Manages all desktop widgets.
 pub struct DesktopWidgetManager {
     /// All widget instances.
@@ -642,17 +718,140 @@ impl DesktopWidgetManager {
         None
     }
 
-    /// Tick all widgets (update those that need it).
-    pub fn tick(&mut self, now_ms: u64) {
-        for w in &mut self.widgets {
-            if w.needs_update(now_ms) {
-                w.last_updated = now_ms;
+    /// Write the placed widgets into a configuration document.
+    ///
+    /// Keyed by ordinal rather than by the runtime `WidgetInstanceId`, because
+    /// that id comes from a counter and means nothing across a restart. The
+    /// file says *what widgets exist and where*, which is all a layout is.
+    ///
+    /// Zero-padded so the keys sort the way they are numbered: a file a user
+    /// has hand-edited need not preserve document order, and `"10"` sorting
+    /// before `"2"` would reorder the layout on a load-save round trip.
+    pub fn write_into(&self, doc: &mut Document) {
+        doc.remove(&["widgets"]);
+        for (i, w) in self.widgets.iter().enumerate() {
+            let key = format!("{i:03}");
+            doc.set_str(&["widgets", &key, "kind"], &w.kind.yaml_name());
+            doc.set_i64(&["widgets", &key, "col"], i64::from(w.position.col));
+            doc.set_i64(&["widgets", &key, "row"], i64::from(w.position.row));
+            doc.set_i64(&["widgets", &key, "cols"], i64::from(w.size.cols));
+            doc.set_i64(&["widgets", &key, "rows"], i64::from(w.size.rows));
+            doc.set_bool(&["widgets", &key, "visible"], w.visible);
+        }
+    }
+
+    /// Replace the placed widgets with those in a configuration document.
+    ///
+    /// Total: an entry that cannot be understood is skipped and the rest load.
+    /// An unknown kind is a file from a newer desktop; a position off the grid
+    /// or one overlapping a widget already placed is a file somebody edited by
+    /// hand. Neither is a reason to discard the widgets that *do* make sense.
+    ///
+    /// Every entry goes in through [`add_widget`](Self::add_widget) rather
+    /// than being pushed directly, which is what keeps the no-overlap
+    /// invariant as true for a hand-written file as for a dragged one.
+    pub fn read_from(&mut self, doc: &Document) {
+        self.widgets.clear();
+        let mut keys = doc.keys(&["widgets"]);
+        keys.sort();
+        for key in keys {
+            let Some(kind) = doc
+                .get_str(&["widgets", &key, "kind"])
+                .and_then(|n| WidgetKind::from_yaml_name(&n))
+            else {
+                continue;
+            };
+            let (Some(col), Some(row)) = (
+                doc.get_i64(&["widgets", &key, "col"])
+                    .and_then(|v| u32::try_from(v).ok()),
+                doc.get_i64(&["widgets", &key, "row"])
+                    .and_then(|v| u32::try_from(v).ok()),
+            ) else {
+                continue;
+            };
+            let Some(id) = self.add_widget(kind, GridPos::new(col, row)) else {
+                continue;
+            };
+            // Size and visibility are corrections to what `add_widget` chose,
+            // and each is independently optional: a file missing them still
+            // places the widget at its default size, which beats refusing an
+            // entry that named a kind and a place.
+            if let (Some(cols), Some(rows)) = (
+                doc.get_i64(&["widgets", &key, "cols"])
+                    .and_then(|v| u32::try_from(v).ok()),
+                doc.get_i64(&["widgets", &key, "rows"])
+                    .and_then(|v| u32::try_from(v).ok()),
+            ) {
+                self.resize_widget(id, WidgetSize::new(cols, rows));
+            }
+            if doc.get_bool(&["widgets", &key, "visible"]) == Some(false)
+                && let Some(w) = self.get_mut(id)
+            {
+                w.visible = false;
             }
         }
     }
 
+    /// Whether any widget wants redrawing at `now_ms`.
+    ///
+    /// The session's wake-up gate: an empty desktop, or one whose widgets are
+    /// all still within their interval, must let the loop park with no bound
+    /// (design-decisions 812). A clock asks for a wake once a minute, and only
+    /// while it is on screen.
+    #[must_use]
+    pub fn needs_tick(&self, now_ms: u64) -> bool {
+        self.layer_visible && self.widgets.iter().any(|w| w.needs_update(now_ms))
+    }
+
+    /// Milliseconds until the earliest widget is next due, if any is.
+    ///
+    /// This, and not [`needs_tick`](Self::needs_tick), is what a caller should
+    /// arm a wake-up from. `needs_tick` answers "is one due *now*", which is
+    /// false for the whole minute between a clock's updates -- so a loop that
+    /// parked on it would park unbounded and never come back, and the clock
+    /// would show the minute it was created for ever. Asking *when* instead
+    /// gives the loop a bound to sleep until, which is the only shape that is
+    /// both correct and idle (design-decisions 812).
+    #[must_use]
+    pub fn next_due_in(&self, now_ms: u64) -> Option<u64> {
+        if !self.layer_visible {
+            return None;
+        }
+        self.widgets
+            .iter()
+            .filter(|w| w.update_interval_ms > 0)
+            .map(|w| {
+                w.last_updated
+                    .saturating_add(w.update_interval_ms)
+                    .saturating_sub(now_ms)
+            })
+            .min()
+    }
+
+    /// Tick all widgets, reporting whether any became due.
+    ///
+    /// It used to return nothing and stamp a field nobody read, which is a
+    /// large part of why nothing ever called it.
+    pub fn tick(&mut self, now_ms: u64) -> bool {
+        let mut any = false;
+        for w in &mut self.widgets {
+            if w.needs_update(now_ms) {
+                w.last_updated = now_ms;
+                any = true;
+            }
+        }
+        any
+    }
+
     /// Render all visible widgets into render commands.
-    pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {
+    ///
+    /// `live` carries the readings this layer cannot work out for itself. The
+    /// clock's text is formatted by the shell rather than here, because the
+    /// shell knows the user's time zone and their 12-versus-24-hour choice --
+    /// the taskbar clock reads both out of `DateTimeSettings`, and a widget
+    /// clock that formatted its own would be a second answer to the same
+    /// question, free to disagree with the one six inches below it.
+    pub fn render(&self, p: &Palette, live: &LiveReadings) -> Vec<RenderCommand> {
         if !self.layer_visible {
             return Vec::new();
         }
@@ -669,7 +868,7 @@ impl DesktopWidgetManager {
             if !w.visible {
                 continue;
             }
-            self.render_widget(w, p, &mut commands);
+            self.render_widget(w, p, live, &mut commands);
         }
 
         // Widget picker overlay.
@@ -720,7 +919,13 @@ impl DesktopWidgetManager {
         }
     }
 
-    fn render_widget(&self, w: &WidgetInstance, p: &Palette, commands: &mut Vec<RenderCommand>) {
+    fn render_widget(
+        &self,
+        w: &WidgetInstance,
+        p: &Palette,
+        live: &LiveReadings,
+        commands: &mut Vec<RenderCommand>,
+    ) {
         let (x, y) = w.position.pixels(
             self.grid.origin_x,
             self.grid.origin_y,
@@ -824,6 +1029,7 @@ impl DesktopWidgetManager {
         self.render_widget_content(
             w,
             p,
+            live,
             x + 8.0,
             content_y,
             width - 16.0,
@@ -837,6 +1043,7 @@ impl DesktopWidgetManager {
         &self,
         w: &WidgetInstance,
         p: &Palette,
+        live: &LiveReadings,
         x: f32,
         y: f32,
         width: f32,
@@ -850,7 +1057,7 @@ impl DesktopWidgetManager {
                 commands.push(RenderCommand::Text {
                     x,
                     y: y + 10.0,
-                    text: "12:34".to_string(),
+                    text: live.clock_time.clone(),
                     font_size: 36.0,
                     color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),
                     font_weight: FontWeightHint::Bold,
@@ -860,7 +1067,7 @@ impl DesktopWidgetManager {
                 commands.push(RenderCommand::Text {
                     x,
                     y: y + 55.0,
-                    text: "Sunday, May 18".to_string(),
+                    text: live.clock_date.clone(),
                     font_size: 12.0,
                     color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
                     font_weight: FontWeightHint::Regular,
@@ -1160,6 +1367,15 @@ mod tests {
     )]
 
     use super::*;
+
+    /// Readings a test can assert against, distinct from anything a widget
+    /// would draw by accident.
+    fn sample_readings() -> LiveReadings {
+        LiveReadings {
+            clock_time: "07:05".to_string(),
+            clock_date: "Tuesday, 3 June".to_string(),
+        }
+    }
     use crate::palette_check::assert_drawn_from;
 
     fn make_mgr() -> DesktopWidgetManager {
@@ -1550,7 +1766,7 @@ mod tests {
     #[test]
     fn render_empty() {
         let mgr = make_mgr();
-        let cmds = mgr.render(&Palette::for_mode(false));
+        let cmds = mgr.render(&Palette::for_mode(false), &sample_readings());
         assert!(cmds.is_empty());
     }
 
@@ -1558,7 +1774,7 @@ mod tests {
     fn render_with_widget() {
         let mut mgr = make_mgr();
         mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0));
-        let cmds = mgr.render(&Palette::for_mode(false));
+        let cmds = mgr.render(&Palette::for_mode(false), &sample_readings());
         assert!(!cmds.is_empty());
     }
 
@@ -1567,7 +1783,7 @@ mod tests {
         let mut mgr = make_mgr();
         mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0));
         mgr.layer_visible = false;
-        let cmds = mgr.render(&Palette::for_mode(false));
+        let cmds = mgr.render(&Palette::for_mode(false), &sample_readings());
         assert!(cmds.is_empty());
     }
 
@@ -1575,7 +1791,7 @@ mod tests {
     fn render_edit_mode_shows_grid() {
         let mut mgr = make_mgr();
         mgr.edit_mode = true;
-        let cmds = mgr.render(&Palette::for_mode(false));
+        let cmds = mgr.render(&Palette::for_mode(false), &sample_readings());
         // Should have grid cells rendered.
         assert!(!cmds.is_empty());
     }
@@ -1584,7 +1800,7 @@ mod tests {
     fn render_picker() {
         let mut mgr = make_mgr();
         mgr.picker_open = true;
-        let cmds = mgr.render(&Palette::for_mode(false));
+        let cmds = mgr.render(&Palette::for_mode(false), &sample_readings());
         assert!(!cmds.is_empty());
     }
 
@@ -1592,7 +1808,7 @@ mod tests {
     fn render_system_monitor() {
         let mut mgr = make_mgr();
         mgr.add_widget(WidgetKind::SystemMonitor, GridPos::new(0, 0));
-        let cmds = mgr.render(&Palette::for_mode(false));
+        let cmds = mgr.render(&Palette::for_mode(false), &sample_readings());
         assert!(cmds.len() > 5);
     }
 
@@ -1600,7 +1816,7 @@ mod tests {
     fn render_notes_empty() {
         let mut mgr = make_mgr();
         mgr.add_widget(WidgetKind::Notes, GridPos::new(0, 0));
-        let cmds = mgr.render(&Palette::for_mode(false));
+        let cmds = mgr.render(&Palette::for_mode(false), &sample_readings());
         assert!(!cmds.is_empty());
     }
 
@@ -1611,7 +1827,7 @@ mod tests {
             .add_widget(WidgetKind::Notes, GridPos::new(0, 0))
             .unwrap();
         mgr.get_mut(id).unwrap().state_text = "Hello world".to_string();
-        let cmds = mgr.render(&Palette::for_mode(false));
+        let cmds = mgr.render(&Palette::for_mode(false), &sample_readings());
         assert!(!cmds.is_empty());
     }
 
@@ -1619,7 +1835,7 @@ mod tests {
     fn render_battery_status() {
         let mut mgr = make_mgr();
         mgr.add_widget(WidgetKind::BatteryStatus, GridPos::new(0, 0));
-        let cmds = mgr.render(&Palette::for_mode(false));
+        let cmds = mgr.render(&Palette::for_mode(false), &sample_readings());
         assert!(cmds.len() > 5);
     }
 
@@ -1629,7 +1845,7 @@ mod tests {
         mgr.add_widget(WidgetKind::Clock, GridPos::new(0, 0));
         mgr.add_widget(WidgetKind::SystemMonitor, GridPos::new(2, 0));
         mgr.add_widget(WidgetKind::BatteryStatus, GridPos::new(4, 0));
-        let cmds = mgr.render(&Palette::for_mode(false));
+        let cmds = mgr.render(&Palette::for_mode(false), &sample_readings());
         assert!(cmds.len() > 15);
     }
 
@@ -1817,7 +2033,7 @@ mod tests {
             for accent in SAFE_ACCENTS {
                 let mut p = Palette::for_mode(light);
                 p.accent = accent;
-                let cmds = full_mgr().render(&p);
+                let cmds = full_mgr().render(&p, &sample_readings());
                 assert_drawn_from(
                     &p,
                     &cmds,
@@ -1837,8 +2053,8 @@ mod tests {
     #[test]
     fn the_fixture_takes_every_branch_the_widget_layer_has() {
         let p = Palette::for_mode(false);
-        let body = body_mgr().render(&p);
-        let full = full_mgr().render(&p);
+        let body = body_mgr().render(&p, &sample_readings());
+        let full = full_mgr().render(&p, &sample_readings());
 
         assert_eq!(
             strokes_of_width(&body, 1.0).len(),
@@ -1871,9 +2087,10 @@ mod tests {
             "the three meters are not drawn as three tracks and three bars"
         );
 
+        let live = sample_readings();
         for (glyph, size, what) in [
-            ("12:34", 36.0, "the clock's time"),
-            ("Sunday, May 18", 12.0, "the clock's date"),
+            (live.clock_time.as_str(), 36.0, "the clock's time"),
+            (live.clock_date.as_str(), 12.0, "the clock's date"),
             ("CPU", 10.0, "a meter's label"),
             (EMPTY_NOTE, 12.0, "the placeholder an empty note draws"),
             (WRITTEN_NOTE, 12.0, "a written note"),
@@ -1917,7 +2134,10 @@ mod tests {
     fn a_hidden_widget_layer_draws_nothing() {
         let mut mgr = full_mgr();
         mgr.layer_visible = false;
-        assert!(mgr.render(&Palette::for_mode(false)).is_empty());
+        assert!(
+            mgr.render(&Palette::for_mode(false), &sample_readings())
+                .is_empty()
+        );
     }
 
     /// The ring around the selected widget is the module's one accent site.
@@ -1935,7 +2155,7 @@ mod tests {
                 let mut p = Palette::for_mode(light);
                 p.accent = accent;
 
-                let ring = strokes_of_width(&full_mgr().render(&p), 2.0);
+                let ring = strokes_of_width(&full_mgr().render(&p, &sample_readings()), 2.0);
                 assert_eq!(ring.len(), 1, "expected exactly one selection ring");
                 assert_eq!(
                     ring[0], p.accent,
@@ -1946,7 +2166,7 @@ mod tests {
                 let mut none = full_mgr();
                 none.selected_widget = None;
                 assert!(
-                    strokes_of_width(&none.render(&p), 2.0).is_empty(),
+                    strokes_of_width(&none.render(&p, &sample_readings()), 2.0).is_empty(),
                     "a ring is drawn with nothing selected (light={light})"
                 );
 
@@ -1955,7 +2175,7 @@ mod tests {
                 let mut viewing = full_mgr();
                 viewing.edit_mode = false;
                 assert!(
-                    strokes_of_width(&viewing.render(&p), 2.0).is_empty(),
+                    strokes_of_width(&viewing.render(&p, &sample_readings()), 2.0).is_empty(),
                     "a ring is drawn outside edit mode (light={light})"
                 );
             }
@@ -1979,7 +2199,7 @@ mod tests {
             for accent in SAFE_ACCENTS {
                 let mut p = Palette::for_mode(light);
                 p.accent = accent;
-                let cmds = full_mgr().render(&p);
+                let cmds = full_mgr().render(&p, &sample_readings());
 
                 let bars = meter_rects(&cmds);
                 assert_eq!(bars.len(), 6);
@@ -2032,7 +2252,7 @@ mod tests {
     fn the_three_meters_never_look_alike() {
         for light in [false, true] {
             let p = Palette::for_mode(light);
-            let bars = meter_rects(&full_mgr().render(&p));
+            let bars = meter_rects(&full_mgr().render(&p, &sample_readings()));
             let fills = [rgb(bars[1]), rgb(bars[3]), rgb(bars[5])];
             for i in 0..fills.len() {
                 for j in (i + 1)..fills.len() {
@@ -2054,7 +2274,7 @@ mod tests {
     fn an_empty_note_and_a_written_one_never_look_alike() {
         for light in [false, true] {
             let p = Palette::for_mode(light);
-            let cmds = body_mgr().render(&p);
+            let cmds = body_mgr().render(&p, &sample_readings());
 
             let empty = texts_saying(&cmds, EMPTY_NOTE, 12.0);
             let written = texts_saying(&cmds, WRITTEN_NOTE, 12.0);
@@ -2093,7 +2313,7 @@ mod tests {
     fn every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil() {
         for light in [false, true] {
             let p = Palette::for_mode(light);
-            let cmds = body_mgr().render(&p);
+            let cmds = body_mgr().render(&p, &sample_readings());
 
             // The grid's wash is a fixed 80, independent of any widget: it is a
             // property of the grid, which no widget owns.
@@ -2143,9 +2363,10 @@ mod tests {
             // and "Disk" are drawn by three separate pushes, and asserting on
             // "CPU" alone left the other two checked by nothing, as it left
             // the battery's estimate. n source sites, n assertions.
+            let live = sample_readings();
             for (glyph, size, role) in [
-                ("12:34", 36.0, p.text),
-                ("Sunday, May 18", 12.0, p.subtext0),
+                (live.clock_time.as_str(), 36.0, p.text),
+                (live.clock_date.as_str(), 12.0, p.subtext0),
                 ("CPU", 10.0, p.subtext0),
                 ("Memory", 10.0, p.subtext0),
                 ("Disk", 10.0, p.subtext0),
@@ -2185,7 +2406,7 @@ mod tests {
     fn the_picker_casts_the_shared_popup_shadow() {
         for light in [false, true] {
             let p = Palette::for_mode(light);
-            let s = shadows_with_blur(&full_mgr().render(&p), 20.0);
+            let s = shadows_with_blur(&full_mgr().render(&p, &sample_readings()), 20.0);
             assert_eq!(s.len(), 1, "expected exactly one picker shadow");
             assert_eq!(
                 s[0],
@@ -2205,7 +2426,7 @@ mod tests {
     fn a_translucent_widget_casts_a_translucent_shadow() {
         let p = Palette::for_mode(false);
 
-        for s in shadows_with_blur(&body_mgr().render(&p), 12.0) {
+        for s in shadows_with_blur(&body_mgr().render(&p, &sample_readings()), 12.0) {
             assert_eq!(rgb(s), (0, 0, 0), "a widget's shadow is not black");
             assert_eq!(
                 s.a, ODD_SHADOW,
@@ -2224,7 +2445,7 @@ mod tests {
         for id in ids {
             fainter.get_mut(id).unwrap().bg_opacity = 60;
         }
-        for s in shadows_with_blur(&fainter.render(&p), 12.0) {
+        for s in shadows_with_blur(&fainter.render(&p, &sample_readings()), 12.0) {
             assert_eq!(s.a, 20, "a fainter widget did not cast a fainter shadow");
         }
     }
@@ -2242,7 +2463,7 @@ mod tests {
             for accent in SAFE_ACCENTS {
                 let mut p = Palette::for_mode(light);
                 p.accent = accent;
-                let cmds = full_mgr().render(&p);
+                let cmds = full_mgr().render(&p, &sample_readings());
 
                 assert_eq!(
                     fills_exactly(&cmds, p.mantle),

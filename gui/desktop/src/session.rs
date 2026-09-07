@@ -492,6 +492,10 @@ impl<T: Transport> ShellSession<T> {
         let mut tree = RenderTree::new();
         tree.commands
             .extend(self.wallpaper.get_render_commands(&p, width, height, day));
+        // After the wallpaper, because they sit on it. This is the *background*
+        // surface, so windows cover the widgets -- which is what makes them
+        // desktop widgets rather than an always-on-top overlay.
+        tree.commands.extend(self.shell.render_widgets());
         self.events
             .submit(self.background.window, &self.background.localize(&tree))
     }
@@ -757,6 +761,12 @@ impl<T: Transport> ShellSession<T> {
                 // rather than an invariant. Under Alt-Tab for the same reason
                 // the menus are: Alt+Tab leaves the card open, and the switcher
                 // is modal while it is up.
+                // Over the menus and under Alt-Tab, with the rest of the
+                // popups. It cannot be on screen beside any of them --
+                // `open_desktop_menu` dismisses everything first, and any other
+                // popup opening dismisses it -- so this position states that
+                // invariant rather than resolving a case.
+                self.shell.render_desktop_menu(),
                 self.shell.render_shortcut_card(),
                 self.shell.render_alt_tab(),
                 // Last of all, over Alt-Tab too, and for the opposite reason to
@@ -825,6 +835,7 @@ impl<T: Transport> ShellSession<T> {
             || self.shell.overview.visible
             || self.shell.run_dialog.is_visible()
             || self.shell.shortcut_card_open
+            || self.shell.desktop_menu.is_visible()
     }
 
     /// Handle everything waiting, without blocking. Reports whether anything
@@ -871,6 +882,13 @@ impl<T: Transport> ShellSession<T> {
             }
             self.dirty = true;
             worked = true;
+        }
+
+        // After the events, before the paint: a drag that ended in this batch
+        // has committed by now, and coalescing here means one write per pump
+        // rather than one per event.
+        if self.shell.take_widgets_dirty() {
+            self.save_widgets();
         }
 
         if self.dirty {
@@ -967,6 +985,27 @@ impl<T: Transport> ShellSession<T> {
         self.shell.load_appearance();
         self.sync_animation_speed();
         self.sync_autohide();
+        // The widget layout comes in on the same call. It is not an appearance
+        // setting, but it is the same question -- "what did this user leave the
+        // desktop looking like?" -- and a second door the caller has to
+        // remember is a door somebody forgets, which is exactly how the
+        // animation speed stayed inert.
+        self.shell.load_widgets();
+    }
+
+    /// Persist the widget layout, reporting a failure rather than hiding it.
+    ///
+    /// Called after a change rather than on a timer: the layout changes when a
+    /// person adds, moves or removes a widget, which is rare and always the
+    /// result of an event this session already handled.
+    fn save_widgets(&mut self) {
+        if let Err(err) = self.shell.save_widgets() {
+            // Not fatal: a desktop whose layout cannot be written is still a
+            // working desktop, and refusing to run would be a worse answer than
+            // forgetting where a clock was. Reported, because silently losing a
+            // user's arrangement every time is a bug they cannot see.
+            self.set_wallpaper_error(Some(format!("widget layout not saved: {err}")));
+        }
     }
 
     /// Push the shell's animation speed into the manager that obeys it.
@@ -1354,6 +1393,11 @@ impl<T: Transport> ShellSession<T> {
         // Auto-hide is dated rather than stepped, so the session's only
         // absolute clock is advanced here and nowhere else.
         self.clock_ms = self.clock_ms.saturating_add(elapsed_ms);
+        // Widgets are dated like auto-hide rather than stepped: a clock is due
+        // at a wall-clock moment, not after so many frames.
+        if self.shell.widgets.tick(self.clock_ms) {
+            self.dirty = true;
+        }
         if self.autohide.tick(self.clock_ms) {
             // The error is deliberately not swallowed: failing to move the
             // panel leaves the bar drawn where it is not, and a shell that
@@ -1373,6 +1417,20 @@ impl<T: Transport> ShellSession<T> {
     fn arm_next_frame(&mut self) {
         if self.anything_moving() {
             self.events.wake_after(self.panel.window, FRAME_INTERVAL);
+            return;
+        }
+        // Nothing is animating, but a widget may still be due at a *known*
+        // future moment -- a clock, once a minute. Armed at that moment rather
+        // than at the frame interval, which would wake sixty times a second to
+        // redraw a minute hand, and rather than not at all, which is what the
+        // first version of this did: `needs_tick` is false for the whole minute
+        // between updates, so the loop parked unbounded and the clock showed
+        // the minute it was created for ever.
+        if let Some(ms) = self.shell.widgets.next_due_in(self.clock_ms) {
+            self.events.wake_after(
+                self.panel.window,
+                std::time::Duration::from_millis(ms.max(1)),
+            );
         }
     }
 

@@ -387,6 +387,11 @@ NOT_A_CHECKER = {
         "the tree, and the gate handles its failure itself by falling back to "
         "one `git cat-file` per file. Through `run_checker` that fallback "
         "would be unreachable: a failure would exit the hook.",
+    'check-lane-signals.py" --quiet':
+        "The halt notice. NOT a gate: it prints and allows the push through "
+        "because pushing is exactly what a halt asks for (stranding unpushed "
+        "work is worse). Through `run_checker` a non-zero exit would abort "
+        "the hook, refusing the push — the opposite of the intended behaviour.",
 }
 
 

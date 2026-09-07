@@ -26,7 +26,30 @@ snapshots_before="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'boot-test-snapshot
 # The payload both variants run: announce, sleep long enough for the editor to
 # land, then announce again.  The second line is the one an edit can corrupt,
 # because bash has not read that far when the sleep starts.
+# The editor waits for the payload to announce itself rather than guessing
+# with a sleep. Guessing was a real defect: the editor fired 1s after launch,
+# betting the script reached its snapshot within a second. Under a loaded
+# machine -- a boot test's gate phase is hundreds of short-lived processes
+# hammering the disk -- mktemp/cat/chmod/exec can exceed that, the edit lands
+# BEFORE the snapshot is taken, and the snapshot faithfully captures the
+# already-edited file. The run prints CLOBBERED and this checker reports
+# "the snapshot did not isolate" -- accusing the re-exec guard of a failure it
+# did not have. Observed 2026-09-06: passed standalone, failed inside a boot
+# test, same commit.
+#
+# Bounded, so a broken payload fails the run instead of hanging it.
+SIGNAL="$tmp/started"
+export SIGNAL
+_wait_for_signal() {
+    local n=0
+    while [ ! -e "$SIGNAL" ] && [ "$n" -lt 300 ]; do
+        sleep 0.1
+        n=$((n + 1))
+    done
+}
+
 payload='echo "PHASE-1"
+: > "$SIGNAL"
 sleep 2
 echo "PHASE-2"
 '
@@ -34,7 +57,7 @@ echo "PHASE-2"
 # --- Control: no preamble.  A mid-run edit must be seen. --------------------
 printf '#!/usr/bin/env bash\n%s' "$payload" > "$tmp/control.sh"
 chmod +x "$tmp/control.sh"
-( sleep 1; printf '#!/usr/bin/env bash\necho "PHASE-1"\nsleep 2\necho "CLOBBERED"\n' > "$tmp/control.sh" ) &
+( _wait_for_signal; printf '#!/usr/bin/env bash\necho "PHASE-1"\n: > "$SIGNAL"\nsleep 2\necho "CLOBBERED"\n' > "$tmp/control.sh" ) &
 control_out="$(bash "$tmp/control.sh" 2>&1)"
 wait
 
@@ -55,7 +78,9 @@ fi
     printf '%s' "$payload"
 } > "$tmp/guarded.sh"
 chmod +x "$tmp/guarded.sh"
-( sleep 1; printf '#!/usr/bin/env bash\necho "PHASE-1"\nsleep 2\necho "CLOBBERED"\n' > "$tmp/guarded.sh" ) &
+# Clear the control run's signal BEFORE arming this editor, not after.
+rm -f "$SIGNAL"
+( _wait_for_signal; printf '#!/usr/bin/env bash\necho "PHASE-1"\n: > "$SIGNAL"\nsleep 2\necho "CLOBBERED"\n' > "$tmp/guarded.sh" ) &
 # The preamble is lifted as a *block*, and a block does not bring its
 # prerequisites with it: `BOOT_TEST_START_EPOCH` is set at the top of
 # boot-test.sh, well above the `if`, and the preamble forwards it to the

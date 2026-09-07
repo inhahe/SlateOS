@@ -161,6 +161,9 @@ pub mod window_rules;
 mod pointer_tests;
 
 use appearance::config;
+use guitk::menu::{ContextMenu, MenuAction, MenuItem, MenuItemId};
+
+use crate::widgets::{DesktopWidgetManager, WidgetInstanceId, WidgetKind};
 use appearance::{
     AppearanceSettings, DecorationColors, Palette, TaskbarStyle, TransparencyLevel, emphasized,
     readable_on,
@@ -923,6 +926,37 @@ pub struct DesktopShell {
     /// and corner radius all live here, and each is read by a different part
     /// of the shell.
     pub appearance: AppearanceSettings,
+    /// The menu that opens on a right-click over bare desktop.
+    ///
+    /// Built once and reused rather than rebuilt per click: its item list is
+    /// fixed, and `ContextMenu::new` measures the panel width from the labels,
+    /// which is work with no reason to repeat.
+    pub desktop_menu: ContextMenu,
+    /// Widget panels drawn on the desktop background.
+    ///
+    /// Empty until the user adds one from [`desktop_menu`](Self::desktop_menu),
+    /// which is what keeps an untouched desktop identical to how it was before
+    /// widgets existed -- and keeps it idle, since a desktop with no widgets
+    /// has nothing that needs ticking.
+    pub widgets: DesktopWidgetManager,
+    /// The widget the open menu is about, if it was opened over one.
+    ///
+    /// Held rather than re-hit-tested when the item is chosen: by then the
+    /// pointer is over the menu, which is drawn *on top of* the widget, so a
+    /// second hit test would answer about wherever the menu happens to sit.
+    menu_widget: Option<WidgetInstanceId>,
+    /// The widget being dragged, and where inside it the pointer took hold.
+    ///
+    /// The offset is what stops a drag snapping the widget's corner to the
+    /// pointer on the first pixel of movement.
+    widget_drag: Option<(WidgetInstanceId, f32, f32)>,
+    /// Whether the widget layout has changed since it was last written.
+    ///
+    /// Set only where a change is *committed* -- a menu action, a drag that
+    /// ended -- and deliberately not on every step of a drag. A flag set per
+    /// pointer move would be a file write per frame while the user is still
+    /// deciding where to put the thing.
+    widgets_dirty: bool,
     /// Watches `appearance.yaml` so a change made in another process reaches
     /// this one without a restart.
     ///
@@ -1336,6 +1370,11 @@ impl DesktopShell {
             overview: overview::OverviewState::new(),
             overview_config: overview::OverviewConfig::default(),
             appearance: AppearanceSettings::default(),
+            desktop_menu: ContextMenu::new(Self::desktop_menu_items()),
+            widgets: DesktopWidgetManager::new(),
+            menu_widget: None,
+            widget_drag: None,
+            widgets_dirty: false,
             appearance_watch: config::Watcher::new(appearance_settings::CONFIG_NAME),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
@@ -1975,6 +2014,81 @@ impl DesktopShell {
     }
 
     fn handle_mouse_inner(&mut self, event: &MouseEvent) -> ShellAction {
+        // The desktop menu first, for the same reason the Run box's chooser is
+        // first below: it is drawn over everything, so a press either landed on
+        // it or dismissed it, and either way no control underneath should see
+        // the same press.
+        if self.desktop_menu.is_visible() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    self.desktop_menu.handle_mouse_move(event.x, event.y);
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Press(_) => {
+                    match self.desktop_menu.handle_click(event.x, event.y) {
+                        Some(id) => {
+                            self.desktop_menu.hide();
+                            self.activate_desktop_menu_item(id);
+                        }
+                        // A press that named no item: on the panel's own
+                        // padding, or outside it. `handle_click` cannot tell
+                        // the caller which, and closing on both is the
+                        // behaviour every menu has -- a click into the gap
+                        // between two rows is a miss, not a hold.
+                        None => self.desktop_menu.hide(),
+                    }
+                    return ShellAction::Consumed;
+                }
+                _ => return ShellAction::Consumed,
+            }
+        }
+        // A drag in progress owns the pointer until the button comes up,
+        // wherever it goes -- including over the taskbar and off the screen
+        // edge. Dropping the widget the moment the pointer left the desktop
+        // would make a widget near the bottom impossible to move, and every
+        // toolkit lets a grab outlive the surface it started on.
+        if self.widget_drag.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    self.drag_widget_to(event.x, event.y);
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Release(_) => {
+                    // Marked dirty on release whether or not this last step
+                    // moved it: the widget may have been carried across three
+                    // cells and dropped back where the final `Move` already
+                    // put it, and that is still a layout that differs from the
+                    // one on disk.
+                    self.drag_widget_to(event.x, event.y);
+                    self.widget_drag = None;
+                    self.widgets_dirty = true;
+                    return ShellAction::Consumed;
+                }
+                _ => return ShellAction::Consumed,
+            }
+        }
+        // A left press on a widget takes hold of it. Before the right-click
+        // below only in source order; the two cannot both match, since a press
+        // carries one button.
+        if let MouseEventKind::Press(MouseButton::Left) = event.kind
+            && !self.any_popup_open()
+            && !self.taskbar_rect().contains(event.x, event.y)
+            && self.begin_widget_drag(event.x, event.y)
+        {
+            return ShellAction::Consumed;
+        }
+        // A right-click on bare desktop opens it. Checked here rather than at
+        // the bottom with the other background presses because the menu must
+        // not be opened by a right-click that landed on the taskbar or a
+        // window, and everything below this point has already claimed its own
+        // rectangle.
+        if let MouseEventKind::Press(MouseButton::Right) = event.kind
+            && !self.any_popup_open()
+            && !self.taskbar_rect().contains(event.x, event.y)
+        {
+            self.open_desktop_menu(event.x, event.y);
+            return ShellAction::Consumed;
+        }
         // The chooser ahead of the Run box that raised it, for the same reason
         // the Run box comes ahead of everything else: it is drawn last, so a
         // press anywhere landed on it or on the space around it.
@@ -2920,6 +3034,28 @@ impl DesktopShell {
                 return HotkeyOutcome::ask(self.finish_alt_tab());
             }
             return HotkeyOutcome::ignored();
+        }
+
+        // The desktop menu owns the keyboard while it is up, for the reason
+        // every modal surface here does: arrows walk its rows, Enter chooses,
+        // Escape closes, and none of those should also do whatever the global
+        // shortcut table says. Without this the menu could be opened and then
+        // only dismissed with the mouse.
+        if self.desktop_menu.is_visible() {
+            return match self.desktop_menu.handle_key(key) {
+                Some(MenuAction::Selected(id)) => {
+                    self.desktop_menu.hide();
+                    self.activate_desktop_menu_item(id);
+                    HotkeyOutcome::consumed()
+                }
+                Some(MenuAction::Closed) => {
+                    self.desktop_menu.hide();
+                    HotkeyOutcome::consumed()
+                }
+                // The menu moved its highlight, or ignored the key. Either way
+                // it stays open and the press goes no further.
+                Some(MenuAction::None) | None => HotkeyOutcome::consumed(),
+            };
         }
 
         // The overview gets every press before the shortcut table does, and
@@ -4401,6 +4537,255 @@ impl DesktopShell {
         self.sync_quick_settings();
     }
 
+    /// Menu item ids. Stable numbers rather than positions, so inserting an
+    /// item cannot silently reassign what the ones below it do.
+    const MENU_ADD_CLOCK: u64 = 1;
+    const MENU_ADD_CALENDAR: u64 = 2;
+    const MENU_ADD_SYSTEM_MONITOR: u64 = 3;
+    const MENU_REMOVE_WIDGETS: u64 = 4;
+    const MENU_REMOVE_ONE_WIDGET: u64 = 5;
+
+    /// The desktop menu's fixed item list.
+    fn desktop_menu_items() -> Vec<MenuItem> {
+        let add = |id: u64, label: &str| MenuItem::Action {
+            id,
+            label: label.to_string(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: None,
+        };
+        vec![
+            MenuItem::Submenu {
+                id: 100,
+                label: "Add widget".to_string(),
+                icon: None,
+                enabled: true,
+                children: vec![
+                    add(Self::MENU_ADD_CLOCK, "Clock"),
+                    add(Self::MENU_ADD_CALENDAR, "Calendar"),
+                    add(Self::MENU_ADD_SYSTEM_MONITOR, "System monitor"),
+                ],
+            },
+            MenuItem::Separator,
+            add(Self::MENU_REMOVE_WIDGETS, "Remove all widgets"),
+        ]
+    }
+
+    /// The items for a right-click *on a widget*.
+    fn widget_menu_items() -> Vec<MenuItem> {
+        let add = |id: u64, label: &str| MenuItem::Action {
+            id,
+            label: label.to_string(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: None,
+        };
+        vec![
+            add(Self::MENU_REMOVE_ONE_WIDGET, "Remove this widget"),
+            MenuItem::Separator,
+            add(Self::MENU_REMOVE_WIDGETS, "Remove all widgets"),
+        ]
+    }
+
+    /// Whether the widget layout needs writing, clearing the flag.
+    ///
+    /// Taken rather than read so a caller cannot ask twice and save twice.
+    pub fn take_widgets_dirty(&mut self) -> bool {
+        core::mem::replace(&mut self.widgets_dirty, false)
+    }
+
+    /// The readings the widget layer cannot derive for itself.
+    ///
+    /// The clock's strings come from the same `ClockDisplay` and time zone the
+    /// taskbar reads, so a widget clock and the tray clock cannot disagree
+    /// about the hour, the format, or the zone -- which they would the moment
+    /// either grew a formatter of its own.
+    /// Public because a caller that renders the widget layer itself needs the
+    /// same readings, and because it is the only way to ask what the layer is
+    /// being *told* as distinct from what it draws.
+    #[must_use]
+    pub fn live_readings(&self) -> crate::widgets::LiveReadings {
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let zone = self.local_zone();
+        let clock = self.clock();
+        crate::widgets::LiveReadings {
+            clock_time: clock.format_time(secs, &zone),
+            clock_date: clock.format_date(secs, &zone),
+        }
+    }
+
+    /// The settings group the widget layout lives in.
+    pub const WIDGETS_CONFIG_NAME: &'static str = "widgets";
+
+    /// Read the saved widget layout.
+    ///
+    /// Kept out of [`new`](Self::new) for the reason
+    /// [`load_appearance`](Self::load_appearance) is: a constructor that reads
+    /// the user's home directory gives every test a machine-dependent result.
+    ///
+    /// A missing or unreadable file is not an error -- it is a desktop with no
+    /// widgets, which is what a fresh install has.
+    pub fn load_widgets(&mut self) {
+        self.widgets
+            .read_from(&config::load(Self::WIDGETS_CONFIG_NAME));
+    }
+
+    /// Write the widget layout back.
+    ///
+    /// Splices into the document that was on disk rather than replacing it, so
+    /// comments and any key a different version of the desktop wrote survive --
+    /// the same contract every other settings group here has.
+    ///
+    /// # Errors
+    ///
+    /// If there is no configuration directory, or the file cannot be written.
+    pub fn save_widgets(&self) -> std::io::Result<()> {
+        let mut doc = config::load(Self::WIDGETS_CONFIG_NAME);
+        self.widgets.write_into(&mut doc);
+        config::store(Self::WIDGETS_CONFIG_NAME, &doc)
+    }
+
+    /// Open the desktop menu at a point, closing whatever else was open.
+    ///
+    /// The item list depends on what is under the pointer: a widget gets a menu
+    /// about *that* widget, bare desktop gets the one about the desktop. Built
+    /// per opening rather than kept as two menus, because `ContextMenu::new`
+    /// measures its panel from the labels and the two lists are different
+    /// widths -- one menu reused would keep whichever width it was built with.
+    ///
+    /// Dismisses first, for the reason every other popup here does: two menus
+    /// on screen at once have no rule about which the next click belongs to.
+    pub fn open_desktop_menu(&mut self, x: f32, y: f32) {
+        self.dismiss_popups();
+        self.menu_widget = self.widgets.hit_test(x, y);
+        let items = if self.menu_widget.is_some() {
+            Self::widget_menu_items()
+        } else {
+            Self::desktop_menu_items()
+        };
+        self.desktop_menu = ContextMenu::new(items);
+        self.desktop_menu.show(x, y);
+    }
+
+    /// Begin dragging the widget under `(x, y)`, if there is one.
+    ///
+    /// Returns whether a drag started, so the caller can stop the press
+    /// falling through to the window underneath.
+    fn begin_widget_drag(&mut self, x: f32, y: f32) -> bool {
+        let Some(id) = self.widgets.hit_test(x, y) else {
+            return false;
+        };
+        let Some(w) = self.widgets.get(id) else {
+            return false;
+        };
+        let g = &self.widgets.grid;
+        let (wx, wy) =
+            w.position
+                .pixels(g.origin_x, g.origin_y, g.cell_width, g.cell_height, g.gap);
+        self.widget_drag = Some((id, x - wx, y - wy));
+        true
+    }
+
+    /// Continue a drag. Returns whether the widget moved.
+    fn drag_widget_to(&mut self, x: f32, y: f32) -> bool {
+        let Some((id, dx, dy)) = self.widget_drag else {
+            return false;
+        };
+        // The grab offset is subtracted before asking which cell: without it
+        // the cell is the one under the *pointer*, so grabbing a widget by its
+        // right-hand edge would teleport it a column left on the first move.
+        let Some(pos) = self.widgets.pixel_to_grid(x - dx, y - dy) else {
+            return false;
+        };
+        self.widgets.move_widget(id, pos)
+    }
+
+    /// Act on a desktop-menu selection. Returns whether anything changed.
+    ///
+    /// Public because a click is not the only way to choose an item: the
+    /// keyboard path below routes `MenuAction::Selected` here too, and a future
+    /// caller (a shortcut that opens the menu, an accessibility driver) needs
+    /// the same door. It takes the id rather than a position for the reason the
+    /// ids are constants — a position is only meaningful next to the item list
+    /// it indexes.
+    pub fn activate_desktop_menu_item(&mut self, id: MenuItemId) -> bool {
+        let changed = self.activate_desktop_menu_item_inner(id);
+        self.widgets_dirty |= changed;
+        changed
+    }
+
+    fn activate_desktop_menu_item_inner(&mut self, id: MenuItemId) -> bool {
+        let kind = match id {
+            Self::MENU_ADD_CLOCK => Some(WidgetKind::Clock),
+            Self::MENU_ADD_CALENDAR => Some(WidgetKind::Calendar),
+            Self::MENU_ADD_SYSTEM_MONITOR => Some(WidgetKind::SystemMonitor),
+            Self::MENU_REMOVE_ONE_WIDGET => {
+                // `menu_widget` rather than a fresh hit test: see the field.
+                return self
+                    .menu_widget
+                    .take()
+                    .is_some_and(|id| self.widgets.remove_widget(id));
+            }
+            Self::MENU_REMOVE_WIDGETS => {
+                let had = self.widgets.count() > 0;
+                for w in self
+                    .widgets
+                    .all_widgets()
+                    .iter()
+                    .map(|w| w.id)
+                    .collect::<Vec<_>>()
+                {
+                    self.widgets.remove_widget(w);
+                }
+                return had;
+            }
+            _ => None,
+        };
+        // `find_free_position` rather than the click point: a widget dropped
+        // where the pointer happened to be would overlap whatever is already
+        // there, and the grid exists to stop that.
+        if let Some(kind) = kind
+            && let Some(pos) = self.widgets.find_free_position(kind.default_size())
+        {
+            return self.widgets.add_widget(kind, pos).is_some();
+        }
+        false
+    }
+
+    /// The desktop menu's draw commands, empty when it is closed.
+    #[must_use]
+    pub fn render_desktop_menu(&self) -> Option<RenderTree> {
+        if !self.desktop_menu.is_visible() {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands.extend(self.desktop_menu.render());
+        Some(tree)
+    }
+
+    /// The widget layer's draw commands, for the *background* surface.
+    ///
+    /// Separate from [`render_desktop_menu`](Self::render_desktop_menu)
+    /// because they go to different surfaces: widgets sit on the desktop and
+    /// windows cover them, while the menu is a popup over everything.
+    #[must_use]
+    pub fn render_widgets(&self) -> Vec<guitk::render::RenderCommand> {
+        // Derived from the settings rather than kept on `DesktopTheme`, which
+        // holds *roles* (taskbar background, title-bar foreground) rather than
+        // the palette they were chosen from -- and a widget panel is not any of
+        // those roles. Same call `render_notifications` makes, a few methods
+        // down, for the same reason.
+        self.widgets.render(
+            &Palette::from_settings(&self.appearance),
+            &self.live_readings(),
+        )
+    }
+
     /// Whether any of the shell's own surfaces is open over the desktop.
     ///
     /// Named separately from [`dismiss_popups`](Self::dismiss_popups), which
@@ -4412,7 +4797,8 @@ impl DesktopShell {
     /// One expression, so they cannot drift apart.
     #[must_use]
     pub fn any_popup_open(&self) -> bool {
-        self.start_menu_open
+        self.desktop_menu.is_visible()
+            || self.start_menu_open
             || self.power_menu_open
             || self.calendar.visible
             || self.notifications.pane_state().is_visible()
@@ -4429,6 +4815,7 @@ impl DesktopShell {
     /// be what the user meant to dismiss.
     pub fn dismiss_popups(&mut self) -> bool {
         let any = self.any_popup_open();
+        self.desktop_menu.hide();
         self.start_menu_open = false;
         self.power_menu_open = false;
         self.calendar.set_visible(false);

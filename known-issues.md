@@ -122801,9 +122801,16 @@ Possible causes:
 - The pty slave's `backend_read_char` function pointer is not overridden
   from the default (keyboard) when the pty is created.
 
-**This is likely lane B's territory** (the pty layer is in `posix/`,
-and the pty kernel support is in `kernel/src/tty/pty.rs`), but the TTY
-dispatch in `kernel/src/tty/` is lane A's.  Both may need changes.
+**This is the known limitation `TD-B-PTY-SLAVE-READ-IS-CTTY-ONLY`.**
+In `posix/src/file.rs:535-550`, the `HandleKind::PtySlave` arm of `read()`
+dispatches to `SYS_TTY_READ` (which takes no handle and always reads from
+`current_tty()`), not to a pty-specific read syscall.  Lane B's own comment
+says: "A process holding a slave fd for a terminal it is not on has no way
+to read it; that needs a handle-taking `SYS_TTY_READ`, which does not exist
+yet."  The ctest-pty fixture reads from the slave fd BEFORE it has a
+controlling terminal (the raw-mode data-path tests at checks 13–18 precede
+`forkpty`), so `current_tty()` returns the console, and the console does a
+blocking keyboard read that never completes.
 
 **Workaround:** the ctest-pty rung is disabled in `kernel/src/main.rs`
 (the function still exists in `spawn.rs`).  Re-enable once the TTY

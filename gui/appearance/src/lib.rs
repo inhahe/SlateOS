@@ -381,6 +381,39 @@ impl ColorFilter {
     }
 
     /// Apply this filter to a color. Alpha is never touched.
+    /// Apply this filter to one packed ARGB8888 pixel.
+    ///
+    /// The form a framebuffer needs. It exists beside [`Self::apply`] rather
+    /// than at the call site because a second unpack/repack written in the
+    /// compositor would be a second definition of what this filter *is*, free
+    /// to drift from the first; `the_packed_filter_agrees_with_the_unpacked_one`
+    /// holds the two together over every channel value.
+    ///
+    /// Alpha is carried through untouched. A colour-vision filter answers "what
+    /// does this look like", and transparency is not something it can change.
+    #[must_use]
+    pub fn apply_argb(self, argb: u32) -> u32 {
+        // The identity case first and without unpacking: this runs once per
+        // pixel of a full frame, and for nearly every user the answer is the
+        // pixel it was handed.
+        if matches!(self, Self::None) {
+            return argb;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let (a, r, g, b) = (
+            (argb >> 24) as u8,
+            (argb >> 16) as u8,
+            (argb >> 8) as u8,
+            argb as u8,
+        );
+        let out = self.apply(Color::rgba(r, g, b, a));
+        (u32::from(out.a) << 24)
+            | (u32::from(out.r) << 16)
+            | (u32::from(out.g) << 8)
+            | u32::from(out.b)
+    }
+
     pub fn apply(&self, color: Color) -> Color {
         match self {
             // Deliberately not routed through the identity matrix, which would
@@ -399,6 +432,29 @@ impl ColorFilter {
     }
 
     /// Label for settings UI.
+    /// The name this filter is stored under.
+    ///
+    /// Separate from [`Self::label`] deliberately: the label is prose shown to
+    /// a user and may be reworded, and a stored file must not change meaning
+    /// because someone improved a caption.
+    #[must_use]
+    pub fn yaml_name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Protanopia => "protanopia",
+            Self::Deuteranopia => "deuteranopia",
+            Self::Tritanopia => "tritanopia",
+            Self::Grayscale => "grayscale",
+            Self::Inverted => "inverted",
+        }
+    }
+
+    /// Read a stored name back, or `None` if it names no filter.
+    #[must_use]
+    pub fn from_yaml_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.yaml_name() == name)
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             Self::None => "None",
@@ -927,6 +983,14 @@ impl TaskbarStyle {
 pub struct AppearanceSettings {
     /// Light/dark/system theme mode.
     pub theme_mode: ThemeMode,
+    /// The colour-vision filter applied to the whole screen.
+    ///
+    /// Unlike every other field here this one is not consumed by the palette:
+    /// a filter transforms *finished pixels*, so it is applied by the
+    /// compositor when it hands a frame to the display. Filtering the
+    /// palette's colours instead would shift the window chrome and leave
+    /// photographs untouched, which is worse than not filtering at all.
+    pub color_filter: ColorFilter,
     /// The high-contrast scheme in force, or `None` for an ordinary theme.
     ///
     /// When set it *replaces* [`theme_mode`](Self::theme_mode) rather than
@@ -979,6 +1043,7 @@ impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
             theme_mode: ThemeMode::Dark,
+            color_filter: ColorFilter::None,
             high_contrast: None,
             accent_color: AccentColor::Blue,
             custom_accent: BLUE,
@@ -1999,6 +2064,12 @@ impl AppearanceSettings {
             .and_then(|v| HighContrastScheme::from_yaml_name(&v));
 
         read_into!(
+            s.color_filter,
+            doc.get_str(&["theme", "color_filter"])
+                .and_then(|v| ColorFilter::from_yaml_name(&v))
+        );
+
+        read_into!(
             s.accent_color,
             doc.get_str(&["theme", "accent"])
                 .and_then(|v| AccentColor::from_yaml_name(&v))
@@ -2090,6 +2161,7 @@ impl AppearanceSettings {
     /// comment, blank line and unrelated key in it exactly as it was.
     pub fn write_into(&self, doc: &mut Document) {
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
+        doc.set_str(&["theme", "color_filter"], self.color_filter.yaml_name());
         doc.set_str(
             &["theme", "high_contrast"],
             self.high_contrast
@@ -2464,6 +2536,7 @@ mod tests {
     fn all_non_default() -> AppearanceSettings {
         AppearanceSettings {
             theme_mode: ThemeMode::Light,
+            color_filter: ColorFilter::Tritanopia,
             high_contrast: Some(HighContrastScheme::YellowOnBlack),
             accent_color: AccentColor::Custom,
             custom_accent: Color::rgba(1, 2, 3, 4),
@@ -3986,4 +4059,93 @@ mod tests {
     }
 
     // -- Magnifier --
+
+    /// The packed form and the unpacked one are the same law, so they must
+    /// give the same answer -- for every filter, over every channel value.
+    ///
+    /// This is what makes `apply_argb` an encoding of `apply` rather than a
+    /// second implementation free to drift from it.
+    #[test]
+    fn the_packed_filter_agrees_with_the_unpacked_one() {
+        for filter in ColorFilter::ALL {
+            for v in 0u16..=255 {
+                #[allow(clippy::cast_possible_truncation)]
+                let c = v as u8;
+                // A value in each channel position, and an alpha that is not
+                // opaque, so a filter that dropped alpha would be caught.
+                let color = Color::rgba(c, c.wrapping_add(85), c.wrapping_add(170), 0x7F);
+                let packed = (0x7F_u32 << 24)
+                    | (u32::from(color.r) << 16)
+                    | (u32::from(color.g) << 8)
+                    | u32::from(color.b);
+
+                let via_color = filter.apply(color);
+                let expected = (u32::from(via_color.a) << 24)
+                    | (u32::from(via_color.r) << 16)
+                    | (u32::from(via_color.g) << 8)
+                    | u32::from(via_color.b);
+
+                assert_eq!(
+                    filter.apply_argb(packed),
+                    expected,
+                    "{} disagrees at {packed:#010X}",
+                    filter.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_filter_changes_a_pixel_it_is_handed() {
+        for argb in [0x0000_0000, 0xFFFF_FFFF, 0x8012_3456, 0xFF00_FF00] {
+            assert_eq!(ColorFilter::None.apply_argb(argb), argb);
+        }
+    }
+
+    #[test]
+    fn every_filter_leaves_alpha_alone_when_packed() {
+        for filter in ColorFilter::ALL {
+            for alpha in [0x00_u32, 0x7F, 0xFF] {
+                let argb = (alpha << 24) | 0x0012_3456;
+                assert_eq!(
+                    filter.apply_argb(argb) >> 24,
+                    alpha,
+                    "{} touched alpha",
+                    filter.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_filter_survives_being_written_and_read_back() {
+        for filter in ColorFilter::ALL {
+            let mut doc = Document::new();
+            AppearanceSettings {
+                color_filter: filter,
+                ..AppearanceSettings::default()
+            }
+            .write_into(&mut doc);
+            assert_eq!(
+                AppearanceSettings::read_from(&doc).color_filter,
+                filter,
+                "{}",
+                filter.label()
+            );
+        }
+    }
+
+    /// A stored name is not a caption. Rewording a label must not silently
+    /// change what an existing config file means.
+    #[test]
+    fn stored_names_are_distinct_and_not_the_labels() {
+        let mut seen = Vec::new();
+        for filter in ColorFilter::ALL {
+            let name = filter.yaml_name();
+            assert!(!seen.contains(&name), "{name} is stored twice");
+            seen.push(name);
+            assert_eq!(ColorFilter::from_yaml_name(name), Some(filter));
+        }
+        assert_eq!(ColorFilter::from_yaml_name("sepia"), None);
+    }
 }

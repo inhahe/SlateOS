@@ -54,6 +54,8 @@ use guiremote::client::Transport;
 use guiremote::socket::{Listener, Socket};
 use inputsettings::InputSettings;
 
+use appearance::ColorFilter;
+
 use crate::present::{Headless, Present};
 use crate::wire::ClientLink;
 use crate::{Compositor, Display, WindowId};
@@ -231,6 +233,14 @@ struct Client {
 pub struct Server {
     listener: Listener,
     clients: Vec<Client>,
+    /// Where a filtered frame is built, reused across frames.
+    ///
+    /// On the server rather than allocated per frame: at 1920x1080 this is
+    /// eight megabytes, and allocating it sixty times a second to hand it
+    /// straight to the display would cost more than the filter does. Empty
+    /// until a filter is first switched on, so a user who never uses one
+    /// never pays for it.
+    filtered: Vec<u32>,
     /// How long the loop is currently waiting between ticks.
     ///
     /// On the server rather than local to [`Self::run_with`] so that the whole
@@ -277,6 +287,7 @@ impl Server {
         Self {
             listener,
             clients: Vec::new(),
+            filtered: Vec::new(),
             backoff: IdleBackoff::new(),
             // Zero is left free as "no client", matching the convention the
             // rest of the compositor uses for ids that may be absent.
@@ -539,9 +550,29 @@ impl Server {
     /// it would put the previous frame on the screen — the one bug in this area
     /// that no pixel assertion in this crate would catch, because every such
     /// test reads the same stale buffer it asserts on.
-    pub fn show<P: Present>(compositor: &Compositor, present: &mut P) {
+    /// The colour-vision filter is applied here, and this is the only place
+    /// it is applied. A filter is a transform of *finished* pixels, so the
+    /// hand-off to the display is the one point that sees every pixel exactly
+    /// once: composition writes only damaged rectangles, and a filter applied
+    /// there would leave the undamaged remainder of the screen unfiltered.
+    ///
+    /// When no filter is set -- nearly always -- the frame is handed over
+    /// untouched and nothing is copied.
+    pub fn show<P: Present>(&mut self, compositor: &Compositor, present: &mut P) {
         let (width, height) = compositor.frame_size();
-        present.show(compositor.present_pixels(), width, height);
+        let pixels = compositor.present_pixels();
+        let filter = compositor.color_filter();
+
+        if matches!(filter, ColorFilter::None) {
+            present.show(pixels, width, height);
+            return;
+        }
+
+        self.filtered.clear();
+        self.filtered.reserve(pixels.len());
+        self.filtered
+            .extend(pixels.iter().map(|p| filter.apply_argb(*p)));
+        present.show(&self.filtered, width, height);
     }
 
     /// Serve clients and composite for ever, at the display's refresh rate.
@@ -723,7 +754,7 @@ impl Server {
             self.tick(compositor)?;
             let composed = self.compose(compositor);
             if composed {
-                Self::show(compositor, present);
+                self.show(compositor, present);
             }
 
             let wait = self.settle(composed, had_input, interval);
@@ -758,6 +789,7 @@ mod tests {
     use guitk::render::RenderTree;
 
     use super::*;
+    use crate::AppearanceSettings;
     use crate::InputEvent;
     use crate::present::{MonitorInfo, Recording};
 
@@ -1613,6 +1645,123 @@ mod tests {
         assert!(
             IdleBackoff::IDLE_INTERVAL > FRAME,
             "backing off to something faster than a frame would be pointless"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Colour filter
+    //
+    // The filter is applied where a frame is handed to the display, so these
+    // check the frame the display actually received -- not the compositor's
+    // buffer, which is deliberately left unfiltered.
+    // ------------------------------------------------------------------
+
+    /// Compose one frame and return what the display was given.
+    fn shown_frame(filter: ColorFilter) -> Vec<u32> {
+        let (mut server, mut compositor, _addr) = server();
+        compositor.set_appearance(AppearanceSettings {
+            color_filter: filter,
+            ..AppearanceSettings::default()
+        });
+
+        let mut display = Recording::new();
+        server.compose(&mut compositor);
+        server.show(&compositor, &mut display);
+
+        let (_, _, pixels) = display.last_frame().expect("a frame must be shown");
+        pixels.to_vec()
+    }
+
+    #[test]
+    fn without_a_filter_the_display_gets_the_frame_untouched() {
+        let (mut server, mut compositor, _addr) = server();
+        let mut display = Recording::new();
+        server.compose(&mut compositor);
+        server.show(&compositor, &mut display);
+
+        let (_, _, shown) = display.last_frame().expect("a frame");
+        assert_eq!(
+            shown,
+            compositor.present_pixels(),
+            "with no filter the display must receive the composed frame itself"
+        );
+    }
+
+    /// The point of the whole feature: a filter changes what reaches the
+    /// screen.
+    #[test]
+    fn a_filter_changes_the_pixels_the_display_receives() {
+        let plain = shown_frame(ColorFilter::None);
+        let inverted = shown_frame(ColorFilter::Inverted);
+
+        assert_eq!(plain.len(), inverted.len(), "same frame, same size");
+        assert_ne!(
+            plain, inverted,
+            "an inverting filter must change the frame it is applied to"
+        );
+    }
+
+    /// And it is the filter's own arithmetic, not something approximate.
+    #[test]
+    fn the_shown_frame_is_exactly_the_filter_applied_to_the_composed_one() {
+        for filter in ColorFilter::ALL {
+            let (mut server, mut compositor, _addr) = server();
+            compositor.set_appearance(AppearanceSettings {
+                color_filter: filter,
+                ..AppearanceSettings::default()
+            });
+
+            let mut display = Recording::new();
+            server.compose(&mut compositor);
+            let expected: Vec<u32> = compositor
+                .present_pixels()
+                .iter()
+                .map(|p| filter.apply_argb(*p))
+                .collect();
+            server.show(&compositor, &mut display);
+
+            let (_, _, shown) = display.last_frame().expect("a frame");
+            assert_eq!(shown, expected.as_slice(), "{}", filter.label());
+        }
+    }
+
+    /// The compositor's own buffer is left alone.
+    ///
+    /// It must be: the filter is applied on the way out, and composition only
+    /// redraws damaged rectangles. Filtering in place would make the next
+    /// frame filter an already-filtered background a second time.
+    #[test]
+    fn filtering_does_not_touch_the_composed_frame() {
+        let (mut server, mut compositor, _addr) = server();
+        compositor.set_appearance(AppearanceSettings {
+            color_filter: ColorFilter::Inverted,
+            ..AppearanceSettings::default()
+        });
+
+        server.compose(&mut compositor);
+        let before = compositor.present_pixels().to_vec();
+
+        let mut display = Recording::new();
+        server.show(&compositor, &mut display);
+        server.show(&compositor, &mut display);
+
+        assert_eq!(
+            compositor.present_pixels(),
+            before.as_slice(),
+            "showing a frame twice must not filter it twice"
+        );
+    }
+
+    #[test]
+    fn no_filter_means_no_buffer_is_allocated() {
+        let (mut server, mut compositor, _addr) = server();
+        let mut display = Recording::new();
+        server.compose(&mut compositor);
+        server.show(&compositor, &mut display);
+
+        assert!(
+            server.filtered.is_empty(),
+            "a user with no filter must not pay for one"
         );
     }
 }

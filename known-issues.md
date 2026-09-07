@@ -123046,7 +123046,49 @@ is no control, and there is no setting behind it if there were.
 
 ---
 
-## `TD-C-THE-COLOUR-FILTER-CONTROL-DOES-NOTHING` (lane C, 2026-09-07)
+## `TD-C-THE-COLOUR-FILTER-CONTROL-DOES-NOTHING` (lane C, 2026-09-07) -- **CLOSED the same day**
+
+**Closed 2026-09-07 (lane C).** Choosing a filter now filters the screen.
+`AppearanceSettings` carries `color_filter`, the compositor reads it, and
+`Server::show` applies it to the frame on its way to the display.
+
+**Where it is applied, and why there.** At the hand-off to the display, over
+the whole buffer -- not during composition. Composition writes only the
+damaged rectangles, so a filter applied there would leave the rest of the
+screen unfiltered, and re-filtering a region that was already filtered would
+compound on every frame. The hand-off is the one point that sees every pixel
+exactly once. `filtering_does_not_touch_the_composed_frame` shows two
+successive `show` calls leave the compositor's own buffer alone, which is what
+makes that safe.
+
+**It costs nothing when it is off.** `ColorFilter::None` returns the pixel it
+was handed without unpacking it, and `show` hands the composed frame straight
+over without copying; `no_filter_means_no_buffer_is_allocated` checks the
+scratch buffer stays empty. That matters -- a full-buffer matrix multiply at
+1920x1080 and 60 Hz is not free, and nobody who has not asked for a filter
+should pay for one.
+
+**`apply_argb` is an encoding of `apply`, not a second implementation.** A
+framebuffer needs packed pixels; writing the unpack/repack at the call site
+would have put a second definition of the filter in the compositor, free to
+drift. `the_packed_filter_agrees_with_the_unpacked_one` runs both over every
+channel value of every filter.
+
+**Stored names are separate from labels** (`yaml_name` / `from_yaml_name`), so
+rewording a caption cannot silently change what an existing config file means.
+
+11 tests across the three crates. Mutation-checked at both ends: removing the
+filter branch in `show` fails two compositor tests, and making the dropdown
+write nothing fails the settings one.
+
+The de-duplication described below is what made this reachable at all -- the
+enum the dropdown used had no transform behind it. `apps/magnifier` still has
+its own for the reason given there, and that remains open.
+
+Original entry follows.
+
+---
+
 
 **In short:** Settings -> Accessibility -> Visual has a "Color Filter" list
 offering Grayscale and the three colour-blindness filters. Choosing one

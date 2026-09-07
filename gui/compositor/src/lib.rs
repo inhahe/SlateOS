@@ -4867,6 +4867,16 @@ impl Compositor {
         self.full_recomposite = true;
     }
 
+    /// The colour-vision filter the user has asked for, if any.
+    ///
+    /// Read by [`Server::show`] once per frame. Exposed rather than applied
+    /// here because the compositor draws into a back buffer and this is a
+    /// transform of what finally reaches the display -- see that function.
+    #[must_use]
+    pub fn color_filter(&self) -> appearance::ColorFilter {
+        self.appearance.color_filter
+    }
+
     /// How close together two title-bar clicks must be to maximize the window.
     ///
     /// Clamped to [`MIN_DOUBLE_CLICK_MS`]..=[`MAX_DOUBLE_CLICK_MS`].

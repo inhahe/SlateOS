@@ -703,7 +703,6 @@ pub struct SettingsState {
     pub text_size_percent: u16,
     pub cursor_size: CursorSize,
     pub reduce_animations: bool,
-    pub color_filter: ColorFilter,
     pub reduce_transparency: bool,
     pub mono_audio: bool,
     pub visual_alerts: bool,
@@ -1188,7 +1187,6 @@ impl SettingsState {
             text_size_percent: 100,
             cursor_size: CursorSize::Small,
             reduce_animations: false,
-            color_filter: ColorFilter::None,
             reduce_transparency: false,
             mono_audio: false,
             visual_alerts: false,
@@ -3584,7 +3582,7 @@ impl SettingsState {
         s.dropdown_row(
             "Color Filters",
             DropdownId::ColorFilter,
-            self.color_filter.label(),
+            self.appearance.settings.color_filter.label(),
         );
         s.toggle_row(
             "Reduce Transparency",
@@ -3592,9 +3590,9 @@ impl SettingsState {
             self.reduce_transparency,
         );
 
-        if self.color_filter != ColorFilter::None {
+        if self.appearance.settings.color_filter != ColorFilter::None {
             s.advance(8.0);
-            let label = self.color_filter.label();
+            let label = self.appearance.settings.color_filter.label();
             s.draw(move |tree, x, y| {
                 fill_rounded(tree, x, y, 300.0, 40.0, COL_SURFACE0, 6.0);
                 tree.text(
@@ -3918,7 +3916,7 @@ impl SettingsState {
                     .collect();
                 let sel = ColorFilter::ALL
                     .iter()
-                    .position(|f| *f == self.color_filter)
+                    .position(|f| *f == self.appearance.settings.color_filter)
                     .unwrap_or(0);
                 (items, sel)
             }
@@ -4651,7 +4649,7 @@ impl SettingsState {
             }
             DropdownId::ColorFilter => {
                 if let Some(filter) = ColorFilter::ALL.get(index) {
-                    self.color_filter = *filter;
+                    self.appearance.settings.color_filter = *filter;
                 }
             }
             DropdownId::CursorSize => {
@@ -7376,6 +7374,30 @@ mod tests {
     // every scheme, choosing one lands in `AppearanceSettings`, and what
     // lands there is what the shell's palette consumes.
     // ------------------------------------------------------------------
+
+    /// The colour filter must reach the file the compositor reads, not a
+    /// variable inside this window.
+    ///
+    /// It was the latter for its whole life: the dropdown wrote to a field on
+    /// `SettingsState` that nothing else looked at, so choosing Deuteranopia
+    /// changed a label and nothing else.
+    #[test]
+    fn choosing_a_colour_filter_reaches_the_persisted_settings() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Visual;
+        assert_eq!(state.appearance.settings.color_filter, ColorFilter::None);
+
+        let target = ColorFilter::Deuteranopia;
+        let index = ColorFilter::ALL
+            .iter()
+            .position(|f| *f == target)
+            .expect("the filter must be offered");
+
+        state.show_dropdown(DropdownId::ColorFilter);
+        state.apply_dropdown_selection(index);
+
+        assert_eq!(state.appearance.settings.color_filter, target);
+    }
 
     /// Pick item `index` from the High Contrast list, the way a click does.
     ///

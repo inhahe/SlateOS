@@ -2670,16 +2670,6 @@ change stays on branch `lane-b-randrange-entropy`, unmerged, and `lane-b` and
 of anything that needs a secret has to work around a host that cannot produce
 one, and the SSH duplication keeps being caught by reading.
 
-# Resolved
-
-**The body above holds OPEN questions only.** When the operator answers one,
-write it up in `design-decisions.md` as a `Decided by: Operator` entry,
-**delete the entry from the body**, and add one line here. That is the whole
-point of the file: it is scanned for what still needs a decision, so an
-answered question left in the body is pure cost — and, being older, it sorts
-*first*, right where it is most in the way. (Why this is not append-only:
-`design-decisions.md` §437.)
-
 ## Which group is a user in? Two files answer, and nothing keeps them agreeing. (lane B, 2026-09-06)
 
 **In short:** "Alice is in the `audio` group" is written down in two separate
@@ -2725,6 +2715,16 @@ code rather than by anything failing.
 The full context, including the non-atomicity of a save across the two stores,
 is in `todo.txt` under "`/etc/group` and `/etc/gshadow` are still hand-written,
 not generated".
+
+# Resolved
+
+**The body above holds OPEN questions only.** When the operator answers one,
+write it up in `design-decisions.md` as a `Decided by: Operator` entry,
+**delete the entry from the body**, and add one line here. That is the whole
+point of the file: it is scanned for what still needs a decision, so an
+answered question left in the body is pure cost — and, being older, it sorts
+*first*, right where it is most in the way. (Why this is not append-only:
+`design-decisions.md` §437.)
 
 ## Resolved — lane A
 

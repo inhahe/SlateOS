@@ -137,3 +137,63 @@ frequently saturated by other work, and there are **four** continuous backup
 jobs (two local, two cloud) touching the tree, which is a much better
 explanation for both the per-file latency and the delete failures. Worth
 re-measuring on E: before drawing conclusions.
+
+---
+
+## Addendum — lane B's answers to the three things the operator asked *back*
+
+Not operator words; my analysis, offered because the questions were pointed at
+whoever picks these up.
+
+### Q46 — a "periodic" trigger that cannot degrade to "never"
+
+The failure mode of "periodic" is that it is attached to a human's intention to
+remember. Attach it instead to an **event the tree already produces**, and make
+the gate refuse to pass until it is satisfied:
+
+1. Record the measurement with the commit it was taken at — a small file
+   (`bench/last-release-measurement.json`) holding the SHA, the date, and the
+   numbers.
+2. A gate script computes **commits touching the measured subsystem since that
+   SHA** (`git rev-list --count <sha>..HEAD -- kernel/ bench/`). Past a
+   threshold, the pre-push gate **fails**, printing the exact command to
+   re-measure and the number of unmeasured commits.
+3. Optionally also fail when a release tag is created with a stale baseline.
+
+That is proportional to *change* rather than to calendar time, so a quiet month
+costs nothing and a busy week triggers it. It cannot silently mean "never",
+because the only way past it is to run the measurement or to consciously raise
+the threshold — and raising it is a visible diff. This is the same shape as
+`scripts/scan-orphan-modules.py`'s ratchet, which is already trusted here.
+
+### Q56 — the per-account default-grant mechanism does not exist
+
+I checked before answering: nothing in `posix/`, `services/` or `init/` carries
+per-account capability defaults — no `default_caps`, no account policy record.
+So the operator's "I think we should" is a **new feature**, not a
+configuration of an existing one. Shape that fits this tree:
+
+- the account record grows a default-grant set (two of them, native and Linux,
+  because the operator asked whether native programs should be included and the
+  honest answer is that they are different populations — a native program is
+  ours and can be expected to ask, a Linux binary cannot ask at all);
+- a program starts with the intersection of its own request and the account
+  default; anything outside it takes the prompt path;
+- "grant all Linux programs these by default" is then just an account whose
+  Linux default set is non-empty, rather than a special case in the checker.
+
+The suspend-and-prompt design the operator described is sound and is what
+makes A workable: a Linux program that expects ambient authority is stopped at
+the check, the user is asked, and the program resumes with no idea it happened.
+The only honest caveat is the one the operator already stated — warn that a
+program denied a capability may misbehave in ways that look like bugs.
+
+### A-Q3 — "is the OS currently usable on actual hardware?"
+
+**No.** `bare-metal-boot.md`'s own first line: *"SlateOS has only ever run
+inside QEMU."* Since 2026-08-21 there is a real GPT + protective-MBR image
+builder (`scripts/build-usb-image.py`) and a guarded writer
+(`scripts/write-usb-stick.ps1`), so the path exists and the irreversible step
+is fenced — but it has not been booted on metal. That bears directly on the
+"A now, D eventually" half of the question: a boot-time self-test that stops
+the machine is a policy about *users*, and there are none yet.

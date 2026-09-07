@@ -122194,6 +122194,26 @@ is **49 seconds**, not the two minutes the cold figure suggested. `cargo check`
 does no codegen, so a downstream re-check is metadata-only: 773 crates in 49 s
 is about 63 ms each.
 
+*Method, and its one hole.* The dependent counts above are **manifest
+mentions**, not the set actually re-checked, and the two differ: touching
+`posix` re-checked **21** crates against 13 manifest mentions, because the
+re-check set is transitive. That the method measures what it claims is
+confirmed rather than assumed -- the run's own `Checking <crate>` lines were
+counted. But only the *last* run's output survived: the harness wrote every run
+to one path and overwrote it, so the same confirmation is not available for the
+other three. The timings stand (they scale with dependent count as expected),
+the per-run re-check counts do not exist for `authlib`, `guitk` or `quoting`,
+and a harness that discards its own evidence is a poor instrument for an entry
+about not discarding evidence.
+
+*A second, softer hole, worth naming because it is the same shape.* Every
+"contended" figure here is labelled with a load that another session **told**
+me it was running, not one this session observed. Had the boot test changed
+phase mid-measurement the label would be silently wrong. Lane A's
+generalisation covers it exactly: a harness that characterises the machine by
+assertion rather than observation is making a claim about the machine, not
+about the code.
+
 Two premises were wrong in the discussion that produced this table, both by
 reasoning about a set without counting it -- the same failure as the `head -3`
 and the one-file `grep -c` recorded elsewhere in this entry:

@@ -197,3 +197,47 @@ builder (`scripts/build-usb-image.py`) and a guarded writer
 is fenced — but it has not been booted on metal. That bears directly on the
 "A now, D eventually" half of the question: a boot-time self-test that stops
 the machine is a policy about *users*, and there are none yet.
+
+### A-Q3, the other half — "is there any advantage in the long run to A now, D eventually, rather than just D now?"
+
+Lane B's read, from outside your tree; you know the kernel and I do not.
+
+**Short answer: no meaningful long-run advantage, and two costs.**
+
+1. **The urgency A trades on does not exist yet.** A's whole case is "removes
+   the user-facing risk immediately". There are no production boots — the OS
+   has only ever run in QEMU (`bare-metal-boot.md`, first line). Nobody's
+   machine can halt over `VERASE != 127` because nobody has a machine. So A
+   buys a flag today and retires a hypothetical.
+2. **A creates a configuration divergence, which is the shape this project
+   dislikes most.** With self-tests behind `selftest=1`, the configuration the
+   boot test exercises is *not* the configuration a user boots. Every "works in
+   the harness, fails on metal" bug lives in that gap — and the first real
+   hardware boot is exactly when you would least want the tested path and the
+   shipped path to differ.
+3. **A removes the pressure that would produce D.** The recommendation says so
+   in as many words: A "makes B-versus-D a much less urgent question". A cheap
+   mitigation that removes the pain is how the proper fix stops happening.
+
+**And D may be much cheaper than the entry prices it.** The 12 674 figure
+assumes editing call sites. Measured just now: the self-tests use the *standard*
+macros — 8 849 `assert_eq!`, 5 771 `assert!`, 51 `assert_ne!`, against only 4
+uses of the kernel's own `kassert!`. That means the fatal-versus-logged split
+can be made **at the macro, not at the call site**:
+
+- one mechanical, scriptable rename of the self-test assertions to a
+  `check!`/`check_eq!` that logs and continues (a rename is reviewable in bulk;
+  it is not 14 620 judgements), then
+- **promote** the load-bearing ones back to a fatal `assert!` one at a time —
+  which is the per-test judgement D is made of, done incrementally, with the
+  safe default already in place after step one.
+
+That path reaches D without ever shipping a configuration the boot test does
+not exercise, and every step is toward the end state rather than beside it.
+(Do *not* shadow `assert!` itself to make it non-fatal — a kernel where
+`assert!` silently continues is a trap for every future reader.)
+
+**If a one-line safety valve is still wanted before the classification is
+done,** the honest version is not A but "a failed self-test is non-fatal by
+default" — same one-line cost, keeps one configuration for everyone, and is
+already step one of D rather than a detour from it.

@@ -1680,6 +1680,120 @@ fn a_removed_widget_stays_removed() {
     });
 }
 
+// ---- a clock widget reads the real clock ----
+
+#[test]
+fn a_clock_widget_shows_the_time_the_taskbar_shows() {
+    // It drew the literal "12:34" until now -- a widget that looks like it
+    // works and does not. The stronger claim is not merely that it is no
+    // longer a placeholder but that it agrees with the tray clock: two clocks
+    // on one screen disagreeing about the hour is worse than one wrong clock,
+    // and they would the moment either grew its own formatter.
+    settingsfile::testing::with_scratch_config("session-clock-widget", |_root| {
+        let (mut first, _desktop) = session();
+        first.load_appearance();
+        first
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+
+        let drawn: Vec<String> = first
+            .shell()
+            .render_widgets()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            !drawn.iter().any(|t| t == "12:34"),
+            "the clock is still drawing its placeholder: {drawn:?}"
+        );
+        // What the layer was told, as distinct from what it drew. The shell
+        // derives this from the same `ClockDisplay` and zone the tray clock
+        // uses -- not the same *format*, since the tray has its own -- so this
+        // says the widget shows a real reading and shows the one it was given.
+        let live = first.shell().live_readings();
+        assert!(
+            !live.clock_time.is_empty(),
+            "the shell derived no time at all"
+        );
+        assert!(
+            drawn.contains(&live.clock_time),
+            "the clock drew none of what it was given ({:?}): {drawn:?}",
+            live.clock_time
+        );
+    });
+}
+
+#[test]
+fn a_desktop_with_a_clock_widget_asks_to_be_woken() {
+    // The other half of the same feature: a clock that never repaints is a
+    // clock that shows the minute it was created. It must keep the loop alive
+    // -- and an empty desktop must not, which the neighbouring test asserts.
+    settingsfile::testing::with_scratch_config("session-clock-wake", |_root| {
+        let (mut first, desktop) = session();
+        first.load_appearance();
+        first
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+        // Through the *session's* wake path, not the manager's predicate. The
+        // first version of this asserted `widgets.needs_tick(u64::MAX)`, which
+        // is a fact about the manager and stayed true when the session stopped
+        // consulting it at all -- the mutation that unhooked widgets from the
+        // wake gate passed it.
+        run_frames(&mut first, &desktop, 1_000);
+        assert!(
+            first.events_mut().next_wakeup().is_some(),
+            "a desktop with a clock widget registered no wake-up, so the              clock would show the minute it was created for ever"
+        );
+
+        // And the counterpart, in the same test so the two cannot drift: with
+        // no widget there is nothing left to arm.
+        //
+        // Asserted on `next_due_in` -- the value `arm_next_frame` reads --
+        // rather than on `next_wakeup`, because removing a widget does not
+        // *cancel* a deadline already armed. That one still fires, the loop
+        // finds nothing to do, arms nothing, and parks. One spurious wake is
+        // the honest cost of not tracking cancellations, and asserting
+        // `next_wakeup().is_none()` here would be asserting something untrue.
+        first
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_REMOVE_WIDGETS);
+        assert!(
+            first.shell().widgets.next_due_in(0).is_none(),
+            "an empty desktop still has a due time to arm from"
+        );
+    });
+}
+
+#[test]
+fn a_clock_widget_is_woken_at_its_due_time_and_not_every_frame() {
+    // The bug this shape exists to avoid, in both directions. `needs_tick`
+    // answers "is one due *now*", which is false for the whole minute between
+    // a clock's updates -- so a loop parking on it would park unbounded and
+    // the clock would show the minute it was created for ever. Waking at the
+    // frame interval instead would redraw a minute hand sixty times a second.
+    settingsfile::testing::with_scratch_config("session-clock-due", |_root| {
+        let (mut first, _desktop) = session();
+        first.load_appearance();
+        first
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+
+        let due = first
+            .shell()
+            .widgets
+            .next_due_in(0)
+            .expect("a clock widget should have a due time");
+        assert!(
+            due > super::FRAME_INTERVAL.as_millis() as u64,
+            "a clock due within one frame would be redrawn at frame rate: {due}ms"
+        );
+    });
+}
+
 // ---- following the display ----
 
 #[test]

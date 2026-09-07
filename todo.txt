@@ -55703,6 +55703,22 @@ nowhere to send it), "whose copy wins while a panel is open with unsaved edits?"
 becomes a real question. `DesktopShell::poll_appearance` is where it will have
 to be answered.
 
+**Swept 2026-09-07, and it is clean.** Every `#[test]` under `gui/`, `apps/`
+and `init/` that reaches `config::load`/`store`, `AppearanceFile::load`/`save`
+or a session's `load_appearance`/`save_widgets` was checked for being inside
+`settingsfile::testing::with_scratch_config`. Four hits, all false positives:
+`HotkeyConfig::save()` returns a `String` rather than writing, and the editor
+and markdowneditor `d.save()` calls are *document* saves already counted
+through `safeio`. So the only offenders were the seven widget tests introduced
+the same day, and they are sandboxed now.
+
+That means the two stray files below almost certainly came from *running* a
+binary -- `apps/settings` writes on any change, and `gui/desktop`'s demo loads
+appearance -- which is correct behaviour for a binary rather than a bug. No
+gate was added: a checker that cannot tell `save()`-to-a-String from
+`save()`-to-a-file is four false positives out of four, and a noisy gate is one
+people learn to skip.
+
 **Smaller finding, not chased.** There is a real `~/.config/slateos/appearance.yaml`
 and `input.yaml` on this development machine, dated 2026-08-14 and 2026-08-22.
 Something wrote them outside a scratch configuration directory — most likely a

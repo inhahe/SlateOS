@@ -4596,6 +4596,29 @@ impl DesktopShell {
         core::mem::replace(&mut self.widgets_dirty, false)
     }
 
+    /// The readings the widget layer cannot derive for itself.
+    ///
+    /// The clock's strings come from the same `ClockDisplay` and time zone the
+    /// taskbar reads, so a widget clock and the tray clock cannot disagree
+    /// about the hour, the format, or the zone -- which they would the moment
+    /// either grew a formatter of its own.
+    /// Public because a caller that renders the widget layer itself needs the
+    /// same readings, and because it is the only way to ask what the layer is
+    /// being *told* as distinct from what it draws.
+    #[must_use]
+    pub fn live_readings(&self) -> crate::widgets::LiveReadings {
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let zone = self.local_zone();
+        let clock = self.clock();
+        crate::widgets::LiveReadings {
+            clock_time: clock.format_time(secs, &zone),
+            clock_date: clock.format_date(secs, &zone),
+        }
+    }
+
     /// The settings group the widget layout lives in.
     pub const WIDGETS_CONFIG_NAME: &'static str = "widgets";
 
@@ -4757,8 +4780,10 @@ impl DesktopShell {
         // the palette they were chosen from -- and a widget panel is not any of
         // those roles. Same call `render_notifications` makes, a few methods
         // down, for the same reason.
-        self.widgets
-            .render(&Palette::from_settings(&self.appearance))
+        self.widgets.render(
+            &Palette::from_settings(&self.appearance),
+            &self.live_readings(),
+        )
     }
 
     /// Whether any of the shell's own surfaces is open over the desktop.

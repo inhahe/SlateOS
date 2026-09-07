@@ -1393,6 +1393,11 @@ impl<T: Transport> ShellSession<T> {
         // Auto-hide is dated rather than stepped, so the session's only
         // absolute clock is advanced here and nowhere else.
         self.clock_ms = self.clock_ms.saturating_add(elapsed_ms);
+        // Widgets are dated like auto-hide rather than stepped: a clock is due
+        // at a wall-clock moment, not after so many frames.
+        if self.shell.widgets.tick(self.clock_ms) {
+            self.dirty = true;
+        }
         if self.autohide.tick(self.clock_ms) {
             // The error is deliberately not swallowed: failing to move the
             // panel leaves the bar drawn where it is not, and a shell that
@@ -1412,6 +1417,20 @@ impl<T: Transport> ShellSession<T> {
     fn arm_next_frame(&mut self) {
         if self.anything_moving() {
             self.events.wake_after(self.panel.window, FRAME_INTERVAL);
+            return;
+        }
+        // Nothing is animating, but a widget may still be due at a *known*
+        // future moment -- a clock, once a minute. Armed at that moment rather
+        // than at the frame interval, which would wake sixty times a second to
+        // redraw a minute hand, and rather than not at all, which is what the
+        // first version of this did: `needs_tick` is false for the whole minute
+        // between updates, so the loop parked unbounded and the clock showed
+        // the minute it was created for ever.
+        if let Some(ms) = self.shell.widgets.next_due_in(self.clock_ms) {
+            self.events.wake_after(
+                self.panel.window,
+                std::time::Duration::from_millis(ms.max(1)),
+            );
         }
     }
 

@@ -59,6 +59,13 @@ HALT = "HALT"
 #: A notice is `notice-<to>-<from>-<stamp>.md`; `to` may be `all`.
 NOTICE_PREFIX = "notice-"
 
+#: Notices older than this are silently expired: still on disk, but no longer
+#: shown by default.  The value is deliberately short — notices are operational
+#: ("the tree moved", "hub restarting"), not archival, and a pile of stale ones
+#: trains readers to skim the output, which is worse than no output at all.
+#: See requests/c-a-notices-never-expire-*.md for why this was added.
+NOTICE_MAX_AGE = _dt.timedelta(days=3)
+
 
 def _detect_lane() -> str | None:
     """Reuse `which-lane.py`'s detector rather than re-deriving it.
@@ -124,8 +131,52 @@ def post_notice(d: Path, to: str, frm: str, text: str) -> Path:
     return p
 
 
-def pending(d: Path, lane: str | None) -> tuple[str | None, list[Path]]:
-    """Return `(halt_text_or_None, notices_addressed_to_this_lane)`."""
+def _notice_stamp(p: Path) -> _dt.datetime | None:
+    """Parse the ISO-8601 timestamp from a notice filename, or ``None``.
+
+    Filenames follow ``notice-<to>-<from>-<YYYYmmddTHHMMSSZ>.md``.
+    The timestamp is the last hyphen-delimited segment before ``.md``.
+    """
+    stem = p.stem  # e.g. "notice-all-a-20260907T160557Z"
+    parts = stem.split("-")
+    if len(parts) < 4:
+        return None
+    raw = parts[-1]  # "20260907T160557Z"
+    try:
+        return _dt.datetime.strptime(raw, "%Y%m%dT%H%M%SZ").replace(
+            tzinfo=_dt.timezone.utc
+        )
+    except ValueError:
+        return None
+
+
+def _notice_is_fresh(
+    p: Path,
+    now: _dt.datetime | None = None,
+    max_age: _dt.timedelta = NOTICE_MAX_AGE,
+) -> bool:
+    """True if *p* was posted within *max_age* of *now* (default: wall clock)."""
+    stamp = _notice_stamp(p)
+    if stamp is None:
+        # Cannot determine age — show it rather than hide it.
+        return True
+    if now is None:
+        now = _dt.datetime.now(_dt.timezone.utc)
+    return (now - stamp) <= max_age
+
+
+def pending(
+    d: Path,
+    lane: str | None,
+    *,
+    include_expired: bool = False,
+) -> tuple[str | None, list[Path]]:
+    """Return `(halt_text_or_None, notices_addressed_to_this_lane)`.
+
+    Notices older than :data:`NOTICE_MAX_AGE` are omitted unless
+    *include_expired* is True.  The files are not deleted — they age out
+    of the output, not out of existence.
+    """
     if not d.is_dir():
         return None, []
     halt = None
@@ -141,7 +192,8 @@ def pending(d: Path, lane: str | None) -> tuple[str | None, list[Path]]:
         # `all` reaches everyone; an unknown lane is shown rather than hidden,
         # because a misaddressed notice nobody sees is worse than a stray one.
         if target == "all" or lane is None or target == lane.lower():
-            notices.append(p)
+            if include_expired or _notice_is_fresh(p):
+                notices.append(p)
     return halt, notices
 
 
@@ -206,6 +258,34 @@ def _self_test() -> int:
             want = 2 if lane == "B" else 1
             check(f"lane {lane} sees the broadcast", len(got), want)
 
+        # --- Notice expiry ---
+        # A notice that just landed is fresh.
+        fresh = list(d.glob(f"{NOTICE_PREFIX}*"))
+        check("freshly-posted notices are fresh",
+              all(_notice_is_fresh(p) for p in fresh), True)
+
+        # A notice with a timestamp 4 days ago is stale (> NOTICE_MAX_AGE=3d).
+        four_days_ago = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=4)
+        stale_stamp = four_days_ago.strftime("%Y%m%dT%H%M%SZ")
+        stale_file = d / f"{NOTICE_PREFIX}all-a-{stale_stamp}.md"
+        stale_file.write_bytes(b"from: lane A\nto: all\nat: old\n\nstale\n")
+        check("a 4-day-old notice is stale",
+              _notice_is_fresh(stale_file), False)
+        # ...and pending() does not return it.
+        _, got_a = pending(d, "A")
+        check("pending() omits the stale notice",
+              stale_file not in got_a, True)
+        # ...but include_expired=True brings it back.
+        _, got_a_all = pending(d, "A", include_expired=True)
+        check("include_expired shows it",
+              stale_file in got_a_all, True)
+
+        # An unparseable timestamp is shown rather than hidden (fail-open).
+        bad_file = d / f"{NOTICE_PREFIX}all-x-BADSTAMP.md"
+        bad_file.write_bytes(b"from: ?\nto: all\nat: ?\n\nbad\n")
+        check("unparseable stamp is treated as fresh",
+              _notice_is_fresh(bad_file), True)
+
     print()
     if failures:
         print(f"{len(failures)} FAILURE(S)")
@@ -229,6 +309,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--to", default="all", help="notice addressee: a, b, c, or all")
     ap.add_argument("--quiet", action="store_true",
                     help="print nothing when there is nothing pending")
+    ap.add_argument("--include-expired", action="store_true",
+                    help="show notices older than the expiry window too")
     args = ap.parse_args(argv)
 
     if args.selftest:
@@ -253,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"notice left for {args.to}: {p}")
         return 0
 
-    halt, notices = pending(d, lane)
+    halt, notices = pending(d, lane, include_expired=args.include_expired)
     if halt is None and not notices:
         if not args.quiet:
             print(f"check-lane-signals: nothing pending for lane {lane or '?'}")

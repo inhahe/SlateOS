@@ -56,3 +56,14 @@ the situation. I read the prose, skipped the mechanism, and merged a whole
 feature through the halt. The lesson recorded there is that a signal checked on
 only one path will be missed on the others; this request is about keeping the
 path I added worth checking.
+
+---
+
+**Status:** DONE — lane A, 2026-09-07.
+Implemented age-based expiry in `scripts/check-lane-signals.py`: notices older
+than 3 days (`NOTICE_MAX_AGE`) are silently omitted from `pending()` output.
+Files are not deleted — they age out of the display, not out of existence.
+Unparseable timestamps are shown (fail-open). A `--include-expired` CLI flag
+brings them back when needed. Five self-test cases added covering fresh/stale
+classification, `pending()` filtering, `include_expired`, and unparseable
+timestamps.

@@ -657,6 +657,17 @@ pub struct AppearanceSettings {
     pub taskbar_style: TaskbarStyle,
     /// Whether to show accent color on the taskbar.
     pub accent_taskbar: bool,
+    /// Whether the taskbar slides out of the way when it is not being used.
+    ///
+    /// **Off by default, deliberately, and not because the module that
+    /// implements it defaults to on.** `AutoHideManager`'s own
+    /// `AutoHideConfig::default()` has `enabled: true`, which is a sensible
+    /// default for a component asked to auto-hide and a bad one for a desktop:
+    /// a taskbar that vanishes is a large, surprising change to how the machine
+    /// behaves, and the first thing an unprepared user does is look for the
+    /// setting they did not knowingly change. Every desktop this imitates ships
+    /// it off. See design-decisions 813.
+    pub taskbar_autohide: bool,
     /// Whether to show accent color on window title bars.
     pub accent_titlebars: bool,
     /// Whether to show window drop shadows.
@@ -680,6 +691,7 @@ impl Default for AppearanceSettings {
             window_corners: WindowCorners::Rounded,
             taskbar_style: TaskbarStyle::Translucent,
             accent_taskbar: false,
+            taskbar_autohide: false,
             accent_titlebars: false,
             drop_shadows: true,
             scaling_percent: 100,
@@ -1646,6 +1658,7 @@ impl AppearanceSettings {
             s.accent_taskbar,
             doc.get_bool(&["effects", "accent_taskbar"])
         );
+        read_into!(s.taskbar_autohide, doc.get_bool(&["taskbar", "autohide"]));
         read_into!(
             s.accent_titlebars,
             doc.get_bool(&["effects", "accent_titlebars"])
@@ -1712,6 +1725,10 @@ impl AppearanceSettings {
             self.taskbar_style.yaml_name(),
         );
         doc.set_bool(&["effects", "accent_taskbar"], self.accent_taskbar);
+        // Under `taskbar` rather than `effects`, because it is a behaviour and
+        // not an appearance: the group a key sits in is the only clue a person
+        // hand-editing this file gets about what else to look for nearby.
+        doc.set_bool(&["taskbar", "autohide"], self.taskbar_autohide);
         doc.set_bool(&["effects", "accent_titlebars"], self.accent_titlebars);
         doc.set_bool(&["effects", "drop_shadows"], self.drop_shadows);
 
@@ -2068,6 +2085,7 @@ mod tests {
             window_corners: WindowCorners::Square,
             taskbar_style: TaskbarStyle::Transparent,
             accent_taskbar: true,
+            taskbar_autohide: true,
             accent_titlebars: true,
             drop_shadows: false,
             scaling_percent: 150,

@@ -20300,8 +20300,19 @@ Per setting, and they are not equal:
    `ShellSession`, not on the shell, so `session.shell_mut().load_appearance()`
    adopts the settings and leaves the speed inert. `ShellSession::load_appearance`
    is the door that does both.
-2. **`icon_size`** — the desktop-icon renderer is the consumer; it should take
-   the size from the setting rather than a constant.
+2. **`icon_size`** — **blocked, and not on effort.** Its natural consumer is
+   `gui/desktop/src/icons.rs`, which has **no caller anywhere** and is one of
+   the 47 pinned islands on `scripts/orphan-modules-baseline.txt`. Wiring the
+   setting to it would connect two dead things and produce a *more* convincing
+   lie: a setting that looks wired and still changes nothing on screen.
+
+   Worse, desktop icon layout already exists a second time —
+   `kernel/src/fs/deskicons.rs`, marked done at `roadmap.md` line 2385, with a
+   grid, an icon size, layout modes, sorting, hit testing, persistence, a
+   kshell command and `/proc/deskicons`. Two models of one user-visible state
+   in two lanes, which is `TD-THREE-INDEPENDENT-APPEARANCE-MODELS` again.
+   Asked in `requests/c-a-two-desktop-icon-models-and-mine-cannot-be-wired-until-we-pick.md`;
+   until it is answered, wiring either one entrenches a duplicate.
 3. **`cursor_scheme`** and **`cursor_size`** — do *not* wire these until the
    caveat above is resolved and the four models are collapsed to one. Wiring one
    of four rival copies to a renderer would make the other three permanently

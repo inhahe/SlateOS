@@ -287,9 +287,19 @@ fn next_in<T: Copy + PartialEq>(all: &[T], current: T) -> T {
 
 // ── Colour filters ─────────────────────────────────────────────────────────
 
-/// What is done to every sampled pixel before it is drawn.
+/// The nine modes the lens can be in, and the order it cycles them.
+///
+/// A *menu*, not a filter. Five of these are the system's colour-vision
+/// filters (`appearance::ColorFilter`) and three are two-tone reductions to a
+/// high-contrast scheme (`appearance::HighContrastScheme`); none of the
+/// arithmetic lives here. It was called `ColorFilter` and did carry its own
+/// copy of both, which made it a fourth definition of a thing defined
+/// elsewhere and free to disagree with it.
+///
+/// What this type legitimately owns is the offer: which nine, in what order,
+/// under what labels. That is this app's business and nobody else's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ColorFilter {
+pub enum LensMode {
     None,
     Inverted,
     YellowOnBlack,
@@ -301,22 +311,22 @@ pub enum ColorFilter {
     Tritanopia,
 }
 
-pub const FILTERS: [ColorFilter; 9] = [
-    ColorFilter::None,
-    ColorFilter::Inverted,
-    ColorFilter::YellowOnBlack,
-    ColorFilter::WhiteOnBlack,
-    ColorFilter::GreenOnBlack,
-    ColorFilter::Greyscale,
-    ColorFilter::Protanopia,
-    ColorFilter::Deuteranopia,
-    ColorFilter::Tritanopia,
+pub const FILTERS: [LensMode; 9] = [
+    LensMode::None,
+    LensMode::Inverted,
+    LensMode::YellowOnBlack,
+    LensMode::WhiteOnBlack,
+    LensMode::GreenOnBlack,
+    LensMode::Greyscale,
+    LensMode::Protanopia,
+    LensMode::Deuteranopia,
+    LensMode::Tritanopia,
 ];
 
 /// The luma above which a high-contrast filter calls a pixel light.
 const CONTRAST_SPLIT: u8 = 128;
 
-impl ColorFilter {
+impl LensMode {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -354,90 +364,62 @@ impl ColorFilter {
     }
 
     /// The colour this filter shows for a screen pixel of `(r, g, b)`.
+    ///
+    /// The arithmetic is not here. Five of these nine are the system's own
+    /// colour-vision filters and come from [`appearance::ColorFilter`]; three
+    /// are two-tone reductions to a high-contrast scheme and take their two
+    /// colours from [`appearance::HighContrastScheme`]. This module used to
+    /// carry its own copy of both -- its own Brettel matrices, and its own
+    /// literal `(255, 255, 0)` for yellow-on-black -- which meant the lens
+    /// could disagree with the same filter applied to the rest of the screen,
+    /// and nothing would have caught it.
+    ///
+    /// What stays here is the *menu*: which nine modes the lens offers and in
+    /// what order it cycles them. That is this app's business.
     #[must_use]
     pub fn apply(self, r: u8, g: u8, b: u8) -> (u8, u8, u8) {
         match self {
             Self::None => (r, g, b),
-            // Saturating, not wrapping. `255 - r` cannot overflow either way,
-            // but `wrapping_sub` on a subtraction that is meant never to wrap
-            // says the wrong thing about what the code expects.
-            Self::Inverted => (
-                u8::MAX.saturating_sub(r),
-                u8::MAX.saturating_sub(g),
-                u8::MAX.saturating_sub(b),
-            ),
-            Self::YellowOnBlack => Self::two_tone(r, g, b, (255, 255, 0)),
-            Self::WhiteOnBlack => Self::two_tone(r, g, b, (255, 255, 255)),
-            Self::GreenOnBlack => Self::two_tone(r, g, b, (0, 255, 0)),
-            Self::Greyscale => {
-                let l = Self::luma(r, g, b);
-                (l, l, l)
+            Self::Inverted => Self::system(appearance::ColorFilter::Inverted, r, g, b),
+            Self::Greyscale => Self::system(appearance::ColorFilter::Grayscale, r, g, b),
+            Self::Protanopia => Self::system(appearance::ColorFilter::Protanopia, r, g, b),
+            Self::Deuteranopia => Self::system(appearance::ColorFilter::Deuteranopia, r, g, b),
+            Self::Tritanopia => Self::system(appearance::ColorFilter::Tritanopia, r, g, b),
+            Self::YellowOnBlack => {
+                Self::two_tone(r, g, b, appearance::HighContrastScheme::YellowOnBlack)
             }
-            // Brettel-style dichromacy approximations: each collapses the axis
-            // the missing cone would have carried and leaves the other two.
-            Self::Protanopia => Self::mix(
-                r,
-                g,
-                b,
-                [0.567, 0.433, 0.0],
-                [0.558, 0.442, 0.0],
-                [0.0, 0.242, 0.758],
-            ),
-            Self::Deuteranopia => Self::mix(
-                r,
-                g,
-                b,
-                [0.625, 0.375, 0.0],
-                [0.7, 0.3, 0.0],
-                [0.0, 0.3, 0.7],
-            ),
-            Self::Tritanopia => Self::mix(
-                r,
-                g,
-                b,
-                [0.95, 0.05, 0.0],
-                [0.0, 0.433, 0.567],
-                [0.0, 0.475, 0.525],
-            ),
+            Self::WhiteOnBlack => {
+                Self::two_tone(r, g, b, appearance::HighContrastScheme::WhiteOnBlack)
+            }
+            Self::GreenOnBlack => {
+                Self::two_tone(r, g, b, appearance::HighContrastScheme::GreenOnBlack)
+            }
         }
     }
 
-    /// `light` where the pixel is light, black where it is dark.
-    fn two_tone(r: u8, g: u8, b: u8, light: (u8, u8, u8)) -> (u8, u8, u8) {
-        if Self::luma(r, g, b) > CONTRAST_SPLIT {
-            light
-        } else {
-            (0, 0, 0)
-        }
+    /// Run one of the system's colour filters over an opaque pixel.
+    fn system(filter: appearance::ColorFilter, r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+        let out = filter.apply(guitk::color::Color::rgba(r, g, b, u8::MAX));
+        (out.r, out.g, out.b)
     }
 
-    /// Three rows of a 3x3 colour matrix, applied and clamped.
+    /// Reduce a pixel to a scheme's two colours: its text colour above the
+    /// split, its background below.
     ///
-    /// Public because the clamping is the part worth testing and the matrices
-    /// that ship all happen to have rows summing to one — so no test driven
-    /// through [`apply`](Self::apply) alone can reach either end of the clamp.
-    #[must_use]
-    pub fn mix(
-        r: u8,
-        g: u8,
-        b: u8,
-        row_r: [f32; 3],
-        row_g: [f32; 3],
-        row_b: [f32; 3],
-    ) -> (u8, u8, u8) {
-        let v = [f32::from(r), f32::from(g), f32::from(b)];
-        let dot = |row: [f32; 3]| -> u8 {
-            let sum = row[0] * v[0] + row[1] * v[1] + row[2] * v[2];
-            // Clamped at both ends. `min(255.0)` alone leaves a negative
-            // coefficient free to produce a negative float, and `as u8` on a
-            // negative float saturates to 0 by accident rather than by intent.
-            sum.clamp(0.0, 255.0) as u8
+    /// The colours come from the scheme rather than from literals here, so a
+    /// lens set to yellow-on-black shows the same yellow the rest of the
+    /// system would. The mapping is by *meaning*, not by name --
+    /// `HighContrastScheme`'s variants were once spelled the other way round,
+    /// and this is the call site that made that worth fixing.
+    fn two_tone(r: u8, g: u8, b: u8, scheme: appearance::HighContrastScheme) -> (u8, u8, u8) {
+        let chosen = if Self::luma(r, g, b) > CONTRAST_SPLIT {
+            scheme.text()
+        } else {
+            scheme.background()
         };
-        (dot(row_r), dot(row_g), dot(row_b))
+        (chosen.r, chosen.g, chosen.b)
     }
 
-    /// BT.601 luma. The three coefficients sum to exactly one, so white is 255.
-    #[must_use]
     pub fn luma(r: u8, g: u8, b: u8) -> u8 {
         let l = f32::from(r) * 0.299 + f32::from(g) * 0.587 + f32::from(b) * 0.114;
         l.clamp(0.0, 255.0) as u8
@@ -971,7 +953,7 @@ pub struct Magnifier {
     preset: usize,
     mode: MagnifyMode,
     tracking: TrackingMode,
-    filter: ColorFilter,
+    filter: LensMode,
 
     /// The screen point the picture is centred on right now.
     centre: (f32, f32),
@@ -1020,7 +1002,7 @@ impl Magnifier {
             preset: DEFAULT_PRESET,
             mode: MagnifyMode::FullScreen,
             tracking: TrackingMode::FollowMouse,
-            filter: ColorFilter::None,
+            filter: LensMode::None,
             centre: middle,
             target: middle,
             pointer: (WINDOW_WIDTH / 2.0, WINDOW_HEIGHT / 2.0),
@@ -1065,7 +1047,7 @@ impl Magnifier {
     }
 
     #[must_use]
-    pub fn filter(&self) -> ColorFilter {
+    pub fn filter(&self) -> LensMode {
         self.filter
     }
 
@@ -1260,7 +1242,7 @@ impl Magnifier {
             hex_of(shown),
             sx,
             sy,
-            if self.filter == ColorFilter::None {
+            if self.filter == LensMode::None {
                 String::new()
             } else {
                 format!(" (screen {})", hex_of((r, g, b)))
@@ -2151,7 +2133,7 @@ impl Magnifier {
             Target::ToggleRuler => self.ruler != Ruler::Off,
             Target::TogglePause => self.paused,
             Target::ToggleHelp => self.show_help,
-            Target::NextFilter => self.filter != ColorFilter::None,
+            Target::NextFilter => self.filter != LensMode::None,
             _ => false,
         }
     }
@@ -2670,7 +2652,7 @@ mod tests {
         assert_eq!(a.tracking(), tracking, "the tracking key never reached it");
     }
 
-    fn to_filter(a: &mut Magnifier, filter: ColorFilter) {
+    fn to_filter(a: &mut Magnifier, filter: LensMode) {
         for _ in 0..FILTERS.len() {
             if a.filter() == filter {
                 return;
@@ -2855,20 +2837,17 @@ mod tests {
     #[test]
     fn no_filter_leaves_a_pixel_alone() {
         for (r, g, b) in [(0, 0, 0), (255, 255, 255), (17, 129, 240)] {
-            assert_eq!(ColorFilter::None.apply(r, g, b), (r, g, b));
+            assert_eq!(LensMode::None.apply(r, g, b), (r, g, b));
         }
     }
 
     #[test]
     fn inverting_twice_gives_the_pixel_back() {
         for (r, g, b) in [(0u8, 0u8, 0u8), (255, 255, 255), (100, 150, 200)] {
-            let once = ColorFilter::Inverted.apply(r, g, b);
-            assert_eq!(
-                ColorFilter::Inverted.apply(once.0, once.1, once.2),
-                (r, g, b)
-            );
+            let once = LensMode::Inverted.apply(r, g, b);
+            assert_eq!(LensMode::Inverted.apply(once.0, once.1, once.2), (r, g, b));
         }
-        assert_eq!(ColorFilter::Inverted.apply(100, 150, 200), (155, 105, 55));
+        assert_eq!(LensMode::Inverted.apply(100, 150, 200), (155, 105, 55));
     }
 
     #[test]
@@ -2876,20 +2855,17 @@ mod tests {
         // Greys either side of the split, chosen so the luma lands on either
         // side of it and nowhere near, so the test is about the rule and not
         // about a rounding.
-        let dark = ColorFilter::YellowOnBlack.apply(100, 100, 100);
-        let light = ColorFilter::YellowOnBlack.apply(200, 200, 200);
+        let dark = LensMode::YellowOnBlack.apply(100, 100, 100);
+        let light = LensMode::YellowOnBlack.apply(200, 200, 200);
         assert_eq!(dark, (0, 0, 0), "below the split is black");
         assert_eq!(light, (255, 255, 0), "above it is the filter's colour");
-        assert_eq!(
-            ColorFilter::WhiteOnBlack.apply(200, 200, 200),
-            (255, 255, 255)
-        );
-        assert_eq!(ColorFilter::GreenOnBlack.apply(200, 200, 200), (0, 255, 0));
+        assert_eq!(LensMode::WhiteOnBlack.apply(200, 200, 200), (255, 255, 255));
+        assert_eq!(LensMode::GreenOnBlack.apply(200, 200, 200), (0, 255, 0));
         // Exactly at the split counts as dark: the test is `> CONTRAST_SPLIT`.
-        let at = ColorFilter::luma(CONTRAST_SPLIT, CONTRAST_SPLIT, CONTRAST_SPLIT);
+        let at = LensMode::luma(CONTRAST_SPLIT, CONTRAST_SPLIT, CONTRAST_SPLIT);
         assert_eq!(at, CONTRAST_SPLIT, "a flat grey's luma is that grey");
         assert_eq!(
-            ColorFilter::YellowOnBlack.apply(CONTRAST_SPLIT, CONTRAST_SPLIT, CONTRAST_SPLIT),
+            LensMode::YellowOnBlack.apply(CONTRAST_SPLIT, CONTRAST_SPLIT, CONTRAST_SPLIT),
             (0, 0, 0),
             "the split itself is on the dark side"
         );
@@ -2897,22 +2873,22 @@ mod tests {
 
     #[test]
     fn greyscale_puts_the_luma_on_all_three_channels() {
-        let (r, g, b) = ColorFilter::Greyscale.apply(255, 0, 0);
+        let (r, g, b) = LensMode::Greyscale.apply(255, 0, 0);
         assert_eq!((r, g), (g, b), "one value on all three channels");
-        assert_eq!(r, ColorFilter::luma(255, 0, 0), "and it is the luma");
+        assert_eq!(r, LensMode::luma(255, 0, 0), "and it is the luma");
         assert!((70..80).contains(&r), "red's luma is about 76, not {r}");
     }
 
     #[test]
     fn luma_runs_the_whole_range_because_its_weights_sum_to_one() {
-        assert_eq!(ColorFilter::luma(0, 0, 0), 0, "black is nothing");
-        assert_eq!(ColorFilter::luma(255, 255, 255), 255, "white is the top");
+        assert_eq!(LensMode::luma(0, 0, 0), 0, "black is nothing");
+        assert_eq!(LensMode::luma(255, 255, 255), 255, "white is the top");
         assert!(
-            ColorFilter::luma(0, 255, 0) > ColorFilter::luma(255, 0, 0),
+            LensMode::luma(0, 255, 0) > LensMode::luma(255, 0, 0),
             "green weighs more than red"
         );
         assert!(
-            ColorFilter::luma(255, 0, 0) > ColorFilter::luma(0, 0, 255),
+            LensMode::luma(255, 0, 0) > LensMode::luma(0, 0, 255),
             "and red more than blue"
         );
     }
@@ -2924,9 +2900,9 @@ mod tests {
         // move. A row that did not sum to one would show up here as a white
         // that came back grey.
         for filter in [
-            ColorFilter::Protanopia,
-            ColorFilter::Deuteranopia,
-            ColorFilter::Tritanopia,
+            LensMode::Protanopia,
+            LensMode::Deuteranopia,
+            LensMode::Tritanopia,
         ] {
             assert_eq!(
                 filter.apply(255, 255, 255),
@@ -2939,33 +2915,97 @@ mod tests {
         }
     }
 
+    // `a_colour_matrix_is_clamped_at_both_ends_not_just_the_top` was here,
+    // and `mix` with it. Both are gone because the matrices left: this lens
+    // now runs the system's `appearance::ColorFilter`, whose weights are
+    // integers over a shared denominator and whose rows are checked to sum to
+    // exactly that denominator *at compile time*. The clamp this tested is
+    // unreachable there by construction rather than by luck, which is the
+    // stronger version of the same guarantee.
+    //
+    // The test's own comment said `mix` was "reachable from here" -- meaning
+    // from the test and nowhere else. A function whose only caller is its own
+    // test does not exist; it only looked like it did.
+
+    /// The lens must show the same colour the rest of the screen would.
+    ///
+    /// This is the whole point of the change that removed this module's own
+    /// matrices. Before it, the magnifier and the compositor each had their
+    /// own Brettel coefficients, and a lens held over a filtered desktop could
+    /// have shown a different answer from the desktop underneath it -- which
+    /// no test in either crate would have caught, because neither knew about
+    /// the other.
     #[test]
-    fn a_colour_matrix_is_clamped_at_both_ends_not_just_the_top() {
-        // `min(255.0)` alone leaves a negative coefficient free to make a
-        // negative float, and `as u8` on one saturates to zero by accident
-        // rather than by intent. Every matrix that ships has rows summing to
-        // exactly one, so neither end of the clamp can be reached through
-        // `apply` — which is why `mix` is reachable from here.
-        let over = ColorFilter::mix(
-            200,
-            200,
-            200,
-            [2.0, 2.0, 2.0],
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-        );
-        assert_eq!(over.0, 255, "a row that overshoots saturates at white");
-        assert_eq!(over.1, 0, "a row of zeroes is black");
-        assert_eq!(over.2, 200, "and an identity row is the channel itself");
-        let under = ColorFilter::mix(
-            10,
-            0,
-            0,
-            [-4.0, 0.0, 0.0],
-            [-0.1, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
-        );
-        assert_eq!(under, (0, 0, 0), "a negative row stops at black");
+    fn the_lens_agrees_with_the_system_filter_it_names() {
+        let pairs = [
+            (LensMode::Inverted, appearance::ColorFilter::Inverted),
+            (LensMode::Greyscale, appearance::ColorFilter::Grayscale),
+            (LensMode::Protanopia, appearance::ColorFilter::Protanopia),
+            (
+                LensMode::Deuteranopia,
+                appearance::ColorFilter::Deuteranopia,
+            ),
+            (LensMode::Tritanopia, appearance::ColorFilter::Tritanopia),
+        ];
+
+        for (lens, system) in pairs {
+            for r in [0u8, 1, 64, 128, 200, 255] {
+                for g in [0u8, 77, 255] {
+                    for b in [0u8, 13, 255] {
+                        let via_lens = lens.apply(r, g, b);
+                        let out = system.apply(guitk::color::Color::rgba(r, g, b, u8::MAX));
+                        assert_eq!(
+                            via_lens,
+                            (out.r, out.g, out.b),
+                            "{} disagrees with the system filter at ({r}, {g}, {b})",
+                            lens.label()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// And the two-tone modes show the scheme's own colours, not literals.
+    #[test]
+    fn a_two_tone_lens_uses_the_high_contrast_scheme_it_names() {
+        let pairs = [
+            (
+                LensMode::YellowOnBlack,
+                appearance::HighContrastScheme::YellowOnBlack,
+            ),
+            (
+                LensMode::WhiteOnBlack,
+                appearance::HighContrastScheme::WhiteOnBlack,
+            ),
+            (
+                LensMode::GreenOnBlack,
+                appearance::HighContrastScheme::GreenOnBlack,
+            ),
+        ];
+
+        for (lens, scheme) in pairs {
+            let light = scheme.text();
+            let dark = scheme.background();
+            assert_eq!(
+                lens.apply(255, 255, 255),
+                (light.r, light.g, light.b),
+                "{}: white must become the scheme's text colour",
+                lens.label()
+            );
+            assert_eq!(
+                lens.apply(0, 0, 0),
+                (dark.r, dark.g, dark.b),
+                "{}: black must become the scheme's background",
+                lens.label()
+            );
+            assert_ne!(
+                light,
+                dark,
+                "{}: a two-tone mode needs two tones",
+                lens.label()
+            );
+        }
     }
 
     #[test]
@@ -2979,11 +3019,11 @@ mod tests {
                         // under every filter here: none of them is a hue
                         // rotation, and one that inverted only some channels
                         // would show up as a mid-grey answer to pure black.
-                        if (r, g, b) == (0, 0, 0) && filter != ColorFilter::Inverted {
+                        if (r, g, b) == (0, 0, 0) && filter != LensMode::Inverted {
                             assert_eq!(out, (0, 0, 0), "{filter:?} on black");
                         }
-                        if (r, g, b) == (255, 255, 255) && filter != ColorFilter::Inverted {
-                            let l = ColorFilter::luma(out.0, out.1, out.2);
+                        if (r, g, b) == (255, 255, 255) && filter != LensMode::Inverted {
+                            let l = LensMode::luma(out.0, out.1, out.2);
                             assert!(l > CONTRAST_SPLIT, "{filter:?} on white came back {out:?}");
                         }
                     }
@@ -3004,11 +3044,11 @@ mod tests {
         // it survives any matrix at all; white saturates, so a row summing to
         // 1.4 still comes back 255. Only the greys in between can tell.
         for filter in [
-            ColorFilter::None,
-            ColorFilter::Greyscale,
-            ColorFilter::Protanopia,
-            ColorFilter::Deuteranopia,
-            ColorFilter::Tritanopia,
+            LensMode::None,
+            LensMode::Greyscale,
+            LensMode::Protanopia,
+            LensMode::Deuteranopia,
+            LensMode::Tritanopia,
         ] {
             for v in [1u8, 17, 64, 128, 200, 254] {
                 let out = filter.apply(v, v, v);
@@ -3763,7 +3803,7 @@ mod tests {
         a.resize(SIZE.0, SIZE.1);
         let v = a.layout().viewport;
         let plain = blocks(&a.draw(SIZE), v);
-        to_filter(&mut a, ColorFilter::Inverted);
+        to_filter(&mut a, LensMode::Inverted);
         let inverted = blocks(&a.draw(SIZE), v);
         assert!(!plain.is_empty(), "there is a picture to filter");
         assert_eq!(
@@ -3919,7 +3959,7 @@ mod tests {
     #[test]
     fn the_readout_gives_the_filtered_colour_and_the_unfiltered_one_beside_it() {
         let mut a = app();
-        to_filter(&mut a, ColorFilter::Inverted);
+        to_filter(&mut a, LensMode::Inverted);
         down(&mut a, Key::C);
         let screen = sample_pixel(
             a.centre().0 as i32,
@@ -3927,7 +3967,7 @@ mod tests {
             a.screen().0 as i32,
             a.screen().1 as i32,
         );
-        let shown = ColorFilter::Inverted.apply(screen.0, screen.1, screen.2);
+        let shown = LensMode::Inverted.apply(screen.0, screen.1, screen.2);
         assert_eq!(
             a.picked(),
             Some(shown),
@@ -4496,13 +4536,13 @@ mod tests {
         let mut a = app();
         to_mode(&mut a, MagnifyMode::Lens);
         to_tracking(&mut a, TrackingMode::Manual);
-        to_filter(&mut a, ColorFilter::Greyscale);
+        to_filter(&mut a, LensMode::Greyscale);
         down(&mut a, Key::C);
         let line = a.info_line();
         for want in [
             MagnifyMode::Lens.label(),
             TrackingMode::Manual.label(),
-            ColorFilter::Greyscale.label(),
+            LensMode::Greyscale.label(),
         ] {
             assert!(
                 line.contains(want),

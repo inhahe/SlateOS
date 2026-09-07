@@ -123120,8 +123120,28 @@ The definition now lives once, in `gui/appearance` beside the palette, with
 its matrix machinery and its fourteen tests. `a11y.rs` and
 `accessibility_settings.rs` re-export it; `apps/settings` imports it.
 
-**`apps/magnifier` deliberately still has its own**, and this is the one place
-a rename would have been the wrong fix: its nine variants glue two concepts
+**`apps/magnifier` was resolved on 2026-09-07 too, and differently.** Its
+nine variants glue two concepts together, so a straight substitution was the
+wrong fix; what it needed was to keep the *menu* and give up the *arithmetic*.
+It is now `LensMode`, and its `apply` delegates: five modes to
+`appearance::ColorFilter`, three to `appearance::HighContrastScheme`'s two
+colours, one to the identity. Its Brettel matrices, its `mix`, and its literal
+`(255, 255, 0)` for yellow-on-black are gone. Two tests assert the lens agrees
+with the system filter it names -- which nothing could have checked before,
+because neither side knew the other existed. `mix`'s only remaining caller was
+its own test, so both went; the shared `ChannelMix` checks the same invariant
+at compile time.
+
+**The variant-name swap that fell out of it.** `HighContrastScheme::BlackOnWhite`
+drew *white* text on black -- the names read backwards, inherited from the
+module the enum came from, and documented as such. That was survivable until
+the magnifier had to map onto them, because `apps/magnifier` has its own
+`WhiteOnBlack` meaning white-on-black, and a mapping written by name would
+have picked the opposite scheme in silence. The two variants were swapped; the
+stored `yaml_name` strings did not move, so existing config files still mean
+what they meant.
+
+**The original entry's text follows.** Its nine variants glue two concepts
 together. `Inverted`, `Protanopia`, `Deuteranopia`, `Tritanopia` and
 `Greyscale` are colour-vision filters, but `YellowOnBlack`, `WhiteOnBlack` and
 `GreenOnBlack` are high-contrast *schemes* -- the same three that

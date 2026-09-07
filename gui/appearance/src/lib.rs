@@ -380,7 +380,6 @@ impl ColorFilter {
         }
     }
 
-    /// Apply this filter to a color. Alpha is never touched.
     /// Apply this filter to one packed ARGB8888 pixel.
     ///
     /// The form a framebuffer needs. It exists beside [`Self::apply`] rather
@@ -414,6 +413,7 @@ impl ColorFilter {
             | u32::from(out.b)
     }
 
+    /// Apply this filter to a color. Alpha is never touched.
     pub fn apply(&self, color: Color) -> Color {
         match self {
             // Deliberately not routed through the identity matrix, which would
@@ -486,9 +486,9 @@ impl ColorFilter {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HighContrastScheme {
     /// Black background, white text. The standard high-contrast look.
-    BlackOnWhite,
-    /// White background, black text. The inverse, for glare sensitivity.
     WhiteOnBlack,
+    /// White background, black text. The inverse, for glare sensitivity.
+    BlackOnWhite,
     /// Yellow on black, which several low-vision guides prefer to white: the
     /// reduced blue component is easier on light sensitivity.
     YellowOnBlack,
@@ -499,8 +499,8 @@ pub enum HighContrastScheme {
 impl HighContrastScheme {
     /// Every scheme, for a settings page that has to offer all of them.
     pub const ALL: [Self; 4] = [
-        Self::BlackOnWhite,
         Self::WhiteOnBlack,
+        Self::BlackOnWhite,
         Self::YellowOnBlack,
         Self::GreenOnBlack,
     ];
@@ -509,8 +509,8 @@ impl HighContrastScheme {
     #[must_use]
     pub fn background(self) -> Color {
         match self {
-            Self::WhiteOnBlack => Color::from_hex(0xFFFFFF),
-            Self::BlackOnWhite | Self::YellowOnBlack | Self::GreenOnBlack => {
+            Self::BlackOnWhite => Color::from_hex(0xFFFFFF),
+            Self::WhiteOnBlack | Self::YellowOnBlack | Self::GreenOnBlack => {
                 Color::from_hex(0x000000)
             }
         }
@@ -520,8 +520,8 @@ impl HighContrastScheme {
     #[must_use]
     pub fn text(self) -> Color {
         match self {
-            Self::BlackOnWhite => Color::from_hex(0xFFFFFF),
-            Self::WhiteOnBlack => Color::from_hex(0x000000),
+            Self::WhiteOnBlack => Color::from_hex(0xFFFFFF),
+            Self::BlackOnWhite => Color::from_hex(0x000000),
             Self::YellowOnBlack => Color::from_hex(0xFFFF00),
             Self::GreenOnBlack => Color::from_hex(0x00FF00),
         }
@@ -529,15 +529,18 @@ impl HighContrastScheme {
 
     /// What to display this scheme as.
     ///
-    /// Named for what the user sees rather than for the variant: the variant
-    /// names read backwards -- `BlackOnWhite` draws white text on black --
-    /// and they are kept only because they are what the schemes have always
-    /// been called in this tree.
+    /// The variant names used to read backwards -- the one now called
+    /// `WhiteOnBlack` was `BlackOnWhite`, and drew white text on black. They
+    /// were swapped once a second consumer had to map onto them *by meaning*:
+    /// `apps/magnifier` has its own `WhiteOnBlack`, which is white-on-black,
+    /// so a mapping written by name would have silently picked the opposite
+    /// scheme. The stored `yaml_name` strings did not move, so existing
+    /// config files still mean what they meant.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::BlackOnWhite => "White on black",
-            Self::WhiteOnBlack => "Black on white",
+            Self::WhiteOnBlack => "White on black",
+            Self::BlackOnWhite => "Black on white",
             Self::YellowOnBlack => "Yellow on black",
             Self::GreenOnBlack => "Green on black",
         }
@@ -547,8 +550,8 @@ impl HighContrastScheme {
     #[must_use]
     pub fn yaml_name(self) -> &'static str {
         match self {
-            Self::BlackOnWhite => "white_on_black",
-            Self::WhiteOnBlack => "black_on_white",
+            Self::WhiteOnBlack => "white_on_black",
+            Self::BlackOnWhite => "black_on_white",
             Self::YellowOnBlack => "yellow_on_black",
             Self::GreenOnBlack => "green_on_black",
         }
@@ -3805,7 +3808,7 @@ mod tests {
     /// request, and there is no second value of it to choose between.
     #[test]
     fn a_custom_accent_is_used_verbatim() {
-        let mut s = hc_settings(HighContrastScheme::BlackOnWhite);
+        let mut s = hc_settings(HighContrastScheme::WhiteOnBlack);
         s.accent_color = AccentColor::Custom;
         s.custom_accent = Color::from_hex(0xAB12CD);
 
@@ -3816,7 +3819,7 @@ mod tests {
     /// construction.
     #[test]
     fn high_contrast_is_never_translucent() {
-        let mut s = hc_settings(HighContrastScheme::BlackOnWhite);
+        let mut s = hc_settings(HighContrastScheme::WhiteOnBlack);
         s.transparency = TransparencyLevel::Full;
         assert_eq!(Palette::from_settings(&s).panel_alpha, 255);
     }
@@ -3826,7 +3829,7 @@ mod tests {
     /// scheme.
     #[test]
     fn the_scheme_overrides_the_theme_mode() {
-        let mut s = hc_settings(HighContrastScheme::BlackOnWhite);
+        let mut s = hc_settings(HighContrastScheme::WhiteOnBlack);
         s.theme_mode = ThemeMode::Light;
         let p = Palette::from_settings(&s);
 

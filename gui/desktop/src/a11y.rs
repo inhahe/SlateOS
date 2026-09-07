@@ -858,8 +858,8 @@ impl AccessibilityConfig {
             out.push_str(&format!(
                 "high_contrast={}\n",
                 match hc {
-                    HighContrastTheme::BlackOnWhite => "black_on_white",
-                    HighContrastTheme::WhiteOnBlack => "white_on_black",
+                    HighContrastTheme::WhiteOnBlack => "black_on_white",
+                    HighContrastTheme::BlackOnWhite => "white_on_black",
                     HighContrastTheme::YellowOnBlack => "yellow_on_black",
                     HighContrastTheme::GreenOnBlack => "green_on_black",
                 }
@@ -913,8 +913,8 @@ impl AccessibilityConfig {
                 match key {
                     "high_contrast" => {
                         cfg.high_contrast = match val {
-                            "black_on_white" => Some(HighContrastTheme::BlackOnWhite),
-                            "white_on_black" => Some(HighContrastTheme::WhiteOnBlack),
+                            "black_on_white" => Some(HighContrastTheme::WhiteOnBlack),
+                            "white_on_black" => Some(HighContrastTheme::BlackOnWhite),
                             "yellow_on_black" => Some(HighContrastTheme::YellowOnBlack),
                             "green_on_black" => Some(HighContrastTheme::GreenOnBlack),
                             _ => None,
@@ -1053,7 +1053,7 @@ mod tests {
 
     #[test]
     fn test_high_contrast_colors() {
-        let hc = HighContrastTheme::BlackOnWhite;
+        let hc = HighContrastTheme::WhiteOnBlack;
         assert_eq!(hc.background(), Color::from_hex(0x000000));
         assert_eq!(hc.text(), Color::from_hex(0xFFFFFF));
         // The accent is no longer a property of a scheme: it follows the
@@ -1068,8 +1068,8 @@ mod tests {
         use guitk::theme::contrast_ratio;
 
         for scheme in [
-            HighContrastTheme::BlackOnWhite,
             HighContrastTheme::WhiteOnBlack,
+            HighContrastTheme::BlackOnWhite,
             HighContrastTheme::YellowOnBlack,
             HighContrastTheme::GreenOnBlack,
         ] {
@@ -1091,8 +1091,8 @@ mod tests {
     #[test]
     fn test_all_contrast_themes_have_different_text() {
         let themes = [
-            HighContrastTheme::BlackOnWhite,
             HighContrastTheme::WhiteOnBlack,
+            HighContrastTheme::BlackOnWhite,
             HighContrastTheme::YellowOnBlack,
             HighContrastTheme::GreenOnBlack,
         ];
@@ -1775,8 +1775,8 @@ mod tests {
         // being a property of a scheme (design-decisions.md 816: it follows
         // the user's setting), and `border` was always just `text` again.
         let table = [
-            (HighContrastTheme::BlackOnWhite, 0x000000, 0xFFFFFF),
-            (HighContrastTheme::WhiteOnBlack, 0xFFFFFF, 0x000000),
+            (HighContrastTheme::WhiteOnBlack, 0x000000, 0xFFFFFF),
+            (HighContrastTheme::BlackOnWhite, 0xFFFFFF, 0x000000),
             (HighContrastTheme::YellowOnBlack, 0x000000, 0xFFFF00),
             (HighContrastTheme::GreenOnBlack, 0x000000, 0x00FF00),
         ];
@@ -1802,8 +1802,8 @@ mod tests {
         for light in [false, true] {
             let p = Palette::for_mode(light);
             for scheme in [
-                HighContrastTheme::BlackOnWhite,
                 HighContrastTheme::WhiteOnBlack,
+                HighContrastTheme::BlackOnWhite,
                 HighContrastTheme::YellowOnBlack,
                 HighContrastTheme::GreenOnBlack,
             ] {
@@ -1842,8 +1842,8 @@ mod tests {
     #[test]
     fn every_high_contrast_scheme_is_legible_with_itself() {
         for scheme in [
-            HighContrastTheme::BlackOnWhite,
             HighContrastTheme::WhiteOnBlack,
+            HighContrastTheme::BlackOnWhite,
             HighContrastTheme::YellowOnBlack,
             HighContrastTheme::GreenOnBlack,
         ] {

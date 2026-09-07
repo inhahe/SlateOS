@@ -3,6 +3,8 @@
 **Filed:** 2026-09-06 by Lane B.
 **Rewritten:** 2026-09-07, after lane A challenged the premise and it did not
 survive measurement.
+**Updated:** 2026-09-07 -- item 2 (lane B's own bug) is fixed; the ask of
+lane A is unchanged.
 **Status:** OPEN, but **much smaller than originally filed** — and one third of
 it is lane B's, not lane A's.
 
@@ -21,7 +23,7 @@ is the same error as reading a stale worktree; I made both on the same day.
 
 | | Linux-ABI kernel handler | native libc (`posix`) | verdict |
 |---|---|---|---|
-| `setgroups` | **real** — `linux.rs:3178` → handler at `:15729`; EPERM if uid≠0, EINVAL over `NGROUPS_MAX`, mutates `new_creds.groups`, incl. the `size==0` clear | `unistd.rs:948` — checks `CAP_SETGID`, validates size and NULL… then **`0`**, having changed nothing | **lane B's bug** |
+| `setgroups` | **real** — `linux.rs:3178` → handler at `:15729`; EPERM if uid≠0, EINVAL over `NGROUPS_MAX`, mutates `new_creds.groups`, incl. the `size==0` clear | `unistd.rs:948` — checks `CAP_SETGID`, validates size and NULL… then **`ENOSYS`** (was `0`, having changed nothing) | **was lane B's bug; fixed** |
 | `chdir` | real — `linux.rs:3438` | `unistd.rs:438` — resolves the path, stats it, real work | **nothing needed** |
 | `chroot` | real — `linux.rs:3216` | `unistd.rs:1964` — validates, checks `CAP_SYS_CHROOT`, then **`ENOSYS`** | needs native wiring |
 
@@ -48,8 +50,22 @@ ENOSYS stub and `su` only mentions it in a comment — so the exposure is latent
 but it is exactly the shape that bites the moment someone wires up a privilege
 drop and trusts the return value.
 
-Tracked in `known-issues.md`. The fix needs a native syscall number to carry it
-(see 3), which is the only part that is lane A's.
+**Fixed 2026-09-07, ahead of the syscall.** `posix::setgroups` now returns
+`-1`/`ENOSYS` after its existing validation instead of `0`. That does not
+implement anything -- it cannot, until item 3 lands -- but it stops the function
+claiming it did. Reasoning in `design-decisions.md` §1004; the `known-issues.md`
+entry is marked FIXED with the audit that unblocked it.
+
+Worth one line on *why* it was fixed early, because it bears on the ordering
+hazard below. The known-issues entry had deferred the choice between `0` and
+`ENOSYS`, on the stated grounds that flipping it might break C programs linked
+against our libc -- the `services/ctest-*` fixtures the boot test runs -- "which
+nobody has audited for it". That was true and was a statement about the auditing,
+not about the hazard. The audit is one command across all file types rather than
+`*.rs`: no caller of `setgroups` exists anywhere in the tree, in any language.
+With nothing to break, there was no tradeoff left to defer.
+
+The remaining need for a native syscall number is unchanged and is item 3 below.
 
 ## 3. What is actually asked of lane A: a native path to what already exists
 
@@ -57,7 +73,8 @@ The kernel implements all three, but only in the **Linux-ABI** table
 (`kernel/src/syscall/linux.rs`), which serves binaries running under
 `AbiMode::Linux`. There is no native syscall number for them — `posix/src/syscall.rs`
 has no `SYS_SETGROUPS`/`SYS_CHROOT` constant — so native libc has nothing to call,
-which is why `posix::chroot` ends in `ENOSYS` and `posix::setgroups` ends in a lie.
+which is why `posix::chroot` ends in `ENOSYS` -- and, since 2026-09-07,
+`posix::setgroups` does too, rather than ending in a lie.
 
 **The ask, therefore, is not "implement these".** It is: *expose the existing
 implementations natively* — a syscall number and dispatch entry for `setgroups`
@@ -89,7 +106,18 @@ at all. It was fixed on 2026-09-07 (`2ed808e29`) *before* any of this landed, an
 found only because lane A's message sent me looking at my own lane for things
 advertised as working that are not.
 
+`posix::setgroups` was the second instance of the same shape, found the same
+way and fixed on 2026-09-07 before this request was granted: a function that
+answered "yes, done" by default, inert only because nothing calls it yet, and
+sitting directly behind the capability being asked for here.
+
 The general form is worth stating: **when lane A grants a capability, the lane
 that asked should re-audit what it had left unfinished on the assumption the
 capability was absent.** The request is the trigger to re-check, not just to
 resume.
+
+A corollary, from the second instance: the re-audit is better done *before* the
+grant than after. Both defects were found while the request was still open, and
+in both cases the fix was cheap precisely because nothing depended on the broken
+behaviour yet. Waiting for the grant would have meant fixing them under a live
+caller.

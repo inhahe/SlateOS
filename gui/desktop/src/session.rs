@@ -937,6 +937,30 @@ impl<T: Transport> ShellSession<T> {
     /// Turning them off cancels what is already running rather than letting it
     /// finish: a user who has just asked for less motion is asking about the
     /// motion on screen now, not about the next one.
+    /// Read the user's saved appearance settings and adopt them, animation
+    /// speed included.
+    ///
+    /// Prefer this to `session.shell_mut().load_appearance()`. The shell holds
+    /// the settings but the *session* holds the `AnimationManager`, so loading
+    /// through the shell alone leaves the animation speed at its default and
+    /// the setting silently inert -- which is the bug this whole change exists
+    /// to fix, and it would be a shame to leave a second door into it.
+    pub fn load_appearance(&mut self) {
+        self.shell.load_appearance();
+        self.sync_animation_speed();
+    }
+
+    /// Push the shell's animation speed into the manager that obeys it.
+    ///
+    /// `AnimationSpeed::multiplier()` is a *duration* multiplier -- 0.75 for
+    /// Fast, 1.5 for Slow, 0.0 for Off -- which is exactly what
+    /// [`AnimationManager::set_duration_scale`] takes, so nothing is converted
+    /// here and there is no second definition of what "slow" means.
+    fn sync_animation_speed(&mut self) {
+        self.animations
+            .set_duration_scale(self.shell.appearance.animation_speed.multiplier());
+    }
+
     pub fn set_reduced_motion(&mut self, reduced: bool) {
         self.animations.reduced_motion = reduced;
         if reduced {
@@ -1062,6 +1086,13 @@ impl<T: Transport> ShellSession<T> {
                 group: SettingsGroup::Appearance,
             } => {
                 if self.shell.poll_appearance() {
+                    // The animation speed lives on this session's manager, not
+                    // on the shell, so adopting the settings is two steps and
+                    // the second is easy to forget. `sync_animation_speed` is
+                    // cheap and unconditional rather than guarded on the speed
+                    // having changed: a guard would be a second place that has
+                    // to know which fields matter.
+                    self.sync_animation_speed();
                     self.dirty = true;
                 }
             }

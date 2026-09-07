@@ -21,7 +21,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use appearance::AccentColor;
+use appearance::{AccentColor, AnimationSpeed};
 use guiremote::control::{RequestBody, ShellControlAction};
 use guiremote::window_list::WindowInfo;
 use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEventKind, SettingsGroup};
@@ -1018,6 +1018,80 @@ fn an_input_settings_announcement_does_not_touch_the_shell() {
             "an input announcement must not make the shell read appearance"
         );
         assert_eq!(desktop.borrow_mut().drawn().len(), before_drawn);
+    });
+}
+
+// ---- the animation speed setting reaches the thing that animates ----
+
+#[test]
+fn the_saved_animation_speed_reaches_the_animation_manager() {
+    // The setting existed, was editable in Settings, was saved to disk and
+    // survived a restart -- and nothing read it, because `AnimationManager`
+    // lives on the session while the settings live on the shell. See
+    // known-issues TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER.
+    settingsfile::testing::with_scratch_config("session-anim-speed", |_root| {
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.animation_speed = AnimationSpeed::Slow;
+        file.save().expect("save");
+
+        let (mut session, _desktop) = session();
+        session.load_appearance();
+
+        assert!(
+            (session.animations().duration_scale() - 1.5).abs() < f32::EPSILON,
+            "Slow is 1.5x; the manager has {}",
+            session.animations().duration_scale()
+        );
+    });
+}
+
+#[test]
+fn changing_the_animation_speed_takes_effect_without_a_restart() {
+    // Through the announcement path, so this covers the join between the
+    // settings watcher and the manager rather than either alone.
+    settingsfile::testing::with_scratch_config("session-anim-live", |_root| {
+        let (mut session, desktop) = session();
+        session.load_appearance();
+        let before = session.animations().duration_scale();
+
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.animation_speed = AnimationSpeed::Fast;
+        file.save().expect("save");
+
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+
+        let after = session.animations().duration_scale();
+        assert!(
+            (before - after).abs() > f32::EPSILON,
+            "the speed change did not arrive: still {before}"
+        );
+        assert!(
+            (after - 0.75).abs() < f32::EPSILON,
+            "Fast is 0.75x; the manager has {after}"
+        );
+    });
+}
+
+#[test]
+fn an_animation_speed_of_off_stops_the_shell_animating() {
+    // `Off` must reach the same gate reduced motion uses. Asserted through
+    // the observable end -- an animation asked for and not started -- rather
+    // than through the scale, because a scale of 0.0 stored but not obeyed
+    // would satisfy the weaker check.
+    settingsfile::testing::with_scratch_config("session-anim-off", |_root| {
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.animation_speed = AnimationSpeed::Off;
+        file.save().expect("save");
+
+        let (mut session, _desktop) = session();
+        session.load_appearance();
+
+        session.animate_desktop_switch(1.0);
+        assert!(
+            !session.animations().has_active(),
+            "Off should start nothing"
+        );
     });
 }
 

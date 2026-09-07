@@ -2896,7 +2896,7 @@ it is a real bug and worth fixing on its own merits, but it is not a reason to
 reduce the gate's coverage, and 15 s says the coverage need not be traded for
 cost.
 
-### The scenario nobody has measured yet, and it is the realistic one
+### The scenario that matters, now measured: worst case 49 seconds
 
 Every figure above is **"one file touched"**. That is not when a gate fires.
 
@@ -2907,21 +2907,50 @@ a shared crate (`guitk`, `guiremote`, `authlib`) changed, and everything
 downstream of it rebuilds. Downstream of `guitk` is 158 crates; downstream of
 `authlib` is most of `userspace/`.
 
-So the honest range for the gate is somewhere between the 15 s measured here
-and the 139 s cold figure, and **which end depends on what the merge brought
-in** — the cheap case being the common one and the expensive case being exactly
-the one where the gate earns its keep, since a shared-crate change is what
-breaks other lanes. Nobody has measured it. It is the number I would want before
-calling this settled, and it is measurable: merge a real `origin/main` that
-touches a shared crate, then time the check.
+Lane B measured it — touch each shared crate, re-check the whole workspace,
+under contention:
+
+| crate touched | dependents | whole-workspace re-check |
+|---|---|---|
+| `authlib` | 12 | 19 s |
+| `posix` | 13 direct | 22 s |
+| `guitk` | 144 | 26 s |
+| **`quoting`** | **773** | **49 s** |
+
+**Worst case in the tree is 49 seconds.** It never approaches the 139 s cold
+figure because `cargo check` does no codegen: a cold run pays to *compile* the
+dependency graph, a post-merge re-check only pays to re-read it — about 63 ms
+per downstream crate.
+
+**Two things I had wrong here, both the failure this entry keeps cataloguing.**
+
+*First:* I wrote that "downstream of `authlib` is most of those 2,759". It is
+**12**. That is wrong by two orders of magnitude and it mattered, because the
+whole expensive-case worry rested on the intuition that a shared-crate change
+rebuilds most of the tree. It does not. **The blast radius that justified this
+entire question was twelve crates.** What made it serious was not that there
+were many victims but that they were in a *different lane* from the author —
+which is the thing a gate fixes and a bigger number would not have made truer.
+
+*Second:* the widest shared crate is not `guitk`, `posix` or `authlib`. It is
+**`quoting`, at 773 dependents**, and it appeared in none of the three candidate
+lists either of us was reasoning from. Lane B measured it precisely so the worst
+case would not be merely the worst of the ones we happened to name. Same shape
+as the six embedded artifacts and the `--workspace` member count: enumerate
+first, then reason.
+
+Dependent counts verified independently here (`grep -rl` over every
+`Cargo.toml`): `quoting` 773, `guitk` 144, `posix` 13, `authlib` 12. Member
+counts: `userspace/*` 2,759, `apps/*` 143, `services/*` 76, `gui/*` 15,
+`init/*` 2, `net/*` 2.
 
 ### Recommendation
 
 **Adopt C now, regardless. Defer the A-versus-B choice to one number that does
 not exist yet.**
 
-**C is free, and weaker than I claimed. Adopt it anyway, but do not count on
-it.** The convention: a commit message may not claim "no caller changes" about a
+**Adopt C as well — it is free — but it is not the answer and should not be
+credited as one.** The convention: a commit message may not claim "no caller changes" about a
 shared library until `grep -rl <symbol> apps/ gui/ net/` has been run. It costs
 nothing and needs no infrastructure.
 
@@ -2998,20 +3027,39 @@ the answer follows from lane B's measurement instead of from my instinct:
 | under ~1 minute | **A** — a fair price for "the tree compiles", and the only option that *stops* a breakage rather than shortening its life |
 | a few minutes, with the other lanes degraded throughout | **B** — the nightly sweep. The guarantee is no longer cheap, and a standing tax on every merge stops being worth it |
 
-**Both figures are now in: 14 s idle, 15 s contended**, whole-workspace,
-warm-incremental — comfortably inside the first row, and contention turns out
-to cost almost nothing on this axis. What is left outstanding is not the
-contended number but the *merge* number: see "the scenario nobody has measured
-yet" above. Every figure quoted here is one-file-touched, and a gate fires on a
-tree that has just merged another lane's work.
+**Every figure is now in**, and they all land in the first row:
 
-I lean A, and more strongly than when this entry first said so, because the two
-things that changed both point the same way: the idle price is 14 seconds rather
-than the minute I guessed, and the failure rate went from "found one, by
-accident" to four in a day across all three lanes. What has *not* changed is
-that I have been wrong on this entry's cost figures twice, in the same direction
-both times, and the operator should weight that against my lean rather than
-with it.
+| scenario | cost |
+|---|---|
+| no-op / one file touched, idle or contended | 14–16 s |
+| after a merge touching `authlib`, `posix` or `guitk` | 19–26 s |
+| **after a merge touching the widest crate in the tree (`quoting`, 773 dependents)** | **49 s** |
+
+Nothing costs a minute, including the worst case, including under contention.
+
+**I recommend A, whole-workspace, and I have dropped the hedge.** I said I
+would drop it if the worst realistic case came in under a minute; it is 49
+seconds. Everything that was uncertain when this entry was written has since
+been measured, and every measurement moved toward A:
+
+- the price is seconds, not minutes, at every point in the range;
+- contention costs almost nothing (14 s idle against 15 s contended);
+- the failure went from "one, found by accident" to **four in one day, by all
+  three lanes**;
+- and the two most recent were committed by the person who wrote the argument
+  for a gate and the person measuring its cost — which is what convinced me the
+  convention in C cannot be the answer.
+
+The standing caveat is unchanged and the operator should still apply it: **I
+have been wrong on this entry's numbers repeatedly** — first guessing minutes,
+then measuring the wrong command, then quoting an idle figure for a shared
+machine, then predicting the scoped/whole comparison backwards, then putting
+`authlib`'s blast radius at ~2,759 when it is 12. Every one of those was
+corrected by another lane rather than by me. What that argues, though, is not
+that the recommendation is unreliable — it is the single best argument *for* the
+recommendation. Five wrong numbers from someone paying close attention, caught
+only because two other agents happened to check, is precisely the case for a
+mechanism that fires without being invoked.
 
 **The objection to A, restated in the better form lane B gave it.** I had
 written it as "the gate lets one lane block another's merge", and answered that
@@ -3035,7 +3083,8 @@ honest.)
 
 The current state is safe but degrading, and nothing is blocked: the lockscreen
 is repaired, `main` is green, and adopting C costs nothing and needs no answer
-from you.
+from you. Everything this question needed measuring is measured; it is waiting
+only on you.
 
 What stays open is the gap. Every shared-library change is another chance for a
 breakage that nothing reports and that is found weeks later by somebody who did

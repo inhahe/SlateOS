@@ -40,7 +40,7 @@ const DEFAULT_SHELL: &str = "/bin/sh";
 //   operation   kernel (Linux-ABI table)   native libc (`posix`)
 //   chroot      real, linux.rs:3216        validates + CAP_SYS_CHROOT, ENOSYS
 //   chdir       real, linux.rs:3438        REAL -- resolves and stats the path
-//   setgroups   real, linux.rs:15729       returns 0 WITHOUT ACTING (see below)
+//   setgroups   real, linux.rs:15729       validates, then ENOSYS (see below)
 //   setuid      real                       real, via SYS_PROCESS_SET_CREDENTIALS
 //   setgid      real                       real, likewise
 //
@@ -50,11 +50,21 @@ const DEFAULT_SHELL: &str = "/bin/sh";
 // `posix/src/syscall.rs` has no constant to reach them with. Asked for in
 // `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
 //
-// `posix::setgroups` is worse than absent: it checks CAP_SETGID, validates its
-// arguments, and returns success having changed nothing. A caller that drops
-// groups and trusts the result keeps them all. See `known-issues.md` ->
-// `B-POSIX-SETGROUPS-REPORTS-SUCCESS-WITHOUT-CHANGING-ANY-GROUPS`. That is
-// this lane's bug, not the kernel's.
+// `posix::setgroups` used to be worse than absent: it checked CAP_SETGID,
+// validated its arguments, and returned success having changed nothing, so a
+// caller that dropped groups and trusted the result kept them all. That was
+// this lane's bug rather than the kernel's, and it was fixed on 2026-09-07 --
+// it now returns ENOSYS after the same validation. See `known-issues.md` ->
+// `B-POSIX-SETGROUPS-REPORTS-SUCCESS-WITHOUT-CHANGING-ANY-GROUPS` (marked
+// FIXED) and `design-decisions.md` §1004.
+//
+// Note that the row above changed because the code changed, not because the
+// measurement was redone. The distinction matters in this particular comment
+// block more than most: the request file cited below was filed with three
+// wrong claims in it, all three taken from *an earlier version of this very
+// block*, read as though it were a measurement. A comment that records a
+// measurement is only as good as its last edit, so when one of these rows
+// moves, say which of the two things moved.
 //
 // This tool still refuses every privilege operation, and that remains the
 // point rather than an oversight: `chdir` works and `setuid`/`setgid` work, so

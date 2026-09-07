@@ -20198,7 +20198,8 @@ the first attempt at this fix went wrong.
 
 **In short:** Open Settings, choose "Slow" animations, and the setting is
 saved, survives a restart, and changes nothing — because nothing in the system
-reads it. The same is true of desktop icon size and cursor scheme. Cursor
+reads it. The same is true of desktop icon size and cursor scheme.
+(**Animation speed is fixed as of 2026-09-06**; the other three stand.) Cursor
 *size* is worse: it exists as four separate settings in four places, and the
 program that draws the cursor reads none of them. These are controls that work
 perfectly and do nothing, which is the most expensive kind of broken, because
@@ -20229,7 +20230,7 @@ read by the panel that edits it is not a consumer.
 | `window_corners`, `drop_shadows` | compositor | **works** |
 | `scaling_percent` | `guitk::scaling` via `set_appearance` | **works** |
 | `fonts` | — | out of scope here; see §400 and C-Q1 |
-| **`animation_speed`** | **none** | **dead** |
+| ~~`animation_speed`~~ | `AnimationManager`, via `ShellSession` | **fixed 2026-09-06** |
 | **`icon_size`** | **none** | **dead** |
 | **`cursor_scheme`** | **none** | **dead** |
 | **`cursor_size`** | **none** — and three rival copies | **dead, four ways** |
@@ -20289,12 +20290,29 @@ heatmap whose legend advertised a gradient the graph did not draw
 
 Per setting, and they are not equal:
 
-1. **`animation_speed`** — give `AnimationManager` a speed multiplier applied
-   where elapsed time enters an animation, and feed it from
-   `DesktopShell::set_appearance`. This is the one with real user value and it
-   is self-contained.
-2. **`icon_size`** — the desktop-icon renderer is the consumer; it should take
-   the size from the setting rather than a constant.
+1. ~~**`animation_speed`**~~ — **done 2026-09-06.** `AnimationManager` gained
+   `set_duration_scale`, applied where elapsed time enters `tick` rather than to
+   each animation's stated duration, so a new animation kind cannot forget to
+   obey it. Two things the plan above did not anticipate: the fractional
+   millisecond has to be *carried* (at 1.5x, truncating 10.67 to 10 loses 4%
+   every frame, so every slow animation would run consistently late), and the
+   feed is **not** `DesktopShell::set_appearance` — the manager lives on
+   `ShellSession`, not on the shell, so `session.shell_mut().load_appearance()`
+   adopts the settings and leaves the speed inert. `ShellSession::load_appearance`
+   is the door that does both.
+2. **`icon_size`** — **blocked, and not on effort.** Its natural consumer is
+   `gui/desktop/src/icons.rs`, which has **no caller anywhere** and is one of
+   the 47 pinned islands on `scripts/orphan-modules-baseline.txt`. Wiring the
+   setting to it would connect two dead things and produce a *more* convincing
+   lie: a setting that looks wired and still changes nothing on screen.
+
+   Worse, desktop icon layout already exists a second time —
+   `kernel/src/fs/deskicons.rs`, marked done at `roadmap.md` line 2385, with a
+   grid, an icon size, layout modes, sorting, hit testing, persistence, a
+   kshell command and `/proc/deskicons`. Two models of one user-visible state
+   in two lanes, which is `TD-THREE-INDEPENDENT-APPEARANCE-MODELS` again.
+   Asked in `requests/c-a-two-desktop-icon-models-and-mine-cannot-be-wired-until-we-pick.md`;
+   until it is answered, wiring either one entrenches a duplicate.
 3. **`cursor_scheme`** and **`cursor_size`** — do *not* wire these until the
    caveat above is resolved and the four models are collapsed to one. Wiring one
    of four rival copies to a renderer would make the other three permanently
@@ -122194,6 +122212,26 @@ is **49 seconds**, not the two minutes the cold figure suggested. `cargo check`
 does no codegen, so a downstream re-check is metadata-only: 773 crates in 49 s
 is about 63 ms each.
 
+*Method, and its one hole.* The dependent counts above are **manifest
+mentions**, not the set actually re-checked, and the two differ: touching
+`posix` re-checked **21** crates against 13 manifest mentions, because the
+re-check set is transitive. That the method measures what it claims is
+confirmed rather than assumed -- the run's own `Checking <crate>` lines were
+counted. But only the *last* run's output survived: the harness wrote every run
+to one path and overwrote it, so the same confirmation is not available for the
+other three. The timings stand (they scale with dependent count as expected),
+the per-run re-check counts do not exist for `authlib`, `guitk` or `quoting`,
+and a harness that discards its own evidence is a poor instrument for an entry
+about not discarding evidence.
+
+*A second, softer hole, worth naming because it is the same shape.* Every
+"contended" figure here is labelled with a load that another session **told**
+me it was running, not one this session observed. Had the boot test changed
+phase mid-measurement the label would be silently wrong. Lane A's
+generalisation covers it exactly: a harness that characterises the machine by
+assertion rather than observation is making a claim about the machine, not
+about the code.
+
 Two premises were wrong in the discussion that produced this table, both by
 reasoning about a set without counting it -- the same failure as the `head -3`
 and the one-file `grep -c` recorded elsewhere in this entry:
@@ -122391,6 +122429,16 @@ That is why `build.rs` should scan rather than hold a list of six.
 
 ## B-POSIX-SETGROUPS-REPORTS-SUCCESS-WITHOUT-CHANGING-ANY-GROUPS (lane B, 2026-09-07)
 
+**Status: FIXED 2026-09-07** (lane B), the same day it was filed. `setgroups`
+now returns `-1`/`ENOSYS` after its validation instead of `0`. The thirteen
+tests that asserted the old success assert the failure *and* the errno; the one
+covering the privilege-drop idiom is now named
+`test_setgroups_phase85_drop_all_groups_idiom_does_not_claim_success`, because
+what it did before was lock in the precise behaviour that hands a caller a
+privilege drop it never performed. The reasoning is
+`design-decisions.md` §1004. The description below is kept in the past tense it
+was written in, because how the decision unblocked is the useful part.
+
 **In short:** the C library function a program calls to drop its extra group
 memberships checks that it is allowed to, checks its arguments, and then returns
 "done" without changing anything. A program that drops privileges this way is
@@ -122420,8 +122468,8 @@ means it sheds none of it while its own logic records that it did.
 
 **Exposure today is latent.** Nothing in this tree calls it: `userspace/chroot`
 has its own `enosys("setgroups")` stub and `userspace/su` mentions it only in a
-comment. The ctest fixtures link libc but are not known to exercise it. So this
-is a landmine rather than a live wound -- and it is the same shape as
+comment. The ctest fixtures link libc and -- audited, see below -- do not
+exercise it either. So this was a landmine rather than a live wound -- and it is the same shape as
 `userspace/newgrp`'s `!password.is_empty()` group check found the same day: a
 security decision that answers "yes" by default, sitting behind something else
 that is missing.
@@ -122433,18 +122481,31 @@ which serves binaries running under `AbiMode::Linux`. There is no native syscall
 number for it, so native libc has nothing to call. Asked for in
 `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
 
-**The interim question, deliberately not decided unilaterally.** Until the native
-path exists, `setgroups` could return `-1`/`ENOSYS` instead of `0`. That is more
-honest and matches what `posix::chroot` already does two thousand lines away in
-the same file. It is *not* obviously right: it converts a silent wrong answer
-into a loud failure in code that currently "works", and the callers it would
-newly break are C programs linked against our libc -- including the ctest
-fixtures the boot test runs -- which nobody has audited for it. The tradeoff is
-real in both directions, so it is recorded here rather than taken. **Recommended
-resolution:** make it `ENOSYS` at the same moment the native syscall lands, so
-the honest-failure window is zero; if the native path is declined, make it
-`ENOSYS` anyway and fix the fallout, because a security function that lies is
-worse than one that refuses.
+**The interim question, and why it stopped being one.** This entry originally
+declined to choose between `0` and `ENOSYS`, on the grounds that switching
+"converts a silent wrong answer into a loud failure in code that currently
+'works', and the callers it would newly break are C programs linked against our
+libc -- including the ctest fixtures the boot test runs -- **which nobody has
+audited for it**."
+
+That objection was checkable, and nobody had checked it. "Nobody has audited
+this" is not a finding about the hazard; it is a finding about the auditing.
+Audited 2026-09-07 across the whole tree and across all file types rather than
+`*.rs` -- which is how the first pass missed C entirely: **there is no caller.**
+The nine `services/ctest-*` fixtures do not mention `setgroups`. The only
+tree-wide match outside `posix/src/unistd.rs` is a syscall-*number* table in
+`find_gaps.py`, which is a lookup rather than a call. So the set of programs the
+change could break is empty, the tradeoff that made this a judgment call does not
+exist, and the "wait for the native syscall so the honest-failure window is zero"
+recommendation was guarding nothing.
+
+Worth recording as the day's recurring failure in a new costume. The five earlier
+instances were *searches* that answered a narrower question than the one asked
+and were reported at the width of the question. This one is the same error moved
+one level up: a **decision** deferred on the strength of a hazard nobody had
+measured, with the deferral stated at the width of a real tradeoff. An unaudited
+objection is not a reason to wait; it is a reason to audit. The audit was one
+command, and it had been available on every one of the days this sat open.
 
 **Related, same file, opposite behaviour:** `posix::chroot`
 (`unistd.rs:1964`) is in the identical position -- kernel handler exists, no

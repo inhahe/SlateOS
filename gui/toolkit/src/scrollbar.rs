@@ -11,12 +11,34 @@
 //!
 //! # Why it exists at all
 //!
-//! Six places in this tree drew a scrollbar and dragged a thumb, each with its
-//! own copy of the same two formulas: `gui/toolkit`'s file dialog, menu and
-//! menubar, the desktop shell and its window-peek strip, and
-//! `apps/dictionary`. Two of them had already drifted on the minimum thumb
-//! height. Six copies of one formula is six chances to write a different one —
-//! the same reasoning that collapsed the glob matchers (design-decisions 555).
+//! Six places in this tree drew a scrollbar with their own copy of the same
+//! formula. Five now call this module: `gui/toolkit`'s file dialog, `menu` and
+//! `menubar`, the desktop shell's start menu, and `apps/dictionary`. Six copies
+//! of one formula is six chances to write a different one — the same reasoning
+//! that collapsed the glob matchers (design-decisions 555).
+//!
+//! **The sixth is `apps/spreadsheet`, and it is deliberately left alone.** Its
+//! scrollbar is generic over the axis — one function draws both the vertical
+//! and the horizontal bar from a `length` — where everything here is vertical,
+//! reading `track.h` and `track.y` by name. Converting it means either
+//! generalising this module to an axis-agnostic span or splitting that function
+//! in two, and both are design decisions rather than mechanical substitutions.
+//!
+//! (A note on the count, because this module's own history has it wrong. The
+//! doc first said six and named `gui/desktop/src/window_peek.rs` as one of
+//! them; that file has no scrollbar. The grep behind the number had matched
+//! `max_thumb_height` and `MIN_THUMBNAIL_WIDTH`, which size a window *preview
+//! image*. It then said five, having dropped `window_peek` without looking for
+//! what else the first grep had missed — which was `apps/spreadsheet`. Six was
+//! right by accident and wrong in its membership, twice. Enumerate, then count.)
+//!
+//! **They had drifted, and on the part that shows.** Each had a different rule
+//! for the smallest a thumb may get: 20 px in the dialog, 16 px in `menu` and
+//! `menubar`, half a row in the shell, five per cent of the pane in
+//! `dictionary`. That is why [`thumb_of`] takes the floor as an argument
+//! instead of imposing [`MIN_THUMB`]: a menu is not a file dialog, and
+//! collapsing five deliberate-looking choices into one would be a visual change
+//! smuggled in under a refactor. What is shared is the arithmetic.
 //!
 //! The extraction started from the file dialog's copy, which was the most
 //! carefully documented and the only one with tests for the end-of-list case;
@@ -70,8 +92,7 @@ pub fn thumb(track: Rect, total: usize, capacity: usize, first: usize) -> Rect {
         clippy::cast_precision_loss,
         reason = "a row count large enough to lose f32 precision is 16M rows"
     )]
-    let shown = (capacity as f32 / total as f32).clamp(0.0, 1.0);
-    let thumb_h = (track.h * shown).clamp(MIN_THUMB.min(track.h), track.h);
+    let shown = capacity as f32 / total as f32;
     let hidden = total.saturating_sub(capacity);
     #[expect(
         clippy::cast_precision_loss,
@@ -80,8 +101,40 @@ pub fn thumb(track: Rect, total: usize, capacity: usize, first: usize) -> Rect {
     let position = if hidden == 0 {
         0.0
     } else {
-        (first as f32 / hidden as f32).clamp(0.0, 1.0)
+        first as f32 / hidden as f32
     };
+    thumb_of(track, shown, position, MIN_THUMB)
+}
+
+/// The thumb's rectangle from two fractions, with an explicit size floor.
+///
+/// The shape underneath [`thumb`], for the callers that do not count rows: a
+/// menu scrolls by pixels, and a pane by a fraction of its content. `shown` is
+/// how much of the content is on screen and `position` how far through it the
+/// view has travelled, both clamped to `0.0..=1.0`.
+///
+/// `min_thumb` is an argument rather than [`MIN_THUMB`] because the callers
+/// disagree about it on purpose -- a menu's floor is smaller than a file
+/// dialog's -- and imposing one value would be a visual change wearing a
+/// refactor's clothes.
+///
+/// A non-finite fraction is read as zero. These come from a division whose
+/// denominator a caller may not have checked, and a `NaN` reaching the
+/// multiply would put the thumb at a position that compares false against
+/// every bound.
+#[must_use]
+pub fn thumb_of(track: Rect, shown: f32, position: f32, min_thumb: f32) -> Rect {
+    let shown = if shown.is_finite() {
+        shown.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let position = if position.is_finite() {
+        position.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let thumb_h = (track.h * shown).clamp(min_thumb.min(track.h), track.h);
     Rect::new(
         track.x,
         track.y + (track.h - thumb_h) * position,
@@ -187,6 +240,47 @@ mod tests {
             t.y + t.h,
             TRACK.y + TRACK.h
         );
+    }
+
+    #[test]
+    fn the_floor_is_the_callers_and_not_this_modules() {
+        // Five callers disagree about the smallest a thumb may be -- 20 px in
+        // the file dialog, 16 in the menus, half a row in the shell, three bar
+        // widths in the dictionary -- and each is a deliberate choice about
+        // its own surface. Imposing one would be a visual change hidden in a
+        // refactor, so the floor is an argument.
+        let tiny = thumb_of(TRACK, 0.001, 0.0, 4.0);
+        assert_eq!(tiny.h, 4.0, "the caller's floor was not honoured");
+        let bigger = thumb_of(TRACK, 0.001, 0.0, 40.0);
+        assert_eq!(bigger.h, 40.0);
+    }
+
+    #[test]
+    fn a_floor_taller_than_the_track_does_not_overflow_it() {
+        let t = thumb_of(TRACK, 0.01, 1.0, TRACK.h * 4.0);
+        assert_eq!(t.h, TRACK.h);
+        assert_eq!(t.y, TRACK.y, "a full-height thumb has nowhere to travel");
+    }
+
+    #[test]
+    fn a_non_finite_fraction_does_not_put_the_thumb_nowhere() {
+        // Both fractions come from a division whose denominator the caller may
+        // not have checked -- content height, a row count, a max-scroll of
+        // zero. A NaN reaching the multiply compares false against every bound,
+        // so the thumb would be drawn at a position nothing could clamp.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let t = thumb_of(TRACK, bad, 0.5, MIN_THUMB);
+            assert!(
+                t.h.is_finite() && t.y.is_finite(),
+                "shown={bad} produced {t:?}"
+            );
+            let t = thumb_of(TRACK, 0.5, bad, MIN_THUMB);
+            assert!(
+                t.h.is_finite() && t.y.is_finite(),
+                "position={bad} produced {t:?}"
+            );
+            assert!(t.y >= TRACK.y && t.y + t.h <= TRACK.y + TRACK.h + 0.01);
+        }
     }
 
     #[test]

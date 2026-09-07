@@ -3975,17 +3975,25 @@ impl DesktopShell {
             let bar_w = self.scale(START_MENU_SCROLLBAR_WIDTH);
             let track_top = self.start_menu_row_rect(0).y;
             let track_h = rows as f32 * row_h;
-            let thumb_h = (track_h * rows as f32 / total as f32).max(row_h / 2.0);
             let max_scroll = self.start_menu_max_scroll().max(1) as f32;
-            let progress = self.start_menu_scroll as f32 / max_scroll;
+            // `guitk::scrollbar`'s arithmetic, shared with the file dialog,
+            // the menus and `apps/dictionary`. The floor stays half a row --
+            // this bar is sized in rows of a start menu, not pixels of a
+            // dialog -- which is why the module takes it as an argument.
+            let thumb = guitk::scrollbar::thumb_of(
+                guitk::frame::Rect::new(
+                    menu.x + menu.w - bar_w - self.scale(2.0),
+                    track_top,
+                    bar_w,
+                    track_h,
+                ),
+                rows as f32 / total as f32,
+                self.start_menu_scroll as f32 / max_scroll,
+                row_h / 2.0,
+            );
             fill_round(
                 &mut tree,
-                Rect::new(
-                    menu.x + menu.w - bar_w - self.scale(2.0),
-                    track_top + (track_h - thumb_h) * progress,
-                    bar_w,
-                    thumb_h,
-                ),
+                Rect::new(thumb.x, thumb.y, thumb.w, thumb.h),
                 self.theme.accent_color,
                 CornerRadii::all(bar_w / 2.0),
             );

@@ -89351,9 +89351,13 @@ a track and a draggable thumb in all three views, a page jump for a click on
 the track either side of it, and no bar at all when the listing fits.
 
 It is drawn from a new shared `guitk::scrollbar`, not a seventh private copy.
-Six places in the tree already had one -- the file dialog, `menu`, `menubar`,
-the desktop shell, `window_peek` and `apps/dictionary` -- each with its own
-version of the same two formulas. The extraction took the file dialog's, which
+Six places in the tree already had one, each with its own version of the same
+formula. Five now share this module -- the file dialog, `menu`, `menubar`, the
+desktop shell and `apps/dictionary`; the sixth, `apps/spreadsheet`, is
+deliberately left because its bar is generic over the axis and this module is
+vertical-only. (The commit named `window_peek` as one of the six. That file has
+no scrollbar: the grep had matched `max_thumb_height`, which sizes a window
+preview. See the module doc.) The extraction took the file dialog's, which
 was the best documented and the only one with a test for the end-of-list case,
 and `dialog.rs` was converted first so its own tests prove the shared module
 says what its copy did.

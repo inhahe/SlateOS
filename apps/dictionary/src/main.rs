@@ -2079,21 +2079,14 @@ fn scrollbar(f: &mut Frame, pane: Rect, fraction: f32, offset: f32) {
     let w = (pane.w * 0.012).clamp(2.0, 5.0);
     let track = Rect::new(pane.right() - w, pane.y, w, pane.h);
     fill(f, track, CRUST, w / 2.0);
-    let thumb_h = (pane.h * fraction.clamp(0.05, 1.0))
-        .max(w * 3.0)
-        .min(pane.h);
-    let travel = (pane.h - thumb_h).max(0.0);
-    fill(
-        f,
-        Rect::new(
-            track.x,
-            pane.y + travel * offset.clamp(0.0, 1.0),
-            w,
-            thumb_h,
-        ),
-        SURFACE1,
-        w / 2.0,
-    );
+    // `guitk::scrollbar`'s arithmetic, shared with the file dialog, the menus
+    // and the desktop shell. Two things stay this pane's own and are passed in
+    // rather than adopted: the floor is three times the bar's own width, so it
+    // scales with a bar that is itself a fraction of the pane; and `fraction`
+    // keeps its 0.05 lower clamp, which stops a very long article's thumb
+    // collapsing before the width-derived floor catches it.
+    let thumb = guitk::scrollbar::thumb_of(track, fraction.clamp(0.05, 1.0), offset, w * 3.0);
+    fill(f, thumb, SURFACE1, w / 2.0);
 }
 
 impl Dictionary {

@@ -53,7 +53,7 @@ use guitk::color::Color;
 use guitk::event::{
     Event as ClientEvent, Key, KeyEvent as ClientKeyEvent, Modifiers,
     MouseButton as ClientMouseButton, MouseEvent as ClientMouseEvent,
-    MouseEventKind as ClientMouseKind,
+    MouseEventKind as ClientMouseKind, SettingsGroup,
 };
 #[allow(unused_imports)]
 use guitk::render::{
@@ -3105,6 +3105,20 @@ pub enum EventNotification {
     FocusGained { window_id: WindowId },
     /// Window lost keyboard focus.
     FocusLost { window_id: WindowId },
+    /// A settings group was rewritten and this window's program should re-read
+    /// it.
+    ///
+    /// Addressed to a window like every other notification here, because the
+    /// routing is per window: the server finds the client from the window the
+    /// event names. A settings change is not *about* a window, so it is sent
+    /// once per window and a program with three of them hears three times.
+    /// That is the same redundancy focus and resize already carry, and the
+    /// alternative -- a second, client-addressed delivery path -- would be a
+    /// lot of machinery for an event that fires when a person clicks Apply.
+    SettingsChanged {
+        window_id: WindowId,
+        group: SettingsGroup,
+    },
 }
 
 impl EventNotification {
@@ -3122,6 +3136,7 @@ impl EventNotification {
             | Self::WindowResized { window_id, .. }
             | Self::FocusGained { window_id }
             | Self::FocusLost { window_id } => *window_id,
+            Self::SettingsChanged { window_id, .. } => *window_id,
         }
     }
 }
@@ -3186,6 +3201,9 @@ fn wire_event(n: EventNotification) -> guiremote::InputEvent {
         }
         EventNotification::FocusLost { window_id } => {
             guiremote::InputEvent::new(window_id.0, ClientEvent::FocusOut)
+        }
+        EventNotification::SettingsChanged { window_id, group } => {
+            guiremote::InputEvent::new(window_id.0, ClientEvent::SettingsChanged { group })
         }
     }
 }
@@ -4888,6 +4906,26 @@ impl Compositor {
     /// case, not a failure to report.
     pub fn reload_appearance(&mut self) {
         self.set_appearance(appearance::AppearanceFile::load().settings);
+    }
+
+    /// Tell every window's program that a settings group was rewritten.
+    ///
+    /// Carries no settings, only the name of the group -- see
+    /// [`ClientEvent::SettingsChanged`]. A receiver re-reads the user's own
+    /// file, so this confers no ability to *say* what anyone's settings are;
+    /// the worst a redundant announcement causes is a redundant read.
+    ///
+    /// Public because the compositor is not the only thing that knows a
+    /// settings file changed: a session may reload on its own, and a test
+    /// needs to make the announcement without a client to send the request.
+    pub fn announce_settings_change(&mut self, group: SettingsGroup) {
+        // Collected first because pushing borrows `self` mutably while
+        // `self.windows` is borrowed to iterate it.
+        let ids: Vec<WindowId> = self.windows.iter().map(|w| w.id).collect();
+        for window_id in ids {
+            self.pending_notifications
+                .push_back(EventNotification::SettingsChanged { window_id, group });
+        }
     }
 
     /// Re-read the user's `input.yaml` and adopt whatever it now says.
@@ -8196,6 +8234,14 @@ impl Compositor {
             }
             CompositorRequest::ReloadAppearance => {
                 self.reload_appearance();
+                // And tell everyone else, which is the point of the request
+                // being a *notification* rather than a write: the sender has
+                // already rewritten the file, and every other program holding
+                // a copy of what it said is now stale. Before this, the
+                // compositor re-read the file and no one else ever learned it
+                // had changed -- so a theme change reached the window
+                // decorations and nothing inside them until the next login.
+                self.announce_settings_change(SettingsGroup::Appearance);
                 // `Ok` whether or not anything changed. The client is being
                 // told the compositor has re-read the file, which is true
                 // either way, and a reply that differed would leak the state of
@@ -8204,6 +8250,7 @@ impl Compositor {
             }
             CompositorRequest::ReloadInput => {
                 self.reload_input();
+                self.announce_settings_change(SettingsGroup::Input);
                 // `Ok` whether or not anything changed, on the same terms as
                 // the appearance reload above: a reply that differed would let
                 // anyone allowed to ask for a reload read back the user's

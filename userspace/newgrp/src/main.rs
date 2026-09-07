@@ -11,6 +11,7 @@
 
 use quoting::quoteaf_os;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::process;
 
@@ -185,24 +186,40 @@ fn prompt_password() -> String {
 // Shell execution
 // ============================================================================
 
-fn get_user_shell() -> String {
-    env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+/// The shell to start, from `SHELL`.
+///
+/// `var_os`, not `var`: `SHELL` names a program, a program is named by a
+/// path, and a path on this OS may hold any byte but `/` and NUL. `env::var`
+/// would report such a value as an error and this would silently fall back to
+/// `/bin/sh` -- starting a shell the user did not choose.
+fn get_user_shell() -> OsString {
+    env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"))
 }
 
-fn exec_with_group(gid: u32, command: Option<&[String]>) -> i32 {
-    // In a real OS, this would call setgid(gid) then exec.
-    // Here we simulate by printing what would happen.
+fn exec_with_group(gid: u32, command: Option<&[OsString]>) -> i32 {
+    // In a real OS, this would call setgid(gid) then exec. It cannot: there is
+    // no SYS_SETGROUPS, and a group change that set the primary gid without
+    // the supplementary set would be a partial one. See
+    // `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
+    // Until then it says what it would do.
     match command {
         Some(cmd) if !cmd.is_empty() => {
+            // Each word quoted separately, because they are separate: joining
+            // them with spaces first would render `sg users -c 'rm a b'` and
+            // `sg users -c 'rm' 'a b'` identically, and an argument may hold a
+            // newline besides.
+            let shown: Vec<String> = cmd.iter().map(quoteaf_os).collect();
             eprintln!(
                 "newgrp: would setgid({}) and exec: {}",
                 gid,
-                cmd.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
+                shown.join(" ")
             );
         }
         _ => {
-            let shell = get_user_shell();
-            eprintln!("newgrp: would setgid({gid}) and exec: {shell}");
+            eprintln!(
+                "newgrp: would setgid({gid}) and exec: {}",
+                quoteaf_os(get_user_shell())
+            );
         }
     }
     0
@@ -212,13 +229,17 @@ fn exec_with_group(gid: u32, command: Option<&[String]>) -> i32 {
 // newgrp personality
 // ============================================================================
 
-fn newgrp_main(args: &[String]) -> i32 {
-    let mut group_name: Option<String> = None;
+fn newgrp_main(args: &[OsString]) -> i32 {
+    let mut group_name: Option<OsString> = None;
     let mut login_shell = false;
     let mut i = 0;
 
+    // An argument that is not valid UTF-8 matches no option, so it falls to
+    // the `!starts_with('-')` arm and is taken as a group name -- which is
+    // what it would have to be.
     while i < args.len() {
-        match args[i].as_str() {
+        let Some(raw) = args.get(i) else { break };
+        match raw.to_str().unwrap_or_default() {
             "-" | "-l" => login_shell = true,
             "--help" => {
                 println!("Usage: newgrp [-] [-l] [group]");
@@ -237,7 +258,7 @@ fn newgrp_main(args: &[String]) -> i32 {
                 return 0;
             }
             s if !s.starts_with('-') => {
-                group_name = Some(s.to_string());
+                group_name = Some(raw.clone());
             }
             other => {
                 eprintln!("newgrp: invalid option {}", quoteaf_os(other));
@@ -251,7 +272,13 @@ fn newgrp_main(args: &[String]) -> i32 {
     let group_db = read_group_db();
 
     let target_group = match &group_name {
-        Some(name) => match find_group_by_name(&group_db, name) {
+        // A group name is text, so a name that is not text names no group --
+        // and is reported as one that does not exist, because that is what it
+        // is.
+        Some(name) => match name
+            .to_str()
+            .and_then(|text| find_group_by_name(&group_db, text))
+        {
             Some(g) => g,
             None => {
                 eprintln!("newgrp: group {} does not exist", quoteaf_os(name));
@@ -295,7 +322,7 @@ fn newgrp_main(args: &[String]) -> i32 {
 // sg personality
 // ============================================================================
 
-fn sg_main(args: &[String]) -> i32 {
+fn sg_main(args: &[OsString]) -> i32 {
     if args.is_empty() {
         eprintln!("Usage: sg group [-c command]");
         eprintln!("       sg group [command]");
@@ -310,7 +337,7 @@ fn sg_main(args: &[String]) -> i32 {
         return 1;
     }
 
-    match args[i].as_str() {
+    match args.get(i).and_then(|a| a.to_str()).unwrap_or_default() {
         "--help" => {
             println!("Usage: sg group [-c command]");
             println!("       sg group [command]");
@@ -330,12 +357,18 @@ fn sg_main(args: &[String]) -> i32 {
         _ => {}
     }
 
-    let group_name = args[i].clone();
+    let Some(group_name) = args.get(i).cloned() else {
+        eprintln!("sg: missing group name");
+        return 1;
+    };
     i += 1;
 
-    let mut command_args: Vec<String> = Vec::new();
+    // The command and its arguments are what will be exec'd, so they are
+    // carried as given: an argument is very often a filename, and a filename
+    // on this OS may hold any byte but `/` and NUL.
+    let mut command_args: Vec<OsString> = Vec::new();
 
-    if i < args.len() && args[i] == "-c" {
+    if args.get(i).is_some_and(|a| a == OsStr::new("-c")) {
         i += 1;
         while i < args.len() {
             command_args.push(args[i].clone());
@@ -351,7 +384,12 @@ fn sg_main(args: &[String]) -> i32 {
     let user = get_current_user();
     let group_db = read_group_db();
 
-    let target_group = match find_group_by_name(&group_db, &group_name) {
+    // A group name is text, so a name that is not text names no group -- and
+    // is reported as one that does not exist, because that is what it is.
+    let target_group = match group_name
+        .to_str()
+        .and_then(|name| find_group_by_name(&group_db, name))
+    {
         Some(g) => g,
         None => {
             eprintln!("sg: group {} does not exist", quoteaf_os(&group_name));
@@ -381,23 +419,32 @@ fn sg_main(args: &[String]) -> i32 {
 // ============================================================================
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    // `args_os`, not `args`: the latter's iterator is a literal `unwrap` and
+    // panics on an argument that is not valid UTF-8.
+    let args: Vec<OsString> = env::args_os().collect();
 
+    // The personality is read from `argv[0]`, which is a path. A path that
+    // cannot be decoded is not one of the two names this binary answers to,
+    // so it takes the `newgrp` default -- the same answer it would give for
+    // any other unrecognised name.
     let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("newgrp");
-        let bytes = s.as_bytes();
+        let argv0 = args
+            .first()
+            .cloned()
+            .unwrap_or_else(|| OsString::from("newgrp"));
+        let text = argv0.to_str().unwrap_or("newgrp");
         let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
+        for (i, &b) in text.as_bytes().iter().enumerate() {
             if b == b'/' || b == b'\\' {
                 last_sep = i + 1;
             }
         }
-        let base = &s[last_sep..];
+        let base = text.get(last_sep..).unwrap_or(text);
         let base = base.strip_suffix(".exe").unwrap_or(base);
         base.to_string()
     };
 
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    let rest: Vec<OsString> = args.into_iter().skip(1).collect();
 
     let exit_code = match prog_name.as_str() {
         "sg" => sg_main(&rest),
@@ -414,6 +461,59 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An argument that a `String` cannot hold. The development host is
+    /// Windows, where argv arrives as UTF-16 and the unrepresentable case is
+    /// an unpaired surrogate rather than a stray byte -- so the fixture is
+    /// written both ways.
+    fn not_text() -> OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            OsString::from_vec(vec![b'a', 0x80, b'b'])
+        }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::ffi::OsStringExt as _;
+            OsString::from_wide(&[0x0061, 0xD800, 0x0062])
+        }
+    }
+
+    /// A group name that is not text is reported as a group that does not
+    /// exist, rather than panicking before `main` runs a line of this file --
+    /// which is what `env::args()` did, because its iterator is a literal
+    /// `unwrap`. See `known-issues.md` ->
+    /// `B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`.
+    #[test]
+    fn a_group_name_that_is_not_text_does_not_exist_rather_than_crashing() {
+        let odd = not_text();
+        assert!(
+            odd.to_str().is_none(),
+            "the fixture must be unrepresentable as a `String`, or this test              asserts nothing"
+        );
+        assert_eq!(newgrp_main(std::slice::from_ref(&odd)), 1);
+    }
+
+    /// `sg` reports the same way, and does not read the odd name as an option.
+    #[test]
+    fn sg_reports_a_group_name_that_is_not_text_as_missing() {
+        assert_eq!(sg_main(std::slice::from_ref(&not_text())), 1);
+    }
+
+    /// A command argument is carried to the exec as given: it is very often a
+    /// filename, and a filename here may hold any byte but `/` and NUL.
+    #[test]
+    fn a_command_argument_that_is_not_text_survives_to_the_exec() {
+        // No group of this name exists, so this reaches the same refusal --
+        // what is asserted is that getting there does not panic on the way.
+        let args = vec![
+            OsString::from("nosuchgroup"),
+            OsString::from("-c"),
+            OsString::from("cat"),
+            not_text(),
+        ];
+        assert_eq!(sg_main(&args), 1);
+    }
 
     #[test]
     fn test_parse_group_line_basic() {

@@ -44,6 +44,7 @@
 #![deny(clippy::all)]
 
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -577,36 +578,50 @@ fn set_ownership(_path: &str, _uid: u32, _gid: u32) {
 // Argument parsing helpers
 // ============================================================================
 
+/// A cursor over the command line.
+///
+/// Holds `OsString`, not `String`: `env::args()`'s iterator is a literal
+/// `unwrap` and panics on an argument that is not valid UTF-8, which on this
+/// OS is legal input -- so these seven commands used to die before running a
+/// line of their own. See `known-issues.md` ->
+/// `B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`.
 struct Args {
-    args: Vec<String>,
+    args: Vec<OsString>,
     pos: usize,
 }
 
 impl Args {
-    fn new(args: Vec<String>) -> Self {
+    fn new(args: Vec<OsString>) -> Self {
         Args { args, pos: 0 }
     }
 
-    /// Get the next argument value for a flag (e.g., -d /home/foo).
+    /// The next argument value for a flag (e.g. `-d /home/foo`).
+    ///
+    /// `None` both when there is no next argument and when it is not text.
+    /// Every value these commands take is stored in `/etc/users.yaml` or
+    /// `/etc/group`, which are text files -- so a value that is not text
+    /// cannot be stored, and "you did not give me a usable argument" is one
+    /// condition rather than two. The callers' messages say "requires a text
+    /// argument" for that reason.
     fn next_value(&mut self) -> Option<String> {
-        self.pos += 1;
-        if self.pos < self.args.len() {
-            Some(self.args[self.pos].clone())
-        } else {
-            None
-        }
+        self.pos = self.pos.saturating_add(1);
+        self.args
+            .get(self.pos)
+            .and_then(|a| a.to_str())
+            .map(str::to_string)
     }
 
+    /// The argument under the cursor, as text.
+    ///
+    /// An argument that is not text reads as empty, which matches no option
+    /// and cannot start with `-` -- so it falls to whatever arm handles a
+    /// positional, and is refused there as a name rather than crashing here.
     fn current(&self) -> Option<&str> {
-        if self.pos < self.args.len() {
-            Some(&self.args[self.pos])
-        } else {
-            None
-        }
+        self.args.get(self.pos).map(|a| a.to_str().unwrap_or(""))
     }
 
     fn advance(&mut self) {
-        self.pos += 1;
+        self.pos = self.pos.saturating_add(1);
     }
 }
 
@@ -671,7 +686,7 @@ impl UseraddOpts {
     }
 }
 
-fn parse_useradd_args(argv: &[String]) -> UseraddOpts {
+fn parse_useradd_args(argv: &[OsString]) -> UseraddOpts {
     let mut opts = UseraddOpts::new();
     let mut args = Args::new(argv.to_vec());
 
@@ -682,19 +697,19 @@ fn parse_useradd_args(argv: &[String]) -> UseraddOpts {
             "-d" => {
                 opts.home_dir = args.next_value();
                 if opts.home_dir.is_none() {
-                    die("useradd", "option -d requires an argument");
+                    die("useradd", "option -d requires a text argument");
                 }
             }
             "-s" => {
                 opts.shell = args.next_value();
                 if opts.shell.is_none() {
-                    die("useradd", "option -s requires an argument");
+                    die("useradd", "option -s requires a text argument");
                 }
             }
             "-g" => {
                 opts.primary_group = args.next_value();
                 if opts.primary_group.is_none() {
-                    die("useradd", "option -g requires an argument");
+                    die("useradd", "option -g requires a text argument");
                 }
             }
             "-G" => {
@@ -703,7 +718,7 @@ fn parse_useradd_args(argv: &[String]) -> UseraddOpts {
                     Some(v) => {
                         opts.supp_groups = v.split(',').map(|s| s.to_string()).collect();
                     }
-                    None => die("useradd", "option -G requires an argument"),
+                    None => die("useradd", "option -G requires a text argument"),
                 }
             }
             "-u" => {
@@ -713,31 +728,31 @@ fn parse_useradd_args(argv: &[String]) -> UseraddOpts {
                         Ok(id) => opts.uid = Some(id),
                         Err(_) => die("useradd", &format!("invalid UID: {}", v)),
                     },
-                    None => die("useradd", "option -u requires an argument"),
+                    None => die("useradd", "option -u requires a text argument"),
                 }
             }
             "-c" => {
                 opts.comment = args.next_value();
                 if opts.comment.is_none() {
-                    die("useradd", "option -c requires an argument");
+                    die("useradd", "option -c requires a text argument");
                 }
             }
             "-e" => {
                 opts.expire_date = args.next_value();
                 if opts.expire_date.is_none() {
-                    die("useradd", "option -e requires an argument");
+                    die("useradd", "option -e requires a text argument");
                 }
             }
             "-p" => {
                 opts.password = args.next_value();
                 if opts.password.is_none() {
-                    die("useradd", "option -p requires an argument");
+                    die("useradd", "option -p requires a text argument");
                 }
             }
             "-k" => {
                 opts.skel_dir = args.next_value();
                 if opts.skel_dir.is_none() {
-                    die("useradd", "option -k requires an argument");
+                    die("useradd", "option -k requires a text argument");
                 }
             }
             _ => {
@@ -752,7 +767,7 @@ fn parse_useradd_args(argv: &[String]) -> UseraddOpts {
     opts
 }
 
-fn cmd_useradd(argv: &[String]) -> i32 {
+fn cmd_useradd(argv: &[OsString]) -> i32 {
     let opts = parse_useradd_args(argv);
 
     let username = match &opts.username {
@@ -953,7 +968,7 @@ struct UserdelOpts {
     username: Option<String>,
 }
 
-fn parse_userdel_args(argv: &[String]) -> UserdelOpts {
+fn parse_userdel_args(argv: &[OsString]) -> UserdelOpts {
     let mut opts = UserdelOpts {
         remove_home: false,
         force: false,
@@ -977,7 +992,7 @@ fn parse_userdel_args(argv: &[String]) -> UserdelOpts {
     opts
 }
 
-fn cmd_userdel(argv: &[String]) -> i32 {
+fn cmd_userdel(argv: &[OsString]) -> i32 {
     let opts = parse_userdel_args(argv);
 
     let username = match &opts.username {
@@ -1078,7 +1093,7 @@ impl UsermodOpts {
     }
 }
 
-fn parse_usermod_args(argv: &[String]) -> UsermodOpts {
+fn parse_usermod_args(argv: &[OsString]) -> UsermodOpts {
     let mut opts = UsermodOpts::new();
     let mut args = Args::new(argv.to_vec());
 
@@ -1091,25 +1106,25 @@ fn parse_usermod_args(argv: &[String]) -> UsermodOpts {
             "-l" => {
                 opts.new_login = args.next_value();
                 if opts.new_login.is_none() {
-                    die("usermod", "option -l requires an argument");
+                    die("usermod", "option -l requires a text argument");
                 }
             }
             "-d" => {
                 opts.home_dir = args.next_value();
                 if opts.home_dir.is_none() {
-                    die("usermod", "option -d requires an argument");
+                    die("usermod", "option -d requires a text argument");
                 }
             }
             "-s" => {
                 opts.shell = args.next_value();
                 if opts.shell.is_none() {
-                    die("usermod", "option -s requires an argument");
+                    die("usermod", "option -s requires a text argument");
                 }
             }
             "-g" => {
                 opts.primary_group = args.next_value();
                 if opts.primary_group.is_none() {
-                    die("usermod", "option -g requires an argument");
+                    die("usermod", "option -g requires a text argument");
                 }
             }
             "-G" => {
@@ -1119,19 +1134,19 @@ fn parse_usermod_args(argv: &[String]) -> UsermodOpts {
                         opts.supp_groups = v.split(',').map(|s| s.to_string()).collect();
                         opts.supp_groups_set = true;
                     }
-                    None => die("usermod", "option -G requires an argument"),
+                    None => die("usermod", "option -G requires a text argument"),
                 }
             }
             "-e" => {
                 opts.expire_date = args.next_value();
                 if opts.expire_date.is_none() {
-                    die("usermod", "option -e requires an argument");
+                    die("usermod", "option -e requires a text argument");
                 }
             }
             "-c" => {
                 opts.comment = args.next_value();
                 if opts.comment.is_none() {
-                    die("usermod", "option -c requires an argument");
+                    die("usermod", "option -c requires a text argument");
                 }
             }
             _ => {
@@ -1146,7 +1161,7 @@ fn parse_usermod_args(argv: &[String]) -> UsermodOpts {
     opts
 }
 
-fn cmd_usermod(argv: &[String]) -> i32 {
+fn cmd_usermod(argv: &[OsString]) -> i32 {
     let opts = parse_usermod_args(argv);
 
     let username = match &opts.username {
@@ -1336,7 +1351,7 @@ struct GroupaddOpts {
     groupname: Option<String>,
 }
 
-fn parse_groupadd_args(argv: &[String]) -> GroupaddOpts {
+fn parse_groupadd_args(argv: &[OsString]) -> GroupaddOpts {
     let mut opts = GroupaddOpts {
         gid: None,
         system_group: false,
@@ -1356,7 +1371,7 @@ fn parse_groupadd_args(argv: &[String]) -> GroupaddOpts {
                         Ok(id) => opts.gid = Some(id),
                         Err(_) => die("groupadd", &format!("invalid GID: {}", v)),
                     },
-                    None => die("groupadd", "option -g requires an argument"),
+                    None => die("groupadd", "option -g requires a text argument"),
                 }
             }
             _ => {
@@ -1371,7 +1386,7 @@ fn parse_groupadd_args(argv: &[String]) -> GroupaddOpts {
     opts
 }
 
-fn cmd_groupadd(argv: &[String]) -> i32 {
+fn cmd_groupadd(argv: &[OsString]) -> i32 {
     let opts = parse_groupadd_args(argv);
 
     let groupname = match &opts.groupname {
@@ -1461,9 +1476,12 @@ fn cmd_groupadd(argv: &[String]) -> i32 {
 // groupdel
 // ============================================================================
 
-fn cmd_groupdel(argv: &[String]) -> i32 {
-    let groupname = match argv.first() {
-        Some(g) => g.clone(),
+fn cmd_groupdel(argv: &[OsString]) -> i32 {
+    // A group name is text -- `/etc/group` is a text file -- so a name that is
+    // not text names no group, and takes the same path as any other name that
+    // does not exist rather than a decoding error of its own.
+    let groupname = match argv.first().and_then(|g| g.to_str()) {
+        Some(g) => g.to_string(),
         None => {
             write_stderr("groupdel: missing group name");
             write_stderr("Usage: groupdel GROUP");
@@ -1520,7 +1538,7 @@ struct GroupmodOpts {
     groupname: Option<String>,
 }
 
-fn parse_groupmod_args(argv: &[String]) -> GroupmodOpts {
+fn parse_groupmod_args(argv: &[OsString]) -> GroupmodOpts {
     let mut opts = GroupmodOpts {
         new_name: None,
         new_gid: None,
@@ -1533,7 +1551,7 @@ fn parse_groupmod_args(argv: &[String]) -> GroupmodOpts {
             "-n" => {
                 opts.new_name = args.next_value();
                 if opts.new_name.is_none() {
-                    die("groupmod", "option -n requires an argument");
+                    die("groupmod", "option -n requires a text argument");
                 }
             }
             "-g" => {
@@ -1543,7 +1561,7 @@ fn parse_groupmod_args(argv: &[String]) -> GroupmodOpts {
                         Ok(id) => opts.new_gid = Some(id),
                         Err(_) => die("groupmod", &format!("invalid GID: {}", v)),
                     },
-                    None => die("groupmod", "option -g requires an argument"),
+                    None => die("groupmod", "option -g requires a text argument"),
                 }
             }
             _ => {
@@ -1558,7 +1576,7 @@ fn parse_groupmod_args(argv: &[String]) -> GroupmodOpts {
     opts
 }
 
-fn cmd_groupmod(argv: &[String]) -> i32 {
+fn cmd_groupmod(argv: &[OsString]) -> i32 {
     let opts = parse_groupmod_args(argv);
 
     let groupname = match &opts.groupname {
@@ -1637,9 +1655,10 @@ fn cmd_groupmod(argv: &[String]) -> i32 {
 // newgrp
 // ============================================================================
 
-fn cmd_newgrp(argv: &[String]) -> i32 {
-    let groupname = match argv.first() {
-        Some(g) => g.clone(),
+fn cmd_newgrp(argv: &[OsString]) -> i32 {
+    // See `cmd_groupdel`: a group name is text.
+    let groupname = match argv.first().and_then(|g| g.to_str()) {
+        Some(g) => g.to_string(),
         None => {
             // No group specified: reset to user's default group.
             write_stdout("newgrp: resetting to default group");
@@ -1698,14 +1717,16 @@ fn usage_all() {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().map(|s| s.as_str()).unwrap_or("useradd");
+    // `args_os`, not `args`: the latter's iterator is a literal `unwrap` and
+    // panics on an argument that is not valid UTF-8.
+    let args: Vec<OsString> = env::args_os().collect();
+    // The personality is read from `argv[0]`, which is a path. One that cannot
+    // be decoded is not any of the seven names this binary answers to, so it
+    // takes the `useradd` default -- the same answer any other unrecognised
+    // name gets.
+    let argv0 = args.first().and_then(|s| s.to_str()).unwrap_or("useradd");
     let personality = detect_personality(argv0);
-    let rest: Vec<String> = if args.len() > 1 {
-        args[1..].to_vec()
-    } else {
-        Vec::new()
-    };
+    let rest: Vec<OsString> = args.iter().skip(1).cloned().collect();
 
     let exit_code = match personality {
         "useradd" => cmd_useradd(&rest),
@@ -1781,6 +1802,50 @@ mod tests {
     // produces those files. What is still this crate's to keep is the record
     // it builds -- and, below, the one option whose argument it must convert
     // rather than copy.
+
+    /// The command line, as `env::args_os` would deliver it.
+    fn argv(parts: &[&str]) -> Vec<OsString> {
+        parts.iter().map(OsString::from).collect()
+    }
+
+    /// An argument that a `String` cannot hold. The development host is
+    /// Windows, where argv arrives as UTF-16 and the unrepresentable case is
+    /// an unpaired surrogate rather than a stray byte -- so the fixture is
+    /// written both ways.
+    fn not_text() -> OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            OsString::from_vec(vec![b'a', 0x80, b'b'])
+        }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::ffi::OsStringExt as _;
+            OsString::from_wide(&[0x0061, 0xD800, 0x0062])
+        }
+    }
+
+    /// An argument that is not text does not crash the parser.
+    ///
+    /// `env::args()`'s iterator is a literal `unwrap`, so these seven commands
+    /// used to die before running a line of their own file. The username here
+    /// is not text, so it is not a name any account can have -- what is
+    /// asserted is that getting to that conclusion does not panic.
+    #[test]
+    fn an_argument_that_is_not_text_does_not_crash_the_parser() {
+        let odd = not_text();
+        assert!(
+            odd.to_str().is_none(),
+            "the fixture must be unrepresentable as a `String`, or this test              asserts nothing"
+        );
+
+        let opts = parse_useradd_args(std::slice::from_ref(&odd));
+        assert_eq!(
+            opts.username.as_deref(),
+            Some(""),
+            "a name that cannot be decoded reads as empty, which              `validate_username` refuses"
+        );
+    }
 
     /// A record shaped like the ones these commands make.
     fn record(name: &str, uid: u32, gid: u32) -> userdb::Record {
@@ -2283,7 +2348,7 @@ mod tests {
 
     #[test]
     fn test_parse_useradd_basic() {
-        let args = vec!["testuser".to_string()];
+        let args = argv(&["testuser"]);
         let opts = parse_useradd_args(&args);
         assert_eq!(opts.username.as_deref(), Some("testuser"));
         assert!(!opts.create_home);
@@ -2292,29 +2357,29 @@ mod tests {
 
     #[test]
     fn test_parse_useradd_all_flags() {
-        let args = vec![
-            "-m".to_string(),
-            "-r".to_string(),
-            "-d".to_string(),
-            "/home/custom".to_string(),
-            "-s".to_string(),
-            "/bin/zsh".to_string(),
-            "-g".to_string(),
-            "staff".to_string(),
-            "-G".to_string(),
-            "wheel,audio".to_string(),
-            "-u".to_string(),
-            "5000".to_string(),
-            "-c".to_string(),
-            "Test User".to_string(),
-            "-e".to_string(),
-            "2025-12-31".to_string(),
-            "-p".to_string(),
-            "$6$hash".to_string(),
-            "-k".to_string(),
-            "/etc/skel2".to_string(),
-            "myuser".to_string(),
-        ];
+        let args = argv(&[
+            "-m",
+            "-r",
+            "-d",
+            "/home/custom",
+            "-s",
+            "/bin/zsh",
+            "-g",
+            "staff",
+            "-G",
+            "wheel,audio",
+            "-u",
+            "5000",
+            "-c",
+            "Test User",
+            "-e",
+            "2025-12-31",
+            "-p",
+            "$6$hash",
+            "-k",
+            "/etc/skel2",
+            "myuser",
+        ]);
         let opts = parse_useradd_args(&args);
         assert!(opts.create_home);
         assert!(opts.system_account);
@@ -2332,7 +2397,7 @@ mod tests {
 
     #[test]
     fn test_parse_userdel_basic() {
-        let args = vec!["bob".to_string()];
+        let args = argv(&["bob"]);
         let opts = parse_userdel_args(&args);
         assert_eq!(opts.username.as_deref(), Some("bob"));
         assert!(!opts.remove_home);
@@ -2341,7 +2406,7 @@ mod tests {
 
     #[test]
     fn test_parse_userdel_with_flags() {
-        let args = vec!["-r".to_string(), "-f".to_string(), "bob".to_string()];
+        let args = argv(&["-r", "-f", "bob"]);
         let opts = parse_userdel_args(&args);
         assert!(opts.remove_home);
         assert!(opts.force);
@@ -2350,11 +2415,7 @@ mod tests {
 
     #[test]
     fn test_parse_usermod_login_rename() {
-        let args = vec![
-            "-l".to_string(),
-            "newname".to_string(),
-            "oldname".to_string(),
-        ];
+        let args = argv(&["-l", "newname", "oldname"]);
         let opts = parse_usermod_args(&args);
         assert_eq!(opts.new_login.as_deref(), Some("newname"));
         assert_eq!(opts.username.as_deref(), Some("oldname"));
@@ -2362,12 +2423,7 @@ mod tests {
 
     #[test]
     fn test_parse_usermod_append_groups() {
-        let args = vec![
-            "-a".to_string(),
-            "-G".to_string(),
-            "audio,video".to_string(),
-            "user1".to_string(),
-        ];
+        let args = argv(&["-a", "-G", "audio,video", "user1"]);
         let opts = parse_usermod_args(&args);
         assert!(opts.append_groups);
         assert!(opts.supp_groups_set);
@@ -2376,12 +2432,12 @@ mod tests {
 
     #[test]
     fn test_parse_usermod_lock_unlock() {
-        let lock_args = vec!["-L".to_string(), "user1".to_string()];
+        let lock_args = argv(&["-L", "user1"]);
         let lock_opts = parse_usermod_args(&lock_args);
         assert!(lock_opts.lock);
         assert!(!lock_opts.unlock);
 
-        let unlock_args = vec!["-U".to_string(), "user1".to_string()];
+        let unlock_args = argv(&["-U", "user1"]);
         let unlock_opts = parse_usermod_args(&unlock_args);
         assert!(!unlock_opts.lock);
         assert!(unlock_opts.unlock);
@@ -2389,7 +2445,7 @@ mod tests {
 
     #[test]
     fn test_parse_groupadd_basic() {
-        let args = vec!["newgroup".to_string()];
+        let args = argv(&["newgroup"]);
         let opts = parse_groupadd_args(&args);
         assert_eq!(opts.groupname.as_deref(), Some("newgroup"));
         assert!(!opts.system_group);
@@ -2398,12 +2454,7 @@ mod tests {
 
     #[test]
     fn test_parse_groupadd_system() {
-        let args = vec![
-            "-r".to_string(),
-            "-g".to_string(),
-            "500".to_string(),
-            "sysgroup".to_string(),
-        ];
+        let args = argv(&["-r", "-g", "500", "sysgroup"]);
         let opts = parse_groupadd_args(&args);
         assert!(opts.system_group);
         assert_eq!(opts.gid, Some(500));
@@ -2412,11 +2463,7 @@ mod tests {
 
     #[test]
     fn test_parse_groupmod_rename() {
-        let args = vec![
-            "-n".to_string(),
-            "newname".to_string(),
-            "oldname".to_string(),
-        ];
+        let args = argv(&["-n", "newname", "oldname"]);
         let opts = parse_groupmod_args(&args);
         assert_eq!(opts.new_name.as_deref(), Some("newname"));
         assert_eq!(opts.groupname.as_deref(), Some("oldname"));
@@ -2424,7 +2471,7 @@ mod tests {
 
     #[test]
     fn test_parse_groupmod_change_gid() {
-        let args = vec!["-g".to_string(), "5000".to_string(), "mygroup".to_string()];
+        let args = argv(&["-g", "5000", "mygroup"]);
         let opts = parse_groupmod_args(&args);
         assert_eq!(opts.new_gid, Some(5000));
         assert_eq!(opts.groupname.as_deref(), Some("mygroup"));
@@ -2922,13 +2969,13 @@ mod tests {
 
     #[test]
     fn test_args_iterator_single() {
-        let args = Args::new(vec!["hello".to_string()]);
+        let args = Args::new(argv(&["hello"]));
         assert_eq!(args.current(), Some("hello"));
     }
 
     #[test]
     fn test_args_next_value_at_end() {
-        let mut args = Args::new(vec!["-d".to_string()]);
+        let mut args = Args::new(argv(&["-d"]));
         args.pos = 0;
         // next_value increments pos to 1, which is past the end.
         assert!(args.next_value().is_none());

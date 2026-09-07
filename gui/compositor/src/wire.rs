@@ -934,6 +934,7 @@ mod tests {
         clippy::indexing_slicing
     )]
 
+    use crate::SettingsGroup;
     use guiremote::control::{
         BufferFormat, CursorShape, Layer, Request, RequestBody, ShellControlAction, WindowSpec,
         decode_responses,
@@ -2040,6 +2041,76 @@ mod tests {
                 !comp.appearance().drop_shadows,
                 "the reload request did not reach the settings the compositor draws from"
             );
+        });
+    }
+
+    /// Every settings group announced since the last look.
+    fn announced(comp: &mut Compositor) -> Vec<(u64, SettingsGroup)> {
+        comp.drain_notifications()
+            .into_iter()
+            .filter_map(|n| match n {
+                EventNotification::SettingsChanged { window_id, group } => {
+                    Some((window_id.0, group))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_reload_request_is_passed_on_to_everybody_else() {
+        // The reason the request exists at all. Before this, the compositor
+        // re-read the file and told nobody, so a theme change reached the
+        // window decorations the compositor draws and *nothing inside them*
+        // until the next login -- including the desktop shell, which is where
+        // the taskbar and the start menu live.
+        appearance::config::testing::with_scratch_config("wire-announce", |_root| {
+            let (mut comp, mut link) = wired();
+            let a = comp.create_window("a".to_string(), 100, 100, 7);
+            let b = comp.create_window("b".to_string(), 100, 100, 7);
+            let _ = announced(&mut comp);
+
+            exchange(&mut comp, &mut link, vec![RequestBody::ReloadAppearance]);
+
+            let mut got = announced(&mut comp);
+            got.sort_by_key(|(id, _)| *id);
+            let mut want = vec![
+                (a.0, SettingsGroup::Appearance),
+                (b.0, SettingsGroup::Appearance),
+            ];
+            want.sort_by_key(|(id, _)| *id);
+            assert_eq!(got, want, "every window's program should have been told");
+        });
+    }
+
+    #[test]
+    fn an_input_reload_announces_input_and_not_appearance() {
+        // The two verbs are two tags, two decode arms and two mappings, and the
+        // announcement adds a third place they can be confused. A `ReloadInput`
+        // that announced `Appearance` would make every window re-read the
+        // wrong file and would leave the one that actually changed unread --
+        // and it would pass every test that only checks *that* something was
+        // announced.
+        inputsettings::config::testing::with_scratch_config("wire-announce-input", |_root| {
+            let (mut comp, mut link) = wired();
+            let w = comp.create_window("a".to_string(), 100, 100, 7);
+            let _ = announced(&mut comp);
+
+            exchange(&mut comp, &mut link, vec![RequestBody::ReloadInput]);
+            assert_eq!(announced(&mut comp), vec![(w.0, SettingsGroup::Input)]);
+        });
+    }
+
+    #[test]
+    fn a_reload_with_no_windows_open_announces_nothing() {
+        // The Settings app can send a reload before opening a window -- the
+        // test above this one asserts it may -- and an announcement addressed
+        // to a window that does not exist has nowhere to be routed. It must
+        // simply not be made, rather than be made against a placeholder id.
+        appearance::config::testing::with_scratch_config("wire-announce-empty", |_root| {
+            let (mut comp, mut link) = wired();
+            exchange(&mut comp, &mut link, vec![RequestBody::ReloadAppearance]);
+            assert!(announced(&mut comp).is_empty());
         });
     }
 

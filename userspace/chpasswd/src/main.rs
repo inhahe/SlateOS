@@ -12,6 +12,7 @@
 
 #[cfg(not(test))]
 use std::env;
+use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
@@ -43,7 +44,11 @@ fn detect_personality(argv0: &str) -> Personality {
 #[derive(Debug, Clone)]
 struct Config {
     personality: Personality,
-    username: Option<String>,
+    /// The account named on the command line, still as the bytes the caller
+    /// gave. Not a `String`: `env::args()` *panics* on an argument that is not
+    /// valid UTF-8, which on this OS is legal input. See `known-issues.md` ->
+    /// `B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`.
+    username: Option<OsString>,
     encrypted: bool, // -e: passwords are already encrypted
     hash_method: HashMethod,
     min_length: usize,
@@ -93,11 +98,14 @@ impl Default for Config {
     }
 }
 
-fn parse_args(args: &[String]) -> Result<Config, String> {
+fn parse_args(args: &[OsString]) -> Result<Config, String> {
+    // `argv[0]` is a path, and one that cannot be decoded is not either of the
+    // two names this binary answers to -- so it takes the default, which is
+    // the same answer any other unrecognised name gets.
     let personality = args
         .first()
-        .map(|a| detect_personality(a))
-        .unwrap_or(Personality::Chpasswd);
+        .and_then(|a| a.to_str())
+        .map_or(Personality::Chpasswd, detect_personality);
 
     let mut cfg = Config {
         personality,
@@ -106,10 +114,13 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
 
     let mut i = 1;
 
+    // An argument that is not valid UTF-8 matches no option, so it falls to
+    // the positional arm -- which is what it would have to be.
     while i < args.len() {
-        let arg = &args[i];
+        let Some(raw) = args.get(i) else { break };
+        let arg = raw.to_str().unwrap_or_default();
         match personality {
-            Personality::Chpasswd => match arg.as_str() {
+            Personality::Chpasswd => match arg {
                 "-e" | "--encrypted" => cfg.encrypted = true,
                 "-m" | "--md5" => cfg.hash_method = HashMethod::Md5,
                 "-s" | "--sha256" => cfg.hash_method = HashMethod::Sha256,
@@ -121,7 +132,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                 }
                 _ => {} // positional args ignored
             },
-            Personality::Passwd => match arg.as_str() {
+            Personality::Passwd => match arg {
                 "-l" | "--lock" => cfg.lock_user = true,
                 "-u" | "--unlock" => cfg.unlock_user = true,
                 "-d" | "--delete" => cfg.delete_password = true,
@@ -146,7 +157,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                 }
                 _ => {
                     if cfg.username.is_none() {
-                        cfg.username = Some(arg.clone());
+                        cfg.username = Some(raw.clone());
                     }
                 }
             },
@@ -476,9 +487,14 @@ fn run_passwd(
     writer: &mut dyn Write,
     err_writer: &mut dyn Write,
 ) -> i32 {
+    // An account name is text, so a name that is not text names no account.
+    // It is carried through as the empty string, which no account has either,
+    // so it fails at the same place any other unknown name does rather than at
+    // a decoding step -- one message for one condition.
     let username = cfg
         .username
-        .clone()
+        .as_ref()
+        .map(|n| n.to_str().unwrap_or_default().to_string())
         .or_else(|| env::var("USER").ok())
         .unwrap_or_else(|| "root".to_string());
 
@@ -698,7 +714,9 @@ fn print_version(personality: Personality) {
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
-    let args: Vec<String> = env::args().collect();
+    // `args_os`, not `args`: the latter's iterator is a literal `unwrap` and
+    // panics on an argument that is not valid UTF-8.
+    let args: Vec<OsString> = env::args_os().collect();
 
     let cfg = match parse_args(&args) {
         Ok(c) => c,
@@ -740,6 +758,43 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    /// The command line, as `env::args_os` would deliver it.
+    fn argv(parts: &[&str]) -> Vec<OsString> {
+        parts.iter().map(OsString::from).collect()
+    }
+
+    /// An argument that a `String` cannot hold. The development host is
+    /// Windows, where argv arrives as UTF-16 and the unrepresentable case is
+    /// an unpaired surrogate rather than a stray byte -- so the fixture is
+    /// written both ways.
+    fn not_text() -> OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            OsString::from_vec(vec![b'a', 0x80, b'b'])
+        }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::ffi::OsStringExt as _;
+            OsString::from_wide(&[0x0061, 0xD800, 0x0062])
+        }
+    }
+
+    /// A username that is not text is a name, not a crash. `env::args()`
+    /// would have panicked before `main` ran a line of this file.
+    #[test]
+    fn a_username_that_is_not_text_is_a_name_and_not_a_crash() {
+        let odd = not_text();
+        assert!(
+            odd.to_str().is_none(),
+            "the fixture must be unrepresentable as a `String`, or this test              asserts nothing"
+        );
+
+        let args = vec![OsString::from("passwd"), odd.clone()];
+        let cfg = parse_args(&args).expect("a name, however spelled, parses");
+        assert_eq!(cfg.username.as_deref(), Some(odd.as_os_str()));
+    }
+
     #[test]
     fn test_detect_personality_chpasswd() {
         assert_eq!(detect_personality("chpasswd"), Personality::Chpasswd);
@@ -757,7 +812,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_chpasswd_basic() {
-        let args = vec!["chpasswd".to_string()];
+        let args = argv(&["chpasswd"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.personality, Personality::Chpasswd);
         assert!(!cfg.encrypted);
@@ -765,58 +820,58 @@ mod tests {
 
     #[test]
     fn test_parse_args_chpasswd_encrypted() {
-        let args = vec!["chpasswd".to_string(), "-e".to_string()];
+        let args = argv(&["chpasswd", "-e"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.encrypted);
     }
 
     #[test]
     fn test_parse_args_chpasswd_md5() {
-        let args = vec!["chpasswd".to_string(), "-m".to_string()];
+        let args = argv(&["chpasswd", "-m"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.hash_method, HashMethod::Md5);
     }
 
     #[test]
     fn test_parse_args_chpasswd_sha256() {
-        let args = vec!["chpasswd".to_string(), "-s".to_string()];
+        let args = argv(&["chpasswd", "-s"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.hash_method, HashMethod::Sha256);
     }
 
     #[test]
     fn test_parse_args_passwd_lock() {
-        let args = vec!["passwd".to_string(), "-l".to_string(), "user1".to_string()];
+        let args = argv(&["passwd", "-l", "user1"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.personality, Personality::Passwd);
         assert!(cfg.lock_user);
-        assert_eq!(cfg.username, Some("user1".to_string()));
+        assert_eq!(cfg.username.as_deref(), Some(std::ffi::OsStr::new("user1")));
     }
 
     #[test]
     fn test_parse_args_passwd_unlock() {
-        let args = vec!["passwd".to_string(), "-u".to_string(), "user1".to_string()];
+        let args = argv(&["passwd", "-u", "user1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.unlock_user);
     }
 
     #[test]
     fn test_parse_args_passwd_delete() {
-        let args = vec!["passwd".to_string(), "-d".to_string()];
+        let args = argv(&["passwd", "-d"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.delete_password);
     }
 
     #[test]
     fn test_parse_args_passwd_expire() {
-        let args = vec!["passwd".to_string(), "-e".to_string()];
+        let args = argv(&["passwd", "-e"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.expire_password);
     }
 
     #[test]
     fn test_parse_args_passwd_status() {
-        let args = vec!["passwd".to_string(), "-S".to_string()];
+        let args = argv(&["passwd", "-S"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.status);
     }
@@ -824,7 +879,7 @@ mod tests {
     #[test]
     fn test_parse_args_help() {
         for name in &["chpasswd", "passwd"] {
-            let args = vec![name.to_string(), "--help".to_string()];
+            let args = argv(&[name, "--help"]);
             let cfg = parse_args(&args).unwrap();
             assert!(cfg.show_help);
         }

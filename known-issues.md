@@ -21108,6 +21108,36 @@ behind a newly added field the way the hand-written check did.
    `drop_shadows`, `animation_speed`, `icon_size`, `cursor_size`,
    `cursor_scheme`, and `scaling_percent` — all now reachable on
    `DesktopShell::appearance`, none consulted.
+1a. **A running desktop now notices a change, but only when asked
+   (2026-09-06).** `settingsfile::Watcher` compares the file's *contents* --
+   not its modification time, which here both misses changes and invents them
+   (see design-decisions 812) -- and `DesktopShell::poll_appearance` applies
+   one, returning whether any *setting* actually differed. So the desktop and
+   the Settings app no longer agree only across a restart.
+
+   **Closed 2026-09-06 (same day): the shell is now told.** The compositor
+   relays `ReloadAppearance`/`ReloadInput` to every window as
+   `Event::SettingsChanged { group }` (wire tag `0x0A`, `INPUT_VERSION` 3),
+   and `ShellSession` answers the appearance one by calling
+   `poll_appearance`. So the chain runs end to end: the Settings app writes
+   the file and sends the request, the compositor re-reads and announces, the
+   shell re-reads and repaints. No timer anywhere. The paragraph below is kept
+   because it is the argument for why there is no timer, which is still the
+   live constraint on anything added here later.
+
+   **What is deliberately *not* here is a cadence.** Nothing
+   calls `poll_appearance` on a timer, because `ShellSession::animations`
+   records that an empty animation set means no wake-up is registered and the
+   loop parks unbounded -- which is what keeps an idle desktop idle. A
+   once-a-second check would end that to notice a setting nobody is changing.
+   Polling on wake-ups that already happen was tried and backed out: a `$HOME`
+   read inside `pump()` makes every session test machine-dependent, and it
+   broke two of the shell's own tests against the developer's real
+   `appearance.yaml`. The finished shape is the `ReloadAppearance`
+   notification the compositor already receives, relayed to shell clients --
+   immediate *and* idle-preserving, which no poll can be at once. See
+   `todo.txt`.
+
 2. **The compositor still cannot see the setting**, so driving `ui_font`
    through `guitk::text::set_font_family` remains wrong for the reason above:
    the desktop would measure in the chosen family while the compositor drew in
@@ -21143,6 +21173,24 @@ Still open, as the end of this entry already noted: a running app has no way to
 learn the file changed, so a live desktop and a live Settings application agree
 only across a restart. That half belongs with the change-notification channel
 design-decisions.md §400 wants.
+
+**Update 2026-09-06 — both halves are built; this part is closed.**
+The telling half landed the same day: `Compositor::announce_settings_change`
+sends `Event::SettingsChanged { group }` to every window whenever it handles a
+reload request, and the shell acts on the appearance one. A live desktop and a
+live Settings app now agree without a restart. What follows is the record of
+the noticing half, which came first.
+
+**The noticing half.**
+`settingsfile::Watcher` plus `DesktopShell::poll_appearance` mean a running
+shell *can* pick up a change without a restart, and does so correctly: the
+watcher compares contents rather than timestamps (which would both miss a
+slider drag and repaint on every no-op re-save), and `poll_appearance` reports
+a change only when a setting actually differs, not merely when the file did.
+What is not built is anything that tells the shell *when* to look. That is on
+purpose -- a timer would end the idle desktop's unbounded park -- and the
+answer is the `ReloadAppearance` notification relayed from the compositor.
+See design-decisions 812 and `todo.txt`.
 
 **Superseded 2026-09-03 — step 3, and the third row of the table below.** Step 3
 said to leave `gui/toolkit`'s `ThemeMode` and `Theme` alone, and that the shared
@@ -121822,3 +121870,53 @@ Not yet exercised on hardware: the new `udp` self-tests have not run in QEMU
 yet, because the boot test has not been run since. The entry stays closed on
 the strength of the fix being structural (the allocator cannot return a port it
 has not checked), but the self-test evidence is still outstanding.
+
+## `apps/**` is not built by anything, so an app can be broken for a day without anyone noticing
+
+**In short:** The lock screen — the program that decides who gets into the
+machine — did not compile, and had not compiled for a day. Nothing noticed,
+because nothing builds the `apps/` directory. A change in a shared library on
+another lane broke it, that lane's own tests stayed green, and the breakage was
+found only because an unrelated tidy-up happened to run `cargo clippy` on that
+one app.
+
+Found 2026-09-06 while sweeping blanket `#![allow(dead_code)]` out of
+`apps/**`. `apps/lockscreen` failed to compile at `HEAD` with two errors:
+
+- `authlib::Authenticator::with_stores` takes one path, not two
+- `authlib::shadow` does not exist
+
+Both come from `5264cba7a` ("authlib: one account store, and the /etc/shadow
+branch deleted", design-decisions §353), which states in its message that "no
+caller changes". That was true of the callers that commit could see: `login`,
+in `userspace/`, lane B's own tree. `apps/lockscreen` is lane C's, is a caller,
+and was not updated. Repaired in the commit that follows this entry.
+
+**The bug is not the missed caller — it is that a missed caller costs nothing.**
+`apps/*` is a workspace *member* (`Cargo.toml` line 5), so a
+`cargo build --workspace` for the host target would have failed. Nothing runs
+one:
+
+- the boot test builds for `x86_64-unknown-none` and `apps/*` are not in
+  `default-members` for it
+- each lane builds the packages it touched, and no lane touches all of `apps/`
+- there is no CI
+
+So the compile error was reachable by one command that nobody has reason to run.
+All 143 app crates were then checked in one go: this is the only broken one,
+and the check took 58 seconds warm. The breakage is rare and the guarantee is
+cheap — see open question C-Q11, where that measurement changed the
+recommendation.
+
+**The proper fix** is a check that builds every workspace member for the host
+target and fails on error, run the way `scripts/check-window-wiring.py` and
+`scripts/check-gates-are-wired.py` are. It is a cross-lane concern (it would
+gate all three lanes' merges), and it is slow — a cold `cargo check --workspace
+--target x86_64-pc-windows-gnu` is minutes, not seconds — so the shape of it
+(pre-push hook? a nightly sweep? `cargo check` rather than `build`?) is worth
+agreeing on rather than one lane imposing. Filed as an open question rather than
+done unilaterally.
+
+Until then, the cheap partial mitigation is what found this one: any lane
+touching a shared library under `userspace/` or `gui/` should
+`grep -rl '<the changed symbol>' apps/` before concluding "no caller changes".

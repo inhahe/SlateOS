@@ -55568,3 +55568,146 @@ One duplicate to resolve rather than build: `Vault::search_entries` is a second
 full-text search beside the toolbar's, which filters through
 `AppState::refresh_filter`. One of the two should go once it is clear which
 shape the UI wants.
+
+## flashcards: import and export are advertised and unreachable
+
+`Deck::export_text` and `Deck::import_text`, and the five escaping helpers only
+they call, have no caller: the module doc lists "Import/export (simple text
+format)" and there is no control that reaches it, nor a filesystem to write to.
+Each carries a `#[allow(dead_code, reason = ...)]` naming the gap rather than
+the blanket `#![allow(dead_code)]` that used to cover the file.
+
+The sink available today is the clipboard, which is what `apps/credmanager`'s
+export wants too -- worth doing both the same way when either is done.
+
+## regextester: the pattern library and the history have no UI
+
+`App::save_to_library`, `load_library_entry` and `add_to_history` have no
+callers, so the library the module doc advertises ("Regex library (save/load
+named patterns)") cannot be used and the history is always empty.
+`MAX_LIBRARY_ENTRIES` and `MAX_HISTORY` are unenforced for the same reason --
+there is nothing to bound. Each carries a `#[allow(dead_code, reason = ...)]`
+saying so.
+
+Two things to settle before wiring the history, which is why it was not done
+along with the field limits:
+
+* **When does a pattern enter the history?** `update_regex` runs on every
+  keystroke, so recording each successful compile would store every prefix of
+  what was typed -- `a`, `a+`, `a+b`. It probably wants to record on blur, on
+  an explicit key, or after an idle gap; that needs a clock this app does not
+  currently ask for.
+* **The library needs a name typed for the pattern**, and the window has three
+  fields with no fourth for a name, nor a modal to ask in.
+
+## Judgment Calls -- lane C, 2026-09-06 (blanket `#![allow(dead_code)]` sweep, apps 11-16)
+
+- habits: the contribution graph now shades a day by **the length of the run
+  of consecutive checked days it belongs to, scaled against the longest run
+  currently on screen**. `heatmap_color(checked, intensity)` already existed
+  and had never been called; the renderer drew a flat two-colour grid while
+  the legend beneath it advertised a "Less -> More" gradient. Two choices were
+  free and I picked both:
+    - *What the intensity means.* A boolean habit has no count to shade by, so
+      there is no obvious quantity. Run length says "momentum", which is the
+      question a habit tracker is looked at to answer -- a fortnight kept reads
+      darker than three separate Tuesdays. Alternatives: days-since (recency),
+      or a rolling 7-day completion rate. Any of the three is defensible.
+    - *What full strength is.* Scaled against the longest run **shown**, not a
+      fixed ceiling, so the graph uses its whole range whether the best run is
+      five days or fifty. The cost is that the same day changes colour as the
+      window scrolls past a better run. A fixed ceiling (say 14 days) would be
+      stable but flat for a beginner.
+  Both are one-line changes in `heatmap_intensities`. If the operator prefers
+  another reading, that is the function to edit.
+
+- habits: `Habit::id` and `Habit::description` **deleted** rather than wired.
+  The id was handed out by a counter, stored, incremented and never read --
+  every lookup is positional, `active_habits()` maps a filtered position back
+  to a real one, and nothing is persisted, so there is no identity to keep
+  across a restart. The description came from `create_description`, a form
+  field with no key handler: it was always empty, and nothing displayed it.
+  Wiring either would have been adding a feature, not fixing one. If habits
+  ever gains persistence (see the note below), ids come back with it.
+
+- lockscreen: `account_has_password` **kept** with an `#[allow(dead_code)]`
+  though it has no production caller, because the fail-closed rule it
+  implements is the one that decides who gets in, and the caller it is for --
+  a typed username rather than a picked one -- is a plausible near addition.
+  Its tests are the specification of that rule. If a typed-username field is
+  still absent in a few months, delete it and move the rule's tests onto
+  `record_has_password`.
+
+- defrag: `lighten_color`/`darken_color` **kept** with an `#[allow]`. No widget
+  shades a block today; the block map is the obvious future caller.
+
+## Notes / smaller findings from the same sweep
+
+- **habits has no persistence at all.** No save, no load, no serde -- the
+  sample habits are regenerated at every launch and everything the user does
+  is lost on exit. Not fixed here (it is a feature, not a defect in what
+  exists) but it makes the app a demonstration rather than a tool, and it is
+  the reason `Habit::id` had nothing to be an identity for.
+
+- **Four apps in this sweep carried an orphan sidebar-width constant** --
+  `SIDEBAR_W`/`SIDEBAR_WIDTH` declared and never used (habits, systemrestore,
+  and two earlier). They look like the residue of a common template that had a
+  sidebar these apps never grew. Deleted in each case; worth a grep across the
+  rest of `apps/` for the same shape.
+
+## Lane C — appearance live-reload, the half that is not done (2026-09-06)
+
+**Relay `ReloadAppearance` from the compositor to shell clients.** This is the
+proper completion of design-decisions 812, and the reason `poll_appearance` is
+an explicit call rather than something on a timer.
+
+- *What exists now.* An app that rewrites `appearance.yaml` sends
+  `guiremote::control::RequestBody::ReloadAppearance`; the compositor handles
+  it by re-reading the file (`Compositor::reload_appearance`). `apps/settings`
+  already sends it — `gui/window/src/app.rs` has the machinery and the tests.
+  `DesktopShell::poll_appearance` now exists and applies a change correctly,
+  with `settingsfile::Watcher` underneath it.
+- *What is missing.* The message goes client → compositor and stops there. The
+  desktop shell is a different process and is never told, so it applies a
+  change only when something calls `poll_appearance`, and nothing does on a
+  cadence — deliberately, see below.
+- *Why not just poll on a timer.* `ShellSession::animations` documents that an
+  empty animation set means **no wake-up is registered and the loop parks with
+  no bound at all**, which is what keeps an idle desktop idle. A once-a-second
+  check ends that: the machine wakes, reads a file, finds nothing, sleeps,
+  forever, on battery. Polling only on wake-ups that already happen was tried
+  and backed out too — a `$HOME` read inside `pump()` makes every session test
+  machine-dependent, and it broke two of the shell's own tests against the
+  developer's real `~/.config/slateos/appearance.yaml`.
+- *The fix.* A compositor → shell notification, so the shell is told exactly
+  when there is something to know. Wire-format change in `gui/remote`
+  (`gui/remote/src/control.rs`, the response/event side rather than the request
+  side) plus a broadcast in `gui/compositor`, and a `ShellSession` handler that
+  calls `poll_appearance`. Both crates are lane C's, so no request is needed.
+  It wants its own commit and its own compatibility argument —
+  `PROTOCOL_VERSION` last moved for `TextOverflow` (§427), and the same
+  reasoning about a silently desynchronising decoder applies.
+- *DONE 2026-09-06, the same day it was filed.* `Event::SettingsChanged
+  { group }` carries it: wire tag `0x0A`, `INPUT_VERSION` bumped to 3,
+  `DecodeError::BadSettingsGroup` for a group a build does not know,
+  `Compositor::announce_settings_change` fanning out to every window, and the
+  `SettingsChanged` arm of `ShellSession::dispatch`. Six tests, three mutations
+  checked. See design-decisions 812, whose "what the finished shape is" section
+  now describes something that exists.
+
+**And the question that is not mine to answer yet:** `poll_appearance` replaces
+what the shell holds, with no merge, which is right only while the shell has no
+appearance editor of its own. When the settings *window* is hosted in the shell
+(still unwired — "Settings" is a start-menu label returning a `Launch` with
+nowhere to send it), "whose copy wins while a panel is open with unsaved edits?"
+becomes a real question. `DesktopShell::poll_appearance` is where it will have
+to be answered.
+
+**Smaller finding, not chased.** There is a real `~/.config/slateos/appearance.yaml`
+and `input.yaml` on this development machine, dated 2026-08-14 and 2026-08-22.
+Something wrote them outside a scratch configuration directory — most likely a
+test or a demo binary run without `with_scratch_config`. Harmless here, but it
+means any test that reaches the real config path silently depends on this
+machine's state, which is how the `pump()` experiment above was caught. Worth a
+sweep for `AppearanceFile::load`/`config::load` calls in test and demo code that
+are not inside a scratch directory.

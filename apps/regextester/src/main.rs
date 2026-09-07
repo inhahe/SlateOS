@@ -33,7 +33,6 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::cognitive_complexity)]
 // Many items are used only via test module and the real GUI event loop
-#![allow(dead_code)]
 
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -68,7 +67,6 @@ const SKY: Color = Color::from_hex(0x89DCEB);
 
 const WINDOW_WIDTH: f32 = 1100.0;
 const WINDOW_HEIGHT: f32 = 750.0;
-const SIDEBAR_WIDTH: f32 = 220.0;
 const TOOLBAR_HEIGHT: f32 = 44.0;
 const PADDING: f32 = 10.0;
 const LINE_HEIGHT: f32 = 20.0;
@@ -84,7 +82,20 @@ const MAX_PATTERN_LEN: usize = 512;
 const MAX_INPUT_LEN: usize = 16384;
 const MAX_REPLACE_LEN: usize = 512;
 const MAX_MATCHES: usize = 1000;
+const _: () = assert!(
+    MAX_INPUT_LEN > MAX_PATTERN_LEN,
+    "the text being searched is expected to dwarf the pattern it is searched      with; if that stops being true the field limits want rethinking rather      than swapping"
+);
+
+/// How many saved patterns the library will hold.
+///
+/// Unenforced, because nothing saves one: `save_to_library` has no caller.
+/// See `todo.txt`.
+#[allow(dead_code, reason = "the library has no control that reaches it")]
 const MAX_LIBRARY_ENTRIES: usize = 100;
+/// How many past patterns to remember. Unenforced for the same reason:
+/// `add_to_history` has no caller, so the history is always empty.
+#[allow(dead_code, reason = "nothing writes to the history")]
 const MAX_HISTORY: usize = 50;
 
 // ============================================================================
@@ -1436,13 +1447,11 @@ enum ActiveField {
 }
 
 #[derive(Debug, Clone)]
-struct MatchHighlight {
-    start: usize,
-    end: usize,
-    group_index: usize, // 0 = full match
-}
-
-#[derive(Debug, Clone)]
+/// A pattern that was tried, for the history panel.
+///
+/// Never constructed: `add_to_history` is the only thing that would build one
+/// and nothing calls it. See `todo.txt`.
+#[allow(dead_code, reason = "nothing writes to the history")]
 struct HistoryEntry {
     pattern: String,
     flags: RegexFlags,
@@ -1490,7 +1499,6 @@ struct App {
     compiled: Option<CompiledRegex>,
     compile_error: Option<String>,
     matches: Vec<RegexMatch>,
-    highlights: Vec<MatchHighlight>,
     replace_result: Option<String>,
     explanations: Vec<String>,
 
@@ -1500,6 +1508,8 @@ struct App {
     library_category_filter: Option<PatternCategory>,
 
     // History
+    /// Patterns tried before now. Always empty: see `add_to_history`.
+    #[allow(dead_code, reason = "nothing writes to the history -- see todo.txt")]
     history: Vec<HistoryEntry>,
 
     // UI state
@@ -1525,7 +1535,6 @@ impl App {
             compiled: None,
             compile_error: None,
             matches: Vec::new(),
-            highlights: Vec::new(),
             replace_result: None,
             explanations: Vec::new(),
             library,
@@ -1545,7 +1554,6 @@ impl App {
             self.compiled = None;
             self.compile_error = None;
             self.matches.clear();
-            self.highlights.clear();
             self.replace_result = None;
             self.explanations.clear();
             return;
@@ -1562,7 +1570,6 @@ impl App {
                 self.compiled = None;
                 self.compile_error = Some(format!("{e}"));
                 self.matches.clear();
-                self.highlights.clear();
                 self.replace_result = None;
                 self.explanations = explain_regex(&self.pattern);
                 return;
@@ -1575,20 +1582,6 @@ impl App {
             if !self.flags.global && self.matches.len() > 1 {
                 self.matches.truncate(1);
             }
-        }
-
-        // Build highlights
-        self.highlights.clear();
-        let match_colors = [0usize, 1, 2, 3, 4, 5, 6, 7];
-        for (mi, m) in self.matches.iter().enumerate() {
-            self.highlights.push(MatchHighlight {
-                start: m.start,
-                end: m.end,
-                group_index: mi
-                    .checked_rem(match_colors.len())
-                    .and_then(|k| match_colors.get(k).copied())
-                    .unwrap_or(0),
-            });
         }
 
         // Replace
@@ -1613,6 +1606,14 @@ impl App {
         }
     }
 
+    /// Remember the pattern just tried.
+    ///
+    /// No caller. The natural moment is a successful compile in
+    /// `update_regex`, but that runs on every keystroke, so recording there
+    /// would fill the history with every prefix of what was typed -- which is
+    /// the design question that has to be answered before this is wired, and
+    /// why it is in `todo.txt` rather than done here.
+    #[allow(dead_code, reason = "no control writes to the history -- see todo.txt")]
     fn add_to_history(&mut self) {
         if self.pattern.is_empty() || self.compile_error.is_some() {
             return;
@@ -1641,6 +1642,9 @@ impl App {
         }
     }
 
+    /// Put a saved pattern back in the fields. No caller: the library panel
+    /// is not drawn and there is no key that opens it. See `todo.txt`.
+    #[allow(dead_code, reason = "no library UI yet -- see todo.txt")]
     fn load_library_entry(&mut self, index: usize) {
         if let Some(entry) = self.library.get(index) {
             self.pattern = entry.pattern.clone();
@@ -1649,6 +1653,9 @@ impl App {
         }
     }
 
+    /// Save the current pattern under a name. No caller, and no way to type
+    /// the name. See `todo.txt`.
+    #[allow(dead_code, reason = "no library UI yet -- see todo.txt")]
     fn save_to_library(&mut self, name: &str) {
         if self.pattern.is_empty() || name.is_empty() || self.library.len() >= MAX_LIBRARY_ENTRIES {
             return;
@@ -2820,13 +2827,14 @@ impl App {
                 true
             }
             _ => {
-                let Some(ch) = key.text.chars().next() else {
-                    return false;
-                };
-                if ch.is_control() {
+                // Every character the keystroke produced, not just the first:
+                // one keypress can type none, one, or several -- a dead key
+                // followed by a letter composes into one character, and an
+                // input method can deliver a whole word. Taking
+                // `text.chars().next()` dropped everything after the first.
+                if !self.type_into_active_field(&key.text) {
                     return false;
                 }
-                self.active_field_mut().push(ch);
                 self.update_regex();
                 true
             }
@@ -2844,6 +2852,45 @@ impl App {
             ActiveField::Input => &mut self.input_text,
             ActiveField::Replace => &mut self.replace_text,
         }
+    }
+
+    /// How many characters a field will hold.
+    ///
+    /// `MAX_PATTERN_LEN`, `MAX_INPUT_LEN` and `MAX_REPLACE_LEN` were declared
+    /// with the rest of the layout constants and consulted by nothing, so all
+    /// three fields were unbounded. That matters more here than in most text
+    /// boxes: `update_regex` compiles the pattern and runs a backtracking
+    /// engine across the whole input on *every keystroke*, so the cost of one
+    /// character is a function of everything typed before it.
+    fn active_field_capacity(&self) -> usize {
+        match self.active_field {
+            ActiveField::Pattern => MAX_PATTERN_LEN,
+            ActiveField::Input => MAX_INPUT_LEN,
+            ActiveField::Replace => MAX_REPLACE_LEN,
+        }
+    }
+
+    /// Append what a keystroke typed, up to the field's limit.
+    ///
+    /// Returns whether anything was added, so a keystroke into a full field
+    /// costs no redraw and no recompile.
+    fn type_into_active_field(&mut self, text: &str) -> bool {
+        let capacity = self.active_field_capacity();
+        let field = self.active_field_mut();
+        let mut added = false;
+        for ch in text.chars() {
+            if ch.is_control() {
+                continue;
+            }
+            // Counted in characters, not bytes: a limit in bytes would cut a
+            // multi-byte character in half and the field holds any of them.
+            if field.chars().count() >= capacity {
+                break;
+            }
+            field.push(ch);
+            added = true;
+        }
+        added
     }
 }
 
@@ -3809,5 +3856,100 @@ mod tests {
             Some("ba"),
             "group references did not survive"
         );
+    }
+
+    // --- Field limits ---
+    //
+    // `MAX_PATTERN_LEN`, `MAX_INPUT_LEN` and `MAX_REPLACE_LEN` were declared
+    // with the layout constants and consulted by nothing, so all three fields
+    // grew without bound -- and `update_regex` runs a backtracking engine over
+    // the whole input on every keystroke.
+
+    #[test]
+    fn a_field_stops_accepting_at_its_limit() {
+        let mut app = App::new();
+        app.active_field = ActiveField::Pattern;
+        app.pattern = "a".repeat(MAX_PATTERN_LEN);
+        assert!(
+            !press(&mut app, guitk::event::Key::A, "b"),
+            "a keystroke into a full field costs no redraw and no recompile"
+        );
+        assert_eq!(app.pattern.chars().count(), MAX_PATTERN_LEN);
+    }
+
+    #[test]
+    fn each_field_has_its_own_limit() {
+        let mut app = App::new();
+        app.active_field = ActiveField::Pattern;
+        assert_eq!(app.active_field_capacity(), MAX_PATTERN_LEN);
+        app.active_field = ActiveField::Input;
+        assert_eq!(app.active_field_capacity(), MAX_INPUT_LEN);
+        app.active_field = ActiveField::Replace;
+        assert_eq!(app.active_field_capacity(), MAX_REPLACE_LEN);
+    }
+
+    #[test]
+    fn a_field_one_short_of_its_limit_still_accepts_one() {
+        let mut app = App::new();
+        app.active_field = ActiveField::Replace;
+        app.replace_text = "x".repeat(MAX_REPLACE_LEN.saturating_sub(1));
+        assert!(press(&mut app, guitk::event::Key::A, "y"));
+        assert_eq!(app.replace_text.chars().count(), MAX_REPLACE_LEN);
+    }
+
+    #[test]
+    fn the_limit_is_counted_in_characters_not_bytes() {
+        // A limit in bytes would cut a multi-byte character in half, and these
+        // fields hold any character at all.
+        let mut app = App::new();
+        app.active_field = ActiveField::Replace;
+        app.replace_text = "é".repeat(MAX_REPLACE_LEN.saturating_sub(1));
+        assert!(press(&mut app, guitk::event::Key::A, "é"));
+        assert_eq!(app.replace_text.chars().count(), MAX_REPLACE_LEN);
+        assert!(!press(&mut app, guitk::event::Key::A, "é"));
+    }
+
+    #[test]
+    fn a_long_keystroke_is_truncated_rather_than_refused() {
+        let mut app = App::new();
+        app.active_field = ActiveField::Replace;
+        app.replace_text = "x".repeat(MAX_REPLACE_LEN.saturating_sub(2));
+        // Three characters offered, two seats left.
+        assert!(press(&mut app, guitk::event::Key::A, "abc"));
+        assert_eq!(app.replace_text.chars().count(), MAX_REPLACE_LEN);
+        assert!(app.replace_text.ends_with("ab"));
+    }
+
+    // --- Multi-character keystrokes ---
+
+    #[test]
+    fn every_character_a_keystroke_typed_is_taken() {
+        // One keypress can produce none, one, or several characters: a dead
+        // key composes with the next, and an input method can deliver a whole
+        // word. This used to take `text.chars().next()` and drop the rest.
+        let mut app = App::new();
+        app.active_field = ActiveField::Input;
+        assert!(press(&mut app, guitk::event::Key::A, "the"));
+        assert_eq!(app.input_text, "the");
+    }
+
+    #[test]
+    fn a_keystroke_that_typed_nothing_costs_no_frame() {
+        let mut app = App::new();
+        app.active_field = ActiveField::Input;
+        assert!(!press(&mut app, guitk::event::Key::A, ""));
+        assert!(
+            !press(&mut app, guitk::event::Key::A, "\u{7}"),
+            "a control character is not text"
+        );
+        assert_eq!(app.input_text, "");
+    }
+
+    #[test]
+    fn control_characters_are_dropped_from_a_mixed_keystroke() {
+        let mut app = App::new();
+        app.active_field = ActiveField::Input;
+        assert!(press(&mut app, guitk::event::Key::A, "a\u{7}b"));
+        assert_eq!(app.input_text, "ab");
     }
 }

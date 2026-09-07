@@ -14,8 +14,6 @@
 //! Uses the guitk library for UI rendering. Disk data is gathered through
 //! Slate OS syscalls; stubbed with representative data for initial development.
 
-#![allow(dead_code)]
-
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
@@ -52,8 +50,15 @@ const COLOR_PEACH: Color = Color::from_hex(0xFAB387);
 const COLOR_LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const COLOR_OVERLAY0: Color = Color::from_hex(0x6C7086);
 const COLOR_MAUVE: Color = Color::from_hex(0xCBA6F7);
+// Part of the complete Catppuccin Mocha palette, kept whole even though no
+// widget currently paints with these three: a named palette with a hole in it is
+// not the palette it is named after, and the next widget to want one would
+// otherwise re-derive the hex by hand.
+#[allow(dead_code, reason = "the palette is kept complete")]
 const COLOR_TEAL: Color = Color::from_hex(0x94E2D5);
+#[allow(dead_code, reason = "the palette is kept complete")]
 const COLOR_SAPPHIRE: Color = Color::from_hex(0x74C7EC);
+#[allow(dead_code, reason = "the palette is kept complete")]
 const COLOR_FLAMINGO: Color = Color::from_hex(0xF2CDCD);
 
 // ============================================================================
@@ -230,6 +235,26 @@ impl FilesystemType {
             Self::Swap,
             Self::EfiSystem,
         ]
+    }
+
+    /// The formattable filesystem after `index`, wrapping at the end.
+    ///
+    /// Both the create-partition dialog and the format dialog cycle this list
+    /// with Tab, and each held its own copy of
+    /// `(index + 1) % formattable().len()`. Two copies of one rule is the
+    /// smaller problem: `%` by a length computed at run time divides by zero
+    /// if the list is ever empty, and emptying it is a one-line edit in a
+    /// function that looks like a constant. Total by construction instead.
+    #[must_use]
+    pub fn next_formattable(index: usize) -> usize {
+        // `checked_rem` rather than a length guard and a `%`: an empty list
+        // makes the remainder `None` rather than a panic, so the emptiness is
+        // handled by the operation instead of by a separate branch above it
+        // that has to be remembered.
+        index
+            .saturating_add(1)
+            .checked_rem(Self::formattable().len())
+            .unwrap_or(0)
     }
 
     /// All filesystem types.
@@ -492,8 +517,9 @@ impl Disk {
         let mut cursor = first_usable;
 
         for part in &sorted_parts {
-            if part.start_sector > cursor {
-                let gap_sectors = part.start_sector - cursor;
+            // `checked_sub` rather than a `>` guard and a `-` that repeat
+            // each other: one of the two can be edited without the other.
+            if let Some(gap_sectors) = part.start_sector.checked_sub(cursor).filter(|g| *g > 0) {
                 regions.push(DiskRegion::Unallocated(UnallocatedSpace {
                     start_sector: cursor,
                     end_sector: part.start_sector.saturating_sub(1),
@@ -504,8 +530,7 @@ impl Disk {
             cursor = part.end_sector.saturating_add(1);
         }
 
-        if cursor < last_usable {
-            let gap_sectors = last_usable - cursor;
+        if let Some(gap_sectors) = last_usable.checked_sub(cursor).filter(|g| *g > 0) {
             regions.push(DiskRegion::Unallocated(UnallocatedSpace {
                 start_sector: cursor,
                 end_sector: last_usable.saturating_sub(1),
@@ -1689,11 +1714,6 @@ impl DiskSidebar {
         x >= self.left && x < self.right() && y >= self.panel_top && y < self.bottom
     }
 
-    /// Whether `(x, y)` is in the region the rows are painted in.
-    fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.left && x < self.right() && y >= self.data_top && y < self.bottom
-    }
-
     /// Top of row `index`. The sidebar does not scroll, so there is no offset
     /// to pass; if it ever does, this and [`Self::row_at`] gain one together
     /// or neither does.
@@ -2473,7 +2493,7 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         tree.push(RenderCommand::Text {
             x: left + 12.0,
             y: ry + 4.0,
-            text: format!("{}.", i + 1),
+            text: format!("{}.", i.saturating_add(1)),
             color: COLOR_SUBTEXT0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
@@ -3750,12 +3770,11 @@ fn handle_key(app: &mut PartitionManagerApp, key_ev: &KeyEvent) -> EventResult {
                 return EventResult::Consumed;
             }
             Key::Right => {
-                dialog.size_percent = (dialog.size_percent + 5).min(100);
+                dialog.size_percent = dialog.size_percent.saturating_add(5).min(100);
                 return EventResult::Consumed;
             }
             Key::Tab => {
-                let max = FilesystemType::formattable().len();
-                dialog.filesystem_index = (dialog.filesystem_index + 1) % max;
+                dialog.filesystem_index = FilesystemType::next_formattable(dialog.filesystem_index);
                 return EventResult::Consumed;
             }
             _ => {
@@ -3775,8 +3794,7 @@ fn handle_key(app: &mut PartitionManagerApp, key_ev: &KeyEvent) -> EventResult {
     // If format dialog, Tab cycles filesystem
     if let ActiveDialog::Format(ref mut dialog) = app.dialog {
         if key_ev.key == Key::Tab {
-            let max = FilesystemType::formattable().len();
-            dialog.filesystem_index = (dialog.filesystem_index + 1) % max;
+            dialog.filesystem_index = FilesystemType::next_formattable(dialog.filesystem_index);
             return EventResult::Consumed;
         }
         return EventResult::Consumed;
@@ -3843,7 +3861,7 @@ fn select_adjacent_region(app: &mut PartitionManagerApp, up: bool) {
             if up {
                 ci.saturating_sub(1)
             } else {
-                (ci + 1).min(regions.len().saturating_sub(1))
+                ci.saturating_add(1).min(regions.len().saturating_sub(1))
             }
         }
         None => 0,
@@ -3941,6 +3959,71 @@ mod tests {
         clippy::expect_used,
         clippy::panic
     )]
+
+    // -- Cycling the formattable filesystem list --
+
+    fn tab_event() -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Tab,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    #[test]
+    fn tab_walks_the_formattable_list_and_wraps() {
+        let n = FilesystemType::formattable().len();
+        assert!(n > 1, "a one-entry list would make the wrap untestable");
+        let mut seen = Vec::with_capacity(n);
+        let mut i = 0;
+        for _ in 0..n {
+            seen.push(i);
+            i = FilesystemType::next_formattable(i);
+        }
+        assert_eq!(i, 0, "a full lap comes back to the start");
+        let mut sorted = seen.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), n, "a lap visits every entry once: {seen:?}");
+    }
+
+    #[test]
+    fn cycling_from_a_stale_index_lands_somewhere_real() {
+        // The index is stored on the dialog and the list it indexes is a
+        // separate `pub fn`. Nothing stops the two disagreeing -- an index
+        // held across a shrink of the list, say -- so the answer has to be in
+        // range regardless of what goes in.
+        let n = FilesystemType::formattable().len();
+        for start in [n, n + 1, usize::MAX] {
+            let next = FilesystemType::next_formattable(start);
+            assert!(next < n, "{start} -> {next}, which is not a filesystem");
+        }
+    }
+
+    #[test]
+    fn both_dialogs_cycle_the_filesystem_the_same_way() {
+        // The two Tab handlers held two copies of the same expression, which
+        // is what would let them drift. They call one function now; this is
+        // the assertion that they still agree.
+        let mut app = PartitionManagerApp::new();
+        app.dialog = ActiveDialog::CreatePartition(CreatePartitionDialog::new(2048, 4096, 512));
+        handle_event(&mut app, &tab_event());
+        let after_create = match &app.dialog {
+            ActiveDialog::CreatePartition(d) => d.filesystem_index,
+            other => panic!("the create dialog did not survive Tab: {other:?}"),
+        };
+
+        app.dialog = ActiveDialog::Format(FormatDialog::new(1, "data"));
+        handle_event(&mut app, &tab_event());
+        let after_format = match &app.dialog {
+            ActiveDialog::Format(d) => d.filesystem_index,
+            other => panic!("the format dialog did not survive Tab: {other:?}"),
+        };
+
+        assert_eq!(after_create, after_format);
+        assert_eq!(after_create, FilesystemType::next_formattable(0));
+    }
 
     use super::*;
     use guitk::text;

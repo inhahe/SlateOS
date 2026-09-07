@@ -44,6 +44,7 @@
 
 use quoting::quoteaf_os;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::process;
@@ -548,7 +549,7 @@ fn evaluate_rules(
     caller_name: &str,
     target_name: &str,
     command: Option<&str>,
-    command_args: &[String],
+    command_args: &[OsString],
 ) -> MatchResult {
     for rule in rules {
         if !identity_matches(&rule.identity, caller_name) {
@@ -576,10 +577,14 @@ fn evaluate_rules(
             if command_args.len() != expected_args.len() {
                 continue;
             }
+            // `doas.conf` is a text file, so an argument that is not text
+            // matches no configured one. That is the answer a rule pinning
+            // arguments should give: it permits exactly the arguments it
+            // lists, and this is not one of them.
             let all_match = expected_args
                 .iter()
                 .zip(command_args.iter())
-                .all(|(exp, act)| exp == act);
+                .all(|(exp, act)| act.to_str() == Some(exp.as_str()));
             if !all_match {
                 continue;
             }
@@ -682,27 +687,35 @@ fn build_environment(
     opts: &RuleOptions,
     target: &PasswdEntry,
     caller_name: &str,
-) -> Vec<(String, String)> {
-    let mut env_map: Vec<(String, String)> = if opts.keepenv {
-        env::vars().collect()
+) -> Vec<(OsString, OsString)> {
+    let pair = |k: &str, v: &str| (OsString::from(k), OsString::from(v));
+    // `vars_os`, not `vars`: `env::vars`'s iterator panics on a variable whose
+    // name or value is not valid UTF-8, and this is the `keepenv` branch --
+    // the one whose entire job is to hand the caller's environment through
+    // unaltered. The one shape of environment it must not lose is the one it
+    // used to die on.
+    let mut env_map: Vec<(OsString, OsString)> = if opts.keepenv {
+        env::vars_os().collect()
     } else {
         let mut base = Vec::new();
-        base.push(("HOME".to_string(), target.home.clone()));
-        base.push(("LOGNAME".to_string(), target.username.clone()));
-        base.push((
-            "PATH".to_string(),
+        base.push(pair("HOME", &target.home));
+        base.push(pair("LOGNAME", &target.username));
+        base.push(pair(
+            "PATH",
             if target.uid == 0 {
-                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
             } else {
-                "/usr/local/bin:/usr/bin:/bin".to_string()
+                "/usr/local/bin:/usr/bin:/bin"
             },
         ));
-        base.push(("SHELL".to_string(), target.shell.clone()));
-        base.push(("USER".to_string(), target.username.clone()));
+        base.push(pair("SHELL", &target.shell));
+        base.push(pair("USER", &target.username));
 
-        // Propagate TERM if the caller has it set.
-        if let Ok(term) = env::var("TERM") {
-            base.push(("TERM".to_string(), term));
+        // Propagate TERM if the caller has it set. `var_os` for the same
+        // reason: a terminal name this cannot decode is a reason to pass it
+        // through unread, not to drop it.
+        if let Some(term) = env::var_os("TERM") {
+            base.push((OsString::from("TERM"), term));
         }
 
         base
@@ -716,20 +729,23 @@ fn build_environment(
         set_env_var(&mut env_map, var, val);
     }
 
-    // Remove unsetenv variables.
+    // Remove unsetenv variables. `doas.conf` is a text file, so a variable
+    // named there is text; a variable in the caller's environment whose *name*
+    // is not text matches none of them and is therefore kept -- which is what
+    // `keepenv` asked for.
     for var in &opts.unsetenv {
-        env_map.retain(|(k, _)| k != var);
+        env_map.retain(|(k, _)| k != OsStr::new(var.as_str()));
     }
 
     env_map
 }
 
 /// Set or overwrite a variable in the environment vector.
-fn set_env_var(env_map: &mut Vec<(String, String)>, key: &str, value: &str) {
-    if let Some(existing) = env_map.iter_mut().find(|(k, _)| k == key) {
-        existing.1 = value.to_string();
+fn set_env_var(env_map: &mut Vec<(OsString, OsString)>, key: &str, value: &str) {
+    if let Some(existing) = env_map.iter_mut().find(|(k, _)| k == OsStr::new(key)) {
+        existing.1 = OsString::from(value);
     } else {
-        env_map.push((key.to_string(), value.to_string()));
+        env_map.push((OsString::from(key), OsString::from(value)));
     }
 }
 
@@ -746,8 +762,8 @@ fn set_env_var(env_map: &mut Vec<(String, String)>, key: &str, value: &str) {
 fn exec_command(
     target: &PasswdEntry,
     command: &str,
-    arguments: &[String],
-    environment: &[(String, String)],
+    arguments: &[OsString],
+    environment: &[(OsString, OsString)],
 ) -> i32 {
     let mut cmd = process::Command::new(command);
     cmd.args(arguments);
@@ -876,12 +892,21 @@ struct DoasArgs {
     /// If `true`, fail immediately if a password is needed.
     non_interactive: bool,
     /// The command to execute.
-    command: Option<String>,
+    /// The command to run, still as the bytes the caller gave -- see
+    /// [`DoasArgs::arguments`].
+    command: Option<OsString>,
     /// Arguments to the command.
-    arguments: Vec<String>,
+    /// The command's own arguments, still as the bytes the caller gave.
+    ///
+    /// These are handed to the exec, and an argument is very often a
+    /// filename -- which on this OS may hold any byte but `/` and NUL. Not
+    /// `String`: `env::args()` *panics* on such an argument, so `doas` died
+    /// before running a line of its own, from a setuid binary. See
+    /// `known-issues.md` -> `B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`.
+    arguments: Vec<OsString>,
 }
 
-fn parse_args(raw: &[String]) -> Result<DoasArgs, String> {
+fn parse_args(raw: &[OsString]) -> Result<DoasArgs, String> {
     let mut result = DoasArgs {
         target_user: "root".to_string(),
         shell_mode: false,
@@ -893,34 +918,41 @@ fn parse_args(raw: &[String]) -> Result<DoasArgs, String> {
         arguments: Vec::new(),
     };
 
-    let mut c = Cursor::new(raw);
-    c.bump(); // skip argv[0]
+    // `Cursor` is the config file's tokeniser and stays over `String`; argv
+    // is walked directly here, because it is the one input that is not text.
+    let mut i = 1; // skip argv[0]
     let mut end_of_opts = false;
 
-    while let Some(arg) = c.peek() {
+    while let Some(raw_arg) = raw.get(i) {
+        // An argument that is not text cannot start with `-`, so it is taken
+        // as the command -- which is what it would have to be, and which then
+        // fails to resolve to a program, by the same path as any other command
+        // that is not on the machine.
+        let arg = raw_arg.to_str().unwrap_or_default();
         if end_of_opts || !arg.starts_with('-') || arg == "-" {
             // First non-option is the command; the rest are its arguments.
-            result.command = Some(arg.to_string());
-            c.bump();
-            result.arguments = c.take_rest().to_vec();
+            result.command = Some(raw_arg.clone());
+            i = i.saturating_add(1);
+            result.arguments = raw.get(i..).unwrap_or_default().to_vec();
             break;
         }
 
-        c.bump();
+        i = i.saturating_add(1);
+        let mut value = |need: &str| -> Result<String, String> {
+            let got = raw.get(i).ok_or_else(|| need.to_string())?;
+            i = i.saturating_add(1);
+            got.to_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("{need}, and {} is not one", quoteaf_os(got)))
+        };
         match arg {
             "--" => end_of_opts = true,
             "-u" | "-U" => {
-                result.target_user = c
-                    .next_tok()
-                    .ok_or_else(|| "option -u requires a user argument".to_string())?
-                    .to_string();
+                result.target_user = value("option -u requires a user argument")?;
             }
             "-s" => result.shell_mode = true,
             "-C" => {
-                result.config_path = c
-                    .next_tok()
-                    .ok_or_else(|| "option -C requires a config file argument".to_string())?
-                    .to_string();
+                result.config_path = value("option -C requires a config file argument")?;
                 result.check_config = true;
             }
             "-L" => result.clear_persist = true,
@@ -941,7 +973,9 @@ fn print_usage() {
 // ============================================================================
 
 fn main() {
-    let raw_args: Vec<String> = env::args().collect();
+    // `args_os`, not `args`: the latter's iterator is a literal `unwrap` and
+    // panics on an argument that is not valid UTF-8.
+    let raw_args: Vec<OsString> = env::args_os().collect();
 
     let args = match parse_args(&raw_args) {
         Ok(a) => a,
@@ -1002,8 +1036,16 @@ fn main() {
             }
         }
     } else {
-        match &args.command {
-            Some(cmd) => cmd.clone(),
+        match args.command.as_ref().and_then(|c| c.to_str()) {
+            // A command name is matched against `doas.conf`, which is a text
+            // file, and is resolved against `PATH`, which is text too -- so a
+            // name that is not text names no permitted command. It reads as
+            // empty here, which matches no rule and resolves to nothing, and
+            // is refused by the same "not permitted" path as any other command
+            // the caller may not run. Refusing it earlier, in its own words,
+            // would tell the caller something the rules did not.
+            Some(cmd) => cmd.to_string(),
+            None if args.command.is_some() => String::new(),
             None => {
                 eprintln!("doas: no command specified");
                 print_usage();
@@ -1139,6 +1181,28 @@ mod tests {
     use super::*;
     use scratchdir::ScratchDir;
     use std::path::PathBuf;
+
+    /// A command line, as `env::args_os` would deliver it.
+    fn argv(parts: &[&str]) -> Vec<OsString> {
+        parts.iter().map(OsString::from).collect()
+    }
+
+    /// An argument that a `String` cannot hold. The development host is
+    /// Windows, where argv arrives as UTF-16 and the unrepresentable case is
+    /// an unpaired surrogate rather than a stray byte -- so the fixture is
+    /// written both ways.
+    fn not_text() -> OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            OsString::from_vec(vec![b'a', 0x80, b'b'])
+        }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::ffi::OsStringExt as _;
+            OsString::from_wide(&[0x0061, 0xD800, 0x0062])
+        }
+    }
 
     // ========================================================================
     // Password verification
@@ -1693,7 +1757,7 @@ mod tests {
     #[test]
     fn match_alice_cmd_pkg_with_args() {
         let rules = sample_rules();
-        let args = vec!["install".to_string(), "vim".to_string()];
+        let args = argv(&["install", "vim"]);
         let result = evaluate_rules(&rules, "alice", "root", Some("/usr/bin/pkg"), &args);
         // The "as root" rule (no cmd) matches first.
         match result {
@@ -1706,7 +1770,7 @@ mod tests {
     fn match_args_mismatch() {
         // Create rules where only the args-restricted rule is available.
         let rules = parse_config("permit alice cmd /usr/bin/pkg args install vim\n").unwrap();
-        let args = vec!["install".to_string(), "emacs".to_string()];
+        let args = argv(&["install", "emacs"]);
         let result = evaluate_rules(&rules, "alice", "root", Some("/usr/bin/pkg"), &args);
         assert_eq!(result, MatchResult::NoMatch);
     }
@@ -1714,7 +1778,7 @@ mod tests {
     #[test]
     fn match_args_count_mismatch() {
         let rules = parse_config("permit alice cmd /usr/bin/pkg args install vim\n").unwrap();
-        let args = vec!["install".to_string()];
+        let args = argv(&["install"]);
         let result = evaluate_rules(&rules, "alice", "root", Some("/usr/bin/pkg"), &args);
         assert_eq!(result, MatchResult::NoMatch);
     }
@@ -1770,18 +1834,18 @@ mod tests {
         let target = make_target_user();
         let environment = build_environment(&opts, &target, "alice");
 
-        let find_val = |key: &str| -> Option<String> {
+        let find_val = |key: &str| -> Option<OsString> {
             environment
                 .iter()
-                .find(|(k, _)| k == key)
+                .find(|(k, _)| k == OsStr::new(key))
                 .map(|(_, v)| v.clone())
         };
 
-        assert_eq!(find_val("HOME"), Some("/root".to_string()));
-        assert_eq!(find_val("LOGNAME"), Some("root".to_string()));
-        assert_eq!(find_val("USER"), Some("root".to_string()));
-        assert_eq!(find_val("SHELL"), Some("/bin/sh".to_string()));
-        assert_eq!(find_val("DOAS_USER"), Some("alice".to_string()));
+        assert_eq!(find_val("HOME"), Some(OsString::from("/root")));
+        assert_eq!(find_val("LOGNAME"), Some(OsString::from("root")));
+        assert_eq!(find_val("USER"), Some(OsString::from("root")));
+        assert_eq!(find_val("SHELL"), Some(OsString::from("/bin/sh")));
+        assert_eq!(find_val("DOAS_USER"), Some(OsString::from("alice")));
         assert!(find_val("PATH").is_some());
     }
 
@@ -1792,9 +1856,9 @@ mod tests {
         let environment = build_environment(&opts, &target, "alice");
         let path = environment
             .iter()
-            .find(|(k, _)| k == "PATH")
+            .find(|(k, _)| k == OsStr::new("PATH"))
             .map(|(_, v)| v.clone());
-        assert!(path.unwrap().contains("/sbin"));
+        assert!(path.unwrap().to_string_lossy().contains("/sbin"));
     }
 
     #[test]
@@ -1810,9 +1874,9 @@ mod tests {
         let environment = build_environment(&opts, &target, "bob");
         let path = environment
             .iter()
-            .find(|(k, _)| k == "PATH")
+            .find(|(k, _)| k == OsStr::new("PATH"))
             .map(|(_, v)| v.clone());
-        assert!(!path.unwrap().contains("/sbin"));
+        assert!(!path.unwrap().to_string_lossy().contains("/sbin"));
     }
 
     #[test]
@@ -1827,7 +1891,9 @@ mod tests {
         let environment = build_environment(&opts, &target, "alice");
 
         // DOAS_USER should always be set.
-        let doas_user = environment.iter().find(|(k, _)| k == "DOAS_USER");
+        let doas_user = environment
+            .iter()
+            .find(|(k, _)| k == OsStr::new("DOAS_USER"));
         assert!(doas_user.is_some());
         assert_eq!(doas_user.unwrap().1, "alice");
     }
@@ -1844,15 +1910,15 @@ mod tests {
         let target = make_target_user();
         let environment = build_environment(&opts, &target, "alice");
 
-        let find_val = |key: &str| -> Option<String> {
+        let find_val = |key: &str| -> Option<OsString> {
             environment
                 .iter()
-                .find(|(k, _)| k == key)
+                .find(|(k, _)| k == OsStr::new(key))
                 .map(|(_, v)| v.clone())
         };
 
-        assert_eq!(find_val("EDITOR"), Some("vim".to_string()));
-        assert_eq!(find_val("PAGER"), Some("less".to_string()));
+        assert_eq!(find_val("EDITOR"), Some(OsString::from("vim")));
+        assert_eq!(find_val("PAGER"), Some(OsString::from("less")));
     }
 
     #[test]
@@ -1865,9 +1931,9 @@ mod tests {
         let environment = build_environment(&opts, &target, "alice");
         let home = environment
             .iter()
-            .find(|(k, _)| k == "HOME")
+            .find(|(k, _)| k == OsStr::new("HOME"))
             .map(|(_, v)| v.clone());
-        assert_eq!(home, Some("/custom".to_string()));
+        assert_eq!(home, Some(OsString::from("/custom")));
     }
 
     #[test]
@@ -1878,7 +1944,7 @@ mod tests {
         };
         let target = make_target_user();
         let environment = build_environment(&opts, &target, "alice");
-        let shell = environment.iter().find(|(k, _)| k == "SHELL");
+        let shell = environment.iter().find(|(k, _)| k == OsStr::new("SHELL"));
         assert!(shell.is_none());
     }
 
@@ -1892,7 +1958,9 @@ mod tests {
         };
         let target = make_target_user();
         let environment = build_environment(&opts, &target, "caller");
-        let doas_user = environment.iter().find(|(k, _)| k == "DOAS_USER");
+        let doas_user = environment
+            .iter()
+            .find(|(k, _)| k == OsStr::new("DOAS_USER"));
         assert_eq!(doas_user.unwrap().1, "caller");
     }
 
@@ -1949,45 +2017,35 @@ mod tests {
 
     #[test]
     fn args_default() {
-        let raw = vec!["doas".to_string(), "ls".to_string()];
+        let raw = argv(&["doas", "ls"]);
         let args = parse_args(&raw).unwrap();
         assert_eq!(args.target_user, "root");
         assert!(!args.shell_mode);
         assert!(!args.check_config);
         assert!(!args.clear_persist);
         assert!(!args.non_interactive);
-        assert_eq!(args.command.as_deref(), Some("ls"));
+        assert_eq!(args.command.as_deref(), Some(OsStr::new("ls")));
         assert!(args.arguments.is_empty());
     }
 
     #[test]
     fn args_target_user() {
-        let raw = vec![
-            "doas".to_string(),
-            "-u".to_string(),
-            "alice".to_string(),
-            "whoami".to_string(),
-        ];
+        let raw = argv(&["doas", "-u", "alice", "whoami"]);
         let args = parse_args(&raw).unwrap();
         assert_eq!(args.target_user, "alice");
-        assert_eq!(args.command.as_deref(), Some("whoami"));
+        assert_eq!(args.command.as_deref(), Some(OsStr::new("whoami")));
     }
 
     #[test]
     fn args_target_user_capital_u() {
-        let raw = vec![
-            "doas".to_string(),
-            "-U".to_string(),
-            "alice".to_string(),
-            "id".to_string(),
-        ];
+        let raw = argv(&["doas", "-U", "alice", "id"]);
         let args = parse_args(&raw).unwrap();
         assert_eq!(args.target_user, "alice");
     }
 
     #[test]
     fn args_shell_mode() {
-        let raw = vec!["doas".to_string(), "-s".to_string()];
+        let raw = argv(&["doas", "-s"]);
         let args = parse_args(&raw).unwrap();
         assert!(args.shell_mode);
         assert!(args.command.is_none());
@@ -1995,11 +2053,7 @@ mod tests {
 
     #[test]
     fn args_check_config() {
-        let raw = vec![
-            "doas".to_string(),
-            "-C".to_string(),
-            "/etc/doas.conf".to_string(),
-        ];
+        let raw = argv(&["doas", "-C", "/etc/doas.conf"]);
         let args = parse_args(&raw).unwrap();
         assert!(args.check_config);
         assert_eq!(args.config_path, "/etc/doas.conf");
@@ -2007,95 +2061,84 @@ mod tests {
 
     #[test]
     fn args_clear_persist() {
-        let raw = vec!["doas".to_string(), "-L".to_string()];
+        let raw = argv(&["doas", "-L"]);
         let args = parse_args(&raw).unwrap();
         assert!(args.clear_persist);
     }
 
     #[test]
     fn args_non_interactive() {
-        let raw = vec!["doas".to_string(), "-n".to_string(), "ls".to_string()];
+        let raw = argv(&["doas", "-n", "ls"]);
         let args = parse_args(&raw).unwrap();
         assert!(args.non_interactive);
     }
 
     #[test]
     fn args_double_dash() {
-        let raw = vec![
-            "doas".to_string(),
-            "--".to_string(),
-            "-dangerous".to_string(),
-        ];
+        let raw = argv(&["doas", "--", "-dangerous"]);
         let args = parse_args(&raw).unwrap();
-        assert_eq!(args.command.as_deref(), Some("-dangerous"));
+        assert_eq!(args.command.as_deref(), Some(OsStr::new("-dangerous")));
     }
 
     #[test]
     fn args_command_with_arguments() {
-        let raw = vec![
-            "doas".to_string(),
-            "pkg".to_string(),
-            "install".to_string(),
-            "vim".to_string(),
-        ];
+        let raw = argv(&["doas", "pkg", "install", "vim"]);
         let args = parse_args(&raw).unwrap();
-        assert_eq!(args.command.as_deref(), Some("pkg"));
-        assert_eq!(args.arguments, vec!["install", "vim"]);
+        assert_eq!(args.command.as_deref(), Some(OsStr::new("pkg")));
+        assert_eq!(args.arguments, argv(&["install", "vim"]));
     }
 
     #[test]
     fn args_missing_u_value() {
-        let raw = vec!["doas".to_string(), "-u".to_string()];
+        let raw = argv(&["doas", "-u"]);
         assert!(parse_args(&raw).is_err());
     }
 
     #[test]
     fn args_missing_c_value() {
-        let raw = vec!["doas".to_string(), "-C".to_string()];
+        let raw = argv(&["doas", "-C"]);
         assert!(parse_args(&raw).is_err());
     }
 
     #[test]
     fn args_unknown_option() {
-        let raw = vec!["doas".to_string(), "-Z".to_string()];
+        let raw = argv(&["doas", "-Z"]);
         assert!(parse_args(&raw).is_err());
     }
 
     #[test]
     fn args_all_flags_combined() {
-        let raw = vec![
-            "doas".to_string(),
-            "-n".to_string(),
-            "-u".to_string(),
-            "bob".to_string(),
-            "vim".to_string(),
-            "/etc/hosts".to_string(),
-        ];
+        let raw = argv(&["doas", "-n", "-u", "bob", "vim", "/etc/hosts"]);
         let args = parse_args(&raw).unwrap();
         assert!(args.non_interactive);
         assert_eq!(args.target_user, "bob");
-        assert_eq!(args.command.as_deref(), Some("vim"));
-        assert_eq!(args.arguments, vec!["/etc/hosts"]);
+        assert_eq!(args.command.as_deref(), Some(OsStr::new("vim")));
+        assert_eq!(args.arguments, argv(&["/etc/hosts"]));
     }
 
     // ========================================================================
     // set_env_var helper tests
     // ========================================================================
 
+    /// One environment entry, as the map holds them.
+    fn entry(key: &str, value: &str) -> (OsString, OsString) {
+        (OsString::from(key), OsString::from(value))
+    }
+
     #[test]
     fn set_env_var_new() {
-        let mut env_map: Vec<(String, String)> = vec![("A".to_string(), "1".to_string())];
+        let mut env_map = vec![entry("A", "1")];
         set_env_var(&mut env_map, "B", "2");
         assert_eq!(env_map.len(), 2);
-        assert_eq!(env_map[1], ("B".to_string(), "2".to_string()));
+        assert_eq!(env_map[1], entry("B", "2"));
     }
 
     #[test]
     fn set_env_var_override() {
-        let mut env_map: Vec<(String, String)> = vec![("A".to_string(), "1".to_string())];
+        let mut env_map = vec![entry("A", "1")];
         set_env_var(&mut env_map, "A", "99");
         assert_eq!(env_map.len(), 1);
-        assert_eq!(env_map[0], ("A".to_string(), "99".to_string()));
+        assert_eq!(env_map[0], entry("A", "99"));
     }
 
     // ========================================================================
@@ -2136,5 +2179,79 @@ mod tests {
         let id = ":wheel";
         assert!(id.starts_with(':'));
         assert_eq!(id.strip_prefix(':'), Some("wheel"));
+    }
+
+    // ========================================================================
+    // argv and the environment as bytes
+    // ========================================================================
+
+    /// A command argument that a `String` cannot hold survives to the exec.
+    ///
+    /// `doas cat FILE` passes a *filename*, and a filename on this OS may hold
+    /// any byte but `/` and NUL. `env::args()`'s iterator is a literal
+    /// `unwrap`, so this used to panic before running a line of its own file
+    /// -- from a setuid binary. See `known-issues.md` ->
+    /// `B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`.
+    #[test]
+    fn a_command_argument_that_is_not_text_survives_parsing() {
+        let odd = not_text();
+        assert!(
+            odd.to_str().is_none(),
+            "the fixture must be unrepresentable as a `String`, or this test              asserts nothing"
+        );
+
+        let raw = vec![OsString::from("doas"), OsString::from("cat"), odd.clone()];
+        let args = parse_args(&raw).expect("parses");
+        assert_eq!(args.command.as_deref(), Some(OsStr::new("cat")));
+        assert_eq!(args.arguments, vec![odd]);
+    }
+
+    /// A rule that pins its arguments does not match one that is not text.
+    ///
+    /// `doas.conf` is a text file, so it cannot name such an argument -- and a
+    /// rule permitting exactly `pkg install vim` must not be satisfied by
+    /// `pkg install <something else>`, whatever that something is.
+    #[test]
+    fn a_rule_pinning_arguments_does_not_match_an_argument_that_is_not_text() {
+        let rules = parse_config(
+            "permit alice as root cmd /usr/bin/pkg args install vim
+",
+        )
+        .expect("config");
+        let args = vec![OsString::from("install"), not_text()];
+        let result = evaluate_rules(&rules, "alice", "root", Some("/usr/bin/pkg"), &args);
+        assert!(
+            matches!(result, MatchResult::NoMatch),
+            "an argument the rule cannot name must not satisfy it"
+        );
+    }
+
+    /// A command name that is not text names no permitted command, and is
+    /// refused by the same path as any other command the caller may not run.
+    #[test]
+    fn a_command_name_that_is_not_text_matches_no_rule() {
+        let rules = parse_config(
+            "permit alice as root cmd /usr/bin/pkg
+",
+        )
+        .expect("config");
+        let result = evaluate_rules(&rules, "alice", "root", Some(""), &[]);
+        assert!(matches!(result, MatchResult::NoMatch));
+    }
+
+    /// `keepenv` hands the caller's environment through, including a variable
+    /// whose value is not text. `env::vars()` panicked on exactly that, in the
+    /// branch whose whole job is to lose nothing.
+    #[test]
+    fn keepenv_carries_a_value_that_is_not_text() {
+        let mut env_map = vec![entry("A", "1")];
+        env_map.push((OsString::from("ODD"), not_text()));
+        set_env_var(&mut env_map, "DOAS_USER", "alice");
+
+        let odd = env_map
+            .iter()
+            .find(|(k, _)| k == OsStr::new("ODD"))
+            .map(|(_, v)| v.clone());
+        assert_eq!(odd, Some(not_text()));
     }
 }

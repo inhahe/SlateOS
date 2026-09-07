@@ -72,6 +72,7 @@
 
 use quoting::quoteaf_os;
 use std::env;
+use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::process;
@@ -307,9 +308,14 @@ fn current_username() -> Option<String> {
 // ============================================================================
 
 /// What a run was asked to do.
+#[derive(Debug)]
 struct Args {
     list: bool,
-    username: Option<String>,
+    /// The account named on the command line, still as the bytes the caller
+    /// gave. Not a `String`: `env::args()` *panics* on an argument that is not
+    /// valid UTF-8, which on this OS is legal input. See `known-issues.md` ->
+    /// `B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`.
+    username: Option<OsString>,
     /// The requested changes, in the order the options were given. Empty means
     /// no `-m`/`-M`/`-W`/`-I`/`-E`/`-d` was passed at all, which is what tells
     /// a bare `chage USER` apart from one that set a field to its own value.
@@ -317,6 +323,7 @@ struct Args {
 }
 
 /// One field to set.
+#[derive(Debug)]
 enum Change {
     Min(Option<i64>),
     Max(Option<i64>),
@@ -361,24 +368,34 @@ fn print_usage() {
 
 /// The value that follows an option, advancing past it.
 ///
+/// Returned as text, because every value this program takes -- a day count or
+/// a date -- is text by definition. An argument that cannot be decoded is
+/// therefore not one, and is refused with the bytes shown rather than
+/// interpolated: an argument may hold a newline, and this program's stderr is
+/// a privileged program's.
+///
 /// # Errors
 ///
-/// If the option was the last argument. A missing value is refused rather than
-/// treated as absent, because every option here that takes one has no meaning
-/// without it, and the alternative -- silently ignoring the option -- is how a
-/// command comes to report success for work it did not do.
-fn value_at(argv: &[String], i: &mut usize, name: &str) -> Result<String, String> {
+/// If the option was the last argument, or its value is not text. A missing
+/// value is refused rather than treated as absent, because every option here
+/// that takes one has no meaning without it, and the alternative -- silently
+/// ignoring the option -- is how a command comes to report success for work it
+/// did not do.
+fn value_at(argv: &[OsString], i: &mut usize, name: &str) -> Result<String, String> {
     *i = i.saturating_add(1);
-    argv.get(*i)
-        .cloned()
-        .ok_or_else(|| format!("option {name} requires an argument"))
+    let arg = argv
+        .get(*i)
+        .ok_or_else(|| format!("option {name} requires an argument"))?;
+    arg.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("invalid value for {name}: {}", quoteaf_os(arg)))
 }
 
 /// # Errors
 ///
 /// Any malformed option or value. Parsing is completed before anything is
 /// read or written, so a run with a bad argument changes nothing.
-fn parse_args(argv: &[String]) -> Result<Args, String> {
+fn parse_args(argv: &[OsString]) -> Result<Args, String> {
     let mut args = Args {
         list: false,
         username: None,
@@ -386,7 +403,10 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     };
     let mut i = 0;
 
-    while let Some(arg) = argv.get(i).map(String::as_str) {
+    // A non-UTF-8 argument matches no option, so it falls to the last arm and
+    // is treated as a name -- which is what it would have to be.
+    while i < argv.len() {
+        let arg = argv.get(i).and_then(|a| a.to_str()).unwrap_or_default();
         // Bound in each arm rather than up front, because reading a value
         // advances `i` and only the arms that take one may do that.
         let mut value = |name: &str| value_at(argv, &mut i, name);
@@ -427,11 +447,14 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             other if other.starts_with('-') && other != "-" => {
                 return Err(format!("unknown option: {other}"));
             }
-            other => {
+            // `arg` is empty for an argument that is not text, which cannot
+            // start with `-` and so is never read as an option.
+            _ => {
+                let Some(named) = argv.get(i) else { break };
                 if args.username.is_some() {
-                    return Err(format!("unexpected argument: {other}"));
+                    return Err(format!("unexpected argument: {}", quoteaf_os(named)));
                 }
-                args.username = Some(other.to_string());
+                args.username = Some(named.clone());
             }
         }
         i = i.saturating_add(1);
@@ -443,7 +466,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
 // The command
 // ============================================================================
 
-fn cmd_chage(argv: &[String], path: &Path, caller_uid: u32) -> i32 {
+fn cmd_chage(argv: &[OsString], path: &Path, caller_uid: u32) -> i32 {
     let args = match parse_args(argv) {
         Ok(a) => a,
         Err(e) => {
@@ -453,9 +476,17 @@ fn cmd_chage(argv: &[String], path: &Path, caller_uid: u32) -> i32 {
         }
     };
 
-    let Some(username) = args.username else {
+    let Some(named) = args.username else {
         eprintln!("chage: no username specified");
         print_usage();
+        return 1;
+    };
+
+    // An account name is text, so a name that is not text names no account.
+    // Reported as "does not exist" rather than as a decoding error, because
+    // that is what it is.
+    let Some(username) = named.to_str().map(str::to_string) else {
+        eprintln!("chage: user {} does not exist", quoteaf_os(&named));
         return 1;
     };
 
@@ -545,7 +576,9 @@ fn cmd_chage(argv: &[String], path: &Path, caller_uid: u32) -> i32 {
 }
 
 fn main() {
-    let argv: Vec<String> = env::args().skip(1).collect();
+    // `args_os`, not `args`: the latter's iterator is a literal `unwrap` and
+    // panics on an argument that is not valid UTF-8.
+    let argv: Vec<OsString> = env::args_os().skip(1).collect();
     let path = Path::new(userdb::DEFAULT_PATH);
     process::exit(cmd_chage(&argv, path, current_uid()));
 }
@@ -582,8 +615,30 @@ mod tests {
     }
 
     fn run(args: &[&str], path: &Path) -> i32 {
-        let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-        cmd_chage(&argv, path, 0)
+        cmd_chage(&argv(args), path, 0)
+    }
+
+    /// The command line, as `env::args_os` would deliver it.
+    fn argv(parts: &[&str]) -> Vec<OsString> {
+        parts.iter().map(OsString::from).collect()
+    }
+
+    /// An argument that a `String` cannot hold. The development host is
+    /// Windows, where argv arrives as UTF-16 and the unrepresentable case is
+    /// an unpaired surrogate rather than a stray byte -- so the fixture is
+    /// written both ways, and each test asserts that it really is
+    /// unrepresentable rather than leaving that to the reader.
+    fn not_text() -> OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            OsString::from_vec(vec![b'a', 0x80, b'b'])
+        }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::ffi::OsStringExt as _;
+            OsString::from_wide(&[0x0061, 0xD800, 0x0062])
+        }
     }
 
     // ---- The bug this rewrite exists for ----
@@ -886,19 +941,53 @@ mod tests {
 
     #[test]
     fn an_option_missing_its_value_is_refused() {
-        assert!(parse_args(&["-M".to_string()]).is_err());
-        assert!(parse_args(&["-E".to_string()]).is_err());
+        assert!(parse_args(&argv(&["-M"])).is_err());
+        assert!(parse_args(&argv(&["-E"])).is_err());
     }
 
     #[test]
     fn an_unknown_option_is_refused() {
-        assert!(parse_args(&["-Z".to_string(), "alice".to_string()]).is_err());
+        assert!(parse_args(&argv(&["-Z", "alice"])).is_err());
     }
 
     #[test]
     fn a_second_username_is_refused() {
-        let argv = ["alice".to_string(), "bob".to_string()];
-        assert!(parse_args(&argv).is_err());
+        assert!(parse_args(&argv(&["alice", "bob"])).is_err());
+    }
+
+    /// An argument that is not text is a name, not a crash. `env::args()`
+    /// would have panicked before `main` ran a line of this file.
+    #[test]
+    fn an_argument_that_is_not_text_is_a_name_and_not_a_crash() {
+        let odd = not_text();
+        assert!(
+            odd.to_str().is_none(),
+            "the fixture must be unrepresentable as a `String`, or this test \
+             asserts nothing"
+        );
+
+        let parsed =
+            parse_args(std::slice::from_ref(&odd)).expect("a name, however spelled, parses");
+        assert_eq!(parsed.username.as_deref(), Some(odd.as_os_str()));
+        assert!(!parsed.list);
+    }
+
+    /// ...and such a name is reported as a user who does not exist, which is
+    /// what it is: an account name is text, so no account can have that name.
+    #[test]
+    fn a_name_that_is_not_text_is_reported_as_a_user_that_does_not_exist() {
+        let scratch = ScratchDir::new("chage-odd-name");
+        let path = scratch_with(&scratch, &Aging::default());
+        assert_eq!(cmd_chage(&[OsString::from("-l"), not_text()], &path, 0), 1);
+    }
+
+    /// A value that is not text is refused with the bytes shown, rather than
+    /// interpolated into the message raw.
+    #[test]
+    fn a_value_that_is_not_text_is_refused_and_quoted() {
+        let args = vec![OsString::from("-M"), not_text(), OsString::from("alice")];
+        let err = parse_args(&args).expect_err("not a number");
+        assert!(err.starts_with("invalid value for -M: "), "{err}");
     }
 
     /// `-l` reads and the other options write; asking for both in one run is a
@@ -918,9 +1007,9 @@ mod tests {
     fn an_ordinary_user_may_not_change_a_policy() {
         let scratch = ScratchDir::new("chage-perm");
         let path = scratch_with(&scratch, &Aging::default());
-        let argv = ["-M".to_string(), "90".to_string(), "alice".to_string()];
+        let args = argv(&["-M", "90", "alice"]);
 
-        assert_eq!(cmd_chage(&argv, &path, 1000), 1);
+        assert_eq!(cmd_chage(&args, &path, 1000), 1);
         assert_eq!(aging_at(&path).max_days, None);
     }
 
@@ -930,8 +1019,8 @@ mod tests {
     fn an_ordinary_user_may_not_read_another_accounts_policy() {
         let scratch = ScratchDir::new("chage-perm-list");
         let path = scratch_with(&scratch, &Aging::default());
-        let argv = ["-l".to_string(), "alice".to_string()];
+        let args = argv(&["-l", "alice"]);
 
-        assert_eq!(cmd_chage(&argv, &path, 1000), 1);
+        assert_eq!(cmd_chage(&args, &path, 1000), 1);
     }
 }

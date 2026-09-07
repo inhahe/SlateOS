@@ -21,9 +21,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use appearance::AccentColor;
 use guiremote::control::{RequestBody, ShellControlAction};
 use guiremote::window_list::WindowInfo;
-use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
+use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEventKind, SettingsGroup};
 use guitk::render::RenderCommand;
 use oswindow::InputEvent;
 use oswindow::testing::{TestConnection, TestDesktop, desktop as wired};
@@ -903,6 +904,121 @@ fn a_press_the_shell_does_not_want_repaints_nothing() {
     press_at(&desktop, session.background(), 400.0, 400.0);
     session.pump().expect("pump");
     assert_eq!(desktop.borrow_mut().drawn().len(), before);
+}
+
+// ---- a settings change, announced rather than polled ----
+
+/// Announce a settings change to one of the shell's surfaces, the way the
+/// compositor does after handling a `ReloadAppearance` request.
+fn announce(desktop: &Desktop, surface: Surface, group: SettingsGroup) {
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        surface.window(),
+        guitk::event::Event::SettingsChanged { group },
+    )]);
+}
+
+#[test]
+fn an_announced_appearance_change_repaints_the_chrome() {
+    // The end of the chain this feature is: the Settings app writes
+    // `appearance.yaml` and sends `ReloadAppearance`; the compositor re-reads
+    // and announces; the shell re-reads and repaints. `apps/settings` proves
+    // the first link and `wire.rs` the second. This is the third.
+    settingsfile::testing::with_scratch_config("session-announce", |_root| {
+        let (mut session, desktop) = session();
+        session.shell_mut().load_appearance();
+        let before_accent = session.shell().appearance.accent_color;
+        let before_drawn = desktop.borrow_mut().drawn().len();
+
+        // Somebody else rewrites the file.
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.accent_color = if before_accent == AccentColor::Teal {
+            AccentColor::Mauve
+        } else {
+            AccentColor::Teal
+        };
+        file.save().expect("save");
+
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+
+        assert_ne!(
+            session.shell().appearance.accent_color,
+            before_accent,
+            "the shell should have re-read the file it was told about"
+        );
+        assert!(
+            desktop.borrow_mut().drawn().len() > before_drawn,
+            "and repainted, since the chrome is drawn in the accent"
+        );
+    });
+}
+
+#[test]
+fn an_announcement_with_nothing_behind_it_repaints_nothing() {
+    // The compositor announces once per window, so the shell hears the same
+    // change four times -- one per surface. Only the first can find anything
+    // changed; the rest must be free. They are, because `poll_appearance`
+    // compares the settings it read against the ones it holds rather than
+    // trusting that an announcement means a difference.
+    settingsfile::testing::with_scratch_config("session-announce-twice", |_root| {
+        let (mut session, desktop) = session();
+        session.shell_mut().load_appearance();
+
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.accent_color = AccentColor::Peach;
+        file.save().expect("save");
+
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+        let after_first = desktop.borrow_mut().drawn().len();
+
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+        assert_eq!(
+            desktop.borrow_mut().drawn().len(),
+            after_first,
+            "the second announcement of the same change should cost nothing"
+        );
+    });
+}
+
+#[test]
+fn an_input_settings_announcement_does_not_touch_the_shell() {
+    // The shell reads `appearance.yaml` and not `input.yaml`, so an
+    // announcement about the other group is not its business.
+    //
+    // The appearance file is changed *and left changed* on purpose. A first
+    // version of this test announced `Input` against an unchanged file and
+    // proved nothing: with nothing to find, a handler that ignored the group
+    // entirely also repainted nothing, and the mutation that deletes the group
+    // check survived. What separates the two is an announcement naming one
+    // group while the *other* group's file is dirty -- then the over-eager
+    // handler adopts a change it was never told about, and the correct one
+    // waits to be told.
+    settingsfile::testing::with_scratch_config("session-announce-input", |_root| {
+        let (mut session, desktop) = session();
+        session.shell_mut().load_appearance();
+        let before_accent = session.shell().appearance.accent_color;
+        let before_drawn = desktop.borrow_mut().drawn().len();
+
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.accent_color = if before_accent == AccentColor::Teal {
+            AccentColor::Mauve
+        } else {
+            AccentColor::Teal
+        };
+        file.save().expect("save");
+
+        announce(&desktop, session.panel(), SettingsGroup::Input);
+        session.pump().expect("pump");
+
+        assert_eq!(
+            session.shell().appearance.accent_color,
+            before_accent,
+            "an input announcement must not make the shell read appearance"
+        );
+        assert_eq!(desktop.borrow_mut().drawn().len(), before_drawn);
+    });
 }
 
 // ---- following the display ----

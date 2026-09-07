@@ -72,7 +72,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use appearance::Palette;
-use guitk::event::{Event, MouseEvent};
+use guitk::event::{Event, MouseEvent, SettingsGroup};
 use guitk::render::RenderTree;
 use oswindow::{
     ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer, PixelFormat, Spec,
@@ -1043,6 +1043,28 @@ impl<T: Transport> ShellSession<T> {
             // asked for, so a late frame steps further rather than slowing the
             // animation down.
             Event::Tick { elapsed_ms } => self.step_frame(elapsed_ms),
+            // Somebody rewrote `appearance.yaml` -- the Settings app, almost
+            // always -- and the compositor has passed the word on. This is
+            // what makes a theme change take effect while the desktop is
+            // running instead of at the next login.
+            //
+            // Told rather than polled, and that is the whole design: a timer
+            // would end the property `animations` documents a few fields up,
+            // that an idle desktop registers no wake-up at all and parks
+            // unbounded. Being told costs nothing when nothing happens. See
+            // design-decisions 812.
+            //
+            // Arrives once per surface, since the compositor addresses the
+            // announcement to each window and the shell has four. The second
+            // and later ones are free: `poll_appearance` re-reads, finds the
+            // settings identical to what it just applied, and answers `false`.
+            Event::SettingsChanged {
+                group: SettingsGroup::Appearance,
+            } => {
+                if self.shell.poll_appearance() {
+                    self.dirty = true;
+                }
+            }
             _ => {}
         }
         if !overview_was_visible && self.shell.overview.visible {

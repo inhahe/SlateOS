@@ -22,8 +22,10 @@
 // preserved for the future driver-attached implementation.
 #![allow(dead_code)]
 
+use quoting::quoteaf_os;
 #[cfg(not(test))]
 use std::env;
+use std::ffi::OsString;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -121,11 +123,35 @@ impl Default for Config {
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-fn parse_args(args: &[String]) -> Result<Config, String> {
+/// The value that follows an option, as the bytes the caller gave.
+///
+/// Kept undecoded for the options whose value is a *path* -- `-f`, `-l`, `-r`
+/// -- because a path on this OS may hold any byte but `/` and NUL, and going
+/// through a `String` would refuse the very names the design allows.
+fn raw_at<'a>(args: &'a [OsString], i: usize, need: &'static str) -> Result<&'a OsString, String> {
+    args.get(i).ok_or_else(|| need.to_string())
+}
+
+/// The value that follows an option, as text.
+///
+/// For the options whose value is text by definition -- a login name, a
+/// hostname, a number. A value that cannot be decoded is not one of those, and
+/// is refused with the bytes shown rather than interpolated: an argument may
+/// hold a newline, and this program's output goes to a console.
+fn text_at<'a>(args: &'a [OsString], i: usize, need: &'static str) -> Result<&'a str, String> {
+    let raw = raw_at(args, i, need)?;
+    raw.to_str()
+        .ok_or_else(|| format!("{need}, and {} is not one", quoteaf_os(raw)))
+}
+
+fn parse_args(args: &[OsString]) -> Result<Config, String> {
+    // `argv[0]` is a path, and one that cannot be decoded is not any of the
+    // names this binary answers to -- so it takes the default, which is the
+    // same answer any other unrecognised name gets.
     let personality = args
         .first()
-        .map(|a| detect_personality(a))
-        .unwrap_or(Personality::Getty);
+        .and_then(|a| a.to_str())
+        .map_or(Personality::Getty, detect_personality);
 
     let mut cfg = Config {
         personality,
@@ -133,37 +159,39 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
     };
 
     let mut i = 1;
-    let mut positional = Vec::new();
+    let mut positional: Vec<OsString> = Vec::new();
 
+    // An argument that is not valid UTF-8 matches no option, so it falls to
+    // the positional arm -- where the port name is, which is a device path.
     while i < args.len() {
-        let arg = &args[i];
-        match arg.as_str() {
+        let Some(raw) = args.get(i) else { break };
+        match raw.to_str().unwrap_or_default() {
             "-h" | "--help" => cfg.show_help = true,
             "-V" | "--version" => cfg.show_version = true,
             "-8" | "--8bits" => {} // accept but no-op in our implementation
             "-a" | "--autologin" => {
                 i += 1;
-                cfg.autologin_user = Some(args.get(i).ok_or("-a requires a username")?.clone());
+                cfg.autologin_user = Some(text_at(args, i, "-a requires a username")?.to_string());
             }
             "-c" | "--noreset" => cfg.no_reset = true,
             "-E" | "--remote" => {} // accept, no-op
             "-f" | "--issue-file" => {
                 i += 1;
-                cfg.issue_file = PathBuf::from(args.get(i).ok_or("-f requires a filename")?);
+                cfg.issue_file = PathBuf::from(raw_at(args, i, "-f requires a filename")?);
             }
             "-H" | "--host" => {
                 i += 1;
-                cfg.host = Some(args.get(i).ok_or("-H requires a hostname")?.clone());
+                cfg.host = Some(text_at(args, i, "-H requires a hostname")?.to_string());
             }
             "-i" | "--noissue" => cfg.no_issue = true,
             "-I" | "--init-string" => {
                 i += 1;
-                cfg.init_string = Some(args.get(i).ok_or("-I requires a string")?.clone());
+                cfg.init_string = Some(text_at(args, i, "-I requires a string")?.to_string());
             }
             "-J" | "--noclear" => cfg.no_clear = true,
             "-l" | "--login-program" => {
                 i += 1;
-                cfg.login_program = PathBuf::from(args.get(i).ok_or("-l requires a program path")?);
+                cfg.login_program = PathBuf::from(raw_at(args, i, "-l requires a program path")?);
             }
             "-L" | "--local-line" => cfg.local_line = true,
             "-m" | "--extract-baud" => cfg.keep_baud = true,
@@ -173,15 +201,14 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
             "-p" | "--login-pause" => cfg.login_pause = true,
             "-r" | "--chroot" => {
                 i += 1;
-                cfg.chroot_dir = Some(PathBuf::from(args.get(i).ok_or("-r requires a directory")?));
+                cfg.chroot_dir = Some(PathBuf::from(raw_at(args, i, "-r requires a directory")?));
             }
             "-R" | "--hangup" => {} // accept, no-op
             "-s" | "--keep-baud" => cfg.keep_baud = true,
             "-t" | "--timeout" => {
                 i += 1;
                 cfg.timeout = Some(
-                    args.get(i)
-                        .ok_or("-t requires a number")?
+                    text_at(args, i, "-t requires a number")?
                         .parse::<u32>()
                         .map_err(|e| format!("-t: {e}"))?,
                 );
@@ -192,19 +219,18 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
             "--nohostname" => cfg.no_hostname = true,
             "--erase-chars" => {
                 i += 1;
-                let s = args.get(i).ok_or("--erase-chars requires a char")?;
+                let s = text_at(args, i, "--erase-chars requires a char")?;
                 cfg.erase_char = s.chars().next();
             }
             "--kill-chars" => {
                 i += 1;
-                let s = args.get(i).ok_or("--kill-chars requires a char")?;
+                let s = text_at(args, i, "--kill-chars requires a char")?;
                 cfg.kill_char = s.chars().next();
             }
             "--delay" => {
                 i += 1;
                 cfg.delay = Some(
-                    args.get(i)
-                        .ok_or("--delay requires a number")?
+                    text_at(args, i, "--delay requires a number")?
                         .parse::<u32>()
                         .map_err(|e| format!("--delay: {e}"))?,
                 );
@@ -212,8 +238,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
             "--nice" => {
                 i += 1;
                 cfg.nice_value = Some(
-                    args.get(i)
-                        .ok_or("--nice requires a number")?
+                    text_at(args, i, "--nice requires a number")?
                         .parse::<i32>()
                         .map_err(|e| format!("--nice: {e}"))?,
                 );
@@ -221,7 +246,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
             other if other.starts_with('-') => {
                 return Err(format!("unknown option: {other}"));
             }
-            _ => positional.push(arg.clone()),
+            _ => positional.push(raw.clone()),
         }
         i += 1;
     }
@@ -230,17 +255,23 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
     match personality {
         Personality::Mingetty => {
             if let Some(port) = positional.first() {
-                cfg.port = port.clone();
+                cfg.port = port.to_string_lossy().into_owned();
             }
             // mingetty doesn't use baud rates
         }
         Personality::Getty => {
             if let Some(port) = positional.first() {
-                cfg.port = port.clone();
+                cfg.port = port.to_string_lossy().into_owned();
             }
             if positional.len() > 1 {
                 cfg.baud_rates.clear();
-                for baud_str in &positional[1..] {
+                for baud in positional.iter().skip(1) {
+                    // A baud rate is a number, so one that is not text is not
+                    // one -- and is refused with the bytes shown rather than
+                    // silently taken as zero.
+                    let baud_str = baud
+                        .to_str()
+                        .ok_or_else(|| format!("invalid baud rate {}", quoteaf_os(baud)))?;
                     // baud rates can be comma-separated
                     for piece in baud_str.split(',') {
                         let b = piece
@@ -643,7 +674,9 @@ fn run_getty(
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
-    let args: Vec<String> = env::args().collect();
+    // `args_os`, not `args`: the latter's iterator is a literal `unwrap` and
+    // panics on an argument that is not valid UTF-8.
+    let args: Vec<OsString> = env::args_os().collect();
 
     let cfg = match parse_args(&args) {
         Ok(c) => c,
@@ -692,6 +725,75 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    /// The command line, as `env::args_os` would deliver it.
+    fn argv(parts: &[&str]) -> Vec<OsString> {
+        parts.iter().map(OsString::from).collect()
+    }
+
+    /// An argument that a `String` cannot hold. The development host is
+    /// Windows, where argv arrives as UTF-16 and the unrepresentable case is
+    /// an unpaired surrogate rather than a stray byte -- so the fixture is
+    /// written both ways.
+    fn not_text() -> OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            OsString::from_vec(vec![b'a', 0x80, b'b'])
+        }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::ffi::OsStringExt as _;
+            OsString::from_wide(&[0x0061, 0xD800, 0x0062])
+        }
+    }
+
+    /// A path option keeps the bytes it was given.
+    ///
+    /// `-l` names the login program and `-f` names the issue file; both are
+    /// paths, and a path on this OS may hold any byte but `/` and NUL. Going
+    /// through a `String` would have refused exactly the names the design
+    /// allows -- and before that, `env::args()` panicked before `main` ran a
+    /// line of this file. See `known-issues.md` ->
+    /// `B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`.
+    #[test]
+    fn a_path_option_keeps_the_bytes_it_was_given() {
+        let odd = not_text();
+        assert!(
+            odd.to_str().is_none(),
+            "the fixture must be unrepresentable as a `String`, or this test              asserts nothing"
+        );
+
+        let args = vec![
+            OsString::from("getty"),
+            OsString::from("-l"),
+            odd.clone(),
+            OsString::from("-f"),
+            odd.clone(),
+            OsString::from("tty1"),
+        ];
+        let cfg = parse_args(&args).expect("a path, however spelled, parses");
+        assert_eq!(cfg.login_program.as_os_str(), odd.as_os_str());
+        assert_eq!(cfg.issue_file.as_os_str(), odd.as_os_str());
+    }
+
+    /// A value that must be text and is not is refused, with the bytes shown
+    /// rather than interpolated: an argument may hold a newline.
+    #[test]
+    fn a_text_option_that_is_not_text_is_refused_and_quoted() {
+        let args = vec![OsString::from("getty"), OsString::from("-H"), not_text()];
+        let err = parse_args(&args).expect_err("not text");
+        assert!(err.contains("-H requires a hostname"), "{err}");
+        assert!(err.contains("is not one"), "{err}");
+    }
+
+    /// A baud rate that is not text is refused rather than silently ignored.
+    #[test]
+    fn a_baud_rate_that_is_not_text_is_refused() {
+        let args = vec![OsString::from("getty"), OsString::from("tty1"), not_text()];
+        let err = parse_args(&args).expect_err("not a baud rate");
+        assert!(err.starts_with("invalid baud rate "), "{err}");
+    }
+
     #[test]
     fn test_detect_personality_getty() {
         assert_eq!(detect_personality("getty"), Personality::Getty);
@@ -708,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_basic() {
-        let args = vec!["getty".to_string(), "tty1".to_string()];
+        let args = argv(&["getty", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.port, "tty1");
         assert_eq!(cfg.personality, Personality::Getty);
@@ -716,11 +818,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_with_baud() {
-        let args = vec![
-            "getty".to_string(),
-            "ttyS0".to_string(),
-            "115200,9600".to_string(),
-        ];
+        let args = argv(&["getty", "ttyS0", "115200,9600"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.port, "ttyS0");
         assert_eq!(cfg.baud_rates, vec![115200, 9600]);
@@ -728,12 +826,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_autologin() {
-        let args = vec![
-            "getty".to_string(),
-            "-a".to_string(),
-            "root".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = argv(&["getty", "-a", "root", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.autologin_user, Some("root".to_string()));
         assert_eq!(cfg.port, "tty1");
@@ -741,116 +834,90 @@ mod tests {
 
     #[test]
     fn test_parse_args_noissue() {
-        let args = vec!["getty".to_string(), "-i".to_string(), "tty1".to_string()];
+        let args = argv(&["getty", "-i", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_issue);
     }
 
     #[test]
     fn test_parse_args_login_program() {
-        let args = vec![
-            "getty".to_string(),
-            "-l".to_string(),
-            "/usr/bin/login".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = argv(&["getty", "-l", "/usr/bin/login", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.login_program, PathBuf::from("/usr/bin/login"));
     }
 
     #[test]
     fn test_parse_args_timeout() {
-        let args = vec![
-            "getty".to_string(),
-            "-t".to_string(),
-            "60".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = argv(&["getty", "-t", "60", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.timeout, Some(60));
     }
 
     #[test]
     fn test_parse_args_host() {
-        let args = vec![
-            "getty".to_string(),
-            "-H".to_string(),
-            "remote.host".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = argv(&["getty", "-H", "remote.host", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.host, Some("remote.host".to_string()));
     }
 
     #[test]
     fn test_parse_args_skip_login() {
-        let args = vec!["getty".to_string(), "-n".to_string(), "tty1".to_string()];
+        let args = argv(&["getty", "-n", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.skip_login);
     }
 
     #[test]
     fn test_parse_args_noclear() {
-        let args = vec!["getty".to_string(), "-J".to_string(), "tty1".to_string()];
+        let args = argv(&["getty", "-J", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_clear);
     }
 
     #[test]
     fn test_parse_args_noreset() {
-        let args = vec!["getty".to_string(), "-c".to_string(), "tty1".to_string()];
+        let args = argv(&["getty", "-c", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_reset);
     }
 
     #[test]
     fn test_parse_args_chroot() {
-        let args = vec![
-            "getty".to_string(),
-            "-r".to_string(),
-            "/mnt/root".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = argv(&["getty", "-r", "/mnt/root", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.chroot_dir, Some(PathBuf::from("/mnt/root")));
     }
 
     #[test]
     fn test_parse_args_multiple_baud_separate() {
-        let args = vec![
-            "getty".to_string(),
-            "ttyS0".to_string(),
-            "115200".to_string(),
-            "57600".to_string(),
-            "9600".to_string(),
-        ];
+        let args = argv(&["getty", "ttyS0", "115200", "57600", "9600"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.baud_rates, vec![115200, 57600, 9600]);
     }
 
     #[test]
     fn test_parse_args_unknown_option() {
-        let args = vec!["getty".to_string(), "--badopt".to_string()];
+        let args = argv(&["getty", "--badopt"]);
         assert!(parse_args(&args).is_err());
     }
 
     #[test]
     fn test_parse_args_help() {
-        let args = vec!["getty".to_string(), "--help".to_string()];
+        let args = argv(&["getty", "--help"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.show_help);
     }
 
     #[test]
     fn test_parse_args_version() {
-        let args = vec!["getty".to_string(), "-V".to_string()];
+        let args = argv(&["getty", "-V"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.show_version);
     }
 
     #[test]
     fn test_parse_args_mingetty() {
-        let args = vec!["mingetty".to_string(), "tty1".to_string()];
+        let args = argv(&["mingetty", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.personality, Personality::Mingetty);
         assert_eq!(cfg.port, "tty1");
@@ -858,26 +925,14 @@ mod tests {
 
     #[test]
     fn test_parse_args_init_string() {
-        let args = vec![
-            "getty".to_string(),
-            "-I".to_string(),
-            "ATZ\r".to_string(),
-            "ttyS0".to_string(),
-        ];
+        let args = argv(&["getty", "-I", "ATZ\r", "ttyS0"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.init_string, Some("ATZ\r".to_string()));
     }
 
     #[test]
     fn test_parse_args_erase_kill_chars() {
-        let args = vec![
-            "getty".to_string(),
-            "--erase-chars".to_string(),
-            "#".to_string(),
-            "--kill-chars".to_string(),
-            "@".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = argv(&["getty", "--erase-chars", "#", "--kill-chars", "@", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.erase_char, Some('#'));
         assert_eq!(cfg.kill_char, Some('@'));
@@ -1138,70 +1193,56 @@ mod tests {
 
     #[test]
     fn test_parse_args_nice() {
-        let args = vec![
-            "getty".to_string(),
-            "--nice".to_string(),
-            "10".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = argv(&["getty", "--nice", "10", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.nice_value, Some(10));
     }
 
     #[test]
     fn test_parse_args_delay() {
-        let args = vec![
-            "getty".to_string(),
-            "--delay".to_string(),
-            "500".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = argv(&["getty", "--delay", "500", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.delay, Some(500));
     }
 
     #[test]
     fn test_parse_args_keep_baud() {
-        let args = vec!["getty".to_string(), "-s".to_string(), "ttyS0".to_string()];
+        let args = argv(&["getty", "-s", "ttyS0"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.keep_baud);
     }
 
     #[test]
     fn test_parse_args_local_line() {
-        let args = vec!["getty".to_string(), "-L".to_string(), "ttyS0".to_string()];
+        let args = argv(&["getty", "-L", "ttyS0"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.local_line);
     }
 
     #[test]
     fn test_parse_args_nonewline() {
-        let args = vec!["getty".to_string(), "-N".to_string(), "tty1".to_string()];
+        let args = argv(&["getty", "-N", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_newline);
     }
 
     #[test]
     fn test_parse_args_login_pause() {
-        let args = vec!["getty".to_string(), "-p".to_string(), "tty1".to_string()];
+        let args = argv(&["getty", "-p", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.login_pause);
     }
 
     #[test]
     fn test_parse_args_long_hostname() {
-        let args = vec!["getty".to_string(), "-o".to_string(), "tty1".to_string()];
+        let args = argv(&["getty", "-o", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.long_hostname);
     }
 
     #[test]
     fn test_parse_args_nohostname() {
-        let args = vec![
-            "getty".to_string(),
-            "--nohostname".to_string(),
-            "tty1".to_string(),
-        ];
+        let args = argv(&["getty", "--nohostname", "tty1"]);
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_hostname);
     }

@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS getty - virtual terminal login manager (agetty/mingetty)"
 [dependencies]
+# One rendering of untrusted text inside a diagnostic. A device name or a
+# login name reaches this program's output, and either may hold any byte but
+# `/` and NUL -- including a newline, which would let whoever chose the name
+# write extra lines of a console program's output.
+quoting = { path = "../quoting" }

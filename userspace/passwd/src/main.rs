@@ -59,6 +59,7 @@
 
 use quoting::quoteaf_os;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, Write};
 use std::process;
 use userdb::{Aging, Record, UserDb};
@@ -459,19 +460,46 @@ enum Action {
     SetInactiveDays(i64),
 }
 
+#[derive(Debug)]
 struct Args {
     action: Action,
-    target_user: Option<String>,
+    /// The account named on the command line, still as the bytes the caller
+    /// gave. Not a `String`: `env::args()` *panics* on an argument that is not
+    /// valid UTF-8, and a setuid program that dies before its own first
+    /// statement is a worse answer than one that says "no such user". See
+    /// `known-issues.md` -> `B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`.
+    target_user: Option<OsString>,
 }
 
-fn parse_args(raw: &[String]) -> Result<Args, String> {
+/// The argument at `idx` as text, or `None` if it is not valid UTF-8.
+///
+/// Every argument this program accepts -- an option, a day count, a login name
+/// -- is text by definition, so "not UTF-8" always means "not one of those".
+/// The value is still carried as `OsStr` so that the *message* can show what
+/// was actually passed.
+fn text(raw: &[OsString], idx: usize) -> Option<&str> {
+    raw.get(idx).and_then(|a| a.to_str())
+}
+
+/// The day count at `idx`, or an error naming what was there instead.
+fn days_at(raw: &[OsString], idx: usize, option: &str) -> Result<i64, String> {
+    let Some(arg) = raw.get(idx) else {
+        return Err(format!("option {option} requires a numeric argument"));
+    };
+    arg.to_str()
+        .and_then(|t| t.parse().ok())
+        .ok_or_else(|| format!("invalid number for {option}: {}", quoteaf_os(arg)))
+}
+
+fn parse_args(raw: &[OsString]) -> Result<Args, String> {
     let mut action = Action::ChangePassword;
-    let mut target_user: Option<String> = None;
+    let mut target_user: Option<OsString> = None;
     let mut idx = 1; // skip argv[0]
 
     while idx < raw.len() {
-        let arg = &raw[idx];
-        match arg.as_str() {
+        // A non-UTF-8 argument matches no option, so it falls to the last arm
+        // and is treated as a name -- which is what it would have to be.
+        match text(raw, idx).unwrap_or_default() {
             "-l" | "--lock" => {
                 action = Action::Lock;
                 idx += 1;
@@ -494,46 +522,22 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             }
             "-n" | "--mindays" => {
                 idx += 1;
-                if idx >= raw.len() {
-                    return Err("option -n requires a numeric argument".to_string());
-                }
-                let days: i64 = raw[idx]
-                    .parse()
-                    .map_err(|_| format!("invalid number for -n: {}", raw[idx]))?;
-                action = Action::SetMinDays(days);
+                action = Action::SetMinDays(days_at(raw, idx, "-n")?);
                 idx += 1;
             }
             "-x" | "--maxdays" => {
                 idx += 1;
-                if idx >= raw.len() {
-                    return Err("option -x requires a numeric argument".to_string());
-                }
-                let days: i64 = raw[idx]
-                    .parse()
-                    .map_err(|_| format!("invalid number for -x: {}", raw[idx]))?;
-                action = Action::SetMaxDays(days);
+                action = Action::SetMaxDays(days_at(raw, idx, "-x")?);
                 idx += 1;
             }
             "-w" | "--warndays" => {
                 idx += 1;
-                if idx >= raw.len() {
-                    return Err("option -w requires a numeric argument".to_string());
-                }
-                let days: i64 = raw[idx]
-                    .parse()
-                    .map_err(|_| format!("invalid number for -w: {}", raw[idx]))?;
-                action = Action::SetWarnDays(days);
+                action = Action::SetWarnDays(days_at(raw, idx, "-w")?);
                 idx += 1;
             }
             "-i" | "--inactive" => {
                 idx += 1;
-                if idx >= raw.len() {
-                    return Err("option -i requires a numeric argument".to_string());
-                }
-                let days: i64 = raw[idx]
-                    .parse()
-                    .map_err(|_| format!("invalid number for -i: {}", raw[idx]))?;
-                action = Action::SetInactiveDays(days);
+                action = Action::SetInactiveDays(days_at(raw, idx, "-i")?);
                 idx += 1;
             }
             "-h" | "--help" => {
@@ -541,13 +545,16 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
                 process::exit(0);
             }
             other => {
+                // `other` is empty for an argument that is not UTF-8, which
+                // cannot start with `-` and so is never read as an option.
                 if other.starts_with('-') {
                     return Err(format!("unknown option: {other}"));
                 }
+                let Some(arg) = raw.get(idx) else { break };
                 if target_user.is_some() {
-                    return Err(format!("unexpected argument: {other}"));
+                    return Err(format!("unexpected argument: {}", quoteaf_os(arg)));
                 }
-                target_user = Some(other.to_string());
+                target_user = Some(arg.clone());
                 idx += 1;
             }
         }
@@ -920,7 +927,9 @@ fn set_aging_field(
 // ============================================================================
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    // `args_os`, not `args`: the latter's iterator is a literal `unwrap`
+    // and panics on an argument that is not valid UTF-8.
+    let args: Vec<OsString> = env::args_os().collect();
 
     let parsed = match parse_args(&args) {
         Ok(a) => a,
@@ -934,15 +943,24 @@ fn main() {
     let caller_uid = current_uid();
 
     // Resolve target user.
-    let target = match &parsed.target_user {
+    let named = match &parsed.target_user {
         Some(name) => name.clone(),
         None => match current_username() {
-            Some(name) => name,
+            Some(name) => OsString::from(name),
             None => {
                 eprintln!("passwd: cannot determine current user");
                 process::exit(1);
             }
         },
+    };
+
+    // An account name is text, so a name that is not UTF-8 names no account.
+    // Reported as "does not exist" rather than as a decoding error, because
+    // that is what it is, and printed through `quoteaf_os` because the bytes
+    // that got here are the caller's.
+    let Some(target) = named.to_str().map(str::to_string) else {
+        eprintln!("passwd: user {} does not exist", quoteaf_os(&named));
+        process::exit(1);
     };
 
     // The database is read once, here, and handed to whichever command runs.
@@ -964,8 +982,8 @@ fn main() {
 
     // Permission check: non-root users can only change their own password
     // (the default ChangePassword action, no flags).
-    let changing_own =
-        parsed.target_user.is_none() || current_username().as_deref() == Some(target.as_str());
+    let changing_own = parsed.target_user.is_none()
+        || current_username().as_deref().map(OsStr::new) == Some(named.as_os_str());
 
     if !is_root() && !changing_own {
         eprintln!("passwd: only root may change another user's password");
@@ -1384,9 +1402,97 @@ mod tests {
 
     // ---- Argument parsing tests ----
 
+    /// The command line, as `env::args_os` would deliver it.
+    fn argv(parts: &[&str]) -> Vec<OsString> {
+        parts.iter().map(OsString::from).collect()
+    }
+
+    /// An argument that a `String` cannot hold.
+    ///
+    /// On this OS a path may hold every byte except `/` and NUL, so such an
+    /// argument is legal input rather than a curiosity. The development host
+    /// is Windows, where argv arrives as UTF-16 and the unrepresentable case
+    /// is an unpaired surrogate instead -- so the fixture is written both
+    /// ways, and the assertion that it *is* unrepresentable is part of each
+    /// test rather than left to the reader.
+    fn not_text() -> OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            OsString::from_vec(vec![b'a', 0x80, b'b'])
+        }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::ffi::OsStringExt as _;
+            OsString::from_wide(&[0x0061, 0xD800, 0x0062])
+        }
+    }
+
+    /// An argument that is not text is a name, not a crash.
+    ///
+    /// `env::args()`'s iterator is a literal `unwrap` and panics on such an
+    /// argument -- so this program used to die before running a line of its
+    /// own, from a *setuid* binary. Now it parses it, finds no such account,
+    /// and says so. See `known-issues.md` ->
+    /// `B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`.
+    #[test]
+    fn an_argument_that_is_not_text_is_a_name_and_not_a_crash() {
+        let odd = not_text();
+        assert!(
+            odd.to_str().is_none(),
+            "the fixture must be unrepresentable as a `String`, or this test \
+             asserts nothing"
+        );
+
+        let args = vec![OsString::from("passwd"), odd.clone()];
+        let parsed = parse_args(&args).expect("a name, however spelled, parses");
+        assert!(matches!(parsed.action, Action::ChangePassword));
+        assert_eq!(parsed.target_user.as_deref(), Some(odd.as_os_str()));
+    }
+
+    /// ...and it is never read as an option. An argument that cannot be
+    /// decoded matches no flag, and the arm that catches it must not then
+    /// treat the empty decoding as though the argument were empty.
+    #[test]
+    fn an_argument_that_is_not_text_is_never_read_as_an_option() {
+        let odd = not_text();
+        let args = vec![OsString::from("passwd"), OsString::from("-l"), odd.clone()];
+        let parsed = parse_args(&args).expect("parses");
+        assert!(matches!(parsed.action, Action::Lock));
+        assert_eq!(parsed.target_user.as_deref(), Some(odd.as_os_str()));
+    }
+
+    /// A day count that is not a number is refused, and the message shows
+    /// what was passed rather than interpolating it raw -- an argument may
+    /// hold a newline, and this program's stderr is a privileged program's.
+    #[test]
+    fn a_day_count_that_is_not_a_number_is_refused_and_quoted() {
+        let args = vec![
+            OsString::from("passwd"),
+            OsString::from("-x"),
+            not_text(),
+            OsString::from("alice"),
+        ];
+        let err = parse_args(&args).expect_err("not a number");
+        assert!(err.starts_with("invalid number for -x: "), "{err}");
+        assert!(err.contains('\''), "the argument should be quoted: {err}");
+    }
+
+    /// A second name is refused, quoted for the same reason.
+    #[test]
+    fn a_second_name_is_refused_and_quoted() {
+        let args = vec![
+            OsString::from("passwd"),
+            OsString::from("alice"),
+            not_text(),
+        ];
+        let err = parse_args(&args).expect_err("two names");
+        assert!(err.starts_with("unexpected argument: "), "{err}");
+    }
+
     #[test]
     fn args_default_change_password() {
-        let args = vec!["passwd".to_string()];
+        let args = argv(&["passwd"]);
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::ChangePassword));
         assert!(parsed.target_user.is_none());
@@ -1394,117 +1500,97 @@ mod tests {
 
     #[test]
     fn args_change_password_for_user() {
-        let args = vec!["passwd".to_string(), "alice".to_string()];
+        let args = argv(&["passwd", "alice"]);
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::ChangePassword));
-        assert_eq!(parsed.target_user.as_deref(), Some("alice"));
+        assert_eq!(parsed.target_user.as_deref(), Some(OsStr::new("alice")));
     }
 
     #[test]
     fn args_lock() {
-        let args = vec!["passwd".to_string(), "-l".to_string(), "bob".to_string()];
+        let args = argv(&["passwd", "-l", "bob"]);
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::Lock));
-        assert_eq!(parsed.target_user.as_deref(), Some("bob"));
+        assert_eq!(parsed.target_user.as_deref(), Some(OsStr::new("bob")));
     }
 
     #[test]
     fn args_unlock() {
-        let args = vec!["passwd".to_string(), "-u".to_string(), "bob".to_string()];
+        let args = argv(&["passwd", "-u", "bob"]);
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::Unlock));
     }
 
     #[test]
     fn args_delete() {
-        let args = vec!["passwd".to_string(), "-d".to_string(), "bob".to_string()];
+        let args = argv(&["passwd", "-d", "bob"]);
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::DeletePassword));
     }
 
     #[test]
     fn args_status() {
-        let args = vec!["passwd".to_string(), "-S".to_string(), "bob".to_string()];
+        let args = argv(&["passwd", "-S", "bob"]);
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::ShowStatus));
     }
 
     #[test]
     fn args_expire() {
-        let args = vec!["passwd".to_string(), "-e".to_string(), "bob".to_string()];
+        let args = argv(&["passwd", "-e", "bob"]);
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::Expire));
     }
 
     #[test]
     fn args_min_days() {
-        let args = vec![
-            "passwd".to_string(),
-            "-n".to_string(),
-            "5".to_string(),
-            "bob".to_string(),
-        ];
+        let args = argv(&["passwd", "-n", "5", "bob"]);
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::SetMinDays(5)));
     }
 
     #[test]
     fn args_max_days() {
-        let args = vec![
-            "passwd".to_string(),
-            "-x".to_string(),
-            "90".to_string(),
-            "bob".to_string(),
-        ];
+        let args = argv(&["passwd", "-x", "90", "bob"]);
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::SetMaxDays(90)));
     }
 
     #[test]
     fn args_warn_days() {
-        let args = vec![
-            "passwd".to_string(),
-            "-w".to_string(),
-            "14".to_string(),
-            "bob".to_string(),
-        ];
+        let args = argv(&["passwd", "-w", "14", "bob"]);
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::SetWarnDays(14)));
     }
 
     #[test]
     fn args_inactive_days() {
-        let args = vec![
-            "passwd".to_string(),
-            "-i".to_string(),
-            "30".to_string(),
-            "bob".to_string(),
-        ];
+        let args = argv(&["passwd", "-i", "30", "bob"]);
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::SetInactiveDays(30)));
     }
 
     #[test]
     fn args_unknown_option() {
-        let args = vec!["passwd".to_string(), "-Z".to_string()];
+        let args = argv(&["passwd", "-Z"]);
         assert!(parse_args(&args).is_err());
     }
 
     #[test]
     fn args_missing_days_value() {
-        let args = vec!["passwd".to_string(), "-n".to_string()];
+        let args = argv(&["passwd", "-n"]);
         assert!(parse_args(&args).is_err());
     }
 
     #[test]
     fn args_invalid_days_value() {
-        let args = vec!["passwd".to_string(), "-n".to_string(), "abc".to_string()];
+        let args = argv(&["passwd", "-n", "abc"]);
         assert!(parse_args(&args).is_err());
     }
 
     #[test]
     fn args_duplicate_username() {
-        let args = vec!["passwd".to_string(), "alice".to_string(), "bob".to_string()];
+        let args = argv(&["passwd", "alice", "bob"]);
         assert!(parse_args(&args).is_err());
     }
 

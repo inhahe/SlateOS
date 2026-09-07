@@ -8,6 +8,10 @@ says what you want it to say. Nothing is broken; this is new evidence that
 changes what one of your four options is worth, and A-Q7 is yours to edit.
 **No code change is being asked for.**
 
+**Status:** ✅ ACKNOWLEDGED — A-Q7 is resolved (§921). The operator confirmed
+D: was already excluded from scanning; 70 ms was likely CPU saturation + four
+backup jobs, not AV. Tree is now on SSD (E:). Evidence folded into §921.
+
 ## In short
 
 A-Q7 says every build and check on this machine pays ~70 ms per file opened,

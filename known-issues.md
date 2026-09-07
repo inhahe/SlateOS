@@ -122644,3 +122644,46 @@ interactive-CPython work, which is why it was found.
 trampoline, which makes it partly lane A's. Not filed as a request yet: the
 libc half (actually storing the alternate stack rather than discarding it) has
 to exist first, and that is this lane's and not written.
+
+
+## B-CTEST-FIXTURES-CANNOT-FIND-THE-FASTPY-CHECKOUT-AFTER-THE-E-DRIVE-MIGRATION (lane B, 2026-09-07)
+
+**In short:** the script that builds the ring-3 C test fixtures needs a second
+repository (fastpy) to do the cross-compile. It looks for that repository *next
+to this one*. The 2026-09-06 move put this repository on `E:` and left fastpy on
+`D:`, so the search fails and every fixture build stops with an error telling
+you to set an environment variable.
+
+**Symptom**, verbatim, from `scripts/ctest-fixtures.py build`:
+
+```
+[ctest] ERROR: cannot find a fastpy checkout (needs compiler/__init__.py).
+[ctest]        or place the fastpy checkout beside this repo:
+[ctest]          E:isual studio projectsastpy
+```
+
+**Workaround, which works today:**
+
+```sh
+FASTPY_DIR="D:/visual studio projects/fastpy" python scripts/ctest-fixtures.py build
+```
+
+**Affects all three lanes**, not just the one that found it: any lane that
+rebuilds a fixture, or that runs a boot test which rebuilds one, hits it. It is
+not a code defect -- the script's own error message names the fix -- but it is a
+per-command tax nobody was told about, and the failure arrives in the middle of
+a build rather than at setup time.
+
+**Worth noticing about the shape:** the script fails *loudly and with the
+remedy*, which is why this is a papercut rather than an incident. Had it instead
+silently skipped the fixtures, a boot test would have run against stale ELFs and
+reported a pass -- the same class of quiet-stale defect as
+`A-A-REBUILT-SERVICE-DOES-NOT-INVALIDATE-THE-KERNEL-THAT-EMBEDS-IT`.
+
+**The proper fix is a decision, not a patch,** which is why this is logged
+rather than fixed: either fastpy moves to `E:` beside the repo (fastest, but it
+is not this project's tree to move), or the search learns the old `D:` location
+(encodes a migration that is supposed to be finished), or `FASTPY_DIR` is set
+once in the environment for all lanes (operator's, and outside any lane's
+files). Lane B has no standing to pick among those, so it is written down with
+the workaround instead.

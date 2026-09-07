@@ -89346,8 +89346,22 @@ the middle of the pane. The wheel multiplies its row step by the column count
 there: a notch is three rows, and in a grid a row is `cols` entries, so
 stepping by entries would move three files and look unresponsive.
 
-**Still open:** a visible scrollbar. There is no way to see how far down a long
-listing you are, or to drag to a position -- only the wheel and the keyboard. `move_selection` also still exists
+**CLOSED 2026-09-07.** The scrollbar landed with the commit after that one:
+a track and a draggable thumb in all three views, a page jump for a click on
+the track either side of it, and no bar at all when the listing fits.
+
+It is drawn from a new shared `guitk::scrollbar`, not a seventh private copy.
+Six places in the tree already had one -- the file dialog, `menu`, `menubar`,
+the desktop shell, `window_peek` and `apps/dictionary` -- each with its own
+version of the same two formulas. The extraction took the file dialog's, which
+was the best documented and the only one with a test for the end-of-list case,
+and `dialog.rs` was converted first so its own tests prove the shared module
+says what its copy did.
+
+**Follow-up worth doing, not done here:** the other five copies. They are
+independent of explorer and each is a small, separately-testable conversion;
+folding them into this change would have made a scrolling fix into a
+five-file refactor. `move_selection` also still exists
 rather than deferring to `ListViewport::select_prev`/`select_next` as the plan
 below suggests -- explorer's multi-selection means the viewport is used for
 scrolling only, and folding the two together is the part that needs the

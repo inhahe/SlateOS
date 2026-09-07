@@ -34,6 +34,7 @@ use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind
 use guitk::listview::ListViewport;
 use guitk::render::RenderTree;
 use guitk::scroll_window;
+use guitk::scrollbar;
 use guitk::wheel::Accumulator as WheelAccumulator;
 
 use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
@@ -323,6 +324,11 @@ pub struct ExplorerState {
     /// Without it a trackpad, which sends many small deltas, scrolls not at
     /// all: each one truncates to zero rows on its own.
     wheel: WheelAccumulator,
+    /// How far below the thumb's own top the pointer took hold, while dragging.
+    ///
+    /// Kept so the thumb follows the grab point rather than jumping its top to
+    /// the pointer on the first move.
+    thumb_grab: Option<f32>,
     /// Navigation history (back stack).
     pub history_back: VecDeque<PathBuf>,
     /// Navigation history (forward stack).
@@ -428,6 +434,7 @@ impl ExplorerState {
             entries: Vec::new(),
             viewport: ListViewport::new(0),
             wheel: WheelAccumulator::default(),
+            thumb_grab: None,
             history_back: VecDeque::new(),
             history_forward: VecDeque::new(),
             view_mode: ViewMode::Details,
@@ -1530,6 +1537,160 @@ impl ExplorerState {
             ViewMode::Icons => self.render_icons(tree, zones, list_x, list_y, list_w, list_h),
             ViewMode::List => self.render_list(tree, zones, list_x, list_y, list_w, list_h),
         }
+        // After the view, so the bar sits over the rows rather than under them.
+        self.render_scrollbar(tree);
+    }
+
+    /// The file pane's rectangle: below the toolbar, right of the sidebar.
+    ///
+    /// The renderer and the hit test both come here rather than each computing
+    /// it, because a scrollbar drawn in one place and hit-tested in another is
+    /// the class of bug nobody sees until they try to drag it.
+    fn pane_rect(&self) -> Rect {
+        Rect::new(
+            self.sidebar_width,
+            64.0,
+            (self.window_width as f32 - self.sidebar_width).max(0.0),
+            (self.window_height as f32 - 64.0 - 24.0).max(0.0),
+        )
+    }
+
+    /// How many rows of the current view fit in the pane.
+    ///
+    /// In the grid a "row" is a row of icons, so this counts *entries* -- the
+    /// unit the viewport offset is in -- by multiplying by the column count.
+    fn visible_capacity(&self) -> usize {
+        let pane = self.pane_rect();
+        match self.view_mode {
+            ViewMode::List => scroll_window::capacity(LIST_ROW_H, pane.height),
+            ViewMode::Details => scroll_window::capacity(ROW_H, (pane.height - HEADER_H).max(0.0)),
+            ViewMode::Icons => scroll_window::capacity(ICON_CELL_H, pane.height)
+                .saturating_mul(self.icon_columns()),
+        }
+    }
+
+    /// The scrollbar's track, when the listing is long enough to have one.
+    fn scrollbar_track(&self) -> Option<Rect> {
+        let capacity = self.visible_capacity();
+        if !scrollbar::needed(self.entries.len(), capacity) {
+            return None;
+        }
+        let pane = self.pane_rect();
+        // The detail view's header is not part of the scrollable region, so the
+        // track starts below it -- a thumb that ran up behind the column
+        // headings would claim rows that are never drawn there.
+        let top = match self.view_mode {
+            ViewMode::Details => pane.y + HEADER_H,
+            ViewMode::List | ViewMode::Icons => pane.y,
+        };
+        Some(Rect::new(
+            pane.x + pane.width - scrollbar::WIDTH,
+            top,
+            scrollbar::WIDTH,
+            (pane.y + pane.height - top).max(0.0),
+        ))
+    }
+
+    /// The thumb's rectangle, in the toolkit's coordinates.
+    fn scrollbar_thumb(&self) -> Option<guitk::frame::Rect> {
+        let track = self.scrollbar_track()?;
+        Some(scrollbar::thumb(
+            guitk::frame::Rect::new(track.x, track.y, track.width, track.height),
+            self.entries.len(),
+            self.visible_capacity(),
+            self.viewport.first_visible(),
+        ))
+    }
+
+    /// Take hold of the thumb, if the press landed on it. A press elsewhere on
+    /// the track pages towards it, which is what every scrollbar does and what
+    /// makes the track worth drawing at all.
+    fn press_scrollbar(&mut self, x: f32, y: f32) -> bool {
+        let (Some(track), Some(thumb)) = (self.scrollbar_track(), self.scrollbar_thumb()) else {
+            return false;
+        };
+        if x < track.x || x >= track.x + track.width {
+            return false;
+        }
+        if y < track.y || y >= track.y + track.height {
+            return false;
+        }
+        if y >= thumb.y && y < thumb.y + thumb.h {
+            self.thumb_grab = Some(y - thumb.y);
+        } else {
+            // A page, in the direction of the click. `checked_neg` rather than
+            // `-page`: a capacity that did not fit in an `isize` would be a
+            // window taller than nine quintillion rows, but the negation is
+            // still the one operation here that can fail, and paging by zero
+            // is a better answer than wrapping to the far end of the list.
+            let page = isize::try_from(self.visible_capacity()).unwrap_or(isize::MAX);
+            let delta = if y < thumb.y {
+                page.checked_neg().unwrap_or(0)
+            } else {
+                page
+            };
+            self.viewport.scroll_by(delta, self.entries.len());
+        }
+        true
+    }
+
+    /// Continue a thumb drag. Returns whether the view moved.
+    fn drag_scrollbar(&mut self, y: f32) -> bool {
+        let (Some(grab), Some(track), Some(thumb)) = (
+            self.thumb_grab,
+            self.scrollbar_track(),
+            self.scrollbar_thumb(),
+        ) else {
+            // The listing got short enough to lose its scrollbar mid-drag.
+            self.thumb_grab = None;
+            return false;
+        };
+        let Some(first) = scrollbar::first_from_drag(
+            guitk::frame::Rect::new(track.x, track.y, track.width, track.height),
+            thumb.h,
+            grab,
+            y,
+            self.entries.len(),
+            self.visible_capacity(),
+        ) else {
+            return false;
+        };
+        if first == self.viewport.first_visible() {
+            return false;
+        }
+        self.viewport.scroll_to(first, self.entries.len());
+        true
+    }
+
+    /// Draw the scrollbar, if there is one.
+    fn render_scrollbar(&self, tree: &mut RenderTree) {
+        let Some(track) = self.scrollbar_track() else {
+            return;
+        };
+        // The toolkit's `Rect` names its sides `w`/`h` where explorer's names
+        // them `width`/`height`; converted here, at the one call that crosses.
+        let track_gui = guitk::frame::Rect::new(track.x, track.y, track.width, track.height);
+        let thumb = scrollbar::thumb(
+            track_gui,
+            self.entries.len(),
+            self.visible_capacity(),
+            self.viewport.first_visible(),
+        );
+        tree.fill_rect(
+            track.x,
+            track.y,
+            track.width,
+            track.height,
+            Color::from_hex(0xF0F0F0),
+        );
+        tree.fill_rounded_rect(
+            thumb.x + 1.0,
+            thumb.y,
+            thumb.w - 2.0,
+            thumb.h,
+            Color::from_hex(0xB0B0B0),
+            guitk::style::CornerRadii::all(4.0),
+        );
     }
 
     /// How many icon cells fit across the file pane.
@@ -2181,7 +2342,16 @@ impl ExplorerState {
 
     fn handle_mouse(&mut self, m: &MouseEvent) -> bool {
         match m.kind {
-            MouseEventKind::Press(MouseButton::Left) => self.click_at(m.x, m.y),
+            // The scrollbar first: it is drawn over the rows, so a press on it
+            // is not a press on the file underneath.
+            MouseEventKind::Press(MouseButton::Left) => {
+                self.press_scrollbar(m.x, m.y) || self.click_at(m.x, m.y)
+            }
+            MouseEventKind::Release(MouseButton::Left) => {
+                let was = self.thumb_grab.take();
+                was.is_some()
+            }
+            MouseEventKind::Move if self.thumb_grab.is_some() => self.drag_scrollbar(m.y),
             MouseEventKind::DoubleClick(MouseButton::Left) => self.open_at(m.x, m.y),
             // A file manager's back/forward thumb buttons are the one mouse
             // gesture users expect to work without a toolbar.
@@ -2622,6 +2792,161 @@ mod tests {
             [first_drawn],
             "the top-left cell named file {:?} instead of the one drawn in it",
             state.selected_indices
+        );
+    }
+
+    fn press(state: &mut ExplorerState, x: f32, y: f32) -> bool {
+        state.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    #[test]
+    fn a_short_listing_has_no_scrollbar() {
+        // A permanent grey stripe beside a three-item folder reads as broken.
+        let dir = ScratchDir::new("explorer-sb-short");
+        dir_with_files(&dir.path(""), 3);
+        let state = state_at(&dir.path(""));
+        assert!(state.scrollbar_track().is_none());
+    }
+
+    #[test]
+    fn a_long_listing_has_one_and_the_thumb_tracks_the_view() {
+        let dir = ScratchDir::new("explorer-sb-long");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        let track = state.scrollbar_track().expect("a long listing needs a bar");
+        let top = state.scrollbar_thumb().expect("and a thumb").y;
+
+        state.viewport.scroll_by(200, state.entries.len());
+        let bottom = state.scrollbar_thumb().expect("still a thumb").y;
+
+        assert!(bottom > top, "the thumb did not move with the view");
+        assert!(
+            bottom + state.scrollbar_thumb().unwrap().h <= track.y + track.height + 0.01,
+            "the thumb ran past the end of its track"
+        );
+    }
+
+    #[test]
+    fn dragging_the_thumb_scrolls_the_listing() {
+        let dir = ScratchDir::new("explorer-sb-drag");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        let track = state.scrollbar_track().expect("a bar");
+        let thumb = state.scrollbar_thumb().expect("a thumb");
+
+        // Take hold of the thumb, then drag to the bottom of the track.
+        assert!(press(&mut state, track.x + 2.0, thumb.y + 2.0));
+        state.handle_mouse(&MouseEvent {
+            x: track.x + 2.0,
+            y: track.y + track.height,
+            kind: MouseEventKind::Move,
+        });
+
+        assert!(
+            state.viewport.first_visible() > 0,
+            "dragging the thumb to the bottom scrolled nothing"
+        );
+    }
+
+    #[test]
+    fn a_press_on_the_scrollbar_is_not_a_press_on_the_file_behind_it() {
+        // The bar is drawn *over* the rows, so without the check the click
+        // falls through and selects whatever file the thumb happens to cover --
+        // the kind of wrong that looks like a misclick and is not.
+        let dir = ScratchDir::new("explorer-sb-steal");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        state.selected_indices.clear();
+        let track = state.scrollbar_track().expect("a bar");
+        let thumb = state.scrollbar_thumb().expect("a thumb");
+
+        press(&mut state, track.x + 2.0, thumb.y + 2.0);
+
+        assert!(
+            state.selected_indices.is_empty(),
+            "pressing the scrollbar selected a file: {:?}",
+            state.selected_indices
+        );
+        assert!(
+            state.thumb_grab.is_some(),
+            "the press did not take the thumb"
+        );
+    }
+
+    #[test]
+    fn grabbing_the_thumb_low_and_not_moving_does_not_jump_the_view() {
+        // The wiring the toolkit's own test cannot reach: `scrollbar` proves
+        // the arithmetic honours a grab offset, but explorer has to *pass*
+        // one. Passing zero compiles, drags smoothly, and jumps the view the
+        // instant you take hold anywhere but the thumb's very top -- a defect
+        // that looks like a twitchy scrollbar rather than a bug.
+        let dir = ScratchDir::new("explorer-sb-grab");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        state.viewport.scroll_by(80, state.entries.len());
+        let before = state.viewport.first_visible();
+        let track = state.scrollbar_track().expect("a bar");
+        let thumb = state.scrollbar_thumb().expect("a thumb");
+
+        // Take hold near the thumb's bottom, then move to exactly where the
+        // pointer already is. Nothing has moved, so nothing should scroll.
+        let grab_y = thumb.y + thumb.h - 2.0;
+        press(&mut state, track.x + 2.0, grab_y);
+        state.handle_mouse(&MouseEvent {
+            x: track.x + 2.0,
+            y: grab_y,
+            kind: MouseEventKind::Move,
+        });
+
+        assert_eq!(
+            state.viewport.first_visible(),
+            before,
+            "taking hold of the thumb moved the view without the pointer moving"
+        );
+    }
+
+    #[test]
+    fn a_release_lets_go_of_the_thumb() {
+        let dir = ScratchDir::new("explorer-sb-release");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        let track = state.scrollbar_track().expect("a bar");
+        let thumb = state.scrollbar_thumb().expect("a thumb");
+        press(&mut state, track.x + 2.0, thumb.y + 2.0);
+        assert!(state.thumb_grab.is_some());
+
+        state.handle_mouse(&MouseEvent {
+            x: track.x + 2.0,
+            y: thumb.y + 2.0,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        });
+        assert!(
+            state.thumb_grab.is_none(),
+            "the thumb is still held after the button came up"
+        );
+    }
+
+    #[test]
+    fn clicking_the_track_below_the_thumb_pages_down() {
+        let dir = ScratchDir::new("explorer-sb-page");
+        dir_with_files(&dir.path(""), 200);
+        let mut state = state_at(&dir.path(""));
+        let track = state.scrollbar_track().expect("a bar");
+        let thumb = state.scrollbar_thumb().expect("a thumb");
+
+        press(&mut state, track.x + 2.0, thumb.y + thumb.h + 4.0);
+
+        assert!(
+            state.viewport.first_visible() > 0,
+            "clicking below the thumb did not page down"
+        );
+        assert!(
+            state.thumb_grab.is_none(),
+            "a click on the track should not grab the thumb"
         );
     }
 

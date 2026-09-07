@@ -904,8 +904,38 @@ Roadmap:
   `encodings` out of the 20 MiB archive read **in place off ext4** before user
   code ran, so 478 symbols' worth of `posix/src` is now exercised by its widest
   consumer at runtime rather than only at link time. See lane A's roadmap entry
-  (line ~570) for the two departures from the request. A real pty layer is
-  still what stands between this and an interactive interpreter.
+  (line ~570) for the two departures from the request.
+  ~~A real pty layer is still what stands between this and an interactive
+  interpreter.~~ **False since 2026-08-23, corrected 2026-09-07.** The pty
+  family landed that day (syscalls 544-556) and the libc half is wired --
+  `posix/src/ioctl.rs` (`posix_openpt`) and `posix/src/pty.rs`
+  (`openpty`/`forkpty`/`login_tty`). The bullet immediately below this one has
+  announced that landing for two weeks, and itself remarks that a status line
+  "is written once, at the moment of blocking, and nothing prompts a rewrite
+  when the block clears". This sentence was the same failure, one paragraph
+  above the observation about it.
+  **What actually remains for interactive CPython, measured 2026-09-07 by
+  reading rather than by running** -- which is the whole of the finding, and the
+  reason the next step is to run it:
+    * **The blockers named above are gone.** `isatty` is real
+      (`posix/src/ioctl.rs:1275`). The pty line discipline is the kernel's and
+      handles `ISIG`. `sshd` already hosts a login shell on a real pty, so a
+      complete interactive path -- ssh -> pty -> shell -> `python3` -- exists
+      end to end without any new kernel rung.
+    * **`^C` has a delivery path**, contrary to what `posix/src/signal.rs` said
+      about itself until today. `init_signals()` registers
+      `__signal_trampoline` from `__libc_start_main` (`crt.rs:700`) and the
+      kernel delivers pending unblocked signals through it, so a handler
+      installed by `signal()`/`sigaction()` runs, and `KeyboardInterrupt` has a
+      route. Three doc comments claiming the opposite were corrected.
+    * **Nobody has ever run it interactively.** That is the actual state, and
+      no measurement here replaces doing so. Everything above says the path
+      should work; none of it says it does.
+    * Two gaps found while checking, neither blocking a first run:
+      `known-issues.md` -> `B-NO-ALTERNATE-SIGNAL-STACK-...` (CPython's
+      `faulthandler` gets no alternate stack, so a Python stack overflow faults
+      without its traceback) and `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING`
+      (`signal.setitimer` and friends report success and never fire).
   **coreutils half measured and closed 2026-08-21:** all **107** binaries of
   GNU coreutils 9.5, unmodified, link against our `libc.a` with zero missing
   symbols and zero duplicates (`scripts/coreutils-spike/README.md`). The first

@@ -48079,7 +48079,22 @@ drawn selected sheet 0`).
 
 241 tests pass; clippy and rustfmt clean.
 
-## C-SPREADSHEET-FREEZE-ACCEPTS-A-BAND-BIGGER-THAN-THE-WINDOW (lane C, 2026-08-20)
+## C-SPREADSHEET-FREEZE-ACCEPTS-A-BAND-BIGGER-THAN-THE-WINDOW (lane C, 2026-08-20) -- **FIXED 2026-09-07**
+
+**Fixed 2026-09-07 (lane C).** A freeze whose band would fill the window is
+refused and says why; the sheet is left as it was. Unfreezing is never
+refused, because the rule is about entering the state, not leaving it.
+
+The policy call this entry deferred was taken rather than escalated, and
+recorded as `design-decisions.md` 820 with the two rejected alternatives, so
+the operator can overrule it cheaply. The reasoning: Excel refuses the same
+operation, the old behaviour was a trap rather than merely imperfect, and
+silently capping to the largest band that fits would have told the user a lie
+about what they asked for -- the same shape as every other defect found here
+this week.
+
+The status bar had no channel for a refusal at all: it was derived entirely
+from the selection. It now prefers a `notice`, cleared by any keystroke.
 
 **Status:** open — degrades safely, but the state is not useful.
 

@@ -48079,7 +48079,22 @@ drawn selected sheet 0`).
 
 241 tests pass; clippy and rustfmt clean.
 
-## C-SPREADSHEET-FREEZE-ACCEPTS-A-BAND-BIGGER-THAN-THE-WINDOW (lane C, 2026-08-20)
+## C-SPREADSHEET-FREEZE-ACCEPTS-A-BAND-BIGGER-THAN-THE-WINDOW (lane C, 2026-08-20) -- **FIXED 2026-09-07**
+
+**Fixed 2026-09-07 (lane C).** A freeze whose band would fill the window is
+refused and says why; the sheet is left as it was. Unfreezing is never
+refused, because the rule is about entering the state, not leaving it.
+
+The policy call this entry deferred was taken rather than escalated, and
+recorded as `design-decisions.md` 820 with the two rejected alternatives, so
+the operator can overrule it cheaply. The reasoning: Excel refuses the same
+operation, the old behaviour was a trap rather than merely imperfect, and
+silently capping to the largest band that fits would have told the user a lie
+about what they asked for -- the same shape as every other defect found here
+this week.
+
+The status bar had no channel for a refusal at all: it was derived entirely
+from the selection. It now prefers a `notice`, cleared by any keystroke.
 
 **Status:** open — degrades safely, but the state is not useful.
 
@@ -123455,6 +123470,39 @@ it is private to the one running `ExplorerState`.
 and that Ctrl+C could not be wired until one was built. It has had one all
 along -- what it lacks is a *shared* one. Wiring the keys was therefore
 correct, and the residue is this narrower thing.
+
+### Update 2026-09-07: the clipboard this entry asks for exists, and cannot carry our paths
+
+**The system clipboard is already built, in the kernel.** `fs::clipboard`
+(`roadmap.md` line 2470, marked done) has exactly the shape this entry asks
+for: a `Format::FilePaths` variant and a `FileOp` enum (`Copy`/`Cut`) beside
+it, explicitly "for file manager copy/cut", with `/proc/clipboard` and a
+kshell command. The open question below -- toolkit, compositor or service --
+was answered before it was asked. There are two *more* clipboards in the tree
+that are not it: `guitk`'s text one, and `gui/clipboard`, a written service
+binary that nothing links to or talks to.
+
+**I went to wire the explorer to it and stopped.** `set_files` joins paths
+with `
+` and takes `&[&str]`; `get_files` splits them with `.lines()` after
+a `from_utf8`. This filesystem allows every byte but `/` and NUL, so `
+` and
+`` are both legal in a filename and UTF-8 is not required at all. A file
+named `a
+b` pastes as two files; a file whose name is not valid UTF-8 makes
+the whole clipboard read back *empty*, with no error, because the `.ok()?`
+turns a decode failure into "nothing here".
+
+Reported as `requests/c-a-the-system-clipboards-file-list-cannot-carry-our-own-paths.md`
+with a proposed fix (NUL as the separator -- the one byte a path cannot
+contain -- or length-prefixing). `kernel/**` is lane A's, and this is a wire
+format two other lanes will build on, so it should be their shape.
+
+**This entry stays open**, and its blocker is now specific: not "there is no
+system clipboard" but "the system clipboard's file list cannot represent a
+legal path". Wiring the explorer to it as it stands would mangle filenames
+silently, on the user's own files, which is worse than copy stopping at the
+window.
 
 **What the proper fix is.** A clipboard owned outside the app, holding a
 *typed* payload rather than text: a file reference is a list of paths plus

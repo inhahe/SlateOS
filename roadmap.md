@@ -2836,7 +2836,11 @@ _Port ext4 first. Don't write a custom filesystem._
   is worth deferring is a *busy mount*, a *read-only mount*, an *absent
   removable/network volume*, and a full volume that cannot accept a trash
   rename. Three ends to build and one shared entry format, so it wants an agreed
-  design before any lane starts:
+  design before any lane starts. **A first draft of that design was filed
+  2026-09-07 as
+  `requests/c-ab-a-concrete-entry-format-for-deferred-filesystem-operations.md`
+  — a concrete entry format, offered to be argued with. Nothing is built
+  against it.** The three ends:
   - `[A]` the persistent per-filesystem queue and the VFS hooks that enqueue and
     replay it. **The security half is the hard half** — the capability must be
     re-checked when the operation *runs*, not only when it is queued, or this

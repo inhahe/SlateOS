@@ -71448,7 +71448,47 @@ it sits.
   It still needs a caller of its own, for the transient messages an OSD is
   actually right for.
 
-## TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE (lane C, 2026-08-25)
+## TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE (lane C, 2026-08-25) -- **FIXED 2026-09-07, with one path unverified here**
+
+**Fixed 2026-09-07 (lane C).** `FileOperation::Link`, `OperationPlan::plan_link`
+and `execute_link_action` exist with the apparatus every other operation has,
+and the refusal in `evaluate_drop` is gone -- an Alt-drag now makes a link.
+
+**A link plan makes one action per source and never walks a directory.**
+Linking a folder means one link *to* the folder; a plan that recursed would
+produce a tree of links to each file inside it, which is not the gesture and is
+not undoable as one thing. `total_bytes` is zero, because counting the target's
+size would put a progress bar on a transfer that is not going to happen.
+
+**Undo removes the link and never the target.** This is the dangerous case the
+entry named, and it needed its own code rather than the copy undo: `is_dir()`
+*follows* a symlink, so the copy arm would reach through a link to a folder.
+`remove_link_or_file` asks `symlink_metadata`, which does not follow. The same
+helper guards replacing an existing link on conflict, where following one would
+delete what the old link pointed at to make room for a new one.
+
+**`OverwriteIfNewer` is treated as plain overwrite** and says so at the arm: the
+comparison is between contents' timestamps and a link has no contents of its
+own.
+
+### The honest part: two tests cannot run on this machine
+
+Windows refuses `symlink_file` without a privilege (error 1314, confirmed by
+probing rather than assumed), so **the link-creation success path is
+unverified on this host**. Two tests --
+`a_link_action_creates_a_link_that_resolves` and
+`undoing_a_link_removes_the_link_and_not_its_target` -- probe for symlink
+support, print `SKIPPED` with the reason, and return. They are not `#[ignore]`d
+and not silently absent: a run on a host that can make links is visibly a
+stronger run than one that cannot, and the output says which happened.
+
+What *is* verified here: the plan shape, the zero byte count, both
+`remove_link_or_file` branches that do not involve a link, and that an Alt-drag
+either produces a symlink or reports a failure -- never a plain copy, which is
+the silent downgrade the entry says is worse than doing nothing.
+
+Original entry follows.
+
 
 **In short:** Holding Alt while dragging a file is the standard way to ask for
 a *symbolic link* — a small stand-in file that points at the real one, so the

@@ -36,6 +36,14 @@ pub enum FileOperation {
     Delete,
     Recycle,
     Restore,
+    /// Create a symbolic link at the destination pointing at the source.
+    ///
+    /// Not a copy with a different name: one action per source, never a walk
+    /// into a directory. Linking a folder means *one* link to the folder, and
+    /// a plan that recursed would produce a tree of links to each file inside
+    /// it -- which is not what the gesture asks for and is not undoable as one
+    /// thing.
+    Link,
 }
 
 /// What to do when a destination already exists.
@@ -285,6 +293,57 @@ impl OperationPlan {
         let mut plan = Self::plan_copy(sources, dest_dir, conflict_policy, error_policy)?;
         plan.operation = FileOperation::Move;
         Ok(plan)
+    }
+
+    /// Build a plan for linking `sources` into `dest_dir`.
+    ///
+    /// One action per source and no recursion, for the reason
+    /// [`FileOperation::Link`] gives. `total_bytes` is zero: a symbolic link
+    /// is a path, and a progress bar that counted the *target's* bytes would
+    /// promise a transfer that is not going to happen.
+    ///
+    /// Nothing is checked here about whether the filesystem supports links.
+    /// It is checked when the link is created, per file, so that a batch on a
+    /// filesystem that refuses them reports which ones failed rather than the
+    /// whole plan refusing up front -- Windows needs a privilege for symlinks,
+    /// so "this machine cannot" is a per-attempt answer rather than a
+    /// property a planner can read.
+    /// Infallible, unlike its `plan_copy` neighbour: there is no scan to
+    /// fail. A link plan reads one `is_dir` per source and asks the
+    /// filesystem nothing else, so there is no error to report until the
+    /// links are actually created.
+    #[must_use]
+    pub fn plan_link(
+        sources: &[PathBuf],
+        dest_dir: &Path,
+        conflict_policy: ConflictPolicy,
+        error_policy: ErrorPolicy,
+    ) -> Self {
+        let mut actions = Vec::new();
+        for (index, src) in sources.iter().enumerate() {
+            let Some(name) = src.file_name() else {
+                continue;
+            };
+            actions.push(PlannedAction {
+                dest: Some(dest_dir.join(name)),
+                // Recorded from the *source*, and only so that a failure can
+                // say "directory" or "file". Nothing walks it.
+                is_dir: src.is_dir(),
+                src: src.clone(),
+                size: 0,
+                index: u32::try_from(index).unwrap_or(u32::MAX),
+            });
+        }
+
+        let total_files = u32::try_from(actions.len()).unwrap_or(u32::MAX);
+        Self {
+            operation: FileOperation::Link,
+            actions,
+            total_bytes: 0,
+            total_files,
+            conflict_policy,
+            error_policy,
+        }
     }
 
     /// Build a plan for deleting `sources` permanently.
@@ -798,6 +857,7 @@ impl OperationExecutor {
                 FileOperation::Delete => self.execute_delete_action(action),
                 FileOperation::Recycle => self.execute_recycle_action(action),
                 FileOperation::Restore => self.execute_restore_action(action),
+                FileOperation::Link => self.execute_link_action(action, conflict_policy),
             };
 
             match result {
@@ -855,6 +915,9 @@ impl OperationExecutor {
                                     FileOperation::Delete => self.execute_delete_action(action),
                                     FileOperation::Recycle => self.execute_recycle_action(action),
                                     FileOperation::Restore => self.execute_restore_action(action),
+                                    FileOperation::Link => {
+                                        self.execute_link_action(action, conflict_policy)
+                                    }
                                 };
                                 if let Ok(outcome) = retry {
                                     if matches!(outcome, ActionOutcome::Skipped) {
@@ -1026,6 +1089,61 @@ impl OperationExecutor {
     /// would report a spurious error.
     fn dir_is_non_empty(dir: &Path) -> bool {
         fs::read_dir(dir).map_or(true, |mut entries| entries.next().is_some())
+    }
+
+    /// Create one symbolic link.
+    ///
+    /// The conflict policy is honoured exactly as a copy honours it: a link is
+    /// still a file appearing where something may already be, and a user who
+    /// asked to rename on conflict means it here too.
+    fn execute_link_action(
+        &mut self,
+        action: &PlannedAction,
+        conflict: ConflictPolicy,
+    ) -> io::Result<ActionOutcome> {
+        let dest = action.dest.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "link action has no destination",
+            )
+        })?;
+
+        // `symlink_metadata`, not `exists`: a broken link already sitting at
+        // the destination is a conflict, and `exists` follows it and answers
+        // "no" -- which would make the create below fail with a bare
+        // AlreadyExists that the conflict policy never got to rule on.
+        let occupied = fs::symlink_metadata(dest).is_ok();
+        let dest = if occupied {
+            match conflict {
+                ConflictPolicy::Skip => return Ok(ActionOutcome::Skipped),
+                // `OverwriteIfNewer` cannot be answered for a link: the
+                // comparison is between the *contents'* timestamps, and a link
+                // has no contents of its own. Treated as plain overwrite,
+                // which is what "replace it" means when there is nothing to
+                // compare -- and said here rather than left to a reader to
+                // work out from the absence of an arm.
+                ConflictPolicy::Overwrite | ConflictPolicy::OverwriteIfNewer => {
+                    // `remove_file` and not `remove_dir_all`: what is being
+                    // replaced may be a link *to* a directory, and following
+                    // it would delete the user's folder to make room for a
+                    // shortcut.
+                    remove_link_or_file(dest)?;
+                    dest.clone()
+                }
+                ConflictPolicy::Rename => resolve_rename(dest),
+                ConflictPolicy::Ask => return Ok(ActionOutcome::Skipped),
+            }
+        } else {
+            dest.clone()
+        };
+
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        create_symlink(&action.src, &dest, action.is_dir)?;
+        self.undo_entries
+            .push((action.src.clone(), UndoTarget::Path(dest)));
+        Ok(ActionOutcome::Done)
     }
 
     fn execute_copy_action(
@@ -1889,6 +2007,26 @@ pub fn execute_undo(record: &UndoRecord, bin: Option<&RecycleBin>) -> io::Result
                 }
             }
         }
+        FileOperation::Link => {
+            // Removing the *link*, never what it points at. `is_dir()` follows
+            // a symlink, so the Copy arm above -- which is otherwise the same
+            // shape -- would call `remove_dir` on a link to a directory and,
+            // on Unix, fail; worse, any code reaching for `remove_dir_all`
+            // there would delete the user's folder to undo a shortcut.
+            // `remove_link_or_file` asks `symlink_metadata`, which does not
+            // follow.
+            for (_src, target) in record.entries.iter().rev() {
+                match target {
+                    UndoTarget::Path(link) => {
+                        if fs::symlink_metadata(link).is_ok() && remove_link_or_file(link).is_ok() {
+                            restored = restored.saturating_add(1);
+                        }
+                    }
+                    UndoTarget::Recycled(_) => return Err(mismatch("link")),
+                    UndoTarget::Nothing => {}
+                }
+            }
+        }
         FileOperation::Move => {
             for (src, target) in &record.entries {
                 match target {
@@ -1945,6 +2083,47 @@ pub fn execute_undo(record: &UndoRecord, bin: Option<&RecycleBin>) -> io::Result
         }
     }
     Ok(restored)
+}
+
+/// Create a symbolic link at `link` pointing at `target`.
+///
+/// Windows needs to know at creation time whether the target is a directory
+/// and needs a privilege (Developer Mode, or SeCreateSymbolicLinkPrivilege) to
+/// do it at all; Unix needs neither. The failure that matters is therefore a
+/// *runtime* one on Windows, which is why nothing tries to answer "does this
+/// filesystem support links" before the attempt.
+#[cfg(windows)]
+fn create_symlink(target: &Path, link: &Path, target_is_dir: bool) -> io::Result<()> {
+    if target_is_dir {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+}
+
+#[cfg(not(windows))]
+fn create_symlink(target: &Path, link: &Path, _target_is_dir: bool) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Remove a path without following it if it is a link.
+///
+/// `remove_dir_all` on a link to a directory deletes the *directory*. This is
+/// used where a link is being replaced, so following one would destroy the
+/// thing the old link pointed at in order to make room for a new link.
+fn remove_link_or_file(path: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        // On Windows a directory symlink is removed with `remove_dir`; on Unix
+        // every symlink is removed with `remove_file`. Trying the file form
+        // first and falling back covers both without a second `cfg`.
+        return fs::remove_file(path).or_else(|_| fs::remove_dir(path));
+    }
+    if meta.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
 }
 
 /// Move `from` back to `to`, creating the parent it used to live in.
@@ -3339,5 +3518,185 @@ mod tests {
             1,
             "a damaged entry was aged out on an age nobody knows"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Linking
+    //
+    // The planning half is platform-independent and tested outright. The
+    // creating half needs a filesystem that will make a symbolic link, which
+    // Windows refuses without a privilege -- those tests announce themselves
+    // and return rather than passing quietly, so a run on a host that *can*
+    // make links is visibly a stronger run than one that cannot.
+    // ------------------------------------------------------------------
+
+    /// Whether this machine can create a symbolic link at all.
+    ///
+    /// Probed by trying, because that is the only reliable answer: Windows
+    /// grants the privilege per user and per session, so no property of the
+    /// path or the build can be consulted instead.
+    fn symlinks_available(dir: &Path) -> bool {
+        let target = dir.join("probe-target");
+        if fs::write(&target, b"x").is_err() {
+            return false;
+        }
+        let link = dir.join("probe-link");
+        let ok = create_symlink(&target, &link, false).is_ok();
+        let _ = fs::remove_file(&link);
+        let _ = fs::remove_file(&target);
+        ok
+    }
+
+    #[test]
+    fn a_link_plan_makes_one_action_per_source_and_never_walks_a_directory() {
+        let scratch = temp_dir("link_plan");
+        let dir = scratch.dir().to_path_buf();
+        let folder = dir.join("folder");
+        fs::create_dir(&folder).expect("mkdir");
+        write_file(&folder.join("inside.txt"), "a");
+        write_file(&folder.join("also.txt"), "b");
+        let loose = dir.join("loose.txt");
+        write_file(&loose, "c");
+
+        let dest = dir.join("dest");
+        fs::create_dir(&dest).expect("mkdir");
+        let plan = OperationPlan::plan_link(
+            &[folder.clone(), loose.clone()],
+            &dest,
+            ConflictPolicy::Rename,
+            ErrorPolicy::SkipAndContinue,
+        );
+
+        assert_eq!(
+            plan.actions.len(),
+            2,
+            "a link plan walked into the directory: {:?}",
+            plan.actions.iter().map(|a| &a.src).collect::<Vec<_>>()
+        );
+        assert_eq!(plan.operation, FileOperation::Link);
+    }
+
+    /// A link plan reports no bytes.
+    ///
+    /// Counting the target's size would put a progress bar on a transfer that
+    /// is not going to happen.
+    #[test]
+    fn a_link_plan_promises_no_transfer() {
+        let scratch = temp_dir("link_bytes");
+        let dir = scratch.dir().to_path_buf();
+        let big = dir.join("big.bin");
+        write_file(&big, &"x".repeat(4096));
+        let dest = dir.join("dest");
+        fs::create_dir(&dest).expect("mkdir");
+
+        let plan = OperationPlan::plan_link(
+            &[big],
+            &dest,
+            ConflictPolicy::Rename,
+            ErrorPolicy::SkipAndContinue,
+        );
+        assert_eq!(plan.total_bytes, 0);
+        assert_eq!(plan.total_files, 1);
+    }
+
+    /// Replacing a plain file with a link does not follow anything.
+    #[test]
+    fn removing_a_plain_file_in_the_way_of_a_link_removes_that_file() {
+        let scratch = temp_dir("link_replace_file");
+        let dir = scratch.dir().to_path_buf();
+        let victim = dir.join("in-the-way.txt");
+        write_file(&victim, "old");
+
+        remove_link_or_file(&victim).expect("remove");
+        assert!(!victim.exists());
+    }
+
+    /// A directory in the way is removed whole, since it is not a link.
+    #[test]
+    fn removing_a_directory_in_the_way_removes_the_directory() {
+        let scratch = temp_dir("link_replace_dir");
+        let dir = scratch.dir().to_path_buf();
+        let victim = dir.join("in-the-way");
+        fs::create_dir(&victim).expect("mkdir");
+        write_file(&victim.join("child.txt"), "x");
+
+        remove_link_or_file(&victim).expect("remove");
+        assert!(!victim.exists());
+    }
+
+    /// Undoing a link removes the link and leaves the target alone.
+    ///
+    /// The failure this guards is the worst one available here: `is_dir()`
+    /// follows a symlink, so an undo written like the copy undo would reach
+    /// through a link to a folder and delete the user's folder to take back a
+    /// shortcut.
+    #[test]
+    fn undoing_a_link_removes_the_link_and_not_its_target() {
+        let scratch = temp_dir("link_undo");
+        let dir = scratch.dir().to_path_buf();
+        if !symlinks_available(&dir) {
+            eprintln!(
+                "SKIPPED undoing_a_link_removes_the_link_and_not_its_target: \
+                 this host will not create symbolic links"
+            );
+            return;
+        }
+
+        let target_dir = dir.join("real-folder");
+        fs::create_dir(&target_dir).expect("mkdir");
+        write_file(&target_dir.join("keep.txt"), "precious");
+        let link = dir.join("shortcut");
+        create_symlink(&target_dir, &link, true).expect("link");
+
+        let record = UndoRecord {
+            id: 1,
+            operation: FileOperation::Link,
+            entries: vec![(target_dir.clone(), UndoTarget::Path(link.clone()))],
+            timestamp: SystemTime::now(),
+        };
+        let removed = execute_undo(&record, None).expect("undo");
+
+        assert_eq!(removed, 1);
+        assert!(
+            fs::symlink_metadata(&link).is_err(),
+            "the link survived the undo"
+        );
+        assert!(
+            target_dir.join("keep.txt").exists(),
+            "the undo followed the link and deleted the folder it pointed at"
+        );
+    }
+
+    /// A link is actually created, and resolves to the target's contents.
+    #[test]
+    fn a_link_action_creates_a_link_that_resolves() {
+        let scratch = temp_dir("link_create");
+        let dir = scratch.dir().to_path_buf();
+        if !symlinks_available(&dir) {
+            eprintln!(
+                "SKIPPED a_link_action_creates_a_link_that_resolves: this host \
+                 will not create symbolic links"
+            );
+            return;
+        }
+
+        let src = dir.join("note.txt");
+        write_file(&src, "hello");
+        let dest = dir.join("dest");
+        fs::create_dir(&dest).expect("mkdir");
+
+        let plan = OperationPlan::plan_link(
+            &[src],
+            &dest,
+            ConflictPolicy::Rename,
+            ErrorPolicy::SkipAndContinue,
+        );
+        let mut executor = OperationExecutor::new(plan);
+        executor.execute();
+
+        let made = dest.join("note.txt");
+        let meta = fs::symlink_metadata(&made).expect("the link exists");
+        assert!(meta.file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&made).expect("resolves"), "hello");
     }
 }

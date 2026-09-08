@@ -948,6 +948,7 @@ dependencies = [
 name = "automator"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -3083,6 +3084,7 @@ dependencies = [
 name = "contacts"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -5648,6 +5650,7 @@ dependencies = [
 name = "fontmanager"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -6967,6 +6970,7 @@ dependencies = [
 name = "habits"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

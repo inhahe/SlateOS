@@ -124422,9 +124422,23 @@ which makes step 1 below larger than one dependency line.
   `photomanager`, `renamer`, `mediaconvert`, `radio`, `flashcards`, `calendar`
   `finance`, `slides`, `worldclock`, `camera`, `compass`, `diskanalyzer`,
   `jsonviewer`, `logviewer`, `passwordgen`, `podcast`, `regextester`,
-  `stickynotes` and `taskscheduler`. Each has a test on the rectangles it
-  emits, and each was mutation-checked by making `theme_changed` ignore its
-  argument.
+  `stickynotes`, `taskscheduler`, `contacts`, `habits`, `fontmanager` and
+  `automator`. Each has a test on the rectangles it emits, and each was
+  mutation-checked by making `theme_changed` ignore its argument.
+
+**A fourth content case, and the tell held again.** `contacts` sets a new
+group's colour in `Group::new` — the swatch that group is shown with, chosen
+by the user. Fixed colour, not the theme. As with `paint`, `whiteboard` and
+`stickynotes`, the constant was read where no window is in scope.
+
+**Where the remaining time actually goes.** Not the substitution, which is
+reliable, but four kinds of call site the scripts cannot rewrite safely:
+generic signatures (`fn f<T: PartialEq + Copy>(…)`, which the parameter regex
+does not match), calls whose first argument is an expression rather than an
+identifier, calls spanning several lines, and *argument order* — a parameter
+inserted second must be passed second, and the compiler reports that as a type
+error rather than an arity one. All are compiler-visible; none is automatable
+without the risk that produced 91 errors in one application earlier.
 
 **Content that only *looks* like chrome, a third time.** `stickynotes`'
 `note_palette` reads two constants — but only as the fallback for an

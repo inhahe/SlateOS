@@ -23,6 +23,7 @@
 //! - Simulated date system for testing
 //! - 5 sample habits pre-loaded
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent};
 use guitk::render::RenderTree;
@@ -40,29 +41,11 @@ use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
+
 // Part of the complete Catppuccin Mocha palette, kept whole even though no
 // widget currently paints with this one: a named palette with a hole in it is
 // not the palette it is named after, and the next widget to want one would
 // otherwise re-derive the hex by hand.
-#[allow(dead_code, reason = "the palette is kept complete")]
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ── Per-habit statistics table ──────────────────────────────────────
 //
@@ -300,17 +283,17 @@ impl Category {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Health => GREEN,
-            Self::Fitness => PEACH,
-            Self::Productivity => BLUE,
-            Self::Mindfulness => MAUVE,
-            Self::Learning => YELLOW,
-            Self::Social => TEAL,
-            Self::Creative => LAVENDER,
-            Self::Finance => RED,
-            Self::Custom => SUBTEXT0,
+            Self::Health => pal.green,
+            Self::Fitness => pal.peach,
+            Self::Productivity => pal.blue,
+            Self::Mindfulness => pal.mauve,
+            Self::Learning => pal.yellow,
+            Self::Social => pal.teal,
+            Self::Creative => pal.lavender,
+            Self::Finance => pal.red,
+            Self::Custom => pal.subtext0,
         }
     }
 
@@ -617,6 +600,12 @@ struct HabitTrackerApp {
     selected_day_col: usize,
     heatmap_habit_idx: usize,
     status_msg: String,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl HabitTrackerApp {
@@ -635,6 +624,7 @@ impl HabitTrackerApp {
             day: 18,
         };
         let mut app = Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width: 1000.0,
             height: 700.0,
             habits: Vec::new(),
@@ -1034,15 +1024,15 @@ impl HabitTrackerApp {
     /// The colour of one cell of the contribution graph.
     ///
     /// Had no caller until now: the renderer drew every checked day in flat
-    /// `GREEN`, which makes a grid rather than a heatmap. A contribution graph
+    /// `self.palette.green`, which makes a grid rather than a heatmap. A contribution graph
     /// says *how much*, and a two-colour one has thrown that away -- the
     /// module doc calls this a "Contribution/heatmap graph" and it was the
     /// half without the heat.
-    fn heatmap_color(checked: bool, intensity: f32) -> Color {
+    fn heatmap_color(checked: bool, pal: &Palette, intensity: f32) -> Color {
         if !checked {
-            return SURFACE0;
+            return pal.surface0;
         }
-        // Blend GREEN with intensity
+        // Blend pal.green with intensity
         let alpha = (intensity * 255.0).clamp(80.0, 255.0) as u8;
         Color::rgba(166, 227, 161, alpha)
     }
@@ -1163,7 +1153,7 @@ impl HabitTrackerApp {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1194,7 +1184,7 @@ impl HabitTrackerApp {
             y: 0.0,
             width: self.width,
             height: Self::HEADER_H,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1203,7 +1193,7 @@ impl HabitTrackerApp {
             y: 14.0,
             text: String::from("\u{1F4CB} Habit Tracker"),
             font_size: 20.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -1220,7 +1210,7 @@ impl HabitTrackerApp {
                 self.today.day_of_week_short()
             ),
             font_size: 14.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(280.0),
             overflow: TextOverflow::Ellipsis,
@@ -1234,7 +1224,7 @@ impl HabitTrackerApp {
             y: 10.0,
             text: progress_text,
             font_size: 16.0,
-            color: GREEN,
+            color: self.palette.green,
             font_weight: FontWeightHint::Bold,
             max_width: Some(180.0),
             overflow: TextOverflow::Ellipsis,
@@ -1250,7 +1240,7 @@ impl HabitTrackerApp {
             y: bar_y,
             width: bar_w,
             height: bar_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         if total > 0 {
@@ -1261,7 +1251,7 @@ impl HabitTrackerApp {
                     y: bar_y,
                     width: fill,
                     height: bar_h,
-                    color: GREEN,
+                    color: self.palette.green,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -1274,7 +1264,7 @@ impl HabitTrackerApp {
             y: 10.0,
             width: 90.0,
             height: 30.0,
-            color: BLUE,
+            color: self.palette.blue,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
@@ -1282,7 +1272,7 @@ impl HabitTrackerApp {
             y: 17.0,
             text: String::from("+ New Habit"),
             font_size: 12.0,
-            color: CRUST,
+            color: self.palette.crust,
             font_weight: FontWeightHint::Bold,
             max_width: Some(80.0),
             overflow: TextOverflow::Ellipsis,
@@ -1296,7 +1286,7 @@ impl HabitTrackerApp {
             y,
             width: self.width,
             height: Self::NAV_H,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1309,8 +1299,16 @@ impl HabitTrackerApp {
         let mut tx = 16.0;
         for (i, tab) in tabs.iter().enumerate() {
             let selected = *tab == self.screen;
-            let bg = if selected { BLUE } else { SURFACE1 };
-            let fg = if selected { CRUST } else { TEXT_COLOR };
+            let bg = if selected {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            };
+            let fg = if selected {
+                self.palette.crust
+            } else {
+                self.palette.text
+            };
             let w = 90.0;
             cmds.push(RenderCommand::FillRect {
                 x: tx,
@@ -1344,7 +1342,7 @@ impl HabitTrackerApp {
                 y: y + 6.0,
                 width: 120.0,
                 height: 24.0,
-                color: cat.color(),
+                color: cat.color(&self.palette),
                 corner_radii: CornerRadii::all(12.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1352,7 +1350,7 @@ impl HabitTrackerApp {
                 y: y + 10.0,
                 text: format!("{} {}", cat.icon(), cat.label()),
                 font_size: 11.0,
-                color: CRUST,
+                color: self.palette.crust,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1368,7 +1366,7 @@ impl HabitTrackerApp {
                 y: start_y + 80.0,
                 text: String::from("No habits yet. Press N to create one."),
                 font_size: 16.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1388,9 +1386,9 @@ impl HabitTrackerApp {
                 d.day_of_week_short().to_string()
             };
             let label_color = if col == self.selected_day_col {
-                BLUE
+                self.palette.blue
             } else {
-                SUBTEXT0
+                self.palette.subtext0
             };
             cmds.push(RenderCommand::Text {
                 x: cx + 2.0,
@@ -1407,7 +1405,7 @@ impl HabitTrackerApp {
                 y: start_y + 18.0,
                 text: format!("{:02}", d.day),
                 font_size: 9.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(Self::DAY_COL_W),
                 overflow: TextOverflow::Ellipsis,
@@ -1421,7 +1419,7 @@ impl HabitTrackerApp {
             y: start_y + 8.0,
             text: String::from("Streak"),
             font_size: 10.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(50.0),
             overflow: TextOverflow::Ellipsis,
@@ -1431,7 +1429,7 @@ impl HabitTrackerApp {
             y: start_y + 8.0,
             text: String::from("7d"),
             font_size: 10.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(30.0),
             overflow: TextOverflow::Ellipsis,
@@ -1441,7 +1439,7 @@ impl HabitTrackerApp {
             y: start_y + 8.0,
             text: String::from("30d"),
             font_size: 10.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(30.0),
             overflow: TextOverflow::Ellipsis,
@@ -1461,11 +1459,11 @@ impl HabitTrackerApp {
 
             let is_selected = vi == self.selected_habit;
             let row_bg = if is_selected {
-                SURFACE1
+                self.palette.surface1
             } else if vi % 2 == 0 {
-                SURFACE0
+                self.palette.surface0
             } else {
-                BASE
+                self.palette.base
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -1483,7 +1481,7 @@ impl HabitTrackerApp {
                 y: ry + 16.0,
                 width: 10.0,
                 height: 10.0,
-                color: habit.category.color(),
+                color: habit.category.color(&self.palette),
                 corner_radii: CornerRadii::all(5.0),
             });
 
@@ -1493,7 +1491,7 @@ impl HabitTrackerApp {
                 y: ry + 8.0,
                 text: habit.name.clone(),
                 font_size: 14.0,
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(160.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1505,7 +1503,7 @@ impl HabitTrackerApp {
                 y: ry + 28.0,
                 text: habit.frequency.label(),
                 font_size: 10.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1518,7 +1516,11 @@ impl HabitTrackerApp {
                 let checked = habit.is_checked_on(d);
                 let cell_selected = is_selected && col == self.selected_day_col;
 
-                let dot_color = if checked { GREEN } else { SURFACE2 };
+                let dot_color = if checked {
+                    self.palette.green
+                } else {
+                    self.palette.surface2
+                };
                 let dot_size = if cell_selected { 22.0 } else { 18.0 };
                 let dot_x = cx + (Self::DAY_COL_W - dot_size) / 2.0;
                 let dot_y = ry + (Self::ROW_H - 2.0 - dot_size) / 2.0;
@@ -1538,7 +1540,7 @@ impl HabitTrackerApp {
                         y: dot_y + 2.0,
                         text: String::from("\u{2713}"),
                         font_size: 12.0,
-                        color: CRUST,
+                        color: self.palette.crust,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(dot_size),
                         overflow: TextOverflow::Ellipsis,
@@ -1551,7 +1553,7 @@ impl HabitTrackerApp {
                         y: dot_y - 2.0,
                         width: dot_size + 4.0,
                         height: dot_size + 4.0,
-                        color: BLUE,
+                        color: self.palette.blue,
                         line_width: 2.0,
                         corner_radii: CornerRadii::all(dot_size.midpoint(4.0)),
                     });
@@ -1560,7 +1562,11 @@ impl HabitTrackerApp {
 
             // Streak
             let streak = habit.current_streak(self.today);
-            let streak_color = if streak > 0 { PEACH } else { OVERLAY0 };
+            let streak_color = if streak > 0 {
+                self.palette.peach
+            } else {
+                self.palette.overlay0
+            };
             cmds.push(RenderCommand::Text {
                 x: stats_x,
                 y: ry + 16.0,
@@ -1574,7 +1580,7 @@ impl HabitTrackerApp {
 
             // 7-day rate
             let rate_7 = habit.completion_rate(self.today, 7);
-            let rate_7_color = rate_color(rate_7);
+            let rate_7_color = rate_color(rate_7, &self.palette);
             cmds.push(RenderCommand::Text {
                 x: stats_x + 50.0,
                 y: ry + 16.0,
@@ -1588,7 +1594,7 @@ impl HabitTrackerApp {
 
             // 30-day rate
             let rate_30 = habit.completion_rate(self.today, 30);
-            let rate_30_color = rate_color(rate_30);
+            let rate_30_color = rate_color(rate_30, &self.palette);
             cmds.push(RenderCommand::Text {
                 x: stats_x + 86.0,
                 y: ry + 16.0,
@@ -1618,9 +1624,9 @@ impl HabitTrackerApp {
             "Today's Progress",
             &format!("{done} / {total}"),
             if total > 0 && done == total {
-                GREEN
+                self.palette.green
             } else {
-                BLUE
+                self.palette.blue
             },
         );
 
@@ -1634,7 +1640,7 @@ impl HabitTrackerApp {
             card_h,
             "Best Streak",
             &format!("{best_val} ({best_name})"),
-            PEACH,
+            self.palette.peach,
         );
 
         // Card 3: 7-day avg
@@ -1647,7 +1653,7 @@ impl HabitTrackerApp {
             card_h,
             "7-Day Average",
             &format!("{}%", (avg_7 * 100.0) as u32),
-            rate_color(avg_7),
+            rate_color(avg_7, &self.palette),
         );
 
         // Card 4: 30-day avg
@@ -1660,7 +1666,7 @@ impl HabitTrackerApp {
             card_h,
             "30-Day Average",
             &format!("{}%", (avg_30 * 100.0) as u32),
-            rate_color(avg_30),
+            rate_color(avg_30, &self.palette),
         );
 
         // Per-habit stats table
@@ -1670,21 +1676,26 @@ impl HabitTrackerApp {
             y: table_y,
             text: String::from("Per-Habit Statistics"),
             font_size: 16.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
         });
 
         let table = Table::with_gap(STATS_COLUMNS, pad, STATS_GAP);
-        table.header(cmds, table_y + 24.0, SUBTEXT0, STATS_HEADER_FONT);
+        table.header(
+            cmds,
+            table_y + 24.0,
+            self.palette.subtext0,
+            STATS_HEADER_FONT,
+        );
 
         cmds.push(RenderCommand::Line {
             x1: pad,
             y1: table_y + 38.0,
             x2: self.width - pad,
             y2: table_y + 38.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
 
@@ -1708,34 +1719,42 @@ impl HabitTrackerApp {
             let r30 = h.completion_rate(self.today, 30);
             let ra = h.completion_rate_alltime(self.today);
             let cells: [(usize, String, Color); 8] = [
-                (STATS_HABIT, h.name.clone(), TEXT_COLOR),
+                (STATS_HABIT, h.name.clone(), self.palette.text),
                 (
                     STATS_CATEGORY,
                     h.category.label().to_string(),
-                    h.category.color(),
+                    h.category.color(&self.palette),
                 ),
                 (
                     STATS_STREAK,
                     format!("{}", h.current_streak(self.today)),
-                    PEACH,
+                    self.palette.peach,
                 ),
-                (STATS_BEST, format!("{}", h.best_streak(self.today)), YELLOW),
+                (
+                    STATS_BEST,
+                    format!("{}", h.best_streak(self.today)),
+                    self.palette.yellow,
+                ),
                 (
                     STATS_7D,
                     format!("{}%", (r7 * 100.0) as u32),
-                    rate_color(r7),
+                    rate_color(r7, &self.palette),
                 ),
                 (
                     STATS_30D,
                     format!("{}%", (r30 * 100.0) as u32),
-                    rate_color(r30),
+                    rate_color(r30, &self.palette),
                 ),
                 (
                     STATS_ALL,
                     format!("{}%", (ra * 100.0) as u32),
-                    rate_color(ra),
+                    rate_color(ra, &self.palette),
                 ),
-                (STATS_TOTAL, format!("{}", h.total_check_ins()), TEXT_COLOR),
+                (
+                    STATS_TOTAL,
+                    format!("{}", h.total_check_ins()),
+                    self.palette.text,
+                ),
             ];
             debug_assert_eq!(
                 cells.len(),
@@ -1767,7 +1786,7 @@ impl HabitTrackerApp {
             y,
             width: w,
             height: h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(8.0),
         });
         cmds.push(RenderCommand::FillRect {
@@ -1783,7 +1802,7 @@ impl HabitTrackerApp {
             y: y + 14.0,
             text: title.to_string(),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 32.0),
             overflow: TextOverflow::Ellipsis,
@@ -1793,7 +1812,7 @@ impl HabitTrackerApp {
             y: y + 40.0,
             text: value.to_string(),
             font_size: 24.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 32.0),
             overflow: TextOverflow::Ellipsis,
@@ -1809,7 +1828,7 @@ impl HabitTrackerApp {
                 y: start_y + 80.0,
                 text: String::from("No archived habits. Press A to archive one."),
                 font_size: 16.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1822,7 +1841,7 @@ impl HabitTrackerApp {
             y: start_y + 12.0,
             text: format!("Archived Habits ({})", archived.len()),
             font_size: 16.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -1838,7 +1857,11 @@ impl HabitTrackerApp {
             }
 
             let is_selected = vi == self.selected_habit;
-            let bg = if is_selected { SURFACE1 } else { SURFACE0 };
+            let bg = if is_selected {
+                self.palette.surface1
+            } else {
+                self.palette.surface0
+            };
 
             cmds.push(RenderCommand::FillRect {
                 x: 16.0,
@@ -1855,7 +1878,7 @@ impl HabitTrackerApp {
                 y: ry + 16.0,
                 width: 10.0,
                 height: 10.0,
-                color: h.category.color(),
+                color: h.category.color(&self.palette),
                 corner_radii: CornerRadii::all(5.0),
             });
 
@@ -1864,7 +1887,7 @@ impl HabitTrackerApp {
                 y: ry + 8.0,
                 text: h.name.clone(),
                 font_size: 14.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1879,7 +1902,7 @@ impl HabitTrackerApp {
                     h.total_check_ins()
                 ),
                 font_size: 10.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1892,7 +1915,7 @@ impl HabitTrackerApp {
                     y: ry + 14.0,
                     text: String::from("Enter to restore"),
                     font_size: 11.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(140.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1909,7 +1932,7 @@ impl HabitTrackerApp {
                 y: start_y + 80.0,
                 text: String::from("No habits to display."),
                 font_size: 16.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1931,7 +1954,7 @@ impl HabitTrackerApp {
             y: start_y + 12.0,
             text: format!("Contribution Graph: {}", habit.name),
             font_size: 16.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
             overflow: TextOverflow::Ellipsis,
@@ -1943,7 +1966,7 @@ impl HabitTrackerApp {
             y: start_y + 34.0,
             text: String::from("Left/Right to switch habits"),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -1965,7 +1988,7 @@ impl HabitTrackerApp {
                     y: hy_start + di as f32 * (cell + gap) + 1.0,
                     text: label.to_string(),
                     font_size: 9.0,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(40.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1985,7 +2008,11 @@ impl HabitTrackerApp {
                 break;
             }
 
-            let color = Self::heatmap_color(*checked, intensities.get(i).copied().unwrap_or(1.0));
+            let color = Self::heatmap_color(
+                *checked,
+                &self.palette,
+                intensities.get(i).copied().unwrap_or(1.0),
+            );
             cmds.push(RenderCommand::FillRect {
                 x: cx,
                 y: cy,
@@ -2010,7 +2037,7 @@ impl HabitTrackerApp {
                         y: hy_start - 14.0,
                         text: date.month_short().to_string(),
                         font_size: 9.0,
-                        color: SUBTEXT0,
+                        color: self.palette.subtext0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(30.0),
                         overflow: TextOverflow::Ellipsis,
@@ -2026,7 +2053,7 @@ impl HabitTrackerApp {
             y: ly,
             text: String::from("Less"),
             font_size: 10.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(40.0),
             overflow: TextOverflow::Ellipsis,
@@ -2036,10 +2063,10 @@ impl HabitTrackerApp {
         // hand-written colours -- and it was the only honest part of the
         // screen, promising a "Less -> More" gradient the graph did not draw.
         let legend_colors = [
-            SURFACE0,
-            Self::heatmap_color(true, 0.0),
-            Self::heatmap_color(true, 0.5),
-            Self::heatmap_color(true, 1.0),
+            self.palette.surface0,
+            Self::heatmap_color(true, &self.palette, 0.0),
+            Self::heatmap_color(true, &self.palette, 0.5),
+            Self::heatmap_color(true, &self.palette, 1.0),
         ];
         for (li, lc) in legend_colors.iter().enumerate() {
             cmds.push(RenderCommand::FillRect {
@@ -2056,7 +2083,7 @@ impl HabitTrackerApp {
             y: ly,
             text: String::from("More"),
             font_size: 10.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(40.0),
             overflow: TextOverflow::Ellipsis,
@@ -2071,20 +2098,23 @@ impl HabitTrackerApp {
         let ra = habit.completion_rate_alltime(self.today);
 
         let stats_items = [
-            (format!("Current Streak: {streak}"), PEACH),
-            (format!("Best Streak: {best}"), YELLOW),
-            (format!("7-day: {}%", (r7 * 100.0) as u32), rate_color(r7)),
+            (format!("Current Streak: {streak}"), self.palette.peach),
+            (format!("Best Streak: {best}"), self.palette.yellow),
+            (
+                format!("7-day: {}%", (r7 * 100.0) as u32),
+                rate_color(r7, &self.palette),
+            ),
             (
                 format!("30-day: {}%", (r30 * 100.0) as u32),
-                rate_color(r30),
+                rate_color(r30, &self.palette),
             ),
             (
                 format!("All-time: {}%", (ra * 100.0) as u32),
-                rate_color(ra),
+                rate_color(ra, &self.palette),
             ),
             (
                 format!("Total check-ins: {}", habit.total_check_ins()),
-                TEXT_COLOR,
+                self.palette.text,
             ),
         ];
 
@@ -2125,7 +2155,7 @@ impl HabitTrackerApp {
             y: fy,
             width: fw,
             height: fh,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::all(12.0),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -2133,7 +2163,7 @@ impl HabitTrackerApp {
             y: fy,
             width: fw,
             height: fh,
-            color: SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(12.0),
         });
@@ -2143,7 +2173,7 @@ impl HabitTrackerApp {
             y: fy + 16.0,
             text: String::from("New Habit"),
             font_size: 18.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -2155,7 +2185,7 @@ impl HabitTrackerApp {
             y: fy + 54.0,
             text: String::from("Name:"),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
             overflow: TextOverflow::Ellipsis,
@@ -2165,7 +2195,7 @@ impl HabitTrackerApp {
             y: fy + 48.0,
             width: 290.0,
             height: 28.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         let display_name = if self.create_name.is_empty() {
@@ -2174,9 +2204,9 @@ impl HabitTrackerApp {
             self.create_name.clone()
         };
         let name_color = if self.create_name.is_empty() {
-            OVERLAY0
+            self.palette.overlay0
         } else {
-            TEXT_COLOR
+            self.palette.text
         };
         cmds.push(RenderCommand::Text {
             x: fx + 88.0,
@@ -2199,7 +2229,7 @@ impl HabitTrackerApp {
             y: fy + 94.0,
             text: String::from("Category:"),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
             overflow: TextOverflow::Ellipsis,
@@ -2209,7 +2239,7 @@ impl HabitTrackerApp {
             y: fy + 88.0,
             width: 140.0,
             height: 24.0,
-            color: cat.color(),
+            color: cat.color(&self.palette),
             corner_radii: CornerRadii::all(12.0),
         });
         cmds.push(RenderCommand::Text {
@@ -2217,7 +2247,7 @@ impl HabitTrackerApp {
             y: fy + 92.0,
             text: format!("{} {} (Tab)", cat.icon(), cat.label()),
             font_size: 11.0,
-            color: CRUST,
+            color: self.palette.crust,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
             overflow: TextOverflow::Ellipsis,
@@ -2229,7 +2259,7 @@ impl HabitTrackerApp {
             y: fy + 134.0,
             text: String::from("Frequency:"),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
             overflow: TextOverflow::Ellipsis,
@@ -2244,7 +2274,7 @@ impl HabitTrackerApp {
             y: fy + 134.0,
             text: freq_text,
             font_size: 12.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(250.0),
             overflow: TextOverflow::Ellipsis,
@@ -2256,7 +2286,7 @@ impl HabitTrackerApp {
             y: fy + fh - 60.0,
             width: 90.0,
             height: 32.0,
-            color: GREEN,
+            color: self.palette.green,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
@@ -2264,7 +2294,7 @@ impl HabitTrackerApp {
             y: fy + fh - 52.0,
             text: String::from("Create"),
             font_size: 13.0,
-            color: CRUST,
+            color: self.palette.crust,
             font_weight: FontWeightHint::Bold,
             max_width: Some(70.0),
             overflow: TextOverflow::Ellipsis,
@@ -2275,7 +2305,7 @@ impl HabitTrackerApp {
             y: fy + fh - 60.0,
             width: 90.0,
             height: 32.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
@@ -2283,7 +2313,7 @@ impl HabitTrackerApp {
             y: fy + fh - 52.0,
             text: String::from("Cancel"),
             font_size: 13.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(70.0),
             overflow: TextOverflow::Ellipsis,
@@ -2297,7 +2327,7 @@ impl HabitTrackerApp {
             y,
             width: self.width,
             height: Self::STATUS_H,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
@@ -2305,7 +2335,7 @@ impl HabitTrackerApp {
             y: y + 7.0,
             text: self.status_msg.clone(),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width * 0.5),
             overflow: TextOverflow::Ellipsis,
@@ -2315,7 +2345,7 @@ impl HabitTrackerApp {
             y: y + 7.0,
             text: String::from("N:New  A:Archive  C:Filter  Space:Check  +/-:Date"),
             font_size: 10.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(310.0),
             overflow: TextOverflow::Ellipsis,
@@ -2323,19 +2353,23 @@ impl HabitTrackerApp {
     }
 }
 
-fn rate_color(rate: f32) -> Color {
+fn rate_color(rate: f32, pal: &Palette) -> Color {
     if rate >= 0.8 {
-        GREEN
+        pal.green
     } else if rate >= 0.5 {
-        YELLOW
+        pal.yellow
     } else if rate >= 0.3 {
-        PEACH
+        pal.peach
     } else {
-        RED
+        pal.red
     }
 }
 
 impl App for HabitTrackerApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Habits".to_string()
     }
@@ -3440,19 +3474,21 @@ mod tests {
 
     #[test]
     fn test_heatmap_color_checked() {
-        let c = HabitTrackerApp::heatmap_color(true, 1.0);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let c = HabitTrackerApp::heatmap_color(true, &pal, 1.0);
         // Should have non-zero alpha
-        assert_ne!(c, SURFACE0);
+        assert_ne!(c, pal.surface0);
     }
 
     #[test]
     fn heatmap_color_darkens_with_intensity() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         // The whole point of the function: a stronger day is a stronger cell.
         // The old test only asked that a checked day differ from an unchecked
-        // one, which a flat `GREEN` also satisfies -- and flat `GREEN` was in
+        // one, which a flat `pal.green` also satisfies -- and flat `pal.green` was in
         // fact what the renderer drew.
-        let faint = HabitTrackerApp::heatmap_color(true, 0.0);
-        let strong = HabitTrackerApp::heatmap_color(true, 1.0);
+        let faint = HabitTrackerApp::heatmap_color(true, &pal, 0.0);
+        let strong = HabitTrackerApp::heatmap_color(true, &pal, 1.0);
         assert!(
             strong.a > faint.a,
             "intensity 1.0 ({}) should be more opaque than 0.0 ({})",
@@ -3529,8 +3565,9 @@ mod tests {
 
     #[test]
     fn render_heatmap_shades_cells_by_run_length() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         // The regression this whole change exists for. The renderer drew
-        // `if checked { GREEN } else { SURFACE0 }` -- two colours, whatever
+        // `if checked { pal.green } else { pal.surface0 }` -- two colours, whatever
         // the data -- while `heatmap_color` sat unused with only its own test
         // for company.
         //
@@ -3578,7 +3615,7 @@ mod tests {
 
         let mut shades: Vec<u8> = squares
             .iter()
-            .filter(|(y, c)| graph_rows.contains(y) && *c != SURFACE0)
+            .filter(|(y, c)| graph_rows.contains(y) && *c != pal.surface0)
             .map(|(_, c)| c.a)
             .collect();
         assert_eq!(shades.len(), 6, "six checked days should be drawn");
@@ -3597,8 +3634,9 @@ mod tests {
 
     #[test]
     fn test_heatmap_color_unchecked() {
-        let c = HabitTrackerApp::heatmap_color(false, 0.5);
-        assert_eq!(c, SURFACE0);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let c = HabitTrackerApp::heatmap_color(false, &pal, 0.5);
+        assert_eq!(c, pal.surface0);
     }
 
     // ── Render tests ────────────────────────────────────────────────
@@ -3734,11 +3772,12 @@ mod tests {
 
     #[test]
     fn test_rate_color_ranges() {
-        assert_eq!(rate_color(1.0), GREEN);
-        assert_eq!(rate_color(0.8), GREEN);
-        assert_eq!(rate_color(0.6), YELLOW);
-        assert_eq!(rate_color(0.4), PEACH);
-        assert_eq!(rate_color(0.1), RED);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(rate_color(1.0, &pal), pal.green);
+        assert_eq!(rate_color(0.8, &pal), pal.green);
+        assert_eq!(rate_color(0.6, &pal), pal.yellow);
+        assert_eq!(rate_color(0.4, &pal), pal.peach);
+        assert_eq!(rate_color(0.1, &pal), pal.red);
     }
 
     // ── Ctrl+D delete test ──────────────────────────────────────────
@@ -4048,6 +4087,65 @@ mod tests {
             app.selected_habit,
             count.saturating_sub(1),
             "Down ran off the bottom"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut HabitTrackerApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = HabitTrackerApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

@@ -16,6 +16,7 @@
 //!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha theme.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::frame::{Frame, Rect};
 // The shared civil-date arithmetic. This app's own copy was *correct* --
@@ -41,26 +42,12 @@ use std::time::Duration;
 // ============================================================================
 
 // Every one of these carried an `#[allow(dead_code)]`, and five of them --
-// CRUST, MAUVE, TEAL, PINK, ROSEWATER -- were never named anywhere but on
+// self.palette.crust, MAUVE, TEAL, PINK, ROSEWATER -- were never named anywhere but on
 // their own definition line. The `allow` is what let that be true for as long
 // as it was: it silences the one warning that would have said so. They are
 // deleted rather than kept "for later", because a palette entry no drawing
 // call reaches is not a palette entry, and the next reader would have had to
 // grep the file to find that out.
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const CRUST: Color = Color::from_hex(0x11111B);
 
 // ============================================================================
 // Constants
@@ -418,7 +405,10 @@ impl ContactGroup {
             id,
             name: name.to_string(),
             description: String::new(),
-            color: BLUE,
+            // Content, not chrome: a group's colour is the user's own
+            // choice, stored per group and shown as its swatch, so it does
+            // not follow the desktop theme.
+            color: Color::from_hex(0x89B4FA),
             member_count: 0,
         }
     }
@@ -2112,11 +2102,18 @@ pub struct ContactsApp {
     // and the next frame is answered against the size the window really is.
     pub window_width: f32,
     pub window_height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl ContactsApp {
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             store: ContactStore::new(),
             view: DetailView::Empty,
             search_query: String::new(),
@@ -2294,7 +2291,7 @@ impl ContactsApp {
         // Edge to edge at every size. The old fill was `self.window_width` by
         // `self.window_height` -- the size the app believed it was, which
         // after a resize is the size it used to be.
-        f.push(fill(l.window, BASE, 0.0));
+        f.push(fill(l.window, self.palette.base, 0.0));
 
         self.draw_sidebar(&mut f, &l);
         self.draw_alphabet(&mut f, &l);
@@ -2306,8 +2303,8 @@ impl ContactsApp {
     /// The sidebar: title, count, `+`, search, the two strips and the list.
     fn draw_sidebar(&self, f: &mut Frame<Target>, l: &Layout) {
         let side = Rect::new(0.0, 0.0, l.list.w + l.alphabet.w, l.status.y);
-        f.push(fill(side, MANTLE, 0.0));
-        f.push(fill(l.header, SURFACE0, 0.0));
+        f.push(fill(side, self.palette.mantle, 0.0));
+        f.push(fill(l.header, self.palette.surface0, 0.0));
 
         // The title and the count share the header, and both stop short of
         // the `+` rather than running under it.
@@ -2318,7 +2315,7 @@ impl ContactsApp {
             Rect::new(12.0, l.header.y, title_w, half),
             "Contacts",
             18.0,
-            TEXT_COLOR,
+            self.palette.text,
             FontWeightHint::Bold,
         );
         put_text(
@@ -2326,18 +2323,18 @@ impl ContactsApp {
             Rect::new(12.0, l.header.y + half, title_w, l.header.h - half),
             &format!("{} contacts", self.store.contact_count()),
             11.0,
-            SUBTEXT0,
+            self.palette.subtext0,
             FontWeightHint::Regular,
         );
 
         if !l.add_button.is_empty() {
-            f.push(fill(l.add_button, BLUE, 6.0));
+            f.push(fill(l.add_button, self.palette.blue, 6.0));
             put_text(
                 f,
                 inset(l.add_button, l.add_button.w / 3.0),
                 "+",
                 18.0,
-                BASE,
+                self.palette.base,
                 FontWeightHint::Bold,
             );
             f.hit(Target::AddContact, l.add_button);
@@ -2355,7 +2352,7 @@ impl ContactsApp {
                 y1: 0.0,
                 x2: l.panel.x,
                 y2: l.status.y,
-                color: SURFACE1,
+                color: self.palette.surface1,
                 width: 1.0,
             });
         }
@@ -2369,7 +2366,11 @@ impl ContactsApp {
         let focused = self.focus == Focus::Search;
         f.push(fill(
             l.search,
-            if focused { SURFACE1 } else { SURFACE0 },
+            if focused {
+                self.palette.surface1
+            } else {
+                self.palette.surface0
+            },
             8.0,
         ));
         let inner = inset(l.search, 10.0);
@@ -2384,7 +2385,11 @@ impl ContactsApp {
             inner,
             shown,
             13.0,
-            if placeholder { OVERLAY0 } else { TEXT_COLOR },
+            if placeholder {
+                self.palette.overlay0
+            } else {
+                self.palette.text
+            },
             FontWeightHint::Regular,
         );
         if focused {
@@ -2395,7 +2400,7 @@ impl ContactsApp {
             let caret_x = (inner.x + used).min(inner.right() - 2.0);
             f.push(fill(
                 Rect::new(caret_x, inner.y + 4.0, 2.0, (inner.h - 8.0).max(0.0)),
-                BLUE,
+                self.palette.blue,
                 0.0,
             ));
         }
@@ -2437,7 +2442,11 @@ impl ContactsApp {
             };
             f.push(fill(
                 inset_x(cell, 4.0),
-                if on { BLUE } else { SURFACE0 },
+                if on {
+                    self.palette.blue
+                } else {
+                    self.palette.surface0
+                },
                 4.0,
             ));
             put_text(
@@ -2445,7 +2454,11 @@ impl ContactsApp {
                 inset(cell, 8.0),
                 &label,
                 11.0,
-                if on { BASE } else { SUBTEXT0 },
+                if on {
+                    self.palette.base
+                } else {
+                    self.palette.subtext0
+                },
                 FontWeightHint::Regular,
             );
             f.hit(target, cell);
@@ -2475,7 +2488,7 @@ impl ContactsApp {
                 inset(Rect::new(l.list.x, l.list.y, l.list.w, 24.0), 12.0),
                 "No contacts match",
                 12.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
             );
             f.unclip();
@@ -2506,7 +2519,7 @@ impl ContactsApp {
                         inset(row, 12.0),
                         &letter.to_string(),
                         12.0,
-                        BLUE,
+                        self.palette.blue,
                         FontWeightHint::Bold,
                     );
                 }
@@ -2535,7 +2548,7 @@ impl ContactsApp {
         f.push(fill(
             row,
             if selected {
-                SURFACE0
+                self.palette.surface0
             } else {
                 Color::TRANSPARENT
             },
@@ -2545,7 +2558,11 @@ impl ContactsApp {
         let avatar = Rect::new(row.x + 10.0, row.y + 6.0, 40.0, 40.0);
         f.push(fill(
             avatar,
-            if contact.favorite { YELLOW } else { SURFACE1 },
+            if contact.favorite {
+                self.palette.yellow
+            } else {
+                self.palette.surface1
+            },
             20.0,
         ));
         put_text(
@@ -2553,7 +2570,11 @@ impl ContactsApp {
             inset(avatar, 10.0),
             &contact.initials(),
             14.0,
-            if contact.favorite { BASE } else { TEXT_COLOR },
+            if contact.favorite {
+                self.palette.base
+            } else {
+                self.palette.text
+            },
             FontWeightHint::Bold,
         );
 
@@ -2569,7 +2590,7 @@ impl ContactsApp {
                 Rect::new(row.right() - star_w - 4.0, row.y, star_w, row.h),
                 "*",
                 16.0,
-                YELLOW,
+                self.palette.yellow,
                 FontWeightHint::Bold,
             );
         }
@@ -2580,7 +2601,7 @@ impl ContactsApp {
             Rect::new(text_x, row.y + 4.0, text_w, name_h - 4.0),
             &contact.computed_display_name(),
             14.0,
-            TEXT_COLOR,
+            self.palette.text,
             FontWeightHint::Regular,
         );
         let subtitle = if !contact.company.is_empty() {
@@ -2598,7 +2619,7 @@ impl ContactsApp {
                 Rect::new(text_x, row.y + name_h, text_w, row.h - name_h - 4.0),
                 &subtitle,
                 11.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
             );
         }
@@ -2620,7 +2641,11 @@ impl ContactsApp {
                 inset_x(cell, 6.0),
                 &letter.to_string(),
                 9.0,
-                if on { BLUE } else { SUBTEXT0 },
+                if on {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext0
+                },
                 if on {
                     FontWeightHint::Bold
                 } else {
@@ -2636,15 +2661,15 @@ impl ContactsApp {
         if l.panel.is_empty() {
             return;
         }
-        f.push(fill(l.panel, BASE, 0.0));
+        f.push(fill(l.panel, self.palette.base, 0.0));
         f.clip(l.panel);
         match &self.view {
-            DetailView::Empty => Self::draw_empty_state(f, l),
+            DetailView::Empty => Self::draw_empty_state(f, &self.palette, l),
             DetailView::ViewContact(id) => {
                 if let Some(contact) = self.store.get_contact(*id) {
                     self.draw_contact_detail(f, l, contact);
                 } else {
-                    Self::draw_empty_state(f, l);
+                    Self::draw_empty_state(f, &self.palette, l);
                 }
             }
             DetailView::EditContact(_) | DetailView::NewContact => self.draw_edit_form(f, l),
@@ -2655,7 +2680,7 @@ impl ContactsApp {
     }
 
     /// What the panel says when nothing is selected.
-    fn draw_empty_state(f: &mut Frame<Target>, l: &Layout) {
+    fn draw_empty_state(f: &mut Frame<Target>, pal: &Palette, l: &Layout) {
         let body = inset(l.panel, DETAIL_PADDING);
         let mid = body.y + body.h / 2.0;
         put_text(
@@ -2663,7 +2688,7 @@ impl ContactsApp {
             Rect::new(body.x, mid - 30.0, body.w, 24.0),
             "Select a contact",
             18.0,
-            SUBTEXT0,
+            pal.subtext0,
             FontWeightHint::Regular,
         );
         put_text(
@@ -2671,7 +2696,7 @@ impl ContactsApp {
             Rect::new(body.x, mid, body.w, 18.0),
             "or press + to add a new one",
             13.0,
-            OVERLAY0,
+            pal.overlay0,
             FontWeightHint::Regular,
         );
     }
@@ -2692,7 +2717,11 @@ impl ContactsApp {
         let avatar = Rect::new(body.x, y, AVATAR_SIZE.min(body.w), AVATAR_SIZE);
         f.push(fill(
             avatar,
-            if contact.favorite { YELLOW } else { BLUE },
+            if contact.favorite {
+                self.palette.yellow
+            } else {
+                self.palette.blue
+            },
             avatar.w / 2.0,
         ));
         put_text(
@@ -2700,7 +2729,7 @@ impl ContactsApp {
             inset(avatar, avatar.w / 3.0),
             &contact.initials(),
             28.0,
-            BASE,
+            self.palette.base,
             FontWeightHint::Bold,
         );
         y += AVATAR_SIZE + 12.0;
@@ -2710,7 +2739,7 @@ impl ContactsApp {
             Rect::new(body.x, y, body.w, 26.0),
             &contact.computed_display_name(),
             22.0,
-            TEXT_COLOR,
+            self.palette.text,
             FontWeightHint::Bold,
         );
         y += 30.0;
@@ -2722,8 +2751,8 @@ impl ContactsApp {
             (true, true) => String::new(),
         };
         for (line, size, color) in [
-            (company_line, 14.0, SUBTEXT0),
-            (contact.department.clone(), 12.0, OVERLAY0),
+            (company_line, 14.0, self.palette.subtext0),
+            (contact.department.clone(), 12.0, self.palette.overlay0),
             (
                 if contact.nickname.is_empty() {
                     String::new()
@@ -2731,7 +2760,7 @@ impl ContactsApp {
                     format!("\"{}\"", contact.nickname)
                 },
                 12.0,
-                LAVENDER,
+                self.palette.lavender,
             ),
         ] {
             if line.is_empty() {
@@ -2769,9 +2798,9 @@ impl ContactsApp {
                 continue;
             }
             let color = match action {
-                QuickAction::Call => GREEN,
-                QuickAction::Email => BLUE,
-                QuickAction::Map => PEACH,
+                QuickAction::Call => self.palette.green,
+                QuickAction::Email => self.palette.blue,
+                QuickAction::Map => self.palette.peach,
             };
             f.push(fill(r, color, 6.0));
             put_text(
@@ -2779,7 +2808,7 @@ impl ContactsApp {
                 inset(r, 8.0),
                 action.label(),
                 13.0,
-                BASE,
+                self.palette.base,
                 FontWeightHint::Bold,
             );
             f.hit(Target::Action(action), r);
@@ -2797,14 +2826,32 @@ impl ContactsApp {
         // Edit / Star / Delete, sharing the panel's width.
         let three_w = ((body.w - gap * 2.0) / 3.0).max(0.0);
         let buttons = [
-            (Target::EditContact, String::from("Edit"), BLUE, BASE),
+            (
+                Target::EditContact,
+                String::from("Edit"),
+                self.palette.blue,
+                self.palette.base,
+            ),
             (
                 Target::ToggleFavorite,
                 String::from(if contact.favorite { "Unstar" } else { "Star" }),
-                if contact.favorite { YELLOW } else { SURFACE1 },
-                if contact.favorite { BASE } else { TEXT_COLOR },
+                if contact.favorite {
+                    self.palette.yellow
+                } else {
+                    self.palette.surface1
+                },
+                if contact.favorite {
+                    self.palette.base
+                } else {
+                    self.palette.text
+                },
             ),
-            (Target::DeleteContact, String::from("Delete"), RED, BASE),
+            (
+                Target::DeleteContact,
+                String::from("Delete"),
+                self.palette.red,
+                self.palette.base,
+            ),
         ];
         for (i, (target, label, bg, fg)) in buttons.into_iter().enumerate() {
             let r = Rect::new(body.x + (i as f32) * (three_w + gap), btn_y, three_w, btn_h);
@@ -2869,7 +2916,7 @@ impl ContactsApp {
             for phone in &contact.phones {
                 let primary = if phone.primary { " (primary)" } else { "" };
                 let s = format!("{}: {}{primary}", phone.phone_type.label(), phone.number);
-                detail(&mut lines, s, TEXT_COLOR, 20.0);
+                detail(&mut lines, s, self.palette.text, 20.0);
             }
             lines.push(FieldLine::Gap(6.0));
         }
@@ -2878,7 +2925,7 @@ impl ContactsApp {
             for email in &contact.emails {
                 let primary = if email.primary { " (primary)" } else { "" };
                 let s = format!("{}: {}{primary}", email.email_type.label(), email.email);
-                detail(&mut lines, s, TEXT_COLOR, 20.0);
+                detail(&mut lines, s, self.palette.text, 20.0);
             }
             lines.push(FieldLine::Gap(6.0));
         }
@@ -2886,7 +2933,7 @@ impl ContactsApp {
             lines.push(FieldLine::Heading("Addresses"));
             for addr in &contact.addresses {
                 let s = format!("{}: {}", addr.address_type.label(), addr.display_line());
-                detail(&mut lines, s, TEXT_COLOR, 20.0);
+                detail(&mut lines, s, self.palette.text, 20.0);
             }
             lines.push(FieldLine::Gap(6.0));
         }
@@ -2894,13 +2941,13 @@ impl ContactsApp {
             lines.push(FieldLine::Heading("Social accounts"));
             for social in &contact.social_accounts {
                 let s = format!("{}: {}", social.platform.label(), social.handle);
-                detail(&mut lines, s, LAVENDER, 20.0);
+                detail(&mut lines, s, self.palette.lavender, 20.0);
             }
             lines.push(FieldLine::Gap(6.0));
         }
         if let Some(ref bday) = contact.birthday {
             lines.push(FieldLine::Heading("Birthday"));
-            detail(&mut lines, bday.format_display(), TEXT_COLOR, 24.0);
+            detail(&mut lines, bday.format_display(), self.palette.text, 24.0);
         }
         if !contact.notes.is_empty() {
             lines.push(FieldLine::Heading("Notes"));
@@ -2916,7 +2963,7 @@ impl ContactsApp {
             ) {
                 lines.push(FieldLine::Detail {
                     text: line,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     size: NOTES_FONT_SIZE,
                     height: NOTES_LINE_HEIGHT,
                     advance: NOTES_LINE_HEIGHT,
@@ -2953,7 +3000,7 @@ impl ContactsApp {
                         Rect::new(area.x, y, area.w, 14.0),
                         title,
                         11.0,
-                        OVERLAY0,
+                        self.palette.overlay0,
                         FontWeightHint::Bold,
                     );
                     y += 16.0;
@@ -2992,7 +3039,14 @@ impl ContactsApp {
                         }
                         let chip = Rect::new(chip_x, y, chip_w, GROUP_CHIP_HEIGHT);
                         f.push(fill(chip, color, GROUP_CHIP_HEIGHT / 2.0));
-                        put_text(f, inset(chip, 8.0), &name, 11.0, BASE, FontWeightHint::Bold);
+                        put_text(
+                            f,
+                            inset(chip, 8.0),
+                            &name,
+                            11.0,
+                            self.palette.base,
+                            FontWeightHint::Bold,
+                        );
                         f.hit(Target::Group(gid), chip);
                         chip_x += chip_w + 8.0;
                     }
@@ -3018,7 +3072,7 @@ impl ContactsApp {
                 "Edit Contact"
             },
             20.0,
-            TEXT_COLOR,
+            self.palette.text,
             FontWeightHint::Bold,
         );
         y += 32.0;
@@ -3054,13 +3108,21 @@ impl ContactsApp {
                     Rect::new(form.x, fy, form.w, 12.0),
                     field.label(),
                     11.0,
-                    OVERLAY0,
+                    self.palette.overlay0,
                     FontWeightHint::Regular,
                 );
                 fy += 14.0;
                 let box_r = Rect::new(form.x, fy, form.w, h);
                 let focused = self.focus == Focus::Field(field);
-                f.push(fill(box_r, if focused { SURFACE1 } else { SURFACE0 }, 6.0));
+                f.push(fill(
+                    box_r,
+                    if focused {
+                        self.palette.surface1
+                    } else {
+                        self.palette.surface0
+                    },
+                    6.0,
+                ));
                 let value = self.field_value(field);
                 let inner = inset(box_r, 10.0);
                 let inner = Rect::new(inner.x, inner.y, inner.w, 20.0_f32.min(inner.h));
@@ -3070,18 +3132,25 @@ impl ContactsApp {
                         inner,
                         field.label(),
                         13.0,
-                        OVERLAY0,
+                        self.palette.overlay0,
                         FontWeightHint::Regular,
                     );
                 } else {
-                    put_text(f, inner, value, 13.0, TEXT_COLOR, FontWeightHint::Regular);
+                    put_text(
+                        f,
+                        inner,
+                        value,
+                        13.0,
+                        self.palette.text,
+                        FontWeightHint::Regular,
+                    );
                 }
                 if focused {
                     let used = text::measure(value, 13.0, FontWeightHint::Regular);
                     let caret_x = (inner.x + used).min(inner.right() - 2.0);
                     f.push(fill(
                         Rect::new(caret_x, inner.y + 2.0, 2.0, (inner.h - 4.0).max(0.0)),
-                        BLUE,
+                        self.palette.blue,
                         0.0,
                     ));
                 }
@@ -3094,8 +3163,13 @@ impl ContactsApp {
         let gap = 10.0;
         let half = ((body.w - gap) / 2.0).max(0.0);
         for (i, (target, label, bg, fg)) in [
-            (Target::Save, "Save", GREEN, BASE),
-            (Target::Cancel, "Cancel", SURFACE1, TEXT_COLOR),
+            (Target::Save, "Save", self.palette.green, self.palette.base),
+            (
+                Target::Cancel,
+                "Cancel",
+                self.palette.surface1,
+                self.palette.text,
+            ),
         ]
         .into_iter()
         .enumerate()
@@ -3119,7 +3193,7 @@ impl ContactsApp {
             Rect::new(body.x, y, body.w, 24.0),
             "Duplicate Detection",
             20.0,
-            TEXT_COLOR,
+            self.palette.text,
             FontWeightHint::Bold,
         );
         y += 32.0;
@@ -3131,7 +3205,7 @@ impl ContactsApp {
                 Rect::new(body.x, y, body.w, 20.0),
                 "No duplicates found.",
                 14.0,
-                GREEN,
+                self.palette.green,
                 FontWeightHint::Regular,
             );
             return;
@@ -3141,7 +3215,7 @@ impl ContactsApp {
             Rect::new(body.x, y, body.w, 18.0),
             &format!("Found {} potential duplicate(s):", duplicates.len()),
             13.0,
-            PEACH,
+            self.palette.peach,
             FontWeightHint::Regular,
         );
         y += 24.0;
@@ -3149,7 +3223,7 @@ impl ContactsApp {
         let merge_w = 64.0_f32.min(body.w / 3.0);
         for dup in &duplicates {
             let card = Rect::new(body.x, y, body.w, 60.0);
-            f.push(fill(card, SURFACE0, 8.0));
+            f.push(fill(card, self.palette.surface0, 8.0));
             let name_a = self
                 .store
                 .get_contact(dup.contact_a_id)
@@ -3164,7 +3238,7 @@ impl ContactsApp {
                 Rect::new(card.x + 12.0, card.y + 8.0, text_w, 18.0),
                 &format!("{name_a}  <->  {name_b}"),
                 13.0,
-                TEXT_COLOR,
+                self.palette.text,
                 FontWeightHint::Bold,
             );
             put_text(
@@ -3176,18 +3250,18 @@ impl ContactsApp {
                     dup.confidence * 100.0
                 ),
                 11.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
             );
             let merge = Rect::new(card.right() - merge_w - 8.0, card.y + 16.0, merge_w, 28.0);
             if !merge.is_empty() {
-                f.push(fill(merge, BLUE, 4.0));
+                f.push(fill(merge, self.palette.blue, 4.0));
                 put_text(
                     f,
                     inset(merge, 6.0),
                     "Merge",
                     11.0,
-                    BASE,
+                    self.palette.base,
                     FontWeightHint::Bold,
                 );
                 f.hit(Target::Merge(dup.contact_a_id, dup.contact_b_id), merge);
@@ -3205,7 +3279,7 @@ impl ContactsApp {
             Rect::new(body.x, y, body.w, 24.0),
             "Groups",
             20.0,
-            TEXT_COLOR,
+            self.palette.text,
             FontWeightHint::Bold,
         );
         y += 32.0;
@@ -3217,18 +3291,20 @@ impl ContactsApp {
                 Rect::new(body.x, y, body.w, 20.0),
                 "No groups yet. Create one to organize contacts.",
                 14.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
             );
             return;
         }
         for (gid, name, count) in &stats {
             let row = Rect::new(body.x, y, body.w, 48.0);
-            f.push(fill(row, SURFACE0, 8.0));
+            f.push(fill(row, self.palette.surface0, 8.0));
             let dot = Rect::new(row.x + 12.0, row.y + 16.0, 16.0, 16.0);
             f.push(fill(
                 dot,
-                self.store.get_group(*gid).map_or(BLUE, |g| g.color),
+                self.store
+                    .get_group(*gid)
+                    .map_or(self.palette.blue, |g| g.color),
                 8.0,
             ));
             let text_x = dot.right() + 8.0;
@@ -3238,7 +3314,7 @@ impl ContactsApp {
                 Rect::new(text_x, row.y + 8.0, text_w, 18.0),
                 name,
                 14.0,
-                TEXT_COLOR,
+                self.palette.text,
                 FontWeightHint::Bold,
             );
             put_text(
@@ -3246,7 +3322,7 @@ impl ContactsApp {
                 Rect::new(text_x, row.y + 26.0, text_w, 16.0),
                 &format!("{count} contact(s)"),
                 11.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
             );
             f.hit(Target::Group(*gid), row);
@@ -3259,13 +3335,13 @@ impl ContactsApp {
         if l.status.is_empty() {
             return;
         }
-        f.push(fill(l.status, CRUST, 0.0));
+        f.push(fill(l.status, self.palette.crust, 0.0));
         put_text(
             f,
             inset(l.status, 8.0),
             &self.status,
             11.0,
-            SUBTEXT0,
+            self.palette.subtext0,
             FontWeightHint::Regular,
         );
     }
@@ -3318,13 +3394,13 @@ impl ContactsApp {
         // Groups
         let g1 = self
             .store
-            .add_group(ContactGroup::new(0, "Family").with_color(GREEN));
+            .add_group(ContactGroup::new(0, "Family").with_color(self.palette.green));
         let g2 = self
             .store
-            .add_group(ContactGroup::new(0, "Work").with_color(BLUE));
+            .add_group(ContactGroup::new(0, "Work").with_color(self.palette.blue));
         let g3 = self
             .store
-            .add_group(ContactGroup::new(0, "Friends").with_color(PEACH));
+            .add_group(ContactGroup::new(0, "Friends").with_color(self.palette.peach));
 
         // Contact 1
         let mut c1 = Contact::new(0, "Alice", "Anderson");
@@ -3896,6 +3972,10 @@ impl ContactsApp {
 // ============================================================================
 
 impl App for ContactsApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Contacts")
     }
@@ -4384,8 +4464,9 @@ mod tests {
 
     #[test]
     fn test_contact_group_with_color() {
-        let g = ContactGroup::new(1, "Work").with_color(RED);
-        assert_eq!(g.color, RED);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let g = ContactGroup::new(1, "Work").with_color(pal.red);
+        assert_eq!(g.color, pal.red);
     }
 
     #[test]
@@ -5693,6 +5774,7 @@ mod tests {
 
     /// The `(y, text)` of every notes line drawn in the detail panel.
     fn notes_lines_drawn(app: &ContactsApp) -> Vec<(f32, String)> {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         app.render()
             .into_iter()
             .filter_map(|c| match c {
@@ -5702,7 +5784,7 @@ mod tests {
                     font_size,
                     color,
                     ..
-                } if (font_size - NOTES_FONT_SIZE).abs() < 0.01 && color == SUBTEXT0 => {
+                } if (font_size - NOTES_FONT_SIZE).abs() < 0.01 && color == pal.subtext0 => {
                     Some((y, text))
                 }
                 _ => None,
@@ -5733,6 +5815,7 @@ mod tests {
 
     #[test]
     fn the_groups_section_starts_below_the_notes() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         // The detail panel is a running cursor, so wrapping the notes without
         // advancing it would have drawn the groups heading over the notes.
         let mut app = app_viewing_notes(LONG_NOTES);
@@ -5749,7 +5832,7 @@ mod tests {
         // The sidebar now carries a `Groups` *button* as well, so matching on
         // the word alone would find that button -- which sits at the top of
         // the window and would fail this test no matter where the panel drew
-        // its heading. The heading is the bold OVERLAY0 run; the button is a
+        // its heading. The heading is the bold pal.overlay0 run; the button is a
         // regular-weight one. Assert there is exactly one of each shape so
         // that a future third `Groups` run cannot quietly be picked instead.
         let headings: Vec<f32> = app
@@ -5764,7 +5847,7 @@ mod tests {
                     ..
                 } if text == "Groups"
                     && font_weight == FontWeightHint::Bold
-                    && color == OVERLAY0 =>
+                    && color == pal.overlay0 =>
                 {
                     Some(y)
                 }
@@ -7812,6 +7895,65 @@ mod tests {
             ),
             before,
             "a press on bare background at {at:?} changed the app"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut ContactsApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = ContactsApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

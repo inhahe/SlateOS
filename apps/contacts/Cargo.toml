@@ -5,6 +5,8 @@ edition = "2024"
 description = "SlateOS Contacts — address book and contact manager"
 
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 # The address book had no way in. `main` built a store, drew one frame into a
 # `Vec` and dropped it, so every control below -- the `+` button, the search

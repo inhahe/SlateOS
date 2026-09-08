@@ -2289,7 +2289,7 @@ primitive than the three that just landed. Promote it to `requests/` the first
 time a port actually depends on the filter — glibc's `posix_spawn` and
 `pthread_cancel` paths are the likeliest candidates.
 
-### TD-POSIX-NATIVE-GETRUSAGE-REPORTS-SYSTEM-WIDE-CPU. `getrusage()` on our own ABI returns the machine's total CPU time as if it were the caller's — LOGGED 2026-08-16 by lane B, filed to lane A
+### TD-POSIX-NATIVE-GETRUSAGE-REPORTS-SYSTEM-WIDE-CPU. `getrusage()` on our own ABI returns the machine's total CPU time as if it were the caller's — LOGGED 2026-08-16 by lane B, filed to lane A — ✅ FIXED 2026-08-16 by lane A (`SYS_PROCESS_GET_RUSAGE = 1064`, commit `c9bc34347`)
 
 **In short:** a program can ask the OS "how much CPU have I used?". On our own
 ABI it gets an answer, the answer looks entirely plausible, and it is **the
@@ -16363,7 +16363,7 @@ round trip deliberately does not model expansion (`strip_quotes` does not
 expand and a real shell does), and says so in place, so that gap is not
 silently absorbed into a property that would then read as covering it.
 
-### A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD, so `$HOME/<TAB>` searches for a directory literally named `$HOME` — 2026-09-04 (lane A) — OPEN
+### A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD, so `$HOME/<TAB>` searches for a directory literally named `$HOME` — 2026-09-04 (lane A) — ✅ FIXED 2026-09-05 by lane A (`eb62e6501`, `completion_view` now calls `expand_vars_speculative_str` before `remove_quotes`)
 
 **In short:** in the kernel shell, press Tab after typing a path that contains
 a variable — `cat $HOME/no<TAB>`, `ls $PWD/<TAB>` — and nothing is offered.
@@ -25539,7 +25539,7 @@ delete.
 directory before it completes, and observe that a partial checkout looks
 identical to a failed one.
 
-### BUG-LIVENESS-SYSTEM-HANG-FALSE-POSITIVE. The total-hang detector fired on a healthy boot and, by disarming, blinded the wall-clock backstop for the remaining ~600 s — 2026-08-15 — OPEN (lane A owns the fix)
+### BUG-LIVENESS-SYSTEM-HANG-FALSE-POSITIVE. The total-hang detector fired on a healthy boot and, by disarming, blinded the wall-clock backstop for the remaining ~600 s — 2026-08-15 — ✅ FIXED (lane A; the total-hang branch no longer disarms, bounded to 3 reports via `LIVENESS_MAX_HANG_REPORTS`; `check_liveness_failures` in boot-test.sh asserts the contract)
 
 **In short.** The boot watchdog announced `SYSTEM HANG`. The machine had not
 hung: the boot continued for another ten minutes and reached `BOOT_OK`. The

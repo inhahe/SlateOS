@@ -214,6 +214,34 @@ pub enum ColorMode {
     Monochrome,
 }
 
+/// How big to print each page.
+///
+/// Two shapes rather than a percentage, because the two halves this format
+/// joins each had one of them and neither could say the other. The PDF viewer
+/// had `scale_to_fit: bool`, which is the option a user actually picks; the
+/// desktop had `scale_percent: u32`, which is the one a printer driver wants.
+/// A format carrying only the percentage would have had to encode "fit" as a
+/// number it cannot know -- the fit depends on the paper *and* the page, which
+/// is the service's business, not the sender's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScaleMode {
+    /// Shrink or grow each page to fill the paper, preserving its shape.
+    #[default]
+    FitToPage,
+    /// A fixed percentage; 100 is actual size.
+    Percent(u32),
+}
+
+impl ScaleMode {
+    /// The largest percentage a printer is asked to honour.
+    ///
+    /// 400, which is `gui/desktop`'s existing limit. Matched deliberately
+    /// rather than chosen: the desktop's number is the one with a capability
+    /// check behind it, and a format that allowed more would produce jobs the
+    /// half that has to print them would refuse.
+    pub const MAX_PERCENT: u32 = 400;
+}
+
 /// Everything an application says about how it wants a document printed.
 ///
 /// The union of the two vocabularies §540 describes: the range from the
@@ -245,8 +273,8 @@ pub struct PrintJob {
     pub duplex: bool,
     /// Collate multi-copy output (1,2,3 / 1,2,3 rather than 1,1 / 2,2 / 3,3).
     pub collate: bool,
-    /// Percentage scale; 100 is actual size.
-    pub scale_percent: u32,
+    /// How big to print each page.
+    pub scale: ScaleMode,
 }
 
 impl Default for PrintJob {
@@ -263,7 +291,7 @@ impl Default for PrintJob {
             color: ColorMode::default(),
             duplex: false,
             collate: true,
-            scale_percent: 100,
+            scale: ScaleMode::FitToPage,
         }
     }
 }
@@ -273,7 +301,7 @@ impl Default for PrintJob {
 pub enum Invalid {
     /// Zero copies, which is a request to do nothing rather than to print.
     NoCopies,
-    /// A scale of zero, or one so large the page cannot hold any of it.
+    /// A percentage of zero, or one past [`ScaleMode::MAX_PERCENT`].
     ImpossibleScale,
     /// The range names no page of this document.
     NoPages,
@@ -300,7 +328,9 @@ impl PrintJob {
         if self.copies == 0 {
             return Err(Invalid::NoCopies);
         }
-        if self.scale_percent == 0 || self.scale_percent > 1000 {
+        if let ScaleMode::Percent(pct) = self.scale
+            && (pct == 0 || pct > ScaleMode::MAX_PERCENT)
+        {
             return Err(Invalid::ImpossibleScale);
         }
         if self.pages().is_empty() {
@@ -463,6 +493,47 @@ mod tests {
             ..PrintJob::default()
         };
         assert_eq!(job.sheets(), 12);
+    }
+
+    #[test]
+    fn fit_to_page_is_the_default_and_is_not_a_percentage() {
+        let job = PrintJob {
+            page_count: 3,
+            ..PrintJob::default()
+        };
+        assert_eq!(job.scale, ScaleMode::FitToPage);
+        assert_eq!(
+            job.validate(),
+            Ok(()),
+            "fitting has no number to be out of range"
+        );
+    }
+
+    #[test]
+    fn a_percentage_outside_what_the_desktop_accepts_is_refused() {
+        for pct in [0, ScaleMode::MAX_PERCENT + 1, 1000] {
+            let job = PrintJob {
+                page_count: 3,
+                scale: ScaleMode::Percent(pct),
+                ..PrintJob::default()
+            };
+            assert_eq!(
+                job.validate(),
+                Err(Invalid::ImpossibleScale),
+                "{pct}% was accepted, and the half that has to print it caps at {}",
+                ScaleMode::MAX_PERCENT
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_percentage_is_accepted() {
+        let job = PrintJob {
+            page_count: 3,
+            scale: ScaleMode::Percent(100),
+            ..PrintJob::default()
+        };
+        assert_eq!(job.validate(), Ok(()));
     }
 
     /// The desktop's single-pair form survives the trip when it is expressible.

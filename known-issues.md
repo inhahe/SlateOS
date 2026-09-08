@@ -115895,7 +115895,7 @@ The verdicts are carried forward into kshell's self-test rungs, so the evidence
 does survive — but only the evidence gathered on the day the rule was written.
 A later edit to `shellquote.rs` that changes behaviour is caught by nothing.
 
-## A-TEST-CANARY-LOADS-LIVE-CASES-FAIL-ON-A-BUSY-HOST — OPEN 2026-09-03 (found by lane B, owned by lane A)
+## A-TEST-CANARY-LOADS-LIVE-CASES-FAIL-ON-A-BUSY-HOST — **FIXED** 2026-09-07 (`0868abf03`) (found by lane B, owned by lane A)
 
 **In short:** `scripts/test-canary-load.py` starts real spinner processes and
 then checks that each one got most of a CPU. On an idle machine that is true;

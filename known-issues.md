@@ -90892,7 +90892,7 @@ client's windows around.
 | ~~`always_on_top`, `always_on_bottom`~~ | **Done 2026-09-07.** A `StackTier` within the layer, not a layer override — see increment 3. |
 | `target_monitor` | multi-monitor placement, which the compositor does not model yet |
 | `no_decorations` | decorations are the client's own; there is no request to strip them |
-| `prevent_close`, `prevent_move`, `prevent_resize` | a per-window policy the *compositor* enforces — these cannot be shell-side, because the shell is not in the path when the user drags a title bar |
+| ~~`prevent_close`, `prevent_move`, `prevent_resize`~~ | **Done 2026-09-07.** `WindowPolicy`, enforced in the compositor exactly where the entry said it had to be. |
 | ~~`initial_state: Fullscreen`~~ | **Done 2026-09-07.** `ShellControlAction::Fullscreen`, `CONTROL_VERSION` 4 → 5. |
 
 **The proper fix**, and why it is not one commit: the eight-verb
@@ -90990,8 +90990,28 @@ need a policy store the compositor does not have. The honest increments are:
    The shell resolves `always_on_top` + `always_on_bottom` set together into
    one tier rather than sending the compositor a contradiction, and a rule
    silent on stacking asks for nothing at all.
-4. **`min_size` / `max_size` done 2026-09-07**, `CONTROL_VERSION` 8 → 9.
-   `prevent_close` / `prevent_move` / `prevent_resize` still open.
+4. **Done 2026-09-07.** `min_size`/`max_size` at `CONTROL_VERSION` 9;
+   `prevent_close`/`prevent_move`/`prevent_resize` at 10, as one
+   `WindowPolicy` carried by `ShellSetWindowPolicy` (tag `0x1E`).
+
+   The entry was right that these could not be shell-side, and the three
+   enforcement points are exactly where it said: `request_close`, the
+   title-bar drag, and the edge drag.
+
+   **They restrain the user, never the program.** `prevent_close` refuses the
+   *request* -- what a close button and a taskbar menu send -- and not
+   `destroy_window`, which is how a program exits. A rule that could stop a
+   process exiting would be a way to make one unkillable from a text file.
+
+   **`prevent_move` stops the drag without stopping the press.** A pinned
+   window still focuses and raises from its title bar; refusing the press
+   outright would make it unfocusable by the one part of it a user reliably
+   aims at.
+
+   One request rather than three: the flags are one rule's worth of answer,
+   and sending them separately could leave a window half-restrained if the
+   second frame were refused. An explicit `false` in a rule takes a
+   restriction back; silence imposes none.
 
    **This entry's claim that "the compositor has no per-window constraint
    store at all" was wrong when I read it.** `Window::min_size`/`max_size` and

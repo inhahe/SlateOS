@@ -1013,6 +1013,19 @@ impl<T: Transport> EventLoop<T> {
     /// # Errors
     ///
     /// As [`Connection::confirm`].
+    /// Say what the user may not do to another client's window.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn shell_set_window_policy(
+        &mut self,
+        window: u64,
+        policy: guiremote::control::WindowPolicy,
+    ) -> Result<(), Error<T>> {
+        self.conn.shell_set_window_policy(window, policy)
+    }
+
     pub fn shell_set_size_limits(
         &mut self,
         window: u64,
@@ -1843,6 +1856,7 @@ pub mod testing {
                 RequestBody::ShellResize { .. } => "ShellResize",
                 RequestBody::ShellSetStackTier { .. } => "ShellSetStackTier",
                 RequestBody::ShellSetSizeLimits { .. } => "ShellSetSizeLimits",
+                RequestBody::ShellSetWindowPolicy { .. } => "ShellSetWindowPolicy",
                 RequestBody::GetDisplayInfo => "GetDisplayInfo",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::ReloadAppearance => "ReloadAppearance",

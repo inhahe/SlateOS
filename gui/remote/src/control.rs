@@ -96,7 +96,7 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// same reason 3 did, and worse: the new field's own length prefix would be
 /// read by a version-3 decoder as the window's *width*, so the failure is not a
 /// wrong flag but a window several hundred million pixels across.
-pub const CONTROL_VERSION: u8 = 9;
+pub const CONTROL_VERSION: u8 = 10;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -344,6 +344,35 @@ impl Layer {
 /// `Move { x, y, w, h }` — a client-supplied rectangle — and that is still
 /// absent, which is the distinction to preserve when adding to this enum: if
 /// the shell has to compute pixels to use a verb, the verb is wrong.
+/// What the *user* may not do to a window, as a window rule says.
+///
+/// Enforced by the compositor, and it has to be: the shell is not in the path
+/// when somebody drags a title bar or presses a close button, so a policy the
+/// shell tried to apply would be one the pointer walks straight past.
+///
+/// **These restrain the user, never the program.** A window whose
+/// `prevent_close` is set still exits when its own code decides to -- what is
+/// refused is the *request* to close it, which is what a title-bar button and
+/// a taskbar menu send. A rule that could stop a program exiting would be a
+/// way to make a process unkillable from a text file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowPolicy {
+    /// The close button and the shell's Close action are refused.
+    pub prevent_close: bool,
+    /// A title-bar drag does not move the window.
+    pub prevent_move: bool,
+    /// An edge drag does not resize the window.
+    pub prevent_resize: bool,
+}
+
+impl WindowPolicy {
+    /// Whether this policy restrains anything at all.
+    #[must_use]
+    pub const fn is_unrestricted(self) -> bool {
+        !self.prevent_close && !self.prevent_move && !self.prevent_resize
+    }
+}
+
 /// Where a window sits *within* its layer.
 ///
 /// Deliberately not more [`Layer`] variants. A layer is chosen by the client
@@ -812,6 +841,13 @@ pub enum RequestBody {
         max_width: u32,
         max_height: u32,
     },
+    /// Say what the user may not do to *another client's* window. Shell only.
+    ///
+    /// How `prevent_close`, `prevent_move` and `prevent_resize` are applied.
+    /// One request rather than three because they are one rule's worth of
+    /// answer: a shell that sent them separately could leave a window
+    /// half-restrained if the second frame were refused.
+    ShellSetWindowPolicy { window: u64, policy: WindowPolicy },
     /// Ask about the display. Answered with [`ResponseBody::DisplayInfo`].
     GetDisplayInfo,
     /// Start or stop receiving the desktop's window list.
@@ -1130,6 +1166,7 @@ enum RequestTag {
     ShellResize = 0x1B,
     ShellSetStackTier = 0x1C,
     ShellSetSizeLimits = 0x1D,
+    ShellSetWindowPolicy = 0x1E,
 }
 
 impl RequestTag {
@@ -1164,6 +1201,7 @@ impl RequestTag {
             0x1B => Self::ShellResize,
             0x1C => Self::ShellSetStackTier,
             0x1D => Self::ShellSetSizeLimits,
+            0x1E => Self::ShellSetWindowPolicy,
             _ => return None,
         })
     }
@@ -1435,6 +1473,16 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             write_u32(out, *min_height);
             write_u32(out, *max_width);
             write_u32(out, *max_height);
+        }
+        RequestBody::ShellSetWindowPolicy { window, policy } => {
+            out.push(RequestTag::ShellSetWindowPolicy as u8);
+            write_u64(out, *window);
+            // A byte each rather than a bitmask. The frame is not short of
+            // room, and three named reads decode into three named fields
+            // without a table of bit positions to keep in step with them.
+            out.push(u8::from(policy.prevent_close));
+            out.push(u8::from(policy.prevent_move));
+            out.push(u8::from(policy.prevent_resize));
         }
         RequestBody::GetDisplayInfo => out.push(RequestTag::GetDisplayInfo as u8),
         RequestBody::SubscribeWindowList { subscribe } => {
@@ -1782,6 +1830,17 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 min_height: r.read_u32()?,
                 max_width: r.read_u32()?,
                 max_height: r.read_u32()?,
+            }
+        }
+        RequestTag::ShellSetWindowPolicy => {
+            let window = r.read_u64()?;
+            RequestBody::ShellSetWindowPolicy {
+                window,
+                policy: WindowPolicy {
+                    prevent_close: r.read_u8()? != 0,
+                    prevent_move: r.read_u8()? != 0,
+                    prevent_resize: r.read_u8()? != 0,
+                },
             }
         }
         RequestTag::GetDisplayInfo => RequestBody::GetDisplayInfo,
@@ -2237,8 +2296,13 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x1E),
+            Some(RequestTag::ShellSetWindowPolicy),
+            "0x1E was taken by ShellSetWindowPolicy in control version 10"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x1F),
             None,
-            "0x1E is the next free tag"
+            "0x1F is the next free tag"
         );
     }
 

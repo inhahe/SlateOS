@@ -48,7 +48,7 @@ use guitk::render::RenderTree;
 
 use crate::DecodeError;
 use crate::control::{
-    BufferFormat, Request, RequestBody, ResponseBody, ShellControlAction, StackTier,
+    BufferFormat, Request, RequestBody, ResponseBody, ShellControlAction, StackTier, WindowPolicy,
     encode_requests_into,
 };
 use crate::frame::{Frame, try_decode_any};
@@ -769,6 +769,19 @@ impl<T: Transport> Connection<T> {
     /// # Errors
     ///
     /// As [`Self::confirm`], plus a refusal if this link is not a shell.
+    /// Say what the user may not do to another client's window. Shell only.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::confirm`], plus a refusal if this link is not a shell.
+    pub fn shell_set_window_policy(
+        &mut self,
+        window: u64,
+        policy: WindowPolicy,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::ShellSetWindowPolicy { window, policy })
+    }
+
     pub fn shell_set_size_limits(
         &mut self,
         window: u64,

@@ -473,6 +473,13 @@ fn to_compositor_request(
                 tier,
             }
         }
+        RequestBody::ShellSetWindowPolicy { window, policy } => {
+            link.require_shell()?;
+            CompositorRequest::SetWindowPolicy {
+                window_id: WindowId::from_raw(window),
+                policy,
+            }
+        }
         RequestBody::ShellSetSizeLimits {
             window,
             min_width,

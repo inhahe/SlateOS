@@ -1544,6 +1544,9 @@ impl<T: Transport> ShellSession<T> {
             ShellRequest::MoveWindowToDesktop { window, desktop } => {
                 self.events.move_window_to_desktop(window.0, desktop)
             }
+            ShellRequest::SetWindowPolicy { window, policy } => {
+                self.events.shell_set_window_policy(window.0, policy)
+            }
             ShellRequest::SetSizeLimits { window, min, max } => {
                 self.events.shell_set_size_limits(window.0, min, max)
             }

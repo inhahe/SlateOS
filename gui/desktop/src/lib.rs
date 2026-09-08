@@ -173,7 +173,7 @@ use appearance::{
 // below so a caller wiring the shell to a compositor need not name `guiremote`
 // itself. `Layer` arrives with them because the list carries the shell's own
 // surfaces too, and telling those apart is the whole reason the field exists.
-pub use guiremote::control::{Layer, ShellControlAction, StackTier};
+pub use guiremote::control::{Layer, ShellControlAction, StackTier, WindowPolicy};
 // `WindowList` comes with it because a window's own desktop and the desktop
 // being shown arrive together, in one frame, and comparing them is the only way
 // to know what the user can see. Taking the windows without the header is what
@@ -759,6 +759,13 @@ pub enum ShellRequest {
         x: i32,
         /// Top-left corner, in display coordinates.
         y: i32,
+    },
+    /// Say what the user may not do to a window, as a window rule asks.
+    SetWindowPolicy {
+        /// The window to restrain.
+        window: WindowId,
+        /// What the user may not do.
+        policy: WindowPolicy,
     },
     /// Constrain a window's size, as a window rule asks.
     SetSizeLimits {
@@ -2881,6 +2888,22 @@ impl DesktopShell {
                 out.push(ShellRequest::window(id, ShellControlAction::Fullscreen));
             }
             Some(window_rules::InitialState::Normal) | None => {}
+        }
+
+        // What the user may not do. Sent whenever the rule names any of the
+        // three, and it names them as a set: a rule that stops saying
+        // `prevent_close` is taking it back, so the policy is replaced whole
+        // rather than merged into whatever was there.
+        let policy = WindowPolicy {
+            prevent_close: actions.prevent_close.unwrap_or(false),
+            prevent_move: actions.prevent_move.unwrap_or(false),
+            prevent_resize: actions.prevent_resize.unwrap_or(false),
+        };
+        if actions.prevent_close.is_some()
+            || actions.prevent_move.is_some()
+            || actions.prevent_resize.is_some()
+        {
+            out.push(ShellRequest::SetWindowPolicy { window: id, policy });
         }
 
         // Size limits before the size itself, so a rule that sets both does
@@ -6560,6 +6583,66 @@ mod window_manager_tests {
         again(&mut shell);
         again(&mut shell);
         assert!(shell.taskbar_windows().is_empty());
+    }
+
+    #[test]
+    fn a_rule_forbidding_something_says_so_once() {
+        let mut shell = shell();
+        rule(&mut shell, "kiosk", |a| {
+            a.prevent_close = Some(true);
+            a.prevent_resize = Some(true);
+        });
+
+        let asked = arrive(&mut shell, 1, "kiosk");
+        assert!(asked.contains(&ShellRequest::SetWindowPolicy {
+            window: WindowId(1),
+            policy: crate::WindowPolicy {
+                prevent_close: true,
+                prevent_move: false,
+                prevent_resize: true,
+            },
+        }));
+        assert_eq!(
+            asked
+                .iter()
+                .filter(|r| matches!(r, ShellRequest::SetWindowPolicy { .. }))
+                .count(),
+            1,
+            "the three flags are one rule's worth of answer, not three requests"
+        );
+    }
+
+    /// A rule that says nothing about restrictions imposes none.
+    #[test]
+    fn a_rule_silent_on_restrictions_asks_for_no_policy() {
+        let mut shell = shell();
+        rule(&mut shell, "kiosk", |a| {
+            a.opacity = Some(1.0);
+        });
+
+        assert!(
+            !arrive(&mut shell, 1, "kiosk")
+                .iter()
+                .any(|r| matches!(r, ShellRequest::SetWindowPolicy { .. })),
+            "silence must not be read as a restriction"
+        );
+    }
+
+    /// An explicit `false` takes a restriction back.
+    #[test]
+    fn a_rule_can_lift_a_restriction_it_previously_set() {
+        let mut shell = shell();
+        rule(&mut shell, "kiosk", |a| {
+            a.prevent_close = Some(false);
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "kiosk").contains(&ShellRequest::SetWindowPolicy {
+                window: WindowId(1),
+                policy: crate::WindowPolicy::default(),
+            }),
+            "an explicit false is a request to be unrestrained, not silence"
+        );
     }
 
     /// A rule naming only one limit sends zeroes for the other.

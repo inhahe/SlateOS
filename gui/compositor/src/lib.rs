@@ -111,7 +111,7 @@ pub use guiremote::control::Layer;
 // Same reason: `CompositorRequest::ShellControl` carries one, so a caller
 // building that request must be able to name it.
 pub use guiremote::control::ShellControlAction;
-use guiremote::control::{StackTier, WindowSpec};
+use guiremote::control::{StackTier, WindowPolicy, WindowSpec};
 // Re-exported for the same reason as `WindowInfo` below: `Window::reserved_edge`
 // holds one and `reserve_edge` takes one, and a panel that has to reach past the
 // compositor to name the edge it is anchored to is naming a different type from
@@ -240,6 +240,12 @@ impl WindowId {
 pub enum CompositorError {
     /// The specified window does not exist.
     WindowNotFound(WindowId),
+    /// A window rule forbids the operation.
+    ///
+    /// A `&'static str` where the errors below carry `String`, and
+    /// deliberately: every refusal here is a fixed sentence about a policy,
+    /// not a report about a value, so there is nothing to format in.
+    Refused(&'static str),
     /// Invalid framebuffer dimensions.
     InvalidDimensions { width: u32, height: u32 },
     /// The framebuffer exceeds maximum supported size.
@@ -278,6 +284,7 @@ impl std::fmt::Display for CompositorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::WindowNotFound(id) => write!(f, "window not found: {}", id.raw()),
+            Self::Refused(why) => write!(f, "{why}"),
             Self::InvalidDimensions { width, height } => {
                 write!(f, "invalid dimensions: {}x{}", width, height)
             }
@@ -860,6 +867,11 @@ pub struct Window {
     /// the band is a role rather than a starting z-order: a starting depth is
     /// something the first raise destroys.
     pub layer: Layer,
+    /// What the user may not do to this window, as a window rule says.
+    ///
+    /// Empty unless a shell has set it. See [`WindowPolicy`] -- it restrains
+    /// the user, never the program.
+    pub policy: WindowPolicy,
     /// Where this window sits within its layer.
     ///
     /// Set by the shell from a window rule, never by the window's own client:
@@ -1044,6 +1056,8 @@ impl Window {
             // Every window starts in the ordinary tier. Only a shell applying
             // a user's rule moves it, which is the whole point of the field.
             tier: StackTier::Normal,
+            // And unrestrained: a rule adds restrictions, never the default.
+            policy: WindowPolicy::default(),
             title: spec.title.clone(),
             app_id: spec.app_id.clone(),
             x,
@@ -2930,6 +2944,11 @@ pub enum CompositorRequest {
     SetStackTier {
         window_id: WindowId,
         tier: StackTier,
+    },
+    /// Say what the user may not do to a window.
+    SetWindowPolicy {
+        window_id: WindowId,
+        policy: WindowPolicy,
     },
     /// Constrain a window's size. `None` in either pair means "no limit".
     SetSizeLimits {
@@ -6153,6 +6172,19 @@ impl Compositor {
     /// check is what stops a notification being queued for an id nothing will
     /// ever deliver.
     pub fn request_close(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        // A window rule may refuse this. It refuses the *request* -- the thing
+        // a close button and a taskbar menu send -- and not the program's own
+        // exit, which goes through `destroy_window` and is none of a rule's
+        // business. A rule that could stop a process exiting would be a way to
+        // make one unkillable from a text file.
+        if self
+            .window_ref(window_id)
+            .is_some_and(|w| w.policy.prevent_close)
+        {
+            return Err(CompositorError::Refused(
+                "a window rule prevents this window from being closed",
+            ));
+        }
         if self.window_ref(window_id).is_none() {
             return Err(CompositorError::WindowNotFound(window_id));
         }
@@ -6781,7 +6813,16 @@ impl Compositor {
                         // record is a write to `self`, and `win` borrows it.
                         let start_window_pos = Point::new(win.x, win.y);
                         let start_window_size = (win.width, win.height);
+                        let pinned = win.policy.prevent_move;
                         self.last_title_press = Some((window_id, now));
+                        // The press is still *recorded* -- it focused and
+                        // raised the window above, and a double-click still
+                        // counts -- but no drag begins. Returning earlier
+                        // would make a pinned window unfocusable by its own
+                        // title bar, which is not what the rule asks for.
+                        if pinned {
+                            return;
+                        }
                         self.drag = Some(DragState {
                             window_id,
                             mode: DragMode::MoveWindow,
@@ -6793,6 +6834,9 @@ impl Compositor {
                     }
                     // Border resize?
                     if let Some(mode) = self.detect_border_drag(win, x, y) {
+                        if win.policy.prevent_resize {
+                            return;
+                        }
                         self.drag = Some(DragState {
                             window_id,
                             mode,
@@ -8240,6 +8284,14 @@ impl Compositor {
                     },
                 }
             }
+            CompositorRequest::SetWindowPolicy { window_id, policy } => {
+                match self.set_window_policy(window_id, policy) {
+                    Ok(()) => CompositorResponse::Ok,
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
             CompositorRequest::SetSizeLimits {
                 window_id,
                 min_size,
@@ -9010,6 +9062,29 @@ impl Compositor {
     /// # Errors
     ///
     /// [`CompositorError::WindowNotFound`] if the window has gone.
+    /// Say what the user may not do to a window.
+    ///
+    /// Replaces the whole policy rather than merging: the three flags are one
+    /// rule's worth of answer, and a merge would make a rule that stops
+    /// naming `prevent_close` unable to take it back.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window has gone.
+    pub fn set_window_policy(
+        &mut self,
+        id: WindowId,
+        policy: WindowPolicy,
+    ) -> CompositorResult<()> {
+        let win = self
+            .windows
+            .iter_mut()
+            .find(|w| w.id == id)
+            .ok_or(CompositorError::WindowNotFound(id))?;
+        win.policy = policy;
+        Ok(())
+    }
+
     /// Constrain a window's size, and bring it inside the new bounds now.
     ///
     /// `None` in either pair means "leave that limit as it is", not "clear
@@ -11303,6 +11378,128 @@ mod tests {
             Err(CompositorError::WindowNotFound(_))
         ));
         assert_eq!(comp.pending_notifications.len(), before);
+    }
+
+    /// `prevent_close` refuses the *request*, not the program's own exit.
+    ///
+    /// The distinction is the whole safety argument for the field. A rule that
+    /// could stop a process exiting would be a way to make one unkillable from
+    /// a text file; what it stops is a close *button*.
+    #[test]
+    fn prevent_close_refuses_the_button_and_not_the_program() {
+        let (mut comp, id) = with_one_window();
+        comp.set_window_policy(
+            id,
+            WindowPolicy {
+                prevent_close: true,
+                ..WindowPolicy::default()
+            },
+        )
+        .expect("policy");
+
+        assert!(
+            matches!(comp.request_close(id), Err(CompositorError::Refused(_))),
+            "a close request must be refused while the rule is in force"
+        );
+        assert!(comp.window_ref(id).is_some(), "and the window must survive");
+
+        // The program's own exit is not a request and is not refused.
+        comp.destroy_window(id).expect("a program may always exit");
+        assert!(comp.window_ref(id).is_none());
+    }
+
+    /// `prevent_move` stops the drag without stopping the click.
+    ///
+    /// A pinned window must still focus and raise when its title bar is
+    /// pressed -- refusing the press outright would make it unfocusable by the
+    /// only part of it a user reliably aims at, which is not what the rule
+    /// asks for.
+    #[test]
+    fn prevent_move_stops_the_drag_but_not_the_focus() {
+        let (mut comp, id) = with_one_window();
+        // Placed clear of the pinned window: the fixture's window is at
+        // (100, 100), and a second one at the default position would sit on
+        // top of it, so the press below would land on the wrong window and
+        // the test would fail for a reason that has nothing to do with the
+        // policy.
+        let mut other_spec = WindowSpec::new("Other", 200, 150);
+        other_spec.position = Some((500, 400));
+        let other = comp.create_window_from_spec(&other_spec, 1);
+        comp.activate_window(other).expect("raise the other one");
+        comp.set_window_policy(
+            id,
+            WindowPolicy {
+                prevent_move: true,
+                ..WindowPolicy::default()
+            },
+        )
+        .expect("policy");
+
+        // Aimed at the title bar the window actually draws, not at an offset
+        // guessed from its client origin. The first version of this test
+        // pressed at `y + 5`, which is *inside* the client area -- no drag
+        // starts there, so the test passed with the guard removed. Mutation
+        // testing found it; the fix is to ask the window where its title bar
+        // is.
+        let bar = comp
+            .window_ref(id)
+            .expect("w")
+            .title_bar_rect()
+            .expect("a framed window has a title bar");
+        #[expect(clippy::cast_possible_wrap, reason = "test geometry is small")]
+        let (x, y) = (
+            bar.x + (bar.width / 2) as i32,
+            bar.y + (bar.height / 2) as i32,
+        );
+        let before = (
+            comp.window_ref(id).expect("w").x,
+            comp.window_ref(id).expect("w").y,
+        );
+        comp.handle_mouse_button(MouseButton::Left, true, x, y);
+        comp.handle_mouse_move(x + 100, y + 100);
+        comp.handle_mouse_button(MouseButton::Left, false, x + 100, y + 100);
+
+        let win = comp.window_ref(id).expect("w");
+        assert_eq!((win.x, win.y), before, "a pinned window was dragged");
+        assert_eq!(comp.focused_window, Some(id), "and it must still focus");
+    }
+
+    /// `prevent_resize` stops an edge drag.
+    #[test]
+    fn prevent_resize_stops_an_edge_drag() {
+        let (mut comp, id) = with_one_window();
+        comp.set_window_policy(
+            id,
+            WindowPolicy {
+                prevent_resize: true,
+                ..WindowPolicy::default()
+            },
+        )
+        .expect("policy");
+
+        let win = comp.window_ref(id).expect("w");
+        let before = (win.width, win.height);
+        #[expect(clippy::cast_possible_wrap, reason = "test geometry is small")]
+        let edge_x = win.x + win.width as i32;
+        let mid_y = win.y + 20;
+        comp.handle_mouse_button(MouseButton::Left, true, edge_x, mid_y);
+        comp.handle_mouse_move(edge_x + 120, mid_y);
+        comp.handle_mouse_button(MouseButton::Left, false, edge_x + 120, mid_y);
+
+        let win = comp.window_ref(id).expect("w");
+        assert_eq!(
+            (win.width, win.height),
+            before,
+            "a pinned window was resized"
+        );
+    }
+
+    /// An unrestricted policy leaves everything working.
+    #[test]
+    fn the_default_policy_restrains_nothing() {
+        let (mut comp, id) = with_one_window();
+        assert!(comp.window_ref(id).expect("w").policy.is_unrestricted());
+        assert!(comp.request_close(id).is_ok());
     }
 
     /// A rule naming only a maximum must not discard the program's minimum.

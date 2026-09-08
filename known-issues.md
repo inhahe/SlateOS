@@ -124377,10 +124377,10 @@ which makes step 1 below larger than one dependency line.
   new defaulted `App::theme_changed` — before the first frame, and again on
   every change. `design-decisions.md` §822 records why it is a trait method
   and not an `Event`.
-- **Step 2 has started: 3 of 129.** `calculator` (11 constants),
-  `diskcleanup` (9) and `charmap` (14). Each has a test on the rectangles it
-  emits, and each was mutation-checked by making `theme_changed` ignore its
-  argument.
+- **Step 2 has started: 4 of 129.** `calculator` (11 constants),
+  `diskcleanup` (9), `charmap` (14) and `clipmanager` (14). Each has a test on
+  the rectangles it emits, and each was mutation-checked by making
+  `theme_changed` ignore its argument.
 
 **Batch conversion was tried and abandoned; do not retry it as written.** The
 substitution half automates well — mapping by *hex value* rather than by
@@ -124417,6 +124417,23 @@ Three shapes, in increasing cost:
    *"expected value, found module `self`"*), so the work is bounded and
    visible; it is the *automatic rewriting of call sites* that is not safe,
    particularly where a call spans several lines.
+
+**Shape 2 does automate, and now does.** `clipmanager` was the worked example:
+52 sites, of which **48** were shape 2 and were rewritten in one pass, leaving
+4 to thread by hand. The script that failed the first time was scanning for
+each function's body by counting braces — which is unreliable in Rust source,
+because `{}` inside a format string unbalances the count and the walk then
+skips the rest of the file in silence, reporting zero work to do. Scanning
+*backwards* from each line that mentions the palette to its enclosing `fn` has
+no such failure mode and is what works.
+
+**One case the shape test gets wrong, and it is worth knowing.** "Has a `self`
+receiver, so `self.palette` is correct" is false when `self` is not the
+application: `clipmanager`'s `ClipType::badge_color(self)` is a method on an
+*enum*, and the substitution put `self.palette` on a type that has no such
+field. The compiler catches it (E0609, "no field `palette` on type
+`ClipType`"), but a converter cannot assume that every `self` in a file is the
+window.
 
 **The pattern, so the rest are mechanical.** Per application: add
 `appearance` to `Cargo.toml`; add a `palette: Palette` field seeded from

@@ -4,6 +4,7 @@
 //! content type, tagging, pinning, template management with placeholder substitution,
 //! batch operations, statistics, and export/import. Inspired by CopyQ and Ditto.
 
+use appearance::Palette;
 use std::collections::{HashSet, VecDeque};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -21,20 +22,6 @@ use oswindow::app::{self, App, Response};
 // ---------------------------------------------------------------------------
 // Catppuccin Mocha palette
 // ---------------------------------------------------------------------------
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const RED: Color = Color::from_hex(0xF38BA8);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const MANTLE: Color = Color::from_hex(0x181825);
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -72,14 +59,14 @@ impl ClipType {
     }
 
     /// Badge colour associated with this type.
-    fn badge_color(self) -> Color {
+    fn badge_color(self, pal: &Palette) -> Color {
         match self {
-            Self::PlainText => BLUE,
-            Self::RichText => MAUVE,
-            Self::Html => PEACH,
-            Self::Image => GREEN,
-            Self::FilePaths => YELLOW,
-            Self::Code => TEAL,
+            Self::PlainText => pal.blue,
+            Self::RichText => pal.mauve,
+            Self::Html => pal.peach,
+            Self::Image => pal.green,
+            Self::FilePaths => pal.yellow,
+            Self::Code => pal.teal,
         }
     }
 
@@ -780,12 +767,19 @@ struct AppState {
     tick_carry_ms: u64,
     /// Fractional wheel notches a trackpad has sent but not yet spent.
     wheel: wheel::Accumulator,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl AppState {
     fn new() -> Self {
         Self {
             store: ClipboardStore::new(),
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             search_query: String::new(),
             type_filter: None,
             filtered_ids: Vec::new(),
@@ -1164,7 +1158,7 @@ fn build_frame(state: &AppState, width: f32, height: f32) -> Frame {
         y: 0.0,
         width,
         height,
-        color: BASE,
+        color: state.palette.base,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1205,8 +1199,8 @@ fn build_frame(state: &AppState, width: f32, height: f32) -> Frame {
 }
 
 /// The colour a text box's border takes when it holds the caret.
-fn field_border(focused: bool) -> Color {
-    if focused { BLUE } else { SURFACE1 }
+fn field_border(focused: bool, pal: &Palette) -> Color {
+    if focused { pal.blue } else { pal.surface1 }
 }
 
 fn render_search_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h: f32) {
@@ -1217,7 +1211,7 @@ fn render_search_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32
         y,
         width: w,
         height: h,
-        color: SURFACE0,
+        color: state.palette.surface0,
         corner_radii: CornerRadii::all(6.0),
     });
     if focused {
@@ -1226,7 +1220,7 @@ fn render_search_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32
             y,
             width: w,
             height: h,
-            color: field_border(true),
+            color: field_border(true, &state.palette),
             line_width: 1.0,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -1236,7 +1230,7 @@ fn render_search_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32
         x: x + 10.0,
         y: y + 10.0,
         text: "Search:".to_string(),
-        color: SUBTEXT0,
+        color: state.palette.subtext0,
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1257,9 +1251,9 @@ fn render_search_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32
         state.search_query.clone()
     };
     let query_color = if state.search_query.is_empty() && !focused {
-        OVERLAY0
+        state.palette.overlay0
     } else {
-        TEXT
+        state.palette.text
     };
     frame.push(RenderCommand::Text {
         x: x + 72.0,
@@ -1275,14 +1269,16 @@ fn render_search_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32
     // The badge sits on top of the box, so it is recorded after it and wins
     // the clicks that land on both.
     let filter_label = state.type_filter.map_or("All Types", ClipType::label);
-    let filter_color = state.type_filter.map_or(OVERLAY0, ClipType::badge_color);
+    let filter_color = state
+        .type_filter
+        .map_or(state.palette.overlay0, |t| t.badge_color(&state.palette));
     let badge = Rect::new(x + w - 100.0, y + 7.0, 80.0, 22.0);
     frame.push(RenderCommand::FillRect {
         x: badge.x,
         y: badge.y,
         width: badge.w,
         height: badge.h,
-        color: SURFACE1,
+        color: state.palette.surface1,
         corner_radii: CornerRadii::all(4.0),
     });
     frame.push(RenderCommand::Text {
@@ -1306,7 +1302,7 @@ fn render_tab_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h
         y,
         width: w,
         height: h,
-        color: MANTLE,
+        color: state.palette.mantle,
         corner_radii: CornerRadii::all(4.0),
     });
 
@@ -1323,7 +1319,7 @@ fn render_tab_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h
                 y: rect.y,
                 width: rect.w,
                 height: rect.h,
-                color: SURFACE0,
+                color: state.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
         }
@@ -1331,7 +1327,11 @@ fn render_tab_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h
             x: rect.x + 16.0,
             y: y + 8.0,
             text: label.to_string(),
-            color: if is_active { BLUE } else { SUBTEXT0 },
+            color: if is_active {
+                state.palette.blue
+            } else {
+                state.palette.subtext0
+            },
             font_size: 13.0,
             font_weight: if is_active {
                 FontWeightHint::Bold
@@ -1362,7 +1362,7 @@ fn render_tag_strip(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
         x,
         y: y + 6.0,
         text: "Tags:".to_string(),
-        color: SUBTEXT0,
+        color: state.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1377,9 +1377,9 @@ fn render_tag_strip(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
         width: all.w,
         height: all.h,
         color: if state.tag_filter.is_none() {
-            SURFACE1
+            state.palette.surface1
         } else {
-            MANTLE
+            state.palette.mantle
         },
         corner_radii: CornerRadii::all(3.0),
     });
@@ -1388,9 +1388,9 @@ fn render_tag_strip(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
         y: all.y + 4.0,
         text: "All".to_string(),
         color: if state.tag_filter.is_none() {
-            BLUE
+            state.palette.blue
         } else {
-            OVERLAY0
+            state.palette.overlay0
         },
         font_size: 10.0,
         font_weight: FontWeightHint::Bold,
@@ -1409,14 +1409,22 @@ fn render_tag_strip(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
             y: chip.y,
             width: chip.w,
             height: chip.h,
-            color: if active { SURFACE1 } else { MANTLE },
+            color: if active {
+                state.palette.surface1
+            } else {
+                state.palette.mantle
+            },
             corner_radii: CornerRadii::all(3.0),
         });
         frame.push(RenderCommand::Text {
             x: chip.x + 6.0,
             y: chip.y + 4.0,
             text: tag.clone(),
-            color: if active { TEAL } else { OVERLAY0 },
+            color: if active {
+                state.palette.teal
+            } else {
+                state.palette.overlay0
+            },
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1441,7 +1449,7 @@ fn render_history_panel(frame: &mut Frame, state: &AppState, rect: Rect, visible
         y,
         width: list_w,
         height: h,
-        color: SURFACE0,
+        color: state.palette.surface0,
         corner_radii: CornerRadii::all(6.0),
     });
 
@@ -1465,6 +1473,7 @@ fn render_history_panel(frame: &mut Frame, state: &AppState, rect: Rect, visible
         {
             render_entry_row(
                 frame,
+                &state.palette,
                 entry,
                 Rect::new(x + 4.0, ry, (list_w - 8.0).max(0.0), ROW_H),
                 RowFlags {
@@ -1486,7 +1495,7 @@ fn render_history_panel(frame: &mut Frame, state: &AppState, rect: Rect, visible
             } else {
                 "Nothing matches the current filter".to_string()
             },
-            color: OVERLAY0,
+            color: state.palette.overlay0,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some((list_w - 32.0).max(0.0)),
@@ -1502,13 +1511,14 @@ fn render_history_panel(frame: &mut Frame, state: &AppState, rect: Rect, visible
         y,
         width: detail_w,
         height: h,
-        color: SURFACE0,
+        color: state.palette.surface0,
         corner_radii: CornerRadii::all(6.0),
     });
 
     match state.selected_id.and_then(|id| state.store.get(id)) {
         Some(entry) => render_detail_panel(
             frame,
+            &state.palette,
             entry,
             Rect::new(detail_x, y, detail_w, h),
             state.now,
@@ -1519,7 +1529,7 @@ fn render_history_panel(frame: &mut Frame, state: &AppState, rect: Rect, visible
             x: detail_x + 16.0,
             y: y + 24.0,
             text: "Select an entry to preview".to_string(),
-            color: OVERLAY0,
+            color: state.palette.overlay0,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1538,7 +1548,14 @@ struct RowFlags {
     marked: bool,
 }
 
-fn render_entry_row(frame: &mut Frame, entry: &ClipEntry, rect: Rect, flags: RowFlags, now: u64) {
+fn render_entry_row(
+    frame: &mut Frame,
+    pal: &Palette,
+    entry: &ClipEntry,
+    rect: Rect,
+    flags: RowFlags,
+    now: u64,
+) {
     let Rect { x, y, w, h } = rect;
 
     frame.push(RenderCommand::FillRect {
@@ -1546,7 +1563,11 @@ fn render_entry_row(frame: &mut Frame, entry: &ClipEntry, rect: Rect, flags: Row
         y,
         width: w,
         height: h,
-        color: if flags.selected { SURFACE1 } else { SURFACE0 },
+        color: if flags.selected {
+            pal.surface1
+        } else {
+            pal.surface0
+        },
         corner_radii: CornerRadii::all(4.0),
     });
 
@@ -1556,7 +1577,7 @@ fn render_entry_row(frame: &mut Frame, entry: &ClipEntry, rect: Rect, flags: Row
             y,
             width: 3.0,
             height: h,
-            color: BLUE,
+            color: pal.blue,
             corner_radii: CornerRadii::ZERO,
         });
     }
@@ -1566,14 +1587,14 @@ fn render_entry_row(frame: &mut Frame, entry: &ClipEntry, rect: Rect, flags: Row
         y: y + 6.0,
         width: 40.0,
         height: 16.0,
-        color: entry.clip_type.badge_color(),
+        color: entry.clip_type.badge_color(pal),
         corner_radii: CornerRadii::all(3.0),
     });
     frame.push(RenderCommand::Text {
         x: x + 12.0,
         y: y + 7.0,
         text: entry.clip_type.label().to_string(),
-        color: MANTLE,
+        color: pal.mantle,
         font_size: 10.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1586,7 +1607,7 @@ fn render_entry_row(frame: &mut Frame, entry: &ClipEntry, rect: Rect, flags: Row
             x: bx,
             y: y + 7.0,
             text: "PIN".to_string(),
-            color: YELLOW,
+            color: pal.yellow,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1599,7 +1620,7 @@ fn render_entry_row(frame: &mut Frame, entry: &ClipEntry, rect: Rect, flags: Row
             x: bx,
             y: y + 7.0,
             text: "MARK".to_string(),
-            color: PEACH,
+            color: pal.peach,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1611,7 +1632,7 @@ fn render_entry_row(frame: &mut Frame, entry: &ClipEntry, rect: Rect, flags: Row
         x: x + 8.0,
         y: y + 26.0,
         text: entry.preview(),
-        color: TEXT,
+        color: pal.text,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some((w - 80.0).max(0.0)),
@@ -1622,7 +1643,7 @@ fn render_entry_row(frame: &mut Frame, entry: &ClipEntry, rect: Rect, flags: Row
         x: x + w - 70.0,
         y: y + 6.0,
         text: entry.time_display(now),
-        color: SUBTEXT0,
+        color: pal.subtext0,
         font_size: 10.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1632,7 +1653,7 @@ fn render_entry_row(frame: &mut Frame, entry: &ClipEntry, rect: Rect, flags: Row
         x: x + w - 70.0,
         y: y + 18.0,
         text: entry.source_app.clone(),
-        color: OVERLAY0,
+        color: pal.overlay0,
         font_size: 10.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1644,7 +1665,7 @@ fn render_entry_row(frame: &mut Frame, entry: &ClipEntry, rect: Rect, flags: Row
             x: x + w - 70.0,
             y: y + 34.0,
             text: format!("{} tags", entry.tags.len()),
-            color: TEAL,
+            color: pal.teal,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1659,6 +1680,7 @@ fn render_entry_row(frame: &mut Frame, entry: &ClipEntry, rect: Rect, flags: Row
 
 fn render_detail_panel(
     frame: &mut Frame,
+    pal: &Palette,
     entry: &ClipEntry,
     rect: Rect,
     now: u64,
@@ -1680,7 +1702,7 @@ fn render_detail_panel(
         x: x + pad,
         y: cy,
         text: format!("{} #{}", entry.clip_type.label(), entry.id),
-        color: BLUE,
+        color: pal.blue,
         font_size: 15.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1697,7 +1719,7 @@ fn render_detail_panel(
             entry.source_app,
             entry.size_display()
         ),
-        color: SUBTEXT0,
+        color: pal.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some((w - pad * 2.0).max(0.0)),
@@ -1710,7 +1732,7 @@ fn render_detail_panel(
             x: x + pad,
             y: cy,
             text: "Pinned".to_string(),
-            color: YELLOW,
+            color: pal.yellow,
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1731,14 +1753,14 @@ fn render_detail_panel(
                 y: chip.y,
                 width: chip.w,
                 height: chip.h,
-                color: SURFACE1,
+                color: pal.surface1,
                 corner_radii: CornerRadii::all(3.0),
             });
             frame.push(RenderCommand::Text {
                 x: chip.x + 6.0,
                 y: chip.y + 3.0,
                 text: tag.clone(),
-                color: TEAL,
+                color: pal.teal,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1758,7 +1780,7 @@ fn render_detail_panel(
         y: field.y,
         width: field.w,
         height: field.h,
-        color: MANTLE,
+        color: pal.mantle,
         corner_radii: CornerRadii::all(3.0),
     });
     frame.push(RenderCommand::StrokeRect {
@@ -1766,7 +1788,7 @@ fn render_detail_panel(
         y: field.y,
         width: field.w,
         height: field.h,
-        color: field_border(tag_focused),
+        color: field_border(tag_focused, pal),
         line_width: 1.0,
         corner_radii: CornerRadii::all(3.0),
     });
@@ -1782,9 +1804,9 @@ fn render_detail_panel(
         y: field.y + 4.0,
         text: tag_display,
         color: if tag_input.is_empty() && !tag_focused {
-            OVERLAY0
+            pal.overlay0
         } else {
-            TEXT
+            pal.text
         },
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
@@ -1799,14 +1821,14 @@ fn render_detail_panel(
         y: add.y,
         width: add.w,
         height: add.h,
-        color: SURFACE1,
+        color: pal.surface1,
         corner_radii: CornerRadii::all(3.0),
     });
     frame.push(RenderCommand::Text {
         x: add.x + 8.0,
         y: add.y + 4.0,
         text: "Tag".to_string(),
-        color: TEAL,
+        color: pal.teal,
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1823,14 +1845,14 @@ fn render_detail_panel(
             y: cy,
             width: 100.0,
             height: 18.0,
-            color: SURFACE1,
+            color: pal.surface1,
             corner_radii: CornerRadii::all(3.0),
         });
         frame.push(RenderCommand::Text {
             x: x + pad + 6.0,
             y: cy + 3.0,
             text: format!("lang: {lang}"),
-            color: MAUVE,
+            color: pal.mauve,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1845,7 +1867,7 @@ fn render_detail_panel(
         y1: cy,
         x2: x + w - pad,
         y2: cy,
-        color: SURFACE1,
+        color: pal.surface1,
         width: 1.0,
     });
     cy += 8.0;
@@ -1868,7 +1890,7 @@ fn render_detail_panel(
             x: x + pad,
             y: cy + (i as f32) * line_h,
             text: line.to_string(),
-            color: TEXT,
+            color: pal.text,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some((w - pad * 2.0).max(0.0)),
@@ -1886,7 +1908,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
         y,
         width: w,
         height: h,
-        color: SURFACE0,
+        color: state.palette.surface0,
         corner_radii: CornerRadii::all(6.0),
     });
 
@@ -1904,7 +1926,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
         x: x + pad,
         y: cy,
         text: "Templates".to_string(),
-        color: BLUE,
+        color: state.palette.blue,
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1917,7 +1939,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
             x: x + pad,
             y: cy,
             text: "No templates defined. Create one below.".to_string(),
-            color: OVERLAY0,
+            color: state.palette.overlay0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1933,14 +1955,22 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
                 y: row.y,
                 width: row.w,
                 height: row.h,
-                color: if is_sel { SURFACE1 } else { SURFACE0 },
+                color: if is_sel {
+                    state.palette.surface1
+                } else {
+                    state.palette.surface0
+                },
                 corner_radii: CornerRadii::all(4.0),
             });
             frame.push(RenderCommand::Text {
                 x: row.x + 8.0,
                 y: row.y + 8.0,
                 text: tmpl.name.clone(),
-                color: if is_sel { BLUE } else { TEXT },
+                color: if is_sel {
+                    state.palette.blue
+                } else {
+                    state.palette.text
+                },
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(180.0),
@@ -1953,7 +1983,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
                     x: row.x + 200.0,
                     y: row.y + 10.0,
                     text: format!("{ph_count} placeholders"),
-                    color: SUBTEXT0,
+                    color: state.palette.subtext0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -1972,15 +2002,20 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
     let use_rect = Rect::new(x + pad, cy, BUTTON_W, 24.0);
     let del_rect = Rect::new(use_rect.right() + BUTTON_GAP, cy, BUTTON_W, 24.0);
     for (rect, label, color, target) in [
-        (use_rect, "Use", GREEN, Target::UseTemplate),
-        (del_rect, "Delete", RED, Target::DeleteTemplate),
+        (use_rect, "Use", state.palette.green, Target::UseTemplate),
+        (
+            del_rect,
+            "Delete",
+            state.palette.red,
+            Target::DeleteTemplate,
+        ),
     ] {
         frame.push(RenderCommand::FillRect {
             x: rect.x,
             y: rect.y,
             width: rect.w,
             height: rect.h,
-            color: SURFACE1,
+            color: state.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
         frame.push(RenderCommand::Text {
@@ -2004,7 +2039,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
             x: x + pad,
             y: cy,
             text: format!("{key}: {}", if value.is_empty() { "-" } else { value }),
-            color: SUBTEXT0,
+            color: state.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some((w - pad * 2.0).max(0.0)),
@@ -2019,7 +2054,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
         y1: cy,
         x2: x + w - pad,
         y2: cy,
-        color: SURFACE1,
+        color: state.palette.surface1,
         width: 1.0,
     });
     cy += 12.0;
@@ -2028,7 +2063,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
         x: x + pad,
         y: cy,
         text: "New Template".to_string(),
-        color: PEACH,
+        color: state.palette.peach,
         font_size: 13.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -2038,6 +2073,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
 
     cy = render_template_field(
         frame,
+        &state.palette,
         TemplateField {
             label: "Name:",
             placeholder: "e.g. Email Reply",
@@ -2053,6 +2089,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
 
     cy = render_template_field(
         frame,
+        &state.palette,
         TemplateField {
             label: "Body:",
             placeholder: "Dear {name}, ...",
@@ -2072,14 +2109,14 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
         y: save.y,
         width: save.w,
         height: save.h,
-        color: SURFACE1,
+        color: state.palette.surface1,
         corner_radii: CornerRadii::all(4.0),
     });
     frame.push(RenderCommand::Text {
         x: save.x + 12.0,
         y: save.y + 6.0,
         text: "Save".to_string(),
-        color: BLUE,
+        color: state.palette.blue,
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -2107,6 +2144,7 @@ struct TemplateField<'a> {
 /// Draw one form field and return the y the next one starts at.
 fn render_template_field(
     frame: &mut Frame,
+    pal: &Palette,
     field: TemplateField<'_>,
     x: f32,
     y: f32,
@@ -2116,7 +2154,7 @@ fn render_template_field(
         x,
         y,
         text: field.label.to_string(),
-        color: SUBTEXT0,
+        color: pal.subtext0,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2129,7 +2167,7 @@ fn render_template_field(
         y: rect.y,
         width: rect.w,
         height: rect.h,
-        color: MANTLE,
+        color: pal.mantle,
         corner_radii: CornerRadii::all(3.0),
     });
     frame.push(RenderCommand::StrokeRect {
@@ -2137,7 +2175,7 @@ fn render_template_field(
         y: rect.y,
         width: rect.w,
         height: rect.h,
-        color: field_border(field.focused),
+        color: field_border(field.focused, pal),
         line_width: 1.0,
         corner_radii: CornerRadii::all(3.0),
     });
@@ -2154,9 +2192,9 @@ fn render_template_field(
         y,
         text: display,
         color: if field.value.is_empty() && !field.focused {
-            OVERLAY0
+            pal.overlay0
         } else {
-            TEXT
+            pal.text
         },
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
@@ -2174,19 +2212,19 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h
         y,
         width: w,
         height: h,
-        color: MANTLE,
+        color: state.palette.mantle,
         corner_radii: CornerRadii::all(4.0),
     });
 
     let mut bx = x + 8.0;
     for (label, color, target) in [
-        ("Copy", BLUE, Target::CopyEntry),
-        ("Pin", YELLOW, Target::PinEntry),
-        ("Mark", PEACH, Target::MarkEntry),
-        ("Delete", RED, Target::DeleteEntry),
-        ("Clear All", PEACH, Target::ClearAll),
-        ("Export", TEAL, Target::ExportAll),
-        ("Import", MAUVE, Target::ImportSelected),
+        ("Copy", state.palette.blue, Target::CopyEntry),
+        ("Pin", state.palette.yellow, Target::PinEntry),
+        ("Mark", state.palette.peach, Target::MarkEntry),
+        ("Delete", state.palette.red, Target::DeleteEntry),
+        ("Clear All", state.palette.peach, Target::ClearAll),
+        ("Export", state.palette.teal, Target::ExportAll),
+        ("Import", state.palette.mauve, Target::ImportSelected),
     ] {
         let rect = Rect::new(bx, y + 5.0, BUTTON_W, (h - 10.0).max(0.0));
         frame.push(RenderCommand::FillRect {
@@ -2194,7 +2232,7 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h
             y: rect.y,
             width: rect.w,
             height: rect.h,
-            color: SURFACE1,
+            color: state.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
         frame.push(RenderCommand::Text {
@@ -2218,7 +2256,7 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h
             x: bx + 8.0,
             y: y + 11.0,
             text: state.status.clone(),
-            color: SUBTEXT0,
+            color: state.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some((x + w - bx - 16.0).max(0.0)),
@@ -2233,7 +2271,7 @@ fn render_stats_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
         y,
         width: w,
         height: h,
-        color: MANTLE,
+        color: state.palette.mantle,
         corner_radii: CornerRadii::all(3.0),
     });
 
@@ -2241,7 +2279,7 @@ fn render_stats_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
         x: x + 10.0,
         y: y + 5.0,
         text: state.stats_line(),
-        color: SUBTEXT0,
+        color: state.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some((w - 100.0).max(0.0)),
@@ -2252,7 +2290,7 @@ fn render_stats_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
         x: x + w - 80.0,
         y: y + 5.0,
         text: format!("{} shown", state.filtered_ids.len()),
-        color: OVERLAY0,
+        color: state.palette.overlay0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2750,6 +2788,10 @@ fn next_type_filter(current: Option<ClipType>) -> Option<ClipType> {
 // ---------------------------------------------------------------------------
 
 impl App for AppState {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Clipboard Manager")
     }
@@ -3197,7 +3239,11 @@ mod tests {
 
     #[test]
     fn test_clip_type_badge_colors_unique() {
-        let colors: Vec<Color> = ClipType::all().iter().map(|t| t.badge_color()).collect();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let colors: Vec<Color> = ClipType::all()
+            .iter()
+            .map(|t| t.badge_color(&pal))
+            .collect();
         for (i, c) in colors.iter().enumerate() {
             for (j, d) in colors.iter().enumerate() {
                 if i != j {
@@ -4702,6 +4748,62 @@ mod tests {
                 "TypeFilter",
                 "UseTemplate",
             ]
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours, not in fourteen constants.
+    ///
+    /// Asserted on the rectangles emitted rather than on the `palette` field,
+    /// which would only prove it was assigned.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut AppState) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = AppState::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on both themes, so it is still \
+             painting from constants"
+        );
+
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

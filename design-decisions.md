@@ -68767,8 +68767,22 @@ there is no second value to choose between.
 
 The scheme now lives in `gui/appearance` as `HighContrastScheme`, and
 `Palette::from_settings` branches on an `AppearanceSettings` field, so the mode
-applies to every surface at once. What remains is that no Settings control
-sets it yet.
+applies to every surface at once.
+
+**Complete as of 2026-09-07; this entry said otherwise until then.** It used to
+end "What remains is that no Settings control sets it yet", which stopped being
+true and was not updated. The chain is whole and checked end to end:
+Settings → Accessibility → High Contrast (`DropdownId::HighContrast`, offering
+"Off" plus every scheme) writes `appearance.settings.high_contrast`, which
+`AppearanceFile` persists under `theme.high_contrast`, which
+`Palette::from_settings` and the compositor's `DecorationTheme::from_settings`
+both read. `apps/settings` covers the control with
+`the_list_offers_off_and_every_scheme` and
+`choosing_a_scheme_sets_it_and_choosing_off_clears_it`; its 213 tests pass.
+
+Recorded because a stale "what remains" line is worse than no line: it is the
+same failure as the seven stale `known-issues.md` entries closed on 2026-09-07,
+and it invites someone to build a control that already exists.
 
 **The one real argument against white**, and the reason the configurability
 requirement matters more than the default: a user who picks "green on black"

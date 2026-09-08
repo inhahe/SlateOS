@@ -5368,6 +5368,12 @@ extern "C" fn kernel_main() -> ! {
             // line-oriented text formats (/proc/mounts, the trash index). A bug here
             // corrupts a file rather than failing loudly, so it is checked on boot.
             fs::escape::self_test();
+            // Deferred filesystem operations — the queue entry serializer/parser and
+            // the filename encoding.  A bug here could cause a replayed operation to
+            // target the wrong file (inode mismatch not detected, path unescaped
+            // wrongly) or silently drop a queued operation (malformed entry not
+            // recognised).  Tested early because the replay hook runs on every mount.
+            fs::deferred_ops::self_test();
             // Locale and timezone. Both self-tests existed but were never called from
             // anywhere — a test that never runs is not a test, and these two are the
             // only coverage the kernel's POSIX `TZ` rule evaluation has.

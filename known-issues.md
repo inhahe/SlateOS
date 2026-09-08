@@ -995,6 +995,47 @@ turns that into a stuck feature rather than a corrupted document.
 
 ## `apps/pdfviewer` can print nothing at all — the whole model is unwired (lane C)
 
+### Update 2026-09-07: the blocker named here is answered, and the seam now exists
+
+**This entry says "*how* to wire it is `C-Q4`". C-Q4 was answered by the
+operator on 2026-08-21 and written up as `design-decisions.md` §540:** printing
+becomes a background service applications submit jobs to, chosen over a shared
+library on the grounds that a print job is not part of the application's
+lifetime. The architecture question this entry defers to is settled; what
+remained was that nobody had built the thing §540 says an application depends
+on -- *"a message format, not code"*.
+
+**`gui/printjob` is that format**, added today. It is the union of the two
+vocabularies this entry tabulates: the discontiguous page range from the
+viewer, and paper/copies/duplex/quality/scale/collate from the desktop. It has
+no printers, no queue, no I/O and no dependencies -- linking it does not let a
+program print, it lets a program *say what it wants printed*. 15 tests.
+
+**Deliberately nothing submits one.** §540: *"until the service exists, neither
+half gains new callers"*, and wiring an application straight to the desktop's
+printing code is the stop-gap it refused.
+
+**There are now two page-range parsers, and that is temporary and tracked.**
+§540 says the viewer's parser *"should be lifted into the job format, not
+reimplemented"*; it has been lifted, and `apps/pdfviewer` has not yet been
+moved onto the lifted copy. That is 71 references and a dozen tests, and the
+two do not agree in three places, so it is a considered migration rather than
+a rename:
+
+| input | `pdfviewer` today | `printjob` |
+|---|---|---|
+| `9-7` (reversed) | dropped | read as 7-9 |
+| `x-5` (bad start) | becomes 1-5, silently | dropped |
+| `1-5, 3-7` (overlapping) | page 3 printed twice | printed once |
+
+I think `printjob` is right on all three -- a reversed span plainly means
+something, a defaulted-to-1 start invents a page the user did not type, and
+paper spent twice on one page was not asked for -- but each is a behaviour
+change to a shipped app and wants its own commit, not a silent swap at the end
+of another one.
+
+**Next:** move `pdfviewer` onto `printjob::PageRange`, then the service.
+
 **Status: OPEN.** Recorded 2026-08-16 by lane C. *How* to wire it is `C-Q4` in
 `open-questions.md`, because it is an architecture choice rather than a repair.
 
@@ -123487,7 +123528,8 @@ with `
 ` and takes `&[&str]`; `get_files` splits them with `.lines()` after
 a `from_utf8`. This filesystem allows every byte but `/` and NUL, so `
 ` and
-`` are both legal in a filename and UTF-8 is not required at all. A file
+`
+` are both legal in a filename and UTF-8 is not required at all. A file
 named `a
 b` pastes as two files; a file whose name is not valid UTF-8 makes
 the whole clipboard read back *empty*, with no error, because the `.ok()?`

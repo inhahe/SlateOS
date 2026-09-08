@@ -114,6 +114,123 @@ pub fn dispatch_debug<E: core::fmt::Debug>(name: &str, severity: Severity, resul
 }
 
 // ---------------------------------------------------------------------------
+// Non-panicking assertion macros for Diagnostic self-tests (§914)
+// ---------------------------------------------------------------------------
+//
+// These are the §914 replacements for `assert!`/`assert_eq!`/`assert_ne!`
+// inside self-tests classified as `Diagnostic`.  On failure they print a
+// `FAIL:` line and return `Err(KernelError::InternalError)` — the
+// `dispatch`/`dispatch_debug` caller then decides whether to halt or
+// continue, based on the test's `Severity`.
+//
+// `assert!` is still correct for `Integrity` tests, where a failure means
+// the kernel's structural invariants are broken and continuing is unsafe.
+//
+// Many subsystems already define a local `check!` with this exact shape
+// (audio_alsa, evdev, drm/*, initproc, …).  These global versions let new
+// conversions use a shared definition rather than copying the macro, and
+// existing local definitions can be replaced incrementally.
+//
+// Usage:
+// ```ignore
+// use crate::selftest;
+// pub fn self_test() -> crate::KernelResult<()> {
+//     selftest::check!(1 + 1 == 2, "basic arithmetic");
+//     selftest::check_eq!(4, 2 + 2, "addition");
+//     selftest::check_ne!(0, 1, "zero is not one");
+//     Ok(())
+// }
+// ```
+
+/// Non-panicking boolean check.  Returns `Err(KernelError::InternalError)`
+/// on failure instead of panicking.
+#[macro_export]
+macro_rules! selftest_check {
+    ($cond:expr, $($arg:tt)*) => {
+        if !($cond) {
+            $crate::serial_println!("  FAIL: {}", format_args!($($arg)*));
+            return Err($crate::error::KernelError::InternalError);
+        }
+    };
+    ($cond:expr) => {
+        if !($cond) {
+            $crate::serial_println!("  FAIL: assertion `{}` failed", stringify!($cond));
+            return Err($crate::error::KernelError::InternalError);
+        }
+    };
+}
+
+/// Non-panicking equality check.  Prints both values on failure.
+#[macro_export]
+macro_rules! selftest_check_eq {
+    ($left:expr, $right:expr, $($arg:tt)+) => {{
+        let left_val = &$left;
+        let right_val = &$right;
+        if !(*left_val == *right_val) {
+            $crate::serial_println!(
+                "  FAIL: {}\n  left:  {:?}\n  right: {:?}",
+                format_args!($($arg)+),
+                left_val,
+                right_val,
+            );
+            return Err($crate::error::KernelError::InternalError);
+        }
+    }};
+    ($left:expr, $right:expr) => {{
+        let left_val = &$left;
+        let right_val = &$right;
+        if !(*left_val == *right_val) {
+            $crate::serial_println!(
+                "  FAIL: assertion `{} == {}` failed\n  left:  {:?}\n  right: {:?}",
+                stringify!($left),
+                stringify!($right),
+                left_val,
+                right_val,
+            );
+            return Err($crate::error::KernelError::InternalError);
+        }
+    }};
+}
+
+/// Non-panicking inequality check.  Prints both values on failure.
+#[macro_export]
+macro_rules! selftest_check_ne {
+    ($left:expr, $right:expr, $($arg:tt)+) => {{
+        let left_val = &$left;
+        let right_val = &$right;
+        if *left_val == *right_val {
+            $crate::serial_println!(
+                "  FAIL: {}\n  both:  {:?}",
+                format_args!($($arg)+),
+                left_val,
+            );
+            return Err($crate::error::KernelError::InternalError);
+        }
+    }};
+    ($left:expr, $right:expr) => {{
+        let left_val = &$left;
+        let right_val = &$right;
+        if *left_val == *right_val {
+            $crate::serial_println!(
+                "  FAIL: assertion `{} != {}` failed\n  both:  {:?}",
+                stringify!($left),
+                stringify!($right),
+                left_val,
+            );
+            return Err($crate::error::KernelError::InternalError);
+        }
+    }};
+}
+
+// Re-export under the `selftest` namespace for ergonomic use as
+// `selftest::check!(...)` etc.  The `#[macro_export]` above places
+// them at the crate root; these `pub use` make them available as
+// `crate::selftest::check` too.
+pub use crate::selftest_check as check;
+pub use crate::selftest_check_eq as check_eq;
+pub use crate::selftest_check_ne as check_ne;
+
+// ---------------------------------------------------------------------------
 // Test suite registry
 // ---------------------------------------------------------------------------
 

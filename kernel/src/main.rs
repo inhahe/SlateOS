@@ -7347,7 +7347,12 @@ extern "C" fn kernel_main() -> ! {
     }
 
     // Unicode support self-test (UTF-8 decoding, box drawing, block elements).
-    unicode::self_test();
+    // §914: Diagnostic — cosmetic rendering, not structural integrity.
+    selftest::dispatch_debug(
+        "Unicode",
+        selftest::Severity::Diagnostic,
+        unicode::self_test(),
+    );
 
     // The uname strings: glibc's start-up version gate, and single-token fields.
     uname::self_test();

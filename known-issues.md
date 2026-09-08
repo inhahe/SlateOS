@@ -124336,19 +124336,30 @@ in `gui/window`, offers a `Palette` — the crate does not even depend on
 `appearance`. An application that wanted to follow the theme would have to
 load and parse `appearance.yaml` itself, which is why none of them does.
 
-**Half the mechanism already exists.** `oswindow::app::Reloads` has an
-`appearance: bool` field and `EventLoop::appearance_changed` already fires
-when `appearance.yaml` is rewritten — so the *notification* that the theme
-changed reaches applications today. What is missing is the palette it would
-notify them about.
+**Correction, same day: less of the mechanism exists than I first wrote here.**
+The first version of this entry said the change-notification already reaches
+applications. It does not, and the direction is the opposite of what I
+assumed. `oswindow::app::Reloads` and `EventLoop::appearance_changed` are
+**outbound**: they are how the Settings application tells the *compositor*
+that it has rewritten `appearance.yaml`. `App::take_reloads`'s own doc says so
+— *"it exists for the handful — Settings, today exactly one — that edit files
+another process reads."*
+
+Inbound there is nothing. `guitk::event::Event` carries `Mouse`, `Key`,
+`Resize`, `Moved`, `FocusIn`, `FocusOut` and `CloseRequested`, and no variant
+about appearance at all. So an application is never told the theme changed,
+and there is no palette for it to be told about. **Both halves are missing**,
+which makes step 1 below larger than one dependency line.
 
 **Proper fix, in order.**
 
-1. **`gui/window` depends on `appearance` and resolves one `Palette`**, from
-   the same `AppearanceSettings` the shell and the compositor use, refreshed
-   on the `Reloads.appearance` edge that already exists. Applications read it
-   rather than each loading a config file — one parse per process, not 135
-   implementations of the same parse.
+1. **`gui/window` depends on `appearance`, resolves one `Palette`, and gains
+   a way to hand it to the application** — most likely a new `Event` variant
+   so a theme change arrives the same way a resize does, plus an accessor for
+   the current palette so an application can paint its first frame correctly
+   before any change has happened. Applications read it rather than each
+   loading a config file — one parse per process, not 135 implementations of
+   the same parse, and one place for the refresh edge to be right.
 2. **Convert applications to it**, deleting their private constants. The
    Settings app is the worked example (2026-09-08): every role in those
    constant blocks maps one-to-one onto `Palette`'s fields under the same

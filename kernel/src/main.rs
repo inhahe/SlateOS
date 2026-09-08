@@ -1532,10 +1532,10 @@ extern "C" fn kernel_main() -> ! {
             // left here is the one call the gate was ever right about, plus the
             // cache flush that pairs with its writes.
             if fat_ok {
-                // RAN-IF: "[fat] Running mkfs/format self-test..."
                 selftest::dispatch_debug(
                     "FAT",
                     selftest::Severity::Diagnostic,
+                    // RAN-IF: "[fat] Running mkfs/format self-test..."
                     fs::fat::self_test(),
                 );
                 // Flush buffer cache to disk so data survives power loss / QEMU kill.
@@ -2151,10 +2151,10 @@ extern "C" fn kernel_main() -> ! {
                 // claims the NIC via the capability-gated SYS_NET_RAW_* syscalls and
                 // proves the raw-frame TX/RX path end-to-end with an ARP round-trip.
                 // Skips gracefully when there's no network.
-                // RAN-IF: "[spawn] Running userspace netstack daemon (ring 3) integration test..."
                 selftest::dispatch_debug(
                     "userspace netstack daemon (ring 3)",
                     selftest::Severity::Diagnostic,
+                    // RAN-IF: "[spawn] Running userspace netstack daemon (ring 3) integration test..."
                     proc::spawn::self_test_userspace_netstack(),
                 );
 
@@ -2162,10 +2162,10 @@ extern "C" fn kernel_main() -> ! {
                 // `netstack` daemon over the Service Registry (`net.stack`), proving the
                 // socket-syscall → IPC path end-to-end. Bounded self-test (the daemon
                 // owns the NIC only briefly); skips gracefully with no network.
-                // RAN-IF: "[spawn] Running netstack DNS-over-IPC (ring 3) integration test..."
                 selftest::dispatch_debug(
                     "netstack DNS-over-IPC (ring 3)",
                     selftest::Severity::Diagnostic,
+                    // RAN-IF: "[spawn] Running netstack DNS-over-IPC (ring 3) integration test..."
                     proc::spawn::self_test_netstack_dns_ipc(),
                 );
             }

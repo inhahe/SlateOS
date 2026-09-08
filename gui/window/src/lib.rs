@@ -976,6 +976,19 @@ impl<T: Transport> EventLoop<T> {
         self.conn.set_window_workspace(window, desktop)
     }
 
+    /// Set another client's window opacity, as a window rule does.
+    ///
+    /// A shell privilege, with [`control_window`](Self::control_window) and
+    /// the rest: the ordinary opacity request resolves against the sender's
+    /// own window, which is what stops any program fading everybody else's.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn shell_set_opacity(&mut self, window: u64, opacity: f32) -> Result<(), Error<T>> {
+        self.conn.shell_set_opacity(window, opacity)
+    }
+
     /// Claim a keyboard chord, so that it arrives here wherever the focus is.
     ///
     /// The third of the shell privileges, with
@@ -1780,6 +1793,7 @@ pub mod testing {
                 RequestBody::SetCursor { .. } => "SetCursor",
                 RequestBody::SetFullscreen { .. } => "SetFullscreen",
                 RequestBody::SetOpacity { .. } => "SetOpacity",
+                RequestBody::ShellSetOpacity { .. } => "ShellSetOpacity",
                 RequestBody::GetDisplayInfo => "GetDisplayInfo",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::ReloadAppearance => "ReloadAppearance",

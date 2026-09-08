@@ -96,7 +96,7 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// same reason 3 did, and worse: the new field's own length prefix would be
 /// read by a version-3 decoder as the window's *width*, so the failure is not a
 /// wrong flag but a window several hundred million pixels across.
-pub const CONTROL_VERSION: u8 = 5;
+pub const CONTROL_VERSION: u8 = 6;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -698,6 +698,19 @@ pub enum RequestBody {
     /// it different from [`WindowSpec::transparent`]: that one says the client
     /// paints its own background and the compositor should not undercoat it.
     SetOpacity { window: u64, opacity: f32 },
+    /// Set *another client's* window opacity. Shell only.
+    ///
+    /// The same operation as [`SetOpacity`](Self::SetOpacity) and a different
+    /// authorisation. `SetOpacity` resolves its window against the sender's
+    /// own, which is what stops any program that can reach the compositor
+    /// fading everybody else's windows; this one is gated on
+    /// `require_shell` instead and names the window directly, exactly as
+    /// [`ShellControl`](Self::ShellControl) does.
+    ///
+    /// A separate request rather than a flag on the existing one, so that the
+    /// privileged path is a different tag on the wire and cannot be reached by
+    /// getting a boolean wrong.
+    ShellSetOpacity { window: u64, opacity: f32 },
     /// Ask about the display. Answered with [`ResponseBody::DisplayInfo`].
     GetDisplayInfo,
     /// Start or stop receiving the desktop's window list.
@@ -1011,6 +1024,7 @@ enum RequestTag {
     DropImage = 0x16,
     GrabKey = 0x17,
     UngrabKey = 0x18,
+    ShellSetOpacity = 0x19,
 }
 
 impl RequestTag {
@@ -1040,6 +1054,7 @@ impl RequestTag {
             0x16 => Self::DropImage,
             0x17 => Self::GrabKey,
             0x18 => Self::UngrabKey,
+            0x19 => Self::ShellSetOpacity,
             _ => return None,
         })
     }
@@ -1269,6 +1284,11 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
         }
         RequestBody::SetOpacity { window, opacity } => {
             out.push(RequestTag::SetOpacity as u8);
+            write_u64(out, *window);
+            write_f32(out, *opacity);
+        }
+        RequestBody::ShellSetOpacity { window, opacity } => {
+            out.push(RequestTag::ShellSetOpacity as u8);
             write_u64(out, *window);
             write_f32(out, *opacity);
         }
@@ -1575,6 +1595,13 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         RequestTag::SetOpacity => {
             let window = r.read_u64()?;
             RequestBody::SetOpacity {
+                window,
+                opacity: r.read_f32()?,
+            }
+        }
+        RequestTag::ShellSetOpacity => {
+            let window = r.read_u64()?;
+            RequestBody::ShellSetOpacity {
                 window,
                 opacity: r.read_f32()?,
             }
@@ -2012,8 +2039,13 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x19),
+            Some(RequestTag::ShellSetOpacity),
+            "0x19 was taken by ShellSetOpacity in control version 6"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x1A),
             None,
-            "0x19 is the next free tag"
+            "0x1A is the next free tag"
         );
     }
 

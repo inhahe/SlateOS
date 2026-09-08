@@ -1544,6 +1544,13 @@ impl<T: Transport> ShellSession<T> {
             ShellRequest::MoveWindowToDesktop { window, desktop } => {
                 self.events.move_window_to_desktop(window.0, desktop)
             }
+            ShellRequest::SetOpacity { window, alpha } => {
+                // Back to the 0.0..=1.0 the wire carries. Exact: 255 divides
+                // to 1.0 and 0 to 0.0, and every step between is a value the
+                // compositor's own eight-bit blend can represent.
+                self.events
+                    .shell_set_opacity(window.0, f32::from(alpha) / 255.0)
+            }
         };
         match sent {
             Ok(()) => {}

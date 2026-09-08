@@ -35,6 +35,7 @@
 #![allow(clippy::match_same_arms)]
 #![allow(clippy::cognitive_complexity)]
 
+use appearance::Palette;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -48,35 +49,6 @@ use std::time::Duration;
 // ============================================================================
 // Catppuccin Mocha theme
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-#[allow(
-    dead_code,
-    reason = "the Catppuccin Mocha palette is carried whole so that a colour \
-              chosen later is the palette's and not a fresh literal; four of \
-              its entries have no use in this program yet"
-)]
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-#[allow(dead_code, reason = "palette entry, see SURFACE2")]
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-#[allow(dead_code, reason = "palette entry, see SURFACE2")]
-const SKY: Color = Color::from_hex(0x89DCEB);
-#[allow(dead_code, reason = "palette entry, see SURFACE2")]
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 
 // ============================================================================
 // Layout constants
@@ -243,8 +215,8 @@ impl Cell {
     fn blank() -> Self {
         Self {
             ch: ' ',
-            fg: TEXT,
-            bg: BASE,
+            fg: Color::from_hex(0xCDD6F4),
+            bg: Color::from_hex(0x1E1E2E),
             bold: false,
             dim: false,
             underline: false,
@@ -303,8 +275,8 @@ impl TerminalBuffer {
             cursor_row: 0,
             cursor_visible: true,
             scrollback: Vec::new(),
-            current_fg: TEXT,
-            current_bg: BASE,
+            current_fg: Color::from_hex(0xCDD6F4),
+            current_bg: Color::from_hex(0x1E1E2E),
             current_bold: false,
             current_dim: false,
             current_underline: false,
@@ -558,8 +530,8 @@ impl TerminalBuffer {
 
     /// Reset SGR attributes.
     fn reset_attrs(&mut self) {
-        self.current_fg = TEXT;
-        self.current_bg = BASE;
+        self.current_fg = Color::from_hex(0xCDD6F4);
+        self.current_bg = Color::from_hex(0x1E1E2E);
         self.current_bold = false;
         self.current_dim = false;
         self.current_underline = false;
@@ -829,33 +801,33 @@ impl AnsiParser {
                 27 => buf.current_reverse = false,
                 // Standard foreground colors
                 30 => buf.current_fg = Color::from_hex(0x45475A), // Black → Surface1
-                31 => buf.current_fg = RED,
-                32 => buf.current_fg = GREEN,
-                33 => buf.current_fg = YELLOW,
-                34 => buf.current_fg = BLUE,
-                35 => buf.current_fg = MAUVE,
-                36 => buf.current_fg = TEAL,
-                37 => buf.current_fg = TEXT,
-                39 => buf.current_fg = TEXT, // Default fg
+                31 => buf.current_fg = Color::from_hex(0xF38BA8),
+                32 => buf.current_fg = Color::from_hex(0xA6E3A1),
+                33 => buf.current_fg = Color::from_hex(0xF9E2AF),
+                34 => buf.current_fg = Color::from_hex(0x89B4FA),
+                35 => buf.current_fg = Color::from_hex(0xCBA6F7),
+                36 => buf.current_fg = Color::from_hex(0x94E2D5),
+                37 => buf.current_fg = Color::from_hex(0xCDD6F4),
+                39 => buf.current_fg = Color::from_hex(0xCDD6F4), // Default fg
                 // Standard background colors
-                40 => buf.current_bg = CRUST,
-                41 => buf.current_bg = RED,
-                42 => buf.current_bg = GREEN,
-                43 => buf.current_bg = YELLOW,
-                44 => buf.current_bg = BLUE,
-                45 => buf.current_bg = MAUVE,
-                46 => buf.current_bg = TEAL,
-                47 => buf.current_bg = TEXT,
-                49 => buf.current_bg = BASE, // Default bg
+                40 => buf.current_bg = Color::from_hex(0x11111B),
+                41 => buf.current_bg = Color::from_hex(0xF38BA8),
+                42 => buf.current_bg = Color::from_hex(0xA6E3A1),
+                43 => buf.current_bg = Color::from_hex(0xF9E2AF),
+                44 => buf.current_bg = Color::from_hex(0x89B4FA),
+                45 => buf.current_bg = Color::from_hex(0xCBA6F7),
+                46 => buf.current_bg = Color::from_hex(0x94E2D5),
+                47 => buf.current_bg = Color::from_hex(0xCDD6F4),
+                49 => buf.current_bg = Color::from_hex(0x1E1E2E), // Default bg
                 // Bright foreground
-                90 => buf.current_fg = OVERLAY0,
-                91 => buf.current_fg = RED,
-                92 => buf.current_fg = GREEN,
-                93 => buf.current_fg = YELLOW,
-                94 => buf.current_fg = BLUE,
-                95 => buf.current_fg = MAUVE,
-                96 => buf.current_fg = TEAL,
-                97 => buf.current_fg = TEXT,
+                90 => buf.current_fg = Color::from_hex(0x6C7086),
+                91 => buf.current_fg = Color::from_hex(0xF38BA8),
+                92 => buf.current_fg = Color::from_hex(0xA6E3A1),
+                93 => buf.current_fg = Color::from_hex(0xF9E2AF),
+                94 => buf.current_fg = Color::from_hex(0x89B4FA),
+                95 => buf.current_fg = Color::from_hex(0xCBA6F7),
+                96 => buf.current_fg = Color::from_hex(0x94E2D5),
+                97 => buf.current_fg = Color::from_hex(0xCDD6F4),
                 // 256-color and truecolor
                 38 => {
                     if let Some(&2) = params.get(i.saturating_add(1)) {
@@ -921,22 +893,22 @@ impl AnsiParser {
 /// Map 256-color index to a Color (simplified).
 fn color_256(n: u16) -> Color {
     match n {
-        0 => CRUST,
-        1 => RED,
-        2 => GREEN,
-        3 => YELLOW,
-        4 => BLUE,
-        5 => MAUVE,
-        6 => TEAL,
-        7 => SUBTEXT1,
-        8 => OVERLAY0,
-        9 => RED,
-        10 => GREEN,
-        11 => YELLOW,
-        12 => BLUE,
-        13 => MAUVE,
-        14 => TEAL,
-        15 => TEXT,
+        0 => Color::from_hex(0x11111B),
+        1 => Color::from_hex(0xF38BA8),
+        2 => Color::from_hex(0xA6E3A1),
+        3 => Color::from_hex(0xF9E2AF),
+        4 => Color::from_hex(0x89B4FA),
+        5 => Color::from_hex(0xCBA6F7),
+        6 => Color::from_hex(0x94E2D5),
+        7 => Color::from_hex(0xBAC2DE),
+        8 => Color::from_hex(0x6C7086),
+        9 => Color::from_hex(0xF38BA8),
+        10 => Color::from_hex(0xA6E3A1),
+        11 => Color::from_hex(0xF9E2AF),
+        12 => Color::from_hex(0x89B4FA),
+        13 => Color::from_hex(0xCBA6F7),
+        14 => Color::from_hex(0x94E2D5),
+        15 => Color::from_hex(0xCDD6F4),
         // 16-231: 6x6x6 color cube
         16..=231 => {
             let idx = n.saturating_sub(16);
@@ -966,7 +938,7 @@ fn color_256(n: u16) -> Color {
             let v = ((n.saturating_sub(232)).saturating_mul(10).saturating_add(8)) as u8;
             Color::rgb(v, v, v)
         }
-        _ => TEXT,
+        _ => Color::from_hex(0xCDD6F4),
     }
 }
 
@@ -1719,6 +1691,12 @@ struct Multiplexer {
     window_width: f32,
     /// How tall the window is, in pixels.
     window_height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Multiplexer {
@@ -1726,6 +1704,7 @@ impl Multiplexer {
         let initial_pane = Pane::new(PaneId(0), INITIAL_COLS, INITIAL_ROWS);
         let session = Session::new(SessionId(0), "main", 0);
         let mut mux = Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             panes: vec![initial_pane],
             sessions: vec![session],
             active_session: 0,
@@ -2655,7 +2634,7 @@ impl Multiplexer {
             y: 0.0,
             width: self.window_width,
             height: self.window_height,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2700,7 +2679,7 @@ impl Multiplexer {
             y: 0.0,
             width: self.window_width,
             height: TAB_BAR_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2711,7 +2690,11 @@ impl Multiplexer {
             let tab_w = text::width(label, SMALL_TEXT) + 24.0;
 
             // Tab background
-            let tab_bg = if is_active { SURFACE0 } else { MANTLE };
+            let tab_bg = if is_active {
+                self.palette.surface0
+            } else {
+                self.palette.mantle
+            };
             cmds.push(RenderCommand::FillRect {
                 x: tab_x,
                 y: 2.0,
@@ -2733,13 +2716,17 @@ impl Multiplexer {
                     y: 2.0,
                     width: tab_w,
                     height: 2.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
 
             // Tab label
-            let tab_color = if is_active { TEXT } else { SUBTEXT0 };
+            let tab_color = if is_active {
+                self.palette.text
+            } else {
+                self.palette.subtext0
+            };
             cmds.push(RenderCommand::Text {
                 x: tab_x + 12.0,
                 y: 8.0,
@@ -2776,12 +2763,16 @@ impl Multiplexer {
             y,
             width,
             height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Pane border
-        let border_color = if active { BLUE } else { SURFACE1 };
+        let border_color = if active {
+            self.palette.blue
+        } else {
+            self.palette.surface1
+        };
         cmds.push(RenderCommand::StrokeRect {
             x,
             y,
@@ -2848,14 +2839,14 @@ impl Multiplexer {
             for (row_idx, row) in pane.buffer.visible_lines(capacity, back).iter().enumerate() {
                 for col_idx in 0..visible_cols.min(row.len()) {
                     if let Some(cell) = row.get(col_idx)
-                        && (cell.ch != ' ' || cell.bg != BASE)
+                        && (cell.ch != ' ' || cell.bg != self.palette.base)
                     {
                         let (fg, bg) = TerminalBuffer::effective_colors(cell);
                         let cx = content_x + col_idx as f32 * cell_w;
                         let cy = content_y + row_idx as f32 * cell_h;
 
                         // Cell background (only if non-default)
-                        if bg != BASE {
+                        if bg != self.palette.base {
                             cmds.push(RenderCommand::FillRect {
                                 x: cx,
                                 y: cy,
@@ -2923,7 +2914,7 @@ impl Multiplexer {
                     y,
                     width: 90.0,
                     height: 18.0,
-                    color: YELLOW,
+                    color: self.palette.yellow,
                     corner_radii: CornerRadii::ZERO,
                 });
                 cmds.push(RenderCommand::Text {
@@ -2935,7 +2926,7 @@ impl Multiplexer {
                     // nothing.
                     text: format!("[COPY -{}]", pane.copy_scroll),
                     font_size: SMALL_TEXT,
-                    color: CRUST,
+                    color: self.palette.crust,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(85.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2949,7 +2940,7 @@ impl Multiplexer {
                     y,
                     width: 16.0,
                     height: 16.0,
-                    color: RED,
+                    color: self.palette.red,
                     corner_radii: CornerRadii::all(8.0),
                 });
             }
@@ -2965,7 +2956,7 @@ impl Multiplexer {
             y,
             width: self.window_width,
             height: STATUS_BAR_HEIGHT,
-            color: GREEN,
+            color: self.palette.green,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2975,7 +2966,7 @@ impl Multiplexer {
             y: y + 4.0,
             text: format!("[{}]", session.name),
             font_size: SMALL_TEXT,
-            color: CRUST,
+            color: self.palette.crust,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -2986,7 +2977,11 @@ impl Multiplexer {
         for (i, window) in session.windows.iter().enumerate() {
             let is_active = i == session.active_window;
             let label = format!("{}:{}", window.index, window.name);
-            let color = if is_active { CRUST } else { MANTLE };
+            let color = if is_active {
+                self.palette.crust
+            } else {
+                self.palette.mantle
+            };
             let weight = if is_active {
                 FontWeightHint::Bold
             } else {
@@ -3037,7 +3032,7 @@ impl Multiplexer {
             y: y + 4.0,
             text: msg,
             font_size: SMALL_TEXT,
-            color: CRUST,
+            color: self.palette.crust,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
             overflow: TextOverflow::Ellipsis,
@@ -3051,7 +3046,7 @@ impl Multiplexer {
             y: 0.0,
             width: self.window_width,
             height: self.window_height,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3060,7 +3055,7 @@ impl Multiplexer {
             y: self.window_height / 2.0 - 20.0,
             text: "[detached]".into(),
             font_size: HEADER_TEXT,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -3071,7 +3066,7 @@ impl Multiplexer {
             y: self.window_height / 2.0 + 10.0,
             text: "Use :attach or tmux attach to reconnect".into(),
             font_size: NORMAL_TEXT,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -3099,7 +3094,7 @@ impl Multiplexer {
             y,
             width: w,
             height: h,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(8.0),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -3107,7 +3102,7 @@ impl Multiplexer {
             y,
             width: w,
             height: h,
-            color: SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -3117,7 +3112,7 @@ impl Multiplexer {
             y: y + 8.0,
             text: "Sessions".into(),
             font_size: HEADER_TEXT,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -3133,7 +3128,7 @@ impl Multiplexer {
                     y: row_y,
                     width: w - 8.0,
                     height: 22.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -3150,7 +3145,11 @@ impl Multiplexer {
                 y: row_y + 3.0,
                 text: label,
                 font_size: SMALL_TEXT,
-                color: if is_active { TEXT } else { SUBTEXT0 },
+                color: if is_active {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -3186,7 +3185,7 @@ impl Multiplexer {
             y,
             width: w,
             height: h,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(8.0),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -3194,7 +3193,7 @@ impl Multiplexer {
             y,
             width: w,
             height: h,
-            color: SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -3204,7 +3203,7 @@ impl Multiplexer {
             y: y + 8.0,
             text: "Windows".into(),
             font_size: HEADER_TEXT,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -3220,7 +3219,7 @@ impl Multiplexer {
                     y: row_y,
                     width: w - 8.0,
                     height: 22.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -3232,7 +3231,11 @@ impl Multiplexer {
                 y: row_y + 3.0,
                 text: label,
                 font_size: SMALL_TEXT,
-                color: if is_active { TEXT } else { SUBTEXT0 },
+                color: if is_active {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -3252,7 +3255,7 @@ impl Multiplexer {
             y,
             width: self.window_width,
             height: STATUS_BAR_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
@@ -3260,7 +3263,7 @@ impl Multiplexer {
             y: y + 4.0,
             text: self.command_input.clone(),
             font_size: SMALL_TEXT,
-            color: YELLOW,
+            color: self.palette.yellow,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.window_width - PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
@@ -3277,7 +3280,7 @@ impl Multiplexer {
             y,
             width: 100.0,
             height: 20.0,
-            color: YELLOW,
+            color: self.palette.yellow,
             corner_radii: CornerRadii::all(0.0),
         });
         cmds.push(RenderCommand::Text {
@@ -3285,7 +3288,7 @@ impl Multiplexer {
             y: y + 3.0,
             text: "Ctrl+B ...".into(),
             font_size: SMALL_TEXT,
-            color: CRUST,
+            color: self.palette.crust,
             font_weight: FontWeightHint::Bold,
             max_width: Some(90.0),
             overflow: TextOverflow::Ellipsis,
@@ -3298,6 +3301,10 @@ impl Multiplexer {
 // ============================================================================
 
 impl App for Multiplexer {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // The session and the window inside it, which is what a multiplexer's
         // title bar is for -- the same two names its own status bar shows. The
@@ -3553,7 +3560,7 @@ mod tests {
         let mut buf = TerminalBuffer::new(80, 24);
         let mut parser = AnsiParser::new();
         parser.feed("\x1B[31mRed", &mut buf);
-        assert_eq!(buf.cells[0][0].fg, RED);
+        assert_eq!(buf.cells[0][0].fg, Color::from_hex(0xF38BA8));
     }
 
     #[test]
@@ -4582,8 +4589,8 @@ mod tests {
 
     #[test]
     fn test_color_256_standard() {
-        assert_eq!(color_256(1), RED);
-        assert_eq!(color_256(2), GREEN);
+        assert_eq!(color_256(1), Color::from_hex(0xF38BA8));
+        assert_eq!(color_256(2), Color::from_hex(0xA6E3A1));
     }
 
     #[test]
@@ -5295,5 +5302,69 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut Multiplexer) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = Multiplexer::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        // No equal-count assertion here, unlike the other applications: a
+        // terminal skips drawing a cell whose background already matches the
+        // surface behind it, so a different background legitimately changes
+        // how many rectangles are emitted. The claim that matters is that the
+        // colours differ.
+        assert!(!light.is_empty(), "the light theme drew nothing at all");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

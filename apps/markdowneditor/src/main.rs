@@ -28,6 +28,7 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -47,39 +48,6 @@ use std::path::PathBuf;
 // ============================================================================
 // Catppuccin Mocha theme constants
 // ============================================================================
-
-/// Catppuccin Mocha base background color.
-const BASE: Color = Color::from_hex(0x1E1E2E);
-/// Catppuccin Mocha mantle (darker background).
-const MANTLE: Color = Color::from_hex(0x181825);
-/// Catppuccin Mocha crust (darkest background).
-const CRUST: Color = Color::from_hex(0x11111B);
-/// Catppuccin Mocha surface level 0.
-const SURFACE0: Color = Color::from_hex(0x313244);
-/// Catppuccin Mocha surface level 1.
-const SURFACE1: Color = Color::from_hex(0x45475A);
-/// Catppuccin Mocha surface level 2.
-const SURFACE2: Color = Color::from_hex(0x585B70);
-/// Catppuccin Mocha primary text color.
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-/// Catppuccin Mocha subtext0 (dimmer text).
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-/// Catppuccin Mocha subtext1 (slightly dimmer text).
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-/// Catppuccin Mocha blue accent.
-const BLUE: Color = Color::from_hex(0x89B4FA);
-/// Catppuccin Mocha green accent.
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-/// Catppuccin Mocha red accent.
-const RED: Color = Color::from_hex(0xF38BA8);
-/// Catppuccin Mocha yellow accent.
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-/// Catppuccin Mocha peach accent.
-const PEACH: Color = Color::from_hex(0xFAB387);
-/// Catppuccin Mocha lavender accent.
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-/// Catppuccin Mocha overlay0 (muted foreground).
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 /// Default font size for the editor.
 const EDITOR_FONT_SIZE: f32 = 14.0;
@@ -2232,7 +2200,7 @@ pub struct HighlightSpan {
 }
 
 /// Produce syntax highlighting spans for a single line of markdown source.
-pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
+pub fn highlight_line(line: &str, pal: &Palette) -> Vec<HighlightSpan> {
     let mut spans = Vec::new();
     let trimmed = line.trim_start();
     let indent_len = line.len().saturating_sub(trimmed.len());
@@ -2243,18 +2211,18 @@ pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
         if hashes <= 6 && (trimmed.len() == hashes || trimmed.as_bytes().get(hashes) == Some(&b' '))
         {
             let heading_color = match hashes {
-                1 => BLUE,
-                2 => LAVENDER,
-                3 => GREEN,
-                4 => YELLOW,
-                5 => PEACH,
-                _ => RED,
+                1 => pal.blue,
+                2 => pal.lavender,
+                3 => pal.green,
+                4 => pal.yellow,
+                5 => pal.peach,
+                _ => pal.red,
             };
             // Hash marks get dimmed.
             spans.push(HighlightSpan {
                 start: indent_len,
                 end: indent_len.saturating_add(hashes),
-                color: OVERLAY0,
+                color: pal.overlay0,
                 weight: FontWeightHint::Bold,
             });
             // The heading text.
@@ -2275,7 +2243,7 @@ pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
         spans.push(HighlightSpan {
             start: 0,
             end: line.len(),
-            color: GREEN,
+            color: pal.green,
             weight: FontWeightHint::Regular,
         });
         return spans;
@@ -2286,14 +2254,14 @@ pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
         spans.push(HighlightSpan {
             start: indent_len,
             end: indent_len.saturating_add(1),
-            color: BLUE,
+            color: pal.blue,
             weight: FontWeightHint::Bold,
         });
         if line.len() > indent_len.saturating_add(1) {
             spans.push(HighlightSpan {
                 start: indent_len.saturating_add(1),
                 end: line.len(),
-                color: SUBTEXT0,
+                color: pal.subtext0,
                 weight: FontWeightHint::Regular,
             });
         }
@@ -2305,7 +2273,7 @@ pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
         spans.push(HighlightSpan {
             start: 0,
             end: line.len(),
-            color: SURFACE2,
+            color: pal.surface2,
             weight: FontWeightHint::Regular,
         });
         return spans;
@@ -2317,7 +2285,7 @@ pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
         spans.push(HighlightSpan {
             start: indent_len,
             end: bullet_end.min(line.len()),
-            color: BLUE,
+            color: pal.blue,
             weight: FontWeightHint::Bold,
         });
         // Check for task list checkbox.
@@ -2326,20 +2294,20 @@ pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
             spans.push(HighlightSpan {
                 start: bullet_end,
                 end: bullet_end.saturating_add(4),
-                color: GREEN,
+                color: pal.green,
                 weight: FontWeightHint::Regular,
             });
-            highlight_inline_spans(line, bullet_end.saturating_add(4), &mut spans);
+            highlight_inline_spans(line, pal, bullet_end.saturating_add(4), &mut spans);
         } else if after_bullet.starts_with("[ ] ") {
             spans.push(HighlightSpan {
                 start: bullet_end,
                 end: bullet_end.saturating_add(4),
-                color: OVERLAY0,
+                color: pal.overlay0,
                 weight: FontWeightHint::Regular,
             });
-            highlight_inline_spans(line, bullet_end.saturating_add(4), &mut spans);
+            highlight_inline_spans(line, pal, bullet_end.saturating_add(4), &mut spans);
         } else {
-            highlight_inline_spans(line, bullet_end, &mut spans);
+            highlight_inline_spans(line, pal, bullet_end, &mut spans);
         }
         return spans;
     }
@@ -2352,10 +2320,10 @@ pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
         spans.push(HighlightSpan {
             start: indent_len,
             end: abs_end.min(line.len()),
-            color: BLUE,
+            color: pal.blue,
             weight: FontWeightHint::Bold,
         });
-        highlight_inline_spans(line, abs_end, &mut spans);
+        highlight_inline_spans(line, pal, abs_end, &mut spans);
         return spans;
     }
 
@@ -2364,21 +2332,21 @@ pub fn highlight_line(line: &str) -> Vec<HighlightSpan> {
         spans.push(HighlightSpan {
             start: 0,
             end: line.len(),
-            color: SURFACE2,
+            color: pal.surface2,
             weight: FontWeightHint::Regular,
         });
         return spans;
     }
 
     // Default: apply inline highlighting.
-    highlight_inline_spans(line, 0, &mut spans);
+    highlight_inline_spans(line, pal, 0, &mut spans);
 
     // If no spans were generated, use default text color.
     if spans.is_empty() {
         spans.push(HighlightSpan {
             start: 0,
             end: line.len(),
-            color: TEXT,
+            color: pal.text,
             weight: FontWeightHint::Regular,
         });
     }
@@ -2412,7 +2380,12 @@ fn scan_to_pair(bytes: &[u8], from: usize, needle: u8) -> Option<usize> {
 }
 
 /// Highlight inline markdown elements within a line starting at a byte offset.
-fn highlight_inline_spans(line: &str, start_offset: usize, spans: &mut Vec<HighlightSpan>) {
+fn highlight_inline_spans(
+    line: &str,
+    pal: &Palette,
+    start_offset: usize,
+    spans: &mut Vec<HighlightSpan>,
+) {
     // `start_offset` is computed by the caller from a prefix it has already
     // matched, so it is a boundary in practice — but it is a *computed* offset
     // into a line the user is still typing into, and the failure mode of
@@ -2442,14 +2415,14 @@ fn highlight_inline_spans(line: &str, start_offset: usize, spans: &mut Vec<Highl
         // Inline code: `code`.
         if b == b'`' {
             if pos > text_start {
-                push(spans, text_start, pos, TEXT, FontWeightHint::Regular);
+                push(spans, text_start, pos, pal.text, FontWeightHint::Regular);
             }
             if let Some(code_end) = scan_to(bytes, pos.saturating_add(1), b'`') {
                 push(
                     spans,
                     pos,
                     code_end.saturating_add(1),
-                    GREEN,
+                    pal.green,
                     FontWeightHint::Regular,
                 );
                 pos = code_end.saturating_add(1);
@@ -2463,16 +2436,28 @@ fn highlight_inline_spans(line: &str, start_offset: usize, spans: &mut Vec<Highl
             let inner_start = pos.saturating_add(2);
             if let Some(inner_end) = scan_to_pair(bytes, inner_start, b) {
                 if pos > text_start {
-                    push(spans, text_start, pos, TEXT, FontWeightHint::Regular);
+                    push(spans, text_start, pos, pal.text, FontWeightHint::Regular);
                 }
                 // Dim the opening markers, bold the text, dim the closing ones.
-                push(spans, pos, inner_start, OVERLAY0, FontWeightHint::Regular);
-                push(spans, inner_start, inner_end, TEXT, FontWeightHint::Bold);
+                push(
+                    spans,
+                    pos,
+                    inner_start,
+                    pal.overlay0,
+                    FontWeightHint::Regular,
+                );
+                push(
+                    spans,
+                    inner_start,
+                    inner_end,
+                    pal.text,
+                    FontWeightHint::Bold,
+                );
                 push(
                     spans,
                     inner_end,
                     inner_end.saturating_add(2),
-                    OVERLAY0,
+                    pal.overlay0,
                     FontWeightHint::Regular,
                 );
                 pos = inner_end.saturating_add(2);
@@ -2485,13 +2470,13 @@ fn highlight_inline_spans(line: &str, start_offset: usize, spans: &mut Vec<Highl
         if b == b'~' && next == Some(b'~') {
             if let Some(inner_end) = scan_to_pair(bytes, pos.saturating_add(2), b'~') {
                 if pos > text_start {
-                    push(spans, text_start, pos, TEXT, FontWeightHint::Regular);
+                    push(spans, text_start, pos, pal.text, FontWeightHint::Regular);
                 }
                 push(
                     spans,
                     pos,
                     inner_end.saturating_add(2),
-                    OVERLAY0,
+                    pal.overlay0,
                     FontWeightHint::Regular,
                 );
                 pos = inner_end.saturating_add(2);
@@ -2505,21 +2490,27 @@ fn highlight_inline_spans(line: &str, start_offset: usize, spans: &mut Vec<Highl
             let inner_start = pos.saturating_add(1);
             if let Some(inner_end) = scan_to(bytes, inner_start, b) {
                 if pos > text_start {
-                    push(spans, text_start, pos, TEXT, FontWeightHint::Regular);
+                    push(spans, text_start, pos, pal.text, FontWeightHint::Regular);
                 }
-                push(spans, pos, inner_start, OVERLAY0, FontWeightHint::Regular);
+                push(
+                    spans,
+                    pos,
+                    inner_start,
+                    pal.overlay0,
+                    FontWeightHint::Regular,
+                );
                 push(
                     spans,
                     inner_start,
                     inner_end,
-                    LAVENDER,
+                    pal.lavender,
                     FontWeightHint::Light,
                 );
                 push(
                     spans,
                     inner_end,
                     inner_end.saturating_add(1),
-                    OVERLAY0,
+                    pal.overlay0,
                     FontWeightHint::Regular,
                 );
                 pos = inner_end.saturating_add(1);
@@ -2537,7 +2528,7 @@ fn highlight_inline_spans(line: &str, start_offset: usize, spans: &mut Vec<Highl
                 && let Some(paren_end) = scan_to(bytes, bracket_end.saturating_add(2), b')')
             {
                 if pos > text_start {
-                    push(spans, text_start, pos, TEXT, FontWeightHint::Regular);
+                    push(spans, text_start, pos, pal.text, FontWeightHint::Regular);
                 }
                 if is_image {
                     // An image is drawn as one span: its alt text is not the
@@ -2547,7 +2538,7 @@ fn highlight_inline_spans(line: &str, start_offset: usize, spans: &mut Vec<Highl
                         spans,
                         pos,
                         paren_end.saturating_add(1),
-                        PEACH,
+                        pal.peach,
                         FontWeightHint::Regular,
                     );
                 } else {
@@ -2555,14 +2546,14 @@ fn highlight_inline_spans(line: &str, start_offset: usize, spans: &mut Vec<Highl
                         spans,
                         bracket_start,
                         bracket_end.saturating_add(1),
-                        BLUE,
+                        pal.blue,
                         FontWeightHint::Regular,
                     );
                     push(
                         spans,
                         bracket_end.saturating_add(1),
                         paren_end.saturating_add(1),
-                        OVERLAY0,
+                        pal.overlay0,
                         FontWeightHint::Regular,
                     );
                 }
@@ -2581,7 +2572,7 @@ fn highlight_inline_spans(line: &str, start_offset: usize, spans: &mut Vec<Highl
             spans,
             text_start,
             bytes.len(),
-            TEXT,
+            pal.text,
             FontWeightHint::Regular,
         );
     }
@@ -2721,6 +2712,7 @@ fn wrap_selection(doc: &mut Document, prefix: &str, suffix: &str) {
 /// Render the editor source view (line numbers + syntax-highlighted text).
 pub fn render_editor(
     doc: &Document,
+    pal: &Palette,
     x: f32,
     y: f32,
     width: f32,
@@ -2745,7 +2737,7 @@ pub fn render_editor(
             y,
             width,
             height,
-            color: BASE,
+            color: pal.base,
             corner_radii: CornerRadii::ZERO,
         },
         // Gutter background.
@@ -2754,7 +2746,7 @@ pub fn render_editor(
             y,
             width: GUTTER_WIDTH,
             height,
-            color: MANTLE,
+            color: pal.mantle,
             corner_radii: CornerRadii::ZERO,
         },
         // Gutter separator line.
@@ -2763,7 +2755,7 @@ pub fn render_editor(
             y1: y,
             x2: x + GUTTER_WIDTH,
             y2: y + height,
-            color: SURFACE0,
+            color: pal.surface0,
             width: 1.0,
         },
     ];
@@ -2823,7 +2815,7 @@ pub fn render_editor(
                 y: line_y,
                 width: width - GUTTER_WIDTH,
                 height: LINE_HEIGHT,
-                color: Color::rgba(SURFACE0.r, SURFACE0.g, SURFACE0.b, 100),
+                color: Color::rgba(pal.surface0.r, pal.surface0.g, pal.surface0.b, 100),
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -2835,7 +2827,7 @@ pub fn render_editor(
                 y: line_y,
                 width: width - GUTTER_WIDTH,
                 height: LINE_HEIGHT,
-                color: Color::rgba(SURFACE0.r, SURFACE0.g, SURFACE0.b, 60),
+                color: Color::rgba(pal.surface0.r, pal.surface0.g, pal.surface0.b, 60),
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -2850,9 +2842,9 @@ pub fn render_editor(
                     .map(|(l, s, _)| l == line_num && s == *match_start)
                     .unwrap_or(false);
                 let highlight_color = if is_current {
-                    Color::rgba(YELLOW.r, YELLOW.g, YELLOW.b, 120)
+                    Color::rgba(pal.yellow.r, pal.yellow.g, pal.yellow.b, 120)
                 } else {
-                    Color::rgba(YELLOW.r, YELLOW.g, YELLOW.b, 50)
+                    Color::rgba(pal.yellow.r, pal.yellow.g, pal.yellow.b, 50)
                 };
                 cmds.push(RenderCommand::FillRect {
                     x: match_x,
@@ -2868,9 +2860,9 @@ pub fn render_editor(
         // Line number.
         let line_num_text = format!("{}", line_num.saturating_add(1));
         let num_color = if line_num == doc.cursor_line {
-            TEXT
+            pal.text
         } else {
-            OVERLAY0
+            pal.overlay0
         };
         cmds.push(RenderCommand::Text {
             x: text::right_x(
@@ -2895,11 +2887,11 @@ pub fn render_editor(
                 vec![HighlightSpan {
                     start: 0,
                     end: line.len(),
-                    color: GREEN,
+                    color: pal.green,
                     weight: FontWeightHint::Regular,
                 }]
             } else {
-                highlight_line(line)
+                highlight_line(line, pal)
             };
 
             for span in &spans {
@@ -2930,7 +2922,7 @@ pub fn render_editor(
                 y: line_y,
                 width: 2.0,
                 height: LINE_HEIGHT,
-                color: TEXT,
+                color: pal.text,
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -2961,7 +2953,7 @@ pub fn render_editor(
                     y: line_y,
                     width: sel_w.max(0.0),
                     height: LINE_HEIGHT,
-                    color: Color::rgba(BLUE.r, BLUE.g, BLUE.b, 60),
+                    color: Color::rgba(pal.blue.r, pal.blue.g, pal.blue.b, 60),
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -2978,6 +2970,8 @@ pub fn render_editor(
 
 /// Context for tracking vertical position during preview rendering.
 struct PreviewContext {
+    /// The desktop theme every element draws in.
+    palette: Palette,
     /// Current Y position for the next element.
     y: f32,
     /// Left edge X position.
@@ -2996,8 +2990,9 @@ struct PreviewContext {
 
 impl PreviewContext {
     /// Create a new preview rendering context.
-    fn new(x: f32, y: f32, width: f32, height: f32, scroll_offset: f32) -> Self {
+    fn new(palette: Palette, x: f32, y: f32, width: f32, height: f32, scroll_offset: f32) -> Self {
         Self {
+            palette,
             y,
             x,
             width,
@@ -3028,6 +3023,7 @@ impl PreviewContext {
 /// Render the preview panel for a list of parsed markdown blocks.
 pub fn render_preview(
     blocks: &[MdBlock],
+    pal: &Palette,
     x: f32,
     y: f32,
     width: f32,
@@ -3042,13 +3038,14 @@ pub fn render_preview(
         y,
         width,
         height,
-        color: BASE,
+        color: pal.base,
         corner_radii: CornerRadii::ZERO,
     });
 
     let content_x = x + PREVIEW_PADDING;
     let content_width = width - PREVIEW_PADDING * 2.0;
     let mut ctx = PreviewContext::new(
+        *pal,
         content_x,
         y + PREVIEW_PADDING,
         content_width,
@@ -3085,7 +3082,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                     y: ctx.render_y(),
                     text,
                     font_size,
-                    color: BLUE,
+                    color: ctx.palette.blue,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(ctx.width),
                     overflow: TextOverflow::Ellipsis,
@@ -3099,7 +3096,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                     y1: ctx.render_y(),
                     x2: ctx.x + ctx.width,
                     y2: ctx.render_y(),
-                    color: SURFACE1,
+                    color: ctx.palette.surface1,
                     width: 1.0,
                 });
                 ctx.y += 4.0;
@@ -3111,7 +3108,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                 inlines,
                 ctx,
                 EDITOR_FONT_SIZE,
-                TEXT,
+                ctx.palette.text,
                 FontWeightHint::Regular,
             );
             ctx.add_spacing(8.0);
@@ -3125,7 +3122,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                     y: ctx.render_y(),
                     width: ctx.width,
                     height: block_height,
-                    color: SURFACE0,
+                    color: ctx.palette.surface0,
                     corner_radii: CornerRadii::all(6.0),
                 });
 
@@ -3136,7 +3133,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                         y: ctx.render_y() + 4.0,
                         text: language.clone(),
                         font_size: 10.0,
-                        color: SUBTEXT0,
+                        color: ctx.palette.subtext0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(ctx.width - 16.0),
                         overflow: TextOverflow::Ellipsis,
@@ -3152,7 +3149,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                         y: line_y,
                         text: code_line.to_string(),
                         font_size: 13.0,
-                        color: GREEN,
+                        color: ctx.palette.green,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(ctx.width - 24.0),
                         overflow: TextOverflow::Ellipsis,
@@ -3183,7 +3180,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                     y: quote_start_y,
                     width: 4.0,
                     height: quote_height,
-                    color: BLUE,
+                    color: ctx.palette.blue,
                     corner_radii: CornerRadii::all(2.0),
                 });
             }
@@ -3197,7 +3194,11 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                     // Bullet or checkbox.
                     if let Some(checked) = item.task {
                         let checkbox_text = if checked { "[x]" } else { "[ ]" };
-                        let cb_color = if checked { GREEN } else { OVERLAY0 };
+                        let cb_color = if checked {
+                            ctx.palette.green
+                        } else {
+                            ctx.palette.overlay0
+                        };
                         ctx.cmds.push(RenderCommand::Text {
                             x: ctx.x,
                             y: ctx.render_y(),
@@ -3214,7 +3215,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                             y: ctx.render_y() + 7.0,
                             width: 6.0,
                             height: 6.0,
-                            color: TEXT,
+                            color: ctx.palette.text,
                             corner_radii: CornerRadii::all(3.0),
                         });
                     }
@@ -3227,7 +3228,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                     &item.inlines,
                     ctx,
                     EDITOR_FONT_SIZE,
-                    TEXT,
+                    ctx.palette.text,
                     FontWeightHint::Regular,
                 );
                 ctx.x = saved_x;
@@ -3244,7 +3245,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                         y: ctx.render_y(),
                         text: num_text,
                         font_size: EDITOR_FONT_SIZE,
-                        color: TEXT,
+                        color: ctx.palette.text,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -3258,7 +3259,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                     &item.inlines,
                     ctx,
                     EDITOR_FONT_SIZE,
-                    TEXT,
+                    ctx.palette.text,
                     FontWeightHint::Regular,
                 );
                 ctx.x = saved_x;
@@ -3274,7 +3275,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                     y1: ctx.render_y(),
                     x2: ctx.x + ctx.width,
                     y2: ctx.render_y(),
-                    color: SURFACE1,
+                    color: ctx.palette.surface1,
                     width: 2.0,
                 });
             }
@@ -3297,7 +3298,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                     y: ctx.render_y(),
                     width: ctx.width,
                     height: row_height,
-                    color: SURFACE0,
+                    color: ctx.palette.surface0,
                     corner_radii: CornerRadii::ZERO,
                 });
 
@@ -3310,7 +3311,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                         y: ctx.render_y() + 4.0,
                         text,
                         font_size: EDITOR_FONT_SIZE,
-                        color: TEXT,
+                        color: ctx.palette.text,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(col_width - 16.0),
                         overflow: TextOverflow::Ellipsis,
@@ -3326,7 +3327,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                     y1: ctx.render_y(),
                     x2: ctx.x + ctx.width,
                     y2: ctx.render_y(),
-                    color: SURFACE1,
+                    color: ctx.palette.surface1,
                     width: 2.0,
                 });
             }
@@ -3342,7 +3343,12 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                             y: ctx.render_y(),
                             width: ctx.width,
                             height: row_height,
-                            color: Color::rgba(SURFACE0.r, SURFACE0.g, SURFACE0.b, 80),
+                            color: Color::rgba(
+                                ctx.palette.surface0.r,
+                                ctx.palette.surface0.g,
+                                ctx.palette.surface0.b,
+                                80,
+                            ),
                             corner_radii: CornerRadii::ZERO,
                         });
                     }
@@ -3355,7 +3361,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                             y: ctx.render_y() + 4.0,
                             text,
                             font_size: EDITOR_FONT_SIZE,
-                            color: TEXT,
+                            color: ctx.palette.text,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(col_width - 16.0),
                             overflow: TextOverflow::Ellipsis,
@@ -3373,7 +3379,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                 y: ctx.render_y() - total_height,
                 width: ctx.width,
                 height: total_height,
-                color: SURFACE1,
+                color: ctx.palette.surface1,
                 line_width: 1.0,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -3386,7 +3392,7 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
                     y1: ctx.render_y() - total_height,
                     x2: sep_x,
                     y2: ctx.render_y(),
-                    color: SURFACE1,
+                    color: ctx.palette.surface1,
                     width: 1.0,
                 });
             }
@@ -3402,7 +3408,7 @@ fn render_inlines_preview(
     color: Color,
     weight: FontWeightHint,
 ) {
-    let text = inlines_to_styled_text(inlines);
+    let text = inlines_to_styled_text(inlines, &ctx.palette);
     if text.is_empty() {
         ctx.y += LINE_HEIGHT;
         return;
@@ -3455,7 +3461,7 @@ struct StyledSegment {
 }
 
 /// Convert inline elements to styled text segments for preview rendering.
-fn inlines_to_styled_text(inlines: &[MdInline]) -> Vec<StyledSegment> {
+fn inlines_to_styled_text(inlines: &[MdInline], pal: &Palette) -> Vec<StyledSegment> {
     let mut segments = Vec::new();
     for inline in inlines {
         match inline {
@@ -3480,7 +3486,7 @@ fn inlines_to_styled_text(inlines: &[MdInline]) -> Vec<StyledSegment> {
                 let inner_text = inlines_to_plain_text(inner);
                 segments.push(StyledSegment {
                     text: inner_text,
-                    color: Some(LAVENDER),
+                    color: Some(pal.lavender),
                     weight: Some(FontWeightHint::Light),
                     font_size: None,
                 });
@@ -3489,7 +3495,7 @@ fn inlines_to_styled_text(inlines: &[MdInline]) -> Vec<StyledSegment> {
                 let inner_text = inlines_to_plain_text(inner);
                 segments.push(StyledSegment {
                     text: inner_text,
-                    color: Some(OVERLAY0),
+                    color: Some(pal.overlay0),
                     weight: None,
                     font_size: None,
                 });
@@ -3497,7 +3503,7 @@ fn inlines_to_styled_text(inlines: &[MdInline]) -> Vec<StyledSegment> {
             MdInline::InlineCode(code) => {
                 segments.push(StyledSegment {
                     text: code.clone(),
-                    color: Some(GREEN),
+                    color: Some(pal.green),
                     weight: None,
                     font_size: None,
                 });
@@ -3506,7 +3512,7 @@ fn inlines_to_styled_text(inlines: &[MdInline]) -> Vec<StyledSegment> {
                 let link_text = inlines_to_plain_text(text);
                 segments.push(StyledSegment {
                     text: link_text,
-                    color: Some(BLUE),
+                    color: Some(pal.blue),
                     weight: None,
                     font_size: None,
                 });
@@ -3514,7 +3520,7 @@ fn inlines_to_styled_text(inlines: &[MdInline]) -> Vec<StyledSegment> {
             MdInline::Image { alt, url: _ } => {
                 segments.push(StyledSegment {
                     text: format!("[Image: {}]", alt),
-                    color: Some(PEACH),
+                    color: Some(pal.peach),
                     weight: None,
                     font_size: None,
                 });
@@ -3731,7 +3737,13 @@ pub fn default_toolbar_buttons() -> Vec<ToolbarButton> {
 }
 
 /// Render the toolbar.
-pub fn render_toolbar(buttons: &[ToolbarButton], x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+pub fn render_toolbar(
+    buttons: &[ToolbarButton],
+    pal: &Palette,
+    x: f32,
+    y: f32,
+    width: f32,
+) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
 
     // Toolbar background.
@@ -3740,7 +3752,7 @@ pub fn render_toolbar(buttons: &[ToolbarButton], x: f32, y: f32, width: f32) -> 
         y,
         width,
         height: TOOLBAR_HEIGHT,
-        color: MANTLE,
+        color: pal.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -3750,7 +3762,7 @@ pub fn render_toolbar(buttons: &[ToolbarButton], x: f32, y: f32, width: f32) -> 
         y1: y + TOOLBAR_HEIGHT,
         x2: x + width,
         y2: y + TOOLBAR_HEIGHT,
-        color: SURFACE0,
+        color: pal.surface0,
         width: 1.0,
     });
 
@@ -3766,7 +3778,7 @@ pub fn render_toolbar(buttons: &[ToolbarButton], x: f32, y: f32, width: f32) -> 
                 y1: btn_y + 2.0,
                 x2: btn_x + 4.0,
                 y2: btn_y + btn_height - 2.0,
-                color: SURFACE1,
+                color: pal.surface1,
                 width: 1.0,
             });
             btn_x += 12.0;
@@ -3781,7 +3793,7 @@ pub fn render_toolbar(buttons: &[ToolbarButton], x: f32, y: f32, width: f32) -> 
             y: btn_y,
             width: btn_width,
             height: btn_height,
-            color: SURFACE0,
+            color: pal.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -3791,7 +3803,7 @@ pub fn render_toolbar(buttons: &[ToolbarButton], x: f32, y: f32, width: f32) -> 
             y: btn_y + 5.0,
             text: button.label.clone(),
             font_size: TOOLBAR_FONT_SIZE,
-            color: TEXT,
+            color: pal.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(btn_width - 16.0),
             overflow: TextOverflow::Ellipsis,
@@ -3810,6 +3822,7 @@ pub fn render_toolbar(buttons: &[ToolbarButton], x: f32, y: f32, width: f32) -> 
 /// Render the tab bar for multi-document editing.
 pub fn render_tab_bar(
     documents: &Tabs<Document>,
+    pal: &Palette,
     x: f32,
     y: f32,
     width: f32,
@@ -3825,7 +3838,7 @@ pub fn render_tab_bar(
         y,
         width,
         height: TAB_BAR_HEIGHT,
-        color: CRUST,
+        color: pal.crust,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -3851,8 +3864,8 @@ pub fn render_tab_bar(
         let tab_width =
             (text::measure(&label, TOOLBAR_FONT_SIZE, label_weight) + 24.0).clamp(80.0, 200.0);
 
-        let bg_color = if is_active { BASE } else { MANTLE };
-        let text_color = if is_active { TEXT } else { SUBTEXT0 };
+        let bg_color = if is_active { pal.base } else { pal.mantle };
+        let text_color = if is_active { pal.text } else { pal.subtext0 };
 
         // Tab background.
         cmds.push(RenderCommand::FillRect {
@@ -3876,7 +3889,7 @@ pub fn render_tab_bar(
                 y: tab_y,
                 width: tab_width,
                 height: 2.0,
-                color: BLUE,
+                color: pal.blue,
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -3899,7 +3912,7 @@ pub fn render_tab_bar(
             y: tab_y + 6.0,
             text: "x".to_string(),
             font_size: 11.0,
-            color: OVERLAY0,
+            color: pal.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3918,6 +3931,7 @@ pub fn render_tab_bar(
 /// Render the status bar with document statistics.
 pub fn render_status_bar(
     doc: &Document,
+    pal: &Palette,
     view_mode: ViewMode,
     x: f32,
     y: f32,
@@ -3933,7 +3947,7 @@ pub fn render_status_bar(
         y,
         width,
         height: STATUS_BAR_HEIGHT,
-        color: MANTLE,
+        color: pal.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -3943,7 +3957,7 @@ pub fn render_status_bar(
         y1: y,
         x2: x + width,
         y2: y,
-        color: SURFACE0,
+        color: pal.surface0,
         width: 1.0,
     });
 
@@ -3965,7 +3979,7 @@ pub fn render_status_bar(
         y: y + 5.0,
         text: pos_text,
         font_size: STATUS_FONT_SIZE,
-        color: SUBTEXT0,
+        color: pal.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -3987,7 +4001,7 @@ pub fn render_status_bar(
             y: y + 5.0,
             text,
             font_size: STATUS_FONT_SIZE,
-            color: RED,
+            color: pal.red,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width * 0.6),
             overflow: TextOverflow::Ellipsis,
@@ -4011,7 +4025,7 @@ pub fn render_status_bar(
             y: y + 5.0,
             text: stats_text,
             font_size: STATUS_FONT_SIZE,
-            color: SUBTEXT0,
+            color: pal.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.6),
             overflow: TextOverflow::Ellipsis,
@@ -4039,7 +4053,7 @@ pub fn render_status_bar(
         y: y + 5.0,
         text: right_items,
         font_size: STATUS_FONT_SIZE,
-        color: SUBTEXT0,
+        color: pal.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -4053,7 +4067,13 @@ pub fn render_status_bar(
 // ============================================================================
 
 /// Render the table of contents sidebar.
-pub fn render_toc_sidebar(entries: &[TocEntry], x: f32, y: f32, height: f32) -> Vec<RenderCommand> {
+pub fn render_toc_sidebar(
+    entries: &[TocEntry],
+    pal: &Palette,
+    x: f32,
+    y: f32,
+    height: f32,
+) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
 
     // Sidebar background.
@@ -4062,7 +4082,7 @@ pub fn render_toc_sidebar(entries: &[TocEntry], x: f32, y: f32, height: f32) -> 
         y,
         width: TOC_SIDEBAR_WIDTH,
         height,
-        color: MANTLE,
+        color: pal.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -4072,7 +4092,7 @@ pub fn render_toc_sidebar(entries: &[TocEntry], x: f32, y: f32, height: f32) -> 
         y1: y,
         x2: x + TOC_SIDEBAR_WIDTH,
         y2: y + height,
-        color: SURFACE0,
+        color: pal.surface0,
         width: 1.0,
     });
 
@@ -4082,7 +4102,7 @@ pub fn render_toc_sidebar(entries: &[TocEntry], x: f32, y: f32, height: f32) -> 
         y: y + 8.0,
         text: "Table of Contents".to_string(),
         font_size: 12.0,
-        color: BLUE,
+        color: pal.blue,
         font_weight: FontWeightHint::Bold,
         max_width: Some(TOC_SIDEBAR_WIDTH - 24.0),
         overflow: TextOverflow::Ellipsis,
@@ -4096,11 +4116,11 @@ pub fn render_toc_sidebar(entries: &[TocEntry], x: f32, y: f32, height: f32) -> 
         }
         let indent = (entry.level.saturating_sub(1) as f32) * 12.0;
         let entry_color = match entry.level {
-            1 => BLUE,
-            2 => LAVENDER,
-            3 => GREEN,
-            4 => SUBTEXT1,
-            _ => SUBTEXT0,
+            1 => pal.blue,
+            2 => pal.lavender,
+            3 => pal.green,
+            4 => pal.subtext1,
+            _ => pal.subtext0,
         };
         let font_weight = if entry.level <= 2 {
             FontWeightHint::Bold
@@ -4137,6 +4157,7 @@ pub fn render_toc_sidebar(entries: &[TocEntry], x: f32, y: f32, height: f32) -> 
 /// Render the find and replace panel.
 pub fn render_find_replace(
     state: &FindReplaceState,
+    pal: &Palette,
     x: f32,
     y: f32,
     width: f32,
@@ -4153,7 +4174,7 @@ pub fn render_find_replace(
         y,
         width,
         height: FIND_PANEL_HEIGHT,
-        color: MANTLE,
+        color: pal.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -4163,7 +4184,7 @@ pub fn render_find_replace(
         y1: y + FIND_PANEL_HEIGHT,
         x2: x + width,
         y2: y + FIND_PANEL_HEIGHT,
-        color: SURFACE0,
+        color: pal.surface0,
         width: 1.0,
     });
 
@@ -4173,7 +4194,7 @@ pub fn render_find_replace(
         y: y + 8.0,
         text: "Find:".to_string(),
         font_size: 12.0,
-        color: SUBTEXT0,
+        color: pal.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -4185,7 +4206,7 @@ pub fn render_find_replace(
         y: y + 4.0,
         width: width * 0.4,
         height: 22.0,
-        color: SURFACE0,
+        color: pal.surface0,
         corner_radii: CornerRadii::all(4.0),
     });
 
@@ -4194,7 +4215,7 @@ pub fn render_find_replace(
         y: y + 8.0,
         text: state.query.clone(),
         font_size: 12.0,
-        color: TEXT,
+        color: pal.text,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width * 0.4 - 8.0),
         overflow: TextOverflow::Ellipsis,
@@ -4215,7 +4236,7 @@ pub fn render_find_replace(
         y: y + 8.0,
         text: match_text,
         font_size: 11.0,
-        color: SUBTEXT0,
+        color: pal.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -4227,7 +4248,7 @@ pub fn render_find_replace(
         y: y + 36.0,
         text: "Replace:".to_string(),
         font_size: 12.0,
-        color: SUBTEXT0,
+        color: pal.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -4239,7 +4260,7 @@ pub fn render_find_replace(
         y: y + 32.0,
         width: width * 0.4,
         height: 22.0,
-        color: SURFACE0,
+        color: pal.surface0,
         corner_radii: CornerRadii::all(4.0),
     });
 
@@ -4248,7 +4269,7 @@ pub fn render_find_replace(
         y: y + 36.0,
         text: state.replacement.clone(),
         font_size: 12.0,
-        color: TEXT,
+        color: pal.text,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width * 0.4 - 8.0),
         overflow: TextOverflow::Ellipsis,
@@ -4265,7 +4286,7 @@ pub fn render_find_replace(
             y: y + 32.0,
             width: bw,
             height: 22.0,
-            color: SURFACE0,
+            color: pal.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -4273,7 +4294,7 @@ pub fn render_find_replace(
             y: y + 36.0,
             text: label.to_string(),
             font_size: SMALL_BUTTON_FONT_SIZE,
-            color: TEXT,
+            color: pal.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bw - 16.0),
             overflow: TextOverflow::Ellipsis,
@@ -4289,7 +4310,13 @@ pub fn render_find_replace(
 // ============================================================================
 
 /// Render a template chooser dialog overlay.
-pub fn render_template_chooser(x: f32, y: f32, width: f32, height: f32) -> Vec<RenderCommand> {
+pub fn render_template_chooser(
+    x: f32,
+    pal: &Palette,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
 
     // Overlay dimmer.
@@ -4327,7 +4354,7 @@ pub fn render_template_chooser(x: f32, y: f32, width: f32, height: f32) -> Vec<R
         y: dialog_y,
         width: dialog_width,
         height: dialog_height,
-        color: MANTLE,
+        color: pal.mantle,
         corner_radii: CornerRadii::all(8.0),
     });
 
@@ -4337,7 +4364,7 @@ pub fn render_template_chooser(x: f32, y: f32, width: f32, height: f32) -> Vec<R
         y: dialog_y,
         width: dialog_width,
         height: dialog_height,
-        color: SURFACE0,
+        color: pal.surface0,
         line_width: 1.0,
         corner_radii: CornerRadii::all(8.0),
     });
@@ -4348,7 +4375,7 @@ pub fn render_template_chooser(x: f32, y: f32, width: f32, height: f32) -> Vec<R
         y: dialog_y + 20.0,
         text: "Choose a Template".to_string(),
         font_size: 18.0,
-        color: BLUE,
+        color: pal.blue,
         font_weight: FontWeightHint::Bold,
         max_width: Some(dialog_width - 40.0),
         overflow: TextOverflow::Ellipsis,
@@ -4366,7 +4393,7 @@ pub fn render_template_chooser(x: f32, y: f32, width: f32, height: f32) -> Vec<R
             y: btn_y,
             width: btn_width,
             height: btn_height,
-            color: SURFACE0,
+            color: pal.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -4375,7 +4402,7 @@ pub fn render_template_chooser(x: f32, y: f32, width: f32, height: f32) -> Vec<R
             y: btn_y + 12.0,
             text: template.label().to_string(),
             font_size: 14.0,
-            color: TEXT,
+            color: pal.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(btn_width - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -4438,6 +4465,12 @@ pub struct App {
     /// closes — and there is no frame clock here to expire a toast on. It is
     /// cleared by the next save that succeeds, and by nothing else.
     pub save_error: Option<String>,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 /// A pending prompt shown when the active document's file changed on disk.
@@ -4475,6 +4508,7 @@ impl App {
         let blocks = parse_markdown(&text);
         let toc = extract_toc(&text);
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             tick_ms_carry: 0,
             documents: Tabs::with(doc),
             view_mode: ViewMode::Split,
@@ -4856,7 +4890,7 @@ impl App {
             y: 0.0,
             width: self.window_width,
             height: self.window_height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4865,6 +4899,7 @@ impl App {
         // Toolbar.
         cmds.extend(render_toolbar(
             &self.toolbar_buttons,
+            &self.palette,
             0.0,
             content_y,
             self.window_width,
@@ -4874,6 +4909,7 @@ impl App {
         // Tab bar.
         cmds.extend(render_tab_bar(
             &self.documents,
+            &self.palette,
             0.0,
             content_y,
             self.window_width,
@@ -4884,6 +4920,7 @@ impl App {
         let find_panel_offset = if self.find_state.visible {
             cmds.extend(render_find_replace(
                 &self.find_state,
+                &self.palette,
                 0.0,
                 content_y,
                 self.window_width,
@@ -4904,6 +4941,7 @@ impl App {
         if self.toc_visible {
             cmds.extend(render_toc_sidebar(
                 &self.cached_toc,
+                &self.palette,
                 0.0,
                 content_y,
                 content_height,
@@ -4918,6 +4956,7 @@ impl App {
             ViewMode::EditorOnly => {
                 cmds.extend(render_editor(
                     doc,
+                    &self.palette,
                     content_x,
                     content_y,
                     available_width,
@@ -4929,6 +4968,7 @@ impl App {
                 let half_width = available_width / 2.0;
                 cmds.extend(render_editor(
                     doc,
+                    &self.palette,
                     content_x,
                     content_y,
                     half_width,
@@ -4941,11 +4981,12 @@ impl App {
                     y: content_y,
                     width: 2.0,
                     height: content_height,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::ZERO,
                 });
                 cmds.extend(render_preview(
                     &self.cached_blocks,
+                    &self.palette,
                     content_x + half_width + 1.0,
                     content_y,
                     half_width - 1.0,
@@ -4956,6 +4997,7 @@ impl App {
             ViewMode::PreviewOnly => {
                 cmds.extend(render_preview(
                     &self.cached_blocks,
+                    &self.palette,
                     content_x,
                     content_y,
                     available_width,
@@ -4968,6 +5010,7 @@ impl App {
         // Status bar.
         cmds.extend(render_status_bar(
             doc,
+            &self.palette,
             self.view_mode,
             0.0,
             status_y,
@@ -4980,6 +5023,7 @@ impl App {
         if self.template_chooser_open {
             cmds.extend(render_template_chooser(
                 0.0,
+                &self.palette,
                 0.0,
                 self.window_width,
                 self.window_height,
@@ -5025,7 +5069,7 @@ impl App {
             y: dy,
             width: dw,
             height: dh,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::FillRect {
@@ -5033,7 +5077,7 @@ impl App {
             y: dy,
             width: dw,
             height: 32.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -5058,7 +5102,7 @@ impl App {
             y: dy + 9.0,
             text: title.to_string(),
             font_size: 14.0,
-            color: YELLOW,
+            color: self.palette.yellow,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dw - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -5068,7 +5112,7 @@ impl App {
             y: dy + 44.0,
             text: body,
             font_size: 12.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -5091,7 +5135,7 @@ impl App {
                 y: by,
                 width: dw - 24.0,
                 height: 30.0,
-                color: SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -5099,7 +5143,7 @@ impl App {
                 y: by + 7.0,
                 text: label.to_string(),
                 font_size: 12.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(140.0),
                 overflow: TextOverflow::Ellipsis,
@@ -5109,7 +5153,7 @@ impl App {
                 y: by + 8.0,
                 text: hint.to_string(),
                 font_size: 10.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dw - 176.0),
                 overflow: TextOverflow::Ellipsis,
@@ -5140,7 +5184,7 @@ impl App {
             y: dy,
             width: dw,
             height: dh,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::FillRect {
@@ -5148,7 +5192,7 @@ impl App {
             y: dy,
             width: dw,
             height: 32.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -5164,7 +5208,7 @@ impl App {
                 review.conflict_count()
             ),
             font_size: 14.0,
-            color: YELLOW,
+            color: self.palette.yellow,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dw - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -5178,7 +5222,7 @@ impl App {
             y: dy + 40.0,
             text: name.to_string(),
             font_size: 11.0,
-            color: GREEN,
+            color: self.palette.green,
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
@@ -5188,7 +5232,7 @@ impl App {
             y: dy + 40.0,
             text: "disk".to_string(),
             font_size: 11.0,
-            color: RED,
+            color: self.palette.red,
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
@@ -5228,7 +5272,7 @@ impl App {
                 y,
                 text: format!("#{}", i.saturating_add(1)),
                 font_size: 9.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(10.0),
                 overflow: TextOverflow::Ellipsis,
@@ -5239,7 +5283,7 @@ impl App {
                     y: y + li as f32 * LINE_HEIGHT,
                     text: line.clone(),
                     font_size: 11.0,
-                    color: TEXT,
+                    color: self.palette.text,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(col_w),
                     overflow: TextOverflow::Ellipsis,
@@ -5251,7 +5295,7 @@ impl App {
                     y: y + li as f32 * LINE_HEIGHT,
                     text: line.clone(),
                     font_size: 11.0,
-                    color: TEXT,
+                    color: self.palette.text,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(col_w),
                     overflow: TextOverflow::Ellipsis,
@@ -5266,7 +5310,7 @@ impl App {
             text: "[Accept]  [Cancel]   per-conflict: take ours / take disk / keep both"
                 .to_string(),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -5582,6 +5626,10 @@ fn printable(ev: &guitk::event::KeyEvent) -> Option<char> {
 }
 
 impl oswindow::app::App for App {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Markdown Editor".to_string()
     }
@@ -6688,7 +6736,8 @@ mod tests {
 
     #[test]
     fn test_highlight_heading() {
-        let spans = highlight_line("# Title");
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let spans = highlight_line("# Title", &pal);
         assert!(!spans.is_empty());
         // Should have hash mark span and text span.
         assert!(spans.len() >= 2);
@@ -6696,50 +6745,57 @@ mod tests {
 
     #[test]
     fn test_highlight_code_fence() {
-        let spans = highlight_line("```rust");
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let spans = highlight_line("```rust", &pal);
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].color, GREEN);
+        assert_eq!(spans[0].color, pal.green);
     }
 
     #[test]
     fn test_highlight_blockquote() {
-        let spans = highlight_line("> Quote text");
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let spans = highlight_line("> Quote text", &pal);
         assert!(spans.len() >= 2);
-        assert_eq!(spans[0].color, BLUE);
+        assert_eq!(spans[0].color, pal.blue);
     }
 
     #[test]
     fn test_highlight_hr() {
-        let spans = highlight_line("---");
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let spans = highlight_line("---", &pal);
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].color, SURFACE2);
+        assert_eq!(spans[0].color, pal.surface2);
     }
 
     #[test]
     fn test_highlight_list_item() {
-        let spans = highlight_line("- Item text");
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let spans = highlight_line("- Item text", &pal);
         assert!(!spans.is_empty());
-        assert_eq!(spans[0].color, BLUE);
+        assert_eq!(spans[0].color, pal.blue);
     }
 
     #[test]
     fn test_highlight_inline_code() {
-        let spans = highlight_line("Use `code` here");
-        let code_span = spans.iter().find(|s| s.color == GREEN);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let spans = highlight_line("Use `code` here", &pal);
+        let code_span = spans.iter().find(|s| s.color == pal.green);
         assert!(code_span.is_some());
     }
 
     #[test]
     fn test_highlight_bold_markers() {
-        let spans = highlight_line("**bold**");
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let spans = highlight_line("**bold**", &pal);
         // Should have dimmed markers and bold text.
         assert!(spans.len() >= 3);
     }
 
     #[test]
     fn test_highlight_link() {
-        let spans = highlight_line("[text](url)");
-        let link_span = spans.iter().find(|s| s.color == BLUE);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let spans = highlight_line("[text](url)", &pal);
+        let link_span = spans.iter().find(|s| s.color == pal.blue);
         assert!(link_span.is_some());
     }
 
@@ -6889,9 +6945,10 @@ mod tests {
 
     #[test]
     fn test_render_editor_produces_commands() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let doc = Document::new();
         let find = FindReplaceState::new();
-        let cmds = render_editor(&doc, 0.0, 0.0, 800.0, 600.0, &find);
+        let cmds = render_editor(&doc, &pal, 0.0, 0.0, 800.0, 600.0, &find);
         assert!(!cmds.is_empty());
     }
 
@@ -6901,6 +6958,7 @@ mod tests {
     /// position that was valid a frame ago.
     #[test]
     fn rendering_past_the_end_of_a_shrunken_document_draws_nothing() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut doc = Document::new();
         doc.lines = vec!["one".to_string()];
         doc.scroll_line = 500;
@@ -6908,67 +6966,75 @@ mod tests {
         let find = FindReplaceState::new();
         // The frame furniture (background, gutter) is still drawn; the point
         // is that it returns at all.
-        let cmds = render_editor(&doc, 0.0, 0.0, 800.0, 600.0, &find);
+        let cmds = render_editor(&doc, &pal, 0.0, 0.0, 800.0, 600.0, &find);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_preview_produces_commands() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let blocks = parse_markdown("# Hello\n\nWorld");
-        let cmds = render_preview(&blocks, 0.0, 0.0, 800.0, 600.0, 0.0);
+        let cmds = render_preview(&blocks, &pal, 0.0, 0.0, 800.0, 600.0, 0.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_toolbar_produces_commands() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let buttons = default_toolbar_buttons();
-        let cmds = render_toolbar(&buttons, 0.0, 0.0, 1200.0);
+        let cmds = render_toolbar(&buttons, &pal, 0.0, 0.0, 1200.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_tab_bar_produces_commands() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let docs = Tabs::with(Document::new());
-        let cmds = render_tab_bar(&docs, 0.0, 0.0, 1200.0);
+        let cmds = render_tab_bar(&docs, &pal, 0.0, 0.0, 1200.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_status_bar_produces_commands() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let doc = Document::new();
-        let cmds = render_status_bar(&doc, ViewMode::Split, 0.0, 0.0, 1200.0, true, None);
+        let cmds = render_status_bar(&doc, &pal, ViewMode::Split, 0.0, 0.0, 1200.0, true, None);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_toc_sidebar_produces_commands() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let entries = vec![TocEntry {
             level: 1,
             text: "Title".to_string(),
             line: 0,
         }];
-        let cmds = render_toc_sidebar(&entries, 0.0, 0.0, 600.0);
+        let cmds = render_toc_sidebar(&entries, &pal, 0.0, 0.0, 600.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_find_replace_hidden() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let state = FindReplaceState::new();
-        let cmds = render_find_replace(&state, 0.0, 0.0, 1200.0);
+        let cmds = render_find_replace(&state, &pal, 0.0, 0.0, 1200.0);
         assert!(cmds.is_empty()); // hidden by default
     }
 
     #[test]
     fn test_render_find_replace_visible() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut state = FindReplaceState::new();
         state.visible = true;
-        let cmds = render_find_replace(&state, 0.0, 0.0, 1200.0);
+        let cmds = render_find_replace(&state, &pal, 0.0, 0.0, 1200.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_render_template_chooser() {
-        let cmds = render_template_chooser(0.0, 0.0, 1200.0, 800.0);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let cmds = render_template_chooser(0.0, &pal, 0.0, 1200.0, 800.0);
         assert!(!cmds.is_empty());
     }
 
@@ -7284,11 +7350,12 @@ mod tests {
 
     #[test]
     fn test_color_constants() {
-        assert_eq!(BASE.r, 0x1E);
-        assert_eq!(BASE.g, 0x1E);
-        assert_eq!(BASE.b, 0x2E);
-        assert_eq!(BLUE.r, 0x89);
-        assert_eq!(TEXT.r, 0xCD);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(pal.base.r, 0x1E);
+        assert_eq!(pal.base.g, 0x1E);
+        assert_eq!(pal.base.b, 0x2E);
+        assert_eq!(pal.blue.r, 0x89);
+        assert_eq!(pal.text.r, 0xCD);
     }
 
     #[test]
@@ -7593,9 +7660,19 @@ mod tests {
 
     #[test]
     fn the_status_bar_shows_the_save_error_instead_of_the_word_count() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let doc = Document::new();
         let msg = "Could not save notes.md: disk full";
-        let cmds = render_status_bar(&doc, ViewMode::Split, 0.0, 0.0, 1200.0, true, Some(msg));
+        let cmds = render_status_bar(
+            &doc,
+            &pal,
+            ViewMode::Split,
+            0.0,
+            0.0,
+            1200.0,
+            true,
+            Some(msg),
+        );
 
         let texts: Vec<&str> = cmds
             .iter()
@@ -7765,9 +7842,18 @@ mod tests {
     /// mono face — a mismatch is invisible in any assertion about positions.
     #[test]
     fn the_source_pane_is_drawn_in_the_family_it_was_measured_in() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut doc = Document::new();
         doc.insert_text("# Heading WWWW\n\nBody text with iiii and *emphasis*.\n");
-        let cmds = render_editor(&doc, 0.0, 0.0, 600.0, 400.0, &FindReplaceState::default());
+        let cmds = render_editor(
+            &doc,
+            &pal,
+            0.0,
+            0.0,
+            600.0,
+            400.0,
+            &FindReplaceState::default(),
+        );
 
         let mut depth = 0_i32;
         let mut deepest = 0_i32;
@@ -8251,5 +8337,64 @@ mod tests {
         let (k, m) = translate_key(&ev).expect("Ctrl+S translates");
         assert_eq!(k, Key::Char('s'));
         assert!(m.ctrl, "the chord lost its modifier");
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut App) -> Vec<Color> {
+            app.render(1200.0, 800.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = App::new(1200.0, 800.0);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

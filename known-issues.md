@@ -37208,7 +37208,36 @@ a value into a log message is not the same as checking it; where a device tells
 you what it accepts, check the request against it rather than printing both and
 trusting the constant.
 
-## TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS (lane C, 2026-08-17)
+## TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS (lane C, 2026-08-17) -- **FIXED 2026-09-07**
+
+**Fixed 2026-09-07 (lane C), by the first of the two options below.**
+`frame_insets` returns `top = TITLE_BAR_HEIGHT + BORDER_WIDTH`,
+`title_bar_rect` starts `BORDER_WIDTH` down from the frame, and
+`render_border` strokes `frame_rect` unmodified. Drawing and measurement now
+name the same box.
+
+**The second option was eliminated first, on evidence** -- see the update
+below. Stroking `frame_rect` while the bar filled the whole top inset put the
+outline under the title bar, which paints over it. That is why the border was
+drawn outside the frame in the first place.
+
+**The top inset is summed as two scaled values, not a scaled sum.**
+`scale_dimension` rounds, so `scale(bar + border)` and
+`scale(bar) + scale(border)` can differ by one, and `title_bar_rect` subtracts
+the border back out to get the bar's own height. Summing the scaled parts makes
+that subtraction exact at every scale factor -- a 2x display gets a 2x bar and
+a 2x border, and the bar is still exactly `TITLE_BAR_HEIGHT * 2`.
+
+**The drag boundary moved, as the entry warned, and now has a test.**
+`the_border_row_resizes_and_the_title_bar_below_it_moves` presses the border
+row and asserts the window resizes, then presses one row lower and asserts it
+moves without resizing. Both halves, because either alone passes if the whole
+top of the window does one thing.
+
+Six existing tests pinned the old geometry and were updated with the reason
+rather than the number: the frame is one row taller at the top, the bottom and
+both sides are unchanged. Mutation-checked -- putting the title bar back at
+the frame's top edge fails six.
 
 **In short:** the 1-pixel line the compositor draws around a window is drawn
 one pixel higher than the space the layout reserved for it. Nobody sees a

@@ -1152,10 +1152,21 @@ impl Window {
     /// Nothing depended on it being one.
     pub fn frame_insets(&self) -> (u32, u32, u32) {
         if self.is_framed() {
+            let border = scale_dimension(BORDER_WIDTH, self.scale_factor);
             (
-                scale_dimension(TITLE_BAR_HEIGHT, self.scale_factor),
-                scale_dimension(BORDER_WIDTH, self.scale_factor),
-                scale_dimension(BORDER_WIDTH, self.scale_factor),
+                // Border *and* title bar. The top inset used to be the bar
+                // alone while `render_border` stroked a row above the frame to
+                // compensate, so the drawing and the measurement disagreed by
+                // a pixel and every derived quantity followed the measurement.
+                //
+                // Summed as two scaled values rather than scaling the sum:
+                // `scale_dimension` rounds, so `scale(a + b)` and
+                // `scale(a) + scale(b)` can differ by one, and `title_bar_rect`
+                // below subtracts the border back out to get the bar's own
+                // height. Doing it this way makes that subtraction exact.
+                scale_dimension(TITLE_BAR_HEIGHT, self.scale_factor).saturating_add(border),
+                border,
+                border,
             )
         } else {
             (0, 0, 0)
@@ -1274,9 +1285,19 @@ impl Window {
         if !self.is_framed() {
             return None;
         }
-        let top = self.frame_insets().0;
+        let (top, side, _) = self.frame_insets();
         let frame = self.frame_rect();
-        Some(Rect::new(frame.x, frame.y, frame.width, top))
+        // Below the top border, not filling the whole top inset: the inset is
+        // border + bar, and the border is drawn in the row above. A bar that
+        // started at `frame.y` would be painted over the outline, which is
+        // exactly what used to happen and why the border was stroked outside
+        // the frame to escape it.
+        Some(Rect::new(
+            frame.x,
+            frame.y.saturating_add(side as i32),
+            frame.width,
+            top.saturating_sub(side),
+        ))
     }
 
     /// The rectangle of the title-bar button in the given slot, counting from
@@ -8038,12 +8059,11 @@ impl Compositor {
     /// `TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS`.
     fn render_border(&mut self, frame: Rect, scale: f32, color: u32, opacity: f32) {
         let width = scale_dimension(BORDER_WIDTH, scale);
-        let border = Rect::new(
-            frame.x,
-            frame.y.saturating_sub(width as i32),
-            frame.width,
-            frame.height.saturating_add(width),
-        );
+        // The frame as measured. `frame_insets` now reserves the border row
+        // above the title bar, so the outline has somewhere of its own to be
+        // drawn and no longer has to be pushed outside the frame to avoid
+        // being painted over.
+        let border = frame;
         // The border traces the outside of the frame, so it takes the frame's
         // radius as-is — the same curve the title bar's top corners are drawn
         // with, from the same call, which is what keeps the two from parting
@@ -10855,6 +10875,75 @@ mod tests {
         }
     }
 
+    /// The row above the title bar resizes; the title bar moves.
+    ///
+    /// This boundary is what moved when `frame_insets` grew to include the
+    /// border above the title bar, and the known-issues entry warned that it
+    /// would. Before the change the two were the same row and the border had
+    /// nowhere of its own to be, so there was nothing to draw the line
+    /// between. Both sides are asserted because only the pair says where the
+    /// line is -- either alone passes if the whole top of the window does one
+    /// thing.
+    #[test]
+    fn the_border_row_resizes_and_the_title_bar_below_it_moves() {
+        let (mut comp, id) = with_one_window();
+        let frame = comp.window_ref(id).expect("w").frame_rect();
+        let bar = comp
+            .window_ref(id)
+            .expect("w")
+            .title_bar_rect()
+            .expect("framed");
+        assert_eq!(
+            bar.y - frame.y,
+            BORDER_WIDTH as i32,
+            "the fixture has no border row to test"
+        );
+
+        let mid_x = frame.x + (frame.width / 2) as i32;
+
+        // The border row: a resize drag begins.
+        let before = (
+            comp.window_ref(id).expect("w").width,
+            comp.window_ref(id).expect("w").height,
+        );
+        comp.handle_mouse_button(MouseButton::Left, true, mid_x, frame.y);
+        comp.handle_mouse_move(mid_x, frame.y - 20);
+        comp.handle_mouse_button(MouseButton::Left, false, mid_x, frame.y - 20);
+        let grew = comp.window_ref(id).expect("w").height;
+        assert!(
+            grew > before.1,
+            "dragging the top border did not resize: {before:?} -> {grew}"
+        );
+
+        // One row lower, in the title bar: a move drag begins instead.
+        let frame = comp.window_ref(id).expect("w").frame_rect();
+        let bar = comp
+            .window_ref(id)
+            .expect("w")
+            .title_bar_rect()
+            .expect("framed");
+        let size_before = (
+            comp.window_ref(id).expect("w").width,
+            comp.window_ref(id).expect("w").height,
+        );
+        let pos_before = (
+            comp.window_ref(id).expect("w").x,
+            comp.window_ref(id).expect("w").y,
+        );
+        let bar_y = bar.y + (bar.height / 2) as i32;
+        comp.handle_mouse_button(MouseButton::Left, true, frame.x + 40, bar_y);
+        comp.handle_mouse_move(frame.x + 60, bar_y + 15);
+        comp.handle_mouse_button(MouseButton::Left, false, frame.x + 60, bar_y + 15);
+
+        let win = comp.window_ref(id).expect("w");
+        assert_eq!(
+            (win.width, win.height),
+            size_before,
+            "dragging the title bar resized the window"
+        );
+        assert_ne!((win.x, win.y), pos_before, "and it did not move it either");
+    }
+
     #[test]
     fn the_outer_rect_is_the_frame_rect_plus_the_shadow() {
         // outer_rect is now defined as frame_rect().inflate(shadow_extent()).
@@ -10862,14 +10951,30 @@ mod tests {
         // out from the constants so a change to either helper has to be
         // deliberate rather than merely compile.
         let win = plain_window(100, 100, 200, 150);
-        assert_eq!(win.frame_rect(), Rect::new(99, 70, 202, 181));
-        assert_eq!(win.outer_rect(), Rect::new(91, 62, 218, 197));
+        // One row taller at the top than it used to be: `frame_insets` now
+        // reserves the border above the title bar, which is where the outline
+        // is drawn. The bottom edge and both sides are unchanged.
+        assert_eq!(win.frame_rect(), Rect::new(99, 69, 202, 182));
+        assert_eq!(win.outer_rect(), Rect::new(91, 61, 218, 198));
         assert_eq!(win.frame_rect().inflate(SHADOW_SIZE), win.outer_rect());
-        // The title bar occupies the top inset of the frame box exactly.
+
+        // The title bar sits *below* the top border rather than filling the
+        // top inset. The row above it is the border's, and a bar that took it
+        // would be painted over the outline -- which is what used to happen.
         let bar = win.title_bar_rect().expect("framed");
         assert_eq!(bar, Rect::new(99, 70, 202, TITLE_BAR_HEIGHT));
         assert_eq!(bar.x, win.frame_rect().x);
         assert_eq!(bar.width, win.frame_rect().width);
+        assert_eq!(
+            bar.y - win.frame_rect().y,
+            BORDER_WIDTH as i32,
+            "the gap above the title bar is exactly the border"
+        );
+        assert_eq!(
+            win.frame_insets().0,
+            TITLE_BAR_HEIGHT + BORDER_WIDTH,
+            "the top inset is border plus bar"
+        );
     }
 
     #[test]
@@ -14754,10 +14859,17 @@ mod tests {
         let (top, side, _) = win.frame_insets();
         assert_eq!(
             top,
-            TITLE_BAR_HEIGHT * 2,
+            (TITLE_BAR_HEIGHT + BORDER_WIDTH) * 2,
             "the title bar is still the 96dpi height"
         );
         assert_eq!(side, BORDER_WIDTH * 2);
+        // The bar itself, with the border taken back out, is what doubled.
+        let bar = win.title_bar_rect().expect("framed");
+        assert_eq!(
+            bar.height,
+            TITLE_BAR_HEIGHT * 2,
+            "the bar inside the inset is not the 2x height"
+        );
         assert_eq!(win.shadow_extent(), SHADOW_SIZE * 2);
 
         let close = win.close_button_rect().expect("a decorated window closes");
@@ -14945,7 +15057,7 @@ mod tests {
             (win.scale_factor - 1.0).abs() < f32::EPSILON,
             "off-screen windows are drawn at the primary display's scale"
         );
-        assert_eq!(win.frame_insets().0, TITLE_BAR_HEIGHT);
+        assert_eq!(win.frame_insets().0, TITLE_BAR_HEIGHT + BORDER_WIDTH);
     }
 
     #[test]
@@ -15098,7 +15210,7 @@ mod tests {
         );
         assert_eq!(
             comp.window_ref(id).expect("window").frame_insets().0,
-            TITLE_BAR_HEIGHT * 2
+            (TITLE_BAR_HEIGHT + BORDER_WIDTH) * 2
         );
     }
 
@@ -15865,18 +15977,16 @@ mod tests {
         let border_at_the_corner = |corners| {
             let (comp, id) = decorated(with_corners(corners));
             let frame = comp.window_ref(id).expect("window").frame_rect();
-            let width = scale_dimension(
-                BORDER_WIDTH,
-                comp.window_ref(id).expect("window").scale_factor,
-            );
-            // The border box starts one stroke above the frame; see
-            // `render_border`. Its own top-left is the pixel a square stroke
-            // paints and a rounded one leaves alone.
+            // The border box *is* the frame: `frame_insets` reserves the
+            // border row above the title bar, so the outline is drawn inside
+            // the measured frame rather than a stroke above it. The frame's
+            // own top-left is the pixel a square stroke paints and a rounded
+            // one leaves alone.
             #[allow(
                 clippy::cast_sign_loss,
                 reason = "the window is placed well inside the 400x300 buffer"
             )]
-            let probe = (frame.x as u32, (frame.y - width as i32) as u32);
+            let probe = (frame.x as u32, frame.y as u32);
             let focused = comp.window_ref(id).expect("window").focused;
             let expected = if focused {
                 comp.theme.border_focused
@@ -18138,7 +18248,8 @@ mod tests {
         // exactly its original size.
         assert_eq!(
             (frame.width, frame.height),
-            (302, 181),
+            // 182, not 181: the top inset gained the border row.
+            (302, 182),
             "the restored window was resized rather than moved"
         );
         assert_eq!(

@@ -7351,10 +7351,13 @@ extern "C" fn kernel_main() -> ! {
     tty::pty::self_test();
 
     // Terminal session multiplexer init + self-test.
+    // §914: Diagnostic — terminal session management, not structural integrity.
     termsession::init();
-    if let Err(e) = termsession::self_test() {
-        serial_println!("[termsession] Self-test failed: {:?} (non-fatal)", e);
-    }
+    selftest::dispatch_debug(
+        "termsession",
+        selftest::Severity::Diagnostic,
+        termsession::self_test(),
+    );
 
     // Unicode support self-test (UTF-8 decoding, box drawing, block elements).
     // §914: Diagnostic — cosmetic rendering, not structural integrity.
@@ -7436,9 +7439,12 @@ extern "C" fn kernel_main() -> ! {
     // Verifies mprotect flag changes, W^X enforcement, JIT capability gate,
     // and audits kernel page tables for write+execute violations.
     // Runs AFTER hardening so the audit reflects the fixed state.
-    if let Err(e) = mm::protect::self_test() {
-        serial_println!("[FATAL] Memory protection self-test failed: {:?}", e);
-    }
+    // §914: Integrity — memory protection (W^X) is a kernel structural invariant.
+    selftest::dispatch_debug(
+        "mm::protect",
+        selftest::Severity::Integrity,
+        mm::protect::self_test(),
+    );
 
     console::boot_step_update(console::BootStatus::Ok, "Security hardening");
 
@@ -7495,14 +7501,20 @@ extern "C" fn kernel_main() -> ! {
     ktrace::self_test();
 
     // Step 22k7: EEVDF scheduler self-test.
-    if let Err(e) = sched::eevdf::self_test() {
-        serial_println!("EEVDF self-test FAILED: {:?}", e);
-    }
+    // §914: Integrity — scheduler correctness is a kernel structural invariant.
+    selftest::dispatch_debug(
+        "EEVDF",
+        selftest::Severity::Integrity,
+        sched::eevdf::self_test(),
+    );
 
     // Step 22k8: Deadline scheduler self-test.
-    if let Err(e) = sched::deadline::self_test() {
-        serial_println!("Deadline scheduler self-test FAILED: {:?}", e);
-    }
+    // §914: Integrity — scheduler correctness is a kernel structural invariant.
+    selftest::dispatch_debug(
+        "deadline",
+        selftest::Severity::Integrity,
+        sched::deadline::self_test(),
+    );
 
     // Step 22k9: Scheduler backend enum self-test.
     sched::backend::self_test();
@@ -7594,34 +7606,52 @@ extern "C" fn kernel_main() -> ! {
     hrtimer::self_test();
 
     // Channel recv_timeout self-test (requires hrtimer for sleep_ms).
-    if let Err(e) = ipc::channel::self_test_timeout() {
-        serial_println!("[FATAL] Channel timeout self-test failed: {:?}", e);
-    }
+    // §914: Integrity — IPC correctness is a kernel structural invariant.
+    selftest::dispatch_debug(
+        "channel timeout",
+        selftest::Severity::Integrity,
+        ipc::channel::self_test_timeout(),
+    );
 
     // Futex wait_timeout self-test (requires hrtimer).
-    if let Err(e) = ipc::futex::self_test_timeout() {
-        serial_println!("[FATAL] Futex timeout self-test failed: {:?}", e);
-    }
+    // §914: Integrity — futex correctness is a kernel structural invariant.
+    selftest::dispatch_debug(
+        "futex timeout",
+        selftest::Severity::Integrity,
+        ipc::futex::self_test_timeout(),
+    );
 
     // Eventfd read_timeout self-test (requires hrtimer).
-    if let Err(e) = ipc::eventfd::self_test_timeout() {
-        serial_println!("[FATAL] Eventfd timeout self-test failed: {:?}", e);
-    }
+    // §914: Integrity — IPC correctness is a kernel structural invariant.
+    selftest::dispatch_debug(
+        "eventfd timeout",
+        selftest::Severity::Integrity,
+        ipc::eventfd::self_test_timeout(),
+    );
 
     // Service registry self-test (requires scheduler + channels).
-    if let Err(e) = ipc::service::self_test() {
-        serial_println!("[FATAL] Service registry self-test failed: {:?}", e);
-    }
+    // §914: Integrity — service registry is a kernel structural invariant.
+    selftest::dispatch_debug(
+        "service registry",
+        selftest::Severity::Integrity,
+        ipc::service::self_test(),
+    );
 
     // Service limits self-test.
-    if let Err(e) = ipc::service_limits::self_test() {
-        serial_println!("[FATAL] Service limits self-test failed: {:?}", e);
-    }
+    // §914: Integrity — service limits enforce kernel resource policy.
+    selftest::dispatch_debug(
+        "service limits",
+        selftest::Severity::Integrity,
+        ipc::service_limits::self_test(),
+    );
 
     // Namespace self-test (pure in-memory, no dependencies beyond alloc).
-    if let Err(e) = ipc::namespace::self_test() {
-        serial_println!("[FATAL] Namespace self-test failed: {:?}", e);
-    }
+    // §914: Integrity — namespace isolation is a kernel structural invariant.
+    selftest::dispatch_debug(
+        "namespace",
+        selftest::Severity::Integrity,
+        ipc::namespace::self_test(),
+    );
 
     // Step 22e: CSPRNG self-test.
     // Verifies output quality now that we've accumulated some interrupt
@@ -7634,9 +7664,12 @@ extern "C" fn kernel_main() -> ! {
             // Zero-on-free test — runs here because it needs HHDM + per-CPU
             // caches, which aren't available during the early frame allocator
             // self-test (test 7 skips there with "HHDM not ready").
-            if let Err(e) = mm::frame::test_zero_on_free() {
-                serial_println!("[FATAL] Zero-on-free self-test failed: {:?}", e);
-            }
+            // §914: Integrity — memory zeroing prevents information leaks.
+            selftest::dispatch_debug(
+                "zero-on-free",
+                selftest::Severity::Integrity,
+                mm::frame::test_zero_on_free(),
+            );
 
             // Zeroed frame allocation — same reason, and until 2026-08-31 this
             // call did not exist, so the case had never run on any boot: its
@@ -7648,9 +7681,12 @@ extern "C" fn kernel_main() -> ! {
             // zero-on-*allocate* path, which is the one that stops a new owner
             // reading the previous owner's bytes and which nothing else in a
             // booting kernel checks.
-            if let Err(e) = mm::frame::test_zeroed_alloc() {
-                serial_println!("[FATAL] Zeroed frame allocation self-test failed: {:?}", e);
-            }
+            // §914: Integrity — memory zeroing prevents information leaks.
+            selftest::dispatch_debug(
+                "zeroed-alloc",
+                selftest::Severity::Integrity,
+                mm::frame::test_zeroed_alloc(),
+            );
 
             boot_timing::mark(boot_timing::Milestone::SelfTests);
 

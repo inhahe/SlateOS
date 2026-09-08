@@ -5102,6 +5102,12 @@ impl Compositor {
         if let Some(layout) = keylayout::by_id(&settings.keyboard.layout) {
             self.layout = layout;
         }
+        // Sticky, filter and mouse keys travel the same road as the pointer
+        // speed and the layout, and are applied here rather than by a second
+        // caller, so that `input.yaml` is the one source. Keeping the live
+        // state machines in step with `self.input` by hand is exactly how this
+        // subsystem came to have three copies of its own settings.
+        self.set_accessibility_keys(settings.accessibility);
         self.input = Some(settings);
     }
 
@@ -7103,6 +7109,11 @@ impl Compositor {
     }
 
     /// Replace the accessibility settings.
+    ///
+    /// Normally reached through
+    /// [`set_input_settings`](Self::set_input_settings), which is what
+    /// `input.yaml` travels through; public for the tests that want to switch
+    /// one feature on without building a whole `InputSettings`.
     pub fn set_accessibility_keys(&mut self, config: inputsettings::AccessibilityKeysConfig) {
         self.a11y_keys.set_config(config);
         if !self.a11y_keys.filter.config().enabled {
@@ -10196,6 +10207,34 @@ mod tests {
         assert!(
             !comp.has_deferred_key(),
             "a keystroke was left waiting for ever"
+        );
+    }
+
+    /// The whole road: a setting as it comes out of `input.yaml` changes what
+    /// typing does. `set_input_settings` is the one door, so that the live
+    /// state machines cannot drift from `self.input` -- drift between copies
+    /// of these settings is how the subsystem came to have three of them.
+    #[test]
+    fn sticky_keys_arrives_through_the_ordinary_input_settings_road() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Editor".to_string(), 400, 300, 1);
+
+        let mut settings = inputsettings::InputSettings::default();
+        settings.accessibility.sticky.enabled = true;
+        comp.set_input_settings(settings);
+        comp.drain_notifications();
+
+        press(&mut comp, 0x2A);
+        release(&mut comp, 0x2A);
+        press(&mut comp, 0x1E);
+
+        let a = key_events_with_mods(&mut comp)
+            .into_iter()
+            .find(|(key, pressed, _, _)| *key == Key::A && *pressed)
+            .expect("the letter never reached the window");
+        assert_eq!(
+            a.2, "A",
+            "a setting that reached `input_settings` did not reach the keyboard"
         );
     }
 

@@ -562,12 +562,27 @@ fn run_filtered(suites: &[TestSuite]) -> TestResults {
     serial_println!("[selftest] Running {} test(s)...", total);
 
     for suite in suites {
-        serial_println!("[selftest] >>> {} — {}", suite.name, suite.description);
+        let sev_tag = match suite.severity {
+            Severity::Integrity => "integrity",
+            Severity::Diagnostic => "diagnostic",
+        };
+        serial_println!(
+            "[selftest] >>> {} — {} [{}]",
+            suite.name,
+            suite.description,
+            sev_tag,
+        );
         let ok = (suite.run)();
         if ok {
             passed += 1;
         } else {
             failed.push(suite.name);
+            if matches!(suite.severity, Severity::Integrity) {
+                serial_println!(
+                    "[selftest] FATAL: integrity test '{}' failed — halting",
+                    suite.name,
+                );
+            }
         }
     }
 

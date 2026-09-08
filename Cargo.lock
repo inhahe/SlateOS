@@ -11825,6 +11825,7 @@ dependencies = [
 name = "notes"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -12740,6 +12741,7 @@ dependencies = [
 name = "paint"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "byteread",
  "guitk",
  "oswindow",
@@ -14276,6 +14278,7 @@ version = "0.1.0"
 name = "qrcode"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -15096,6 +15099,7 @@ dependencies = [
 name = "rssreader"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -16656,6 +16660,7 @@ dependencies = [
 name = "spreadsheet"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -19016,6 +19021,7 @@ dependencies = [
 name = "videoplayer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

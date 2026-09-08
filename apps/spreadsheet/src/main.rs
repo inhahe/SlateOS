@@ -21,6 +21,7 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -39,21 +40,10 @@ use std::time::Duration;
 // Catppuccin Mocha theme colors
 // ============================================================================
 
-const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
-const COLOR_MANTLE: Color = Color::from_hex(0x181825);
-const COLOR_CRUST: Color = Color::from_hex(0x11111B);
-const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
-const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
 const _COLOR_SURFACE2: Color = Color::from_hex(0x585B70);
-const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COLOR_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COLOR_SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
-const COLOR_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COLOR_RED: Color = Color::from_hex(0xF38BA8);
+
 const _COLOR_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COLOR_PEACH: Color = Color::from_hex(0xFAB387);
-const COLOR_LAVENDER: Color = Color::from_hex(0xB4BEFE);
+
 const _COLOR_OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
@@ -2775,12 +2765,19 @@ pub struct SpreadsheetApp {
     pub show_toolbar: bool,
     /// Whether to show the status bar.
     pub show_status_bar: bool,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl SpreadsheetApp {
     /// Create a new spreadsheet application with a single sheet.
     pub fn new(width: f32, height: f32) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             sheets: SheetBook::new(Sheet::new("Sheet1")),
             mode: InteractionMode::Normal,
             clipboard: None,
@@ -4453,7 +4450,7 @@ impl SpreadsheetApp {
             y: 0.0,
             width: self.window_width,
             height: self.window_height,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4710,7 +4707,7 @@ impl SpreadsheetApp {
             y,
             width: self.window_width,
             height: TOOLBAR_HEIGHT,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4720,7 +4717,7 @@ impl SpreadsheetApp {
             y1: y + TOOLBAR_HEIGHT - 1.0,
             x2: self.window_width,
             y2: y + TOOLBAR_HEIGHT - 1.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -4731,7 +4728,7 @@ impl SpreadsheetApp {
                     y1: button.rect.y + 2.0,
                     x2: button.rect.x - 8.0,
                     y2: button.rect.y + button.rect.h - 2.0,
-                    color: COLOR_SURFACE1,
+                    color: self.palette.surface1,
                     width: 1.0,
                 });
             }
@@ -4764,11 +4761,15 @@ impl SpreadsheetApp {
         bold: bool,
     ) {
         let bg = if active {
-            COLOR_SURFACE1
+            self.palette.surface1
         } else {
-            COLOR_SURFACE0
+            self.palette.surface0
         };
-        let fg = if active { COLOR_BLUE } else { COLOR_TEXT };
+        let fg = if active {
+            self.palette.blue
+        } else {
+            self.palette.text
+        };
 
         cmds.push(RenderCommand::FillRect {
             x,
@@ -4804,7 +4805,7 @@ impl SpreadsheetApp {
             y,
             width: self.window_width,
             height: FORMULA_BAR_HEIGHT,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4815,7 +4816,7 @@ impl SpreadsheetApp {
             y: y + 3.0,
             width: 60.0,
             height: FORMULA_BAR_HEIGHT - 6.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
         cmds.push(RenderCommand::Text {
@@ -4823,7 +4824,7 @@ impl SpreadsheetApp {
             y: y + 7.0,
             text: addr_text,
             font_size: FONT_SIZE,
-            color: COLOR_BLUE,
+            color: self.palette.blue,
             font_weight: FontWeightHint::Bold,
             max_width: Some(54.0),
             overflow: TextOverflow::Ellipsis,
@@ -4835,7 +4836,7 @@ impl SpreadsheetApp {
             y: y + 7.0,
             text: "fx".to_string(),
             font_size: FONT_SIZE,
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4847,7 +4848,7 @@ impl SpreadsheetApp {
             y: y + 3.0,
             width: self.window_width - 100.0,
             height: FORMULA_BAR_HEIGHT - 6.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -4867,7 +4868,7 @@ impl SpreadsheetApp {
             y: y + 7.0,
             text: formula_text,
             font_size: FONT_SIZE,
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.window_width - 112.0),
             overflow: TextOverflow::Ellipsis,
@@ -4879,7 +4880,7 @@ impl SpreadsheetApp {
             y1: y + FORMULA_BAR_HEIGHT - 1.0,
             x2: self.window_width,
             y2: y + FORMULA_BAR_HEIGHT - 1.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -4894,7 +4895,7 @@ impl SpreadsheetApp {
             y,
             width: self.window_width,
             height: COL_HEADER_HEIGHT,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4904,7 +4905,7 @@ impl SpreadsheetApp {
             y,
             width: ROW_HEADER_WIDTH,
             height: COL_HEADER_HEIGHT,
-            color: COLOR_CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4952,7 +4953,7 @@ impl SpreadsheetApp {
             y1: y + COL_HEADER_HEIGHT - 1.0,
             x2: self.window_width,
             y2: y + COL_HEADER_HEIGHT - 1.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -4995,9 +4996,9 @@ impl SpreadsheetApp {
             .any(|r| col >= r.start().col && col <= r.end().col);
 
         let bg = if is_selected {
-            COLOR_SURFACE1
+            self.palette.surface1
         } else {
-            COLOR_MANTLE
+            self.palette.mantle
         };
         cmds.push(RenderCommand::FillRect {
             x: header_x,
@@ -5009,9 +5010,9 @@ impl SpreadsheetApp {
         });
 
         let text_color = if is_selected {
-            COLOR_BLUE
+            self.palette.blue
         } else {
-            COLOR_SUBTEXT1
+            self.palette.subtext1
         };
         cmds.push(RenderCommand::Text {
             x: header_x + w / 2.0 - 4.0,
@@ -5030,7 +5031,7 @@ impl SpreadsheetApp {
             y1: y,
             x2: header_x + w,
             y2: y + COL_HEADER_HEIGHT,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -5107,9 +5108,9 @@ impl SpreadsheetApp {
             .iter()
             .any(|r| row >= r.start().row && row <= r.end().row);
         let header_bg = if is_row_selected {
-            COLOR_SURFACE1
+            self.palette.surface1
         } else {
-            COLOR_MANTLE
+            self.palette.mantle
         };
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
@@ -5121,9 +5122,9 @@ impl SpreadsheetApp {
         });
 
         let text_color = if is_row_selected {
-            COLOR_BLUE
+            self.palette.blue
         } else {
-            COLOR_SUBTEXT1
+            self.palette.subtext1
         };
         cmds.push(RenderCommand::Text {
             x: 4.0,
@@ -5142,7 +5143,7 @@ impl SpreadsheetApp {
             y1: row_y + row_h,
             x2: ROW_HEADER_WIDTH,
             y2: row_y + row_h,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -5173,11 +5174,16 @@ impl SpreadsheetApp {
         let bg_color = if let Some(bg) = cell.format.bg_color {
             bg
         } else if is_active {
-            COLOR_SURFACE0
+            self.palette.surface0
         } else if is_selected {
-            Color::rgba(COLOR_BLUE.r, COLOR_BLUE.g, COLOR_BLUE.b, 30)
+            Color::rgba(
+                self.palette.blue.r,
+                self.palette.blue.g,
+                self.palette.blue.b,
+                30,
+            )
         } else {
-            COLOR_BASE
+            self.palette.base
         };
 
         cmds.push(RenderCommand::FillRect {
@@ -5196,7 +5202,7 @@ impl SpreadsheetApp {
                 y1: row_y,
                 x2: cell_x + col_w,
                 y2: row_y + row_h,
-                color: COLOR_SURFACE0,
+                color: self.palette.surface0,
                 width: 1.0,
             });
             cmds.push(RenderCommand::Line {
@@ -5204,14 +5210,14 @@ impl SpreadsheetApp {
                 y1: row_y + row_h,
                 x2: cell_x + col_w,
                 y2: row_y + row_h,
-                color: COLOR_SURFACE0,
+                color: self.palette.surface0,
                 width: 1.0,
             });
         }
 
         // Cell borders
         if cell.format.borders.has_any() {
-            let border_color = COLOR_TEXT;
+            let border_color = self.palette.text;
             if cell.format.borders.top {
                 cmds.push(RenderCommand::Line {
                     x1: cell_x,
@@ -5270,10 +5276,10 @@ impl SpreadsheetApp {
         }
 
         let text_color = cell.format.text_color.unwrap_or(match &cell.value {
-            CellValue::Error(_) => COLOR_RED,
-            CellValue::Boolean(_) => COLOR_PEACH,
-            CellValue::Number(_) => COLOR_TEXT,
-            _ => COLOR_TEXT,
+            CellValue::Error(_) => self.palette.red,
+            CellValue::Boolean(_) => self.palette.peach,
+            CellValue::Number(_) => self.palette.text,
+            _ => self.palette.text,
         });
 
         let font_weight = if cell.format.bold {
@@ -5330,7 +5336,7 @@ impl SpreadsheetApp {
             y: y_start,
             width: grid_w,
             height: grid_h,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -5399,7 +5405,7 @@ impl SpreadsheetApp {
             y: active_y,
             width: active_w,
             height: active_h,
-            color: COLOR_BLUE,
+            color: self.palette.blue,
             line_width: 2.0,
             corner_radii: CornerRadii::ZERO,
         });
@@ -5411,7 +5417,7 @@ impl SpreadsheetApp {
             y: active_y + active_h - handle_size / 2.0,
             width: handle_size,
             height: handle_size,
-            color: COLOR_BLUE,
+            color: self.palette.blue,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -5425,7 +5431,7 @@ impl SpreadsheetApp {
                     y: ry,
                     width: rw,
                     height: rh,
-                    color: COLOR_BLUE,
+                    color: self.palette.blue,
                     line_width: 1.5,
                     corner_radii: CornerRadii::ZERO,
                 });
@@ -5446,7 +5452,7 @@ impl SpreadsheetApp {
                 y: ry,
                 width: rw,
                 height: rh,
-                color: COLOR_GREEN,
+                color: self.palette.green,
                 line_width: 2.0,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -5460,7 +5466,7 @@ impl SpreadsheetApp {
                 y1: y_start,
                 x2: fx,
                 y2: y_start + grid_h,
-                color: COLOR_LAVENDER,
+                color: self.palette.lavender,
                 width: 2.0,
             });
         }
@@ -5471,7 +5477,7 @@ impl SpreadsheetApp {
                 y1: fy,
                 x2: self.window_width,
                 y2: fy,
-                color: COLOR_LAVENDER,
+                color: self.palette.lavender,
                 width: 2.0,
             });
         }
@@ -5492,7 +5498,7 @@ impl SpreadsheetApp {
             y: self.tab_top(),
             width: self.window_width,
             height: SHEET_TAB_HEIGHT,
-            color: COLOR_CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -5500,11 +5506,15 @@ impl SpreadsheetApp {
         for (idx, sheet) in self.sheets.iter().enumerate() {
             let Some(rect) = rects.next() else { break };
             let is_active = idx == self.sheets.active_index();
-            let bg = if is_active { COLOR_BASE } else { COLOR_MANTLE };
-            let fg = if is_active {
-                COLOR_BLUE
+            let bg = if is_active {
+                self.palette.base
             } else {
-                COLOR_SUBTEXT0
+                self.palette.mantle
+            };
+            let fg = if is_active {
+                self.palette.blue
+            } else {
+                self.palette.subtext0
             };
             let radii = CornerRadii {
                 top_left: 4.0,
@@ -5545,7 +5555,7 @@ impl SpreadsheetApp {
             y: plus.y,
             width: plus.w,
             height: plus.h,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -5553,7 +5563,7 @@ impl SpreadsheetApp {
             y: plus.y + 5.0,
             text: "+".to_string(),
             font_size: FONT_SIZE,
-            color: COLOR_SUBTEXT1,
+            color: self.palette.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -5568,7 +5578,7 @@ impl SpreadsheetApp {
             y,
             width: self.window_width,
             height: STATUS_BAR_HEIGHT,
-            color: COLOR_CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -5578,7 +5588,7 @@ impl SpreadsheetApp {
             y1: y,
             x2: self.window_width,
             y2: y,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -5590,7 +5600,7 @@ impl SpreadsheetApp {
                 y: y + 5.0,
                 text: status,
                 font_size: SMALL_FONT,
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(390.0),
                 overflow: TextOverflow::Ellipsis,
@@ -5615,7 +5625,7 @@ impl SpreadsheetApp {
             y: y + 5.0,
             text: mode_text.to_string(),
             font_size: SMALL_FONT,
-            color: COLOR_GREEN,
+            color: self.palette.green,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -5628,7 +5638,7 @@ impl SpreadsheetApp {
             y: y + 5.0,
             text: range_text,
             font_size: SMALL_FONT,
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -5647,7 +5657,7 @@ impl SpreadsheetApp {
                 y: bar.track.y,
                 width: bar.track.w,
                 height: bar.track.h,
-                color: COLOR_MANTLE,
+                color: self.palette.mantle,
                 corner_radii: CornerRadii::ZERO,
             });
             if let Some(thumb) = bar.thumb {
@@ -5656,7 +5666,7 @@ impl SpreadsheetApp {
                     y: thumb.y,
                     width: thumb.w,
                     height: thumb.h,
-                    color: COLOR_SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -5829,7 +5839,7 @@ impl SpreadsheetApp {
             y: dlg_y,
             width: dlg_w,
             height: dlg_h,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -5839,7 +5849,7 @@ impl SpreadsheetApp {
             y: dlg_y,
             width: dlg_w,
             height: dlg_h,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -5850,7 +5860,7 @@ impl SpreadsheetApp {
             y: dlg_y + 12.0,
             text: "Find and Replace".to_string(),
             font_size: FONT_SIZE,
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -5874,7 +5884,7 @@ impl SpreadsheetApp {
                         y: rect.y + 5.0,
                         text: label.to_string(),
                         font_size: SMALL_FONT,
-                        color: COLOR_SUBTEXT0,
+                        color: self.palette.subtext0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -5884,7 +5894,7 @@ impl SpreadsheetApp {
                         y: rect.y,
                         width: rect.w,
                         height: rect.h,
-                        color: COLOR_SURFACE0,
+                        color: self.palette.surface0,
                         corner_radii: CornerRadii::all(3.0),
                     });
                     // Which field the next keystroke goes into. Two identical
@@ -5896,7 +5906,7 @@ impl SpreadsheetApp {
                             y: rect.y,
                             width: rect.w,
                             height: rect.h,
-                            color: COLOR_BLUE,
+                            color: self.palette.blue,
                             line_width: 1.0,
                             corner_radii: CornerRadii::all(3.0),
                         });
@@ -5906,7 +5916,7 @@ impl SpreadsheetApp {
                         y: rect.y + 4.0,
                         text: value.clone(),
                         font_size: SMALL_FONT,
-                        color: COLOR_TEXT,
+                        color: self.palette.text,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(rect.w - 8.0),
                         overflow: TextOverflow::Ellipsis,
@@ -5923,7 +5933,7 @@ impl SpreadsheetApp {
                         y: rect.y,
                         width: rect.w,
                         height: rect.h,
-                        color: COLOR_SURFACE0,
+                        color: self.palette.surface0,
                         corner_radii: CornerRadii::all(4.0),
                     });
                     cmds.push(RenderCommand::Text {
@@ -5931,7 +5941,7 @@ impl SpreadsheetApp {
                         y: rect.y + 5.0,
                         text: label.to_string(),
                         font_size: SMALL_FONT,
-                        color: COLOR_TEXT,
+                        color: self.palette.text,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(rect.w - 16.0),
                         overflow: TextOverflow::Ellipsis,
@@ -5946,7 +5956,7 @@ impl SpreadsheetApp {
             y: dlg_y + 40.0,
             text: format!("{} found", self.find_replace.result_count()),
             font_size: SMALL_FONT,
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -6002,6 +6012,10 @@ fn handle_editing_key(buffer: &mut EditBuffer, event: &KeyEvent) -> EventResult 
 // ============================================================================
 
 impl App for SpreadsheetApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // `Sheet1!B4` is the reference a spreadsheet user would write for the
         // selected cell, so the title bar says where you are in the same words
@@ -8612,11 +8626,12 @@ mod tests {
 
     #[test]
     fn test_render_active_cell_outline() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let app = SpreadsheetApp::new(1280.0, 800.0);
         let cmds = app.render_commands();
         let has_stroke = cmds
             .iter()
-            .any(|c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == COLOR_BLUE));
+            .any(|c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == pal.blue));
         assert!(has_stroke);
     }
 
@@ -9853,13 +9868,14 @@ mod tests {
     /// surrounds, so it cannot end up somewhere its own cell is not.
     #[test]
     fn the_active_cell_outline_sits_on_the_cell_it_outlines() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut app = frozen_app(2, 3);
         let addr = CellAddr::new(1, 2);
         *app.selection_mut() = Selection::single(addr);
         let (want_x, want_y) = (app.col_screen_x(addr.col), app.row_screen_y(addr.row));
         let found = app.render_commands().into_iter().any(|c| {
             matches!(c, RenderCommand::StrokeRect { x, y, color, .. }
-                     if color == COLOR_BLUE
+                     if color == pal.blue
                         && (x - want_x).abs() < 0.5
                         && (y - want_y).abs() < 0.5)
         });
@@ -9956,5 +9972,64 @@ mod tests {
         });
 
         assert!(app.notice.is_none());
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut SpreadsheetApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = SpreadsheetApp::new(1000.0, 700.0);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

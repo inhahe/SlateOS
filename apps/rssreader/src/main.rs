@@ -23,6 +23,7 @@
 
 #![allow(dead_code, clippy::too_many_arguments)]
 
+use appearance::Palette;
 use std::collections::HashMap;
 
 use guitk::color::Color;
@@ -47,23 +48,6 @@ use guitk::textfind;
 // ============================================================================
 // Catppuccin Mocha palette
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const CRUST: Color = Color::from_hex(0x11111B);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
 // XML Parser — minimal, built-in, no external crates
@@ -2095,12 +2079,19 @@ pub struct RssReaderApp {
     // Auto-refresh
     pub global_auto_refresh_seconds: u64,
     pub last_global_refresh: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl RssReaderApp {
     /// Create a new RSS reader app with default dimensions and sample data.
     pub fn new(width: f32, height: f32) -> Self {
         let mut app = Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
             feeds: Vec::new(),
@@ -2979,7 +2970,7 @@ impl RssReaderApp {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3017,7 +3008,7 @@ impl RssReaderApp {
                 y1: content_y,
                 x2: list_x,
                 y2: content_y + content_height,
-                color: SURFACE1,
+                color: self.palette.surface1,
                 width: 1.0,
             });
 
@@ -3035,7 +3026,7 @@ impl RssReaderApp {
                 y1: content_y,
                 x2: content_pane_x,
                 y2: content_y + content_height,
-                color: SURFACE1,
+                color: self.palette.surface1,
                 width: 1.0,
             });
 
@@ -3065,7 +3056,7 @@ impl RssReaderApp {
                 y1: content_y,
                 x2: content_pane_x,
                 y2: content_y + content_height,
-                color: SURFACE1,
+                color: self.palette.surface1,
                 width: 1.0,
             });
 
@@ -3106,7 +3097,7 @@ impl RssReaderApp {
             y: 0.0,
             width: self.width,
             height,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3116,7 +3107,7 @@ impl RssReaderApp {
             y: 10.0,
             text: "RSS".to_string(),
             font_size: 13.0,
-            color: PEACH,
+            color: self.palette.peach,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3128,7 +3119,7 @@ impl RssReaderApp {
             y: 10.0,
             text: "Feed Reader".to_string(),
             font_size: 16.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3144,7 +3135,7 @@ impl RssReaderApp {
             y: 13.0,
             text: info,
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3157,7 +3148,7 @@ impl RssReaderApp {
             y: 8.0,
             width: 100.0,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -3165,7 +3156,7 @@ impl RssReaderApp {
             y: 12.0,
             text: "Refresh All".to_string(),
             font_size: 12.0,
-            color: BLUE,
+            color: self.palette.blue,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3177,7 +3168,7 @@ impl RssReaderApp {
             y1: height,
             x2: self.width,
             y2: height,
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
     }
@@ -3190,23 +3181,23 @@ impl RssReaderApp {
             y,
             width: self.width,
             height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Filter button
         let filter_x = 12.0;
         let filter_color = match self.filter_mode {
-            FilterMode::All => SUBTEXT0,
-            FilterMode::Unread => BLUE,
-            FilterMode::Starred => YELLOW,
+            FilterMode::All => self.palette.subtext0,
+            FilterMode::Unread => self.palette.blue,
+            FilterMode::Starred => self.palette.yellow,
         };
         cmds.push(RenderCommand::FillRect {
             x: filter_x,
             y: y + 6.0,
             width: 110.0,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -3227,7 +3218,7 @@ impl RssReaderApp {
             y: y + 6.0,
             width: 160.0,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -3235,7 +3226,7 @@ impl RssReaderApp {
             y: y + 10.0,
             text: format!("Sort: {}", self.sort_order.label()),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(144.0),
             overflow: TextOverflow::Ellipsis,
@@ -3248,7 +3239,7 @@ impl RssReaderApp {
             y: y + 6.0,
             width: 240.0,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         if self.search_active {
@@ -3257,7 +3248,7 @@ impl RssReaderApp {
                 y: y + 6.0,
                 width: 240.0,
                 height: 24.0,
-                color: BLUE,
+                color: self.palette.blue,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(4.0),
             });
@@ -3269,9 +3260,9 @@ impl RssReaderApp {
             self.search_query.clone()
         };
         let search_text_color = if self.search_query.is_empty() {
-            OVERLAY0
+            self.palette.overlay0
         } else {
-            TEXT
+            self.palette.text
         };
         cmds.push(RenderCommand::Text {
             x: search_x + 8.0,
@@ -3290,7 +3281,7 @@ impl RssReaderApp {
             y1: y + height,
             x2: self.width,
             y2: y + height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -3310,7 +3301,7 @@ impl RssReaderApp {
             y,
             width: panel_width,
             height: panel_height,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3334,7 +3325,11 @@ impl RssReaderApp {
                 y: cy,
                 width: panel_width - 8.0,
                 height: item_height,
-                color: if active_highlight { SURFACE1 } else { SURFACE0 },
+                color: if active_highlight {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii::all(4.0),
             });
         }
@@ -3343,7 +3338,11 @@ impl RssReaderApp {
             y: cy + 6.0,
             text: "All Feeds".to_string(),
             font_size: 13.0,
-            color: if is_selected { TEXT } else { SUBTEXT0 },
+            color: if is_selected {
+                self.palette.text
+            } else {
+                self.palette.subtext0
+            },
             font_weight: FontWeightHint::Bold,
             max_width: Some(panel_width - 60.0),
             overflow: TextOverflow::Ellipsis,
@@ -3357,7 +3356,7 @@ impl RssReaderApp {
                 y: cy + 4.0,
                 width: 32.0,
                 height: 20.0,
-                color: BLUE,
+                color: self.palette.blue,
                 corner_radii: CornerRadii::all(10.0),
             });
             cmds.push(RenderCommand::Text {
@@ -3365,7 +3364,7 @@ impl RssReaderApp {
                 y: cy + 7.0,
                 text: badge_text,
                 font_size: 11.0,
-                color: CRUST,
+                color: self.palette.crust,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3383,9 +3382,9 @@ impl RssReaderApp {
                 width: panel_width - 8.0,
                 height: item_height,
                 color: if starred_highlight {
-                    SURFACE1
+                    self.palette.surface1
                 } else {
-                    SURFACE0
+                    self.palette.surface0
                 },
                 corner_radii: CornerRadii::all(4.0),
             });
@@ -3396,9 +3395,9 @@ impl RssReaderApp {
             text: "Starred".to_string(),
             font_size: 13.0,
             color: if is_starred_selected {
-                YELLOW
+                self.palette.yellow
             } else {
-                SUBTEXT0
+                self.palette.subtext0
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_width - 60.0),
@@ -3411,7 +3410,7 @@ impl RssReaderApp {
                 y: cy + 4.0,
                 width: 32.0,
                 height: 20.0,
-                color: YELLOW,
+                color: self.palette.yellow,
                 corner_radii: CornerRadii::all(10.0),
             });
             cmds.push(RenderCommand::Text {
@@ -3419,7 +3418,7 @@ impl RssReaderApp {
                 y: cy + 7.0,
                 text: format!("{starred_count}"),
                 font_size: 11.0,
-                color: CRUST,
+                color: self.palette.crust,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3433,7 +3432,7 @@ impl RssReaderApp {
             y1: cy,
             x2: x + panel_width - 12.0,
             y2: cy,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
         cy += 8.0;
@@ -3449,7 +3448,11 @@ impl RssReaderApp {
                     y: cy,
                     width: panel_width - 8.0,
                     height: item_height,
-                    color: if folder_highlight { SURFACE1 } else { SURFACE0 },
+                    color: if folder_highlight {
+                        self.palette.surface1
+                    } else {
+                        self.palette.surface0
+                    },
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -3461,7 +3464,7 @@ impl RssReaderApp {
                 y: cy + 6.0,
                 text: indicator.to_string(),
                 font_size: 11.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3472,7 +3475,11 @@ impl RssReaderApp {
                 y: cy + 6.0,
                 text: folder.name.clone(),
                 font_size: 12.0,
-                color: if is_folder_selected { TEXT } else { SUBTEXT0 },
+                color: if is_folder_selected {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(panel_width - 72.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3486,7 +3493,7 @@ impl RssReaderApp {
                     y: cy + 7.0,
                     text: format!("{folder_unread}"),
                     font_size: 10.0,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -3510,13 +3517,21 @@ impl RssReaderApp {
                             y: cy,
                             width: panel_width - 8.0,
                             height: item_height,
-                            color: if feed_highlight { SURFACE1 } else { SURFACE0 },
+                            color: if feed_highlight {
+                                self.palette.surface1
+                            } else {
+                                self.palette.surface0
+                            },
                             corner_radii: CornerRadii::all(4.0),
                         });
                     }
 
                     // Health indicator dot
-                    let health_color = if feed.health.is_healthy() { GREEN } else { RED };
+                    let health_color = if feed.health.is_healthy() {
+                        self.palette.green
+                    } else {
+                        self.palette.red
+                    };
                     cmds.push(RenderCommand::FillRect {
                         x: x + 28.0,
                         y: cy + 10.0,
@@ -3531,7 +3546,11 @@ impl RssReaderApp {
                         y: cy + 6.0,
                         text: feed.title.clone(),
                         font_size: 12.0,
-                        color: if is_feed_selected { TEXT } else { SUBTEXT0 },
+                        color: if is_feed_selected {
+                            self.palette.text
+                        } else {
+                            self.palette.subtext0
+                        },
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(panel_width - 88.0),
                         overflow: TextOverflow::Ellipsis,
@@ -3545,7 +3564,7 @@ impl RssReaderApp {
                             y: cy + 7.0,
                             text: format!("{feed_unread}"),
                             font_size: 10.0,
-                            color: BLUE,
+                            color: self.palette.blue,
                             font_weight: FontWeightHint::Bold,
                             max_width: None,
                             overflow: TextOverflow::Clip,
@@ -3571,7 +3590,7 @@ impl RssReaderApp {
                 y1: cy,
                 x2: x + panel_width - 12.0,
                 y2: cy,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 width: 1.0,
             });
             cy += 8.0;
@@ -3585,12 +3604,20 @@ impl RssReaderApp {
                         y: cy,
                         width: panel_width - 8.0,
                         height: item_height,
-                        color: if feed_highlight { SURFACE1 } else { SURFACE0 },
+                        color: if feed_highlight {
+                            self.palette.surface1
+                        } else {
+                            self.palette.surface0
+                        },
                         corner_radii: CornerRadii::all(4.0),
                     });
                 }
 
-                let health_color = if feed.health.is_healthy() { GREEN } else { RED };
+                let health_color = if feed.health.is_healthy() {
+                    self.palette.green
+                } else {
+                    self.palette.red
+                };
                 cmds.push(RenderCommand::FillRect {
                     x: x + 12.0,
                     y: cy + 10.0,
@@ -3605,7 +3632,11 @@ impl RssReaderApp {
                     y: cy + 6.0,
                     text: feed.title.clone(),
                     font_size: 12.0,
-                    color: if is_feed_selected { TEXT } else { SUBTEXT0 },
+                    color: if is_feed_selected {
+                        self.palette.text
+                    } else {
+                        self.palette.subtext0
+                    },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(panel_width - 72.0),
                     overflow: TextOverflow::Ellipsis,
@@ -3618,7 +3649,7 @@ impl RssReaderApp {
                         y: cy + 7.0,
                         text: format!("{feed_unread}"),
                         font_size: 10.0,
-                        color: BLUE,
+                        color: self.palette.blue,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -3646,7 +3677,7 @@ impl RssReaderApp {
             y,
             width: panel_width,
             height: panel_height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3668,7 +3699,7 @@ impl RssReaderApp {
                 y: y + panel_height / 2.0 - 20.0,
                 text: "No articles match the current filter".to_string(),
                 font_size: 13.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - 32.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3678,7 +3709,7 @@ impl RssReaderApp {
                 y: y + panel_height / 2.0 + 4.0,
                 text: "Try changing the filter or selecting a different feed".to_string(),
                 font_size: 11.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(panel_width - 32.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3711,7 +3742,11 @@ impl RssReaderApp {
                     y: cy,
                     width: panel_width - 8.0,
                     height: item_height - 4.0,
-                    color: if is_active { SURFACE1 } else { SURFACE0 },
+                    color: if is_active {
+                        self.palette.surface1
+                    } else {
+                        self.palette.surface0
+                    },
                     corner_radii: CornerRadii::all(6.0),
                 });
             }
@@ -3723,7 +3758,7 @@ impl RssReaderApp {
                     y: cy + 10.0,
                     width: 8.0,
                     height: 8.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -3735,7 +3770,7 @@ impl RssReaderApp {
                     y: cy + 6.0,
                     text: "*".to_string(),
                     font_size: 16.0,
-                    color: YELLOW,
+                    color: self.palette.yellow,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -3743,7 +3778,11 @@ impl RssReaderApp {
             }
 
             // Title
-            let title_color = if article.is_read { SUBTEXT0 } else { TEXT };
+            let title_color = if article.is_read {
+                self.palette.subtext0
+            } else {
+                self.palette.text
+            };
             let title_weight = if article.is_read {
                 FontWeightHint::Regular
             } else {
@@ -3769,7 +3808,7 @@ impl RssReaderApp {
                 y: cy + 26.0,
                 text: meta_text,
                 font_size: 11.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - 40.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3805,7 +3844,7 @@ impl RssReaderApp {
                 y: cy + 44.0,
                 text: preview,
                 font_size: preview_size,
-                color: SURFACE2,
+                color: self.palette.surface2,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(preview_width),
                 overflow: TextOverflow::Ellipsis,
@@ -3832,7 +3871,7 @@ impl RssReaderApp {
             y,
             width: panel_width,
             height: panel_height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3856,7 +3895,7 @@ impl RssReaderApp {
                 y: cy,
                 text: article.title.clone(),
                 font_size: 20.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(content_width),
                 overflow: TextOverflow::Ellipsis,
@@ -3877,7 +3916,7 @@ impl RssReaderApp {
                 y: cy,
                 text: meta_line,
                 font_size: 12.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_width),
                 overflow: TextOverflow::Ellipsis,
@@ -3886,13 +3925,17 @@ impl RssReaderApp {
 
             // Status badges (read/unread, starred)
             let status_text = if article.is_read { "Read" } else { "Unread" };
-            let status_color = if article.is_read { OVERLAY0 } else { BLUE };
+            let status_color = if article.is_read {
+                self.palette.overlay0
+            } else {
+                self.palette.blue
+            };
             cmds.push(RenderCommand::FillRect {
                 x: x + padding,
                 y: cy,
                 width: 60.0,
                 height: 22.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -3912,7 +3955,7 @@ impl RssReaderApp {
                     y: cy,
                     width: 70.0,
                     height: 22.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -3920,7 +3963,7 @@ impl RssReaderApp {
                     y: cy + 4.0,
                     text: "* Starred".to_string(),
                     font_size: 11.0,
-                    color: YELLOW,
+                    color: self.palette.yellow,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -3939,7 +3982,7 @@ impl RssReaderApp {
                     y: cy,
                     width: 62.0,
                     height: 22.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -3947,7 +3990,7 @@ impl RssReaderApp {
                     y: cy + 4.0,
                     text: "Cached".to_string(),
                     font_size: 11.0,
-                    color: GREEN,
+                    color: self.palette.green,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -3962,7 +4005,7 @@ impl RssReaderApp {
                 y1: cy,
                 x2: x + padding + content_width,
                 y2: cy,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 width: 1.0,
             });
             cy += 16.0;
@@ -3974,7 +4017,7 @@ impl RssReaderApp {
                     y: cy,
                     text: article.link.clone(),
                     font_size: 11.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_width),
                     overflow: TextOverflow::Ellipsis,
@@ -4000,7 +4043,7 @@ impl RssReaderApp {
                     y: cy,
                     text: line.clone(),
                     font_size: 14.0,
-                    color: SUBTEXT1,
+                    color: self.palette.subtext1,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_width),
                     overflow: TextOverflow::Ellipsis,
@@ -4014,7 +4057,7 @@ impl RssReaderApp {
                 y: y + panel_height / 2.0 - 20.0,
                 text: "Select an article to read".to_string(),
                 font_size: 15.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - 40.0),
                 overflow: TextOverflow::Ellipsis,
@@ -4024,7 +4067,7 @@ impl RssReaderApp {
                 y: y + panel_height / 2.0 + 10.0,
                 text: "Use J/K or arrow keys to navigate".to_string(),
                 font_size: 12.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(panel_width - 40.0),
                 overflow: TextOverflow::Ellipsis,
@@ -4041,7 +4084,7 @@ impl RssReaderApp {
             y,
             width: self.width,
             height,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4051,7 +4094,7 @@ impl RssReaderApp {
             y1: y,
             x2: self.width,
             y2: y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -4066,7 +4109,7 @@ impl RssReaderApp {
             y: y + 7.0,
             text: pane_label.to_string(),
             font_size: 11.0,
-            color: BLUE,
+            color: self.palette.blue,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4078,7 +4121,7 @@ impl RssReaderApp {
             y: y + 7.0,
             text: format!("{} | {}", self.filter_mode.label(), self.sort_order.label()),
             font_size: 11.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -4091,7 +4134,7 @@ impl RssReaderApp {
                 y: y + 7.0,
                 text: self.status_message.clone(),
                 font_size: 11.0,
-                color: PEACH,
+                color: self.palette.peach,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width / 2.0 - 120.0),
                 overflow: TextOverflow::Ellipsis,
@@ -4109,7 +4152,7 @@ impl RssReaderApp {
             y: y + 7.0,
             text: cache_info,
             font_size: 11.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
             overflow: TextOverflow::Ellipsis,
@@ -4121,7 +4164,7 @@ impl RssReaderApp {
             y: y + 7.0,
             text: "? Help".to_string(),
             font_size: 10.0,
-            color: SURFACE2,
+            color: self.palette.surface2,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4151,7 +4194,7 @@ impl RssReaderApp {
             y: dy,
             width: dialog_width,
             height: dialog_height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(12.0),
         });
 
@@ -4161,7 +4204,7 @@ impl RssReaderApp {
             y: dy,
             width: dialog_width,
             height: dialog_height,
-            color: SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(12.0),
         });
@@ -4172,7 +4215,7 @@ impl RssReaderApp {
             y: dy + 16.0,
             text: "Keyboard Shortcuts".to_string(),
             font_size: 16.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4184,7 +4227,7 @@ impl RssReaderApp {
             y: dy + 18.0,
             text: "Press ? to close".to_string(),
             font_size: 10.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4196,7 +4239,7 @@ impl RssReaderApp {
             y1: dy + 44.0,
             x2: dx + dialog_width - 20.0,
             y2: dy + 44.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
 
@@ -4215,7 +4258,7 @@ impl RssReaderApp {
                 y: row_y,
                 width: 120.0,
                 height: 18.0,
-                color: CRUST,
+                color: self.palette.crust,
                 corner_radii: CornerRadii::all(3.0),
             });
             cmds.push(RenderCommand::Text {
@@ -4223,7 +4266,7 @@ impl RssReaderApp {
                 y: row_y + 2.0,
                 text: action.key_hint().to_string(),
                 font_size: 11.0,
-                color: PEACH,
+                color: self.palette.peach,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(110.0),
                 overflow: TextOverflow::Ellipsis,
@@ -4235,7 +4278,7 @@ impl RssReaderApp {
                 y: row_y + 2.0,
                 text: action.description().to_string(),
                 font_size: 12.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_width - 180.0),
                 overflow: TextOverflow::Ellipsis,
@@ -4268,7 +4311,7 @@ impl RssReaderApp {
             y: dy,
             width: dialog_width,
             height: dialog_height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(12.0),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -4276,7 +4319,7 @@ impl RssReaderApp {
             y: dy,
             width: dialog_width,
             height: dialog_height,
-            color: SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(12.0),
         });
@@ -4287,7 +4330,7 @@ impl RssReaderApp {
             y: dy + 16.0,
             text: "Add New Feed".to_string(),
             font_size: 16.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4299,7 +4342,7 @@ impl RssReaderApp {
             y: dy + 56.0,
             text: "Feed URL:".to_string(),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4311,7 +4354,7 @@ impl RssReaderApp {
             y: dy + 76.0,
             width: dialog_width - 40.0,
             height: 32.0,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -4319,7 +4362,7 @@ impl RssReaderApp {
             y: dy + 76.0,
             width: dialog_width - 40.0,
             height: 32.0,
-            color: BLUE,
+            color: self.palette.blue,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -4328,7 +4371,7 @@ impl RssReaderApp {
             y: dy + 84.0,
             text: "https://example.com/feed.xml".to_string(),
             font_size: 12.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_width - 56.0),
             overflow: TextOverflow::Ellipsis,
@@ -4340,7 +4383,7 @@ impl RssReaderApp {
             y: dy + 124.0,
             text: "Folder (optional):".to_string(),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4352,7 +4395,7 @@ impl RssReaderApp {
             y: dy + 144.0,
             width: dialog_width - 40.0,
             height: 32.0,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -4360,7 +4403,7 @@ impl RssReaderApp {
             y: dy + 152.0,
             text: "None (ungrouped)".to_string(),
             font_size: 12.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_width - 56.0),
             overflow: TextOverflow::Ellipsis,
@@ -4375,7 +4418,7 @@ impl RssReaderApp {
             y: button_y,
             width: 80.0,
             height: 32.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
@@ -4383,7 +4426,7 @@ impl RssReaderApp {
             y: button_y + 8.0,
             text: "Cancel".to_string(),
             font_size: 12.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4395,7 +4438,7 @@ impl RssReaderApp {
             y: button_y,
             width: 88.0,
             height: 32.0,
-            color: BLUE,
+            color: self.palette.blue,
             corner_radii: CornerRadii::all(6.0),
         });
         cmds.push(RenderCommand::Text {
@@ -4403,7 +4446,7 @@ impl RssReaderApp {
             y: button_y + 8.0,
             text: "Add Feed".to_string(),
             font_size: 12.0,
-            color: CRUST,
+            color: self.palette.crust,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4435,7 +4478,7 @@ impl RssReaderApp {
             y: dy,
             width: dialog_width,
             height: dialog_height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(12.0),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -4443,7 +4486,7 @@ impl RssReaderApp {
             y: dy,
             width: dialog_width,
             height: dialog_height,
-            color: SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(12.0),
         });
@@ -4454,7 +4497,7 @@ impl RssReaderApp {
             y: dy + 16.0,
             text: "Feed Health Status".to_string(),
             font_size: 16.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4466,7 +4509,7 @@ impl RssReaderApp {
             y: dy + 44.0,
             text: "Feed".to_string(),
             font_size: 11.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4476,7 +4519,7 @@ impl RssReaderApp {
             y: dy + 44.0,
             text: "Format".to_string(),
             font_size: 11.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4486,7 +4529,7 @@ impl RssReaderApp {
             y: dy + 44.0,
             text: "Status".to_string(),
             font_size: 11.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4498,7 +4541,7 @@ impl RssReaderApp {
             y1: dy + header_height,
             x2: dx + dialog_width - 20.0,
             y2: dy + header_height,
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
 
@@ -4506,7 +4549,11 @@ impl RssReaderApp {
         let mut row_y = dy + header_height + 8.0;
         for feed in &self.feeds {
             // Health dot
-            let health_color = if feed.health.is_healthy() { GREEN } else { RED };
+            let health_color = if feed.health.is_healthy() {
+                self.palette.green
+            } else {
+                self.palette.red
+            };
             cmds.push(RenderCommand::FillRect {
                 x: dx + 20.0,
                 y: row_y + 6.0,
@@ -4522,7 +4569,7 @@ impl RssReaderApp {
                 y: row_y + 2.0,
                 text: feed.title.clone(),
                 font_size: 12.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(156.0),
                 overflow: TextOverflow::Ellipsis,
@@ -4534,7 +4581,7 @@ impl RssReaderApp {
                 y: row_y + 2.0,
                 text: feed.format.label().to_string(),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -4542,7 +4589,11 @@ impl RssReaderApp {
 
             // Status text
             let status = feed.health.status_text();
-            let status_color = if feed.health.is_healthy() { GREEN } else { RED };
+            let status_color = if feed.health.is_healthy() {
+                self.palette.green
+            } else {
+                self.palette.red
+            };
             cmds.push(RenderCommand::Text {
                 x: dx + 280.0,
                 y: row_y + 2.0,
@@ -4560,7 +4611,7 @@ impl RssReaderApp {
                 y: row_y + 18.0,
                 text: feed.url.clone(),
                 font_size: 9.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(dialog_width - 60.0),
                 overflow: TextOverflow::Ellipsis,
@@ -4615,6 +4666,10 @@ pub fn wrap_text(text: &str, max_width: f32, font_size: f32) -> Vec<String> {
 // ============================================================================
 
 impl App for RssReaderApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // The unread count, which is what a feed reader is consulted for
         // without being raised. The harness re-reads this as the program runs.
@@ -6971,6 +7026,65 @@ mod tests {
         assert!(
             texts.iter().any(|t| t == "короткий"),
             "the short summary was not drawn intact; got {texts:?}"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut RssReaderApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = RssReaderApp::new(1000.0, 700.0);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

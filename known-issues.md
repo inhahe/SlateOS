@@ -124377,11 +124377,35 @@ which makes step 1 below larger than one dependency line.
   new defaulted `App::theme_changed` — before the first frame, and again on
   every change. `design-decisions.md` §822 records why it is a trait method
   and not an `Event`.
-- **Step 2 has started: 8 of 129.** `calculator` (11 constants),
-  `diskcleanup` (9), `charmap` (14), `clipmanager` (14), `fileassoc` (13),
-  `startupmanager` (13), `magnifier` (13) and `systemrestore` (15). Each has a
-  test on the rectangles it emits, and each was mutation-checked by making
+- **Step 2: 14 done.** `calculator`, `diskcleanup`, `charmap`, `clipmanager`,
+  `fileassoc`, `startupmanager`, `magnifier`, `systemrestore`, `videoplayer`,
+  `qrcode`, `notes`, `rssreader`, `spreadsheet` and `paint`. Each has a test on
+  the rectangles it emits, and each was mutation-checked by making
   `theme_changed` ignore its argument.
+
+**The "129" in this entry's own table was wrong, and the real number is
+smaller.** That figure counted crates containing a hardcoded colour, which is
+not the same as crates that ignore the theme. Surveying all 140 applications
+that draw:
+
+| | count |
+|---|---|
+| applications with a `main.rs` | 140 |
+| **name no palette role at all** — nothing to convert | **48** |
+| games (deprioritised by the operator's standing instruction) | 23 |
+| converted | 14 |
+| **genuinely left** | **~55** |
+
+The 48 matter to the estimate and to correctness both. A crate full of
+`Color::rgb(…)` calls is usually naming *content*, not chrome — a paint
+program's swatches, a syntax highlighter's token colours, a disk map's
+category fills — and converting those would be a bug, not a fix. Matching on
+the *hex value* against the known Catppuccin roles is what separates the two
+automatically: `paint` had 16 chrome constants (converted) and 64
+`Color::rgb` swatches (untouched, and they must be).
+
+**Of the ~55 remaining, 11 need no hand-threading at all** and the rest average
+one to three helper functions each; the survey names them per application.
 
 **Survey before converting.** A script that groups every constant use by its
 enclosing `impl` block answers, in one pass and before any edit, the only
@@ -124452,6 +124476,13 @@ had at least one such method: `ClipType::badge_color`,
 `palette` on type …"), but the useful fix is to group palette uses by their
 enclosing `impl` before touching anything — a five-line scan that names the
 non-window impls up front instead of discovering them one build at a time.
+
+**A name collision to expect: `palette` may already mean something.**
+`paint` has a `palette: Vec<Color>` field — its forty-eight drawing swatches —
+so the theme went in as `theme` instead. Check the struct for an existing
+`palette` before adding one, and be careful that a blanket
+`self.palette.` → `self.theme.` rename does not catch the application's own
+uses: it caught `self.palette.iter()`, which iterates the swatches.
 
 **Three smaller things that recur:**
 

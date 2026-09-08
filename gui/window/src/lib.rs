@@ -1008,6 +1008,20 @@ impl<T: Transport> EventLoop<T> {
     /// # Errors
     ///
     /// As [`Connection::confirm`].
+    /// Constrain another client's window size, as a window rule does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn shell_set_size_limits(
+        &mut self,
+        window: u64,
+        min: (u32, u32),
+        max: (u32, u32),
+    ) -> Result<(), Error<T>> {
+        self.conn.shell_set_size_limits(window, min, max)
+    }
+
     pub fn shell_set_stack_tier(
         &mut self,
         window: u64,
@@ -1828,6 +1842,7 @@ pub mod testing {
                 RequestBody::ShellMove { .. } => "ShellMove",
                 RequestBody::ShellResize { .. } => "ShellResize",
                 RequestBody::ShellSetStackTier { .. } => "ShellSetStackTier",
+                RequestBody::ShellSetSizeLimits { .. } => "ShellSetSizeLimits",
                 RequestBody::GetDisplayInfo => "GetDisplayInfo",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::ReloadAppearance => "ReloadAppearance",

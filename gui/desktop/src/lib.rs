@@ -760,6 +760,15 @@ pub enum ShellRequest {
         /// Top-left corner, in display coordinates.
         y: i32,
     },
+    /// Constrain a window's size, as a window rule asks.
+    SetSizeLimits {
+        /// The window to constrain.
+        window: WindowId,
+        /// Smallest client area; `(0, 0)` for no minimum.
+        min: (u32, u32),
+        /// Largest client area; `(0, 0)` for no maximum.
+        max: (u32, u32),
+    },
     /// Keep a window above or below its neighbours, as a window rule asks.
     SetStackTier {
         /// The window to re-file.
@@ -2872,6 +2881,20 @@ impl DesktopShell {
                 out.push(ShellRequest::window(id, ShellControlAction::Fullscreen));
             }
             Some(window_rules::InitialState::Normal) | None => {}
+        }
+
+        // Size limits before the size itself, so a rule that sets both does
+        // not resize to something its own maximum then claws back.
+        if actions.min_size.is_some() || actions.max_size.is_some() {
+            out.push(ShellRequest::SetSizeLimits {
+                window: id,
+                // `(0, 0)` is "this rule says nothing about that limit", which
+                // leaves whatever the program asked for in place. A rule that
+                // names only a maximum must not discard the program's own
+                // minimum.
+                min: actions.min_size.unwrap_or((0, 0)),
+                max: actions.max_size.unwrap_or((0, 0)),
+            });
         }
 
         // Size before position, and both before the state match below. A
@@ -6537,6 +6560,82 @@ mod window_manager_tests {
         again(&mut shell);
         again(&mut shell);
         assert!(shell.taskbar_windows().is_empty());
+    }
+
+    /// A rule naming only one limit sends zeroes for the other.
+    ///
+    /// The zeroes mean "say nothing about that one", which is what stops a
+    /// maximum-only rule from discarding the program's own minimum.
+    #[test]
+    fn a_rule_naming_one_size_limit_says_nothing_about_the_other() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.max_size = Some((900, 700));
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "chat").contains(&ShellRequest::SetSizeLimits {
+                window: WindowId(1),
+                min: (0, 0),
+                max: (900, 700),
+            })
+        );
+    }
+
+    #[test]
+    fn a_rule_naming_both_size_limits_sends_both() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.min_size = Some((300, 200));
+            a.max_size = Some((900, 700));
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "chat").contains(&ShellRequest::SetSizeLimits {
+                window: WindowId(1),
+                min: (300, 200),
+                max: (900, 700),
+            })
+        );
+    }
+
+    /// The limits are asked for before the size, so a sized-and-limited rule
+    /// clamps on the way in rather than being corrected afterwards.
+    #[test]
+    fn size_limits_are_asked_for_before_the_size() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.min_size = Some((300, 200));
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 100,
+                height: 100,
+            });
+        });
+
+        let asked = arrive(&mut shell, 1, "chat");
+        let limits = asked
+            .iter()
+            .position(|r| matches!(r, ShellRequest::SetSizeLimits { .. }))
+            .expect("limits");
+        let resize = asked
+            .iter()
+            .position(|r| matches!(r, ShellRequest::ResizeWindow { .. }))
+            .expect("resize");
+        assert!(limits < resize);
+    }
+
+    #[test]
+    fn a_rule_silent_on_size_limits_asks_for_none() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.opacity = Some(1.0);
+        });
+
+        assert!(
+            !arrive(&mut shell, 1, "chat")
+                .iter()
+                .any(|r| matches!(r, ShellRequest::SetSizeLimits { .. }))
+        );
     }
 
     #[test]

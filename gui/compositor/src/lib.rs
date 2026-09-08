@@ -2931,6 +2931,12 @@ pub enum CompositorRequest {
         window_id: WindowId,
         tier: StackTier,
     },
+    /// Constrain a window's size. `None` in either pair means "no limit".
+    SetSizeLimits {
+        window_id: WindowId,
+        min_size: Option<(u32, u32)>,
+        max_size: Option<(u32, u32)>,
+    },
     /// Query display information.
     GetDisplayInfo,
     /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
@@ -8234,6 +8240,16 @@ impl Compositor {
                     },
                 }
             }
+            CompositorRequest::SetSizeLimits {
+                window_id,
+                min_size,
+                max_size,
+            } => match self.set_size_limits(window_id, min_size, max_size) {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
             CompositorRequest::SetStackTier { window_id, tier } => {
                 match self.set_stack_tier(window_id, tier) {
                     Ok(()) => CompositorResponse::Ok,
@@ -8994,6 +9010,50 @@ impl Compositor {
     /// # Errors
     ///
     /// [`CompositorError::WindowNotFound`] if the window has gone.
+    /// Constrain a window's size, and bring it inside the new bounds now.
+    ///
+    /// `None` in either pair means "leave that limit as it is", not "clear
+    /// it" -- see [`RequestBody::ShellSetSizeLimits`] for why the distinction
+    /// matters.
+    ///
+    /// Applying the clamp immediately rather than waiting for the next resize
+    /// is the difference between a rule and a suggestion: a rule that says
+    /// "this window is at most 400 wide" and leaves a 900-wide window alone
+    /// until the user happens to drag its edge has not been applied.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window has gone.
+    pub fn set_size_limits(
+        &mut self,
+        id: WindowId,
+        min_size: Option<(u32, u32)>,
+        max_size: Option<(u32, u32)>,
+    ) -> CompositorResult<()> {
+        let win = self
+            .windows
+            .iter_mut()
+            .find(|w| w.id == id)
+            .ok_or(CompositorError::WindowNotFound(id))?;
+        // `None` is "the rule said nothing about this one", not "clear it".
+        // A rule naming only a maximum must not discard the minimum the
+        // program asked for -- nothing in the rule vocabulary can request
+        // that, so nothing here should perform it.
+        if min_size.is_some() {
+            win.min_size = min_size;
+        }
+        if max_size.is_some() {
+            win.max_size = max_size;
+        }
+        let (width, height) = win.clamp_size(win.width, win.height);
+        if (width, height) != (win.width, win.height) {
+            win.width = width;
+            win.height = height;
+            self.full_recomposite = true;
+        }
+        Ok(())
+    }
+
     pub fn set_stack_tier(&mut self, id: WindowId, tier: StackTier) -> CompositorResult<()> {
         let win = self
             .windows
@@ -11243,6 +11303,44 @@ mod tests {
             Err(CompositorError::WindowNotFound(_))
         ));
         assert_eq!(comp.pending_notifications.len(), before);
+    }
+
+    /// A rule naming only a maximum must not discard the program's minimum.
+    ///
+    /// The failure this prevents is quiet and nasty: a user writes "this
+    /// window is at most 400 wide", and the program's own "never below 300"
+    /// disappears with it, so the window can then be dragged down to nothing.
+    /// Nothing in the rule vocabulary asks for that.
+    #[test]
+    fn setting_one_size_limit_leaves_the_other_alone() {
+        let (mut comp, id) = with_one_window();
+        comp.set_size_limits(id, Some((300, 200)), None)
+            .expect("min");
+        comp.set_size_limits(id, None, Some((900, 700)))
+            .expect("max");
+
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!(win.min_size, Some((300, 200)), "the minimum was discarded");
+        assert_eq!(win.max_size, Some((900, 700)));
+    }
+
+    /// A new maximum takes effect at once, not at the next resize.
+    ///
+    /// A rule that leaves a too-large window alone until the user happens to
+    /// drag its edge has not been applied.
+    #[test]
+    fn a_new_maximum_shrinks_the_window_immediately() {
+        let (mut comp, id) = with_one_window();
+        comp.set_size_limits(id, None, Some((120, 90)))
+            .expect("max");
+
+        let win = comp.window_ref(id).expect("window");
+        assert!(
+            win.width <= 120 && win.height <= 90,
+            "the window is still {}x{} after being capped at 120x90",
+            win.width,
+            win.height
+        );
     }
 
     /// An always-on-top window sits above its neighbours and below the shell.

@@ -96,7 +96,7 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// same reason 3 did, and worse: the new field's own length prefix would be
 /// read by a version-3 decoder as the window's *width*, so the failure is not a
 /// wrong flag but a window several hundred million pixels across.
-pub const CONTROL_VERSION: u8 = 8;
+pub const CONTROL_VERSION: u8 = 9;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -783,6 +783,35 @@ pub enum RequestBody {
     /// How `always_on_top` and `always_on_bottom` are applied. See
     /// [`StackTier`] for why this is not a layer.
     ShellSetStackTier { window: u64, tier: StackTier },
+    /// Constrain *another client's* window size. Shell only.
+    ///
+    /// How `min_size` and `max_size` window rules are applied. The compositor
+    /// already stores and enforces both -- `Window::clamp_size` is consulted
+    /// by every resize, by maximise, and at creation -- but until now they
+    /// could only be set by the window's own client in its `WindowSpec`, so a
+    /// rule naming them had nowhere to go.
+    ///
+    /// A pair of **zeroes means "leave this one as it is"**, not "no limit".
+    ///
+    /// That is the direction a window rule can actually express. The rule
+    /// vocabulary has `min_size` and `max_size` as *optional* fields: a rule
+    /// either names one or says nothing about it, and there is no way to write
+    /// "remove the minimum this program asked for". A request whose zeroes
+    /// meant "no limit" would make a rule that names only a maximum silently
+    /// discard the program's own minimum, which the user never asked for and
+    /// would only notice when the window collapsed.
+    ///
+    /// Zero is safe as the sentinel because a window may not be zero wide or
+    /// zero tall, so it cannot collide with a real constraint -- and it keeps
+    /// the frame four plain `u32`s rather than growing presence flags that
+    /// could disagree with the numbers beside them.
+    ShellSetSizeLimits {
+        window: u64,
+        min_width: u32,
+        min_height: u32,
+        max_width: u32,
+        max_height: u32,
+    },
     /// Ask about the display. Answered with [`ResponseBody::DisplayInfo`].
     GetDisplayInfo,
     /// Start or stop receiving the desktop's window list.
@@ -1100,6 +1129,7 @@ enum RequestTag {
     ShellMove = 0x1A,
     ShellResize = 0x1B,
     ShellSetStackTier = 0x1C,
+    ShellSetSizeLimits = 0x1D,
 }
 
 impl RequestTag {
@@ -1133,6 +1163,7 @@ impl RequestTag {
             0x1A => Self::ShellMove,
             0x1B => Self::ShellResize,
             0x1C => Self::ShellSetStackTier,
+            0x1D => Self::ShellSetSizeLimits,
             _ => return None,
         })
     }
@@ -1390,6 +1421,20 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::ShellSetStackTier as u8);
             write_u64(out, *window);
             out.push(tier.as_byte());
+        }
+        RequestBody::ShellSetSizeLimits {
+            window,
+            min_width,
+            min_height,
+            max_width,
+            max_height,
+        } => {
+            out.push(RequestTag::ShellSetSizeLimits as u8);
+            write_u64(out, *window);
+            write_u32(out, *min_width);
+            write_u32(out, *min_height);
+            write_u32(out, *max_width);
+            write_u32(out, *max_height);
         }
         RequestBody::GetDisplayInfo => out.push(RequestTag::GetDisplayInfo as u8),
         RequestBody::SubscribeWindowList { subscribe } => {
@@ -1727,6 +1772,16 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             RequestBody::ShellSetStackTier {
                 window,
                 tier: StackTier::from_byte(b).ok_or(DecodeError::BadStackTier(b))?,
+            }
+        }
+        RequestTag::ShellSetSizeLimits => {
+            let window = r.read_u64()?;
+            RequestBody::ShellSetSizeLimits {
+                window,
+                min_width: r.read_u32()?,
+                min_height: r.read_u32()?,
+                max_width: r.read_u32()?,
+                max_height: r.read_u32()?,
             }
         }
         RequestTag::GetDisplayInfo => RequestBody::GetDisplayInfo,
@@ -2177,8 +2232,13 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x1D),
+            Some(RequestTag::ShellSetSizeLimits),
+            "0x1D was taken by ShellSetSizeLimits in control version 9"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x1E),
             None,
-            "0x1D is the next free tag"
+            "0x1E is the next free tag"
         );
     }
 

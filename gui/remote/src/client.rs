@@ -761,6 +761,29 @@ impl<T: Transport> Connection<T> {
     /// # Errors
     ///
     /// As [`Self::confirm`], plus a refusal if this link is not a shell.
+    /// Constrain another client's window size. Shell only.
+    ///
+    /// Zero in either pair means "no limit"; see
+    /// [`RequestBody::ShellSetSizeLimits`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::confirm`], plus a refusal if this link is not a shell.
+    pub fn shell_set_size_limits(
+        &mut self,
+        window: u64,
+        min: (u32, u32),
+        max: (u32, u32),
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::ShellSetSizeLimits {
+            window,
+            min_width: min.0,
+            min_height: min.1,
+            max_width: max.0,
+            max_height: max.1,
+        })
+    }
+
     pub fn shell_set_stack_tier(
         &mut self,
         window: u64,

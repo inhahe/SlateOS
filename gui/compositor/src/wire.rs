@@ -473,6 +473,23 @@ fn to_compositor_request(
                 tier,
             }
         }
+        RequestBody::ShellSetSizeLimits {
+            window,
+            min_width,
+            min_height,
+            max_width,
+            max_height,
+        } => {
+            link.require_shell()?;
+            // Zero means "leave this one alone" on the wire; it becomes
+            // `None` here so the sentinel does not travel further in.
+            let pair = |w: u32, h: u32| (w != 0 || h != 0).then_some((w, h));
+            CompositorRequest::SetSizeLimits {
+                window_id: WindowId::from_raw(window),
+                min_size: pair(min_width, min_height),
+                max_size: pair(max_width, max_height),
+            }
+        }
         RequestBody::GetDisplayInfo => CompositorRequest::GetDisplayInfo,
         // Unlike every window request above there is no `link.resolve` on
         // either of these, and nothing to resolve: a reload names no window and

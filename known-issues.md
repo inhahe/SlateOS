@@ -90887,7 +90887,7 @@ client's windows around.
 |---|---|
 | ~~`position`~~ | **Done 2026-09-07**, except `CenterOnMonitor(n>0)`. `RequestBody::ShellMove`, tag `0x1A`. |
 | ~~`size`~~ | **Done 2026-09-07.** `RequestBody::ShellResize`, tag `0x1B`. |
-| `min_size`, `max_size` | a size-constraint request; the compositor has no per-window constraint store at all |
+| ~~`min_size`, `max_size`~~ | **Done 2026-09-07.** The store existed all along — see increment 4. |
 | ~~`opacity`~~ | **Done 2026-09-07.** `RequestBody::ShellSetOpacity`, tag `0x19`, `CONTROL_VERSION` 5 → 6. |
 | ~~`always_on_top`, `always_on_bottom`~~ | **Done 2026-09-07.** A `StackTier` within the layer, not a layer override — see increment 3. |
 | `target_monitor` | multi-monitor placement, which the compositor does not model yet |
@@ -90990,8 +90990,31 @@ need a policy store the compositor does not have. The honest increments are:
    The shell resolves `always_on_top` + `always_on_bottom` set together into
    one tier rather than sending the compositor a contradiction, and a rule
    silent on stacking asks for nothing at all.
-4. A compositor-side policy store for `prevent_close` / `prevent_move` /
-   `prevent_resize`, and constraints for `min_size` / `max_size`.
+4. **`min_size` / `max_size` done 2026-09-07**, `CONTROL_VERSION` 8 → 9.
+   `prevent_close` / `prevent_move` / `prevent_resize` still open.
+
+   **This entry's claim that "the compositor has no per-window constraint
+   store at all" was wrong when I read it.** `Window::min_size`/`max_size` and
+   `Window::clamp_size` already existed and were already consulted by every
+   resize, by maximise, and at creation. What was missing was only the ability
+   for a *shell* to set them: they came from the client's `WindowSpec` and
+   nowhere else. `RequestBody::ShellSetSizeLimits` (tag `0x1D`) is that.
+
+   **Zeroes on the wire mean "leave this one as it is", not "no limit"**, and
+   that distinction is the whole design. The rule vocabulary has `min_size`
+   and `max_size` as *optional* fields — a rule either names one or says
+   nothing, and there is no way to write "remove the minimum this program
+   asked for". Had zero meant "no limit", a rule naming only a maximum would
+   silently discard the program's own minimum, and the user would find out
+   when the window collapsed under a drag. Mutation-checked: making `None`
+   clear instead of skip fails the test.
+
+   The new limits are applied to the window immediately rather than at the
+   next resize. A rule that says "at most 400 wide" and leaves a 900-wide
+   window alone until somebody drags its edge has not been applied.
+
+   The limits are asked for before the size, so a rule setting both clamps on
+   the way in rather than being corrected afterwards.
 5. `target_monitor` last, behind multi-monitor support.
 
 **Severity while open:** low but *dishonest*, which is the part that matters.

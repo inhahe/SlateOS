@@ -124425,7 +124425,7 @@ which makes step 1 below larger than one dependency line.
   `stickynotes`, `taskscheduler`, `contacts`, `habits`, `fontmanager` and
   `automator`, `sysmonitor`, `undelete`, `ircclient`, `dictionary`,
   `reminders`, `weather`, `alarmclock`, `diagram`, `partmanager` and
-  `credmanager`, `vpnmanager`, `dbviewer`, `whiteboard`, `mindmap` and `tmux`.
+  `credmanager`, `vpnmanager`, `dbviewer`, `whiteboard`, `mindmap`, `tmux` and `remotedesktop`.
   Each has a test on the rectangles it emits, and each was mutation-checked by
   making `theme_changed` ignore its argument.
 

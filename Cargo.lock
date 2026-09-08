@@ -14755,6 +14755,7 @@ dependencies = [
 name = "remotedesktop"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

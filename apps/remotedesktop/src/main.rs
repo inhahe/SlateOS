@@ -21,6 +21,7 @@
 //! representative data for initial development.
 
 #[allow(unused_imports)]
+use appearance::Palette;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
@@ -38,25 +39,6 @@ use std::collections::VecDeque;
 // ============================================================================
 // Catppuccin Mocha Theme Colors
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-#[allow(dead_code)]
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-#[allow(dead_code)]
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
 // Layout Constants
@@ -139,11 +121,11 @@ impl Protocol {
     }
 
     /// Color indicator for protocol in UI.
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Rdp => BLUE,
-            Self::Vnc => GREEN,
-            Self::Ssh => PEACH,
+            Self::Rdp => pal.blue,
+            Self::Vnc => pal.green,
+            Self::Ssh => pal.peach,
         }
     }
 }
@@ -224,12 +206,12 @@ impl QualityPreset {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Auto => BLUE,
-            Self::LowBandwidth => YELLOW,
-            Self::Balanced => GREEN,
-            Self::HighQuality => LAVENDER,
+            Self::Auto => pal.blue,
+            Self::LowBandwidth => pal.yellow,
+            Self::Balanced => pal.green,
+            Self::HighQuality => pal.lavender,
         }
     }
 }
@@ -373,13 +355,13 @@ impl TransferState {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Queued => SUBTEXT0,
-            Self::InProgress => BLUE,
-            Self::Completed => GREEN,
-            Self::Failed => RED,
-            Self::Cancelled => YELLOW,
+            Self::Queued => pal.subtext0,
+            Self::InProgress => pal.blue,
+            Self::Completed => pal.green,
+            Self::Failed => pal.red,
+            Self::Cancelled => pal.yellow,
         }
     }
 }
@@ -464,13 +446,13 @@ impl SessionState {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Disconnected => OVERLAY0,
-            Self::Connecting | Self::Authenticating => YELLOW,
-            Self::Connected => GREEN,
-            Self::Reconnecting => PEACH,
-            Self::Error => RED,
+            Self::Disconnected => pal.overlay0,
+            Self::Connecting | Self::Authenticating => pal.yellow,
+            Self::Connected => pal.green,
+            Self::Reconnecting => pal.peach,
+            Self::Error => pal.red,
         }
     }
 }
@@ -679,6 +661,12 @@ pub struct RemoteDesktopApp {
     pub window_width: f32,
     /// How tall the window is, in pixels.
     pub window_height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for RemoteDesktopApp {
@@ -733,6 +721,7 @@ impl SidebarRow {
 impl RemoteDesktopApp {
     pub fn new() -> Self {
         let mut app = Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             profiles: Vec::new(),
             selected_profile: None,
             next_profile_id: 1,
@@ -1742,7 +1731,7 @@ impl RemoteDesktopApp {
             y: 0.0,
             width: self.window_width,
             height: self.window_height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1786,7 +1775,7 @@ impl RemoteDesktopApp {
             y: 0.0,
             width: self.window_width,
             height: TITLE_BAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1796,7 +1785,7 @@ impl RemoteDesktopApp {
             y: 8.0,
             width: 22.0,
             height: 16.0,
-            color: BLUE,
+            color: self.palette.blue,
             line_width: 2.0,
             corner_radii: CornerRadii::all(3.0),
         });
@@ -1806,7 +1795,7 @@ impl RemoteDesktopApp {
             y1: 24.0,
             x2: 23.0,
             y2: 30.0,
-            color: BLUE,
+            color: self.palette.blue,
             width: 2.0,
         });
         cmds.push(RenderCommand::Line {
@@ -1814,7 +1803,7 @@ impl RemoteDesktopApp {
             y1: 30.0,
             x2: 29.0,
             y2: 30.0,
-            color: BLUE,
+            color: self.palette.blue,
             width: 2.0,
         });
 
@@ -1824,7 +1813,7 @@ impl RemoteDesktopApp {
             y: 12.0,
             text: "Remote Desktop Viewer".into(),
             font_size: 15.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -1837,7 +1826,7 @@ impl RemoteDesktopApp {
                 y: 8.0,
                 width: 80.0,
                 height: 22.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1845,7 +1834,7 @@ impl RemoteDesktopApp {
                 y: 12.0,
                 text: "Fullscreen".into(),
                 font_size: 11.0,
-                color: GREEN,
+                color: self.palette.green,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(70.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1858,7 +1847,7 @@ impl RemoteDesktopApp {
             y1: TITLE_BAR_HEIGHT,
             x2: self.window_width,
             y2: TITLE_BAR_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -1872,12 +1861,18 @@ impl RemoteDesktopApp {
             y,
             width: self.window_width,
             height: TOOLBAR_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
         let btn_labels = ["+ New", "Connect", "Screenshot", "Fullscreen", "Perf"];
-        let btn_colors = [GREEN, BLUE, PEACH, LAVENDER, YELLOW];
+        let btn_colors = [
+            self.palette.green,
+            self.palette.blue,
+            self.palette.peach,
+            self.palette.lavender,
+            self.palette.yellow,
+        ];
         let btn_width = 85.0;
         let gap = 6.0;
         let mut bx = SECTION_PADDING;
@@ -1886,7 +1881,7 @@ impl RemoteDesktopApp {
             let color = if let Some(&c) = btn_colors.get(i) {
                 c
             } else {
-                SURFACE1
+                self.palette.surface1
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -1894,7 +1889,7 @@ impl RemoteDesktopApp {
                 y: y + 4.0,
                 width: btn_width,
                 height: TOOLBAR_HEIGHT - 8.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1916,7 +1911,7 @@ impl RemoteDesktopApp {
             y: y + 10.0,
             text: "Quality:".into(),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
             overflow: TextOverflow::Ellipsis,
@@ -1932,7 +1927,7 @@ impl RemoteDesktopApp {
             y: y + 6.0,
             width: 120.0,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -1940,7 +1935,7 @@ impl RemoteDesktopApp {
             y: y + 10.0,
             text: preset.label().into(),
             font_size: 12.0,
-            color: preset.color(),
+            color: preset.color(&self.palette),
             font_weight: FontWeightHint::Bold,
             max_width: Some(104.0),
             overflow: TextOverflow::Ellipsis,
@@ -1952,7 +1947,7 @@ impl RemoteDesktopApp {
             y1: y + TOOLBAR_HEIGHT,
             x2: self.window_width,
             y2: y + TOOLBAR_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -1965,7 +1960,7 @@ impl RemoteDesktopApp {
             y,
             width: self.window_width,
             height: TAB_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1980,8 +1975,16 @@ impl RemoteDesktopApp {
 
         for tab in &tabs {
             let is_active = *tab == self.current_view;
-            let bg = if is_active { SURFACE0 } else { MANTLE };
-            let fg = if is_active { TEXT_COLOR } else { SUBTEXT0 };
+            let bg = if is_active {
+                self.palette.surface0
+            } else {
+                self.palette.mantle
+            };
+            let fg = if is_active {
+                self.palette.text
+            } else {
+                self.palette.subtext0
+            };
 
             cmds.push(RenderCommand::FillRect {
                 x: tx,
@@ -2004,7 +2007,7 @@ impl RemoteDesktopApp {
                     y1: y + TAB_HEIGHT - 1.0,
                     x2: tx + tab_width,
                     y2: y + TAB_HEIGHT - 1.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     width: 2.0,
                 });
             }
@@ -2033,7 +2036,7 @@ impl RemoteDesktopApp {
             y1: y + TAB_HEIGHT,
             x2: self.window_width,
             y2: y + TAB_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -2048,7 +2051,7 @@ impl RemoteDesktopApp {
             y1: content_y,
             x2: SIDEBAR_WIDTH,
             y2: content_y + content_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2064,7 +2067,7 @@ impl RemoteDesktopApp {
                 y: content_y + content_h / 2.0 - 10.0,
                 text: "Select a connection profile or create a new one".into(),
                 font_size: 14.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(400.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2084,7 +2087,7 @@ impl RemoteDesktopApp {
             y: content_y,
             width: SIDEBAR_WIDTH,
             height: content_h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2113,7 +2116,7 @@ impl RemoteDesktopApp {
                         y: cy + 6.0,
                         text: group.clone(),
                         font_size: 10.0,
-                        color: OVERLAY0,
+                        color: self.palette.overlay0,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(SIDEBAR_WIDTH - 2.0 * SECTION_PADDING),
                         overflow: TextOverflow::Ellipsis,
@@ -2124,7 +2127,11 @@ impl RemoteDesktopApp {
                         continue;
                     };
                     let is_selected = self.selected_profile == Some(*pi);
-                    let bg = if is_selected { SURFACE0 } else { MANTLE };
+                    let bg = if is_selected {
+                        self.palette.surface0
+                    } else {
+                        self.palette.mantle
+                    };
 
                     cmds.push(RenderCommand::FillRect {
                         x: 4.0,
@@ -2141,7 +2148,7 @@ impl RemoteDesktopApp {
                             y1: cy,
                             x2: 4.0,
                             y2: cy + SIDEBAR_ITEM_HEIGHT - 4.0,
-                            color: BLUE,
+                            color: self.palette.blue,
                             width: 3.0,
                         });
                     }
@@ -2152,7 +2159,7 @@ impl RemoteDesktopApp {
                         y: cy + 6.0,
                         width: 36.0,
                         height: 18.0,
-                        color: protocol_badge_bg(profile.protocol),
+                        color: protocol_badge_bg(profile.protocol, &self.palette),
                         corner_radii: CornerRadii::all(3.0),
                     });
                     cmds.push(RenderCommand::Text {
@@ -2160,7 +2167,7 @@ impl RemoteDesktopApp {
                         y: cy + 8.0,
                         text: profile.protocol.label().into(),
                         font_size: 10.0,
-                        color: CRUST,
+                        color: self.palette.crust,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(28.0),
                         overflow: TextOverflow::Ellipsis,
@@ -2172,7 +2179,7 @@ impl RemoteDesktopApp {
                         y: cy + 8.0,
                         text: profile.display_name.clone(),
                         font_size: 13.0,
-                        color: TEXT_COLOR,
+                        color: self.palette.text,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(SIDEBAR_WIDTH - 80.0),
                         overflow: TextOverflow::Ellipsis,
@@ -2184,7 +2191,7 @@ impl RemoteDesktopApp {
                         y: cy + 26.0,
                         text: format!("{}:{}", profile.hostname, profile.port),
                         font_size: 11.0,
-                        color: SUBTEXT0,
+                        color: self.palette.subtext0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(SIDEBAR_WIDTH - 80.0),
                         overflow: TextOverflow::Ellipsis,
@@ -2218,8 +2225,16 @@ impl RemoteDesktopApp {
         let mut dtx = px;
         for dt in &detail_tabs {
             let is_active = *dt == self.detail_tab;
-            let bg = if is_active { SURFACE0 } else { BASE };
-            let fg = if is_active { BLUE } else { SUBTEXT0 };
+            let bg = if is_active {
+                self.palette.surface0
+            } else {
+                self.palette.base
+            };
+            let fg = if is_active {
+                self.palette.blue
+            } else {
+                self.palette.subtext0
+            };
 
             cmds.push(RenderCommand::FillRect {
                 x: dtx,
@@ -2282,30 +2297,41 @@ impl RemoteDesktopApp {
         ];
 
         for (label, value) in &fields {
-            render_field_row(cmds, px, cy, pw, label, value);
+            render_field_row(cmds, &self.palette, px, cy, pw, label, value);
             cy += FIELD_HEIGHT + 6.0;
         }
 
         // Buttons
         cy += 10.0;
-        render_button(cmds, px, cy, BUTTON_WIDTH, BUTTON_HEIGHT, "Save", GREEN);
         render_button(
             cmds,
+            &self.palette,
+            px,
+            cy,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+            "Save",
+            self.palette.green,
+        );
+        render_button(
+            cmds,
+            &self.palette,
             px + BUTTON_WIDTH + 10.0,
             cy,
             BUTTON_WIDTH,
             BUTTON_HEIGHT,
             "Delete",
-            RED,
+            self.palette.red,
         );
         render_button(
             cmds,
+            &self.palette,
             px + 2.0 * (BUTTON_WIDTH + 10.0),
             cy,
             BUTTON_WIDTH,
             BUTTON_HEIGHT,
             "Connect",
-            BLUE,
+            self.palette.blue,
         );
     }
 
@@ -2331,7 +2357,7 @@ impl RemoteDesktopApp {
         ];
 
         for (label, value) in &fields {
-            render_field_row(cmds, px, cy, pw, label, value);
+            render_field_row(cmds, &self.palette, px, cy, pw, label, value);
             cy += FIELD_HEIGHT + 6.0;
         }
 
@@ -2342,20 +2368,29 @@ impl RemoteDesktopApp {
             y: cy,
             text: "Multi-Monitor".into(),
             font_size: 13.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(pw),
             overflow: TextOverflow::Ellipsis,
         });
         cy += 22.0;
 
-        render_field_row(cmds, px, cy, pw, "Mode", &self.monitor_mode.label());
+        render_field_row(
+            cmds,
+            &self.palette,
+            px,
+            cy,
+            pw,
+            "Mode",
+            &self.monitor_mode.label(),
+        );
         cy += FIELD_HEIGHT + 6.0;
 
         for monitor in &self.remote_monitors {
             let primary_tag = if monitor.primary { " (Primary)" } else { "" };
             render_field_row(
                 cmds,
+                &self.palette,
                 px,
                 cy,
                 pw,
@@ -2405,7 +2440,7 @@ impl RemoteDesktopApp {
         ];
 
         for (label, value) in &input_fields {
-            render_field_row(cmds, px, cy, pw, label, value);
+            render_field_row(cmds, &self.palette, px, cy, pw, label, value);
             cy += FIELD_HEIGHT + 6.0;
         }
 
@@ -2416,7 +2451,7 @@ impl RemoteDesktopApp {
             y: cy,
             text: "Key Mappings".into(),
             font_size: 13.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(pw),
             overflow: TextOverflow::Ellipsis,
@@ -2429,7 +2464,7 @@ impl RemoteDesktopApp {
                 y: cy,
                 width: pw.min(400.0),
                 height: FIELD_HEIGHT,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -2437,7 +2472,7 @@ impl RemoteDesktopApp {
                 y: cy + 6.0,
                 text: mapping.label.clone(),
                 font_size: 12.0,
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(pw.min(380.0)),
                 overflow: TextOverflow::Ellipsis,
@@ -2464,7 +2499,7 @@ impl RemoteDesktopApp {
         ];
 
         for (label, value) in &fields {
-            render_field_row(cmds, px, cy, pw, label, value);
+            render_field_row(cmds, &self.palette, px, cy, pw, label, value);
             cy += FIELD_HEIGHT + 6.0;
         }
 
@@ -2475,7 +2510,7 @@ impl RemoteDesktopApp {
             y: cy,
             text: "Clipboard Status".into(),
             font_size: 13.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(pw),
             overflow: TextOverflow::Ellipsis,
@@ -2493,7 +2528,7 @@ impl RemoteDesktopApp {
         ];
 
         for (label, value) in &clip_fields {
-            render_field_row(cmds, px, cy, pw, label, value);
+            render_field_row(cmds, &self.palette, px, cy, pw, label, value);
             cy += FIELD_HEIGHT + 6.0;
         }
     }
@@ -2505,7 +2540,7 @@ impl RemoteDesktopApp {
             y: content_y,
             width: SIDEBAR_WIDTH,
             height: content_h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2522,7 +2557,7 @@ impl RemoteDesktopApp {
                 y: content_y + 20.0,
                 text: "No active sessions".into(),
                 font_size: 13.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 2.0 * SECTION_PADDING),
                 overflow: TextOverflow::Ellipsis,
@@ -2546,7 +2581,11 @@ impl RemoteDesktopApp {
                 .take(visible.count)
             {
                 let is_sel = self.selected_session == Some(i);
-                let bg = if is_sel { SURFACE0 } else { MANTLE };
+                let bg = if is_sel {
+                    self.palette.surface0
+                } else {
+                    self.palette.mantle
+                };
 
                 cmds.push(RenderCommand::FillRect {
                     x: 4.0,
@@ -2563,7 +2602,7 @@ impl RemoteDesktopApp {
                     y: cy + 10.0,
                     width: 10.0,
                     height: 10.0,
-                    color: session.state.color(),
+                    color: session.state.color(&self.palette),
                     corner_radii: CornerRadii::all(5.0),
                 });
 
@@ -2572,7 +2611,7 @@ impl RemoteDesktopApp {
                     y: cy + 8.0,
                     text: session.display_name.clone(),
                     font_size: 13.0,
-                    color: TEXT_COLOR,
+                    color: self.palette.text,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(SIDEBAR_WIDTH - 60.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2583,7 +2622,7 @@ impl RemoteDesktopApp {
                     y: cy + 26.0,
                     text: session.state.label().into(),
                     font_size: 11.0,
-                    color: session.state.color(),
+                    color: session.state.color(&self.palette),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(SIDEBAR_WIDTH - 60.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2601,7 +2640,7 @@ impl RemoteDesktopApp {
             y1: content_y,
             x2: SIDEBAR_WIDTH,
             y2: content_y + content_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2618,7 +2657,7 @@ impl RemoteDesktopApp {
                     y: cy,
                     text: session.display_name.clone(),
                     font_size: 16.0,
-                    color: TEXT_COLOR,
+                    color: self.palette.text,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(pw),
                     overflow: TextOverflow::Ellipsis,
@@ -2632,23 +2671,33 @@ impl RemoteDesktopApp {
                 ];
 
                 for (label, value) in &detail_fields {
-                    render_field_row(cmds, px, cy, pw, label, value);
+                    render_field_row(cmds, &self.palette, px, cy, pw, label, value);
                     cy += FIELD_HEIGHT + 6.0;
                 }
 
                 // Action buttons
                 cy += 10.0;
                 if session.state == SessionState::Connected {
-                    render_button(cmds, px, cy, BUTTON_WIDTH, BUTTON_HEIGHT, "Disconnect", RED);
+                    render_button(
+                        cmds,
+                        &self.palette,
+                        px,
+                        cy,
+                        BUTTON_WIDTH,
+                        BUTTON_HEIGHT,
+                        "Disconnect",
+                        self.palette.red,
+                    );
                 } else if session.state == SessionState::Disconnected {
                     render_button(
                         cmds,
+                        &self.palette,
                         px,
                         cy,
                         BUTTON_WIDTH,
                         BUTTON_HEIGHT,
                         "Reconnect",
-                        GREEN,
+                        self.palette.green,
                     );
                 }
             }
@@ -2658,7 +2707,7 @@ impl RemoteDesktopApp {
                 y: content_y + content_h / 2.0 - 10.0,
                 text: "Select a session to view details".into(),
                 font_size: 14.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(400.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2676,7 +2725,7 @@ impl RemoteDesktopApp {
             y: content_y + SECTION_PADDING,
             text: "File Transfers".into(),
             font_size: 16.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(pw),
             overflow: TextOverflow::Ellipsis,
@@ -2684,15 +2733,25 @@ impl RemoteDesktopApp {
 
         // Action buttons
         let btn_y = content_y + SECTION_PADDING + 28.0;
-        render_button(cmds, px, btn_y, 100.0, 28.0, "Upload File", BLUE);
         render_button(
             cmds,
+            &self.palette,
+            px,
+            btn_y,
+            100.0,
+            28.0,
+            "Upload File",
+            self.palette.blue,
+        );
+        render_button(
+            cmds,
+            &self.palette,
             px + 110.0,
             btn_y,
             120.0,
             28.0,
             "Clear Finished",
-            OVERLAY0,
+            self.palette.overlay0,
         );
 
         // Transfer list
@@ -2710,7 +2769,7 @@ impl RemoteDesktopApp {
                 y: list_y + 20.0,
                 text: "No file transfers. Drag files here to start.".into(),
                 font_size: 13.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(pw - 80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2749,7 +2808,7 @@ impl RemoteDesktopApp {
             y: ty,
             width: pw,
             height: TRANSFER_ITEM_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -2759,8 +2818,8 @@ impl RemoteDesktopApp {
             TransferDirection::Download => "v",
         };
         let arrow_color = match transfer.direction {
-            TransferDirection::Upload => BLUE,
-            TransferDirection::Download => GREEN,
+            TransferDirection::Upload => self.palette.blue,
+            TransferDirection::Download => self.palette.green,
         };
         cmds.push(RenderCommand::Text {
             x: px + 10.0,
@@ -2779,7 +2838,7 @@ impl RemoteDesktopApp {
             y: ty + 6.0,
             text: transfer.filename.clone(),
             font_size: 13.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(pw - 200.0),
             overflow: TextOverflow::Ellipsis,
@@ -2796,7 +2855,7 @@ impl RemoteDesktopApp {
                 transfer.state.label()
             ),
             font_size: 11.0,
-            color: transfer.state.color(),
+            color: transfer.state.color(&self.palette),
             font_weight: FontWeightHint::Regular,
             max_width: Some(pw - 200.0),
             overflow: TextOverflow::Ellipsis,
@@ -2814,7 +2873,7 @@ impl RemoteDesktopApp {
             y: bar_y,
             width: bar_w,
             height: bar_h,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -2827,7 +2886,7 @@ impl RemoteDesktopApp {
                 y: bar_y,
                 width: fill_w,
                 height: bar_h,
-                color: transfer.state.color(),
+                color: transfer.state.color(&self.palette),
                 corner_radii: CornerRadii::all(4.0),
             });
         }
@@ -2838,7 +2897,7 @@ impl RemoteDesktopApp {
             y: ty + 17.0,
             text: format!("{:.0}%", transfer.progress_percent()),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(40.0),
             overflow: TextOverflow::Ellipsis,
@@ -2855,7 +2914,7 @@ impl RemoteDesktopApp {
             y: content_y + SECTION_PADDING,
             text: "Connection History".into(),
             font_size: 16.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(pw),
             overflow: TextOverflow::Ellipsis,
@@ -2863,12 +2922,13 @@ impl RemoteDesktopApp {
 
         render_button(
             cmds,
+            &self.palette,
             self.window_width - SECTION_PADDING - 100.0,
             content_y + SECTION_PADDING - 2.0,
             100.0,
             28.0,
             "Clear All",
-            RED,
+            self.palette.red,
         );
 
         let list_y = content_y + SECTION_PADDING + 32.0;
@@ -2885,7 +2945,7 @@ impl RemoteDesktopApp {
                 y: list_y + 20.0,
                 text: "No connection history".into(),
                 font_size: 13.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(pw - 80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2915,12 +2975,16 @@ impl RemoteDesktopApp {
             y: hy,
             width: pw,
             height: HISTORY_ITEM_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
 
         // Status dot
-        let status_color = if entry.success { GREEN } else { RED };
+        let status_color = if entry.success {
+            self.palette.green
+        } else {
+            self.palette.red
+        };
         cmds.push(RenderCommand::FillRect {
             x: px + 10.0,
             y: hy + 16.0,
@@ -2936,7 +3000,7 @@ impl RemoteDesktopApp {
             y: hy + 6.0,
             width: 36.0,
             height: 18.0,
-            color: protocol_badge_bg(entry.protocol),
+            color: protocol_badge_bg(entry.protocol, &self.palette),
             corner_radii: CornerRadii::all(3.0),
         });
         cmds.push(RenderCommand::Text {
@@ -2944,7 +3008,7 @@ impl RemoteDesktopApp {
             y: hy + 8.0,
             text: entry.protocol.label().into(),
             font_size: 10.0,
-            color: CRUST,
+            color: self.palette.crust,
             font_weight: FontWeightHint::Bold,
             max_width: Some(28.0),
             overflow: TextOverflow::Ellipsis,
@@ -2956,7 +3020,7 @@ impl RemoteDesktopApp {
             y: hy + 6.0,
             text: entry.profile_name.clone(),
             font_size: 13.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -2971,14 +3035,23 @@ impl RemoteDesktopApp {
                 format_duration(entry.duration_secs)
             ),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
         });
 
         // Quick connect button
-        render_button(cmds, pw - 80.0, hy + 8.0, 80.0, 28.0, "Connect", BLUE);
+        render_button(
+            cmds,
+            &self.palette,
+            pw - 80.0,
+            hy + 8.0,
+            80.0,
+            28.0,
+            "Connect",
+            self.palette.blue,
+        );
     }
 
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
@@ -2989,7 +3062,7 @@ impl RemoteDesktopApp {
             y,
             width: self.window_width,
             height: STATUS_BAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2999,7 +3072,7 @@ impl RemoteDesktopApp {
             y1: y,
             x2: self.window_width,
             y2: y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -3014,7 +3087,11 @@ impl RemoteDesktopApp {
             y: y + 7.0,
             text: format!("{active_count} active"),
             font_size: 11.0,
-            color: if active_count > 0 { GREEN } else { OVERLAY0 },
+            color: if active_count > 0 {
+                self.palette.green
+            } else {
+                self.palette.overlay0
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
@@ -3026,7 +3103,7 @@ impl RemoteDesktopApp {
             y: y + 7.0,
             text: format!("{} profiles", self.profiles.len()),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
@@ -3044,7 +3121,7 @@ impl RemoteDesktopApp {
                 y: y + 7.0,
                 text: format!("{active_transfers} transfers"),
                 font_size: 11.0,
-                color: BLUE,
+                color: self.palette.blue,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3058,7 +3135,7 @@ impl RemoteDesktopApp {
                 y: y + 7.0,
                 text: msg.clone(),
                 font_size: 11.0,
-                color: YELLOW,
+                color: self.palette.yellow,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3071,7 +3148,7 @@ impl RemoteDesktopApp {
             y: y + 7.0,
             text: format!("{:.1}ms", self.perf_metrics.latency_ms),
             font_size: 11.0,
-            color: latency_color(self.perf_metrics.latency_ms),
+            color: latency_color(self.perf_metrics.latency_ms, &self.palette),
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
             overflow: TextOverflow::Ellipsis,
@@ -3083,7 +3160,7 @@ impl RemoteDesktopApp {
             y: y + 7.0,
             text: format!("{:.0} fps", self.perf_metrics.frame_rate),
             font_size: 11.0,
-            color: fps_color(self.perf_metrics.frame_rate),
+            color: fps_color(self.perf_metrics.frame_rate, &self.palette),
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
             overflow: TextOverflow::Ellipsis,
@@ -3124,7 +3201,7 @@ impl RemoteDesktopApp {
             y: oy,
             width: ow,
             height: oh,
-            color: SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -3135,7 +3212,7 @@ impl RemoteDesktopApp {
             y: oy + 8.0,
             text: "Performance".into(),
             font_size: 12.0,
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(ow - 20.0),
             overflow: TextOverflow::Ellipsis,
@@ -3145,27 +3222,27 @@ impl RemoteDesktopApp {
             (
                 "Bandwidth",
                 format!("{:.1} Kbps", self.perf_metrics.bandwidth_kbps),
-                BLUE,
+                self.palette.blue,
             ),
             (
                 "Latency",
                 format!("{:.1} ms", self.perf_metrics.latency_ms),
-                latency_color(self.perf_metrics.latency_ms),
+                latency_color(self.perf_metrics.latency_ms, &self.palette),
             ),
             (
                 "Frame Rate",
                 format!("{:.1} fps", self.perf_metrics.frame_rate),
-                fps_color(self.perf_metrics.frame_rate),
+                fps_color(self.perf_metrics.frame_rate, &self.palette),
             ),
             (
                 "Sent",
                 format_link_bytes(self.perf_metrics.bytes_sent),
-                SUBTEXT0,
+                self.palette.subtext0,
             ),
             (
                 "Received",
                 format_link_bytes(self.perf_metrics.bytes_received),
-                SUBTEXT0,
+                self.palette.subtext0,
             ),
             (
                 "Packets",
@@ -3173,7 +3250,7 @@ impl RemoteDesktopApp {
                     "{}/{}",
                     self.perf_metrics.packets_sent, self.perf_metrics.packets_received
                 ),
-                SUBTEXT0,
+                self.palette.subtext0,
             ),
         ];
 
@@ -3184,7 +3261,7 @@ impl RemoteDesktopApp {
                 y: my,
                 text: (*label).into(),
                 font_size: 11.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(90.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3211,6 +3288,7 @@ impl RemoteDesktopApp {
 /// Render a labeled field row.
 fn render_field_row(
     cmds: &mut Vec<RenderCommand>,
+    pal: &Palette,
     x: f32,
     y: f32,
     _width: f32,
@@ -3222,7 +3300,7 @@ fn render_field_row(
         y: y + 5.0,
         text: label.into(),
         font_size: 12.0,
-        color: SUBTEXT0,
+        color: pal.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(FIELD_LABEL_WIDTH),
         overflow: TextOverflow::Ellipsis,
@@ -3232,7 +3310,7 @@ fn render_field_row(
         y,
         width: 260.0,
         height: FIELD_HEIGHT,
-        color: SURFACE0,
+        color: pal.surface0,
         corner_radii: CornerRadii::all(4.0),
     });
     cmds.push(RenderCommand::Text {
@@ -3240,7 +3318,7 @@ fn render_field_row(
         y: y + 6.0,
         text: value.into(),
         font_size: 12.0,
-        color: TEXT_COLOR,
+        color: pal.text,
         font_weight: FontWeightHint::Regular,
         max_width: Some(244.0),
         overflow: TextOverflow::Ellipsis,
@@ -3250,6 +3328,7 @@ fn render_field_row(
 /// Render a simple button.
 fn render_button(
     cmds: &mut Vec<RenderCommand>,
+    pal: &Palette,
     x: f32,
     y: f32,
     w: f32,
@@ -3262,7 +3341,7 @@ fn render_button(
         y,
         width: w,
         height: h,
-        color: SURFACE0,
+        color: pal.surface0,
         corner_radii: CornerRadii::all(6.0),
     });
     cmds.push(RenderCommand::StrokeRect {
@@ -3287,29 +3366,29 @@ fn render_button(
 }
 
 /// Protocol badge background color.
-fn protocol_badge_bg(proto: Protocol) -> Color {
-    proto.color()
+fn protocol_badge_bg(proto: Protocol, pal: &Palette) -> Color {
+    proto.color(pal)
 }
 
 /// Color for latency value (green = good, yellow = ok, red = bad).
-fn latency_color(ms: f32) -> Color {
+fn latency_color(ms: f32, pal: &Palette) -> Color {
     if ms < 30.0 {
-        GREEN
+        pal.green
     } else if ms < 100.0 {
-        YELLOW
+        pal.yellow
     } else {
-        RED
+        pal.red
     }
 }
 
 /// Color for frame rate value (green = good, yellow = ok, red = bad).
-fn fps_color(fps: f32) -> Color {
+fn fps_color(fps: f32, pal: &Palette) -> Color {
     if fps >= 50.0 {
-        GREEN
+        pal.green
     } else if fps >= 25.0 {
-        YELLOW
+        pal.yellow
     } else {
-        RED
+        pal.red
     }
 }
 
@@ -3344,6 +3423,10 @@ fn format_duration(secs: u64) -> String {
 // ============================================================================
 
 impl App for RemoteDesktopApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // What is connected, because that is what a remote-desktop window is
         // about and what a taskbar entry needs to distinguish two of them. The
@@ -3942,9 +4025,10 @@ mod tests {
 
     #[test]
     fn test_protocol_colors_differ() {
-        let c1 = Protocol::Rdp.color();
-        let c2 = Protocol::Vnc.color();
-        let c3 = Protocol::Ssh.color();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let c1 = Protocol::Rdp.color(&pal);
+        let c2 = Protocol::Vnc.color(&pal);
+        let c3 = Protocol::Ssh.color(&pal);
         assert_ne!(c1, c2);
         assert_ne!(c2, c3);
     }
@@ -4031,10 +4115,11 @@ mod tests {
 
     #[test]
     fn test_quality_preset_colors_differ() {
-        let c1 = QualityPreset::Auto.color();
-        let c2 = QualityPreset::LowBandwidth.color();
-        let c3 = QualityPreset::Balanced.color();
-        let c4 = QualityPreset::HighQuality.color();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let c1 = QualityPreset::Auto.color(&pal);
+        let c2 = QualityPreset::LowBandwidth.color(&pal);
+        let c3 = QualityPreset::Balanced.color(&pal);
+        let c4 = QualityPreset::HighQuality.color(&pal);
         assert_ne!(c1, c2);
         assert_ne!(c3, c4);
     }
@@ -4136,9 +4221,10 @@ mod tests {
 
     #[test]
     fn test_session_state_colors_differ() {
-        let c1 = SessionState::Connected.color();
-        let c2 = SessionState::Disconnected.color();
-        let c3 = SessionState::Error.color();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let c1 = SessionState::Connected.color(&pal);
+        let c2 = SessionState::Disconnected.color(&pal);
+        let c3 = SessionState::Error.color(&pal);
         assert_ne!(c1, c2);
         assert_ne!(c1, c3);
     }
@@ -4498,6 +4584,7 @@ mod tests {
     #[allow(clippy::float_cmp)]
     #[test]
     fn test_render_starts_with_background() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let app = RemoteDesktopApp::new();
         let cmds = app.render_commands();
         match &cmds[0] {
@@ -4513,7 +4600,7 @@ mod tests {
                 assert_eq!(*y, 0.0);
                 assert_eq!(*width, WINDOW_WIDTH);
                 assert_eq!(*height, WINDOW_HEIGHT);
-                assert_eq!(*color, BASE);
+                assert_eq!(*color, pal.base);
             }
             _ => panic!("First command should be background FillRect"),
         }
@@ -4710,32 +4797,38 @@ mod tests {
 
     #[test]
     fn test_latency_color_good() {
-        assert_eq!(latency_color(10.0), GREEN);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(latency_color(10.0, &pal), pal.green);
     }
 
     #[test]
     fn test_latency_color_medium() {
-        assert_eq!(latency_color(50.0), YELLOW);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(latency_color(50.0, &pal), pal.yellow);
     }
 
     #[test]
     fn test_latency_color_bad() {
-        assert_eq!(latency_color(150.0), RED);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(latency_color(150.0, &pal), pal.red);
     }
 
     #[test]
     fn test_fps_color_good() {
-        assert_eq!(fps_color(60.0), GREEN);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(fps_color(60.0, &pal), pal.green);
     }
 
     #[test]
     fn test_fps_color_medium() {
-        assert_eq!(fps_color(30.0), YELLOW);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(fps_color(30.0, &pal), pal.yellow);
     }
 
     #[test]
     fn test_fps_color_bad() {
-        assert_eq!(fps_color(10.0), RED);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(fps_color(10.0, &pal), pal.red);
     }
 
     #[test]
@@ -5043,5 +5136,64 @@ mod tests {
 
         app.handle_event(&wheel_at(10.0, -1.0));
         assert_eq!(app.sidebar_scroll, rows_per_notch());
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut RemoteDesktopApp) -> Vec<Color> {
+            app.render(1200.0, 800.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = RemoteDesktopApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

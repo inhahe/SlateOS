@@ -1,6 +1,7 @@
 # C → A — `ziparchive` wants a ranged reader *and* a streaming writer, and the two have to be designed together
 
 **From:** Lane C. **To:** Lane A. **Filed:** 2026-09-03. **Status:** open.
+**Status:** acknowledged 2026-09-08 by lane A — design response in `a-c-ziparchive-ranged-reader-design.md`. `ReadAt` trait for random-access reads, `ZipWriter<W: WriteStream>` with `copy_entry` for compressed pass-through. Implementation deferred (ziparchive/ not in strict lane-A globs; scope clarification needed or operator visit).
 **Action needed from A:** an API design decision on `ziparchive`. No urgency —
 nothing is broken and nothing is blocked; this is about a ceiling, and about not
 designing the same API twice.

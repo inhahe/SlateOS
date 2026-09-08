@@ -124163,7 +124163,7 @@ no other crate depends on it), so nothing outside the corpus could reach them.
 
 | module | what it holds | what is missing |
 |---|---|---|
-| `login_screen.rs` | `LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig` | Construction and a session hand-off. §815 says wire it up. This is also where `design-decisions.md` §818 (a passwordless account is never locked) has to take effect, and it currently cannot. |
+| `login_screen.rs` | `LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig` | Construction and a session hand-off. §815 says wire it up. *(Correction, 2026-09-08: an earlier version of this row said §818 has to take effect here. It does not — §818 is about the **lock** screen, `apps/lockscreen`, which is a separate program. See `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.)* |
 | `blur.rs` | `BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager` | A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
 | `input_method.rs` | `InputMethodManager`, `SwitchShortcut` | A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
 | `tray_dnd.rs` | `TrayDragSource`, `TrayDropTarget`, `TrayIconSlot`, `TrayIconArrangement`, `TraySlotConfig`, `TrayArrangementConfig`, `StartInTrayConfig` | A caller in the tray's event path. |
@@ -124179,3 +124179,54 @@ last, because wiring is the small half of it.
 job with a design question in it, and this was a dead-code sweep. What matters
 is that the sweep is written down: before it, nothing in the tree said these
 four were disconnected, and their size makes them look finished.
+
+---
+
+## TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `apps/lockscreen/src/main.rs`, `gui/desktop/src/hotkeys.rs`
+(`LOCK_COMMAND`), `gui/desktop/src/session.rs`.
+
+**In short:** the operator decided on 2026-09-07 (`design-decisions.md` §818)
+that an account with no password is never locked — the lock screen simply does
+not appear, instead of appearing and letting anyone dismiss it. That decision
+is **not implemented**, and it cannot be implemented where it naturally
+belongs, because nothing in the tree actually locks the screen.
+
+**What is true today.** Pressing the lock shortcut produces a *launch request*
+for `/usr/bin/lockscreen` and nothing executes it — the shell reports launches
+through `HotkeyOutcome::launches` / `ShellSession::take_launches` and has no
+connection to a process server. So the screen never appears at all, for any
+account. The bug §818 describes is therefore latent rather than live.
+
+**Why it cannot simply be done inside `apps/lockscreen`.** "Never lock" is a
+decision made by whatever *locks*, and that program only runs after the
+decision. It has no trustworthy way to learn whose session it is locking:
+there is no per-process user identity available to an application here, and
+the only identity mechanism (`authlib`) verifies a username the caller
+supplies. Deciding whether to lock from `$USER` would be worse than the
+original bug — an environment variable an attacker can set would decide
+whether the machine locks.
+
+**Where it does belong**, once there is a lock path at all: at the point that
+requests the lock, which knows the session. The shell already has the
+ingredients — `user_accounts::UserAccount` carries `is_current` and
+`login_options.has_password` — so the rule is one condition on a launch that
+something must first be executing.
+
+**What was done in the meantime.** `LockScreen::unlocks_for`'s doc comment
+said the passwordless case was *"an open question rather than a settled one"*
+and weighed two options. That has been false since §818, and a comment
+claiming a decision is unmade is worse than no comment: it invites the next
+reader to re-litigate a settled question, or to "fix" it by refusing the empty
+password, which is the option §818 explicitly rejected for stranding the user.
+The comment now records the decision, why accepting stays (it is the fallback
+for a state §818 says cannot arise, reachable only if a password is removed
+while the screen is already up), and why the real fix is elsewhere.
+
+**Order.** This is behind the same prerequisite as
+`TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED`: the session has no
+lock/login lifecycle. Build that, and §818 is one condition. Do not implement
+§818 by making the lock screen refuse empty passwords — that is option B,
+which the operator considered and rejected.

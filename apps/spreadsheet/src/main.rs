@@ -2758,6 +2758,15 @@ pub struct SpreadsheetApp {
     pub window_height: f32,
     /// Find and replace state.
     pub find_replace: FindReplace,
+    /// A one-line notice that replaces the status bar's sum until the next
+    /// keystroke.
+    ///
+    /// The status bar is otherwise derived entirely from the selection, so an
+    /// operation that declines to do something had nowhere to say so. It is
+    /// cleared by any key rather than by a timer: a message that vanishes on
+    /// its own is one the user can miss, and one that never vanishes is one
+    /// they stop reading.
+    pub notice: Option<String>,
     /// Whether to show gridlines.
     pub show_gridlines: bool,
     /// Whether to show the formula bar.
@@ -2779,6 +2788,7 @@ impl SpreadsheetApp {
             window_width: width,
             window_height: height,
             find_replace: FindReplace::new(),
+            notice: None,
             show_gridlines: true,
             show_formula_bar: true,
             show_toolbar: true,
@@ -3333,14 +3343,36 @@ impl SpreadsheetApp {
     pub fn toggle_freeze_panes(&mut self) {
         let col = self.selection().active.col;
         let row = self.selection().active.row;
+        let (grid_w, grid_h) = (self.grid_width(), self.grid_height());
         let sheet = self.active_sheet_mut();
         if sheet.frozen_cols > 0 || sheet.frozen_rows > 0 {
             sheet.frozen_cols = 0;
             sheet.frozen_rows = 0;
         } else {
+            // A frozen band that fills the window leaves nothing able to
+            // scroll: the whole sheet becomes pinned, and the only way out is
+            // to freeze again to unfreeze. Refused, and said out loud.
+            //
+            // Refusing rather than capping silently to the largest band that
+            // would fit: a user who asked to freeze at column T and got column
+            // H, with nothing said, would be told a lie by the result. Excel
+            // refuses the same operation for the same reason. The alternatives
+            // are recorded in `design-decisions.md` 820.
+            let band_w = sheet.col_x_offset(col);
+            let band_h = sheet.row_y_offset(row);
+            if band_w >= grid_w || band_h >= grid_h {
+                self.notice = Some(
+                    "Cannot freeze here: the frozen rows and columns would fill \
+                     the window, leaving nothing to scroll. Pick a cell nearer \
+                     the top left."
+                        .to_string(),
+                );
+                return;
+            }
             sheet.frozen_cols = col;
             sheet.frozen_rows = row;
         }
+        self.notice = None;
         // Freezing does not change either limit, but it does change which
         // cells the current offset is showing, and `ensure_cell_visible` now
         // treats the frozen band differently. Re-running the bound keeps the
@@ -3639,6 +3671,11 @@ impl SpreadsheetApp {
 
     /// Get status bar text showing SUM/AVG/COUNT of selection.
     pub fn status_bar_text(&self) -> String {
+        // A notice outranks the sum. The sum is always available by looking at
+        // the selection again; a refusal is only said once.
+        if let Some(notice) = &self.notice {
+            return notice.clone();
+        }
         let nums = self.selection().numeric_values(self.active_sheet());
         if nums.is_empty() {
             return String::new();
@@ -3654,6 +3691,9 @@ impl SpreadsheetApp {
         if !event.pressed {
             return EventResult::Ignored;
         }
+        // Any keystroke dismisses a notice. Cleared before dispatch, so an
+        // operation below is free to set a new one.
+        self.notice = None;
 
         // Handle find/replace mode
         if self.mode == InteractionMode::FindReplace {
@@ -9833,5 +9873,88 @@ mod tests {
         app.add_sheet();
         assert_eq!(app.scroll().x, 0.0);
         assert_eq!(app.scroll().y, 0.0);
+    }
+
+    // ------------------------------------------------------------------
+    // Freezing panes
+    // ------------------------------------------------------------------
+
+    /// A freeze that would fill the window is refused, and says so.
+    ///
+    /// Without the check the whole sheet becomes frozen band with nothing able
+    /// to scroll, and the only way out is to freeze again to unfreeze -- a
+    /// trap the pointer cannot leave by any other route.
+    #[test]
+    fn a_freeze_that_would_fill_the_window_is_refused_out_loud() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        // Far enough right that the frozen band is wider than the grid.
+        app.selection_mut().active = CellAddr { col: 60, row: 0 };
+
+        app.toggle_freeze_panes();
+
+        let sheet = app.active_sheet();
+        assert_eq!(
+            (sheet.frozen_cols, sheet.frozen_rows),
+            (0, 0),
+            "the sheet was frozen into a state with nothing left to scroll"
+        );
+        assert!(
+            app.status_bar_text().contains("Cannot freeze"),
+            "the refusal was silent: {:?}",
+            app.status_bar_text()
+        );
+    }
+
+    /// An ordinary freeze still works and clears any previous notice.
+    #[test]
+    fn a_freeze_that_fits_is_carried_out() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.notice = Some("stale".to_string());
+        app.selection_mut().active = CellAddr { col: 2, row: 3 };
+
+        app.toggle_freeze_panes();
+
+        let sheet = app.active_sheet();
+        assert_eq!((sheet.frozen_cols, sheet.frozen_rows), (2, 3));
+        assert!(
+            !app.status_bar_text().contains("stale"),
+            "a successful freeze left the old notice up"
+        );
+    }
+
+    /// Unfreezing is never refused.
+    ///
+    /// The refusal is about *entering* a state with nothing to scroll; leaving
+    /// one must always be possible, or a sheet frozen by an older build could
+    /// not be recovered.
+    #[test]
+    fn unfreezing_is_always_allowed() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        {
+            let sheet = app.active_sheet_mut();
+            sheet.frozen_cols = 60;
+            sheet.frozen_rows = 40;
+        }
+
+        app.toggle_freeze_panes();
+
+        let sheet = app.active_sheet();
+        assert_eq!((sheet.frozen_cols, sheet.frozen_rows), (0, 0));
+    }
+
+    /// A keystroke dismisses the notice.
+    #[test]
+    fn any_key_clears_a_notice() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.notice = Some("something".to_string());
+
+        let _ = app.handle_key_event(&KeyEvent {
+            key: Key::Right,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+
+        assert!(app.notice.is_none());
     }
 }

@@ -858,7 +858,7 @@ impl DropdownId {
     /// Three of these were drawn with nothing that could open them, and the
     /// only cheap way to keep an eleventh from joining them is to iterate the
     /// enum rather than trust that whoever adds it also wires it.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Resolution,
         Self::RefreshRate,
         Self::Scale,
@@ -869,6 +869,7 @@ impl DropdownId {
         Self::ColorFilter,
         Self::CursorSize,
         Self::NarratorVerbosity,
+        Self::HighContrast,
     ];
 }
 

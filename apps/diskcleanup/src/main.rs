@@ -53,7 +53,7 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colours come from `appearance::Palette` -- see design-decisions 822.
 // ============================================================================
 
 // There are no colours here. They come from `appearance::Palette`, handed

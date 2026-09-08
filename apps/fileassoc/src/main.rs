@@ -6,6 +6,7 @@
 //!
 //! Uses the guitk library for rendering. Dark theme (Catppuccin Mocha).
 
+use appearance::Palette;
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
@@ -21,22 +22,8 @@ use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colours come from `appearance::Palette` -- see design-decisions 822.
 // ============================================================================
-
-const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
-const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
-const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
-const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COLOR_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COLOR_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const COLOR_MANTLE: Color = Color::from_hex(0x181825);
-const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
-const COLOR_RED: Color = Color::from_hex(0xF38BA8);
-const COLOR_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COLOR_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COLOR_PEACH: Color = Color::from_hex(0xFAB387);
-const COLOR_MAUVE: Color = Color::from_hex(0xCBA6F7);
 
 // ============================================================================
 // Layout constants
@@ -143,15 +130,15 @@ impl FileCategory {
     }
 
     /// Accent color for this category.
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Documents => COLOR_BLUE,
-            Self::Images => COLOR_GREEN,
-            Self::Audio => COLOR_PEACH,
-            Self::Video => COLOR_RED,
-            Self::Archives => COLOR_YELLOW,
-            Self::Code => COLOR_MAUVE,
-            Self::Other => COLOR_SUBTEXT0,
+            Self::Documents => pal.blue,
+            Self::Images => pal.green,
+            Self::Audio => pal.peach,
+            Self::Video => pal.red,
+            Self::Archives => pal.yellow,
+            Self::Code => pal.mauve,
+            Self::Other => pal.subtext0,
         }
     }
 
@@ -1356,6 +1343,12 @@ pub struct FileAssocUI {
     /// Window dimensions.
     pub window_width: f32,
     pub window_height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for FileAssocUI {
@@ -1369,6 +1362,7 @@ impl FileAssocUI {
     pub fn new() -> Self {
         Self {
             registry: AssociationRegistry::with_defaults(),
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             selected_category: None,
             search_query: String::new(),
             search_focused: false,
@@ -2027,7 +2021,7 @@ impl FileAssocUI {
             y: 0.0,
             width: l.width,
             height: l.height,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2102,7 +2096,7 @@ impl FileAssocUI {
             y: 0.0,
             width: l.width,
             height: TOOLBAR_HEIGHT,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2110,7 +2104,7 @@ impl FileAssocUI {
             x: PADDING,
             y: (TOOLBAR_HEIGHT - FONT_SIZE_HEADING) / 2.0,
             text: String::from("File Associations"),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some((l.search.x - PADDING).max(0.0)),
@@ -2127,7 +2121,7 @@ impl FileAssocUI {
                 y: r.y,
                 width: r.w,
                 height: r.h,
-                color: COLOR_SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             if self.search_focused {
@@ -2136,7 +2130,7 @@ impl FileAssocUI {
                     y: r.y,
                     width: r.w,
                     height: r.h,
-                    color: COLOR_BLUE,
+                    color: self.palette.blue,
                     line_width: 1.0,
                     corner_radii: CornerRadii::all(4.0),
                 });
@@ -2151,7 +2145,11 @@ impl FileAssocUI {
                 x: r.x + 8.0,
                 y: r.y + (r.h - FONT_SIZE).max(0.0) / 2.0,
                 text: shown,
-                color: if empty { COLOR_OVERLAY0 } else { COLOR_TEXT },
+                color: if empty {
+                    self.palette.overlay0
+                } else {
+                    self.palette.text
+                },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((r.w - 16.0).max(0.0)),
@@ -2165,7 +2163,7 @@ impl FileAssocUI {
                 x: l.status.x,
                 y: l.status.y + (l.status.h - FONT_SIZE_SMALL).max(0.0) / 2.0,
                 text: self.status.clone(),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(l.status.w),
@@ -2178,8 +2176,8 @@ impl FileAssocUI {
             Target::AddButton,
             l.add,
             "Add Type",
-            COLOR_SURFACE1,
-            COLOR_TEXT,
+            self.palette.surface1,
+            self.palette.text,
             FONT_SIZE_SMALL,
         );
         Self::draw_button(
@@ -2187,8 +2185,8 @@ impl FileAssocUI {
             Target::ExportButton,
             l.export,
             "Export",
-            COLOR_SURFACE1,
-            COLOR_TEXT,
+            self.palette.surface1,
+            self.palette.text,
             FONT_SIZE_SMALL,
         );
         Self::draw_button(
@@ -2196,8 +2194,8 @@ impl FileAssocUI {
             Target::ResetButton,
             l.reset,
             "Reset Defaults",
-            COLOR_SURFACE1,
-            COLOR_TEXT,
+            self.palette.surface1,
+            self.palette.text,
             FONT_SIZE_SMALL,
         );
     }
@@ -2209,7 +2207,7 @@ impl FileAssocUI {
             y: l.sidebar.y,
             width: l.sidebar.w,
             height: l.sidebar.h,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2225,7 +2223,7 @@ impl FileAssocUI {
             x: PADDING,
             y: l.sidebar.y + SIDEBAR_ITEM_HEIGHT + 6.0,
             text: String::from("CATEGORIES"),
-            color: COLOR_OVERLAY0,
+            color: self.palette.overlay0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some((l.sidebar.w - 2.0 * PADDING).max(0.0)),
@@ -2260,9 +2258,9 @@ impl FileAssocUI {
             width: r.w,
             height: r.h,
             color: if selected {
-                COLOR_SURFACE0
+                self.palette.surface0
             } else {
-                COLOR_MANTLE
+                self.palette.mantle
             },
             corner_radii: CornerRadii::ZERO,
         });
@@ -2273,14 +2271,14 @@ impl FileAssocUI {
                 y: r.y + 7.0,
                 width: 20.0,
                 height: 20.0,
-                color: cat.color(),
+                color: cat.color(&self.palette),
                 corner_radii: CornerRadii::all(10.0),
             });
             frame.push(RenderCommand::Text {
                 x: PADDING + 5.0,
                 y: r.y + 10.0,
                 text: String::from(cat.icon()),
-                color: COLOR_BASE,
+                color: self.palette.base,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -2292,7 +2290,11 @@ impl FileAssocUI {
             x: PADDING + 28.0,
             y: r.y + 10.0,
             text: String::from(label),
-            color: if selected { COLOR_BLUE } else { COLOR_TEXT },
+            color: if selected {
+                self.palette.blue
+            } else {
+                self.palette.text
+            },
             font_size: FONT_SIZE,
             font_weight: if selected {
                 FontWeightHint::Bold
@@ -2308,7 +2310,7 @@ impl FileAssocUI {
                 x: (r.right() - 30.0).max(0.0),
                 y: r.y + 10.0,
                 text: format!("{count}"),
-                color: COLOR_OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2326,7 +2328,7 @@ impl FileAssocUI {
             y: l.table.y,
             width: l.table.w,
             height: l.table.h,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
         // Recorded before the rows, so a row painted on top of it wins the hit
@@ -2340,7 +2342,7 @@ impl FileAssocUI {
             y: l.table_header.y,
             width: l.table_header.w,
             height: l.table_header.h,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2354,7 +2356,7 @@ impl FileAssocUI {
                 x: *x,
                 y: header_y,
                 text: String::from(title),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some((l.table.right() - x).max(0.0)),
@@ -2367,7 +2369,7 @@ impl FileAssocUI {
             y1: l.rows.y,
             x2: l.table.right(),
             y2: l.rows.y,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
 
@@ -2384,11 +2386,11 @@ impl FileAssocUI {
             };
             let selected = self.selected_index == Some(i);
             let row_bg = if selected {
-                COLOR_SURFACE1
+                self.palette.surface1
             } else if i % 2 == 0 {
-                COLOR_BASE
+                self.palette.base
             } else {
-                COLOR_SURFACE0
+                self.palette.surface0
             };
 
             frame.push(RenderCommand::FillRect {
@@ -2407,14 +2409,18 @@ impl FileAssocUI {
                 y: y + (ROW_HEIGHT - 8.0) / 2.0,
                 width: 8.0,
                 height: 8.0,
-                color: cat.color(),
+                color: cat.color(&self.palette),
                 corner_radii: CornerRadii::all(4.0),
             });
             frame.push(RenderCommand::Text {
                 x: l.columns[0] + 14.0,
                 y: text_y,
                 text: format!(".{}", ft.extension),
-                color: if selected { COLOR_BLUE } else { COLOR_TEXT },
+                color: if selected {
+                    self.palette.blue
+                } else {
+                    self.palette.text
+                },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some((l.columns[1] - l.columns[0] - 16.0).max(0.0)),
@@ -2424,7 +2430,7 @@ impl FileAssocUI {
                 x: l.columns[1],
                 y: text_y,
                 text: ft.description.clone(),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((l.columns[2] - l.columns[1] - 8.0).max(0.0)),
@@ -2434,7 +2440,7 @@ impl FileAssocUI {
                 x: l.columns[2],
                 y: text_y,
                 text: ft.mime_type.clone(),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((l.columns[3] - l.columns[2] - 8.0).max(0.0)),
@@ -2450,9 +2456,9 @@ impl FileAssocUI {
                 y: text_y,
                 text: app_name,
                 color: if ft.default_app_id.is_some() {
-                    COLOR_GREEN
+                    self.palette.green
                 } else {
-                    COLOR_OVERLAY0
+                    self.palette.overlay0
                 },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -2475,7 +2481,7 @@ impl FileAssocUI {
                 x: l.rows.x + (l.rows.w - w).max(0.0) / 2.0,
                 y: l.rows.y + 40.0,
                 text: String::from(msg),
-                color: COLOR_OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(l.rows.w),
@@ -2492,7 +2498,7 @@ impl FileAssocUI {
             y: panel.y,
             width: panel.w,
             height: panel.h,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         frame.push(RenderCommand::Line {
@@ -2500,7 +2506,7 @@ impl FileAssocUI {
             y1: panel.y,
             x2: panel.x,
             y2: panel.bottom(),
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
 
@@ -2516,7 +2522,7 @@ impl FileAssocUI {
             x,
             y,
             text: String::from("Details"),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w),
@@ -2530,7 +2536,7 @@ impl FileAssocUI {
                 x,
                 y,
                 text: String::from("Select a file type to see details"),
-                color: COLOR_OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w),
@@ -2546,14 +2552,14 @@ impl FileAssocUI {
             y,
             width: 60.0_f32.min(content_w),
             height: 28.0,
-            color: cat.color(),
+            color: cat.color(&self.palette),
             corner_radii: CornerRadii::all(4.0),
         });
         frame.push(RenderCommand::Text {
             x: x + 8.0,
             y: y + 7.0,
             text: format!(".{}", ft.extension),
-            color: COLOR_BASE,
+            color: self.palette.base,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some((content_w - 8.0).max(0.0)),
@@ -2572,7 +2578,7 @@ impl FileAssocUI {
             ("Category", cat.label()),
             ("Default App", app_name.as_str()),
         ] {
-            Self::draw_detail_row(frame, x, y, content_w, label, value);
+            Self::draw_detail_row(frame, &self.palette, x, y, content_w, label, value);
             y += 24.0;
         }
         y += 12.0;
@@ -2582,8 +2588,8 @@ impl FileAssocUI {
             Target::OpenWithButton,
             Rect::new(x, y, content_w, BUTTON_HEIGHT),
             "Open With...",
-            COLOR_BLUE,
-            COLOR_BASE,
+            self.palette.blue,
+            self.palette.base,
             FONT_SIZE,
         );
         y += BUTTON_HEIGHT + 8.0;
@@ -2593,8 +2599,8 @@ impl FileAssocUI {
             Target::ClearButton,
             Rect::new(x, y, content_w, BUTTON_HEIGHT),
             "Clear Association",
-            COLOR_RED,
-            COLOR_BASE,
+            self.palette.red,
+            self.palette.base,
             FONT_SIZE,
         );
         y += BUTTON_HEIGHT + 16.0;
@@ -2603,7 +2609,7 @@ impl FileAssocUI {
             x,
             y,
             text: String::from("Compatible Apps"),
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w),
@@ -2617,7 +2623,7 @@ impl FileAssocUI {
                 x,
                 y,
                 text: String::from("No compatible apps"),
-                color: COLOR_OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w),
@@ -2633,9 +2639,9 @@ impl FileAssocUI {
                     width: r.w,
                     height: r.h,
                     color: if is_default {
-                        COLOR_SURFACE0
+                        self.palette.surface0
                     } else {
-                        COLOR_MANTLE
+                        self.palette.mantle
                     },
                     corner_radii: CornerRadii::all(3.0),
                 });
@@ -2643,7 +2649,11 @@ impl FileAssocUI {
                     x: r.x + 8.0,
                     y: r.y + (r.h - FONT_SIZE_SMALL).max(0.0) / 2.0,
                     text: app.name.clone(),
-                    color: if is_default { COLOR_GREEN } else { COLOR_TEXT },
+                    color: if is_default {
+                        self.palette.green
+                    } else {
+                        self.palette.text
+                    },
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some((r.w - 16.0).max(0.0)),
@@ -2658,13 +2668,21 @@ impl FileAssocUI {
     }
 
     /// Helper: render a label+value detail row.
-    fn draw_detail_row(frame: &mut Frame, x: f32, y: f32, w: f32, label: &str, value: &str) {
+    fn draw_detail_row(
+        frame: &mut Frame,
+        pal: &Palette,
+        x: f32,
+        y: f32,
+        w: f32,
+        label: &str,
+        value: &str,
+    ) {
         let value_x = x + DETAIL_LABEL_WIDTH;
         frame.push(RenderCommand::Text {
             x,
             y,
             text: String::from(label),
-            color: COLOR_SUBTEXT0,
+            color: pal.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(DETAIL_LABEL_WIDTH.min(w)),
@@ -2674,7 +2692,7 @@ impl FileAssocUI {
             x: value_x,
             y,
             text: String::from(value),
-            color: COLOR_TEXT,
+            color: pal.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some((w - DETAIL_LABEL_WIDTH).max(0.0)),
@@ -2683,7 +2701,7 @@ impl FileAssocUI {
     }
 
     /// The panel, shadow and title bar every dialog shares.
-    fn draw_dialog_chrome(frame: &mut Frame, l: &Layout, title: &str) {
+    fn draw_dialog_chrome(frame: &mut Frame, pal: &Palette, l: &Layout, title: &str) {
         let d = l.dialog;
         frame.push(RenderCommand::BoxShadow {
             x: d.x,
@@ -2702,7 +2720,7 @@ impl FileAssocUI {
             y: d.y,
             width: d.w,
             height: d.h,
-            color: COLOR_SURFACE0,
+            color: pal.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         frame.push(RenderCommand::FillRect {
@@ -2710,7 +2728,7 @@ impl FileAssocUI {
             y: d.y,
             width: d.w,
             height: DIALOG_TITLE_HEIGHT.min(d.h),
-            color: COLOR_SURFACE1,
+            color: pal.surface1,
             corner_radii: CornerRadii {
                 top_left: CORNER_RADIUS,
                 top_right: CORNER_RADIUS,
@@ -2722,7 +2740,7 @@ impl FileAssocUI {
             x: d.x + PADDING,
             y: d.y + (DIALOG_TITLE_HEIGHT - FONT_SIZE).max(0.0) / 2.0,
             text: String::from(title),
-            color: COLOR_TEXT,
+            color: pal.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some((d.w - 2.0 * PADDING).max(0.0)),
@@ -2731,15 +2749,15 @@ impl FileAssocUI {
     }
 
     /// The `Cancel` / `OK` pair every dialog shares.
-    fn draw_dialog_buttons(frame: &mut Frame, l: &Layout, ok_label: &str) {
+    fn draw_dialog_buttons(frame: &mut Frame, pal: &Palette, l: &Layout, ok_label: &str) {
         let (cancel, ok) = l.dialog_buttons();
         Self::draw_button(
             frame,
             Target::DialogCancel,
             cancel,
             "Cancel",
-            COLOR_SURFACE1,
-            COLOR_TEXT,
+            pal.surface1,
+            pal.text,
             FONT_SIZE_SMALL,
         );
         Self::draw_button(
@@ -2747,8 +2765,8 @@ impl FileAssocUI {
             Target::DialogOk,
             ok,
             ok_label,
-            COLOR_BLUE,
-            COLOR_BASE,
+            pal.blue,
+            pal.base,
             FONT_SIZE_SMALL,
         );
     }
@@ -2757,6 +2775,7 @@ impl FileAssocUI {
     fn draw_open_with_dialog(&self, frame: &mut Frame, l: &Layout) {
         Self::draw_dialog_chrome(
             frame,
+            &self.palette,
             l,
             &format!("Open With \u{2014} .{}", self.dialog_target_ext),
         );
@@ -2777,14 +2796,22 @@ impl FileAssocUI {
                 y: r.y,
                 width: r.w,
                 height: r.h,
-                color: if selected { COLOR_BLUE } else { COLOR_SURFACE0 },
+                color: if selected {
+                    self.palette.blue
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii::all(4.0),
             });
             frame.push(RenderCommand::Text {
                 x: r.x + 12.0,
                 y: r.y + 6.0,
                 text: app.name.clone(),
-                color: if selected { COLOR_BASE } else { COLOR_TEXT },
+                color: if selected {
+                    self.palette.base
+                } else {
+                    self.palette.text
+                },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some((r.w - 24.0).max(0.0)),
@@ -2795,9 +2822,9 @@ impl FileAssocUI {
                 y: r.y + 20.0,
                 text: app.exec_path.clone(),
                 color: if selected {
-                    COLOR_MANTLE
+                    self.palette.mantle
                 } else {
-                    COLOR_OVERLAY0
+                    self.palette.overlay0
                 },
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
@@ -2811,7 +2838,7 @@ impl FileAssocUI {
                 x: l.dialog.x + PADDING,
                 y: list.y + PADDING,
                 text: format!("No app handles .{}", self.dialog_target_ext),
-                color: COLOR_OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((l.dialog.w - 2.0 * PADDING).max(0.0)),
@@ -2826,7 +2853,7 @@ impl FileAssocUI {
             y: box_rect.y,
             width: box_rect.w,
             height: box_rect.h,
-            color: COLOR_OVERLAY0,
+            color: self.palette.overlay0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(2.0),
         });
@@ -2836,7 +2863,7 @@ impl FileAssocUI {
                 y: box_rect.y + 3.0,
                 width: (box_rect.w - 6.0).max(0.0),
                 height: (box_rect.h - 6.0).max(0.0),
-                color: COLOR_BLUE,
+                color: self.palette.blue,
                 corner_radii: CornerRadii::all(2.0),
             });
         }
@@ -2844,7 +2871,7 @@ impl FileAssocUI {
             x: box_rect.right() + 8.0,
             y: box_rect.y + 1.0,
             text: String::from("Always use this app"),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some((strip.right() - box_rect.right() - 8.0).max(0.0)),
@@ -2852,12 +2879,12 @@ impl FileAssocUI {
         });
         frame.hit(Target::DialogAlwaysUse, strip);
 
-        Self::draw_dialog_buttons(frame, l, "OK");
+        Self::draw_dialog_buttons(frame, &self.palette, l, "OK");
     }
 
     /// Render the "Add File Type" modal dialog.
     fn draw_add_file_type_dialog(&self, frame: &mut Frame, l: &Layout) {
-        Self::draw_dialog_chrome(frame, l, "Add File Type");
+        Self::draw_dialog_chrome(frame, &self.palette, l, "Add File Type");
 
         for (i, field) in NewField::ALL.iter().enumerate() {
             let r = l.dialog_field(i);
@@ -2868,7 +2895,7 @@ impl FileAssocUI {
                 x: r.x,
                 y: (r.y - FIELD_LABEL_HEIGHT).max(l.dialog.y),
                 text: String::from(field.label()),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(r.w),
@@ -2879,7 +2906,7 @@ impl FileAssocUI {
                 y: r.y,
                 width: r.w,
                 height: r.h,
-                color: COLOR_MANTLE,
+                color: self.palette.mantle,
                 corner_radii: CornerRadii::all(4.0),
             });
             let focused = self.new_field == *field;
@@ -2889,7 +2916,7 @@ impl FileAssocUI {
                     y: r.y,
                     width: r.w,
                     height: r.h,
-                    color: COLOR_BLUE,
+                    color: self.palette.blue,
                     line_width: 1.0,
                     corner_radii: CornerRadii::all(4.0),
                 });
@@ -2908,7 +2935,11 @@ impl FileAssocUI {
                 } else {
                     value.to_string()
                 },
-                color: if empty { COLOR_OVERLAY0 } else { COLOR_TEXT },
+                color: if empty {
+                    self.palette.overlay0
+                } else {
+                    self.palette.text
+                },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((r.w - 16.0).max(0.0)),
@@ -2923,7 +2954,7 @@ impl FileAssocUI {
                 x: cat.x,
                 y: (cat.y - FIELD_LABEL_HEIGHT).max(l.dialog.y),
                 text: String::from("Category"),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(cat.w),
@@ -2935,12 +2966,12 @@ impl FileAssocUI {
             Target::DialogCategory,
             cat,
             self.new_category.label(),
-            self.new_category.color(),
-            COLOR_BASE,
+            self.new_category.color(&self.palette),
+            self.palette.base,
             FONT_SIZE,
         );
 
-        Self::draw_dialog_buttons(frame, l, "Add");
+        Self::draw_dialog_buttons(frame, &self.palette, l, "Add");
     }
 }
 
@@ -2949,6 +2980,10 @@ impl FileAssocUI {
 // ============================================================================
 
 impl App for FileAssocUI {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("File Associations")
     }
@@ -3090,8 +3125,9 @@ mod tests {
 
     #[test]
     fn test_category_color_is_opaque() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         for cat in FileCategory::ALL {
-            assert_eq!(cat.color().a, 255);
+            assert_eq!(cat.color(&pal).a, 255);
         }
     }
 
@@ -4544,5 +4580,64 @@ mod tests {
                 "no state draws {name}; drawn were {seen:?}",
             );
         }
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut FileAssocUI) -> Vec<Color> {
+            app.render(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = FileAssocUI::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

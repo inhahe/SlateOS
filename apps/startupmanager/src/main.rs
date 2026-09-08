@@ -20,6 +20,7 @@
 //! StartupUI       -- guitk-based GUI with table, toolbar, details panel
 //! ```
 
+use appearance::Palette;
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
@@ -34,23 +35,8 @@ use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colours come from `appearance::Palette` -- see design-decisions 822.
 // ============================================================================
-
-const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
-const COLOR_MANTLE: Color = Color::from_hex(0x181825);
-const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
-const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
-#[allow(dead_code)]
-const COLOR_SURFACE2: Color = Color::from_hex(0x585B70);
-const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COLOR_SUBTEXT: Color = Color::from_hex(0xA6ADC8);
-const COLOR_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
-const COLOR_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COLOR_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COLOR_RED: Color = Color::from_hex(0xF38BA8);
-const COLOR_PEACH: Color = Color::from_hex(0xFAB387);
 
 // ============================================================================
 // Layout constants
@@ -212,12 +198,12 @@ impl StartupImpact {
     }
 
     /// Color associated with this impact level.
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::None => COLOR_SUBTEXT,
-            Self::Low => COLOR_GREEN,
-            Self::Medium => COLOR_YELLOW,
-            Self::High => COLOR_RED,
+            Self::None => pal.subtext0,
+            Self::Low => pal.green,
+            Self::Medium => pal.yellow,
+            Self::High => pal.red,
         }
     }
 
@@ -289,11 +275,11 @@ impl StartupEntry {
     }
 
     /// Status color for display.
-    pub fn status_color(&self) -> Color {
+    pub fn status_color(&self, pal: &Palette) -> Color {
         if self.enabled {
-            COLOR_GREEN
+            pal.green
         } else {
-            COLOR_OVERLAY0
+            pal.overlay0
         }
     }
 }
@@ -399,13 +385,13 @@ impl StartupStats {
     }
 
     /// Color for the overall impact.
-    pub fn impact_color(&self) -> Color {
+    pub fn impact_color(&self, pal: &Palette) -> Color {
         match self.total_impact_weight {
-            0 => COLOR_SUBTEXT,
-            1..=5 => COLOR_GREEN,
-            6..=15 => COLOR_YELLOW,
-            16..=30 => COLOR_PEACH,
-            _ => COLOR_RED,
+            0 => pal.subtext0,
+            1..=5 => pal.green,
+            6..=15 => pal.yellow,
+            16..=30 => pal.peach,
+            _ => pal.red,
         }
     }
 }
@@ -1149,13 +1135,13 @@ impl ToolbarAction {
     }
 
     /// Accent colour for the button.
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Add => COLOR_BLUE,
-            Self::Remove => COLOR_RED,
-            Self::Enable => COLOR_GREEN,
-            Self::Disable => COLOR_PEACH,
-            Self::Refresh => COLOR_SUBTEXT,
+            Self::Add => pal.blue,
+            Self::Remove => pal.red,
+            Self::Enable => pal.green,
+            Self::Disable => pal.peach,
+            Self::Refresh => pal.subtext0,
         }
     }
 
@@ -1470,6 +1456,12 @@ pub struct StartupUI {
     /// of an action. Drawn in the dialog footer while a dialog is open, and in
     /// the header otherwise.
     pub status: String,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl StartupUI {
@@ -1479,6 +1471,7 @@ impl StartupUI {
         manager.populate_sample_data();
         Self {
             manager,
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             sort_column: SortColumn::Name,
             sort_order: SortOrder::Ascending,
             search_query: String::new(),
@@ -2060,7 +2053,7 @@ impl StartupUI {
             y: 0.0,
             width: l.width,
             height: l.height,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2100,14 +2093,14 @@ impl StartupUI {
             y: l.header.y,
             width: l.header.w,
             height: l.header.h,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         frame.push(RenderCommand::Text {
             x: PADDING,
             y: l.header.y + ((l.header.h - FONT_SIZE_HEADING) / 2.0).max(0.0),
             text: String::from("Startup Apps Manager"),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Option::None,
@@ -2122,7 +2115,7 @@ impl StartupUI {
                 x: (l.width - PADDING - w).max(PADDING),
                 y: l.header.y + ((l.header.h - FONT_SIZE_SMALL) / 2.0).max(0.0),
                 text: self.status.clone(),
-                color: COLOR_YELLOW,
+                color: self.palette.yellow,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((l.width / 2.0).max(0.0)),
@@ -2135,7 +2128,7 @@ impl StartupUI {
             y1: l.header.bottom(),
             x2: l.width,
             y2: l.header.bottom(),
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -2147,7 +2140,7 @@ impl StartupUI {
                 y: l.toolbar.y,
                 width: l.toolbar.w,
                 height: l.toolbar.h,
-                color: COLOR_SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -2157,7 +2150,7 @@ impl StartupUI {
                 Target::Toolbar(*action),
                 *rect,
                 action.label(),
-                action.color(),
+                action.color(&self.palette),
             );
         }
     }
@@ -2210,7 +2203,7 @@ impl StartupUI {
                 y: l.search_bar.y,
                 width: l.search_bar.w,
                 height: l.search_bar.h,
-                color: COLOR_BASE,
+                color: self.palette.base,
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -2222,7 +2215,7 @@ impl StartupUI {
             y: l.search.y,
             width: l.search.w,
             height: l.search.h,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         if self.search_focused {
@@ -2231,7 +2224,7 @@ impl StartupUI {
                 y: l.search.y,
                 width: l.search.w,
                 height: l.search.h,
-                color: COLOR_BLUE,
+                color: self.palette.blue,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(4.0),
             });
@@ -2247,7 +2240,11 @@ impl StartupUI {
             x: l.search.x + 8.0,
             y: l.search.y + ((l.search.h - FONT_SIZE) / 2.0).max(0.0),
             text: display.to_string(),
-            color: if empty { COLOR_OVERLAY0 } else { COLOR_TEXT },
+            color: if empty {
+                self.palette.overlay0
+            } else {
+                self.palette.text
+            },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some((l.search.w - 16.0).max(0.0)),
@@ -2263,7 +2260,7 @@ impl StartupUI {
                 y: l.table_header.y,
                 width: l.table_header.w,
                 height: l.table_header.h,
-                color: COLOR_SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -2284,7 +2281,11 @@ impl StartupUI {
                 x: rect.x + 4.0,
                 y: rect.y + ((rect.h - FONT_SIZE_SMALL) / 2.0).max(0.0),
                 text: label,
-                color: if active { COLOR_BLUE } else { COLOR_TEXT },
+                color: if active {
+                    self.palette.blue
+                } else {
+                    self.palette.text
+                },
                 font_size: FONT_SIZE_SMALL,
                 font_weight: if active {
                     FontWeightHint::Bold
@@ -2303,7 +2304,7 @@ impl StartupUI {
                 y1: l.table_header.bottom(),
                 x2: l.width,
                 y2: l.table_header.bottom(),
-                color: COLOR_SURFACE0,
+                color: self.palette.surface0,
                 width: 1.0,
             });
         }
@@ -2324,11 +2325,21 @@ impl StartupUI {
             }
             let selected = self.selected_id == Some(entry.id);
             let bg = if selected {
-                Color::rgba(COLOR_BLUE.r, COLOR_BLUE.g, COLOR_BLUE.b, 30)
+                Color::rgba(
+                    self.palette.blue.r,
+                    self.palette.blue.g,
+                    self.palette.blue.b,
+                    30,
+                )
             } else if i % 2 == 1 {
-                Color::rgba(COLOR_SURFACE0.r, COLOR_SURFACE0.g, COLOR_SURFACE0.b, 80)
+                Color::rgba(
+                    self.palette.surface0.r,
+                    self.palette.surface0.g,
+                    self.palette.surface0.b,
+                    80,
+                )
             } else {
-                COLOR_BASE
+                self.palette.base
             };
             frame.push(RenderCommand::FillRect {
                 x: row.x,
@@ -2344,7 +2355,7 @@ impl StartupUI {
                     y: row.y,
                     width: 3.0_f32.min(row.w),
                     height: row.h,
-                    color: COLOR_BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -2353,42 +2364,42 @@ impl StartupUI {
             let cells: [(&str, Color, f32, FontWeightHint, f32); 6] = [
                 (
                     &entry.name,
-                    COLOR_TEXT,
+                    self.palette.text,
                     COL_NAME_WIDTH,
                     FontWeightHint::Regular,
                     FONT_SIZE,
                 ),
                 (
                     &entry.publisher,
-                    COLOR_SUBTEXT,
+                    self.palette.subtext0,
                     COL_PUBLISHER_WIDTH,
                     FontWeightHint::Regular,
                     FONT_SIZE,
                 ),
                 (
                     entry.status_label(),
-                    entry.status_color(),
+                    entry.status_color(&self.palette),
                     COL_STATUS_WIDTH,
                     FontWeightHint::Bold,
                     FONT_SIZE,
                 ),
                 (
                     entry.impact.label(),
-                    entry.impact.color(),
+                    entry.impact.color(&self.palette),
                     COL_IMPACT_WIDTH,
                     FontWeightHint::Regular,
                     FONT_SIZE,
                 ),
                 (
                     entry.startup_type.label(),
-                    COLOR_SUBTEXT,
+                    self.palette.subtext0,
                     COL_TYPE_WIDTH,
                     FontWeightHint::Regular,
                     FONT_SIZE,
                 ),
                 (
                     &entry.path,
-                    COLOR_OVERLAY0,
+                    self.palette.overlay0,
                     COL_PATH_WIDTH,
                     FontWeightHint::Regular,
                     FONT_SIZE_SMALL,
@@ -2422,7 +2433,7 @@ impl StartupUI {
             y: l.details.y,
             width: l.details.w,
             height: l.details.h,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         frame.push(RenderCommand::Line {
@@ -2430,7 +2441,7 @@ impl StartupUI {
             y1: l.details.y,
             x2: l.width,
             y2: l.details.y,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2440,7 +2451,7 @@ impl StartupUI {
                 x: PADDING,
                 y: l.details.y + (l.details.h / 2.0 - FONT_SIZE / 2.0).max(0.0),
                 text: String::from("Select an entry to view details"),
-                color: COLOR_OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Option::None,
@@ -2457,7 +2468,7 @@ impl StartupUI {
             x: x_left,
             y: ly,
             text: entry.name.clone(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some((l.width - PADDING * 2.0).max(0.0)),
@@ -2466,22 +2477,62 @@ impl StartupUI {
         ly += DETAIL_LINE_SPACING + 4.0;
 
         let mut ry = ly;
-        Self::draw_detail_row(frame, l, x_left, ly, "Path:", &entry.path);
+        Self::draw_detail_row(frame, &self.palette, l, x_left, ly, "Path:", &entry.path);
         ly += DETAIL_LINE_SPACING;
         if !entry.args.is_empty() {
-            Self::draw_detail_row(frame, l, x_left, ly, "Args:", &entry.args);
+            Self::draw_detail_row(frame, &self.palette, l, x_left, ly, "Args:", &entry.args);
             ly += DETAIL_LINE_SPACING;
         }
-        Self::draw_detail_row(frame, l, x_left, ly, "Publisher:", &entry.publisher);
+        Self::draw_detail_row(
+            frame,
+            &self.palette,
+            l,
+            x_left,
+            ly,
+            "Publisher:",
+            &entry.publisher,
+        );
 
-        Self::draw_detail_row(frame, l, x_right, ry, "Type:", entry.startup_type.label());
+        Self::draw_detail_row(
+            frame,
+            &self.palette,
+            l,
+            x_right,
+            ry,
+            "Type:",
+            entry.startup_type.label(),
+        );
         ry += DETAIL_LINE_SPACING;
-        Self::draw_detail_row(frame, l, x_right, ry, "Impact:", entry.impact.label());
+        Self::draw_detail_row(
+            frame,
+            &self.palette,
+            l,
+            x_right,
+            ry,
+            "Impact:",
+            entry.impact.label(),
+        );
         ry += DETAIL_LINE_SPACING;
-        Self::draw_detail_row(frame, l, x_right, ry, "Status:", entry.status_label());
+        Self::draw_detail_row(
+            frame,
+            &self.palette,
+            l,
+            x_right,
+            ry,
+            "Status:",
+            entry.status_label(),
+        );
     }
 
-    fn draw_detail_row(frame: &mut Frame, l: &Layout, x: f32, y: f32, label: &str, value: &str) {
+    fn draw_detail_row(
+        frame: &mut Frame,
+        pal: &Palette,
+        l: &Layout,
+        x: f32,
+        y: f32,
+        label: &str,
+        value: &str,
+    ) {
         if y + FONT_SIZE_SMALL > l.details.bottom() {
             return;
         }
@@ -2489,7 +2540,7 @@ impl StartupUI {
             x,
             y,
             text: label.to_string(),
-            color: COLOR_SUBTEXT,
+            color: pal.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Option::None,
@@ -2499,7 +2550,7 @@ impl StartupUI {
             x: x + text::measure(label, FONT_SIZE_SMALL, FontWeightHint::Bold) + 8.0,
             y,
             text: value.to_string(),
-            color: COLOR_TEXT,
+            color: pal.text,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some((l.width / 2.0 - 40.0).max(0.0)),
@@ -2516,7 +2567,7 @@ impl StartupUI {
             y: l.status.y,
             width: l.status.w,
             height: l.status.h,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2538,7 +2589,7 @@ impl StartupUI {
             x: PADDING,
             y: l.status.y + ((l.status.h - FONT_SIZE_SMALL) / 2.0).max(0.0),
             text: summary,
-            color: COLOR_SUBTEXT,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some((l.width - PADDING * 2.0).max(0.0)),
@@ -2566,7 +2617,14 @@ impl StartupUI {
 
     /// Box, border and title of a dialog. Returns nothing: the caller already
     /// has the rectangle.
-    fn draw_dialog_chrome(frame: &mut Frame, rect: Rect, title: &str, border: Color, tint: Color) {
+    fn draw_dialog_chrome(
+        frame: &mut Frame,
+        pal: &Palette,
+        rect: Rect,
+        title: &str,
+        border: Color,
+        tint: Color,
+    ) {
         if rect.is_empty() {
             return;
         }
@@ -2575,7 +2633,7 @@ impl StartupUI {
             y: rect.y,
             width: rect.w,
             height: rect.h,
-            color: COLOR_SURFACE0,
+            color: pal.surface0,
             corner_radii: CornerRadii::all(8.0),
         });
         frame.push(RenderCommand::StrokeRect {
@@ -2613,7 +2671,7 @@ impl StartupUI {
             x: rect.x + PADDING,
             y: rect.bottom() - BUTTON_HEIGHT - PADDING + (BUTTON_HEIGHT - FONT_SIZE_SMALL) / 2.0,
             text: self.status.clone(),
-            color: COLOR_YELLOW,
+            color: self.palette.yellow,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
@@ -2627,7 +2685,14 @@ impl StartupUI {
         } else {
             "Add Startup Entry"
         };
-        Self::draw_dialog_chrome(frame, l.dialog, title, COLOR_SURFACE1, COLOR_TEXT);
+        Self::draw_dialog_chrome(
+            frame,
+            &self.palette,
+            l.dialog,
+            title,
+            self.palette.surface1,
+            self.palette.text,
+        );
         if l.dialog.is_empty() {
             return;
         }
@@ -2635,6 +2700,7 @@ impl StartupUI {
         for (i, (label, value)) in dlg.fields().into_iter().enumerate() {
             Self::draw_form_field(
                 frame,
+                &self.palette,
                 Target::DialogField(i),
                 l.dialog_field(i),
                 l.dialog_field_top(i),
@@ -2646,15 +2712,17 @@ impl StartupUI {
 
         Self::draw_selector(
             frame,
+            &self.palette,
             Target::DialogType,
             l.dialog_type(),
             (l.dialog.x + PADDING, l.selector_y()),
             "Type:",
             dlg.selected_type().label(),
-            COLOR_BLUE,
+            self.palette.blue,
         );
         Self::draw_selector(
             frame,
+            &self.palette,
             Target::DialogImpact,
             l.dialog_impact(),
             (
@@ -2663,7 +2731,7 @@ impl StartupUI {
             ),
             "Impact:",
             dlg.selected_impact().label(),
-            dlg.selected_impact().color(),
+            dlg.selected_impact().color(&self.palette),
         );
 
         self.draw_dialog_status(frame, l.dialog);
@@ -2673,15 +2741,16 @@ impl StartupUI {
             Target::DialogCancel,
             cancel,
             "Cancel",
-            COLOR_OVERLAY0,
+            self.palette.overlay0,
         );
-        Self::draw_button(frame, Target::DialogSave, save, "Save", COLOR_GREEN);
+        Self::draw_button(frame, Target::DialogSave, save, "Save", self.palette.green);
     }
 
     /// A labelled text input. `label_y` is where the caption goes; `input` is
     /// the box, which is also the hit box.
     fn draw_form_field(
         frame: &mut Frame,
+        pal: &Palette,
         target: Target,
         input: Rect,
         label_y: f32,
@@ -2696,7 +2765,7 @@ impl StartupUI {
             x: input.x,
             y: label_y,
             text: label.to_string(),
-            color: COLOR_SUBTEXT,
+            color: pal.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(input.w),
@@ -2707,7 +2776,7 @@ impl StartupUI {
             y: input.y,
             width: input.w,
             height: input.h,
-            color: COLOR_BASE,
+            color: pal.base,
             corner_radii: CornerRadii::all(4.0),
         });
         frame.push(RenderCommand::StrokeRect {
@@ -2715,7 +2784,7 @@ impl StartupUI {
             y: input.y,
             width: input.w,
             height: input.h,
-            color: if focused { COLOR_BLUE } else { COLOR_SURFACE1 },
+            color: if focused { pal.blue } else { pal.surface1 },
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -2725,7 +2794,7 @@ impl StartupUI {
             x: input.x + 6.0,
             y: input.y + ((input.h - FONT_SIZE) / 2.0).max(0.0),
             text: if empty { label } else { value }.to_string(),
-            color: if empty { COLOR_OVERLAY0 } else { COLOR_TEXT },
+            color: if empty { pal.overlay0 } else { pal.text },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some((input.w - 12.0).max(0.0)),
@@ -2737,6 +2806,7 @@ impl StartupUI {
     /// A "Label: Value" pair whose value cycles when clicked.
     fn draw_selector(
         frame: &mut Frame,
+        pal: &Palette,
         target: Target,
         hit: Rect,
         label_pos: (f32, f32),
@@ -2749,7 +2819,7 @@ impl StartupUI {
             x: label_x,
             y,
             text: label.to_string(),
-            color: COLOR_SUBTEXT,
+            color: pal.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Option::None,
@@ -2772,7 +2842,14 @@ impl StartupUI {
     }
 
     fn draw_confirm_delete_dialog(&self, frame: &mut Frame, l: &Layout, id: u64) {
-        Self::draw_dialog_chrome(frame, l.confirm, "Confirm Delete", COLOR_RED, COLOR_RED);
+        Self::draw_dialog_chrome(
+            frame,
+            &self.palette,
+            l.confirm,
+            "Confirm Delete",
+            self.palette.red,
+            self.palette.red,
+        );
         if l.confirm.is_empty() {
             return;
         }
@@ -2785,7 +2862,7 @@ impl StartupUI {
             x: l.confirm.x + PADDING,
             y: l.confirm.y + 50.0,
             text: format!("Remove \"{name}\" from startup?"),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some((l.confirm.w - PADDING * 2.0).max(0.0)),
@@ -2795,7 +2872,7 @@ impl StartupUI {
             x: l.confirm.x + PADDING,
             y: l.confirm.y + 74.0,
             text: String::from("This action cannot be undone."),
-            color: COLOR_SUBTEXT,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some((l.confirm.w - PADDING * 2.0).max(0.0)),
@@ -2808,9 +2885,15 @@ impl StartupUI {
             Target::DeleteCancel,
             cancel,
             "Cancel",
-            COLOR_OVERLAY0,
+            self.palette.overlay0,
         );
-        Self::draw_button(frame, Target::DeleteConfirm, delete, "Delete", COLOR_RED);
+        Self::draw_button(
+            frame,
+            Target::DeleteConfirm,
+            delete,
+            "Delete",
+            self.palette.red,
+        );
     }
 }
 
@@ -2821,6 +2904,10 @@ impl Default for StartupUI {
 }
 
 impl App for StartupUI {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Startup Apps Manager")
     }
@@ -2984,7 +3071,8 @@ mod tests {
     #[test]
     fn test_impact_color_distinct() {
         // Each impact level should have a distinct color.
-        let colors: Vec<Color> = StartupImpact::all().iter().map(|i| i.color()).collect();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let colors: Vec<Color> = StartupImpact::all().iter().map(|i| i.color(&pal)).collect();
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {
                 assert_ne!(colors[i], colors[j], "impact colors should be distinct");
@@ -3049,9 +3137,10 @@ mod tests {
             "",
             0,
         );
-        assert_eq!(entry.status_color(), COLOR_GREEN);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(entry.status_color(&pal), pal.green);
         entry.enabled = false;
-        assert_eq!(entry.status_color(), COLOR_OVERLAY0);
+        assert_eq!(entry.status_color(&pal), pal.overlay0);
     }
 
     // -- StartupManager CRUD tests ------------------------------------------
@@ -4934,5 +5023,64 @@ mod tests {
                 "{expected} is a target no state ever draws; seen: {seen:?}"
             );
         }
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut StartupUI) -> Vec<Color> {
+            app.render(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = StartupUI::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

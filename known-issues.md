@@ -124377,10 +124377,10 @@ which makes step 1 below larger than one dependency line.
   new defaulted `App::theme_changed` — before the first frame, and again on
   every change. `design-decisions.md` §822 records why it is a trait method
   and not an `Event`.
-- **Step 2 has started: 4 of 129.** `calculator` (11 constants),
-  `diskcleanup` (9), `charmap` (14) and `clipmanager` (14). Each has a test on
-  the rectangles it emits, and each was mutation-checked by making
-  `theme_changed` ignore its argument.
+- **Step 2 has started: 6 of 129.** `calculator` (11 constants),
+  `diskcleanup` (9), `charmap` (14), `clipmanager` (14), `fileassoc` (13) and
+  `startupmanager` (13). Each has a test on the rectangles it emits, and each
+  was mutation-checked by making `theme_changed` ignore its argument.
 
 **Batch conversion was tried and abandoned; do not retry it as written.** The
 substitution half automates well — mapping by *hex value* rather than by
@@ -124427,13 +124427,29 @@ skips the rest of the file in silence, reporting zero work to do. Scanning
 *backwards* from each line that mentions the palette to its enclosing `fn` has
 no such failure mode and is what works.
 
-**One case the shape test gets wrong, and it is worth knowing.** "Has a `self`
-receiver, so `self.palette` is correct" is false when `self` is not the
-application: `clipmanager`'s `ClipType::badge_color(self)` is a method on an
-*enum*, and the substitution put `self.palette` on a type that has no such
-field. The compiler catches it (E0609, "no field `palette` on type
-`ClipType`"), but a converter cannot assume that every `self` in a file is the
-window.
+**The shape test must be "which `impl` block is this in", not "does it take
+`self`".** "Has a `self` receiver, so `self.palette` is correct" is false
+whenever `self` is not the window, and every application converted so far has
+had at least one such method: `ClipType::badge_color`,
+`FileCategory::color`, `StartupImpact::color`, `StartupEntry::status_color`,
+`StartupStats::impact_color`. The compiler catches each (E0609, "no field
+`palette` on type …"), but the useful fix is to group palette uses by their
+enclosing `impl` before touching anything — a five-line scan that names the
+non-window impls up front instead of discovering them one build at a time.
+
+**Three smaller things that recur:**
+
+- **Stranded attributes.** Deleting `const COLOR_X: Color = …;` lines leaves
+  behind any `#[allow(dead_code)]` that annotated them, which is
+  `clippy::empty_line_after_outer_attr` — an *error* in this workspace, and
+  one the test suite does not catch because `cargo test` passes while
+  `cargo clippy` fails. Sweep for orphaned attributes after the deletion.
+- **Method references stop composing.** `map_or(default, ClipType::badge_color)`
+  cannot survive `badge_color` gaining a parameter; it has to become a
+  closure.
+- **Tests call these helpers too.** A blanket call-site rewrite to
+  `&self.palette` lands inside `#[test]` functions that have no `self`; those
+  want a locally built default palette instead.
 
 **The pattern, so the rest are mechanical.** Per application: add
 `appearance` to `Cargo.toml`; add a `palette: Palette` field seeded from

@@ -5239,6 +5239,7 @@ version = "0.1.0"
 name = "fileassoc"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -16911,6 +16912,7 @@ dependencies = [
 name = "startupmanager"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

@@ -4,6 +4,7 @@
 fix — whether to add one line to the root `.gitattributes`. Nothing is
 currently broken and your build is not at risk. This is a request to re-read an
 entry whose "wait for X" condition came true without anyone noticing.
+**Status:** ✅ resolved 2026-09-07 by lane A — option (c) already happened. The `.gitattributes` catch-all (`* text=auto eol=lf`) landed via `design-decisions.md` §769, covering `*.rs` and everything else. `git ls-files --eol kernel/ | grep w/crlf` now returns **0 files** in lane-a's worktree. A-27's deferral condition was met, the durable fix was applied, and the CRLF population has been driven to zero.
 
 ## In short
 

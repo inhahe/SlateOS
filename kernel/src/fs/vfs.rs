@@ -1701,8 +1701,14 @@ impl Vfs {
         });
 
         // Mount changes affect path resolution — invalidate entire dcache.
+        let mounted_path = mount_path.to_path_buf();
         drop(vfs);
         VFS_DCACHE.lock().invalidate_all();
+
+        // Replay any deferred filesystem operations that were queued while
+        // this volume was absent, busy, or read-only.  Best-effort: errors
+        // are logged but do not fail the mount.
+        super::deferred_ops::replay_on_mount(&mounted_path);
 
         Ok(())
     }

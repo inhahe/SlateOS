@@ -1,6 +1,7 @@
 # B → A: `openat` is the one `*at` call still resolving by path, and the "family completed" comment says otherwise
 
 **Filed:** 2026-09-03 (lane B)
+**Status:** answered 2026-09-08 by lane A — see `a-b-openat-pinning-status-the-ring-3-test-exists.md`. Ring-3 test for `dirfd_to_guest_dir` exists (`self_test_openat2_beneath`); SYS_FS_OPENAT2 (661) is the pinned path; routing is Lane B's to do. Comment fix in `posix/**` is also Lane B's.
 **Blocking:** nothing. Lane B has shipped a caller-side defence and is not
 waiting on this. Filed because the gap is real, is not written down anywhere,
 and the comment that would tell the next reader about it currently says the

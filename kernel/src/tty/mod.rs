@@ -961,13 +961,12 @@ pub(crate) enum Input {
 /// Block until an input byte is available for `id`.
 ///
 /// The console never reports [`Input::Hangup`] — a program cannot unplug the
-/// keyboard. It *does* now report [`Input::Interrupted`]: the console read is a
-/// `HLT` poll that re-checks the calling process's pending-signal mask on every
-/// wake, so a task blocked reading the console can be killed without a key
-/// being pressed. (The wake still costs up to one timer tick of latency,
-/// because nothing signals the poll directly; making the reader genuinely park
-/// is stage 2 of `known-issues.md` → `BUG-CONSOLE-READ-UNINTERRUPTIBLE`, and
-/// is blocked on moving USB HID polling out of the read path.)
+/// keyboard. It *does* report [`Input::Interrupted`]: the console reader parks
+/// via `park_interruptible` and is woken by `keyboard::push_char_raw` (ISR-safe
+/// wake from the lock-free waiter array), by signal delivery, or by a deadline
+/// timer. A task blocked reading the console is promptly interruptible — no
+/// HLT-spin latency. See `known-issues.md` → `BUG-CONSOLE-READ-UNINTERRUPTIBLE`
+/// (FIXED, both stages).
 fn backend_read_char(id: TtyId, backend: Backend) -> Input {
     match backend {
         Backend::Console => {
@@ -1095,6 +1094,9 @@ pub enum ConsoleRead {
     /// typed so far is still in the device's editor and will be there when the
     /// read restarts.
     Interrupted,
+    /// No data is immediately available and the caller requested a non-blocking
+    /// read ([`try_read`]).  The POSIX layer maps this to `EAGAIN`.
+    WouldBlock,
 }
 
 /// Read from the console into `out` per the current line discipline.
@@ -1148,6 +1150,132 @@ pub fn read(id: TtyId, out: &mut [u8]) -> ConsoleRead {
         canonical_read(id, backend, &t, out)
     } else {
         raw_read(id, backend, &t, out)
+    }
+}
+
+/// Non-blocking terminal read — returns [`ConsoleRead::WouldBlock`] instead
+/// of parking the caller when no data is immediately available.
+///
+/// This is the `O_NONBLOCK` counterpart of [`read`]:
+///
+/// * **Canonical mode:** feed any immediately-available characters into the
+///   line editor.  If a complete line results, deliver it; otherwise return
+///   `WouldBlock`.  Characters read are *not* lost — they stay in the editor
+///   for the next call.
+/// * **Raw mode:** behaves as `VMIN=0, VTIME=0` regardless of the actual
+///   termios settings — a pure poll that returns whatever bytes are buffered
+///   right now (possibly zero).
+///
+/// The `pending` buffer (leftover from a previous line that was larger than
+/// the caller's buffer) is drained first, identically to [`read`].
+pub fn try_read(id: TtyId, out: &mut [u8]) -> ConsoleRead {
+    if out.is_empty() {
+        return ConsoleRead::Data(0);
+    }
+    let Some((t, backend, leftover)) = with_device(id, |d| {
+        let leftover = if d.pending.has_data() {
+            Some(d.pending.drain_into(out))
+        } else {
+            None
+        };
+        (d.termios, d.backend, leftover)
+    }) else {
+        return ConsoleRead::Data(0);
+    };
+    if let Some(n) = leftover {
+        return ConsoleRead::Data(n);
+    }
+
+    if t.is_canonical() {
+        canonical_try_read(id, backend, &t, out)
+    } else {
+        raw_try_read(id, backend, &t, out)
+    }
+}
+
+/// Non-blocking canonical read: feed any immediately-available characters
+/// into the line editor.  If a complete line results, deliver it; otherwise
+/// return `WouldBlock`.
+fn canonical_try_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> ConsoleRead {
+    loop {
+        let raw = match backend_try_read_char(id, backend) {
+            Input::Byte(b) => b,
+            // Hangup: deliver whatever partial line exists (matching
+            // `canonical_read`'s hangup behaviour).
+            Input::Hangup => return deliver_line(id, out),
+            // No more characters available right now and no hangup.  The
+            // partial line (if any) stays in the device's editor for the
+            // next call.
+            Input::Empty => return ConsoleRead::WouldBlock,
+            Input::Interrupted => return ConsoleRead::Interrupted,
+        };
+        let Some((step, echo)) = with_device(id, |d| feed(&mut d.line, raw, t)) else {
+            return ConsoleRead::Data(0);
+        };
+        echo_step(id, backend, t, echo);
+        match step {
+            LineStep::Pending => {}
+            LineStep::Line | LineStep::Eof => return deliver_line(id, out),
+            LineStep::Signal(sig) => return ConsoleRead::Signal(sig),
+        }
+    }
+}
+
+/// Non-blocking raw read: pure poll regardless of `VMIN`/`VTIME`.
+fn raw_try_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> ConsoleRead {
+    let cap = out.len();
+    if cap == 0 {
+        return ConsoleRead::Data(0);
+    }
+    let mut n = 0usize;
+
+    // Signal-character classification (same as `raw_read`).
+    let isig = t.c_lflag & lflag::ISIG != 0;
+    let g = |idx: usize, dflt: u8| t.c_cc.get(idx).copied().unwrap_or(dflt);
+    let vintr = g(cc::VINTR, 3);
+    let vquit = g(cc::VQUIT, 28);
+    let vsusp = g(cc::VSUSP, 26);
+    let sig_for = |ch: u8| -> Option<u8> {
+        if !isig {
+            return None;
+        }
+        match ch {
+            c if c == vintr => Some(2),
+            c if c == vquit => Some(3),
+            c if c == vsusp => Some(20),
+            _ => None,
+        }
+    };
+
+    macro_rules! accept {
+        ($c:expr) => {{
+            let c: u8 = $c;
+            echo_step(id, backend, t, render_echo(c, t));
+            if let Some(s) = sig_for(c) {
+                return ConsoleRead::Signal(s);
+            }
+            if let Some(slot) = out.get_mut(n) {
+                *slot = c;
+            }
+            n = n.saturating_add(1);
+        }};
+    }
+
+    // Pure poll: drain whatever is immediately available.
+    while n < cap {
+        match backend_try_read_char(id, backend) {
+            Input::Byte(c) => accept!(c),
+            Input::Empty | Input::Hangup | Input::Interrupted => break,
+        }
+    }
+    if n == 0 {
+        // Nothing was available.  For the non-blocking variant we return
+        // WouldBlock so the caller can distinguish "zero bytes because
+        // VMIN=0 poll" from "zero bytes because O_NONBLOCK and nothing
+        // ready".  The POSIX layer maps this to EAGAIN.
+        ConsoleRead::WouldBlock
+    } else {
+        ConsoleRead::Data(n)
     }
 }
 

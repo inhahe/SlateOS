@@ -202,22 +202,24 @@ pub fn set_text(text: &str, source: &str) -> KernelResult<()> {
 
 /// Set clipboard to file paths.
 ///
-/// `paths` is a list of file paths. `op` is Copy or Cut.
-pub fn set_files(paths: &[&str], op: FileOp, source: &str) -> KernelResult<()> {
-    // Encode as newline-separated path list.
-    let mut data = String::new();
+/// `paths` is a list of file paths as byte slices — **not** `&str`, because
+/// our filesystem allows every byte except `/` and NUL in a filename, and
+/// UTF-8 is not required.  The on-wire encoding is NUL-separated (the one
+/// byte a path cannot contain), so round-tripping is lossless for all legal
+/// paths.
+pub fn set_files(paths: &[&[u8]], op: FileOp, source: &str) -> KernelResult<()> {
+    // Encode as NUL-separated path list.  NUL is the only byte that
+    // cannot appear in a legal path (along with `/` as the separator),
+    // so this is unambiguous for any filename the VFS accepts.
+    let total: usize = paths.iter().map(|p| p.len()).sum::<usize>() + paths.len().saturating_sub(1); // separators
+    let mut data = Vec::with_capacity(total);
     for (i, path) in paths.iter().enumerate() {
         if i > 0 {
-            data.push('\n');
+            data.push(0); // NUL separator
         }
-        data.push_str(path);
+        data.extend_from_slice(path);
     }
-    set_single(
-        Format::FilePaths,
-        Vec::from(data.as_bytes()),
-        source,
-        Some(op),
-    )
+    set_single(Format::FilePaths, data, source, Some(op))
 }
 
 /// Set clipboard with a single format.
@@ -323,9 +325,10 @@ pub fn get_text() -> Option<String> {
         }
     }
 
-    // Fall back to any text format.
+    // Fall back to HTML (which is actual text).  FilePaths is excluded:
+    // it is NUL-separated raw bytes, not a meaningful text representation.
     for fd in &entry.formats {
-        if fd.format == Format::Html || fd.format == Format::FilePaths {
+        if fd.format == Format::Html {
             return core::str::from_utf8(&fd.data).ok().map(String::from);
         }
     }
@@ -333,8 +336,12 @@ pub fn get_text() -> Option<String> {
     None
 }
 
-/// Get clipboard file paths.
-pub fn get_files() -> Option<(Vec<String>, FileOp)> {
+/// Get clipboard file paths as byte vectors.
+///
+/// Returns `None` if the clipboard is empty or has no `FilePaths` format.
+/// Paths are returned as raw bytes — no UTF-8 assumption, matching the
+/// filesystem's byte-path contract.
+pub fn get_files() -> Option<(Vec<Vec<u8>>, FileOp)> {
     PASTE_COUNT.fetch_add(1, Ordering::Relaxed);
     let current = CURRENT.lock();
     let entry = current.as_ref()?;
@@ -342,11 +349,14 @@ pub fn get_files() -> Option<(Vec<String>, FileOp)> {
 
     for fd in &entry.formats {
         if fd.format == Format::FilePaths {
-            let text = core::str::from_utf8(&fd.data).ok()?;
-            let paths: Vec<String> = text
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(String::from)
+            // NUL-separated byte paths — split on NUL, keep every segment
+            // (an empty segment between two NULs would be a zero-length
+            // path, which the VFS rejects, so filtering it out is correct).
+            let paths: Vec<Vec<u8>> = fd
+                .data
+                .split(|&b| b == 0)
+                .filter(|s| !s.is_empty())
+                .map(Vec::from)
                 .collect();
             return Some((paths, op));
         }
@@ -541,13 +551,32 @@ fn test_text_copy_paste() {
 fn test_file_copy() {
     clear_all();
 
-    let paths = ["/home/user/file1.txt", "/home/user/file2.txt"];
+    // Basic round-trip with normal paths.
+    let paths: [&[u8]; 2] = [b"/home/user/file1.txt", b"/home/user/file2.txt"];
     set_files(&paths, FileOp::Cut, "explorer").unwrap();
 
     let (files, op) = get_files().unwrap();
     assert_eq!(files.len(), 2);
-    assert_eq!(files[0], "/home/user/file1.txt");
+    assert_eq!(files[0].as_slice(), b"/home/user/file1.txt");
+    assert_eq!(files[1].as_slice(), b"/home/user/file2.txt");
     assert_eq!(op, FileOp::Cut);
+
+    // Paths with bytes that the old newline separator would have mangled:
+    // a filename containing \n, one containing \r, and one with non-UTF8.
+    clear_all();
+    let tricky: [&[u8]; 3] = [
+        b"/data/line\nbreak.txt",        // embedded newline
+        b"/data/cr\rname",               // embedded carriage return
+        &[b'/', 0xFF, 0xFE, b'/', 0x80], // non-UTF8 path
+    ];
+    set_files(&tricky, FileOp::Copy, "test").unwrap();
+
+    let (files2, op2) = get_files().unwrap();
+    assert_eq!(files2.len(), 3);
+    assert_eq!(files2[0].as_slice(), b"/data/line\nbreak.txt");
+    assert_eq!(files2[1].as_slice(), b"/data/cr\rname");
+    assert_eq!(files2[2].as_slice(), &[b'/', 0xFF, 0xFE, b'/', 0x80]);
+    assert_eq!(op2, FileOp::Copy);
 
     clear_all();
     serial_println!("[clipboard]   file_copy: ok");

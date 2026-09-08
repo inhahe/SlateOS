@@ -36430,7 +36430,14 @@ fn cmd_clipboard(args: &str) {
                 };
                 shell_println!("File operation: {}", op_label);
                 for p in &paths {
-                    shell_println!("  {}", p);
+                    // Display with lossy UTF-8 — this is a debug shell,
+                    // and a human reading the output needs *something*
+                    // for non-UTF8 bytes.  The clipboard itself stores
+                    // the exact bytes; only this display path approximates.
+                    match core::str::from_utf8(p) {
+                        Ok(s) => shell_println!("  {}", s),
+                        Err(_) => shell_println!("  {:?}", p),
+                    }
                 }
             }
             None => shell_println!("No files on clipboard."),

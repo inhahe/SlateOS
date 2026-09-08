@@ -60628,14 +60628,16 @@ it.
 
 ---
 
-## `BUG-CONSOLE-READ-UNINTERRUPTIBLE` — **stage 1 FIXED 2026-08-21; stage 2 open** (lane A)
+## `BUG-CONSOLE-READ-UNINTERRUPTIBLE` — **FIXED** (lane A, stage 1: 2026-08-21, stage 2: 2026-09-08)
 
-**Status:** the user-visible half is fixed — a process blocked reading the
-console is now interruptible by a signal, and `SYS_CONSOLE_READ_CHAR` /
-`tty::read` return `EINTR`. What remains open is that the reader still *polls*
-rather than parking, so the wake costs up to one timer tick and a core cannot
-go idle. See "**The proper fix, corrected**" below: the fix originally recorded
-here would have broken USB keyboards, which is why it was split.
+**Status: FIXED.** Both stages are now complete. A process blocked reading the
+console is interruptible by signals (stage 1) and genuinely parks in the
+scheduler rather than HLT-spinning (stage 2). The keyboard's `read_char_inner`
+uses a lock-free CAS array of waiting task ids (`KEYBOARD_WAITERS`),
+`park_interruptible`, and ISR-safe wakes from `push_char_raw` — matching the
+pty backend's design. Deadline-based reads arm an hrtimer for precise wakeup.
+Kernel-mode readers (kshell) keep the HLT loop, which is correct for their
+use case.
 
 **Stage 1, as landed (2026-08-21).** `kernel/src/keyboard.rs` grew
 `pub enum ReadOutcome { Byte(u8), Interrupted, TimedOut }` and one private
@@ -60689,15 +60691,18 @@ So stage 2 is two changes, in order:
    objection. The poller still wakes nobody, so step 2's wake side is
    untouched — a parked reader would now sleep through a keystroke that *was*
    successfully captured, which is a better failure but still a hang.
-2. **Then** convert the loop to a real park: a waiter set on the scancode
-   queue, `park_interruptible`, and a wake from both the PS/2 IRQ and the new
-   HID poll task. The wake must use the ISR-safe idiom — `sched::try_wake(tid)`
-   and, on failure, `sched::defer_wake(tid)` — **not** `WaitQueue::try_wake_one`
-   and not a `try_lock`ed waiter set: both of those *lose* the wake when the
-   ISR loses the lock, and a lost wake here is a hang. The natural shape is a
-   lock-free CAS array of waiting task ids whose full-array fallback is today's
-   `HLT` poll, so the degenerate case degrades to current behaviour rather than
-   to a deadlock.
+2. ✅ **DONE 2026-09-08.** **Convert the loop to a real park**: a lock-free
+   CAS array of waiting task ids (`KEYBOARD_WAITERS`, 4 slots),
+   `park_interruptible`, and a wake from `push_char_raw` (reached from both
+   the PS/2 IRQ 1 handler and the USB HID poll timer). The wake uses the
+   ISR-safe idiom — `sched::try_wake(tid)` and, on failure,
+   `sched::defer_wake(tid)` — as prescribed. The full-array fallback is the
+   old `HLT` poll, so the degenerate case degrades to current behaviour rather
+   than to a deadlock. Deadline-based reads (VTIME) arm a one-shot hrtimer
+   that wakes the parked task at the deadline, so they no longer rely on the
+   timer tick for wakeup. Kernel-mode readers (`pid == 0` — kshell, boot
+   console) keep the HLT loop: they have no signal context, and `park_interruptible`
+   degrades to `block_current` for pid 0 anyway.
 
 **Original report follows, unedited apart from the heading, because the
 reasoning it records is what stage 1 acted on.**
@@ -124090,6 +124095,40 @@ exists and only the wiring is missing), then auto-click (self-contained, in
 the compositor's pointer path, and the closest analogue to the sticky-keys
 work just finished). Flash-screen needs a system-sound event to hang off.
 Captions are not really an accessibility-settings job at all.
+
+## TD-A-CTEST-PTY-HANGS-BOOT — PtySlave reads dispatch through SYS_TTY_READ which targets the console, not the pty (lane A, 2026-09-08) — KERNEL SIDE FIXED
+
+**Root cause.** `posix/src/file.rs` routes `HandleKind::PtySlave` reads
+through `SYS_TTY_READ(buf, count)`, which calls `tty_read_into_user` with
+`current_tty()` — hardcoded to the console.  The console's default termios
+is canonical (`ICANON`, `VMIN=1`), so `canonical_read()` blocks forever
+waiting for keyboard input.  The pty slave's own termios (set to raw by
+the `ctest-pty` fixture) is never consulted.
+
+This is the missing `SYS_PTY_SLAVE_READ` half of an asymmetry: the master
+side has had `SYS_PTY_MASTER_READ` (546) and `SYS_PTY_MASTER_TRY_READ`
+(547) since the pty was built; the slave side has `SYS_PTY_SLAVE_WRITE`
+(548) but no read.
+
+**Fix (kernel, done).** `SYS_PTY_SLAVE_READ` (872) and
+`SYS_PTY_SLAVE_TRY_READ` (873) added.  Both use `resolve_tty_arg` to
+target the correct pty and call `tty::read` / `tty::try_read`.
+
+**Fix (POSIX, pending lane B).** `posix/src/file.rs` must route PtySlave
+reads through 872/873 instead of `SYS_TTY_READ`.  Filed as request
+`a-b-pty-slave-read-syscalls-exist-route-posix-reads.md`.
+
+**The "scheduler doesn't preempt" concern was a false alarm.**
+`schedule_inner` correctly returns without context-switching when the
+spinning task is the only runnable one (`picked_id == current_id`).  The
+liveness check's "zero context switches" is technically correct but
+misleading — the scheduler *is* running, it just picks the same task
+because nothing else is runnable.
+
+**Where.** `kernel/src/syscall/number.rs` (872–873),
+`kernel/src/syscall/handlers.rs` (`sys_pty_slave_read`,
+`sys_pty_slave_try_read`), `kernel/src/tty/mod.rs` (`try_read`,
+`canonical_try_read`, `raw_try_read`).
 
 ---
 

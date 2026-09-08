@@ -4868,6 +4868,61 @@ pub const SYS_PTY_GET_PGRP: u64 = 870;
 pub const SYS_PTY_SET_PGRP: u64 = 871;
 
 // ---------------------------------------------------------------------------
+// Slave-side reads (872–873)
+// ---------------------------------------------------------------------------
+//
+// The missing half of the slave I/O family.  [`SYS_PTY_SLAVE_WRITE`] (548) has
+// existed since the pty was born, but the slave *read* went through
+// [`SYS_TTY_READ`] (543), which hardcodes `current_tty()`.  For a process whose
+// controlling terminal is the pty slave, `current_tty()` returns the slave's
+// `TtyId` and the read works.  For one that holds a slave *handle* but whose
+// controlling terminal is still the console (i.e. the fixture before `forkpty`
+// calls `login_tty`), `current_tty()` is the console — and the console's
+// canonical-mode `VMIN=1` read blocks forever on keyboard input that never
+// arrives.  That is the root cause of the `ctest-pty` hang.
+//
+// These two syscalls mirror [`SYS_PTY_MASTER_READ`] (546) and
+// [`SYS_PTY_MASTER_TRY_READ`] (547): one blocking, one non-blocking, both
+// taking a terminal argument under the [`resolve_tty_arg`] convention (`0` =
+// the caller's controlling terminal, `>= 2` = an owned pty handle).  The
+// blocking variant calls [`crate::tty::read`], which already works for pty
+// backends.  The non-blocking variant calls [`crate::tty::try_read`], which
+// returns `WouldBlock` instead of parking the caller.
+
+/// Read from the slave end of a pty (blocking).
+///
+/// `arg0`: terminal, under the family's naming convention — `0` is the caller's
+/// controlling terminal, `>= 2` is an owned pty handle.
+/// `arg1`: pointer to the output buffer.
+/// `arg2`: capacity in bytes.
+///
+/// This is what `read(slave_fd, ...)` should dispatch to.  Unlike
+/// [`SYS_TTY_READ`] (543), this resolves the terminal from the argument rather
+/// than hardcoding `current_tty()`, so the read targets the correct pty even
+/// when the caller's controlling terminal is something else (the console, or no
+/// terminal at all).
+///
+/// The read honours the slave's own termios: canonical mode returns a complete
+/// line, raw mode honours `VMIN`/`VTIME`.  `ISIG` characters generate signals
+/// and abort the read, just as on the console.
+///
+/// Returns: bytes read; `InvalidHandle`; `ChannelClosed` (EIO) on hangup;
+/// the restart sentinel on a signal.  Chosen number 872.
+pub const SYS_PTY_SLAVE_READ: u64 = 872;
+
+/// Non-blocking [`SYS_PTY_SLAVE_READ`].
+///
+/// Same arguments.  Returns immediately with `WouldBlock` if no data is
+/// available (raw mode: no bytes buffered; canonical mode: no complete line
+/// buffered).  In raw mode with `VMIN=0, VTIME=0` this is equivalent to the
+/// blocking variant (which is already a pure poll in that case).
+///
+/// Returns: bytes read (may be 0 in raw `VMIN=0` mode); `WouldBlock` if no
+/// data is available; `InvalidHandle`; `ChannelClosed` on hangup.
+/// Chosen number 873.
+pub const SYS_PTY_SLAVE_TRY_READ: u64 = 873;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 
@@ -5087,6 +5142,78 @@ pub const SYS_DRM_ATOMIC_COMMIT: u64 = 1060;
 /// Chosen number 1066, at the high-water mark — see
 /// [`SYS_PTY_MASTER_TRY_WRITE`] for why numbers are never recycled.
 pub const SYS_WAIT_MULTIPLE: u64 = 1066;
+
+// ---------------------------------------------------------------------------
+// Supplementary groups + chroot (1067–1068)
+// ---------------------------------------------------------------------------
+
+/// Set the calling process's supplementary group list.
+///
+/// The native counterpart of the Linux `setgroups(2)` that already lives in
+/// `linux.rs`.  Unlike that handler (which checks `uid == 0`), this one uses
+/// the kernel's own capability system: the caller must hold
+/// `(Process, SET_CREDENTIALS)` to make any change.  A `count == 0` call
+/// drops all supplementary groups — the classic privilege-drop idiom.
+///
+/// # Arguments
+///
+/// - `arg0` — `count: u64` — number of GIDs to install (0 = drop all).
+///   Capped at `NGROUPS_MAX` (65 536); values above return `InvalidArgument`.
+/// - `arg1` — `list_ptr: u64` — user-space pointer to an array of `count`
+///   `u32` values (ignored when `count == 0`).
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] — the caller is a kernel task with no
+///   owning process.
+/// - [`KernelError::PermissionDenied`] — the caller does not hold
+///   `(Process, SET_CREDENTIALS)`.
+/// - [`KernelError::InvalidArgument`] — `count > NGROUPS_MAX`.
+/// - [`KernelError::PageFault`] — `list_ptr` is null or unmapped when
+///   `count > 0`.
+///
+/// Chosen number 1067, next free slot after 1066.
+pub const SYS_PROCESS_SETGROUPS: u64 = 1067;
+
+/// Change the calling process's filesystem root directory (chroot).
+///
+/// The native counterpart of the POSIX `chroot(2)`.  The Linux-ABI handler
+/// in `linux.rs` validates but terminally refuses (`EPERM`) because no
+/// Linux-ABI caller holds `CAP_SYS_CHROOT`.  The native handler gates on
+/// `(Process, SET_CREDENTIALS)` instead — the same right that governs uid
+/// and gid mutations — and, when the caller holds it, actually installs the
+/// new root.
+///
+/// # Arguments
+///
+/// - `arg0` — `path_ptr: u64` — user-space pointer to a NUL-terminated
+///   canonical absolute path (UTF-8, the same encoding VFS paths use in our
+///   kernel).  The path must name an existing directory.
+///
+/// # Semantics
+///
+/// After a successful call, every path-resolution in this process treats the
+/// named directory as `/`.  A relative path `foo/bar` resolves against the
+/// cwd as before; an absolute path `/foo/bar` resolves against the new root.
+/// The cwd is not moved — if it fell outside the new root, subsequent
+/// relative lookups can escape (the classic chroot caveat; this is POSIX
+/// behaviour, not a bug).
+///
+/// The root is inherited across `fork` and `exec`.  `None` means the
+/// real filesystem root `/`.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] — the caller is a kernel task.
+/// - [`KernelError::PermissionDenied`] — the caller does not hold
+///   `(Process, SET_CREDENTIALS)`.
+/// - [`KernelError::NotFound`] — the path does not exist.
+/// - [`KernelError::InvalidArgument`] — the path is empty, too long, or
+///   does not name a directory.
+/// - [`KernelError::PageFault`] — null or unmapped pointer.
+///
+/// Chosen number 1068, next free slot after 1067.
+pub const SYS_PROCESS_CHROOT: u64 = 1068;
 
 // ---------------------------------------------------------------------------
 // Version info

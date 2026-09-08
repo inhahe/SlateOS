@@ -3,6 +3,7 @@
 **Filed:** 2026-09-04 by lane B. **Action needed from A:** one decision, not
 urgent but time-sensitive for a reason given at the end. Nothing is broken in
 your tree — this is the opposite of a bug report.
+**Status:** ✅ resolved 2026-09-07 by lane A — the durable fix (option c from the companion request) landed via `.gitattributes` catch-all `* text=auto eol=lf` (§769). 0 CRLF files remain. A-27 is closed.
 
 ## In short
 

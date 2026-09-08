@@ -2456,16 +2456,27 @@ extern "C" fn kernel_main() -> ! {
         case();
     }
 
-    // DISABLED: ctest-pty hangs the boot — the fixture enters a kernel
-    // syscall at 0xffffffff819dc695 that busy-loops, and the scheduler
-    // fails to preempt it (preempt_disable_depth=0, zero context switches).
-    // Two bugs:
-    //   1. A pty syscall path spins in kernel space (lane B's pty layer or
-    //      a kernel primitive it calls).
-    //   2. The scheduler does not preempt a kernel-space loop even with
-    //      preemption enabled — timer ticks advance but no reschedule fires.
-    // Filed as A-CTEST-PTY-HANGS-BOOT in known-issues.md.  Re-enable once
-    // both bugs are fixed.
+    // DISABLED: ctest-pty hangs the boot.
+    //
+    // ROOT CAUSE (2026-09-08): PtySlave reads in posix/src/file.rs dispatch
+    // through SYS_TTY_READ(buf, count), which hardcodes current_tty() — the
+    // console.  The console's default termios is canonical (ICANON, VMIN=1),
+    // so canonical_read() blocks forever waiting for keyboard input that
+    // never arrives.  The pty slave's own termios (set to raw by the fixture)
+    // is never consulted because the read goes to the wrong device.
+    //
+    // KERNEL FIX: SYS_PTY_SLAVE_READ (872) and SYS_PTY_SLAVE_TRY_READ (873)
+    // now exist.  They use resolve_tty_arg to read from the correct pty.
+    //
+    // REMAINING: posix/src/file.rs (lane B) must route HandleKind::PtySlave
+    // reads through the new syscalls instead of SYS_TTY_READ.  Filed as
+    // request a-b-pty-slave-read-syscalls-exist-route-posix-reads.md.
+    //
+    // The "scheduler doesn't preempt" concern from the original filing was a
+    // false alarm: schedule_inner correctly returns without switching when the
+    // spinning task is the only runnable one (picked_id == current_id).
+    //
+    // Re-enable once lane B routes PtySlave reads through 872/873.
     //
     // if let Err(e) = proc::spawn::self_test_ctest_pty() {
     //     serial_println!(
@@ -5368,6 +5379,12 @@ extern "C" fn kernel_main() -> ! {
             // line-oriented text formats (/proc/mounts, the trash index). A bug here
             // corrupts a file rather than failing loudly, so it is checked on boot.
             fs::escape::self_test();
+            // Deferred filesystem operations — the queue entry serializer/parser and
+            // the filename encoding.  A bug here could cause a replayed operation to
+            // target the wrong file (inode mismatch not detected, path unescaped
+            // wrongly) or silently drop a queued operation (malformed entry not
+            // recognised).  Tested early because the replay hook runs on every mount.
+            fs::deferred_ops::self_test();
             // Locale and timezone. Both self-tests existed but were never called from
             // anywhere — a test that never runs is not a test, and these two are the
             // only coverage the kernel's POSIX `TZ` rule evaluation has.

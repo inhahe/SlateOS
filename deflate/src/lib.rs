@@ -724,6 +724,324 @@ fn inflate_codes(
 }
 
 // ---------------------------------------------------------------------------
+// Streaming inflate — incremental decompression
+// ---------------------------------------------------------------------------
+
+/// The DEFLATE window size: back-references can look up to 32 KiB behind.
+const WINDOW_SIZE: usize = 32768;
+
+/// Incremental raw-DEFLATE decompressor.
+///
+/// Decodes a raw DEFLATE stream one block at a time and lets the caller pull
+/// bytes through [`read`](Self::read). Between reads, only the 32 KiB sliding
+/// window plus pending (not-yet-consumed) output is held in memory — the
+/// caller never sees the full decompressed buffer.
+///
+/// # Output limit
+///
+/// The limit passed to [`inflate_stream`] caps the *total* decompressed
+/// output, exactly like [`inflate_limited`]. [`Error::OutputTooLarge`] fires
+/// at the same byte.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let mut stream = deflate::inflate_stream(compressed, expected_len)?;
+/// let mut row = [0u8; ROW_BYTES];
+/// while stream.read(&mut row)? > 0 {
+///     process_row(&row);
+/// }
+/// ```
+pub struct InflateStream<'a> {
+    reader: BitReader<'a>,
+    /// Decoded bytes. The front holds the sliding window (already consumed);
+    /// `buf[cursor..]` is pending output the caller has not read yet.
+    buf: Vec<u8>,
+    /// Index into `buf` of the next byte to hand out via `read`.
+    cursor: usize,
+    /// Total bytes drained from the front of `buf` across all compactions.
+    flushed: usize,
+    /// Caller's total-output cap.
+    limit: usize,
+    /// `true` once the BFINAL block has been fully decoded.
+    finished: bool,
+}
+
+/// Create a streaming raw-DEFLATE inflater.
+///
+/// This is the streaming twin of [`inflate_limited`]: it decodes the same
+/// data, enforces the same output cap, but lets the caller pull bytes
+/// incrementally rather than receiving a single `Vec`.
+///
+/// # Errors
+///
+/// Construction itself is infallible (no bytes are decoded yet). All errors
+/// surface from [`InflateStream::read`].
+#[must_use]
+pub fn inflate_stream(data: &[u8], limit: usize) -> InflateStream<'_> {
+    InflateStream {
+        reader: BitReader::new(data),
+        buf: Vec::with_capacity(data.len().saturating_mul(2).min(limit).min(65536)),
+        cursor: 0,
+        flushed: 0,
+        limit,
+        finished: false,
+    }
+}
+
+impl<'a> InflateStream<'a> {
+    /// Pull decompressed bytes into `out`.
+    ///
+    /// Returns the number of bytes written, which is `out.len()` when there
+    /// are enough decoded bytes, and less only at end-of-stream. **Returns 0
+    /// only at EOF** — the same contract as `std::io::Read`.
+    ///
+    /// # Errors
+    ///
+    /// Every [`Error`] that [`inflate_limited`] can return, at the same byte.
+    pub fn read(&mut self, out: &mut [u8]) -> Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+
+        // Serve from pending bytes first.
+        let avail = self.buf.len().saturating_sub(self.cursor);
+        if avail > 0 {
+            let n = avail.min(out.len());
+            let src = self
+                .buf
+                .get(self.cursor..self.cursor.wrapping_add(n))
+                .ok_or(Error::UnexpectedEnd)?;
+            out.get_mut(..n)
+                .ok_or(Error::UnexpectedEnd)?
+                .copy_from_slice(src);
+            self.cursor = self.cursor.wrapping_add(n);
+            self.compact();
+            return Ok(n);
+        }
+
+        if self.finished {
+            return Ok(0);
+        }
+
+        // Decode one more DEFLATE block.
+        self.decode_block()?;
+
+        // Serve from the freshly decoded bytes.
+        let avail = self.buf.len().saturating_sub(self.cursor);
+        if avail > 0 {
+            let n = avail.min(out.len());
+            let src = self
+                .buf
+                .get(self.cursor..self.cursor.wrapping_add(n))
+                .ok_or(Error::UnexpectedEnd)?;
+            out.get_mut(..n)
+                .ok_or(Error::UnexpectedEnd)?
+                .copy_from_slice(src);
+            self.cursor = self.cursor.wrapping_add(n);
+            self.compact();
+            Ok(n)
+        } else if self.finished {
+            Ok(0)
+        } else {
+            // Empty block (possible with stored blocks of length 0).
+            self.read(out)
+        }
+    }
+
+    /// Total decompressed bytes returned by `read` so far.
+    #[must_use]
+    pub fn total_out(&self) -> usize {
+        self.flushed.wrapping_add(self.cursor)
+    }
+
+    /// Decode one DEFLATE block into the internal buffer.
+    fn decode_block(&mut self) -> Result<()> {
+        let eff_limit = self.limit.saturating_sub(self.flushed);
+        let bfinal = self.reader.read_bits(1)?;
+        let btype = self.reader.read_bits(2)?;
+
+        match btype {
+            0 => inflate_stored(&mut self.reader, &mut self.buf, eff_limit)?,
+            1 => inflate_fixed(&mut self.reader, &mut self.buf, eff_limit)?,
+            2 => inflate_dynamic(&mut self.reader, &mut self.buf, eff_limit)?,
+            _ => return Err(Error::ReservedBlockType),
+        }
+
+        if bfinal != 0 {
+            self.finished = true;
+        }
+        Ok(())
+    }
+
+    /// Trim consumed bytes from the front of `buf`, keeping the 32 KiB window
+    /// that back-references need.
+    fn compact(&mut self) {
+        if self.cursor > WINDOW_SIZE {
+            let drain = self.cursor.saturating_sub(WINDOW_SIZE);
+            self.buf.drain(..drain);
+            self.cursor = self.cursor.saturating_sub(drain);
+            self.flushed = self.flushed.wrapping_add(drain);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming zlib inflate
+// ---------------------------------------------------------------------------
+
+/// Incremental Adler-32 state, for verifying the zlib checksum as bytes are
+/// consumed rather than re-hashing the entire output.
+struct Adler32State {
+    s1: u32,
+    s2: u32,
+    /// Bytes fed since last modular reduction. Kept under 5552 to avoid
+    /// overflow of the `u32` accumulators.
+    pending: u32,
+}
+
+impl Adler32State {
+    const MOD: u32 = 65521;
+    const CHUNK: u32 = 5552;
+
+    fn new() -> Self {
+        Self {
+            s1: 1,
+            s2: 0,
+            pending: 0,
+        }
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        for &b in data {
+            self.s1 = self.s1.wrapping_add(u32::from(b));
+            self.s2 = self.s2.wrapping_add(self.s1);
+            self.pending = self.pending.wrapping_add(1);
+            if self.pending >= Self::CHUNK {
+                self.s1 %= Self::MOD;
+                self.s2 %= Self::MOD;
+                self.pending = 0;
+            }
+        }
+    }
+
+    fn finish(&self) -> u32 {
+        let s1 = self.s1 % Self::MOD;
+        let s2 = self.s2 % Self::MOD;
+        (s2 << 16) | s1
+    }
+}
+
+/// Incremental zlib-wrapped (RFC 1950) decompressor.
+///
+/// The streaming twin of [`zlib_inflate_limited`]: same data, same output cap,
+/// but the decompressed bytes are pulled through [`read`](Self::read) rather
+/// than returned in one `Vec`.
+///
+/// The Adler-32 checksum is verified incrementally: each `read` feeds the
+/// returned bytes into the rolling checksum, and `read` returning 0 (EOF)
+/// means the checksum has already been confirmed.
+pub struct ZlibInflateStream<'a> {
+    inner: InflateStream<'a>,
+    adler: Adler32State,
+    stored_checksum: u32,
+    verified: bool,
+}
+
+/// Create a streaming zlib inflater.
+///
+/// Parses the 2-byte zlib header immediately and returns the stream positioned
+/// at the first DEFLATE byte. The 4-byte Adler-32 trailer is verified on EOF.
+///
+/// # Errors
+///
+/// [`Error::BadWrapperHeader`] if the header is not zlib, or
+/// [`Error::PresetDictionary`] if the stream requires one.
+pub fn zlib_inflate_stream(data: &[u8], limit: usize) -> Result<ZlibInflateStream<'_>> {
+    // Same header validation as zlib_inflate_limited.
+    let (cmf, flg) = match data {
+        [cmf, flg, ..] if data.len() >= 6 => (*cmf, *flg),
+        _ => return Err(Error::UnexpectedEnd),
+    };
+
+    let cm = cmf & 0x0F;
+    if cm != 8 {
+        return Err(Error::BadWrapperHeader);
+    }
+
+    let header_check = u16::from(cmf)
+        .wrapping_mul(256)
+        .wrapping_add(u16::from(flg));
+    if header_check % 31 != 0 {
+        return Err(Error::BadWrapperHeader);
+    }
+
+    if flg & 0x20 != 0 {
+        return Err(Error::PresetDictionary);
+    }
+
+    // Compressed payload: skip 2-byte header, exclude 4-byte trailer.
+    let compressed = data
+        .get(2..data.len().saturating_sub(4))
+        .ok_or(Error::UnexpectedEnd)?;
+
+    // Read the stored Adler-32 from the trailer (big-endian).
+    let trailer_start = data.len().saturating_sub(4);
+    let stored_checksum = match data.get(trailer_start..) {
+        Some(&[a, b, c, d]) => u32::from_be_bytes([a, b, c, d]),
+        _ => return Err(Error::UnexpectedEnd),
+    };
+
+    Ok(ZlibInflateStream {
+        inner: inflate_stream(compressed, limit),
+        adler: Adler32State::new(),
+        stored_checksum,
+        verified: false,
+    })
+}
+
+impl<'a> ZlibInflateStream<'a> {
+    /// Pull decompressed bytes, exactly like [`InflateStream::read`].
+    ///
+    /// The Adler-32 checksum is fed incrementally with each chunk returned.
+    /// When `read` returns `Ok(0)` (EOF), the checksum has already been
+    /// verified — a mismatch returns [`Error::ChecksumMismatch`] instead.
+    ///
+    /// # Errors
+    ///
+    /// Every [`Error`] that [`zlib_inflate_limited`] can return, at the same
+    /// byte.
+    pub fn read(&mut self, out: &mut [u8]) -> Result<usize> {
+        let n = self.inner.read(out)?;
+        if n > 0 {
+            if let Some(chunk) = out.get(..n) {
+                self.adler.update(chunk);
+            }
+            return Ok(n);
+        }
+
+        // EOF — verify the checksum once.
+        if !self.verified {
+            self.verified = true;
+            let computed = self.adler.finish();
+            if computed != self.stored_checksum {
+                return Err(Error::ChecksumMismatch {
+                    expected: self.stored_checksum,
+                    actual: computed,
+                });
+            }
+        }
+        Ok(0)
+    }
+
+    /// Total decompressed bytes returned by `read` so far.
+    #[must_use]
+    pub fn total_out(&self) -> usize {
+        self.inner.total_out()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DEFLATE deflate (compression)
 // ---------------------------------------------------------------------------
 
@@ -2313,8 +2631,9 @@ mod tests {
     use super::{
         BitWriter, DEFAULT_MAX_CHAIN, Error, HuffmanTable, LzToken, MAX_OUTPUT, adler32, deflate,
         deflate_level, deflate_stored, encode_dynamic, encode_fixed, fixed_lit_lengths, gunzip,
-        gunzip_limited, gzip, inflate, inflate_limited, level_max_chain, lz77_tokenize,
-        stored_size, zlib_deflate, zlib_inflate, zlib_inflate_limited,
+        gunzip_limited, gzip, inflate, inflate_limited, inflate_stream, level_max_chain,
+        lz77_tokenize, stored_size, zlib_deflate, zlib_inflate, zlib_inflate_limited,
+        zlib_inflate_stream,
     };
     use alloc::format;
     use alloc::string::String;
@@ -2998,5 +3317,166 @@ mod tests {
             assert_eq!(deflate_level(&tiny, level), base);
         }
         assert_eq!(inflate(&base).expect("tiny must inflate"), tiny);
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming inflate tests
+    // -----------------------------------------------------------------------
+
+    /// The streaming inflater produces the same bytes as the one-shot variant.
+    #[test]
+    fn streaming_inflate_matches_oneshot() {
+        let original: Vec<u8> = (0..4096u16).map(|i| (i & 0xFF) as u8).collect();
+        let compressed = deflate(&original);
+
+        // One-shot reference.
+        let expected = inflate(&compressed).expect("inflate");
+
+        // Streaming — read in 128-byte chunks.
+        let mut stream = inflate_stream(&compressed, original.len());
+        let mut got = Vec::new();
+        let mut buf = [0u8; 128];
+        loop {
+            let n = stream.read(&mut buf).expect("stream read");
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(got, expected, "streaming output must match one-shot");
+    }
+
+    /// The streaming zlib inflater matches the one-shot variant and verifies
+    /// the Adler-32 checksum.
+    #[test]
+    fn streaming_zlib_inflate_matches_oneshot() {
+        let original: Vec<u8> = (0..8192u16).map(|i| (i % 251) as u8).collect();
+        let compressed = zlib_deflate(&original);
+
+        let expected = zlib_inflate(&compressed).expect("zlib_inflate");
+
+        let mut stream = zlib_inflate_stream(&compressed, original.len()).expect("stream new");
+        let mut got = Vec::new();
+        let mut buf = [0u8; 256];
+        loop {
+            let n = stream.read(&mut buf).expect("stream read");
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(got, expected, "streaming zlib output must match one-shot");
+    }
+
+    /// Streaming inflate with a 1-byte read buffer (worst-case fragmentation).
+    #[test]
+    fn streaming_inflate_single_byte_reads() {
+        let original = b"Hello, streaming DEFLATE world!";
+        let compressed = deflate(original.as_slice());
+
+        let mut stream = inflate_stream(&compressed, original.len());
+        let mut got = Vec::new();
+        let mut buf = [0u8; 1];
+        loop {
+            let n = stream.read(&mut buf).expect("read");
+            if n == 0 {
+                break;
+            }
+            got.push(buf[0]);
+        }
+        assert_eq!(got, original);
+    }
+
+    /// The output limit is enforced in streaming mode.
+    #[test]
+    fn streaming_inflate_respects_limit() {
+        let original: Vec<u8> = alloc::vec![0xAA; 1024];
+        let compressed = deflate(&original);
+
+        let mut stream = inflate_stream(&compressed, 500);
+        let mut buf = [0u8; 256];
+        let mut total = 0;
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => total += n,
+                Err(Error::OutputTooLarge) => break,
+                Err(e) => panic!("unexpected error: {e:?}"),
+            }
+        }
+        assert!(total <= 500, "limit must cap output: got {total}");
+    }
+
+    /// Streaming zlib inflate detects a corrupted Adler-32 checksum.
+    #[test]
+    fn streaming_zlib_inflate_detects_bad_checksum() {
+        let original = b"checksum test data";
+        let mut compressed = zlib_deflate(original.as_slice());
+
+        // Corrupt the last byte of the Adler-32 trailer.
+        let last = compressed.len() - 1;
+        compressed[last] ^= 0xFF;
+
+        let mut stream = zlib_inflate_stream(&compressed, original.len()).expect("stream new");
+        let mut buf = [0u8; 256];
+        let mut err_seen = false;
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(Error::ChecksumMismatch { .. }) => {
+                    err_seen = true;
+                    break;
+                }
+                Err(e) => panic!("unexpected error: {e:?}"),
+            }
+        }
+        assert!(err_seen, "corrupted checksum must be detected");
+    }
+
+    /// `total_out` tracks the cumulative byte count correctly.
+    #[test]
+    fn streaming_total_out_is_correct() {
+        let original: Vec<u8> = (0..2000u16).map(|i| (i & 0xFF) as u8).collect();
+        let compressed = zlib_deflate(&original);
+
+        let mut stream = zlib_inflate_stream(&compressed, original.len()).expect("stream");
+        let mut buf = [0u8; 300];
+        let mut manual_count = 0usize;
+        loop {
+            let n = stream.read(&mut buf).expect("read");
+            if n == 0 {
+                break;
+            }
+            manual_count += n;
+            assert_eq!(
+                stream.total_out(),
+                manual_count,
+                "total_out must match manual count after each read"
+            );
+        }
+        assert_eq!(manual_count, original.len());
+    }
+
+    /// Large data: streaming inflate stays correct across window compactions.
+    #[test]
+    fn streaming_inflate_large_data_with_compaction() {
+        // 128 KiB — well above the 32 KiB window, forcing multiple compactions.
+        let original: Vec<u8> = (0..131072u32).map(|i| (i % 251) as u8).collect();
+        let compressed = zlib_deflate(&original);
+
+        let expected = zlib_inflate(&compressed).expect("one-shot");
+
+        let mut stream = zlib_inflate_stream(&compressed, original.len()).expect("stream");
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut buf).expect("read");
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(got, expected, "large streaming output must match one-shot");
     }
 }

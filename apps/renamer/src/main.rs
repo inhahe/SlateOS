@@ -33,6 +33,7 @@
 #![allow(clippy::match_same_arms)]
 #![allow(clippy::cognitive_complexity)]
 
+use appearance::Palette;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -47,25 +48,6 @@ use std::time::Duration;
 // ============================================================================
 // Catppuccin Mocha theme
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 
 // ============================================================================
 // Layout constants
@@ -246,18 +228,18 @@ impl RenameOp {
         }
     }
 
-    fn color(&self) -> Color {
+    fn color(&self, pal: &Palette) -> Color {
         match self {
-            Self::FindReplace { .. } => BLUE,
-            Self::Insert { .. } => GREEN,
-            Self::Remove { .. } => RED,
-            Self::ChangeCase(_) => MAUVE,
-            Self::Number { .. } => PEACH,
-            Self::DateStamp { .. } => TEAL,
-            Self::Regex { .. } => YELLOW,
-            Self::Trim { .. } => LAVENDER,
-            Self::Extension(_) => OVERLAY0,
-            Self::Template { .. } => SUBTEXT1,
+            Self::FindReplace { .. } => pal.blue,
+            Self::Insert { .. } => pal.green,
+            Self::Remove { .. } => pal.red,
+            Self::ChangeCase(_) => pal.mauve,
+            Self::Number { .. } => pal.peach,
+            Self::DateStamp { .. } => pal.teal,
+            Self::Regex { .. } => pal.yellow,
+            Self::Trim { .. } => pal.lavender,
+            Self::Extension(_) => pal.overlay0,
+            Self::Template { .. } => pal.subtext1,
         }
     }
 }
@@ -907,6 +889,12 @@ struct RenamerApp {
     /// Without it, typing "c" to search would toggle the conflicts filter. The
     /// app had no input at all, so nothing had needed the distinction.
     searching: bool,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -919,6 +907,7 @@ enum SidebarPanel {
 impl RenamerApp {
     fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             files: Vec::new(),
             operations: Vec::new(),
             undo_stack: Vec::new(),
@@ -1507,7 +1496,7 @@ impl RenamerApp {
             y: 0.0,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1532,7 +1521,7 @@ impl RenamerApp {
             y: 0.0,
             width: WINDOW_WIDTH,
             height: TOOLBAR_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1542,7 +1531,7 @@ impl RenamerApp {
             y: 10.0,
             text: "Batch File Renamer".into(),
             font_size: TITLE_TEXT,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -1550,11 +1539,11 @@ impl RenamerApp {
 
         // Toolbar buttons. Pair label with color so we never index out of bounds.
         let buttons = [
-            ("Add Files", BLUE),
-            ("Rename", GREEN),
-            ("Undo", PEACH),
-            ("Redo", PEACH),
-            ("Clear", RED),
+            ("Add Files", self.palette.blue),
+            ("Rename", self.palette.green),
+            ("Undo", self.palette.peach),
+            ("Redo", self.palette.peach),
+            ("Clear", self.palette.red),
         ];
         let mut bx = 220.0;
         for (label, color) in buttons {
@@ -1564,7 +1553,7 @@ impl RenamerApp {
                 y: 6.0,
                 width: bw,
                 height: BUTTON_HEIGHT,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1592,7 +1581,7 @@ impl RenamerApp {
             y: 14.0,
             text: count_text,
             font_size: SMALL_TEXT,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(290.0),
             overflow: TextOverflow::Ellipsis,
@@ -1609,7 +1598,7 @@ impl RenamerApp {
             y,
             width: SIDEBAR_WIDTH,
             height: h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1623,7 +1612,11 @@ impl RenamerApp {
                 SidebarPanel::Preview => i == 1,
                 SidebarPanel::History => i == 2,
             };
-            let bg = if is_active { SURFACE0 } else { MANTLE };
+            let bg = if is_active {
+                self.palette.surface0
+            } else {
+                self.palette.mantle
+            };
             cmds.push(RenderCommand::FillRect {
                 x: tx,
                 y,
@@ -1638,7 +1631,7 @@ impl RenamerApp {
                     y,
                     width: tab_w,
                     height: 2.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -1647,7 +1640,11 @@ impl RenamerApp {
                 y: y + 8.0,
                 text: (*tab).into(),
                 font_size: SMALL_TEXT,
-                color: if is_active { TEXT } else { SUBTEXT0 },
+                color: if is_active {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -1680,7 +1677,7 @@ impl RenamerApp {
                 y: y + PADDING,
                 text: "No operations added yet.".into(),
                 font_size: SMALL_TEXT,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1690,7 +1687,7 @@ impl RenamerApp {
                 y: y + PADDING + 18.0,
                 text: "Add operations to see a".into(),
                 font_size: SMALL_TEXT,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1700,7 +1697,7 @@ impl RenamerApp {
                 y: y + PADDING + 34.0,
                 text: "live rename preview.".into(),
                 font_size: SMALL_TEXT,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1711,7 +1708,11 @@ impl RenamerApp {
         let mut oy = y + 4.0;
         for (i, op) in self.operations.iter().enumerate() {
             let is_selected = i == self.selected_op;
-            let bg = if is_selected { SURFACE0 } else { MANTLE };
+            let bg = if is_selected {
+                self.palette.surface0
+            } else {
+                self.palette.mantle
+            };
 
             cmds.push(RenderCommand::FillRect {
                 x: x + 4.0,
@@ -1728,7 +1729,7 @@ impl RenamerApp {
                 y: oy + 6.0,
                 width: 4.0,
                 height: 18.0,
-                color: op.color(),
+                color: op.color(&self.palette),
                 corner_radii: CornerRadii::all(2.0),
             });
 
@@ -1738,7 +1739,11 @@ impl RenamerApp {
                 y: oy + 4.0,
                 text: format!("{}. {}", i.saturating_add(1), op.label()),
                 font_size: SMALL_TEXT,
-                color: if is_selected { TEXT } else { SUBTEXT0 },
+                color: if is_selected {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(SIDEBAR_WIDTH - 40.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1782,7 +1787,7 @@ impl RenamerApp {
                     y: oy + 17.0,
                     text: detail,
                     font_size: OP_DETAIL_SIZE,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(OP_DETAIL_WIDTH),
                     overflow: TextOverflow::Ellipsis,
@@ -1802,7 +1807,7 @@ impl RenamerApp {
                 y: py,
                 text: "Selected File".into(),
                 font_size: HEADER_TEXT,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1815,7 +1820,7 @@ impl RenamerApp {
                 y: py,
                 text: "Original:".into(),
                 font_size: SMALL_TEXT,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1826,7 +1831,7 @@ impl RenamerApp {
                 y: py,
                 text: file.original_name.clone(),
                 font_size: NORMAL_TEXT,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 3.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1839,18 +1844,18 @@ impl RenamerApp {
                 y: py,
                 text: "New:".into(),
                 font_size: SMALL_TEXT,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
             });
             py += 16.0;
             let name_color = if file.conflict {
-                RED
+                self.palette.red
             } else if file.new_name != file.original_name {
-                GREEN
+                self.palette.green
             } else {
-                TEXT
+                self.palette.text
             };
             cmds.push(RenderCommand::Text {
                 x: x + PADDING + 8.0,
@@ -1870,7 +1875,7 @@ impl RenamerApp {
                     y: py,
                     text: "⚠ Name conflict detected!".into(),
                     font_size: SMALL_TEXT,
-                    color: RED,
+                    color: self.palette.red,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1885,7 +1890,7 @@ impl RenamerApp {
                 y: py,
                 width: SIDEBAR_WIDTH - PADDING * 2.0,
                 height: 1.0,
-                color: SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::ZERO,
             });
             py += 8.0;
@@ -1896,7 +1901,7 @@ impl RenamerApp {
                 y: py,
                 text: format!("Size: {size_str}"),
                 font_size: SMALL_TEXT,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1915,7 +1920,7 @@ impl RenamerApp {
                     }
                 ),
                 font_size: SMALL_TEXT,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1926,7 +1931,7 @@ impl RenamerApp {
                 y: y + PADDING,
                 text: "No file selected".into(),
                 font_size: SMALL_TEXT,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1941,7 +1946,7 @@ impl RenamerApp {
                 y: y + PADDING,
                 text: "No rename history yet.".into(),
                 font_size: SMALL_TEXT,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1956,7 +1961,11 @@ impl RenamerApp {
                 y: hy,
                 width: SIDEBAR_WIDTH - 8.0,
                 height: 28.0,
-                color: if i % 2 == 0 { MANTLE } else { SURFACE0 },
+                color: if i % 2 == 0 {
+                    self.palette.mantle
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii::all(3.0),
             });
 
@@ -1970,7 +1979,7 @@ impl RenamerApp {
                 y: hy + 7.0,
                 text: label,
                 font_size: SMALL_TEXT,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1992,12 +2001,12 @@ impl RenamerApp {
             y,
             width: w,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
         let table = Table::new(FILE_COLUMNS, x);
-        table.header(cmds, y + 5.0, SUBTEXT1, SMALL_TEXT);
+        table.header(cmds, y + 5.0, self.palette.subtext1, SMALL_TEXT);
 
         // File rows
         let filtered = self.filtered_files();
@@ -2010,9 +2019,9 @@ impl RenamerApp {
         {
             let is_selected = *file_idx == self.selected_file;
             let bg = if is_selected {
-                SURFACE0
+                self.palette.surface0
             } else if display_idx % 2 == 0 {
-                BASE
+                self.palette.base
             } else {
                 Color::from_hex(0x1F1F30) // Slightly lighter than base
             };
@@ -2030,7 +2039,11 @@ impl RenamerApp {
             // against its column's left edge by hand.
             let cx = table.left(COL_CHECK);
 
-            let check_color = if file.selected { GREEN } else { SURFACE2 };
+            let check_color = if file.selected {
+                self.palette.green
+            } else {
+                self.palette.surface2
+            };
             cmds.push(RenderCommand::FillRect {
                 x: cx,
                 y: ry + 4.0,
@@ -2045,7 +2058,7 @@ impl RenamerApp {
                     y: ry + 4.0,
                     text: "✓".into(),
                     font_size: 10.0,
-                    color: CRUST,
+                    color: self.palette.crust,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(12.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2066,7 +2079,7 @@ impl RenamerApp {
                 COL_ORIGINAL,
                 ry + 4.0,
                 &file.original_name,
-                TEXT,
+                self.palette.text,
                 SMALL_TEXT,
                 Fit::End,
             );
@@ -2076,18 +2089,22 @@ impl RenamerApp {
                 COL_ARROW,
                 ry + 4.0,
                 if changed { "→" } else { "=" },
-                if changed { GREEN } else { OVERLAY0 },
+                if changed {
+                    self.palette.green
+                } else {
+                    self.palette.overlay0
+                },
                 SMALL_TEXT,
                 Fit::Start,
                 FontWeightHint::Bold,
             );
 
             let new_color = if file.conflict {
-                RED
+                self.palette.red
             } else if changed {
-                GREEN
+                self.palette.green
             } else {
-                SUBTEXT0
+                self.palette.subtext0
             };
             table.cell_weighted(
                 cmds,
@@ -2109,17 +2126,17 @@ impl RenamerApp {
                 COL_SIZE,
                 ry + 4.0,
                 &format_size(file.size),
-                SUBTEXT0,
+                self.palette.subtext0,
                 SMALL_TEXT,
                 Fit::Start,
             );
 
             let status = if file.conflict {
-                ("Conflict", RED)
+                ("Conflict", self.palette.red)
             } else if changed {
-                ("Changed", GREEN)
+                ("Changed", self.palette.green)
             } else {
-                ("", OVERLAY0)
+                ("", self.palette.overlay0)
             };
             if !status.0.is_empty() {
                 table.cell_weighted(
@@ -2146,7 +2163,7 @@ impl RenamerApp {
             y,
             width: WINDOW_WIDTH,
             height: STATUS_BAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2166,7 +2183,7 @@ impl RenamerApp {
             y: y + 5.0,
             text: msg,
             font_size: SMALL_TEXT,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(WINDOW_WIDTH - PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
@@ -2187,6 +2204,10 @@ fn format_size(bytes: u64) -> String {
 // ============================================================================
 
 impl App for RenamerApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         let selected = self.files.iter().filter(|f| f.selected).count();
         if selected == 0 {
@@ -3881,6 +3902,65 @@ mod tests {
         assert_eq!(
             simulate(&["a", "b", "c"], &[("a", "b"), ("b", "a"), ("c", "d")]),
             dir(&["a", "b", "d"])
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut RenamerApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = RenamerApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

@@ -441,6 +441,31 @@ fn to_compositor_request(
                 opacity,
             }
         }
+        // `ShellMove` and `ShellResize` follow `ShellSetOpacity` exactly: the
+        // same compositor operation as the self-only arm above each of them,
+        // reached through `require_shell` and a direct id rather than
+        // `resolve`. A window rule that places or sizes a program's window is
+        // acting on somebody else's by definition.
+        RequestBody::ShellMove { window, x, y } => {
+            link.require_shell()?;
+            CompositorRequest::Move {
+                window_id: WindowId::from_raw(window),
+                x,
+                y,
+            }
+        }
+        RequestBody::ShellResize {
+            window,
+            width,
+            height,
+        } => {
+            link.require_shell()?;
+            CompositorRequest::Resize {
+                window_id: WindowId::from_raw(window),
+                width,
+                height,
+            }
+        }
         RequestBody::GetDisplayInfo => CompositorRequest::GetDisplayInfo,
         // Unlike every window request above there is no `link.resolve` on
         // either of these, and nothing to resolve: a reload names no window and
@@ -1507,6 +1532,62 @@ mod tests {
         let lists = pump_lists(&mut comp, &mut shell);
         assert_eq!(lists.len(), 1);
         assert!(!lists[0][0].minimized);
+    }
+
+    /// The shell may place and size somebody else's window; an application
+    /// may not.
+    ///
+    /// Same shape as the opacity test below, and here for the same reason: two
+    /// more privileged tags were added at once, and a test that covered only
+    /// one of them would leave the other free to be wired through `resolve` by
+    /// mistake and never noticed.
+    #[test]
+    fn a_shell_can_place_a_window_it_does_not_own_and_an_application_still_cannot() {
+        let (mut comp, mut shell) = wired();
+        let mut app = ClientLink::new(99);
+        let theirs = open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+        assert!(!shell.owns(WindowId::from_raw(theirs)));
+
+        for privileged in [
+            RequestBody::ShellMove {
+                window: theirs,
+                x: 10,
+                y: 20,
+            },
+            RequestBody::ShellResize {
+                window: theirs,
+                width: 300,
+                height: 200,
+            },
+        ] {
+            let name = format!("{privileged:?}");
+            let responses = exchange(&mut comp, &mut shell, vec![privileged]);
+            assert!(
+                matches!(responses[0].body, ResponseBody::Ok),
+                "{name} was refused: {:?}",
+                responses[0].body
+            );
+        }
+
+        for ordinary in [
+            RequestBody::Move {
+                window: theirs,
+                x: 10,
+                y: 20,
+            },
+            RequestBody::Resize {
+                window: theirs,
+                width: 300,
+                height: 200,
+            },
+        ] {
+            let name = format!("{ordinary:?}");
+            let responses = exchange(&mut comp, &mut shell, vec![ordinary]);
+            assert!(
+                !matches!(responses[0].body, ResponseBody::Ok),
+                "{name} accepted a foreign window, which is what the shell                  variants exist to avoid"
+            );
+        }
     }
 
     /// The shell may fade somebody else's window; an application may not.

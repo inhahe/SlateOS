@@ -1544,6 +1544,12 @@ impl<T: Transport> ShellSession<T> {
             ShellRequest::MoveWindowToDesktop { window, desktop } => {
                 self.events.move_window_to_desktop(window.0, desktop)
             }
+            ShellRequest::MoveWindow { window, x, y } => self.events.shell_move(window.0, x, y),
+            ShellRequest::ResizeWindow {
+                window,
+                width,
+                height,
+            } => self.events.shell_resize(window.0, width, height),
             ShellRequest::SetOpacity { window, alpha } => {
                 // Back to the 0.0..=1.0 the wire carries. Exact: 255 divides
                 // to 1.0 and 0 to 0.0, and every step between is a value the

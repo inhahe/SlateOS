@@ -96,7 +96,7 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// same reason 3 did, and worse: the new field's own length prefix would be
 /// read by a version-3 decoder as the window's *width*, so the failure is not a
 /// wrong flag but a window several hundred million pixels across.
-pub const CONTROL_VERSION: u8 = 6;
+pub const CONTROL_VERSION: u8 = 7;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -711,6 +711,23 @@ pub enum RequestBody {
     /// privileged path is a different tag on the wire and cannot be reached by
     /// getting a boolean wrong.
     ShellSetOpacity { window: u64, opacity: f32 },
+    /// Move *another client's* window. Shell only.
+    ///
+    /// The privileged counterpart of [`Move`](Self::Move), for the reason
+    /// [`ShellSetOpacity`](Self::ShellSetOpacity) gives: a window rule placing
+    /// a program's window is the shell acting on somebody else's, which the
+    /// ordinary request refuses by design.
+    ShellMove { window: u64, x: i32, y: i32 },
+    /// Resize *another client's* window. Shell only.
+    ///
+    /// As [`ShellMove`](Self::ShellMove). The size is the client area, the
+    /// same quantity [`Resize`](Self::Resize) names, so a rule and a client
+    /// asking for "800 wide" mean the same 800.
+    ShellResize {
+        window: u64,
+        width: u32,
+        height: u32,
+    },
     /// Ask about the display. Answered with [`ResponseBody::DisplayInfo`].
     GetDisplayInfo,
     /// Start or stop receiving the desktop's window list.
@@ -1025,6 +1042,8 @@ enum RequestTag {
     GrabKey = 0x17,
     UngrabKey = 0x18,
     ShellSetOpacity = 0x19,
+    ShellMove = 0x1A,
+    ShellResize = 0x1B,
 }
 
 impl RequestTag {
@@ -1055,6 +1074,8 @@ impl RequestTag {
             0x17 => Self::GrabKey,
             0x18 => Self::UngrabKey,
             0x19 => Self::ShellSetOpacity,
+            0x1A => Self::ShellMove,
+            0x1B => Self::ShellResize,
             _ => return None,
         })
     }
@@ -1291,6 +1312,22 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::ShellSetOpacity as u8);
             write_u64(out, *window);
             write_f32(out, *opacity);
+        }
+        RequestBody::ShellMove { window, x, y } => {
+            out.push(RequestTag::ShellMove as u8);
+            write_u64(out, *window);
+            write_i32(out, *x);
+            write_i32(out, *y);
+        }
+        RequestBody::ShellResize {
+            window,
+            width,
+            height,
+        } => {
+            out.push(RequestTag::ShellResize as u8);
+            write_u64(out, *window);
+            write_u32(out, *width);
+            write_u32(out, *height);
         }
         RequestBody::GetDisplayInfo => out.push(RequestTag::GetDisplayInfo as u8),
         RequestBody::SubscribeWindowList { subscribe } => {
@@ -1604,6 +1641,22 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             RequestBody::ShellSetOpacity {
                 window,
                 opacity: r.read_f32()?,
+            }
+        }
+        RequestTag::ShellMove => {
+            let window = r.read_u64()?;
+            RequestBody::ShellMove {
+                window,
+                x: r.read_i32()?,
+                y: r.read_i32()?,
+            }
+        }
+        RequestTag::ShellResize => {
+            let window = r.read_u64()?;
+            RequestBody::ShellResize {
+                window,
+                width: r.read_u32()?,
+                height: r.read_u32()?,
             }
         }
         RequestTag::GetDisplayInfo => RequestBody::GetDisplayInfo,
@@ -2044,8 +2097,13 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x1A),
+            Some(RequestTag::ShellMove),
+            "0x1A was taken by ShellMove in control version 7"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x1C),
             None,
-            "0x1A is the next free tag"
+            "0x1C is the next free tag"
         );
     }
 

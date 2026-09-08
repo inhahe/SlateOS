@@ -90885,8 +90885,8 @@ client's windows around.
 
 | Field | What it would need |
 |---|---|
-| `position` (incl. `RememberLast`, `CenterOnMonitor`) | a `ShellMove { window, x, y }` request |
-| `size` (incl. `RememberLast`) | a `ShellResize { window, w, h }` request |
+| ~~`position`~~ | **Done 2026-09-07**, except `CenterOnMonitor(n>0)`. `RequestBody::ShellMove`, tag `0x1A`. |
+| ~~`size`~~ | **Done 2026-09-07.** `RequestBody::ShellResize`, tag `0x1B`. |
 | `min_size`, `max_size` | a size-constraint request; the compositor has no per-window constraint store at all |
 | ~~`opacity`~~ | **Done 2026-09-07.** `RequestBody::ShellSetOpacity`, tag `0x19`, `CONTROL_VERSION` 5 → 6. |
 | `always_on_top`, `always_on_bottom` | a per-window layer override; today `Layer` is fixed at creation by the client |
@@ -90901,8 +90901,31 @@ cheap — but `CONTROL_VERSION` is a wire version and each addition costs a bump
 plus a compositor-side implementation, and three of the twelve (`prevent_*`)
 need a policy store the compositor does not have. The honest increments are:
 
-1. `ShellMove` + `ShellResize` (unblocks `position`, `size`, and the
-   already-working `remember_state` bookkeeping that currently feeds nothing).
+1. ~~`ShellMove` + `ShellResize`~~ — **done 2026-09-07**, `CONTROL_VERSION`
+   6 → 7. Both follow `ShellSetOpacity` exactly: a separate tag, gated on
+   `require_shell` and naming the window directly, mapping to the *existing*
+   `CompositorRequest::Move`/`Resize`. `RememberLast` needed nothing new --
+   `resolve_remembered` already turns it into `Absolute`/`Exact` before the
+   requests are built, so the bookkeeping that "currently feeds nothing" now
+   feeds these.
+
+   **Size is asked for before position, and that is not cosmetic**: a centred
+   placement is computed *from* the size, so a window sized after being
+   centred would be centred for the size it used to have. There is a test on
+   the ordering.
+
+   **Two cases are declined rather than guessed**, and the declining is the
+   part worth reading:
+
+   - *Centring with no size in the rule.* The shell is told window positions
+     in the window list but not the size a program is about to choose, so
+     there is nothing to centre. Declining leaves the window where the program
+     put it; centring against a guess moves it somewhere wrong.
+   - *`CenterOnMonitor(n)` for n > 0.* This shell has bounds for one display.
+     Putting a window on the wrong screen is a worse answer than leaving it
+     alone, so it waits for multi-monitor with `target_monitor`.
+
+   Percentages *are* resolved, against the display the shell was built for.
 2. ~~`ShellSetOpacity` and a `Fullscreen` verb~~ — **half done 2026-09-07**:
    the `Fullscreen` verb is in. It took a wire byte *past* the zone range
    rather than the free slot at 7, because the zone bytes are

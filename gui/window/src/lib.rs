@@ -989,6 +989,24 @@ impl<T: Transport> EventLoop<T> {
         self.conn.shell_set_opacity(window, opacity)
     }
 
+    /// Move another client's window, as a window rule does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn shell_move(&mut self, window: u64, x: i32, y: i32) -> Result<(), Error<T>> {
+        self.conn.shell_move(window, x, y)
+    }
+
+    /// Resize another client's window, as a window rule does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn shell_resize(&mut self, window: u64, width: u32, height: u32) -> Result<(), Error<T>> {
+        self.conn.shell_resize(window, width, height)
+    }
+
     /// Claim a keyboard chord, so that it arrives here wherever the focus is.
     ///
     /// The third of the shell privileges, with
@@ -1794,6 +1812,8 @@ pub mod testing {
                 RequestBody::SetFullscreen { .. } => "SetFullscreen",
                 RequestBody::SetOpacity { .. } => "SetOpacity",
                 RequestBody::ShellSetOpacity { .. } => "ShellSetOpacity",
+                RequestBody::ShellMove { .. } => "ShellMove",
+                RequestBody::ShellResize { .. } => "ShellResize",
                 RequestBody::GetDisplayInfo => "GetDisplayInfo",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::ReloadAppearance => "ReloadAppearance",

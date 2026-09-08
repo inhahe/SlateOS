@@ -741,6 +741,33 @@ impl<T: Transport> Connection<T> {
         self.confirm(RequestBody::ShellSetOpacity { window, opacity })
     }
 
+    /// Move another client's window. Shell only.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::confirm`], plus a refusal if this link is not a shell.
+    pub fn shell_move(&mut self, window: u64, x: i32, y: i32) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::ShellMove { window, x, y })
+    }
+
+    /// Resize another client's window. Shell only.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::confirm`], plus a refusal if this link is not a shell.
+    pub fn shell_resize(
+        &mut self,
+        window: u64,
+        width: u32,
+        height: u32,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::ShellResize {
+            window,
+            width,
+            height,
+        })
+    }
+
     pub fn upload_image(
         &mut self,
         window: u64,

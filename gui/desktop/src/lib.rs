@@ -751,6 +751,24 @@ pub enum ShellRequest {
         /// below this one.
         alpha: u8,
     },
+    /// Put a window at a place, as a window rule asks.
+    MoveWindow {
+        /// The window to move.
+        window: WindowId,
+        /// Top-left corner, in display coordinates.
+        x: i32,
+        /// Top-left corner, in display coordinates.
+        y: i32,
+    },
+    /// Give a window a size, as a window rule asks.
+    ResizeWindow {
+        /// The window to resize.
+        window: WindowId,
+        /// Client-area width.
+        width: u32,
+        /// Client-area height.
+        height: u32,
+    },
 }
 
 impl ShellRequest {
@@ -2703,7 +2721,13 @@ impl DesktopShell {
                 let actions = self.rules.evaluate(&info.title, &info.app_id);
                 skip_taskbar = actions.skip_taskbar.unwrap_or(false);
                 skip_alt_tab = actions.skip_alt_tab.unwrap_or(false);
-                requests.extend(Self::rule_requests(id, info, &actions, self.num_desktops));
+                requests.extend(Self::rule_requests(
+                    id,
+                    info,
+                    &actions,
+                    self.num_desktops,
+                    (self.screen_width, self.screen_height),
+                ));
             }
 
             // Recorded on every list, not only on arrival: "remember last
@@ -2802,6 +2826,10 @@ impl DesktopShell {
         info: &WindowInfo,
         actions: &window_rules::RuleActions,
         num_desktops: u32,
+        // Passed rather than read off `self`, like `num_desktops` beside it:
+        // this stays an associated function so a test can drive one rule
+        // without standing a whole shell up around it.
+        screen: (u32, u32),
     ) -> Vec<ShellRequest> {
         let mut out = Vec::new();
 
@@ -2837,6 +2865,26 @@ impl DesktopShell {
                 out.push(ShellRequest::window(id, ShellControlAction::Fullscreen));
             }
             Some(window_rules::InitialState::Normal) | None => {}
+        }
+
+        // Size before position, and both before the state match below. A
+        // window resized after being placed keeps its top-left corner, so the
+        // order does not change where it lands -- but a *centred* placement is
+        // computed from the size, so the size has to be settled first.
+        if let Some(size) = actions.size {
+            if let Some((width, height)) = Self::rule_size_px(size, screen) {
+                out.push(ShellRequest::ResizeWindow {
+                    window: id,
+                    width,
+                    height,
+                });
+            }
+        }
+
+        if let Some(position) = actions.position {
+            if let Some((x, y)) = Self::rule_position_px(position, actions.size, screen) {
+                out.push(ShellRequest::MoveWindow { window: id, x, y });
+            }
         }
 
         // Opacity is independent of state and zone -- a window can be
@@ -4835,6 +4883,72 @@ impl DesktopShell {
     }
 
     /// The settings group the widget layout lives in.
+    /// A rule's size in pixels, or `None` if this build cannot work it out.
+    ///
+    /// `RememberLast` never reaches here -- `resolve_remembered` has already
+    /// turned it into `Exact` or dropped it.
+    fn rule_size_px(size: window_rules::SizeSpec, screen: (u32, u32)) -> Option<(u32, u32)> {
+        match size {
+            window_rules::SizeSpec::Exact { width, height } => Some((width, height)),
+            window_rules::SizeSpec::Percentage { w_pct, h_pct } => Some((
+                Self::fraction_of(screen.0, w_pct),
+                Self::fraction_of(screen.1, h_pct),
+            )),
+            // Already resolved away; reaching here means the resolution was
+            // skipped, and guessing a size would be worse than leaving the
+            // window where the program put it.
+            window_rules::SizeSpec::RememberLast => None,
+        }
+    }
+
+    /// A rule's position in pixels, or `None` if this build cannot work it out.
+    ///
+    /// `size` is the rule's own size, needed only to centre: centring is a
+    /// function of how big the window will be, and the rule's size is the size
+    /// it is about to be given. A rule that centres without setting a size
+    /// cannot be honoured here -- the shell is told window *positions* in the
+    /// window list but not the size a program is about to choose -- so it is
+    /// declined rather than centred against a guess.
+    fn rule_position_px(
+        position: window_rules::PositionSpec,
+        size: Option<window_rules::SizeSpec>,
+        screen: (u32, u32),
+    ) -> Option<(i32, i32)> {
+        match position {
+            window_rules::PositionSpec::Absolute { x, y } => Some((x, y)),
+            window_rules::PositionSpec::Percentage { x_pct, y_pct } => Some((
+                Self::fraction_of(screen.0, x_pct).cast_signed(),
+                Self::fraction_of(screen.1, y_pct).cast_signed(),
+            )),
+            // Monitor 0 is the display this shell was built for, which is the
+            // only one it has bounds for. A rule naming a second monitor is
+            // declined rather than centred on the first: putting a window on
+            // the wrong screen is a worse answer than leaving it alone, and
+            // multi-monitor placement is tracked separately.
+            window_rules::PositionSpec::CenterOnMonitor(0) => {
+                let (w, h) = Self::rule_size_px(size?, screen)?;
+                Some((
+                    screen.0.saturating_sub(w).cast_signed() / 2,
+                    screen.1.saturating_sub(h).cast_signed() / 2,
+                ))
+            }
+            window_rules::PositionSpec::CenterOnMonitor(_)
+            | window_rules::PositionSpec::RememberLast => None,
+        }
+    }
+
+    /// `pct` of `whole`, clamped to the display and rounded.
+    fn fraction_of(whole: u32, pct: f32) -> u32 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to 0.0..=1.0 first, so the product is within the \
+                      u32 it was taken from"
+        )]
+        let scaled = (f64::from(whole) * f64::from(pct.clamp(0.0, 1.0))).round() as u32;
+        scaled
+    }
+
     /// The file the user's keyboard shortcuts live in.
     pub const SHORTCUTS_CONFIG_NAME: &'static str = "shortcuts";
 
@@ -6398,6 +6512,151 @@ mod window_manager_tests {
         again(&mut shell);
         again(&mut shell);
         assert!(shell.taskbar_windows().is_empty());
+    }
+
+    /// A rule can place and size a window.
+    #[test]
+    fn a_rule_giving_a_position_and_a_size_is_carried_out() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::Absolute { x: 40, y: 60 });
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 800,
+                height: 600,
+            });
+        });
+
+        let asked = arrive(&mut shell, 1, "editor");
+        assert!(
+            asked.contains(&ShellRequest::ResizeWindow {
+                window: WindowId(1),
+                width: 800,
+                height: 600,
+            }),
+            "the size was lost: {asked:?}"
+        );
+        assert!(
+            asked.contains(&ShellRequest::MoveWindow {
+                window: WindowId(1),
+                x: 40,
+                y: 60,
+            }),
+            "the position was lost: {asked:?}"
+        );
+    }
+
+    /// The size is asked for before the position.
+    ///
+    /// Not cosmetic: a centred placement is computed *from* the size, so a
+    /// window sized after being centred would be centred for the size it used
+    /// to have.
+    #[test]
+    fn a_rule_sizes_before_it_places() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::Absolute { x: 0, y: 0 });
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 100,
+                height: 100,
+            });
+        });
+
+        let asked = arrive(&mut shell, 1, "editor");
+        let resize = asked
+            .iter()
+            .position(|r| matches!(r, ShellRequest::ResizeWindow { .. }))
+            .expect("a resize");
+        let mv = asked
+            .iter()
+            .position(|r| matches!(r, ShellRequest::MoveWindow { .. }))
+            .expect("a move");
+        assert!(resize < mv, "size must be settled before the placement");
+    }
+
+    /// A percentage rule is resolved against the display the shell knows.
+    #[test]
+    fn a_percentage_rule_is_resolved_against_the_screen() {
+        let mut shell = DesktopShell::new(1000, 800);
+        rule(&mut shell, "editor", |a| {
+            a.size = Some(window_rules::SizeSpec::Percentage {
+                w_pct: 0.5,
+                h_pct: 0.25,
+            });
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "editor").contains(&ShellRequest::ResizeWindow {
+                window: WindowId(1),
+                width: 500,
+                height: 200,
+            })
+        );
+    }
+
+    /// Centring needs a size, and says so by declining.
+    ///
+    /// The shell is told window positions in the window list but not the size
+    /// a program is about to choose, so a rule that centres without setting a
+    /// size cannot be honoured. Declining leaves the window where the program
+    /// put it; centring against a guess would move it somewhere wrong.
+    #[test]
+    fn centring_without_a_size_is_declined_rather_than_guessed() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::CenterOnMonitor(0));
+        });
+
+        let asked = arrive(&mut shell, 1, "editor");
+        assert!(
+            !asked
+                .iter()
+                .any(|r| matches!(r, ShellRequest::MoveWindow { .. })),
+            "centred against a size nobody knows: {asked:?}"
+        );
+    }
+
+    #[test]
+    fn centring_with_a_size_puts_the_window_in_the_middle() {
+        let mut shell = DesktopShell::new(1000, 800);
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::CenterOnMonitor(0));
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 400,
+                height: 200,
+            });
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "editor").contains(&ShellRequest::MoveWindow {
+                window: WindowId(1),
+                x: 300,
+                y: 300,
+            })
+        );
+    }
+
+    /// A second monitor is declined, not centred on the first.
+    ///
+    /// Putting a window on the wrong screen is a worse answer than leaving it
+    /// alone, and this shell has bounds for one display.
+    #[test]
+    fn a_rule_naming_a_second_monitor_is_declined() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::CenterOnMonitor(1));
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 100,
+                height: 100,
+            });
+        });
+
+        let asked = arrive(&mut shell, 1, "editor");
+        assert!(
+            !asked
+                .iter()
+                .any(|r| matches!(r, ShellRequest::MoveWindow { .. })),
+            "placed on a monitor this shell has no bounds for: {asked:?}"
+        );
     }
 
     /// An opacity rule now reaches the compositor.

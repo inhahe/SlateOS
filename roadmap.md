@@ -2827,7 +2827,7 @@ _Port ext4 first. Don't write a custom filesystem._
   its owner most wants to read files off it (design-decisions §248));
   the write sides remain open
 
-- [ ] `[A]`+`[B]`+`[C]` **Deferred filesystem operations** — queue a delete or
+- [-] `[A]`+`[B]`+`[C]` **Deferred filesystem operations** — queue a delete or
   rename that cannot happen yet, and remember it across a reboot. Operator's
   request, 2026-09-07. See `roadmap-detailed.md` → "Deferred filesystem
   operations" for the full inventory, and **read its premise note first**: the
@@ -2836,16 +2836,13 @@ _Port ext4 first. Don't write a custom filesystem._
   is worth deferring is a *busy mount*, a *read-only mount*, an *absent
   removable/network volume*, and a full volume that cannot accept a trash
   rename. Three ends to build and one shared entry format, so it wants an agreed
-  design before any lane starts. **A first draft of that design was filed
-  2026-09-07 as
-  `requests/c-ab-a-concrete-entry-format-for-deferred-filesystem-operations.md`
-  — a concrete entry format, offered to be argued with. Nothing is built
-  against it.** The three ends:
-  - `[A]` the persistent per-filesystem queue and the VFS hooks that enqueue and
-    replay it. **The security half is the hard half** — the capability must be
-    re-checked when the operation *runs*, not only when it is queued, or this
-    becomes SlateOS's version of `PendingFileRenameOperations`, a list written
-    by one user and executed early with more authority than they had.
+  design before any lane starts. **Design agreed 2026-09-07** in
+  `requests/a-cb-deferred-ops-format-agreed-with-notes.md`. The three ends:
+  - [x] `[A]` the persistent per-filesystem queue and the VFS hooks that enqueue
+    and replay it (2026-09-07). `fs::deferred_ops` — `enqueue()`, `replay()`,
+    `cancel()`, `list()`, `replay_on_mount()` hook in `Vfs::mount_with_options`.
+    Security: re-checks ACLs against stored UID/GID/groups at execution time;
+    drops entries on inode mismatch or permission revocation. 9 self-tests.
   - `[B]` `rm`/`mv` offering the deferral when a failure is deferrable —
     interactively only, with an explicit flag for scripts, and never silently:
     a batch job must not queue a deletion that happens an hour after it exits.

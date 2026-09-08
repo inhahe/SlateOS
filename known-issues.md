@@ -124000,15 +124000,10 @@ neither part of the three features above:
   nothing. They are not superseded — they are features never built — so the
   fields were left rather than deleted, since deleting them would remove the
   only record that they are wanted.
-- `gui/desktop/src/accessibility_settings.rs` is a 2 019-line settings panel
-  **nothing constructs**. Every one of its public types —
-  `AccessibilitySettings`, `A11yFeature`, `A11yTab`, `VisualSettings`,
-  `AudioA11ySettings`, `ContrastMode`, `TextScale`, `CursorIndicator` — has
-  zero uses outside the file. `design-decisions.md` §815 (the operator's
-  answer to C-Q6) already settles what happens to it: screens you *open* move
-  to the Settings app and the shell's copies go. This is one of those copies,
-  and the Settings app has the working version. It should be deleted as part
-  of executing §815 rather than piecemeal here.
+- ~~`gui/desktop/src/accessibility_settings.rs`, the 2 019-line panel nothing
+  constructs.~~ **Done 2026-09-08:** deleted under §815. Twelve of its sixteen
+  features were already in the Settings app; the other four are logged as
+  `TD-C-FOUR-ACCESSIBILITY-FEATURES-EXISTED-ONLY-AS-A-DEAD-PANELS-CONTROLS`.
 
 **Superseded — what was still not connected: the Settings UI.**
 `gui/desktop/src/accessibility_settings.rs` and `apps/settings` still write to

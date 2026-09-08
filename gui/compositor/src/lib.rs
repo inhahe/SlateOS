@@ -66,6 +66,11 @@ use osfont::system::{Family, FontCache, Weight};
 
 mod buffer;
 pub use buffer::{BufferFormat, ImageAsset, SharedBuffer};
+// Sticky, filter and mouse keys. The state machines live here rather than
+// beside the settings because the compositor is the only place every
+// keystroke passes through; `inputsettings` owns what the user chose.
+pub mod a11ykeys;
+pub use a11ykeys::{AccessibilityKeys, MouseKeyAction, Rejected, StickyModifier, StickyModifiers};
 // The rendering-backend seam. Everything from `compose_frame` down to a
 // primitive is written against `RenderTarget`, so the CPU rasterizer below is a
 // *choice* rather than the only thing the compositor can do — which is what a

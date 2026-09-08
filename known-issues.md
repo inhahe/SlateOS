@@ -1734,9 +1734,38 @@ once, since `compare` is the single place case-insensitive ordering is decided.
 Nothing is unsafe and nothing is blocked; the sort is total and stable, just
 not idiomatic for the locale.
 
-## TD-EXPLORER-UNREADABLE-RECYCLE-ENTRY
+## TD-EXPLORER-UNREADABLE-RECYCLE-ENTRY -- **FIXED 2026-09-07**
 
-**Status: OPEN 2026-08-16** (lane C). `apps/explorer/src/fileops.rs`,
+**Fixed 2026-09-07 (lane C).** A damaged entry is listed instead of skipped.
+`RecycleEntry::original_path` and `recycled_at` are `Option`, `None` meaning
+"this entry's metadata would not parse" -- the one thing genuinely unknown is
+marked unknown, rather than the whole row being hidden because part of it is.
+
+What a caller may do follows from the field and needed no second flag:
+restoring wants somewhere to restore *to*, so it is refused with a reason;
+deleting wants only the id, so emptying the bin now reclaims the space.
+
+Three details that are not incidental:
+
+- **The size is still measured**, from the data on disk rather than from
+  `meta.txt`, because space is usually what brings a user to the recycle bin
+  at all. A row that said "unknown item, unknown size" would answer none of
+  the question they came with.
+- **`display_name` never falls back to the id.** The id is a hash; shown in a
+  name column it would read as though it were the file's name.
+- **`purge_old` skips it.** Its age is unknown, and unknown must not be read
+  as old -- ageing it out on a guess would delete a user's file in order to
+  tidy up a metadata problem.
+
+The UI decision the original entry was waiting on turned out to be the one it
+had already proposed, and small enough to take: "Unknown item (damaged entry)",
+delete available, restore refused.
+
+Six tests. Mutation-checked: restoring the old skip fails four of them.
+
+Original entry follows.
+
+**Status: ~~OPEN~~ FIXED 2026-08-16** (lane C). `apps/explorer/src/fileops.rs`,
 `RecycleBin::list`.
 
 The recycle-bin listing skips any entry whose `meta.txt` will not parse, rather

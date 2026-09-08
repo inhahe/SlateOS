@@ -1357,14 +1357,58 @@ fn copy_tree(src: &Path, dest: &Path) -> io::Result<()> {
 pub struct RecycleEntry {
     /// Unique identifier for this entry.
     pub id: String,
-    /// Original absolute path before recycling.
-    pub original_path: PathBuf,
-    /// When the item was recycled.
-    pub recycled_at: SystemTime,
+    /// Original absolute path before recycling, or `None` if this entry's
+    /// metadata could not be read.
+    ///
+    /// `None` is the whole reason this is an `Option`. An entry whose
+    /// `meta.txt` is damaged used to be *skipped* by [`RecycleBin::list`], so
+    /// the file stayed on disk, kept occupying space, and could not be seen or
+    /// emptied through any interface -- undeletable by the only means a user
+    /// has. It is listed now, with the one thing that is genuinely unknown
+    /// marked unknown, rather than hidden because part of it is.
+    ///
+    /// What a caller may do with it follows from this field and needs no
+    /// second flag: restoring requires somewhere to restore *to*, so it is
+    /// refused; deleting requires only the id, so it works.
+    pub original_path: Option<PathBuf>,
+    /// When the item was recycled, or `None` if the metadata could not be
+    /// read.
+    pub recycled_at: Option<SystemTime>,
     /// Size in bytes (0 for directories).
+    ///
+    /// Known either way: it is measured from the data on disk rather than
+    /// read out of `meta.txt`, so a damaged entry still accounts for its own
+    /// space.
     pub size: u64,
-    /// Whether this is a directory.
+    /// Whether this is a directory. `false` for an unreadable entry, which is
+    /// not a claim -- see [`is_readable`](Self::is_readable).
     pub is_dir: bool,
+}
+
+impl RecycleEntry {
+    /// Whether this entry's metadata was readable.
+    ///
+    /// An unreadable entry can be deleted and cannot be restored.
+    #[must_use]
+    pub fn is_readable(&self) -> bool {
+        self.original_path.is_some()
+    }
+
+    /// What to show a user in place of a name.
+    ///
+    /// The original file name when it is known, and a fixed label when it is
+    /// not -- never a guess derived from the entry id, which is a hash and
+    /// would read as though it were the file's name.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        match &self.original_path {
+            Some(path) => path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            ),
+            None => "Unknown item (damaged entry)".to_string(),
+        }
+    }
 }
 
 /// Manages the recycle bin at `~/.recycle/`.
@@ -1485,10 +1529,21 @@ impl RecycleBin {
     /// either; there was nothing left to recover.
     pub fn restore(&self, entry_id: &str) -> io::Result<PathBuf> {
         let entry = self.read_entry(entry_id)?;
+        // An entry whose metadata would not parse has no original path, so
+        // there is nowhere to put it back. `read_entry` fails for those, so
+        // this is unreachable today -- it is written out anyway because `list`
+        // now hands such entries to callers, and the next reader should find
+        // the refusal here rather than an `unwrap` that happens to be safe.
+        let Some(original_path) = entry.original_path else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "this entry's metadata is damaged, so there is no path to restore it to",
+            ));
+        };
         let data_path = self.root.join(entry_id).join("data");
 
         // Ensure parent directory exists.
-        if let Some(parent) = entry.original_path.parent() {
+        if let Some(parent) = original_path.parent() {
             fs::create_dir_all(parent)?;
         }
 
@@ -1496,10 +1551,10 @@ impl RecycleBin {
         // cannot close — there is no "rename only if the destination is free".
         // The same tradeoff is documented on the engine's own conflict handling
         // above; narrowing it needs a platform primitive we do not have here.
-        let dest = if entry.original_path.exists() {
-            resolve_rename(&entry.original_path)
+        let dest = if original_path.exists() {
+            resolve_rename(&original_path)
         } else {
-            entry.original_path.clone()
+            original_path.clone()
         };
 
         move_path(&data_path, &dest)?;
@@ -1544,17 +1599,28 @@ impl RecycleBin {
                 continue;
             }
             let id = dir_entry.file_name().to_string_lossy().to_string();
-            // An entry whose metadata will not parse is skipped rather than
-            // failing the whole listing: one corrupt `meta.txt` must not make
-            // every other recycled file unrestorable. The cost is that the
-            // damaged entry is invisible in the UI — tracked in
-            // `known-issues.md` as `TD-EXPLORER-UNREADABLE-RECYCLE-ENTRY`.
-            if let Ok(entry) = self.read_entry(&id) {
-                entries.push(entry);
+            // An entry whose metadata will not parse is *listed* rather than
+            // skipped. Failing the whole listing would make one corrupt
+            // `meta.txt` hide every other recycled file; skipping it hid the
+            // damaged one, which then occupied space nothing could account for
+            // and could not be emptied. Listing it with its unknown parts
+            // marked unknown is the only option that loses nothing.
+            match self.read_entry(&id) {
+                Ok(entry) => entries.push(entry),
+                Err(_) => entries.push(RecycleEntry {
+                    size: Self::entry_size(&dir_entry.path()),
+                    id,
+                    original_path: None,
+                    recycled_at: None,
+                    is_dir: false,
+                }),
             }
         }
 
-        // Most recently recycled first.
+        // Most recently recycled first. An entry with no readable timestamp
+        // sorts last rather than first: it is the one the user is least likely
+        // to be looking for, and putting an unnameable row at the top of the
+        // bin would bury what they came for.
         entries.sort_by_key(|e| std::cmp::Reverse(e.recycled_at));
         Ok(entries)
     }
@@ -1579,9 +1645,14 @@ impl RecycleBin {
         let mut count = 0u32;
 
         for entry in &entries {
-            let age = now
-                .duration_since(entry.recycled_at)
-                .unwrap_or(Duration::ZERO);
+            // An entry with no readable timestamp is never aged out. Its age
+            // is unknown, and "unknown" must not be read as "old": purging on
+            // a guess would delete a user's file to tidy up a metadata
+            // problem. It stays listed, and the user can empty it themselves.
+            let Some(recycled_at) = entry.recycled_at else {
+                continue;
+            };
+            let age = now.duration_since(recycled_at).unwrap_or(Duration::ZERO);
             if age > self.max_age {
                 let entry_dir = self.root.join(&entry.id);
                 if fs::remove_dir_all(&entry_dir).is_ok() {
@@ -1674,6 +1745,39 @@ impl RecycleBin {
     }
 
     /// Read the metadata for a recycled entry.
+    /// Where this bin keeps its entries.
+    ///
+    /// For a caller that needs to reach an entry's directory directly -- the
+    /// tests that damage a `meta.txt` on purpose, and anything that later
+    /// wants to report *which* file on disk is unreadable.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Bytes on disk under an entry directory, best effort.
+    ///
+    /// Used for an entry whose `meta.txt` will not parse: the size is the one
+    /// fact still knowable about it, and it is the fact that matters, because
+    /// the complaint that brings a user to the recycle bin is usually space.
+    /// Recursive, and unreadable children count as zero rather than aborting
+    /// the walk -- a partial total is more use than none.
+    fn entry_size(dir: &Path) -> u64 {
+        let Ok(read) = fs::read_dir(dir) else {
+            return 0;
+        };
+        let mut total = 0u64;
+        for child in read.flatten() {
+            let path = child.path();
+            if path.is_dir() {
+                total = total.saturating_add(Self::entry_size(&path));
+            } else if let Ok(meta) = child.metadata() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+        total
+    }
+
     fn read_entry(&self, id: &str) -> io::Result<RecycleEntry> {
         let entry_dir = self.root.join(id);
         let meta_path = entry_dir.join("meta.txt");
@@ -1715,8 +1819,10 @@ impl RecycleBin {
 
         Ok(RecycleEntry {
             id: id.to_string(),
-            original_path,
-            recycled_at,
+            // `Some` because this function only returns at all when the
+            // metadata parsed; the `None` case is built by `list`.
+            original_path: Some(original_path),
+            recycled_at: Some(recycled_at),
             size,
             is_dir,
         })
@@ -2442,7 +2548,10 @@ mod tests {
         // List.
         let entries = bin.list().unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].original_path, file_path);
+        assert_eq!(
+            entries[0].original_path.as_deref(),
+            Some(file_path.as_path())
+        );
 
         // Restore.
         let restored = bin.restore(&id).unwrap();
@@ -2768,8 +2877,8 @@ mod tests {
             "an already-deleted file must not be orphaned"
         );
         assert_eq!(
-            listed.first().expect("one").original_path,
-            PathBuf::from("/home/u/legacy.txt")
+            listed.first().expect("one").original_path.as_deref(),
+            Some(Path::new("/home/u/legacy.txt"))
         );
     }
 
@@ -3122,5 +3231,113 @@ mod tests {
         executor.execute();
 
         assert!(!dir.join("delme").exists());
+    }
+
+    // ------------------------------------------------------------------
+    // A damaged recycle entry
+    //
+    // It used to be skipped by `list`, which meant the file stayed on disk,
+    // kept occupying space, and could not be seen or emptied by the only
+    // means a user has. These cover it being visible, deletable, and not
+    // restorable or silently aged out.
+    // ------------------------------------------------------------------
+
+    /// Recycle a file, then corrupt its metadata.
+    fn bin_with_a_damaged_entry(root: &Path) -> (RecycleBin, String) {
+        let bin = RecycleBin::new(root.join("bin"), Duration::from_secs(3600));
+        let file = root.join("notes.txt");
+        write_file(&file, "some bytes");
+        let id = bin.recycle(&file).expect("recycle");
+        fs::write(
+            bin.root().join(&id).join("meta.txt"),
+            "\u{fffd}not a meta file",
+        )
+        .expect("corrupt the metadata");
+        (bin, id)
+    }
+
+    #[test]
+    fn a_damaged_entry_is_listed_rather_than_hidden() {
+        let scratch = temp_dir("recycle_damaged_listed");
+        let (bin, id) = bin_with_a_damaged_entry(scratch.dir());
+
+        let listed = bin.list().expect("list");
+        assert_eq!(listed.len(), 1, "the damaged entry vanished from the bin");
+        let entry = listed.first().expect("one");
+        assert_eq!(entry.id, id);
+        assert!(!entry.is_readable());
+        assert_eq!(entry.original_path, None, "and does not invent a path");
+    }
+
+    /// Its size is still known, because that is what a user came to the bin
+    /// about.
+    #[test]
+    fn a_damaged_entry_still_accounts_for_its_space() {
+        let scratch = temp_dir("recycle_damaged_size");
+        let (bin, _) = bin_with_a_damaged_entry(scratch.dir());
+
+        let listed = bin.list().expect("list");
+        assert!(
+            listed.first().expect("one").size >= 10,
+            "the ten bytes of the recycled file are unaccounted for"
+        );
+    }
+
+    /// It reads as something, and not as its hash.
+    #[test]
+    fn a_damaged_entry_has_a_name_that_is_not_its_id() {
+        let scratch = temp_dir("recycle_damaged_name");
+        let (bin, id) = bin_with_a_damaged_entry(scratch.dir());
+
+        let listed = bin.list().expect("list");
+        let name = listed.first().expect("one").display_name();
+        assert!(!name.contains(&id), "the id is a hash, not a name: {name}");
+        assert!(!name.is_empty());
+    }
+
+    /// Emptying the bin removes it: the point of listing it at all.
+    #[test]
+    fn a_damaged_entry_can_be_emptied() {
+        let scratch = temp_dir("recycle_damaged_empty");
+        let (bin, _) = bin_with_a_damaged_entry(scratch.dir());
+
+        bin.empty().expect("empty");
+        assert!(
+            bin.list().expect("list").is_empty(),
+            "the damaged entry survived an empty, so its space is still lost"
+        );
+    }
+
+    /// Restoring it is refused rather than attempted.
+    #[test]
+    fn a_damaged_entry_cannot_be_restored() {
+        let scratch = temp_dir("recycle_damaged_restore");
+        let (bin, id) = bin_with_a_damaged_entry(scratch.dir());
+
+        assert!(
+            bin.restore(&id).is_err(),
+            "restored a file to a path nobody knows"
+        );
+    }
+
+    /// And it is never aged out.
+    ///
+    /// Its age is unknown, and unknown must not be read as old: purging on a
+    /// guess would delete a user's file to tidy up a metadata problem.
+    #[test]
+    fn a_damaged_entry_is_not_purged_by_age() {
+        let scratch = temp_dir("recycle_damaged_purge");
+        let bin = RecycleBin::new(scratch.dir().join("bin"), Duration::from_secs(0));
+        let file = scratch.dir().join("notes.txt");
+        write_file(&file, "some bytes");
+        let id = bin.recycle(&file).expect("recycle");
+        fs::write(bin.root().join(&id).join("meta.txt"), "not a meta file").expect("corrupt");
+
+        bin.purge_old().expect("purge");
+        assert_eq!(
+            bin.list().expect("list").len(),
+            1,
+            "a damaged entry was aged out on an age nobody knows"
+        );
     }
 }

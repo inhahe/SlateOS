@@ -608,6 +608,12 @@ pub enum LineStep {
 struct LineBuf {
     buf: [u8; MAX_CANON],
     len: usize,
+    /// Current cursor column, tracked so that `ECHOE` can rub out the correct
+    /// number of columns for a tab (1–8 depending on the tab stop the cursor
+    /// was at when the tab was echoed).  Updated by [`feed`], not by the
+    /// push/pop/clear methods, because the column depends on the `Termios`
+    /// (control bytes are 2 columns under `ECHOCTL`, 1 otherwise).
+    col: usize,
 }
 
 impl LineBuf {
@@ -615,6 +621,7 @@ impl LineBuf {
         Self {
             buf: [0u8; MAX_CANON],
             len: 0,
+            col: 0,
         }
     }
 
@@ -706,9 +713,9 @@ fn render_echo(ch: u8, t: &Termios) -> Echo {
 /// How wide `ch` is on screen once echoed, so an erase can rub out the right
 /// number of columns.
 ///
-/// A control byte echoed as `^X` under `ECHOCTL` occupies two columns; `\t`
-/// would occupy up to eight, which this deliberately does not model — see the
-/// note in [`feed`].
+/// A control byte echoed as `^X` under `ECHOCTL` occupies two columns; a tab
+/// advances to the next 8-column tab stop (1–8 columns).  Ordinary bytes are
+/// one column each.
 ///
 /// Deliberately independent of the `ECHO` bit: this answers "how wide is it",
 /// not "is it shown", and the callers already gate on `ECHO` themselves.
@@ -718,6 +725,37 @@ fn echo_width(ch: u8, t: &Termios) -> usize {
     } else {
         1
     }
+}
+
+/// Advance a cursor column after echoing one byte.
+///
+/// This models what the terminal actually shows — a tab jumps to the next
+/// 8-column tab stop (`(col | 7) + 1`), a control byte echoed as `^X` takes
+/// two columns, `\r` resets to 0, and everything else takes one.
+fn advance_col(col: usize, ch: u8, t: &Termios) -> usize {
+    if ch == b'\t' {
+        // Next 8-column tab stop: 0→8, 1→8, 7→8, 8→16, etc.
+        (col | 7).wrapping_add(1)
+    } else if ch == b'\r' {
+        0
+    } else if is_ctrl_echo(ch) && (t.c_lflag & lflag::ECHOCTL != 0) {
+        col.wrapping_add(2) // ^X
+    } else {
+        col.wrapping_add(1)
+    }
+}
+
+/// Recompute the cursor column by replaying the echo width of every byte in
+/// the buffer from the start.  Called after an erase (`pop`) so the column
+/// reflects the state *without* the erased character.  O(len) but `MAX_CANON`
+/// is small (~256 bytes), and this only runs on erase — which is interactive,
+/// so latency is negligible.
+fn compute_col(buf: &[u8], t: &Termios) -> usize {
+    let mut c = 0usize;
+    for &ch in buf {
+        c = advance_col(c, ch, t);
+    }
+    c
 }
 
 /// [`feed`], discarding the echo half of the answer.
@@ -739,12 +777,13 @@ fn step(line: &mut LineBuf, raw: u8, t: &Termios) -> LineStep {
 /// performing that echo is the caller's job (the keyboard driver for the
 /// console, a write to the master end for a pty).
 ///
-/// **Not modelled:** the column width of a literal tab. `ECHOE` rubs out one
-/// column per erased character (two for a `^X`-echoed control byte), which is
-/// wrong for a `\t` that expanded to a tab stop. Linux tracks the real column
-/// to get this right. Doing so needs the discipline to know the cursor
-/// position, which for a pty it cannot know at all — the emulator on the far
-/// end owns the screen. Recorded in `todo.txt`.
+/// **Column tracking:** the line buffer carries a cursor column (`LineBuf.col`)
+/// advanced by [`advance_col`] on every push, reset on clear/newline, and
+/// recomputed from scratch on erase.  `ECHOE` rubs out the column *delta*
+/// between the current position and the position before the erased byte, so a
+/// tab at column 5 that advanced to column 8 produces three backspace-space-
+/// backspace sequences.  For a pty the emulator on the far end owns the real
+/// screen, so our column is an approximation — see `todo.txt` for the caveat.
 fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
     // Input translation: ICRNL maps a received CR to NL (the common case so
     // that the Enter key — which the keyboard delivers as '\n' already, but a
@@ -777,6 +816,7 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
         let mut signal = |sig: u8| -> (LineStep, Echo) {
             if flush {
                 line.clear();
+                line.col = 0;
             }
             (LineStep::Signal(sig), render(ch))
         };
@@ -803,13 +843,17 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
     if ch == verase {
         // Erase echoes only if something was actually erased — rubbing out a
         // character that is not there would eat the prompt.
-        let last = line.last();
+        let old_col = line.col;
         let erased = line.pop();
-        let echo = match (erased, last) {
-            (true, Some(c)) if echo_on && (t.c_lflag & lflag::ECHOE != 0) => {
-                Echo::Erase(echo_width(c, t))
-            }
-            _ => Echo::None,
+        if erased {
+            line.col = compute_col(line.as_slice(), t);
+        }
+        let echo = if erased && echo_on && (t.c_lflag & lflag::ECHOE != 0) {
+            // Rub out the column delta — correct for tabs (1–8 columns)
+            // and control bytes (2 columns under ECHOCTL).
+            Echo::Erase(old_col.saturating_sub(line.col))
+        } else {
+            Echo::None
         };
         return (LineStep::Pending, echo);
     }
@@ -817,12 +861,9 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
         // ECHOKE rubs the whole line out in place; ECHOK (the older, weaker
         // behaviour) just starts a fresh line. ECHOKE wins when both are set,
         // matching Linux.
-        let width: usize = line
-            .as_slice()
-            .iter()
-            .map(|c| echo_width(*c, t))
-            .fold(0usize, |a, b| a.saturating_add(b));
+        let width = line.col;
         line.clear();
+        line.col = 0;
         let echo = if !echo_on {
             Echo::None
         } else if t.c_lflag & lflag::ECHOKE != 0 {
@@ -839,6 +880,7 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
         // ECHONL echoes it even with ECHO off — that is the bit's whole
         // purpose, so a password prompt still moves to the next line.
         let _ = line.push(b'\n');
+        line.col = 0; // newline resets the cursor column
         let echo = if echo_on || (t.c_lflag & lflag::ECHONL != 0) {
             Echo::Newline
         } else {
@@ -849,6 +891,9 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
 
     // Ordinary byte: append (silently dropped if the line is full).
     let pushed = line.push(ch);
+    if pushed {
+        line.col = advance_col(line.col, ch, t);
+    }
     let echo = if pushed { render(ch) } else { Echo::None };
     (LineStep::Pending, echo)
 }
@@ -1744,13 +1789,50 @@ pub fn self_test() {
             "erasing a ^X-echoed byte rubs out two columns"
         );
 
+        // Tab erase: a tab at column 0 advances to column 8, so erasing
+        // it should rub out 8 columns, not 1 as the old code did.
+        let mut et = LineBuf::new();
+        let _ = step(&mut et, b'\t', &t);
+        assert_eq!(et.col, 8, "tab at col 0 advances to col 8");
+        assert_eq!(
+            feed(&mut et, 127, &t).1,
+            Echo::Erase(8),
+            "erasing a tab at col 0 rubs out 8 columns"
+        );
+
+        // Tab after 3 characters: col 3 → col 8, so the tab is 5 wide.
+        let mut et2 = LineBuf::new();
+        let _ = step(&mut et2, b'a', &t); // col 1
+        let _ = step(&mut et2, b'b', &t); // col 2
+        let _ = step(&mut et2, b'c', &t); // col 3
+        assert_eq!(et2.col, 3, "three chars at col 3");
+        let _ = step(&mut et2, b'\t', &t); // col 8
+        assert_eq!(et2.col, 8, "tab from col 3 advances to col 8");
+        assert_eq!(
+            feed(&mut et2, 127, &t).1,
+            Echo::Erase(5),
+            "erasing a tab from col 3 rubs out 5 columns"
+        );
+
+        // ECHOKE (line kill) with a tab: "ab\t" at col 8 → erase 8.
+        let mut ek = LineBuf::new();
+        let _ = step(&mut ek, b'a', &t); // col 1
+        let _ = step(&mut ek, b'b', &t); // col 2
+        let _ = step(&mut ek, b'\t', &t); // col 8
+        assert_eq!(ek.col, 8, "line col before kill");
+        assert_eq!(
+            feed(&mut ek, 21, &t).1, // ^U = VKILL
+            Echo::Erase(8),
+            "ECHOKE of a line with a tab rubs out 8 columns total"
+        );
+
         // Clearing ECHO silences everything the editor would have drawn.
         let mut off = Termios::sane_default();
         off.c_lflag &= !lflag::ECHO;
         let mut q = LineBuf::new();
         assert_eq!(feed(&mut q, b'a', &off).1, Echo::None, "ECHO off ⇒ silent");
 
-        crate::serial_println!("[tty]   echo rendering (printable/^X/tab/erase/off): OK");
+        crate::serial_println!("[tty]   echo rendering (printable/^X/tab/erase/tab-erase/off): OK");
     }
 
     // PendingLine: a line longer than the reader buffer is delivered in pieces.

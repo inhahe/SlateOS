@@ -15560,7 +15560,11 @@ pub fn sys_process_setgroups(args: &SyscallArgs) -> SyscallResult {
         if list_ptr == 0 {
             return SyscallResult::err(KernelError::PageFault);
         }
-        match crate::mm::user::read_user_items::<u32>(list_ptr, count as usize, NGROUPS_MAX as usize) {
+        match crate::mm::user::read_user_items::<u32>(
+            list_ptr,
+            count as usize,
+            NGROUPS_MAX as usize,
+        ) {
             Ok(v) => v,
             Err(e) => return SyscallResult::err(e),
         }

@@ -34,6 +34,7 @@
 #![allow(clippy::cognitive_complexity)]
 // Many items are used only via test module and the real GUI event loop
 
+use appearance::Palette;
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -42,24 +43,6 @@ use guitk::text;
 // ============================================================================
 // Catppuccin Mocha theme
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const SKY: Color = Color::from_hex(0x89DCEB);
 
 // ============================================================================
 // Layout constants
@@ -1292,15 +1275,15 @@ impl PatternCategory {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Validation => BLUE,
-            Self::Extraction => GREEN,
-            Self::Format => PEACH,
-            Self::Network => TEAL,
-            Self::DateTime => YELLOW,
-            Self::Programming => MAUVE,
-            Self::Custom => SUBTEXT0,
+            Self::Validation => pal.blue,
+            Self::Extraction => pal.green,
+            Self::Format => pal.peach,
+            Self::Network => pal.teal,
+            Self::DateTime => pal.yellow,
+            Self::Programming => pal.mauve,
+            Self::Custom => pal.subtext0,
         }
     }
 }
@@ -1518,12 +1501,19 @@ struct App {
     current_match_index: usize,
     show_replace: bool,
     show_groups: bool,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl App {
     fn new() -> Self {
         let library = built_in_patterns();
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
             pattern: String::new(),
@@ -1731,7 +1721,7 @@ impl App {
             y: 0.0,
             width: self.window_width,
             height: self.window_height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1755,7 +1745,7 @@ impl App {
             y: 0.0,
             width: self.window_width,
             height: TOOLBAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1765,7 +1755,7 @@ impl App {
             y: 13.0,
             text: "Regex Tester".into(),
             font_size: TITLE_TEXT,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(150.0),
             overflow: TextOverflow::Ellipsis,
@@ -1792,7 +1782,7 @@ impl App {
                     y: 8.0,
                     width: w,
                     height: 28.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -1802,7 +1792,11 @@ impl App {
                 y: 15.0,
                 text: label.into(),
                 font_size: NORMAL_TEXT,
-                color: if active { BLUE } else { SUBTEXT0 },
+                color: if active {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: tab_weight,
                 max_width: Some(w),
                 overflow: TextOverflow::Ellipsis,
@@ -1826,7 +1820,11 @@ impl App {
                 y: 8.0,
                 width: 30.0,
                 height: 28.0,
-                color: if *active { BLUE } else { SURFACE0 },
+                color: if *active {
+                    self.palette.blue
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1834,7 +1832,11 @@ impl App {
                 y: 15.0,
                 text: (*label).into(),
                 font_size: NORMAL_TEXT,
-                color: if *active { CRUST } else { SUBTEXT0 },
+                color: if *active {
+                    self.palette.crust
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1854,7 +1856,7 @@ impl App {
                 y: 15.0,
                 text: nav_text,
                 font_size: SMALL_TEXT,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(90.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1870,6 +1872,7 @@ impl App {
         let pattern_y = content_y;
         Self::render_input_field(
             cmds,
+            &self.palette,
             PADDING,
             pattern_y,
             self.window_width - 2.0 * PADDING,
@@ -1887,7 +1890,7 @@ impl App {
                 y: status_y,
                 text: format!("Error: {err}"),
                 font_size: SMALL_TEXT,
-                color: RED,
+                color: self.palette.red,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.window_width - 100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1898,7 +1901,7 @@ impl App {
                 y: status_y,
                 text: self.match_stats(),
                 font_size: SMALL_TEXT,
-                color: GREEN,
+                color: self.palette.green,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.window_width - 100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1910,6 +1913,7 @@ impl App {
         if self.show_replace {
             Self::render_input_field(
                 cmds,
+                &self.palette,
                 PADDING,
                 next_y,
                 self.window_width - 2.0 * PADDING,
@@ -1949,6 +1953,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     fn render_input_field(
         cmds: &mut Vec<RenderCommand>,
+        pal: &Palette,
         x: f32,
         y: f32,
         width: f32,
@@ -1963,7 +1968,7 @@ impl App {
             y: y + 10.0,
             text: label.into(),
             font_size: SMALL_TEXT,
-            color: SUBTEXT0,
+            color: pal.subtext0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(70.0),
             overflow: TextOverflow::Ellipsis,
@@ -1977,7 +1982,7 @@ impl App {
             y,
             width: input_width,
             height,
-            color: MANTLE,
+            color: pal.mantle,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -1987,7 +1992,7 @@ impl App {
             y,
             width: input_width,
             height,
-            color: if focused { BLUE } else { SURFACE1 },
+            color: if focused { pal.blue } else { pal.surface1 },
             line_width: if focused { 2.0 } else { 1.0 },
             corner_radii: CornerRadii::all(4.0),
         });
@@ -1999,9 +2004,9 @@ impl App {
             value
         };
         let text_color = if value.is_empty() && !focused {
-            OVERLAY0
+            pal.overlay0
         } else {
-            TEXT
+            pal.text
         };
 
         cmds.push(RenderCommand::Text {
@@ -2041,7 +2046,7 @@ impl App {
                 y: y + 6.0,
                 width: 2.0,
                 height: height - 12.0,
-                color: BLUE,
+                color: pal.blue,
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -2065,7 +2070,7 @@ impl App {
             y,
             width,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii {
                 top_left: 4.0,
                 top_right: 4.0,
@@ -2078,7 +2083,7 @@ impl App {
             y: y + 5.0,
             text: label.into(),
             font_size: SMALL_TEXT,
-            color: SUBTEXT1,
+            color: self.palette.subtext1,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 16.0),
             overflow: TextOverflow::Ellipsis,
@@ -2092,7 +2097,7 @@ impl App {
             y: body_y,
             width,
             height: body_height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii {
                 top_left: 0.0,
                 top_right: 0.0,
@@ -2107,7 +2112,11 @@ impl App {
             y,
             width,
             height,
-            color: if focused { BLUE } else { SURFACE1 },
+            color: if focused {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            },
             line_width: if focused { 2.0 } else { 1.0 },
             corner_radii: CornerRadii::all(4.0),
         });
@@ -2129,7 +2138,7 @@ impl App {
                 y: ly,
                 text: format!("{:>3}", li.saturating_add(1)),
                 font_size: SMALL_TEXT,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(30.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2179,7 +2188,7 @@ impl App {
                 y: ly,
                 text: display_line,
                 font_size: NORMAL_TEXT,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 50.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2194,7 +2203,7 @@ impl App {
             y: y + 5.0,
             text: format!("{} lines", lines.len()),
             font_size: SMALL_TEXT,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(70.0),
             overflow: TextOverflow::Ellipsis,
@@ -2215,7 +2224,7 @@ impl App {
             y,
             width,
             height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -2232,7 +2241,7 @@ impl App {
                     y: y + 4.0,
                     width: tw,
                     height: 22.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(3.0),
                 });
             }
@@ -2242,7 +2251,11 @@ impl App {
                 y: y + 8.0,
                 text: (*label).into(),
                 font_size: SMALL_TEXT,
-                color: if selected { BLUE } else { SUBTEXT0 },
+                color: if selected {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(tw),
                 overflow: TextOverflow::Ellipsis,
@@ -2261,7 +2274,7 @@ impl App {
                     y: content_y + 20.0,
                     text: "Enter a pattern to begin".into(),
                     font_size: NORMAL_TEXT,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 24.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2272,7 +2285,7 @@ impl App {
                     y: content_y + 20.0,
                     text: "No matches found".into(),
                     font_size: NORMAL_TEXT,
-                    color: YELLOW,
+                    color: self.palette.yellow,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 24.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2292,7 +2305,7 @@ impl App {
                 y: explain_y - 4.0,
                 width: width - 8.0,
                 height: 1.0,
-                color: SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::ZERO,
             });
 
@@ -2301,7 +2314,7 @@ impl App {
                 y: explain_y + 2.0,
                 text: "Pattern Breakdown:".into(),
                 font_size: SMALL_TEXT,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2313,7 +2326,7 @@ impl App {
                     y: explain_y + 20.0 + (ei as f32) * LINE_HEIGHT,
                     text: explanation.clone(),
                     font_size: SMALL_TEXT,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 24.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2351,7 +2364,7 @@ impl App {
                     y: row_y,
                     width: width - 8.0,
                     height: LINE_HEIGHT * 2.0 - 4.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -2362,7 +2375,11 @@ impl App {
                 y: row_y + 2.0,
                 text: format!("#{} [{}-{}]", mi.saturating_add(1), m.start, m.end),
                 font_size: SMALL_TEXT,
-                color: if is_current { BLUE } else { OVERLAY0 },
+                color: if is_current {
+                    self.palette.blue
+                } else {
+                    self.palette.overlay0
+                },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2386,7 +2403,7 @@ impl App {
                 y: row_y + LINE_HEIGHT,
                 text: format!("\"{display}\""),
                 font_size: SMALL_TEXT,
-                color: GREEN,
+                color: self.palette.green,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2419,7 +2436,7 @@ impl App {
                         y: row_y + 2.0,
                         text: groups_str,
                         font_size: SMALL_TEXT,
-                        color: MAUVE,
+                        color: self.palette.mauve,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width - 130.0),
                         overflow: TextOverflow::Ellipsis,
@@ -2454,7 +2471,11 @@ impl App {
                 y: content_y,
                 width: w,
                 height: 24.0,
-                color: if selected { SURFACE1 } else { SURFACE0 },
+                color: if selected {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii::all(12.0),
             });
             cmds.push(RenderCommand::Text {
@@ -2463,9 +2484,9 @@ impl App {
                 text: label.into(),
                 font_size: SMALL_TEXT,
                 color: if selected {
-                    cat.map_or(BLUE, PatternCategory::color)
+                    cat.map_or(self.palette.blue, |c| c.color(&self.palette))
                 } else {
-                    SUBTEXT0
+                    self.palette.subtext0
                 },
                 font_weight: if selected {
                     FontWeightHint::Bold
@@ -2501,7 +2522,11 @@ impl App {
                 y: row_y,
                 width: self.window_width - 2.0 * PADDING,
                 height: 54.0,
-                color: if selected { SURFACE0 } else { MANTLE },
+                color: if selected {
+                    self.palette.surface0
+                } else {
+                    self.palette.mantle
+                },
                 corner_radii: CornerRadii::all(6.0),
             });
 
@@ -2513,7 +2538,7 @@ impl App {
                 y: row_y + 6.0,
                 width: badge_w,
                 height: 18.0,
-                color: entry.category.color(),
+                color: entry.category.color(&self.palette),
                 corner_radii: CornerRadii::all(9.0),
             });
             cmds.push(RenderCommand::Text {
@@ -2521,7 +2546,7 @@ impl App {
                 y: row_y + 9.0,
                 text: cat_label.into(),
                 font_size: BADGE_TEXT,
-                color: CRUST,
+                color: self.palette.crust,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(badge_w),
                 overflow: TextOverflow::Ellipsis,
@@ -2533,7 +2558,7 @@ impl App {
                 y: row_y + 8.0,
                 text: entry.name.clone(),
                 font_size: NORMAL_TEXT,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(300.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2551,7 +2576,7 @@ impl App {
                     FontWeightHint::Regular,
                 ),
                 font_size: SMALL_TEXT,
-                color: SKY,
+                color: self.palette.sky,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.window_width - 40.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2563,7 +2588,7 @@ impl App {
                 y: row_y + 8.0,
                 text: entry.description.clone(),
                 font_size: SMALL_TEXT,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(230.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2576,7 +2601,7 @@ impl App {
                 y: list_y + 40.0,
                 text: "No patterns in this category".into(),
                 font_size: NORMAL_TEXT,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2594,7 +2619,7 @@ impl App {
             y: content_y,
             width: col_width,
             height: self.window_height - content_y - PADDING,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -2603,7 +2628,7 @@ impl App {
             y: content_y + 10.0,
             text: "Syntax Reference".into(),
             font_size: HEADER_TEXT,
-            color: BLUE,
+            color: self.palette.blue,
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_width - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -2648,7 +2673,7 @@ impl App {
                 y: sy,
                 text: (*syntax).into(),
                 font_size: SMALL_TEXT,
-                color: GREEN,
+                color: self.palette.green,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2658,7 +2683,7 @@ impl App {
                 y: sy,
                 text: (*desc).into(),
                 font_size: SMALL_TEXT,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_width - 112.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2672,7 +2697,7 @@ impl App {
             y: content_y,
             width: col_width,
             height: self.window_height - content_y - PADDING,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -2681,7 +2706,7 @@ impl App {
             y: content_y + 10.0,
             text: "Replacement Reference".into(),
             font_size: HEADER_TEXT,
-            color: PEACH,
+            color: self.palette.peach,
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_width - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -2703,7 +2728,7 @@ impl App {
                 y: ry,
                 text: (*syntax).into(),
                 font_size: SMALL_TEXT,
-                color: PEACH,
+                color: self.palette.peach,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2713,7 +2738,7 @@ impl App {
                 y: ry,
                 text: (*desc).into(),
                 font_size: SMALL_TEXT,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_width - 112.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2727,7 +2752,7 @@ impl App {
             y: tips_y,
             text: "Tips & Tricks".into(),
             font_size: HEADER_TEXT,
-            color: TEAL,
+            color: self.palette.teal,
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_width - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -2754,7 +2779,7 @@ impl App {
                 y: ty,
                 text: format!("- {tip}"),
                 font_size: SMALL_TEXT,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_width - 28.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2895,6 +2920,10 @@ impl App {
 }
 
 impl oswindow::app::App for App {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Regex Tester".to_string()
     }
@@ -3951,5 +3980,65 @@ mod tests {
         app.active_field = ActiveField::Input;
         assert!(press(&mut app, guitk::event::Key::A, "a\u{7}b"));
         assert_eq!(app.input_text, "ab");
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        use oswindow::app::App as _;
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut App) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = App::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

@@ -8216,6 +8216,7 @@ dependencies = [
 name = "jsonviewer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -9529,6 +9530,7 @@ dependencies = [
 name = "logviewer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -12923,6 +12925,7 @@ dependencies = [
 name = "passwordgen"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -13529,6 +13532,7 @@ dependencies = [
 name = "podcast"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -14694,6 +14698,7 @@ dependencies = [
 name = "regextester"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

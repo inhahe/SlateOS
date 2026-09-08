@@ -124420,9 +124420,25 @@ which makes step 1 below larger than one dependency line.
   `fileassoc`, `startupmanager`, `magnifier`, `systemrestore`, `videoplayer`,
   `qrcode`, `notes`, `rssreader`, `spreadsheet`, `paint`, `defrag`, `netscan`,
   `photomanager`, `renamer`, `mediaconvert`, `radio`, `flashcards`, `calendar`
-  `finance`, `slides`, `worldclock`, `camera`, `compass` and `diskanalyzer`.
-  Each has a test on the rectangles it emits, and each was mutation-checked by
+  `finance`, `slides`, `worldclock`, `camera`, `compass`, `diskanalyzer`,
+  `jsonviewer`, `logviewer`, `passwordgen`, `podcast` and `regextester`. Each
+  has a test on the rectangles it emits, and each was mutation-checked by
   making `theme_changed` ignore its argument.
+
+**The one conversion bug that a test would not have caught.** A script that
+gives `#[test]` functions a local palette matched a *production* function too
+and inserted `let pal = Palette::from_settings(&default())` inside
+`jsonviewer::highlight_json_text` — **shadowing the parameter**. The function
+then ignored the palette it was handed and always drew in the defaults: it
+compiles, every test passes, and the only symptom is JSON syntax highlighting
+that does not follow the theme while everything around it does.
+
+It surfaced as `unused variable: pal` from clippy, not from any test. Two
+things follow. Any script that inserts a binding must check that the enclosing
+function does not already have one of that name. And the whole set is worth
+auditing for it: `grep` every converted application for a `let pal =` inside a
+function whose signature already says `pal: &Palette`. That audit found this
+one and no others.
 
 **One application refused conversion, correctly: `whiteboard`.** Its
 `MOCHA_TEXT` is read in a `Default::default()` — the default *pen* colour — and

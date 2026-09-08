@@ -182,16 +182,31 @@ impl PageRange {
     ///
     /// For talking to code that predates this format. `None` when the range
     /// cannot be said that way -- which is most of why this format exists.
+    ///
+    /// **One-based `u32`, matching that pair, not this type.** The desktop's
+    /// field is `Option<(u32, u32)>` counting from one -- its validator
+    /// rejects a start of zero -- while a `PageRange` counts from zero like
+    /// the document it indexes. Returning this type's own numbering would
+    /// have made every use of this helper an off-by-one, which is the exact
+    /// mistake a conversion helper exists to prevent.
     #[must_use]
-    pub fn as_single_span(&self) -> Option<(usize, usize)> {
-        match self {
-            Self::Custom(spans) if spans.len() == 1 => spans.first().copied(),
-            _ => None,
-        }
+    pub fn as_single_span(&self) -> Option<(u32, u32)> {
+        let Self::Custom(spans) = self else {
+            return None;
+        };
+        let &(lo, hi) = spans.first().filter(|_| spans.len() == 1)?;
+        // Zero-based back to one-based, and only if it fits the older field.
+        let lo = u32::try_from(lo.checked_add(1)?).ok()?;
+        let hi = u32::try_from(hi.checked_add(1)?).ok()?;
+        Some((lo, hi))
     }
 }
 
 /// Paper size, in the vocabulary the desktop already uses.
+///
+/// All eight of the desktop's sizes, because a format that could express only
+/// six of them would be one the desktop cannot migrate onto without taking
+/// choices away from a dialog that already offers them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PaperSize {
     A3,
@@ -201,6 +216,58 @@ pub enum PaperSize {
     Letter,
     Legal,
     Tabloid,
+    /// #10 envelope.
+    Envelope,
+    /// A size the user gave, in tenths of a millimetre.
+    ///
+    /// Tenths of a millimetre rather than `f32` so the whole format can stay
+    /// `Eq` -- two jobs either are the same job or are not, and a paper size
+    /// is not a quantity anyone needs sub-0.1 mm precision in.
+    ///
+    /// The dimensions are carried here rather than left to the receiver
+    /// because the desktop's own `Custom` does not carry them: its
+    /// `width_mm`/`height_mm` return 210x297 for it, which is A4. A message
+    /// saying "custom" and meaning "A4" is a message that lies, so this
+    /// variant cannot be constructed without saying custom *what*.
+    Custom {
+        width_tenths_mm: u32,
+        height_tenths_mm: u32,
+    },
+}
+
+impl PaperSize {
+    /// Width in tenths of a millimetre.
+    #[must_use]
+    pub fn width_tenths_mm(self) -> u32 {
+        match self {
+            Self::A3 => 2970,
+            Self::A4 => 2100,
+            Self::A5 => 1480,
+            Self::Letter | Self::Legal => 2159,
+            Self::Tabloid => 2794,
+            Self::Envelope => 1048,
+            Self::Custom {
+                width_tenths_mm, ..
+            } => width_tenths_mm,
+        }
+    }
+
+    /// Height in tenths of a millimetre.
+    #[must_use]
+    pub fn height_tenths_mm(self) -> u32 {
+        match self {
+            Self::A3 => 4200,
+            Self::A4 => 2970,
+            Self::A5 => 2100,
+            Self::Letter => 2794,
+            Self::Legal => 3556,
+            Self::Tabloid => 4318,
+            Self::Envelope => 2413,
+            Self::Custom {
+                height_tenths_mm, ..
+            } => height_tenths_mm,
+        }
+    }
 }
 
 /// How much ink and time to spend.
@@ -581,13 +648,35 @@ mod tests {
         assert_eq!(job.validate(), Ok(()));
     }
 
+    /// Every paper size knows its own dimensions, including a custom one.
+    #[test]
+    fn a_custom_paper_size_carries_the_size_it_is() {
+        let custom = PaperSize::Custom {
+            width_tenths_mm: 1000,
+            height_tenths_mm: 1500,
+        };
+        assert_eq!(custom.width_tenths_mm(), 1000);
+        assert_eq!(custom.height_tenths_mm(), 1500);
+        // The desktop's `Custom` reports A4's dimensions; ours cannot, because
+        // it cannot be built without them.
+        assert_ne!(
+            (custom.width_tenths_mm(), custom.height_tenths_mm()),
+            (
+                PaperSize::A4.width_tenths_mm(),
+                PaperSize::A4.height_tenths_mm()
+            )
+        );
+        assert_eq!(PaperSize::Envelope.width_tenths_mm(), 1048);
+        assert_eq!(PaperSize::A4.height_tenths_mm(), 2970);
+    }
+
     /// The desktop's single-pair form survives the trip when it is expressible.
     #[test]
     fn a_single_span_can_still_be_read_as_the_old_pair() {
         assert_eq!(
             PageRange::parse("3-7").as_single_span(),
-            Some((2, 6)),
-            "the old from/to form must still be recoverable"
+            Some((3, 7)),
+            "the old from/to form counts from one, as the user typed it"
         );
         assert_eq!(
             PageRange::All.as_single_span(),

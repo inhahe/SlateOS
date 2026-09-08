@@ -13,6 +13,17 @@
 //! resulting character (if any) into the ring buffer.  All ISR-side code
 //! uses only atomic operations (no locks).
 //!
+//! ## Blocking reads and wake
+//!
+//! Userspace readers park via [`ipc::waiters::park_interruptible`] and are
+//! woken by [`push_char_raw`] through a lock-free CAS array of waiting task
+//! IDs ([`KEYBOARD_WAITERS`]).  The wake uses the ISR-safe idiom
+//! (`sched::try_wake` + `sched::defer_wake` fallback) to avoid losing wakes
+//! when the scheduler lock is contended.  Deadline-based reads (VTIME) arm
+//! a one-shot hrtimer for precise timeout.  Kernel-mode readers (kshell)
+//! keep the simpler HLT-spin loop, which is correct for their use case.
+//! See `known-issues.md` → `BUG-CONSOLE-READ-UNINTERRUPTIBLE`.
+//!
 //! ## Scan code set
 //!
 //! QEMU's i8042 emulation enables scan code set 2 → set 1 translation by
@@ -25,7 +36,7 @@
 //! atomic head/tail.  Modifier state is maintained atomically.  The module
 //! is safe to call from interrupt and task contexts.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::port;
 
@@ -932,6 +943,13 @@ fn push_char_raw(ch: u8) -> bool {
     let idx = (head as usize) & INPUT_BUF_MASK;
     INPUT_BUF[idx].store(ch, Ordering::Release);
     INPUT_HEAD.store(next_head, Ordering::Release);
+
+    // Wake any tasks parked waiting for keyboard input.  This runs in ISR
+    // context (PS/2 IRQ 1) and in the hrtimer-driven USB HID poll callback,
+    // both of which are lock-free — `wake_keyboard_waiters` uses
+    // `try_wake`/`defer_wake`, never a blocking lock.
+    wake_keyboard_waiters();
+
     true
 }
 
@@ -1141,26 +1159,83 @@ pub enum ReadOutcome {
 /// reproduces the historical uninterruptible behaviour exactly, with no
 /// second copy of this loop to keep in sync.
 ///
-/// **Why this is still a `HLT` poll and not a real park.**  The reason it was
-/// wrong *before* is now gone: [`start_usb_hid_poller`] drives HID polling
-/// from a timer, so a reader that stopped spinning no longer takes the USB
-/// keyboard down with it.  That was the blocking half of
-/// `known-issues.md` → `BUG-CONSOLE-READ-UNINTERRUPTIBLE` stage 2, and it is
-/// unblocked.
+/// ## Parking vs. HLT
 ///
-/// What stage 2 still needs is the wake side, which is a separate piece of
-/// work and is not done here: the poller pushes into the ring but wakes
-/// nobody, so a genuinely parked reader would sleep through its own keystroke.
-/// Converting this loop to `park_interruptible` therefore requires
-/// `push_char` to wake the waiting reader — with the ISR-safe idiom
-/// (`sched::try_wake`, falling back to `sched::defer_wake`), not
-/// `WaitQueue::try_wake_one`, which loses the wake on a lost `try_lock`.
-/// Until then the `HLT` spin is what makes the ring get looked at.
+/// Userspace readers (`pid != 0`) use the `park_interruptible` +
+/// `KEYBOARD_WAITERS` path: the task blocks in the scheduler and is woken
+/// by `push_char_raw` → `wake_keyboard_waiters` when a byte lands in the
+/// ring — or by signal delivery (via `register_signalfd_waiter`), or by an
+/// hrtimer callback when a deadline is set.  This makes console reads
+/// interruptible by signals, fixing `known-issues.md` →
+/// `BUG-CONSOLE-READ-UNINTERRUPTIBLE`.
 ///
-/// [`usb_hid_poller_armed`] is the precondition to check before making that
-/// change; do not assume it, because the poller does not arm on a machine
-/// with no xHCI controller.
+/// Kernel tasks (`pid == 0` — kshell, boot console) keep the HLT loop.
+/// They have no signal context to check, and `park_interruptible` degrades
+/// to `block_current` for pid 0 anyway — but the HLT fallback is strictly
+/// simpler and never needs the waiter array.
+///
+/// If the waiter array is full (more than [`KEYBOARD_WAITER_SLOTS`]
+/// concurrent readers, which is not expected in practice), the overflow
+/// reader falls back to HLT as well, so the degenerate case degrades to
+/// current behaviour rather than to a deadlock.
 fn read_char_inner(deadline_ns: Option<u64>, pid: u64) -> ReadOutcome {
+    let use_park = pid != 0;
+    let task = if use_park {
+        crate::sched::current_task_id()
+    } else {
+        0
+    };
+
+    // For deadline-based reads with parking, arm a one-shot hrtimer that
+    // wakes us when the deadline fires — otherwise `block_current` would
+    // sleep through it.  Kernel-mode reads (pid == 0) don't park, so the
+    // HLT-based deadline check in the loop body is sufficient.
+    let deadline_timer = if use_park {
+        deadline_ns.and_then(|deadline| {
+            let now = crate::hrtimer::now_ns();
+            if now >= deadline {
+                return None; // Already expired — no timer needed.
+            }
+
+            /// ISR-safe wake for the deadline timer.
+            fn deadline_wake(tid: u64) {
+                if !crate::sched::try_wake(tid) {
+                    crate::sched::defer_wake(tid);
+                }
+            }
+
+            Some(crate::hrtimer::schedule_ns(
+                deadline.saturating_sub(now),
+                deadline_wake,
+                task,
+            ))
+        })
+    } else {
+        None
+    };
+
+    let result = read_char_inner_loop(deadline_ns, pid, task, use_park);
+
+    // Cleanup: cancel the deadline timer if it was armed (harmless if it
+    // already fired) and make sure we are not left in the waiter array.
+    if let Some(timer) = deadline_timer {
+        crate::hrtimer::cancel(timer);
+    }
+    if use_park {
+        deregister_keyboard_waiter(task);
+    }
+
+    result
+}
+
+/// Inner loop for [`read_char_inner`], factored out so the cleanup in
+/// `read_char_inner` runs on every return path without repetition.
+fn read_char_inner_loop(
+    deadline_ns: Option<u64>,
+    pid: u64,
+    task: u64,
+    use_park: bool,
+) -> ReadOutcome {
     loop {
         // A no-op once the periodic poller is armed; the fallback for when it
         // is not.  See `poll_usb_keyboard_if_unpolled`.
@@ -1183,10 +1258,38 @@ fn read_char_inner(deadline_ns: Option<u64>, pid: u64) -> ReadOutcome {
             return ReadOutcome::TimedOut;
         }
 
-        // Yield CPU until next interrupt (the keyboard IRQ or the periodic
-        // timer tick, which bounds how long we sleep past a deadline and how
-        // long a signal waits to be noticed).
-        crate::cpu::hlt();
+        if use_park {
+            // Register as a waiter, then re-check the ring to close the race
+            // window: data may have arrived between `try_read_char_raw` above
+            // and the registration.  Without this double-check a keystroke
+            // pushed in that gap would wake nobody (we weren't registered yet)
+            // and we'd sleep until the next spurious event.
+            let registered = register_keyboard_waiter(task);
+
+            if let Some(ch) = try_read_char_raw() {
+                return ReadOutcome::Byte(ch);
+            }
+            if crate::ipc::waiters::deliverable_signal_pending(pid) {
+                return ReadOutcome::Interrupted;
+            }
+
+            if registered {
+                // Park until woken by a keystroke, a signal, or the deadline
+                // timer.  `park_interruptible` handles the signal-waiter
+                // registration internally.
+                crate::ipc::waiters::park_interruptible(pid, task);
+                // Woken — loop back to consume whatever woke us.
+            } else {
+                // Waiter array full: fall back to HLT (bounded by the timer
+                // tick, same as the pre-park behaviour).
+                crate::cpu::hlt();
+            }
+        } else {
+            // Kernel task: yield CPU until next interrupt (keyboard IRQ or
+            // timer tick, which bounds how long we sleep past a deadline and
+            // how long a signal waits to be noticed).
+            crate::cpu::hlt();
+        }
     }
 }
 
@@ -1217,6 +1320,12 @@ pub fn read_char() -> u8 {
 /// unlike [`read_char`] it unwinds with [`ReadOutcome::Interrupted`] so the
 /// caller can return `EINTR` and let the signal run.  Passing `pid == 0`
 /// degrades to the uninterruptible behaviour of [`read_char`].
+///
+/// For `pid != 0` this parks via [`crate::ipc::waiters::park_interruptible`]
+/// and is woken by `push_char_raw` (keystroke), signal delivery, or the
+/// deadline timer — it does **not** HLT-spin.  A signalled process blocked
+/// on the console now returns `EINTR` promptly, without waiting for the next
+/// timer tick.
 pub fn read_char_interruptible(pid: u64) -> ReadOutcome {
     read_char_inner(None, pid)
 }
@@ -1225,8 +1334,8 @@ pub fn read_char_interruptible(pid: u64) -> ReadOutcome {
 /// monotonic clock reaches `deadline_ns` (an [`crate::hrtimer::now_ns`]
 /// timestamp).  Returns `Some(ch)` on input, `None` on timeout.
 ///
-/// Like [`read_char`] this yields the CPU via `HLT` between polls (waking on
-/// the keyboard IRQ or the timer tick), so it does not hot-spin.  It is the
+/// For kernel-mode callers (pid == 0) this yields the CPU via `HLT` between
+/// polls (waking on the keyboard IRQ or the timer tick).  It is the
 /// primitive behind the terminal `VTIME` read timeout: a `VMIN=0,VTIME>0`
 /// bounded read and the inter-byte timer of a `VMIN>0,VTIME>0` read.
 ///
@@ -1245,6 +1354,9 @@ pub fn read_char_timeout(deadline_ns: u64) -> Option<u8> {
 /// [`read_char_timeout`] on behalf of user process `pid`, distinguishing a
 /// signal ([`ReadOutcome::Interrupted`]) from the deadline expiring
 /// ([`ReadOutcome::TimedOut`]).
+///
+/// For `pid != 0` this uses real parking with an hrtimer for the deadline,
+/// so both signal delivery and timeout are prompt — no HLT-spin latency.
 pub fn read_char_timeout_interruptible(deadline_ns: u64, pid: u64) -> ReadOutcome {
     read_char_inner(Some(deadline_ns), pid)
 }
@@ -1593,6 +1705,108 @@ fn poll_usb_keyboard_if_unpolled() {
 #[must_use]
 pub fn usb_hid_poller_armed() -> bool {
     USB_HID_POLLER_ARMED.load(Ordering::Acquire)
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard waiter array — ISR-safe wake for blocked readers
+// ---------------------------------------------------------------------------
+//
+// A lock-free CAS array of task IDs parked waiting for keyboard input.
+// `push_char_raw` wakes every registered waiter after pushing a byte, using
+// the ISR-safe `sched::try_wake` / `sched::defer_wake` idiom.
+//
+// The array is intentionally small: at most one task reads the console at a
+// time (the foreground shell), and even with job control the number of
+// concurrent console readers is bounded by the user's patience.  The
+// known-issues entry that specified this design says: "The natural shape is
+// a lock-free CAS array of waiting task ids whose full-array fallback is
+// today's `HLT` poll, so the degenerate case degrades to current behaviour
+// rather than to a deadlock."
+
+/// Maximum concurrent tasks that can park waiting for keyboard input.
+const KEYBOARD_WAITER_SLOTS: usize = 4;
+
+/// Sentinel: slot is empty.
+const KEYBOARD_WAITER_EMPTY: u64 = 0;
+
+/// Lock-free array of parked task IDs.  Each slot is either
+/// [`KEYBOARD_WAITER_EMPTY`] (0) or a live task ID.  Task ID 0 is the idle
+/// task and never parks here.
+static KEYBOARD_WAITERS: [AtomicU64; KEYBOARD_WAITER_SLOTS] = {
+    const EMPTY: AtomicU64 = AtomicU64::new(KEYBOARD_WAITER_EMPTY);
+    [EMPTY; KEYBOARD_WAITER_SLOTS]
+};
+
+/// Register `task` as waiting for keyboard input.
+///
+/// Returns `true` if the task is now registered (either freshly or already
+/// present), `false` if the array is full.  Idempotent: a task that calls
+/// this twice without deregistering keeps its existing slot.
+fn register_keyboard_waiter(task: u64) -> bool {
+    // Already registered?  Scan first to avoid claiming a second slot.
+    for slot in &KEYBOARD_WAITERS {
+        if slot.load(Ordering::Acquire) == task {
+            return true;
+        }
+    }
+    // Try to claim an empty slot.
+    for slot in &KEYBOARD_WAITERS {
+        if slot
+            .compare_exchange(
+                KEYBOARD_WAITER_EMPTY,
+                task,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Remove `task` from the waiter array.  Safe to call even if not registered.
+fn deregister_keyboard_waiter(task: u64) {
+    for slot in &KEYBOARD_WAITERS {
+        // CAS rather than a blind store: another path (wake) may have already
+        // cleared the slot, and a blind store would clobber a new occupant.
+        let _ = slot.compare_exchange(
+            task,
+            KEYBOARD_WAITER_EMPTY,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
+    }
+}
+
+/// Wake every task registered in the waiter array.
+///
+/// Called from ISR context (`push_char_raw`) and from the USB HID poll timer,
+/// so it must be lock-free and ISR-safe.  Uses `sched::try_wake` (fast path)
+/// with `sched::defer_wake` (fallback when the scheduler lock is held),
+/// exactly as prescribed by `known-issues.md` → `BUG-CONSOLE-READ-UNINTERRUPTIBLE`.
+fn wake_keyboard_waiters() {
+    for slot in &KEYBOARD_WAITERS {
+        let task = slot.load(Ordering::Acquire);
+        if task == KEYBOARD_WAITER_EMPTY {
+            continue;
+        }
+        // Clear the slot *before* waking: if try_wake succeeds, the task will
+        // re-register on its next loop iteration; if it fails, defer_wake posts
+        // it and the deferred-wake drain will move it to Ready.  Either way the
+        // slot must be free by the time the woken task runs, so it doesn't
+        // see its own stale entry and skip registration.
+        let _ = slot.compare_exchange(
+            task,
+            KEYBOARD_WAITER_EMPTY,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
+        if !crate::sched::try_wake(task) {
+            crate::sched::defer_wake(task);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

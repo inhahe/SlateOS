@@ -961,13 +961,12 @@ pub(crate) enum Input {
 /// Block until an input byte is available for `id`.
 ///
 /// The console never reports [`Input::Hangup`] — a program cannot unplug the
-/// keyboard. It *does* now report [`Input::Interrupted`]: the console read is a
-/// `HLT` poll that re-checks the calling process's pending-signal mask on every
-/// wake, so a task blocked reading the console can be killed without a key
-/// being pressed. (The wake still costs up to one timer tick of latency,
-/// because nothing signals the poll directly; making the reader genuinely park
-/// is stage 2 of `known-issues.md` → `BUG-CONSOLE-READ-UNINTERRUPTIBLE`, and
-/// is blocked on moving USB HID polling out of the read path.)
+/// keyboard. It *does* report [`Input::Interrupted`]: the console reader parks
+/// via `park_interruptible` and is woken by `keyboard::push_char_raw` (ISR-safe
+/// wake from the lock-free waiter array), by signal delivery, or by a deadline
+/// timer. A task blocked reading the console is promptly interruptible — no
+/// HLT-spin latency. See `known-issues.md` → `BUG-CONSOLE-READ-UNINTERRUPTIBLE`
+/// (FIXED, both stages).
 fn backend_read_char(id: TtyId, backend: Backend) -> Input {
     match backend {
         Backend::Console => {

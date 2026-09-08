@@ -65794,6 +65794,196 @@ which is the audit this decision avoids needing.
 
 ---
 
+## §914 — Boot self-tests: halt on kernel-integrity failures, log-and-continue for everything else
+
+**Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+
+**In short:** the kernel runs several hundred self-tests at boot. Until now,
+every failure panicked the machine dead. The operator was asked whether a
+user's computer should refuse to start because a cosmetic terminal flag
+(`VERASE`) is wrong, and answered: **option D — split by severity.** A bad
+memory-manager invariant still halts; a cosmetic mismatch prints a warning
+and boots. Option A (gate all self-tests behind a boot flag, skip in
+production) was explicitly not taken as an interim step — the operator went
+straight to the end state.
+
+**The question (A-Q3 in `open-questions.md`):** 567 kernel files contain
+self-test functions with a total of ~12 674 assertion sites. Only ~299 use the
+log-and-continue style. The four options were: (A) skip self-tests on
+production boots via a boot flag; (B) always run but never panic; (C) keep
+today's halt-everything behaviour as deliberate policy; (D) classify each
+test — halt for structural integrity, log-and-continue for the rest.
+
+**Operator's answer (verbatim):** "D" — keep assertions for checks about
+kernel integrity, log-and-continue for the rest.
+
+**Background the operator also received (and which shaped D-straight-away over
+A-now-D-later):** (1) the OS has zero real-world users — it has never been
+booted on hardware, so A's urgency is hypothetical; (2) A creates a
+configuration divergence — the tested path (with self-tests) differs from the
+shipped path (without), and the first hardware boot is exactly when you least
+want them to differ; (3) D's real cost is one macro-level change (a
+`#[severity]` attribute or classification table) plus incremental per-test
+judgement, not 12 674 individual site edits.
+
+**Implementation plan:** introduce a per-self-test severity classification
+(e.g. `Integrity` vs `Diagnostic`). `Integrity` tests (memory manager, page
+table, scheduler invariants, capability enforcement) keep the panic-on-failure
+behaviour. `Diagnostic` tests (terminal flags, cosmetic checks, informational
+self-tests) switch to log-and-continue. Migration is incremental — each
+self-test is classified as it is touched, with the default being
+halt-on-failure (the safe side) until classified.
+
+**How to reverse.** Reclassify individual tests or revert to a blanket halt
+policy by setting the default severity back to `Integrity`.
+
+**Where it lives.** The classification will be per-test-function metadata;
+the enforcement in `kernel/src/main.rs`'s self-test dispatch. See
+`known-issues.md` → `TD-A-MOST-BOOT-SELF-TESTS-PANIC-THE-KERNEL-INSTEAD-OF-REPORTING`.
+
+---
+
+## §915 — Fix fastpy's sysroot lookup directly rather than working around it per-lane
+
+**Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+
+**In short:** the C-test fixtures are compiled by fastpy (a separate project).
+Fastpy hard-codes a sibling folder named `os` to find the C library, but the
+project now lives in `os-lane-a`/`b`/`c` worktrees. The compiler never finds
+the library, so every boot test prints a warning and the C-test results are
+unattributable. The operator chose **option A**: fix fastpy directly (walk up
+from launch directory, keep old `os` as fallback), bump its version, and
+commit without pushing.
+
+**Alternatives rejected:** (B) set the location explicitly per-lane — fixes
+the symptom for one caller; (C) leave the warning — nothing degrades but the
+gap persists.
+
+**Implementation note:** this is a change to `D:\visual studio projects\fastpy`,
+not to this tree. The fix is "walk up from the current working directory to
+find the sysroot" with the old hard-coded `os` path as fallback.
+
+---
+
+## §916 — `find -size 100` means 512-byte blocks (POSIX), not bytes
+
+**Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+
+**In short:** our `find -size 100` treated a bare number as bytes; every
+other `find` treats it as 512-byte blocks (POSIX). The operator chose
+**option C**: match POSIX, acknowledging that `b` for blocks is unintuitive
+(most users expect bytes) but any deviation bites people familiar with the
+tool, and there's no way to be both intuitive and compliant.
+
+**Where it lives.** `userspace/shell/` — the `find` implementation's
+`-size` parser.
+
+---
+
+## §917 — `oci run` refuses to start when an option cannot be applied
+
+**Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+
+**In short:** when a user asks `oci run` to apply an option (e.g. a
+resource limit, a namespace flag) that the runtime cannot honour, should it
+start the container anyway or refuse? The operator chose **option A**:
+refuse to start. A container running with fewer restrictions than requested
+is a security gap; a clear error at launch is preferable.
+
+**Where it lives.** `kernel/src/container/` — the OCI runtime's option
+validation path.
+
+---
+
+## §918 — A program may prompt for keyboard/microphone/camera permission
+
+**Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+
+**In short:** should a program be able to pop up a prompt asking the user
+for permission to read the keyboard, microphone, or camera? The operator
+chose **option A: yes**, and also instructed to fix the error message
+(which currently does not explain what happened when permission is denied).
+
+**Where it lives.** The capability prompt system and the error path for
+denied device access.
+
+---
+
+## §919 — The shell's `grep` uses standard defaults; operator's custom features to be integrated
+
+**Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+
+**In short:** our shell `grep` defaulted to case-insensitive search with
+line numbers, unlike every other Unix `grep`. The operator chose **option A**:
+match standard defaults (case-sensitive, no line numbers unless `-n`). The
+operator also noted a custom grep implementation at
+`D:\visual studio projects\grep` (Python and C++) with additional features
+beyond GNU grep, and wants those integrated into SlateOS's grep so it
+becomes a superset. The grep implementation is in `userspace/` (lane B's
+territory), so lane B handles the actual port.
+
+---
+
+## §920 — Leave the destructive-looking commits and fake-signed history as-is
+
+**Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+
+**In short:** two commits that appear to delete the whole OS and 33 commits
+signed by a name the operator did not authorise are permanently in the
+published git history. The operator chose **option A**: leave the history
+as-is. The commits are harmless (the "deletions" were artifacts of the
+migration, and the signatures were from a misconfigured account), and
+rewriting published history would break all three lanes' worktrees and
+require force-pushes on shared branches.
+
+---
+
+## §921 — The 70ms per-file-open was not the antivirus; re-measure on E:
+
+**Date:** 2026-09-07. **Decided by:** Operator (factual correction). **Lane:** A.
+
+**In short:** every build and check was paying ~70ms per file opened. The
+entry hypothesised Defender real-time scanning. The operator reported that
+`D:\visual studio projects` was already excluded from scanning, so the
+antivirus was not the cause. More likely explanations: CPU saturation from
+concurrent work, filesystem I/O contention from four continuous backup jobs
+(two local, two cloud), and HDD latency (the tree has since moved to SSD).
+The question is effectively closed — re-measure on E: if the latency
+persists, but the leading hypothesis is invalidated.
+
+---
+
+## §922 — Release boot test staleness gate: commit-count trigger that cannot mean "never"
+
+**Date:** 2026-09-07. **Decided by:** Operator (chose C; implementation design
+by Claude). **Lane:** A.
+
+**In short:** the operator chose option C for Q46 (debug build by default, with
+a periodic release boot test) and instructed: "make a solution that will not
+result in 'never' in practice." The trigger is a **commit-count gate in the
+pre-push hook**: `scripts/check-release-staleness.py` counts kernel-touching
+commits (`kernel/`, `bench/`) since the last release boot test (recorded in
+`bench/last-release-boot.json`), and refuses the push when the count exceeds
+100 (roughly a day or two of active work at this project's measured rate).
+
+The mechanism is attached to an event the tree already produces (commits past
+a threshold), not to a human's intention to remember, so a quiet month costs
+nothing and a busy week triggers it. The only way past it is to run the
+measurement (`./scripts/boot-test.sh --profile=release` and update the
+baseline) or to consciously raise the threshold — and raising it is a visible
+diff. This is the shape lane B proposed (ratchet attached to change, not
+calendar) and is the same pattern as `scripts/scan-orphan-modules.py`.
+
+**Escape hatch:** `ALLOW_STALE_RELEASE=1 git push ...` for cases where the
+release test is about to be run.
+
+**Where it lives.** `scripts/check-release-staleness.py` (the gate),
+`bench/last-release-boot.json` (the baseline), wired into
+`scripts/hooks/pre-push` (gate 15) and `scripts/boot-test.sh` (informational
+line before build).
+
+---
+
 ## 758. `/proc` gets a crate of its own, and its readers return "not exported" and "could not read" as two different answers
 
 **Lane:** B

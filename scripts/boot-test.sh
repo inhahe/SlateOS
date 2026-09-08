@@ -6509,6 +6509,22 @@ if [ -n "${CHECKER_TIMING_LOG:-}" ] && [ -s "$CHECKER_TIMING_LOG" ]; then
     echo "     through run_checker, so they are in the remainder, not the table)."
 fi
 
+# Release-staleness informational line (Q46 → §914).  NOT a gate in
+# boot-test.sh — the gate lives in pre-push.  This just reports the count so
+# a developer running a debug boot test sees how close the threshold is.
+_staleness="$PROJECT_ROOT/scripts/check-release-staleness.py"
+if [ -f "$_staleness" ]; then
+    # $py is a function-local variable, not available at top level.
+    # Use the same command-v probe other top-level blocks use.
+    if command -v python &>/dev/null; then
+        python "$_staleness" 2>/dev/null || true
+    elif command -v python3 &>/dev/null; then
+        python3 "$_staleness" 2>/dev/null || true
+    fi
+    # Non-zero exits are ignored: this is informational, not a gate.
+    # The pre-push gate is what actually refuses.
+fi
+
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then
     check_free_space "before building"

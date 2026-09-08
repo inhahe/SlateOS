@@ -111,3 +111,33 @@ is no longer the pty layer — that landed on 2026-08-23. `^C` → `SIGINT` →
 `KeyboardInterrupt` is the mechanism an interactive interpreter needs, and this
 fixture is the smallest thing that proves the mechanism works before anything
 is built on top of it.
+
+---
+
+**Status:** RUNG ADDED, DISABLED — lane A, 2026-09-07.
+Rung added in `kernel/src/proc/spawn.rs` (`self_test_ctest_pty`) and called
+from `kernel/src/main.rs` after `self_test_cctty`. The rung spawns
+`/tests/ctest-pty.elf`, waits for Zombie, and asserts exit code 42. Detailed
+exit-code diagnostic decodes the interesting child-side codes (70, 71/72, 78)
+inline.
+
+**First execution result: HANG.** The fixture entered a kernel syscall
+(RIP `0xffffffff819dc695`, kernel text) that busy-loops. The scheduler
+failed to preempt it — `preempt_disable_depth=0`, timer ticks advanced,
+but zero context switches fired. Process 198 (tid 167, "ctest-pty")
+remained in state `Running` at tick 82496+, monopolizing cpu0. The forked
+child (tid 166, "forked") reached state `Dead` blocked at
+`kernel/src/ipc/waiters.rs:166`. The boot never reached `BOOT_OK` and the
+QEMU timeout killed the VM.
+
+**Rung is currently disabled** in `main.rs` to unblock the boot test.
+Filed as `A-CTEST-PTY-HANGS-BOOT` in `known-issues.md`. Two bugs:
+1. A pty syscall path spins in kernel space (a pty/tty primitive, or
+   something the fixture's `openpty`/`forkpty` calls under the hood).
+2. The scheduler does not preempt a kernel-space busy-loop even with
+   preemption enabled. This is lane A's bug.
+
+The fixture *is* linked correctly and did begin executing (the spawn
+succeeded, ring-3 entry was logged, and at least one mmap commit
+occurred). The hang is in the kernel, not in the loader or the fixture's
+preamble. No exit code was produced.

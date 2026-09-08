@@ -124425,8 +124425,17 @@ which makes step 1 below larger than one dependency line.
   `stickynotes`, `taskscheduler`, `contacts`, `habits`, `fontmanager` and
   `automator`, `sysmonitor`, `undelete`, `ircclient`, `dictionary`,
   `reminders`, `weather`, `alarmclock`, `diagram`, `partmanager` and
-  `credmanager`. Each has a test on the rectangles it emits, and each was
-  mutation-checked by making `theme_changed` ignore its argument.
+  `credmanager` and `vpnmanager`. Each has a test on the rectangles it emits,
+  and each was mutation-checked by making `theme_changed` ignore its argument.
+
+**A `const` table of colours cannot hold a palette, and the fix is a role
+selector.** `vpnmanager`'s `TOOLBAR_BUTTONS` was
+`&[(&str, Color, Target)]` — a top-level constant, so no runtime palette can
+reach it. Changing the middle field to `fn(&Palette) -> Color` keeps the table
+declarative and picks the role out at draw time; function pointers are
+const-constructible and `|p| p.green` is one. Clippy then wants a `type` alias
+for the tuple. This is the shape behind every "`<top level>` use" the survey
+reports.
 
 **The shape-2 fixer must handle both spellings of the palette.** The constant
 substitution produces `self.palette.<role>`; the `.color()` call-site rewrites

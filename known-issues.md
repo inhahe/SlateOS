@@ -123961,6 +123961,28 @@ part is the piece that does not exist anywhere: there is currently no hook in
 the input path at all, which is why nothing could have been wired even if the
 models agreed.
 
+**Where the hook goes, since that was the unknown.** There is exactly one
+funnel: `Compositor::handle_key(scancode, pressed, character)` at
+`gui/compositor/src/lib.rs:6913`, reached only from `InputEvent::KeyDown` and
+`InputEvent::KeyUp` (lines 6532-6533). Both accessibility filters fit inside
+it, in an order the existing code already implies:
+
+- **Filter keys** first, at the very top, before `self.modifiers.update()` —
+  a rejected keystroke must not move the modifier state either. It needs a
+  press timestamp and a hold duration, which `handle_key` does not currently
+  receive; that is the one signature change the work requires.
+- **Sticky keys** folded into the modifier step, since `self.modifiers` is
+  already the thing that decides whether Shift is down when `A` arrives, and
+  sticky keys are precisely a rule about how long that stays true.
+- **Mouse keys** is separate and easier: it turns key events into pointer
+  motion, so it belongs beside the existing pointer handling rather than in
+  the modifier path.
+
+`handle_key` already consults window grabs "after the chord is known, before
+the event is delivered", so the structure for intercepting is there; nothing
+about this needs new architecture, only a decision about which config model
+feeds it.
+
 **Why this is not fixed here.** The keyboard event path is the compositor's,
 the fix spans three files that each hold a competing model, and choosing which
 model survives is exactly the "band-aid accumulation — stop and redesign"

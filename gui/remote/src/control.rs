@@ -96,7 +96,7 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// same reason 3 did, and worse: the new field's own length prefix would be
 /// read by a version-3 decoder as the window's *width*, so the failure is not a
 /// wrong flag but a window several hundred million pixels across.
-pub const CONTROL_VERSION: u8 = 4;
+pub const CONTROL_VERSION: u8 = 5;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -393,6 +393,18 @@ pub enum ShellControlAction {
     /// rejected there was not a payload as such, it was a *separately encoded*
     /// one.
     SnapToZone(SnapSlot),
+    /// Fill the whole display, decorations and all.
+    ///
+    /// Distinct from [`Maximize`](Self::Maximize), which fills the *work area*
+    /// and leaves the taskbar visible. A window rule asking for a program to
+    /// open fullscreen means the display, not the work area.
+    ///
+    /// The self-only `SetFullscreen` request already existed and could not
+    /// serve: like `Move`, `Resize` and `SetOpacity` it resolves against the
+    /// sender's own window, which is what stops any client that can reach the
+    /// compositor rearranging everybody else's. A shell acting on another
+    /// client's window has to go through this enum.
+    Fullscreen,
 }
 
 impl ShellControlAction {
@@ -403,6 +415,12 @@ impl ShellControlAction {
     /// format**: inserting a zoneless action rather than appending one would
     /// slide every slot onto a different byte.
     const ZONE_BYTE_BASE: u8 = 7;
+
+    /// The wire byte for [`Fullscreen`](Self::Fullscreen), one past the last
+    /// zone. Kept next to [`ZONE_BYTE_BASE`](Self::ZONE_BYTE_BASE) so the two
+    /// ranges are read together; `no_action_byte_is_used_twice` checks they do
+    /// not collide.
+    const FULLSCREEN_BYTE: u8 = Self::ZONE_BYTE_BASE + SnapSlot::COUNT;
 
     /// Every action that names no zone.
     ///
@@ -418,7 +436,7 @@ impl ShellControlAction {
     /// [`SnapSlot::all`] is their list, and listing them again here would be
     /// the stale hand-written list this array exists to avoid. The tests below
     /// iterate both together.
-    pub const ZONELESS: [Self; 7] = [
+    pub const ZONELESS: [Self; 8] = [
         Self::Activate,
         Self::Minimize,
         Self::Restore,
@@ -426,6 +444,7 @@ impl ShellControlAction {
         Self::Close,
         Self::SnapLeft,
         Self::SnapRight,
+        Self::Fullscreen,
     ];
 
     /// The wire byte for this action.
@@ -445,6 +464,14 @@ impl ShellControlAction {
             Self::SnapLeft => 5,
             Self::SnapRight => 6,
             Self::SnapToZone(slot) => Self::ZONE_BYTE_BASE.saturating_add(slot.index()),
+            // *After* the zone range, not in the gap at 7. The zone bytes are
+            // `ZONE_BYTE_BASE + slot`, so taking 7 would have meant shifting
+            // all twenty-two of them -- renumbering an action every deployed
+            // peer already agrees on, which is the one change a wire format
+            // must not make quietly. A byte past the end costs nothing: an
+            // older peer answers `None` to it, which is exactly what it should
+            // do with a verb it does not know.
+            Self::Fullscreen => Self::FULLSCREEN_BYTE,
         }
     }
 
@@ -467,6 +494,7 @@ impl ShellControlAction {
             4 => Some(Self::Close),
             5 => Some(Self::SnapLeft),
             6 => Some(Self::SnapRight),
+            b if b == Self::FULLSCREEN_BYTE => Some(Self::Fullscreen),
             // Cannot underflow: the arms above cover everything below the base.
             _ => match SnapSlot::from_index(b.saturating_sub(Self::ZONE_BYTE_BASE)) {
                 Some(slot) => Some(Self::SnapToZone(slot)),
@@ -2070,6 +2098,47 @@ mod tests {
     /// catches the other half — a variant named in the match and in `ZONELESS`
     /// but not counted in its fixed length is a compile error, and one that is
     /// somehow neither fails here.
+    /// The new verb took a byte past the zone range rather than the gap at 7.
+    ///
+    /// Taking 7 would have shifted all twenty-two zone bytes -- renumbering
+    /// actions that deployed peers already agree on, which is the one change a
+    /// wire format must not make quietly. This is what stops someone
+    /// "tidying" the numbering later.
+    #[test]
+    fn fullscreen_sits_past_the_zone_range_and_shifts_nothing() {
+        let fullscreen = ShellControlAction::Fullscreen.as_byte();
+        for slot in SnapSlot::all() {
+            let zone = ShellControlAction::SnapToZone(slot).as_byte();
+            assert_ne!(zone, fullscreen, "{slot:?} collides with Fullscreen");
+            assert!(
+                zone < fullscreen,
+                "{slot:?} is at {zone}, past Fullscreen at {fullscreen}"
+            );
+        }
+        assert_eq!(
+            ShellControlAction::SnapToZone(SnapSlot::all().next().expect("a slot")).as_byte(),
+            7,
+            "the first zone must still be byte 7, or every deployed peer is wrong"
+        );
+    }
+
+    /// A byte no version of this protocol has issued decodes to nothing.
+    ///
+    /// The property the whole `from_byte`-returns-`Option` design rests on: a
+    /// peer speaking a later protocol is refused rather than guessed at.
+    #[test]
+    fn a_byte_past_every_action_is_refused() {
+        let highest = every_action()
+            .into_iter()
+            .map(ShellControlAction::as_byte)
+            .max()
+            .expect("actions exist");
+        assert_eq!(
+            ShellControlAction::from_byte(highest.saturating_add(1)),
+            None
+        );
+    }
+
     #[test]
     fn all_really_is_every_action() {
         for action in every_action() {
@@ -2081,7 +2150,8 @@ mod tests {
                 | ShellControlAction::Close
                 | ShellControlAction::SnapLeft
                 | ShellControlAction::SnapRight
-                | ShellControlAction::SnapToZone(_) => {}
+                | ShellControlAction::SnapToZone(_)
+                | ShellControlAction::Fullscreen => {}
             }
         }
 
@@ -2163,10 +2233,17 @@ mod tests {
         let last = ShellControlAction::ZONE_BYTE_BASE + SnapSlot::COUNT - 1;
         assert!(ShellControlAction::from_byte(last).is_some());
         for b in (last + 1)..=u8::MAX {
-            assert_eq!(
-                ShellControlAction::from_byte(b),
-                None,
-                "byte {b} decoded to something"
+            // Not "decodes to nothing" any more -- `Fullscreen` was added past
+            // the zone range on purpose. What must still hold is the thing
+            // this test is named for: no byte past the last zone may come back
+            // as a *zone*. Widening it to "nothing at all" would have made
+            // every future verb break a test about rounding.
+            assert!(
+                !matches!(
+                    ShellControlAction::from_byte(b),
+                    Some(ShellControlAction::SnapToZone(_))
+                ),
+                "byte {b} decoded to a zone it is not"
             );
         }
     }

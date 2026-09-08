@@ -8279,6 +8279,11 @@ impl Compositor {
                     ShellControlAction::SnapToZone(slot) => {
                         self.snap_window_to_zone(window_id, slot)
                     }
+                    // `true`, not a toggle. A window rule says "open this
+                    // fullscreen"; a verb that flipped the state would make
+                    // the result depend on what the window was already doing,
+                    // and the rule would undo itself if it ever ran twice.
+                    ShellControlAction::Fullscreen => self.set_fullscreen(window_id, true),
                 };
                 match result {
                     Ok(()) => CompositorResponse::Ok,
@@ -11182,10 +11187,15 @@ mod tests {
 
     /// Every action reaches the operation it names.
     ///
-    /// Listed rather than sampled: the dispatch is a five-arm match and an arm
-    /// wired to the wrong method is invisible to a test that only sends one
-    /// action. Each assertion is chosen to distinguish that arm from the other
-    /// four.
+    /// Listed rather than sampled: the dispatch is a match, and an arm wired
+    /// to the wrong method is invisible to a test that only sends one action.
+    /// Each assertion is chosen to distinguish its arm from every other one --
+    /// which is not automatic, and `Fullscreen` is the example: wiring it to
+    /// `maximize_window` passed the whole suite until the assertion below was
+    /// written to tell the two apart.
+    ///
+    /// No count in this sentence on purpose. It said "five-arm" while the
+    /// match had seven.
     #[test]
     fn every_shell_control_action_reaches_its_own_operation() {
         let (mut comp, id) = with_one_window();
@@ -11208,6 +11218,28 @@ mod tests {
             CompositorResponse::Ok
         ));
         assert!(!maximized(&comp, id), "Restore");
+
+        // Fullscreen, and specifically *not* Maximize. The two look alike from
+        // a shell -- both make a window big -- but fullscreen covers the
+        // display and maximize leaves the work area, so an arm pointed at the
+        // wrong one is a taskbar that stays visible when the user asked for it
+        // gone. `maximized` is asserted false to make that difference the
+        // thing this checks.
+        assert!(!comp.is_fullscreen(id), "not fullscreen to begin with");
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Fullscreen),
+            CompositorResponse::Ok
+        ));
+        assert!(comp.is_fullscreen(id), "Fullscreen");
+        assert!(
+            !maximized(&comp, id),
+            "Fullscreen must not be routed to maximize_window"
+        );
+
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Restore),
+            CompositorResponse::Ok
+        ));
 
         assert!(matches!(
             send(&mut comp, ShellControlAction::Minimize),

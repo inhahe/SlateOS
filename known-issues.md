@@ -89831,7 +89831,43 @@ a bug.
 
 ---
 
-## `TD-C-A-SHORTCUT-ONLY-WORKS-WHEN-THE-DESKTOP-IS-FOCUSED` (lane C, 2026-08-26)
+## `TD-C-A-SHORTCUT-ONLY-WORKS-WHEN-THE-DESKTOP-IS-FOCUSED` (lane C, 2026-08-26) -- **CLOSED; entry was stale**
+
+**Closed 2026-09-07 (lane C), on verifying it.** The entry's mechanism claim --
+"there is no global-hotkey path, no key-grab table, and no 'system keys' list
+anywhere in the tree" -- is no longer true. `Compositor::handle_key` consults a
+grab table, and the shell's session claims its chords at startup.
+
+The implementation goes further than the entry asked for, and the comments at
+the call site name the two decisions that matter:
+
+- **Grabs are consulted after the chord is known and before the focused window
+  is looked up.** After, because a grab is on Alt+Tab rather than on scancode
+  `0x0F`, so it cannot be matched until the layout and the AltGr fold have had
+  their say. Before, because the whole point is to reach a client that is not
+  focused.
+- **A match returns rather than also delivering to the focused window** --
+  otherwise a text field would take a bare `Tab` every time the user switched
+  windows.
+- A modifier release owed to a grabber is taken from the table *before* the
+  grab check, because a modifier key can itself be a grabbed chord (the shell
+  holds bare Super, and Super is also the modifier in Super+D), so a debt
+  collected after the early return would never be collected for exactly the
+  keys most likely to owe one.
+
+Eleven grab tests pass, including
+`a_grabbed_chord_reaches_the_grabber_and_not_the_focused_window` and
+`a_shell_grabs_a_chord_over_the_wire_and_receives_it_from_another_window` --
+which is this entry's headline case, Alt+Tab pressed from inside somebody
+else's window.
+
+**Nothing was done to the code for this closure.** Fifth stale entry closed
+today; see the note in `todo.txt`.
+
+Original entry follows.
+
+---
+
 
 **In short:** every keyboard shortcut the desktop defines — Super+N, Alt+Tab,
 Super+D, and now the volume keys — only fires while the taskbar itself has
@@ -90833,7 +90869,7 @@ rest.
 |---|---|
 | `skip_taskbar` | shell-local: `ManagedWindow::skip_taskbar`, filtered out of `taskbar_windows` |
 | `skip_alt_tab` | shell-local: filtered out of `switcher_windows` |
-| `initial_state` | `ShellControlAction::Minimize` / `Maximize` (but not `Fullscreen` — see below) |
+| `initial_state` | `ShellControlAction::Minimize` / `Maximize` / `Fullscreen` (all three, since 2026-09-07) |
 | `snap_zone` | `ShellControlAction::SnapToZone(SnapSlot)` |
 | `desktop` | `ShellRequest::MoveWindowToDesktop` |
 
@@ -90857,7 +90893,7 @@ client's windows around.
 | `target_monitor` | multi-monitor placement, which the compositor does not model yet |
 | `no_decorations` | decorations are the client's own; there is no request to strip them |
 | `prevent_close`, `prevent_move`, `prevent_resize` | a per-window policy the *compositor* enforces — these cannot be shell-side, because the shell is not in the path when the user drags a title bar |
-| `initial_state: Fullscreen` | `SetFullscreen` is self-only; needs a `ShellControlAction::Fullscreen` verb |
+| ~~`initial_state: Fullscreen`~~ | **Done 2026-09-07.** `ShellControlAction::Fullscreen`, `CONTROL_VERSION` 4 → 5. |
 
 **The proper fix**, and why it is not one commit: the eight-verb
 `ShellControlAction` is a lane-C-owned enum in `gui/remote`, so adding verbs is
@@ -90867,8 +90903,28 @@ need a policy store the compositor does not have. The honest increments are:
 
 1. `ShellMove` + `ShellResize` (unblocks `position`, `size`, and the
    already-working `remember_state` bookkeeping that currently feeds nothing).
-2. `ShellSetOpacity` and a `Fullscreen` verb — both are one-line compositor
-   changes on top of state that already exists.
+2. ~~`ShellSetOpacity` and a `Fullscreen` verb~~ — **half done 2026-09-07**:
+   the `Fullscreen` verb is in. It took a wire byte *past* the zone range
+   rather than the free slot at 7, because the zone bytes are
+   `ZONE_BYTE_BASE + slot` and taking 7 would have shifted all twenty-two of
+   them — renumbering actions every deployed peer already agrees on. An older
+   peer answers `None` to the new byte, which is what it should do with a verb
+   it does not know.
+
+   The compositor arm sets fullscreen to `true` rather than toggling: a rule
+   says "open this fullscreen", and a verb that flipped the state would make
+   the result depend on what the window was already doing and undo itself if
+   the rule ran twice.
+
+   **The test that mattered was the one that nearly was not written.** Wiring
+   the arm to `maximize_window` instead passed all 695 compositor tests --
+   `every_shell_control_action_reaches_its_own_operation` did not know about
+   the new verb, and the shell-side tests only prove the *request* is sent.
+   The action test now distinguishes fullscreen from maximize explicitly, and
+   its doc records the near miss. Mutation-checked afterwards.
+
+   `ShellSetOpacity` remains: it is a new `RequestBody` variant rather than an
+   action byte, so it is a larger change than this one was.
 3. A per-window layer override for `always_on_top` / `always_on_bottom`.
 4. A compositor-side policy store for `prevent_close` / `prevent_move` /
    `prevent_resize`, and constraints for `min_size` / `max_size`.

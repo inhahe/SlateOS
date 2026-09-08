@@ -2807,8 +2807,7 @@ impl DesktopShell {
         // `Normal` is not "restore it": a rule that says a window should start
         // normal is describing what a window already is, and sending `Restore`
         // to a window that opened maximized of its own accord would be the rule
-        // overriding the program rather than the default. `Fullscreen` has no
-        // request the shell may send about another client's window.
+        // overriding the program rather than the default.
         match actions.initial_state {
             Some(window_rules::InitialState::Minimized) => {
                 out.push(ShellRequest::window(id, ShellControlAction::Minimize));
@@ -2816,8 +2815,13 @@ impl DesktopShell {
             Some(window_rules::InitialState::Maximized) => {
                 out.push(ShellRequest::window(id, ShellControlAction::Maximize));
             }
-            Some(window_rules::InitialState::Normal | window_rules::InitialState::Fullscreen)
-            | None => {}
+            // Fullscreen is the display; Maximize is the work area. A rule
+            // asking for fullscreen wants the taskbar covered too, so this is
+            // not a synonym for the arm above.
+            Some(window_rules::InitialState::Fullscreen) => {
+                out.push(ShellRequest::window(id, ShellControlAction::Fullscreen));
+            }
+            Some(window_rules::InitialState::Normal) | None => {}
         }
 
         // Last, so that a rule setting both a state and a zone lands in the
@@ -6366,6 +6370,51 @@ mod window_manager_tests {
         again(&mut shell);
         again(&mut shell);
         assert!(shell.taskbar_windows().is_empty());
+    }
+
+    /// A fullscreen rule now reaches the compositor.
+    ///
+    /// It was accepted by the panel, saved to the file, shown in the rule
+    /// list, and then dropped on the floor: `Fullscreen` was the one
+    /// `InitialState` with no verb the shell could send about another client's
+    /// window. `Minimized` and `Maximized` worked, which made it the kind of
+    /// gap a user finds by writing a rule and watching nothing happen.
+    #[test]
+    fn a_rule_asking_for_a_fullscreen_start_is_carried_out() {
+        let mut shell = shell();
+        rule(&mut shell, "player", |a| {
+            a.initial_state = Some(window_rules::InitialState::Fullscreen);
+        });
+
+        assert_eq!(
+            arrive(&mut shell, 1, "player"),
+            vec![ShellRequest::window(
+                WindowId(1),
+                ShellControlAction::Fullscreen
+            )]
+        );
+    }
+
+    /// And it is not a synonym for maximise.
+    ///
+    /// Maximize fills the work area and leaves the taskbar showing; fullscreen
+    /// covers the display. A rule that asked for one and got the other would
+    /// look almost right, which is the hardest kind of wrong to notice.
+    #[test]
+    fn fullscreen_and_maximized_are_different_requests() {
+        let mut full = shell();
+        rule(&mut full, "player", |a| {
+            a.initial_state = Some(window_rules::InitialState::Fullscreen);
+        });
+        let mut max = shell();
+        rule(&mut max, "player", |a| {
+            a.initial_state = Some(window_rules::InitialState::Maximized);
+        });
+
+        assert_ne!(
+            arrive(&mut full, 1, "player"),
+            arrive(&mut max, 1, "player")
+        );
     }
 
     #[test]

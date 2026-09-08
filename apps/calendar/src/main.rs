@@ -8,6 +8,7 @@
 //! the box it was painted in, as it is painted, and the hit test reads those
 //! boxes back. Nothing here answers "where is that day" twice.
 
+use appearance::Palette;
 use guitk::color::Color;
 // The shared civil-date arithmetic. This app used to carry its own: a Zeller's
 // congruence for the weekday, a *separate* Julian day number for differences,
@@ -31,32 +32,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // Catppuccin Mocha palette
 // ============================================================================
 
-const BASE: Color = Color::from_hex(0x1E1E2E);
 // Catppuccin Mocha palette — kept complete even though a few entries are
 // not currently referenced; future event-category styling will pick them up.
-#[allow(dead_code)]
-const MANTLE: Color = Color::from_hex(0x181825);
-#[allow(dead_code)]
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-#[allow(dead_code)]
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-#[allow(dead_code)]
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-#[allow(dead_code)]
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const SKY: Color = Color::from_hex(0x89DCEB);
+
 const PINK: Color = Color::from_hex(0xF5C2E7);
 #[allow(dead_code)]
 const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
@@ -391,18 +369,18 @@ impl EventCategory {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Work => BLUE,
-            Self::Personal => GREEN,
-            Self::Health => RED,
-            Self::Travel => PEACH,
+            Self::Work => pal.blue,
+            Self::Personal => pal.green,
+            Self::Health => pal.red,
+            Self::Travel => pal.peach,
             Self::Birthday => PINK,
-            Self::Holiday => YELLOW,
-            Self::Meeting => MAUVE,
-            Self::Deadline => RED,
-            Self::Social => TEAL,
-            Self::Education => SKY,
+            Self::Holiday => pal.yellow,
+            Self::Meeting => pal.mauve,
+            Self::Deadline => pal.red,
+            Self::Social => pal.teal,
+            Self::Education => pal.sky,
         }
     }
 
@@ -594,8 +572,9 @@ pub struct CalendarEvent {
 }
 
 impl CalendarEvent {
-    pub fn effective_color(&self) -> Color {
-        self.color_override.unwrap_or_else(|| self.category.color())
+    pub fn effective_color(&self, pal: &Palette) -> Color {
+        self.color_override
+            .unwrap_or_else(|| self.category.color(pal))
     }
 
     pub fn duration_minutes(&self) -> u32 {
@@ -1272,11 +1251,18 @@ pub struct CalendarApp {
     pub search_focused: bool,
     /// Cleared when the window is closed, which is what stops the loop.
     pub running: bool,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl CalendarApp {
     pub fn new(width: f32, height: f32, today: Date) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
             view: CalendarView::Month,
@@ -1621,7 +1607,7 @@ impl CalendarApp {
         let mut frame = Frame::new(width, height);
         let layout = Layout::new(width, height, self.sidebar_visible);
 
-        fill(&mut frame, layout.window, BASE, 0.0);
+        fill(&mut frame, layout.window, self.palette.base, 0.0);
         self.draw_top_bar(&mut frame, &layout);
 
         if let Some(bar) = layout.sidebar {
@@ -1653,20 +1639,26 @@ impl CalendarApp {
     }
 
     fn draw_top_bar(&self, frame: &mut Frame, layout: &Layout) {
-        fill(frame, layout.top_bar, MANTLE, 0.0);
+        fill(frame, layout.top_bar, self.palette.mantle, 0.0);
 
-        draw_nav_button(frame, layout.nav_back, "<", Target::NavBack);
-        draw_nav_button(frame, layout.nav_forward, ">", Target::NavForward);
+        draw_nav_button(frame, &self.palette, layout.nav_back, "<", Target::NavBack);
+        draw_nav_button(
+            frame,
+            &self.palette,
+            layout.nav_forward,
+            ">",
+            Target::NavForward,
+        );
 
         let today = layout.today_button;
-        fill(frame, today, BLUE, 4.0);
+        fill(frame, today, self.palette.blue, 4.0);
         label(
             frame,
             today.x + 12.0,
             today.y + 8.0,
             "Today",
             12.0,
-            CRUST,
+            self.palette.crust,
             FontWeightHint::Bold,
             Some(today.w - 8.0),
         );
@@ -1679,16 +1671,16 @@ impl CalendarApp {
                 header.y + 6.0,
                 self.header_text(),
                 16.0,
-                TEXT,
+                self.palette.text,
                 FontWeightHint::Bold,
                 Some(header.w),
             );
         }
 
         if let Some(search) = layout.search {
-            fill(frame, search, SURFACE0, 4.0);
+            fill(frame, search, self.palette.surface0, 4.0);
             if self.search_focused {
-                stroke(frame, search, BLUE, 4.0, 1.5);
+                stroke(frame, search, self.palette.blue, 4.0, 1.5);
             }
             let empty = self.search_query.is_empty();
             label(
@@ -1701,7 +1693,11 @@ impl CalendarApp {
                     self.search_query.clone()
                 },
                 11.0,
-                if empty { OVERLAY0 } else { TEXT },
+                if empty {
+                    self.palette.overlay0
+                } else {
+                    self.palette.text
+                },
                 FontWeightHint::Regular,
                 Some(search.w - 16.0),
             );
@@ -1711,14 +1707,27 @@ impl CalendarApp {
         for (i, view) in CalendarView::all().iter().enumerate() {
             let tab = layout.view_tab(i);
             let active = *view == self.view;
-            fill(frame, tab, if active { SURFACE0 } else { MANTLE }, 4.0);
+            fill(
+                frame,
+                tab,
+                if active {
+                    self.palette.surface0
+                } else {
+                    self.palette.mantle
+                },
+                4.0,
+            );
             label(
                 frame,
                 tab.x + 8.0,
                 tab.y + 8.0,
                 view.label(),
                 11.0,
-                if active { BLUE } else { SUBTEXT0 },
+                if active {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext0
+                },
                 if active {
                     FontWeightHint::Bold
                 } else {
@@ -1730,11 +1739,19 @@ impl CalendarApp {
         }
 
         let sep = layout.top_bar.bottom();
-        line(frame, 0.0, sep, layout.window.w, sep, SURFACE0, 1.0);
+        line(
+            frame,
+            0.0,
+            sep,
+            layout.window.w,
+            sep,
+            self.palette.surface0,
+            1.0,
+        );
     }
 
     fn draw_sidebar(&self, frame: &mut Frame, layout: &Layout, bar: Rect) {
-        fill(frame, bar, MANTLE, 0.0);
+        fill(frame, bar, self.palette.mantle, 0.0);
 
         if let Some(mini) = layout.mini_calendar() {
             self.draw_mini_calendar(frame, mini);
@@ -1746,7 +1763,7 @@ impl CalendarApp {
             bar.y + 210.0,
             "Categories",
             12.0,
-            SUBTEXT0,
+            self.palette.subtext0,
             FontWeightHint::Bold,
             Some(bar.w - 20.0),
         );
@@ -1759,7 +1776,11 @@ impl CalendarApp {
             fill(
                 frame,
                 Rect::new(row.x + 4.0, row.y + 4.0, 12.0, 12.0),
-                if active { cat.color() } else { SURFACE0 },
+                if active {
+                    cat.color(&self.palette)
+                } else {
+                    self.palette.surface0
+                },
                 2.0,
             );
             label(
@@ -1768,7 +1789,11 @@ impl CalendarApp {
                 row.y + 4.0,
                 cat.label(),
                 11.0,
-                if active { TEXT } else { OVERLAY0 },
+                if active {
+                    self.palette.text
+                } else {
+                    self.palette.overlay0
+                },
                 FontWeightHint::Regular,
                 Some((row.w - 60.0).max(1.0)),
             );
@@ -1780,7 +1805,7 @@ impl CalendarApp {
                     row.y + 4.0,
                     count.to_string(),
                     10.0,
-                    OVERLAY0,
+                    self.palette.overlay0,
                     FontWeightHint::Regular,
                     Option::None,
                 );
@@ -1789,7 +1814,15 @@ impl CalendarApp {
         }
 
         let edge = bar.right() - 0.5;
-        line(frame, edge, bar.y, edge, bar.bottom(), SURFACE0, 1.0);
+        line(
+            frame,
+            edge,
+            bar.y,
+            edge,
+            bar.bottom(),
+            self.palette.surface0,
+            1.0,
+        );
     }
 
     fn draw_mini_calendar(&self, frame: &mut Frame, area: Rect) {
@@ -1806,7 +1839,7 @@ impl CalendarApp {
             area.y,
             "<",
             11.0,
-            SUBTEXT0,
+            self.palette.subtext0,
             FontWeightHint::Bold,
             Option::None,
         );
@@ -1816,7 +1849,7 @@ impl CalendarApp {
             area.y,
             ">",
             11.0,
-            SUBTEXT0,
+            self.palette.subtext0,
             FontWeightHint::Bold,
             Option::None,
         );
@@ -1833,7 +1866,7 @@ impl CalendarApp {
                 self.mini_cal_year
             ),
             11.0,
-            TEXT,
+            self.palette.text,
             FontWeightHint::Bold,
             Some(area.w - 40.0),
         );
@@ -1846,7 +1879,7 @@ impl CalendarApp {
                 header_y,
                 *dh,
                 9.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
                 Some(cell_w),
             );
@@ -1879,19 +1912,23 @@ impl CalendarApp {
                 fill(
                     frame,
                     Rect::new(cell.x, cell.y - 1.0, cell_w - 1.0, cell_h - 2.0),
-                    if is_today { BLUE } else { SURFACE0 },
+                    if is_today {
+                        self.palette.blue
+                    } else {
+                        self.palette.surface0
+                    },
                     3.0,
                 );
             }
 
             let fg = if is_today {
-                CRUST
+                self.palette.crust
             } else if is_selected {
-                TEXT
+                self.palette.text
             } else if date.is_weekend() {
-                SUBTEXT0
+                self.palette.subtext0
             } else {
-                TEXT
+                self.palette.text
             };
             label(
                 frame,
@@ -1912,7 +1949,7 @@ impl CalendarApp {
                 fill(
                     frame,
                     Rect::new(cell.x + cell_w / 2.0 - 2.0, cell.bottom() - 5.0, 4.0, 3.0),
-                    PEACH,
+                    self.palette.peach,
                     1.5,
                 );
             }
@@ -1931,7 +1968,7 @@ impl CalendarApp {
                 area.y + 6.0,
                 *dh,
                 11.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
                 Some((col_w - 12.0).max(1.0)),
             );
@@ -1960,13 +1997,17 @@ impl CalendarApp {
             let is_today = date.is_today(self.today);
             let is_selected = date == self.selected_date;
 
-            stroke(frame, cell, SURFACE0, 0.0, 0.5);
+            stroke(frame, cell, self.palette.surface0, 0.0, 0.5);
 
             if is_today || is_selected {
                 fill(
                     frame,
                     Rect::new(cell.x + 4.0, cell.y + 2.0, 22.0, 18.0),
-                    if is_today { BLUE } else { SURFACE1 },
+                    if is_today {
+                        self.palette.blue
+                    } else {
+                        self.palette.surface1
+                    },
                     4.0,
                 );
             }
@@ -1978,11 +2019,11 @@ impl CalendarApp {
                 day.to_string(),
                 12.0,
                 if is_today {
-                    CRUST
+                    self.palette.crust
                 } else if date.is_weekend() {
-                    SUBTEXT0
+                    self.palette.subtext0
                 } else {
-                    TEXT
+                    self.palette.text
                 },
                 if is_today {
                     FontWeightHint::Bold
@@ -2005,7 +2046,7 @@ impl CalendarApp {
                     (col_w - 8.0).max(1.0),
                     14.0,
                 );
-                fill(frame, chip, ev.effective_color(), 2.0);
+                fill(frame, chip, ev.effective_color(&self.palette), 2.0);
                 let prefix = if ev.all_day {
                     String::new()
                 } else {
@@ -2017,12 +2058,12 @@ impl CalendarApp {
                     chip.y + 2.0,
                     format!("{prefix}{}", ev.title),
                     9.0,
-                    CRUST,
+                    self.palette.crust,
                     FontWeightHint::Bold,
                     Some((chip.w - 6.0).max(1.0)),
                 );
                 if self.selected_event_id == Some(ev.id) {
-                    stroke(frame, chip, TEXT, 2.0, 1.5);
+                    stroke(frame, chip, self.palette.text, 2.0, 1.5);
                 }
                 frame.hit(Target::Event(ev.id), chip);
             }
@@ -2034,7 +2075,7 @@ impl CalendarApp {
                     cell.y + 22.0 + max_visible as f32 * 16.0,
                     format!("+{} more", events.len().saturating_sub(max_visible)),
                     9.0,
-                    OVERLAY0,
+                    self.palette.overlay0,
                     FontWeightHint::Regular,
                     Some((col_w - 16.0).max(1.0)),
                 );
@@ -2055,14 +2096,23 @@ impl CalendarApp {
                 WEEK_HEADER_H,
             );
             let is_today = date.is_today(self.today);
-            fill(frame, header, if is_today { SURFACE0 } else { MANTLE }, 0.0);
+            fill(
+                frame,
+                header,
+                if is_today {
+                    self.palette.surface0
+                } else {
+                    self.palette.mantle
+                },
+                0.0,
+            );
             label(
                 frame,
                 header.x + 4.0,
                 header.y + 4.0,
                 date.day_of_week_short(),
                 10.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
                 Some((day_w - 8.0).max(1.0)),
             );
@@ -2072,7 +2122,11 @@ impl CalendarApp {
                 header.y + 18.0,
                 date.day.to_string(),
                 16.0,
-                if is_today { BLUE } else { TEXT },
+                if is_today {
+                    self.palette.blue
+                } else {
+                    self.palette.text
+                },
                 if is_today {
                     FontWeightHint::Bold
                 } else {
@@ -2097,7 +2151,7 @@ impl CalendarApp {
                     time.format_12h()
                 },
                 10.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
                 Some(WEEK_TIME_COL_W - 8.0),
             );
@@ -2107,7 +2161,7 @@ impl CalendarApp {
                 hy,
                 area.right(),
                 hy,
-                SURFACE0,
+                self.palette.surface0,
                 0.5,
             );
             line(
@@ -2136,14 +2190,14 @@ impl CalendarApp {
                     (day_w - 4.0).max(1.0),
                     (((end_min - start_min) / 60.0) * WEEK_HOUR_H).max(16.0),
                 );
-                fill(frame, block, ev.effective_color(), 3.0);
+                fill(frame, block, ev.effective_color(&self.palette), 3.0);
                 label(
                     frame,
                     block.x + 3.0,
                     block.y + 2.0,
                     ev.title.clone(),
                     10.0,
-                    CRUST,
+                    self.palette.crust,
                     FontWeightHint::Bold,
                     Some((block.w - 6.0).max(1.0)),
                 );
@@ -2154,13 +2208,13 @@ impl CalendarApp {
                         block.y + 14.0,
                         ev.time_range_label(),
                         9.0,
-                        CRUST,
+                        self.palette.crust,
                         FontWeightHint::Regular,
                         Some((block.w - 6.0).max(1.0)),
                     );
                 }
                 if self.selected_event_id == Some(ev.id) {
-                    stroke(frame, block, TEXT, 3.0, 1.5);
+                    stroke(frame, block, self.palette.text, 3.0, 1.5);
                 }
                 frame.hit(Target::Event(ev.id), block);
             }
@@ -2170,14 +2224,27 @@ impl CalendarApp {
     fn draw_day_view(&self, frame: &mut Frame, area: Rect) {
         let is_today = self.view_date.is_today(self.today);
         let header = Rect::new(area.x, area.y, area.w, DAY_HEADER_H);
-        fill(frame, header, if is_today { SURFACE0 } else { MANTLE }, 0.0);
+        fill(
+            frame,
+            header,
+            if is_today {
+                self.palette.surface0
+            } else {
+                self.palette.mantle
+            },
+            0.0,
+        );
         label(
             frame,
             header.x + 16.0,
             header.y + 10.0,
             self.view_date.format_long(),
             14.0,
-            if is_today { BLUE } else { TEXT },
+            if is_today {
+                self.palette.blue
+            } else {
+                self.palette.text
+            },
             FontWeightHint::Bold,
             Some((area.w - 32.0).max(1.0)),
         );
@@ -2193,19 +2260,19 @@ impl CalendarApp {
                 event_w,
                 24.0,
             );
-            fill(frame, block, ev.effective_color(), 4.0);
+            fill(frame, block, ev.effective_color(&self.palette), 4.0);
             label(
                 frame,
                 block.x + 8.0,
                 block.y + 5.0,
                 format!("All day: {}", ev.title),
                 11.0,
-                CRUST,
+                self.palette.crust,
                 FontWeightHint::Bold,
                 Some((block.w - 16.0).max(1.0)),
             );
             if self.selected_event_id == Some(ev.id) {
-                stroke(frame, block, TEXT, 4.0, 1.5);
+                stroke(frame, block, self.palette.text, 4.0, 1.5);
             }
             frame.hit(Target::Event(ev.id), block);
         }
@@ -2224,7 +2291,7 @@ impl CalendarApp {
                     time.format_12h()
                 },
                 11.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
                 Some(DAY_TIME_COL_W - 8.0),
             );
@@ -2234,7 +2301,7 @@ impl CalendarApp {
                 hy,
                 area.right(),
                 hy,
-                SURFACE0,
+                self.palette.surface0,
                 0.5,
             );
         }
@@ -2248,14 +2315,14 @@ impl CalendarApp {
                 event_w,
                 (((end_min - start_min) / 60.0) * DAY_HOUR_H).max(20.0),
             );
-            fill(frame, block, ev.effective_color(), 4.0);
+            fill(frame, block, ev.effective_color(&self.palette), 4.0);
             label(
                 frame,
                 block.x + 6.0,
                 block.y + 4.0,
                 ev.title.clone(),
                 12.0,
-                CRUST,
+                self.palette.crust,
                 FontWeightHint::Bold,
                 Some((block.w - 16.0).max(1.0)),
             );
@@ -2266,7 +2333,7 @@ impl CalendarApp {
                     block.y + 18.0,
                     ev.time_range_label(),
                     10.0,
-                    CRUST,
+                    self.palette.crust,
                     FontWeightHint::Regular,
                     Some((block.w - 16.0).max(1.0)),
                 );
@@ -2280,13 +2347,13 @@ impl CalendarApp {
                     block.y + 32.0,
                     loc.clone(),
                     10.0,
-                    CRUST,
+                    self.palette.crust,
                     FontWeightHint::Regular,
                     Some((block.w - 16.0).max(1.0)),
                 );
             }
             if self.selected_event_id == Some(ev.id) {
-                stroke(frame, block, TEXT, 4.0, 1.5);
+                stroke(frame, block, self.palette.text, 4.0, 1.5);
             }
             frame.hit(Target::Event(ev.id), block);
         }
@@ -2309,7 +2376,11 @@ impl CalendarApp {
                 my + 4.0,
                 month_name(month),
                 12.0,
-                if is_current_month { BLUE } else { TEXT },
+                if is_current_month {
+                    self.palette.blue
+                } else {
+                    self.palette.text
+                },
                 FontWeightHint::Bold,
                 Some((month_w - 16.0).max(1.0)),
             );
@@ -2342,7 +2413,7 @@ impl CalendarApp {
                     fill(
                         frame,
                         Rect::new(cell.x - 1.0, cell.y - 1.0, cell_w, cell_h - 1.0),
-                        BLUE,
+                        self.palette.blue,
                         2.0,
                     );
                 }
@@ -2354,13 +2425,13 @@ impl CalendarApp {
                     day.to_string(),
                     8.0,
                     if is_today {
-                        CRUST
+                        self.palette.crust
                     } else if has_events {
-                        PEACH
+                        self.palette.peach
                     } else if date.is_weekend() {
-                        OVERLAY0
+                        self.palette.overlay0
                     } else {
-                        SUBTEXT0
+                        self.palette.subtext0
                     },
                     FontWeightHint::Regular,
                     Some(cell_w.max(1.0)),
@@ -2384,7 +2455,7 @@ impl CalendarApp {
                 format!("{} matching \"{}\"", events.len(), self.search_query)
             },
             14.0,
-            TEXT,
+            self.palette.text,
             FontWeightHint::Bold,
             Some((area.w - 32.0).max(1.0)),
         );
@@ -2399,7 +2470,16 @@ impl CalendarApp {
                 }
                 let is_today = ev.start.date.is_today(self.today);
                 let head = Rect::new(area.x + 8.0, row_y, (area.w - 16.0).max(1.0), 22.0);
-                fill(frame, head, if is_today { SURFACE0 } else { MANTLE }, 4.0);
+                fill(
+                    frame,
+                    head,
+                    if is_today {
+                        self.palette.surface0
+                    } else {
+                        self.palette.mantle
+                    },
+                    4.0,
+                );
                 label(
                     frame,
                     head.x + 8.0,
@@ -2410,7 +2490,11 @@ impl CalendarApp {
                         ev.start.date.format_long()
                     },
                     12.0,
-                    if is_today { BLUE } else { TEXT },
+                    if is_today {
+                        self.palette.blue
+                    } else {
+                        self.palette.text
+                    },
                     FontWeightHint::Bold,
                     Some((head.w - 24.0).max(1.0)),
                 );
@@ -2423,7 +2507,7 @@ impl CalendarApp {
             fill(
                 frame,
                 Rect::new(card.x, card.y, 4.0, card.h),
-                ev.effective_color(),
+                ev.effective_color(&self.palette),
                 2.0,
             );
             label(
@@ -2432,7 +2516,7 @@ impl CalendarApp {
                 card.y + 2.0,
                 ev.title.clone(),
                 13.0,
-                TEXT,
+                self.palette.text,
                 FontWeightHint::Bold,
                 Some((card.w - 84.0).max(1.0)),
             );
@@ -2447,7 +2531,7 @@ impl CalendarApp {
                     ev.category.label()
                 ),
                 10.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
                 Some((card.w - 44.0).max(1.0)),
             );
@@ -2458,13 +2542,13 @@ impl CalendarApp {
                     card.y + 30.0,
                     loc.clone(),
                     10.0,
-                    OVERLAY0,
+                    self.palette.overlay0,
                     FontWeightHint::Regular,
                     Some((card.w - 44.0).max(1.0)),
                 );
             }
             if self.selected_event_id == Some(ev.id) {
-                stroke(frame, card, TEXT, 4.0, 1.5);
+                stroke(frame, card, self.palette.text, 4.0, 1.5);
             }
             frame.hit(Target::Event(ev.id), card);
 
@@ -2482,7 +2566,7 @@ impl CalendarApp {
                     "Nothing matches that search"
                 },
                 14.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
                 Some(220.0),
             );
@@ -2566,15 +2650,15 @@ fn line(frame: &mut Frame, x1: f32, y1: f32, x2: f32, y2: f32, color: Color, wid
     });
 }
 
-fn draw_nav_button(frame: &mut Frame, rect: Rect, glyph: &str, target: Target) {
-    fill(frame, rect, SURFACE0, 4.0);
+fn draw_nav_button(frame: &mut Frame, pal: &Palette, rect: Rect, glyph: &str, target: Target) {
+    fill(frame, rect, pal.surface0, 4.0);
     label(
         frame,
         rect.x + rect.w / 2.0 - 4.0,
         rect.y + rect.h / 2.0 - 6.0,
         glyph,
         14.0,
-        TEXT,
+        pal.text,
         FontWeightHint::Bold,
         Option::None,
     );
@@ -2810,6 +2894,10 @@ fn handle_mouse(state: &mut CalendarApp, mouse: &MouseEvent) -> EventResult {
 // ============================================================================
 
 impl App for CalendarApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Calendar")
     }
@@ -3348,8 +3436,9 @@ mod tests {
     // Event category tests
     #[test]
     fn test_category_colors() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         for cat in EventCategory::all() {
-            let _ = cat.color();
+            let _ = cat.color(&pal);
             let _ = cat.label();
             let _ = cat.icon();
         }
@@ -4769,5 +4858,69 @@ mod tests {
         );
         assert!(today.month >= 1 && today.month <= 12);
         assert!(today.day >= 1 && today.day <= 31);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut CalendarApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let today = Date {
+            year: 2026,
+            month: 9,
+            day: 8,
+        };
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, today);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

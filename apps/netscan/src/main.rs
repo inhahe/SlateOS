@@ -20,6 +20,7 @@
 //! data for initial development.
 
 #[allow(unused_imports)]
+use appearance::Palette;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{
@@ -43,24 +44,6 @@ use std::collections::VecDeque;
 // ============================================================================
 // Catppuccin Mocha Theme Colors
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
 // Layout Constants
@@ -1433,11 +1416,11 @@ impl PortState {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Open => GREEN,
-            Self::Closed => RED,
-            Self::Filtered => YELLOW,
+            Self::Open => pal.green,
+            Self::Closed => pal.red,
+            Self::Filtered => pal.yellow,
         }
     }
 }
@@ -2153,11 +2136,18 @@ pub struct NetScanApp {
     results_wheel: wheel::Accumulator,
     ports_wheel: wheel::Accumulator,
     pub config_field_focus: usize,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for NetScanApp {
     fn default() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             config: ScanConfig::default(),
             active_tab: ViewTab::Results,
             profile_tab_idx: 0,
@@ -2657,7 +2647,7 @@ impl NetScanApp {
             y: 0.0,
             width: self.window_width,
             height: self.window_height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2687,7 +2677,7 @@ impl NetScanApp {
             y: 0.0,
             width: self.window_width,
             height: TITLE_BAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2699,7 +2689,7 @@ impl NetScanApp {
             y: icon_cy - 8.0,
             width: 16.0,
             height: 16.0,
-            color: BLUE,
+            color: self.palette.blue,
             corner_radii: CornerRadii::all(8.0),
         });
         tree.push(RenderCommand::FillRect {
@@ -2707,7 +2697,7 @@ impl NetScanApp {
             y: icon_cy - 3.0,
             width: 6.0,
             height: 6.0,
-            color: GREEN,
+            color: self.palette.green,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -2716,7 +2706,7 @@ impl NetScanApp {
             x: 40.0,
             y: 10.0,
             text: "Network Scanner".to_string(),
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2731,7 +2721,11 @@ impl NetScanApp {
         } else {
             "Idle"
         };
-        let status_color = if self.is_scanning { YELLOW } else { GREEN };
+        let status_color = if self.is_scanning {
+            self.palette.yellow
+        } else {
+            self.palette.green
+        };
         tree.push(RenderCommand::FillRect {
             x: self.window_width - 200.0,
             y: TITLE_BAR_HEIGHT / 2.0 - 4.0,
@@ -2744,7 +2738,7 @@ impl NetScanApp {
             x: self.window_width - 188.0,
             y: 12.0,
             text: status_text.to_string(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2761,7 +2755,7 @@ impl NetScanApp {
             y,
             width: self.window_width,
             height: CONFIG_PANEL_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2770,7 +2764,7 @@ impl NetScanApp {
             x: PADDING,
             y: y + 8.0,
             text: "Scan Configuration".to_string(),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2783,8 +2777,16 @@ impl NetScanApp {
         for (i, profile) in ScanProfile::ALL.iter().enumerate() {
             let pw = profile_width(*profile);
             let is_selected = i == self.profile_tab_idx;
-            let bg = if is_selected { BLUE } else { SURFACE0 };
-            let fg = if is_selected { CRUST } else { TEXT_COLOR };
+            let bg = if is_selected {
+                self.palette.blue
+            } else {
+                self.palette.surface0
+            };
+            let fg = if is_selected {
+                self.palette.crust
+            } else {
+                self.palette.text
+            };
             tree.push(RenderCommand::FillRect {
                 x: px,
                 y: profile_y,
@@ -2816,7 +2818,7 @@ impl NetScanApp {
             x: PADDING,
             y: input_y,
             text: "Target:".to_string(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2837,7 +2839,7 @@ impl NetScanApp {
                 x: PADDING + 330.0,
                 y: input_y,
                 text: "Ports:".to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2864,7 +2866,7 @@ impl NetScanApp {
                 self.config.timeout_ms,
                 self.config.concurrency,
             ),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2895,7 +2897,7 @@ impl NetScanApp {
                     "Est. time: {:.1}s ({} hosts x {} ports)",
                     est, host_count, port_count
                 ),
-                color: TEAL,
+                color: self.palette.teal,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2906,8 +2908,16 @@ impl NetScanApp {
         // Scan button
         let scan_btn_x = self.window_width - 150.0 - PADDING;
         let scan_btn_y = y + PADDING;
-        let btn_color = if self.is_scanning { SURFACE1 } else { GREEN };
-        let btn_text_color = if self.is_scanning { SUBTEXT0 } else { CRUST };
+        let btn_color = if self.is_scanning {
+            self.palette.surface1
+        } else {
+            self.palette.green
+        };
+        let btn_text_color = if self.is_scanning {
+            self.palette.subtext0
+        } else {
+            self.palette.crust
+        };
         tree.push(RenderCommand::FillRect {
             x: scan_btn_x,
             y: scan_btn_y,
@@ -2947,7 +2957,7 @@ impl NetScanApp {
             y,
             width,
             height: INPUT_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         tree.push(RenderCommand::StrokeRect {
@@ -2955,15 +2965,15 @@ impl NetScanApp {
             y,
             width,
             height: INPUT_HEIGHT,
-            color: SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         let display = if value.is_empty() { placeholder } else { value };
         let color = if value.is_empty() {
-            OVERLAY0
+            self.palette.overlay0
         } else {
-            TEXT_COLOR
+            self.palette.text
         };
         tree.push(RenderCommand::Text {
             x: x + 8.0,
@@ -2986,7 +2996,7 @@ impl NetScanApp {
             y: tab_y - 2.0,
             width: self.window_width,
             height: TAB_HEIGHT + 4.0,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2995,11 +3005,15 @@ impl NetScanApp {
             let tw = tab_width(*tab);
             let is_active = *tab == self.active_tab;
             let bg = if is_active {
-                SURFACE0
+                self.palette.surface0
             } else {
                 Color::TRANSPARENT
             };
-            let fg = if is_active { BLUE } else { SUBTEXT0 };
+            let fg = if is_active {
+                self.palette.blue
+            } else {
+                self.palette.subtext0
+            };
 
             tree.push(RenderCommand::FillRect {
                 x: tab_x,
@@ -3022,7 +3036,7 @@ impl NetScanApp {
                     y: tab_y + TAB_HEIGHT - 2.0,
                     width: tw,
                     height: 2.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -3098,7 +3112,7 @@ impl NetScanApp {
                     x: PADDING,
                     y: rows_y + (window.count as f32) * TABLE_ROW_HEIGHT,
                     text: format!("{hidden} more"),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: SMALL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -3113,7 +3127,7 @@ impl NetScanApp {
                 x: text::center_x(headline, table_width / 2.0, 14.0, FontWeightHint::Regular),
                 y: rows_y + 80.0,
                 text: headline.to_string(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3128,7 +3142,7 @@ impl NetScanApp {
                 ),
                 y: rows_y + 100.0,
                 text: subline.to_string(),
-                color: SURFACE2,
+                color: self.palette.surface2,
                 font_size: CHIP_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3155,7 +3169,7 @@ impl NetScanApp {
                 result.duration_secs,
                 result.profile.label(),
             ),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -3169,7 +3183,7 @@ impl NetScanApp {
             y,
             width,
             height: TABLE_HEADER_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3177,7 +3191,7 @@ impl NetScanApp {
         host_table(&columns, x).header_weighted(
             &mut tree.commands,
             y + 9.0,
-            LAVENDER,
+            self.palette.lavender,
             HEADER_TEXT,
             FontWeightHint::Bold,
         );
@@ -3198,9 +3212,9 @@ impl NetScanApp {
     ) {
         // Row background
         let bg = if selected {
-            SURFACE1
+            self.palette.surface1
         } else if idx.is_multiple_of(2) {
-            BASE
+            self.palette.base
         } else {
             Color::rgba(49, 50, 68, 80) // Semi-transparent surface
         };
@@ -3221,7 +3235,11 @@ impl NetScanApp {
 
         // Status dot. Its inset is capped by the column, so a narrow table
         // shrinks the dot's margin instead of pushing it into the IP address.
-        let dot_color = if host.is_up { GREEN } else { RED };
+        let dot_color = if host.is_up {
+            self.palette.green
+        } else {
+            self.palette.red
+        };
         let dot_inset = DOT_INSET.min((table.width(COL_STATUS) - DOT_SIZE).max(0.0));
         cmds.push(RenderCommand::FillRect {
             x: table.left(COL_STATUS) + dot_inset,
@@ -3240,7 +3258,7 @@ impl NetScanApp {
             COL_IP,
             text_y,
             &host.ip.display(),
-            TEXT_COLOR,
+            self.palette.text,
             BODY_TEXT,
             Fit::End,
         );
@@ -3256,7 +3274,7 @@ impl NetScanApp {
             COL_HOSTNAME,
             text_y,
             &hostname,
-            SUBTEXT0,
+            self.palette.subtext0,
             BODY_TEXT,
             Fit::Start,
         );
@@ -3272,7 +3290,7 @@ impl NetScanApp {
             COL_MAC,
             text_y,
             &mac_str,
-            SUBTEXT0,
+            self.palette.subtext0,
             SMALL_TEXT,
             Fit::End,
         );
@@ -3282,7 +3300,7 @@ impl NetScanApp {
             COL_OS,
             text_y,
             host.os_guess.label(),
-            PEACH,
+            self.palette.peach,
             SMALL_TEXT,
             Fit::Start,
         );
@@ -3290,11 +3308,11 @@ impl NetScanApp {
         // Open ports count
         let open_count = host.open_port_count();
         let port_color = if open_count > 5 {
-            YELLOW
+            self.palette.yellow
         } else if open_count > 0 {
-            GREEN
+            self.palette.green
         } else {
-            OVERLAY0
+            self.palette.overlay0
         };
         table.cell(
             cmds,
@@ -3311,7 +3329,7 @@ impl NetScanApp {
             COL_LATENCY,
             text_y,
             &format!("{:.1}ms", host.latency_ms),
-            SUBTEXT0,
+            self.palette.subtext0,
             SMALL_TEXT,
             Fit::Start,
         );
@@ -3324,7 +3342,7 @@ impl NetScanApp {
             y: top_y,
             width: SIDEBAR_WIDTH,
             height: self.window_height - top_y,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3334,7 +3352,7 @@ impl NetScanApp {
             y: top_y,
             width: 1.0,
             height: self.window_height - top_y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3346,7 +3364,7 @@ impl NetScanApp {
                 x: x + PADDING,
                 y: top_y + PADDING,
                 text: "Host Details".to_string(),
-                color: LAVENDER,
+                color: self.palette.lavender,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -3356,7 +3374,7 @@ impl NetScanApp {
                 x: x + PADDING,
                 y: top_y + PADDING + 24.0,
                 text: "Select a host to view details".to_string(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
@@ -3369,7 +3387,7 @@ impl NetScanApp {
                 x: x + PADDING,
                 y: wol_y,
                 text: "Wake-on-LAN".to_string(),
-                color: LAVENDER,
+                color: self.palette.lavender,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -3391,7 +3409,7 @@ impl NetScanApp {
                 y: wol_btn_y,
                 width: 120.0,
                 height: BUTTON_HEIGHT,
-                color: MAUVE,
+                color: self.palette.mauve,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
             tree.push(RenderCommand::Text {
@@ -3403,7 +3421,7 @@ impl NetScanApp {
                     "Send WOL"
                 }
                 .to_string(),
-                color: CRUST,
+                color: self.palette.crust,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -3418,14 +3436,14 @@ impl NetScanApp {
                     y: export_y,
                     width: 120.0,
                     height: BUTTON_HEIGHT,
-                    color: TEAL,
+                    color: self.palette.teal,
                     corner_radii: CornerRadii::all(SMALL_RADIUS),
                 });
                 tree.push(RenderCommand::Text {
                     x: x + PADDING + 20.0,
                     y: export_y + 9.0,
                     text: "Export...".to_string(),
-                    color: CRUST,
+                    color: self.palette.crust,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
@@ -3453,14 +3471,14 @@ impl NetScanApp {
                     y: menu_y,
                     width: 120.0,
                     height: 56.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(SMALL_RADIUS),
                 });
                 tree.push(RenderCommand::Text {
                     x: x + PADDING + 10.0,
                     y: menu_y + 8.0,
                     text: "Export as CSV".to_string(),
-                    color: TEXT_COLOR,
+                    color: self.palette.text,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -3470,7 +3488,7 @@ impl NetScanApp {
                     x: x + PADDING + 10.0,
                     y: menu_y + 32.0,
                     text: "Export as JSON".to_string(),
-                    color: TEXT_COLOR,
+                    color: self.palette.text,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -3488,7 +3506,7 @@ impl NetScanApp {
             x,
             y,
             text: host.display_hostname(),
-            color: BLUE,
+            color: self.palette.blue,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w),
@@ -3525,7 +3543,7 @@ impl NetScanApp {
                 x,
                 y: dy,
                 text: label.to_string(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3535,7 +3553,7 @@ impl NetScanApp {
                 x: x + 85.0,
                 y: dy,
                 text: value.clone(),
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 90.0),
@@ -3551,7 +3569,7 @@ impl NetScanApp {
             y: dy,
             width: w,
             height: 1.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::ZERO,
         });
         dy += 6.0;
@@ -3559,7 +3577,7 @@ impl NetScanApp {
             x,
             y: dy,
             text: "Port Details".to_string(),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3572,7 +3590,7 @@ impl NetScanApp {
             x,
             y: dy,
             text: "Port".to_string(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3582,7 +3600,7 @@ impl NetScanApp {
             x: x + 55.0,
             y: dy,
             text: "State".to_string(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3592,7 +3610,7 @@ impl NetScanApp {
             x: x + 115.0,
             y: dy,
             text: "Service".to_string(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3602,7 +3620,7 @@ impl NetScanApp {
             x: x + 200.0,
             y: dy,
             text: "Response".to_string(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3633,7 +3651,7 @@ impl NetScanApp {
                 x,
                 y: port_y,
                 text: port.port.to_string(),
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3643,7 +3661,7 @@ impl NetScanApp {
                 x: x + 55.0,
                 y: port_y,
                 text: port.state.label().to_string(),
-                color: port.state.color(),
+                color: port.state.color(&self.palette),
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3653,7 +3671,7 @@ impl NetScanApp {
                 x: x + 115.0,
                 y: port_y,
                 text: port.service.clone().unwrap_or_else(|| "-".to_string()),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
@@ -3663,7 +3681,7 @@ impl NetScanApp {
                 x: x + 200.0,
                 y: port_y,
                 text: format!("{:.1}ms", port.response_ms),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3693,7 +3711,7 @@ impl NetScanApp {
                 x,
                 y: rows_top + (window.count as f32) * PORT_ROW_HEIGHT,
                 text: format!("{hidden} more"),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3713,7 +3731,7 @@ impl NetScanApp {
             y: content_y,
             width: area_w,
             height: area_h,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -3721,7 +3739,7 @@ impl NetScanApp {
             x: PADDING + 12.0,
             y: content_y + 12.0,
             text: "Network Topology".to_string(),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3735,7 +3753,7 @@ impl NetScanApp {
                     x: text::center_x(empty, area_w / 2.0, 13.0, FontWeightHint::Regular),
                     y: content_y + area_h / 2.0,
                     text: empty.to_string(),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 13.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -3754,14 +3772,14 @@ impl NetScanApp {
                 y: center_y - gateway_size / 2.0,
                 width: gateway_size,
                 height: gateway_size,
-                color: PEACH,
+                color: self.palette.peach,
                 corner_radii: CornerRadii::all(gateway_size / 2.0),
             });
             tree.push(RenderCommand::Text {
                 x: center_x - 20.0,
                 y: center_y + gateway_size / 2.0 + 4.0,
                 text: "Gateway".to_string(),
-                color: PEACH,
+                color: self.palette.peach,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -3788,19 +3806,19 @@ impl NetScanApp {
                     y1: center_y + gateway_size / 2.0,
                     x2: node_x,
                     y2: node_y - node_size / 2.0,
-                    color: SURFACE2,
+                    color: self.palette.surface2,
                     width: 1.0,
                 });
 
                 // Node color based on OS
                 let node_color = match host.os_guess {
-                    OsGuess::Linux => GREEN,
-                    OsGuess::Windows => BLUE,
-                    OsGuess::MacOS => MAUVE,
-                    OsGuess::Router => PEACH,
-                    OsGuess::Printer => YELLOW,
-                    OsGuess::IoTDevice => TEAL,
-                    _ => SURFACE2,
+                    OsGuess::Linux => self.palette.green,
+                    OsGuess::Windows => self.palette.blue,
+                    OsGuess::MacOS => self.palette.mauve,
+                    OsGuess::Router => self.palette.peach,
+                    OsGuess::Printer => self.palette.yellow,
+                    OsGuess::IoTDevice => self.palette.teal,
+                    _ => self.palette.surface2,
                 };
 
                 tree.push(RenderCommand::FillRect {
@@ -3818,7 +3836,7 @@ impl NetScanApp {
                     x: node_x - 12.0,
                     y: node_y + node_size / 2.0 + 2.0,
                     text: short_ip,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: 9.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -3836,7 +3854,7 @@ impl NetScanApp {
                     x: PADDING + 12.0,
                     y: content_y + 30.0,
                     text: format!("{hidden} more hosts not shown"),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: LEGEND_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -3847,12 +3865,12 @@ impl NetScanApp {
             // Legend
             let legend_y = content_y + area_h - 50.0;
             let legend_items = [
-                (GREEN, "Linux"),
-                (BLUE, "Windows"),
-                (MAUVE, "macOS"),
-                (PEACH, "Router"),
-                (YELLOW, "Printer"),
-                (TEAL, "IoT"),
+                (self.palette.green, "Linux"),
+                (self.palette.blue, "Windows"),
+                (self.palette.mauve, "macOS"),
+                (self.palette.peach, "Router"),
+                (self.palette.yellow, "Printer"),
+                (self.palette.teal, "IoT"),
             ];
             let mut lx = PADDING + 12.0;
             for (color, label) in &legend_items {
@@ -3868,7 +3886,7 @@ impl NetScanApp {
                     x: lx + 14.0,
                     y: legend_y - 1.0,
                     text: label.to_string(),
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: LEGEND_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -3883,7 +3901,7 @@ impl NetScanApp {
                 x: text::center_x(empty, area_w / 2.0, 13.0, FontWeightHint::Regular),
                 y: content_y + area_h / 2.0,
                 text: empty.to_string(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3899,7 +3917,7 @@ impl NetScanApp {
             x: PADDING,
             y: content_y,
             text: "Scan History".to_string(),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3911,7 +3929,7 @@ impl NetScanApp {
                 x: PADDING,
                 y: content_y + 30.0,
                 text: "No scan history yet".to_string(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3927,7 +3945,7 @@ impl NetScanApp {
             y: header_y,
             width: self.window_width - PADDING * 2.0,
             height: TABLE_HEADER_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3945,7 +3963,7 @@ impl NetScanApp {
                 x: *cx,
                 y: header_y + 9.0,
                 text: label.to_string(),
-                color: LAVENDER,
+                color: self.palette.lavender,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -3962,7 +3980,7 @@ impl NetScanApp {
             }
 
             let bg = if i % 2 == 0 {
-                BASE
+                self.palette.base
             } else {
                 Color::rgba(49, 50, 68, 80)
             };
@@ -3979,7 +3997,7 @@ impl NetScanApp {
                 x: PADDING + 4.0,
                 y: row_y + 7.0,
                 text: entry.id.to_string(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3989,7 +4007,7 @@ impl NetScanApp {
                 x: PADDING + 40.0,
                 y: row_y + 7.0,
                 text: entry.timestamp.clone(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(160.0),
@@ -3999,7 +4017,7 @@ impl NetScanApp {
                 x: PADDING + 210.0,
                 y: row_y + 7.0,
                 text: entry.target_description.clone(),
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(180.0),
@@ -4009,7 +4027,7 @@ impl NetScanApp {
                 x: PADDING + 400.0,
                 y: row_y + 7.0,
                 text: entry.profile.label().to_string(),
-                color: PEACH,
+                color: self.palette.peach,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -4019,7 +4037,7 @@ impl NetScanApp {
                 x: PADDING + 510.0,
                 y: row_y + 7.0,
                 text: entry.hosts_up().to_string(),
-                color: GREEN,
+                color: self.palette.green,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -4029,7 +4047,7 @@ impl NetScanApp {
                 x: PADDING + 600.0,
                 y: row_y + 7.0,
                 text: entry.total_open_ports().to_string(),
-                color: YELLOW,
+                color: self.palette.yellow,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -4039,7 +4057,7 @@ impl NetScanApp {
                 x: PADDING + 700.0,
                 y: row_y + 7.0,
                 text: format!("{:.1}s", entry.duration_secs),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -4064,9 +4082,9 @@ impl NetScanApp {
                             removed.len()
                         ),
                         color: if added.is_empty() && removed.is_empty() {
-                            OVERLAY0
+                            self.palette.overlay0
                         } else {
-                            YELLOW
+                            self.palette.yellow
                         },
                         font_size: 12.0,
                         font_weight: FontWeightHint::Bold,
@@ -4085,7 +4103,7 @@ impl NetScanApp {
             x: PADDING,
             y: content_y,
             text: "Traceroute".to_string(),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -4098,7 +4116,7 @@ impl NetScanApp {
             x: PADDING,
             y: input_y + 5.0,
             text: "Target:".to_string(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -4120,14 +4138,14 @@ impl NetScanApp {
             y: btn_y,
             width: 120.0,
             height: BUTTON_HEIGHT,
-            color: BLUE,
+            color: self.palette.blue,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         tree.push(RenderCommand::Text {
             x: PADDING + 16.0,
             y: btn_y + 9.0,
             text: "Run Traceroute".to_string(),
-            color: CRUST,
+            color: self.palette.crust,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -4144,7 +4162,7 @@ impl NetScanApp {
                 y: table_y,
                 width: self.window_width - PADDING * 2.0,
                 height: TABLE_HEADER_HEIGHT,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::ZERO,
             });
             let hop_cols = [
@@ -4158,7 +4176,7 @@ impl NetScanApp {
                     x: *cx,
                     y: table_y + 9.0,
                     text: label.to_string(),
-                    color: LAVENDER,
+                    color: self.palette.lavender,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
@@ -4174,7 +4192,7 @@ impl NetScanApp {
                 }
 
                 let bg = if i % 2 == 0 {
-                    BASE
+                    self.palette.base
                 } else {
                     Color::rgba(49, 50, 68, 80)
                 };
@@ -4191,7 +4209,7 @@ impl NetScanApp {
                     x: PADDING + 4.0,
                     y: row_y + 7.0,
                     text: hop.hop_number.to_string(),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -4203,7 +4221,7 @@ impl NetScanApp {
                         x: PADDING + 50.0,
                         y: row_y + 7.0,
                         text: "* * * (timed out)".to_string(),
-                        color: RED,
+                        color: self.palette.red,
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -4218,7 +4236,7 @@ impl NetScanApp {
                         x: PADDING + 50.0,
                         y: row_y + 7.0,
                         text: ip_str,
-                        color: TEXT_COLOR,
+                        color: self.palette.text,
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -4228,7 +4246,7 @@ impl NetScanApp {
                         x: PADDING + 220.0,
                         y: row_y + 7.0,
                         text: hop.hostname.clone().unwrap_or_else(|| "-".to_string()),
-                        color: SUBTEXT0,
+                        color: self.palette.subtext0,
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(220.0),
@@ -4238,7 +4256,7 @@ impl NetScanApp {
                         x: PADDING + 450.0,
                         y: row_y + 7.0,
                         text: format!("{:.1} ms", hop.rtt_ms),
-                        color: TEAL,
+                        color: self.palette.teal,
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -4270,7 +4288,7 @@ impl NetScanApp {
             x: PADDING,
             y: content_y,
             text: "WHOIS Lookup".to_string(),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -4283,7 +4301,7 @@ impl NetScanApp {
             x: PADDING,
             y: input_y + 5.0,
             text: "IP:".to_string(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -4305,14 +4323,14 @@ impl NetScanApp {
             y: btn_y,
             width: 120.0,
             height: BUTTON_HEIGHT,
-            color: MAUVE,
+            color: self.palette.mauve,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         tree.push(RenderCommand::Text {
             x: PADDING + 18.0,
             y: btn_y + 9.0,
             text: "Lookup WHOIS".to_string(),
-            color: CRUST,
+            color: self.palette.crust,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -4328,7 +4346,7 @@ impl NetScanApp {
                 y: card_y,
                 width: 500.0,
                 height: 220.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
             tree.push(RenderCommand::StrokeRect {
@@ -4336,7 +4354,7 @@ impl NetScanApp {
                 y: card_y,
                 width: 500.0,
                 height: 220.0,
-                color: SURFACE1,
+                color: self.palette.surface1,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
@@ -4357,7 +4375,7 @@ impl NetScanApp {
                     x: PADDING + 14.0,
                     y: fy,
                     text: label.to_string(),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
@@ -4367,7 +4385,7 @@ impl NetScanApp {
                     x: PADDING + 140.0,
                     y: fy,
                     text: value.clone(),
-                    color: TEXT_COLOR,
+                    color: self.palette.text,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(340.0),
@@ -4387,7 +4405,7 @@ impl NetScanApp {
             y,
             width: self.window_width,
             height: PROGRESS_BAR_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4413,7 +4431,7 @@ impl NetScanApp {
                 progress.hosts_found,
                 progress.elapsed_secs,
             ),
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -4475,6 +4493,10 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
 // ============================================================================
 
 impl App for NetScanApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // What the last scan found, because that is the answer the user came
         // for and the one thing worth reading from a taskbar. The harness
@@ -6671,5 +6693,64 @@ mod tests {
         app.start_scan();
         assert_eq!(app.results_scroll, 0);
         assert_eq!(app.detail_port_scroll, 0);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut NetScanApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = NetScanApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

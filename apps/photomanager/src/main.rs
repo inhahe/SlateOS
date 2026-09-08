@@ -36,6 +36,7 @@
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::doc_markdown)]
 
+use appearance::Palette;
 use guitk::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -52,23 +53,6 @@ use std::collections::HashMap;
 // ============================================================================
 // Catppuccin Mocha theme
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
 
 // ============================================================================
 // Layout constants
@@ -271,15 +255,15 @@ impl ColorLabel {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::None => OVERLAY0,
-            Self::Red => RED,
-            Self::Orange => PEACH,
-            Self::Yellow => YELLOW,
-            Self::Green => GREEN,
-            Self::Blue => BLUE,
-            Self::Purple => MAUVE,
+            Self::None => pal.overlay0,
+            Self::Red => pal.red,
+            Self::Orange => pal.peach,
+            Self::Yellow => pal.yellow,
+            Self::Green => pal.green,
+            Self::Blue => pal.blue,
+            Self::Purple => pal.mauve,
         }
     }
 
@@ -1575,6 +1559,12 @@ pub struct PhotoApp {
     photo_id_gen: IdGen,
     album_id_gen: IdGen,
     timestamp_counter: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for PhotoApp {
@@ -1587,6 +1577,7 @@ impl PhotoApp {
     /// Create a new empty photo manager.
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             photos: Vec::new(),
             albums: Vec::new(),
             smart_albums: Vec::new(),
@@ -2156,9 +2147,19 @@ impl PhotoApp {
         let mut rows = vec![
             SidebarRow::Gap(8.0),
             SidebarRow::Header("LIBRARY"),
-            item("All Photos", SidebarItem::AllPhotos, 16.0, BLUE),
-            item("Favorites", SidebarItem::Favorites, 16.0, BLUE),
-            item("Recent", SidebarItem::RecentImports, 16.0, BLUE),
+            item(
+                "All Photos",
+                SidebarItem::AllPhotos,
+                16.0,
+                self.palette.blue,
+            ),
+            item("Favorites", SidebarItem::Favorites, 16.0, self.palette.blue),
+            item(
+                "Recent",
+                SidebarItem::RecentImports,
+                16.0,
+                self.palette.blue,
+            ),
             SidebarRow::Gap(12.0),
             SidebarRow::Header("ALBUMS"),
         ];
@@ -2167,7 +2168,7 @@ impl PhotoApp {
                 label: format!("{} ({})", album.name, album.photo_count()),
                 target: SidebarItem::Album(album.id),
                 indent: 20.0,
-                accent: BLUE,
+                accent: self.palette.blue,
             });
         }
         rows.push(SidebarRow::Gap(12.0));
@@ -2178,7 +2179,7 @@ impl PhotoApp {
                     label: album.name.clone(),
                     target: SidebarItem::SmartAlbum(album.id),
                     indent: 20.0,
-                    accent: MAUVE,
+                    accent: self.palette.mauve,
                 });
             }
         }
@@ -2187,7 +2188,7 @@ impl PhotoApp {
             label: format!("Trash ({})", self.trash.len()),
             target: SidebarItem::Trash,
             indent: 16.0,
-            accent: RED,
+            accent: self.palette.red,
         });
         rows
     }
@@ -2643,7 +2644,7 @@ impl PhotoApp {
             y: 0.0,
             width,
             height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2684,7 +2685,7 @@ impl PhotoApp {
             y: 0.0,
             width,
             height: TOOLBAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2693,7 +2694,7 @@ impl PhotoApp {
             x: 12.0,
             y: 12.0,
             text: "Photo Manager".to_owned(),
-            color: BLUE,
+            color: self.palette.blue,
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(140.0),
@@ -2720,8 +2721,16 @@ impl PhotoApp {
         ] {
             let is_active = self.view_mode == mode;
             let rect = rect_of(ToolbarControl::View(mode));
-            let bg = if is_active { SURFACE1 } else { SURFACE0 };
-            let fg = if is_active { BLUE } else { SUBTEXT0 };
+            let bg = if is_active {
+                self.palette.surface1
+            } else {
+                self.palette.surface0
+            };
+            let fg = if is_active {
+                self.palette.blue
+            } else {
+                self.palette.subtext0
+            };
             cmds.push(RenderCommand::FillRect {
                 x: rect.x,
                 y: rect.y,
@@ -2750,14 +2759,14 @@ impl PhotoApp {
             y: 8.0,
             width: 110.0,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
             x: sort_x + 8.0,
             y: 14.0,
             text: sort_label,
-            color: TEXT,
+            color: self.palette.text,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
@@ -2772,7 +2781,7 @@ impl PhotoApp {
             y: 8.0,
             width: search_w,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         let search_text = if self.search_query.is_empty() {
@@ -2781,9 +2790,9 @@ impl PhotoApp {
             self.search_query.clone()
         };
         let search_color = if self.search_query.is_empty() {
-            OVERLAY0
+            self.palette.overlay0
         } else {
-            TEXT
+            self.palette.text
         };
         cmds.push(RenderCommand::Text {
             x: search_x + 8.0,
@@ -2803,7 +2812,7 @@ impl PhotoApp {
             x: search_x + search_w + 16.0,
             y: 14.0,
             text: size_label,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2818,9 +2827,9 @@ impl PhotoApp {
             width: 80.0,
             height: 24.0,
             color: if self.slideshow.is_some() {
-                SURFACE1
+                self.palette.surface1
             } else {
-                SURFACE0
+                self.palette.surface0
             },
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -2829,9 +2838,9 @@ impl PhotoApp {
             y: 14.0,
             text: "Slideshow".to_owned(),
             color: if self.slideshow.is_some() {
-                GREEN
+                self.palette.green
             } else {
-                SUBTEXT0
+                self.palette.subtext0
             },
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
@@ -2845,7 +2854,7 @@ impl PhotoApp {
             y1: TOOLBAR_HEIGHT,
             x2: width,
             y2: TOOLBAR_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -2858,7 +2867,7 @@ impl PhotoApp {
             y: bar_y,
             width,
             height: STATUS_BAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2867,7 +2876,7 @@ impl PhotoApp {
             y1: bar_y,
             x2: width,
             y2: bar_y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2881,7 +2890,7 @@ impl PhotoApp {
             x: 12.0,
             y: bar_y + 6.0,
             text: status_text,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
@@ -2897,7 +2906,7 @@ impl PhotoApp {
                 x: width - 300.0,
                 y: bar_y + 6.0,
                 text: sel_text,
-                color: TEXT,
+                color: self.palette.text,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(280.0),
@@ -2913,7 +2922,7 @@ impl PhotoApp {
             y,
             width: SIDEBAR_WIDTH,
             height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2923,7 +2932,7 @@ impl PhotoApp {
             y1: y,
             x2: SIDEBAR_WIDTH,
             y2: y + height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2935,7 +2944,7 @@ impl PhotoApp {
                     x: 12.0,
                     y: cy,
                     text: (*text).to_owned(),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(SIDEBAR_WIDTH - 24.0),
@@ -2954,16 +2963,16 @@ impl PhotoApp {
                             y: cy,
                             width: SIDEBAR_WIDTH - 8.0,
                             height: ITEM_HEIGHT,
-                            color: SURFACE0,
+                            color: self.palette.surface0,
                             corner_radii: CornerRadii::all(CORNER_RADIUS),
                         });
                     }
                     let color = if is_selected {
                         *accent
                     } else if *target == SidebarItem::Trash {
-                        SUBTEXT0
+                        self.palette.subtext0
                     } else {
-                        TEXT
+                        self.palette.text
                     };
                     cmds.push(RenderCommand::Text {
                         x: *indent,
@@ -2998,7 +3007,7 @@ impl PhotoApp {
             y,
             width,
             height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3008,7 +3017,7 @@ impl PhotoApp {
             y1: y,
             x2: x,
             y2: y + height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -3017,7 +3026,7 @@ impl PhotoApp {
                 x: x + 12.0,
                 y: y + 20.0,
                 text: "No photo selected".to_owned(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 24.0),
@@ -3039,7 +3048,7 @@ impl PhotoApp {
             x: lx,
             y: cy,
             text: photo.file_name.clone(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
@@ -3053,7 +3062,7 @@ impl PhotoApp {
             x: lx,
             y: cy,
             text: info_line,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
@@ -3067,7 +3076,7 @@ impl PhotoApp {
             x: lx,
             y: cy,
             text: stars_text,
-            color: YELLOW,
+            color: self.palette.yellow,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
@@ -3082,14 +3091,14 @@ impl PhotoApp {
                 y: cy,
                 width: 12.0,
                 height: 12.0,
-                color: photo.color_label.color(),
+                color: photo.color_label.color(&self.palette),
                 corner_radii: CornerRadii::all(2.0),
             });
             cmds.push(RenderCommand::Text {
                 x: lx + 18.0,
                 y: cy,
                 text: photo.color_label.label().to_owned(),
-                color: TEXT,
+                color: self.palette.text,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w - 20.0),
@@ -3105,7 +3114,7 @@ impl PhotoApp {
                 x: lx,
                 y: cy,
                 text: "TAGS".to_owned(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(max_w),
@@ -3117,7 +3126,7 @@ impl PhotoApp {
                 x: lx,
                 y: cy,
                 text: tags_line,
-                color: TEAL,
+                color: self.palette.teal,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
@@ -3132,7 +3141,7 @@ impl PhotoApp {
             x: lx,
             y: cy,
             text: "EXIF DATA".to_owned(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
@@ -3146,7 +3155,7 @@ impl PhotoApp {
                 x: lx,
                 y: cy,
                 text: format!("{label}:"),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
@@ -3156,7 +3165,7 @@ impl PhotoApp {
                 x: lx + 85.0,
                 y: cy,
                 text: value.clone(),
-                color: TEXT,
+                color: self.palette.text,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w - 90.0),
@@ -3172,7 +3181,7 @@ impl PhotoApp {
                 x: lx,
                 y: cy,
                 text: "ADJUSTMENTS".to_owned(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(max_w),
@@ -3194,7 +3203,7 @@ impl PhotoApp {
                         x: lx,
                         y: cy,
                         text: format!("{label}: {sign}{val:.1}"),
-                        color: SUBTEXT1,
+                        color: self.palette.subtext1,
                         font_size: 10.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_w),
@@ -3278,7 +3287,7 @@ impl PhotoApp {
                 x: x + width / 2.0 - 60.0,
                 y: y + height / 2.0,
                 text: "No photos".to_owned(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 16.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3300,13 +3309,17 @@ impl PhotoApp {
                 self.selected_photo == Some(pid) || self.selected_photos.contains(&pid);
 
             // Thumbnail placeholder
-            let border_color = if is_selected { BLUE } else { SURFACE1 };
+            let border_color = if is_selected {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            };
             cmds.push(RenderCommand::FillRect {
                 x: cx,
                 y: cy,
                 width: thumb,
                 height: thumb,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
             cmds.push(RenderCommand::StrokeRect {
@@ -3325,7 +3338,7 @@ impl PhotoApp {
                     x: cx + 4.0,
                     y: cy + thumb - 16.0,
                     text: photo.file_name.clone(),
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: 9.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(thumb - 8.0),
@@ -3338,7 +3351,7 @@ impl PhotoApp {
                         x: cx + 4.0,
                         y: cy + 4.0,
                         text: "*".repeat(photo.rating as usize),
-                        color: YELLOW,
+                        color: self.palette.yellow,
                         font_size: 10.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(thumb - 8.0),
@@ -3353,7 +3366,7 @@ impl PhotoApp {
                         y: cy + 4.0,
                         width: 10.0,
                         height: 10.0,
-                        color: PEACH,
+                        color: self.palette.peach,
                         corner_radii: CornerRadii::all(5.0),
                     });
                 }
@@ -3365,7 +3378,7 @@ impl PhotoApp {
                         y: cy + 18.0,
                         width: 10.0,
                         height: 10.0,
-                        color: photo.color_label.color(),
+                        color: photo.color_label.color(&self.palette),
                         corner_radii: CornerRadii::all(5.0),
                     });
                 }
@@ -3386,7 +3399,7 @@ impl PhotoApp {
                 x: x + width / 2.0 - 80.0,
                 y: y + height / 2.0,
                 text: "Select a photo to view".to_owned(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3413,7 +3426,7 @@ impl PhotoApp {
             y: display_y,
             width: display_w,
             height: display_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -3421,7 +3434,7 @@ impl PhotoApp {
             y: display_y,
             width: display_w,
             height: display_h,
-            color: SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -3431,7 +3444,7 @@ impl PhotoApp {
             x: display_x + display_w / 2.0 - 60.0,
             y: display_y + display_h / 2.0 - 10.0,
             text: photo.file_name.clone(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(display_w - 40.0),
@@ -3441,7 +3454,7 @@ impl PhotoApp {
             x: display_x + display_w / 2.0 - 50.0,
             y: display_y + display_h / 2.0 + 10.0,
             text: format!("{} — {}", photo.exif.resolution_str(), photo.human_size()),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(display_w - 40.0),
@@ -3453,7 +3466,7 @@ impl PhotoApp {
             x: x + width / 2.0 - 80.0,
             y: y + height - 20.0,
             text: "< Prev  |  Next >".to_owned(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -3486,7 +3499,7 @@ impl PhotoApp {
                 x: x + 12.0,
                 y: cy,
                 text: format!("{label} ({} photos)", photo_ids.len()),
-                color: BLUE,
+                color: self.palette.blue,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 24.0),
@@ -3512,7 +3525,7 @@ impl PhotoApp {
                     y: ty,
                     width: thumb,
                     height: thumb,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(CORNER_RADIUS),
                 });
                 if is_selected {
@@ -3521,7 +3534,7 @@ impl PhotoApp {
                         y: ty,
                         width: thumb,
                         height: thumb,
-                        color: BLUE,
+                        color: self.palette.blue,
                         line_width: 2.0,
                         corner_radii: CornerRadii::all(CORNER_RADIUS),
                     });
@@ -3537,7 +3550,7 @@ impl PhotoApp {
                 x: x + width / 2.0 - 50.0,
                 y: y + height / 2.0,
                 text: "No photos".to_owned(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 16.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3564,7 +3577,7 @@ impl PhotoApp {
             y,
             width,
             height,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3582,7 +3595,7 @@ impl PhotoApp {
                 y: display_y,
                 width: display_w,
                 height: display_h,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(8.0),
             });
 
@@ -3590,7 +3603,7 @@ impl PhotoApp {
                 x: display_x + display_w / 2.0 - 60.0,
                 y: display_y + display_h / 2.0,
                 text: photo.file_name.clone(),
-                color: TEXT,
+                color: self.palette.text,
                 font_size: 16.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(display_w - 40.0),
@@ -3612,7 +3625,7 @@ impl PhotoApp {
             x: x + width / 2.0 - 80.0,
             y: ctrl_y,
             text: progress,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
@@ -3650,6 +3663,10 @@ pub struct LibraryStats<'a> {
 // ============================================================================
 
 impl App for PhotoApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // What is being looked at, because that is what the window is: a
         // library behind three other windows is found again by its title.
@@ -5218,5 +5235,64 @@ mod tests {
             "acting on both halves of a click runs every button twice"
         );
         assert_eq!(app.selected_photo, None);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut PhotoApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = PhotoApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

@@ -9,6 +9,7 @@
 //! Track income and expenses across categories, set budgets, view spending
 //! trends, manage accounts, and get financial summaries.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -18,25 +19,6 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const SKY: Color = Color::from_hex(0x89DCEB);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ── Category ────────────────────────────────────────────────────────
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -117,20 +99,20 @@ impl Category {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Food => PEACH,
-            Self::Housing => BLUE,
-            Self::Transportation => SKY,
-            Self::Utilities => YELLOW,
-            Self::Healthcare => RED,
-            Self::Entertainment => MAUVE,
-            Self::Shopping => LAVENDER,
-            Self::Education => TEAL,
-            Self::Savings => GREEN,
-            Self::Income => GREEN,
-            Self::Investment => BLUE,
-            Self::Other => OVERLAY0,
+            Self::Food => pal.peach,
+            Self::Housing => pal.blue,
+            Self::Transportation => pal.sky,
+            Self::Utilities => pal.yellow,
+            Self::Healthcare => pal.red,
+            Self::Entertainment => pal.mauve,
+            Self::Shopping => pal.lavender,
+            Self::Education => pal.teal,
+            Self::Savings => pal.green,
+            Self::Income => pal.green,
+            Self::Investment => pal.blue,
+            Self::Other => pal.overlay0,
         }
     }
 }
@@ -322,12 +304,19 @@ struct FinanceApp {
     search_active: bool,
     category_filter: Option<Category>,
     status_msg: String,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl FinanceApp {
     fn new() -> Self {
         let today = SimpleDate::new(2026, 5, 18);
         let mut app = Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width: 1100.0,
             height: 750.0,
             screen: Screen::Dashboard,
@@ -875,12 +864,12 @@ impl FinanceApp {
         format!("{sign}${dollars}.{remainder:02}")
     }
 
-    fn format_currency_colored(cents: i64) -> (String, Color) {
+    fn format_currency_colored(cents: i64, pal: &Palette) -> (String, Color) {
         let text = Self::format_currency(cents);
         let color = match cents.cmp(&0) {
-            std::cmp::Ordering::Greater => GREEN,
-            std::cmp::Ordering::Less => RED,
-            std::cmp::Ordering::Equal => TEXT_COLOR,
+            std::cmp::Ordering::Greater => pal.green,
+            std::cmp::Ordering::Less => pal.red,
+            std::cmp::Ordering::Equal => pal.text,
         };
         (text, color)
     }
@@ -1024,7 +1013,7 @@ impl FinanceApp {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1049,7 +1038,7 @@ impl FinanceApp {
             y: 0.0,
             width: Self::SIDEBAR_W,
             height: self.height,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1059,7 +1048,7 @@ impl FinanceApp {
             y: 16.0,
             text: String::from("\u{1F4B0} Finance"),
             font_size: 18.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(Self::SIDEBAR_W - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -1071,11 +1060,15 @@ impl FinanceApp {
             let iy = nav_y + i as f32 * 40.0;
             let is_active = *screen == self.screen;
             let bg = if is_active {
-                SURFACE1
+                self.palette.surface1
             } else {
                 Color::rgba(0, 0, 0, 0)
             };
-            let tc = if is_active { BLUE } else { SUBTEXT0 };
+            let tc = if is_active {
+                self.palette.blue
+            } else {
+                self.palette.subtext0
+            };
 
             cmds.push(RenderCommand::FillRect {
                 x: 8.0,
@@ -1103,13 +1096,13 @@ impl FinanceApp {
 
         // Quick stats at bottom
         let total = self.total_balance();
-        let (total_str, total_color) = Self::format_currency_colored(total);
+        let (total_str, total_color) = Self::format_currency_colored(total, &self.palette);
         cmds.push(RenderCommand::Text {
             x: 16.0,
             y: self.height - 60.0,
             text: String::from("Total Balance"),
             font_size: 11.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(Self::SIDEBAR_W - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -1132,7 +1125,7 @@ impl FinanceApp {
             y: 0.0,
             width: self.content_w(),
             height: Self::HEADER_H,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1146,7 +1139,7 @@ impl FinanceApp {
                 self.view_month.year
             ),
             font_size: 18.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -1158,12 +1151,16 @@ impl FinanceApp {
         let savings = self.month_savings();
         let hx = self.width - 460.0;
         for (label, amount, color, offset) in [
-            ("Income", income, GREEN, 0.0_f32),
-            ("Expenses", expenses, RED, 150.0),
+            ("Income", income, self.palette.green, 0.0_f32),
+            ("Expenses", expenses, self.palette.red, 150.0),
             (
                 "Savings",
                 savings,
-                if savings >= 0 { TEAL } else { RED },
+                if savings >= 0 {
+                    self.palette.teal
+                } else {
+                    self.palette.red
+                },
                 300.0,
             ),
         ] {
@@ -1172,7 +1169,7 @@ impl FinanceApp {
                 y: 6.0,
                 text: label.to_string(),
                 font_size: 10.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1208,7 +1205,7 @@ impl FinanceApp {
             y: cy,
             text: String::from("Budget Overview"),
             font_size: 16.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -1228,11 +1225,11 @@ impl FinanceApp {
             let spent = self.category_spending(budget.category);
             let usage = Self::usage_ratio(spent, budget.monthly_limit);
             let bar_color = if usage > 1.0 {
-                RED
+                self.palette.red
             } else if usage > 0.8 {
-                YELLOW
+                self.palette.yellow
             } else {
-                GREEN
+                self.palette.green
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -1240,7 +1237,7 @@ impl FinanceApp {
                 y: card_y,
                 width: card_w,
                 height: card_h,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(8.0),
             });
 
@@ -1249,7 +1246,7 @@ impl FinanceApp {
                 y: card_y + 6.0,
                 text: format!("{} {}", budget.category.icon(), budget.category.label()),
                 font_size: 12.0,
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(card_w - 16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1264,7 +1261,7 @@ impl FinanceApp {
                     Self::format_currency(budget.monthly_limit)
                 ),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(card_w - 16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1280,7 +1277,7 @@ impl FinanceApp {
                 y: bar_y,
                 width: bar_w,
                 height: bar_h,
-                color: SURFACE2,
+                color: self.palette.surface2,
                 corner_radii: CornerRadii::all(4.0),
             });
             let fill_w = (bar_w * usage.min(1.0)).max(0.0);
@@ -1303,7 +1300,7 @@ impl FinanceApp {
             y: section_y,
             text: String::from("Top Spending Categories"),
             font_size: 16.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -1321,7 +1318,7 @@ impl FinanceApp {
                 y: ry + 4.0,
                 text: format!("{} {}", cat.icon(), cat.label()),
                 font_size: 12.0,
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(140.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1331,7 +1328,7 @@ impl FinanceApp {
                 y: ry + 2.0,
                 width: bar_w.max(4.0),
                 height: 20.0,
-                color: cat.color(),
+                color: cat.color(&self.palette),
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1339,7 +1336,7 @@ impl FinanceApp {
                 y: ry + 4.0,
                 text: Self::format_currency(*amount),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1353,7 +1350,7 @@ impl FinanceApp {
             y: recent_y,
             text: String::from("Recent Transactions"),
             font_size: 16.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -1368,7 +1365,7 @@ impl FinanceApp {
                 y: ry,
                 text: tx.date.format(),
                 font_size: 11.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(90.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1378,12 +1375,12 @@ impl FinanceApp {
                 y: ry,
                 text: tx.description.clone(),
                 font_size: 12.0,
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            let (amt_str, amt_color) = Self::format_currency_colored(tx.amount);
+            let (amt_str, amt_color) = Self::format_currency_colored(tx.amount, &self.palette);
             cmds.push(RenderCommand::Text {
                 x: cx + cw - 120.0,
                 y: ry,
@@ -1408,7 +1405,7 @@ impl FinanceApp {
             y: cy,
             width: cw,
             height: 32.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
         let search_text = if self.search_query.is_empty() {
@@ -1426,9 +1423,9 @@ impl FinanceApp {
             text: search_text,
             font_size: 13.0,
             color: if self.search_query.is_empty() && !self.search_active {
-                OVERLAY0
+                self.palette.overlay0
             } else {
-                TEXT_COLOR
+                self.palette.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(cw - 24.0),
@@ -1442,7 +1439,7 @@ impl FinanceApp {
                 y: cy + 4.0,
                 width: 130.0,
                 height: 24.0,
-                color: cat.color(),
+                color: cat.color(&self.palette),
                 corner_radii: CornerRadii::all(12.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1450,7 +1447,7 @@ impl FinanceApp {
                 y: cy + 8.0,
                 text: cat.label().to_string(),
                 font_size: 11.0,
-                color: CRUST,
+                color: self.palette.crust,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(120.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1464,7 +1461,7 @@ impl FinanceApp {
             y: list_y,
             width: cw,
             height: 28.0,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
         for (hx, label) in [
@@ -1478,7 +1475,7 @@ impl FinanceApp {
                 y: list_y + 6.0,
                 text: label.to_string(),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(120.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1497,11 +1494,11 @@ impl FinanceApp {
             let is_sel = Some(tx.id) == self.selected_id;
             let _ = orig_idx;
             let bg = if is_sel {
-                SURFACE1
+                self.palette.surface1
             } else if vi % 2 == 0 {
-                SURFACE0
+                self.palette.surface0
             } else {
-                BASE
+                self.palette.base
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -1517,7 +1514,7 @@ impl FinanceApp {
                 y: ry + 10.0,
                 text: tx.date.format(),
                 font_size: 12.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1527,7 +1524,7 @@ impl FinanceApp {
                 y: ry + 10.0,
                 text: tx.description.clone(),
                 font_size: 13.0,
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(270.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1537,12 +1534,12 @@ impl FinanceApp {
                 y: ry + 10.0,
                 text: format!("{} {}", tx.category.icon(), tx.category.label()),
                 font_size: 11.0,
-                color: tx.category.color(),
+                color: tx.category.color(&self.palette),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            let (amt_str, amt_color) = Self::format_currency_colored(tx.amount);
+            let (amt_str, amt_color) = Self::format_currency_colored(tx.amount, &self.palette);
             cmds.push(RenderCommand::Text {
                 x: cx + 528.0,
                 y: ry + 10.0,
@@ -1559,7 +1556,7 @@ impl FinanceApp {
                     y: ry + 10.0,
                     text: String::from("\u{1F501}"),
                     font_size: 11.0,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(20.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1582,7 +1579,7 @@ impl FinanceApp {
                 self.view_month.year
             ),
             font_size: 18.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
             overflow: TextOverflow::Ellipsis,
@@ -1598,11 +1595,11 @@ impl FinanceApp {
             let usage = Self::usage_ratio(spent, budget.monthly_limit);
             let remaining = budget.monthly_limit.saturating_sub(spent);
             let bar_color = if usage > 1.0 {
-                RED
+                self.palette.red
             } else if usage > 0.8 {
-                YELLOW
+                self.palette.yellow
             } else {
-                GREEN
+                self.palette.green
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -1610,7 +1607,7 @@ impl FinanceApp {
                 y: iy,
                 width: cw,
                 height: item_h,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(8.0),
             });
 
@@ -1619,7 +1616,7 @@ impl FinanceApp {
                 y: iy + 8.0,
                 text: format!("{} {}", budget.category.icon(), budget.category.label()),
                 font_size: 15.0,
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(250.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1634,7 +1631,11 @@ impl FinanceApp {
                     Self::format_currency(budget.monthly_limit)
                 ),
                 font_size: 14.0,
-                color: if remaining >= 0 { GREEN } else { RED },
+                color: if remaining >= 0 {
+                    self.palette.green
+                } else {
+                    self.palette.red
+                },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(190.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1650,7 +1651,7 @@ impl FinanceApp {
                 y: bar_y,
                 width: bar_w,
                 height: bar_h,
-                color: SURFACE2,
+                color: self.palette.surface2,
                 corner_radii: CornerRadii::all(6.0),
             });
             let fill_w = (bar_w * usage.min(1.0)).max(0.0);
@@ -1671,7 +1672,7 @@ impl FinanceApp {
                 y: iy + 54.0,
                 text: format!("{:.0}% used", usage * 100.0),
                 font_size: 11.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1689,7 +1690,11 @@ impl FinanceApp {
                 y: iy + 54.0,
                 text: rem_text,
                 font_size: 11.0,
-                color: if remaining >= 0 { TEAL } else { RED },
+                color: if remaining >= 0 {
+                    self.palette.teal
+                } else {
+                    self.palette.red
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1707,7 +1712,7 @@ impl FinanceApp {
             y: cy,
             text: String::from("Accounts"),
             font_size: 18.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -1722,14 +1727,14 @@ impl FinanceApp {
             let ay = cy + 36.0 + row as f32 * (card_h + 12.0);
 
             let balance = self.account_balance(account.id);
-            let (bal_str, bal_color) = Self::format_currency_colored(balance);
+            let (bal_str, bal_color) = Self::format_currency_colored(balance, &self.palette);
 
             cmds.push(RenderCommand::FillRect {
                 x: ax,
                 y: ay,
                 width: card_w,
                 height: card_h,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(8.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1737,7 +1742,7 @@ impl FinanceApp {
                 y: ay + 10.0,
                 text: account.name.clone(),
                 font_size: 15.0,
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(card_w - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1747,7 +1752,7 @@ impl FinanceApp {
                 y: ay + 32.0,
                 text: account.account_type.label().to_string(),
                 font_size: 11.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1779,7 +1784,7 @@ impl FinanceApp {
                 self.view_month.year
             ),
             font_size: 18.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
             overflow: TextOverflow::Ellipsis,
@@ -1792,9 +1797,17 @@ impl FinanceApp {
 
         // Summary cards
         let summaries = [
-            ("Total Income", income, GREEN),
-            ("Total Expenses", expenses, RED),
-            ("Net Savings", net, if net >= 0 { TEAL } else { RED }),
+            ("Total Income", income, self.palette.green),
+            ("Total Expenses", expenses, self.palette.red),
+            (
+                "Net Savings",
+                net,
+                if net >= 0 {
+                    self.palette.teal
+                } else {
+                    self.palette.red
+                },
+            ),
         ];
         for (i, (label, amount, color)) in summaries.iter().enumerate() {
             let sx = cx + i as f32 * (cw / 3.0);
@@ -1804,7 +1817,7 @@ impl FinanceApp {
                 y: cy + 36.0,
                 width: sw,
                 height: 70.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(8.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1812,7 +1825,7 @@ impl FinanceApp {
                 y: cy + 46.0,
                 text: (*label).to_string(),
                 font_size: 12.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sw - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1835,7 +1848,7 @@ impl FinanceApp {
             y: cy + 120.0,
             text: format!("{tx_count} transactions this month"),
             font_size: 13.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -1847,7 +1860,7 @@ impl FinanceApp {
             y: cy + 150.0,
             text: String::from("Expense Breakdown by Category"),
             font_size: 16.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
             overflow: TextOverflow::Ellipsis,
@@ -1865,7 +1878,7 @@ impl FinanceApp {
                 y: ry + 4.0,
                 text: format!("{} {}", cat.icon(), cat.label()),
                 font_size: 12.0,
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(140.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1875,7 +1888,7 @@ impl FinanceApp {
                 y: ry + 2.0,
                 width: bar_w.max(4.0),
                 height: 20.0,
-                color: cat.color(),
+                color: cat.color(&self.palette),
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1883,7 +1896,7 @@ impl FinanceApp {
                 y: ry + 4.0,
                 text: format!("{} ({pct:.1}%)", Self::format_currency(*amount)),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(150.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1900,11 +1913,11 @@ impl FinanceApp {
                 text: format!("Savings Rate: {savings_rate:.1}%"),
                 font_size: 16.0,
                 color: if savings_rate >= 20.0 {
-                    GREEN
+                    self.palette.green
                 } else if savings_rate >= 0.0 {
-                    YELLOW
+                    self.palette.yellow
                 } else {
-                    RED
+                    self.palette.red
                 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(300.0),
@@ -1920,7 +1933,7 @@ impl FinanceApp {
             y: sy,
             width: self.width,
             height: Self::STATUS_H,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
@@ -1928,7 +1941,7 @@ impl FinanceApp {
             y: sy + 6.0,
             text: self.status_msg.clone(),
             font_size: 12.0,
-            color: SUBTEXT1,
+            color: self.palette.subtext1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(400.0),
             overflow: TextOverflow::Ellipsis,
@@ -1937,6 +1950,10 @@ impl FinanceApp {
 }
 
 impl App for FinanceApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Finance".to_string()
     }
@@ -2237,12 +2254,13 @@ mod tests {
 
     #[test]
     fn test_format_currency_colored() {
-        let (_, c1) = FinanceApp::format_currency_colored(100);
-        let (_, c2) = FinanceApp::format_currency_colored(-100);
-        let (_, c3) = FinanceApp::format_currency_colored(0);
-        assert_eq!(c1.r, GREEN.r);
-        assert_eq!(c2.r, RED.r);
-        assert_eq!(c3.r, TEXT_COLOR.r);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let (_, c1) = FinanceApp::format_currency_colored(100, &pal);
+        let (_, c2) = FinanceApp::format_currency_colored(-100, &pal);
+        let (_, c3) = FinanceApp::format_currency_colored(0, &pal);
+        assert_eq!(c1.r, pal.green.r);
+        assert_eq!(c2.r, pal.red.r);
+        assert_eq!(c3.r, pal.text.r);
     }
 
     #[test]
@@ -2550,5 +2568,64 @@ mod tests {
         app.handle_key("Down", false, false);
         app.handle_key("d", true, false);
         assert_eq!(app.transactions.len(), n - 1);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut FinanceApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = FinanceApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

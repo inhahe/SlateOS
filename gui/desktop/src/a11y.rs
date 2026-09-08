@@ -74,11 +74,12 @@ use guitk::style::CornerRadii;
 /// `design-decisions.md` §816 while nothing was reading it.
 ///
 /// See `known-issues.md`
-/// `TD-C-HIGH-CONTRAST-MODE-IS-NOT-CONNECTED-TO-ANYTHING`, which this
-/// half-closes: high contrast now reaches the palette. What remains open
-/// there is the *other* duplication -- `accessibility_settings.rs` models the
-/// same feature a third way, and the keyboard-accessibility halves of both
-/// modules still overlap.
+/// `TD-C-HIGH-CONTRAST-MODE-IS-NOT-CONNECTED-TO-ANYTHING`, which this closes:
+/// high contrast now reaches the palette, and the two duplications that entry
+/// also named are gone -- `accessibility_settings.rs` (which modelled the same
+/// feature a third way) was deleted under `design-decisions.md` §815, and the
+/// keyboard-accessibility half moved to `inputsettings` and
+/// `compositor::a11ykeys`.
 pub use appearance::HighContrastScheme as HighContrastTheme;
 
 // ============================================================================

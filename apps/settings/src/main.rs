@@ -10,6 +10,7 @@ mod associations;
 mod remote;
 mod snapshots;
 
+use appearance::Palette;
 use appearance::{
     AccentColor, AnimationSpeed, AppearanceFile, ColorFilter, HighContrastScheme, ThemeMode,
     TransparencyLevel,
@@ -37,41 +38,18 @@ use std::process::ExitCode;
 // Catppuccin Mocha theme colors
 // ============================================================================
 
-/// Background (base)
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-/// Surface layer 0
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-/// Surface layer 1 (sidebar)
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-/// Surface layer 2 (hover)
-const COL_SURFACE2: Color = Color::from_hex(0x585B70);
-/// Overlay 0
-const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
-/// Main text
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-/// Subtext (dimmer)
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-/// Subtext (dimmest)
-const COL_SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-/// Accent (blue)
-const COL_ACCENT: Color = Color::from_hex(0x89B4FA);
-/// Green (for toggles on)
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-/// Red (for destructive actions)
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-/// Peach (for warnings)
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
-/// Lavender
-#[allow(dead_code)]
-const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
-/// Teal
-#[allow(dead_code)]
-const COL_TEAL: Color = Color::from_hex(0x94E2D5);
-/// Mauve
-#[allow(dead_code)]
-const COL_MAUVE: Color = Color::from_hex(0xCBA6F7);
-/// Crust (darkest)
-const COL_CRUST: Color = Color::from_hex(0x11111B);
+// The sixteen colour constants that used to be here are gone.
+//
+// They were Catppuccin Mocha, hardcoded, so the Settings application drew
+// itself in a fixed dark theme no matter what the user had chosen -- on the
+// very page where they chose it, and including the high-contrast schemes
+// that `design-decisions.md` §816 had just made reach every other surface.
+// Every role they named exists on `appearance::Palette` under the same name,
+// so the conversion was one-to-one.
+//
+// §815 states the rule: whatever is themeable reads from the current
+// settings. Its practical test is that changing a theme axis must visibly
+// change the settings pages too.
 
 // ============================================================================
 // Layout constants
@@ -454,11 +432,11 @@ impl AccountType {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Admin => COL_ACCENT,
-            Self::Standard => COL_GREEN,
-            Self::Child => COL_PEACH,
+            Self::Admin => pal.accent,
+            Self::Standard => pal.green,
+            Self::Child => pal.peach,
         }
     }
 }
@@ -578,11 +556,11 @@ impl UpdateStatus {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Installed => COL_GREEN,
-            Self::Failed => COL_RED,
-            Self::Pending => COL_PEACH,
+            Self::Installed => pal.green,
+            Self::Failed => pal.red,
+            Self::Pending => pal.peach,
         }
     }
 }
@@ -935,6 +913,23 @@ impl SettingsState {
     /// `$HOME` would make every test's result depend on the machine.
     pub fn load_input(&mut self) {
         self.input = InputFile::load();
+    }
+
+    /// The palette this application draws itself with.
+    ///
+    /// Derived from the same `AppearanceSettings` the shell uses, so the
+    /// Settings window follows the theme, accent, high-contrast scheme and
+    /// colour filter chosen *in it* -- which it did not, when its colours were
+    /// sixteen hardcoded Catppuccin Mocha constants. `design-decisions.md`
+    /// §815: whatever is themeable reads from the current settings.
+    ///
+    /// Rebuilt per call rather than cached. It is a plain struct of colours and
+    /// the alternative is a copy that has to be invalidated whenever a setting
+    /// changes -- which is the same staleness bug in a different place, and
+    /// this application exists to change those settings.
+    #[must_use]
+    pub fn palette(&self) -> Palette {
+        Palette::from_settings(&self.appearance.settings)
     }
 
     /// Write the input settings back to `input.yaml`.
@@ -1291,8 +1286,8 @@ fn text_clipped(
 }
 
 /// Render a toggle switch (on/off).
-fn render_toggle(tree: &mut RenderTree, x: f32, y: f32, enabled: bool) {
-    let track_color = if enabled { COL_GREEN } else { COL_SURFACE2 };
+fn render_toggle(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, enabled: bool) {
+    let track_color = if enabled { pal.green } else { pal.surface2 };
     fill_rounded(
         tree,
         x,
@@ -1318,7 +1313,7 @@ fn render_toggle(tree: &mut RenderTree, x: f32, y: f32, enabled: bool) {
         handle_y,
         handle_diameter,
         handle_diameter,
-        COL_TEXT,
+        pal.text,
         handle_diameter / 2.0,
     );
 }
@@ -1354,7 +1349,7 @@ fn slider_band(x: f32, y: f32) -> (f32, f32, f32, f32) {
 
 /// Render a horizontal slider at the given position.
 /// Returns nothing; slider_value should be 0.0..=1.0.
-fn render_slider(tree: &mut RenderTree, x: f32, y: f32, value: f32) {
+fn render_slider(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, value: f32) {
     let (x, track_y) = slider_track(x, y);
 
     // Track background
@@ -1364,7 +1359,7 @@ fn render_slider(tree: &mut RenderTree, x: f32, y: f32, value: f32) {
         track_y,
         SLIDER_WIDTH,
         SLIDER_HEIGHT,
-        COL_SURFACE2,
+        pal.surface2,
         SLIDER_HEIGHT / 2.0,
     );
 
@@ -1377,7 +1372,7 @@ fn render_slider(tree: &mut RenderTree, x: f32, y: f32, value: f32) {
             track_y,
             fill_width,
             SLIDER_HEIGHT,
-            COL_ACCENT,
+            pal.accent,
             SLIDER_HEIGHT / 2.0,
         );
     }
@@ -1391,7 +1386,7 @@ fn render_slider(tree: &mut RenderTree, x: f32, y: f32, value: f32) {
         handle_y,
         SLIDER_HANDLE_RADIUS * 2.0,
         SLIDER_HANDLE_RADIUS * 2.0,
-        COL_TEXT,
+        pal.text,
         SLIDER_HANDLE_RADIUS,
     );
 }
@@ -1400,25 +1395,33 @@ fn render_slider(tree: &mut RenderTree, x: f32, y: f32, value: f32) {
 /// Returns the y offset for the next item.
 fn render_setting_row(
     tree: &mut RenderTree,
+    pal: &Palette,
     x: f32,
     y: f32,
     label: &str,
     content_width: f32,
 ) -> f32 {
-    tree.text(x, y + 14.0, label, COL_TEXT, 14.0);
+    tree.text(x, y + 14.0, label, pal.text, 14.0);
     let _ = content_width; // used by caller to position right-side widget
     y + ITEM_HEIGHT
 }
 
 /// Render a dropdown button (closed state).
-fn render_dropdown_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, width: f32) {
-    fill_rounded(tree, x, y + 6.0, width, 32.0, COL_SURFACE1, 6.0);
+fn render_dropdown_button(
+    tree: &mut RenderTree,
+    pal: &Palette,
+    x: f32,
+    y: f32,
+    label: &str,
+    width: f32,
+) {
+    fill_rounded(tree, x, y + 6.0, width, 32.0, pal.surface1, 6.0);
     tree.push(RenderCommand::StrokeRect {
         x,
         y: y + 6.0,
         width,
         height: 32.0,
-        color: COL_OVERLAY0,
+        color: pal.overlay0,
         line_width: 1.0,
         corner_radii: CornerRadii::all(6.0),
     });
@@ -1427,24 +1430,24 @@ fn render_dropdown_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, wi
         x + 10.0,
         y + 16.0,
         label,
-        COL_TEXT,
+        pal.text,
         13.0,
         width - 30.0,
     );
     // Down arrow indicator
-    tree.text(x + width - 20.0, y + 16.0, "\u{25BC}", COL_SUBTEXT0, 10.0);
+    tree.text(x + width - 20.0, y + 16.0, "\u{25BC}", pal.subtext0, 10.0);
 }
 
 /// Render a section header (bold text with divider line below).
-fn render_section_header(tree: &mut RenderTree, x: f32, y: f32, title: &str) -> f32 {
-    text_bold(tree, x, y, title, COL_TEXT, 16.0);
+fn render_section_header(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, title: &str) -> f32 {
+    text_bold(tree, x, y, title, pal.text, 16.0);
     let line_y = y + 24.0;
     tree.push(RenderCommand::Line {
         x1: x,
         y1: line_y,
         x2: x + 600.0,
         y2: line_y,
-        color: COL_SURFACE1,
+        color: pal.surface1,
         width: 1.0,
     });
     line_y + 12.0
@@ -1480,13 +1483,13 @@ fn pill_rect(index: usize, x: f32, y: f32) -> (f32, f32, f32, f32) {
 }
 
 /// Draw a row of pills, the selected one filled with the accent color.
-fn render_pill_row(tree: &mut RenderTree, x: f32, y: f32, items: &[(&str, bool)]) {
+fn render_pill_row(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, items: &[(&str, bool)]) {
     for (idx, (label, active)) in items.iter().enumerate() {
         let (px, py, pw, ph) = pill_rect(idx, x, y);
         let (bg, fg) = if *active {
-            (COL_ACCENT, COL_CRUST)
+            (pal.accent, pal.crust)
         } else {
-            (COL_SURFACE1, COL_SUBTEXT0)
+            (pal.surface1, pal.subtext0)
         };
         fill_rounded(tree, px, py, pw, ph, bg, 6.0);
         tree.text(px + 10.0, py + 7.0, label, fg, 12.0);
@@ -1530,9 +1533,9 @@ fn button_width(label: &str) -> f32 {
 /// Only for a button that has somewhere to send a click; one that does not is
 /// drawn by [`render_disabled_button`]. Which of the two runs is not a choice
 /// any caller makes — see [`PageSink::button_at`].
-fn render_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) {
+fn render_button(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, label: &str, color: Color) {
     fill_rounded(tree, x, y, button_width(label), BUTTON_HEIGHT, color, 6.0);
-    tree.text(x + 12.0, y + 8.0, label, COL_CRUST, 13.0);
+    tree.text(x + 12.0, y + 8.0, label, pal.crust, 13.0);
 }
 
 /// Draw a push button that has nothing behind it: dimmed fill, muted label.
@@ -1545,30 +1548,37 @@ fn render_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Colo
 ///
 /// Same width and height as the live button, from the same [`button_width`],
 /// so nothing on the page moves depending on whether a feature exists yet.
-fn render_disabled_button(tree: &mut RenderTree, x: f32, y: f32, label: &str) {
+fn render_disabled_button(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, label: &str) {
     fill_rounded(
         tree,
         x,
         y,
         button_width(label),
         BUTTON_HEIGHT,
-        COL_SURFACE0,
+        pal.surface0,
         6.0,
     );
-    tree.text(x + 12.0, y + 8.0, label, COL_OVERLAY0, 13.0);
+    tree.text(x + 12.0, y + 8.0, label, pal.overlay0, 13.0);
 }
 
 /// Draw a read-only text field showing `value`, inset within a row at `y`.
-fn render_text_field(tree: &mut RenderTree, x: f32, y: f32, value: &str, width: f32) {
+fn render_text_field(
+    tree: &mut RenderTree,
+    pal: &Palette,
+    x: f32,
+    y: f32,
+    value: &str,
+    width: f32,
+) {
     let field_y = y + 6.0;
     let field_h = 32.0;
-    fill_rounded(tree, x, field_y, width, field_h, COL_SURFACE0, 6.0);
+    fill_rounded(tree, x, field_y, width, field_h, pal.surface0, 6.0);
     tree.push(RenderCommand::StrokeRect {
         x,
         y: field_y,
         width,
         height: field_h,
-        color: COL_OVERLAY0,
+        color: pal.overlay0,
         line_width: 1.0,
         corner_radii: CornerRadii::all(6.0),
     });
@@ -1577,7 +1587,7 @@ fn render_text_field(tree: &mut RenderTree, x: f32, y: f32, value: &str, width: 
         x + 8.0,
         field_y + 8.0,
         value,
-        COL_TEXT,
+        pal.text,
         13.0,
         width - 16.0,
     );
@@ -1597,8 +1607,15 @@ const THEME_CARD_HEIGHT: f32 = 100.0;
 const THEME_CARD_SPACING: f32 = 16.0;
 
 /// Draw one theme-mode card with its top-left corner at (`x`, `y`).
-fn render_theme_card(tree: &mut RenderTree, x: f32, y: f32, mode: ThemeMode, selected: bool) {
-    let card_bg = if selected { COL_SURFACE1 } else { COL_SURFACE0 };
+fn render_theme_card(
+    tree: &mut RenderTree,
+    pal: &Palette,
+    x: f32,
+    y: f32,
+    mode: ThemeMode,
+    selected: bool,
+) {
+    let card_bg = if selected { pal.surface1 } else { pal.surface0 };
     fill_rounded(
         tree,
         x,
@@ -1615,7 +1632,7 @@ fn render_theme_card(tree: &mut RenderTree, x: f32, y: f32, mode: ThemeMode, sel
             y,
             width: THEME_CARD_WIDTH,
             height: THEME_CARD_HEIGHT,
-            color: COL_ACCENT,
+            color: pal.accent,
             line_width: 2.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -1640,7 +1657,7 @@ fn render_theme_card(tree: &mut RenderTree, x: f32, y: f32, mode: ThemeMode, sel
     );
     tree.text(preview_x + 8.0, preview_y + 18.0, "Aa", win_text, 16.0);
 
-    let label_color = if selected { COL_ACCENT } else { COL_SUBTEXT0 };
+    let label_color = if selected { pal.accent } else { pal.subtext0 };
     tree.text(
         x + THEME_CARD_WIDTH / 2.0 - 16.0,
         y + THEME_CARD_HEIGHT - 22.0,
@@ -1694,8 +1711,15 @@ fn picture_tile_dx(index: usize) -> f32 {
 }
 
 /// Draw one account-picture tile with its top-left corner at (`x`, `y`).
-fn render_account_picture(tree: &mut RenderTree, x: f32, y: f32, icon: &str, selected: bool) {
-    let bg = if selected { COL_SURFACE1 } else { COL_SURFACE0 };
+fn render_account_picture(
+    tree: &mut RenderTree,
+    pal: &Palette,
+    x: f32,
+    y: f32,
+    icon: &str,
+    selected: bool,
+) {
+    let bg = if selected { pal.surface1 } else { pal.surface0 };
     fill_rounded(tree, x, y, PICTURE_TILE_SIZE, PICTURE_TILE_SIZE, bg, 8.0);
     if selected {
         tree.push(RenderCommand::StrokeRect {
@@ -1703,12 +1727,12 @@ fn render_account_picture(tree: &mut RenderTree, x: f32, y: f32, icon: &str, sel
             y,
             width: PICTURE_TILE_SIZE,
             height: PICTURE_TILE_SIZE,
-            color: COL_ACCENT,
+            color: pal.accent,
             line_width: 2.0,
             corner_radii: CornerRadii::all(8.0),
         });
     }
-    tree.text(x + 12.0, y + 12.0, icon, COL_TEXT, 20.0);
+    tree.text(x + 12.0, y + 12.0, icon, pal.text, 20.0);
 }
 
 // --- Pointer size buttons ---------------------------------------------------
@@ -1731,11 +1755,18 @@ fn pointer_size_of(index: usize) -> u8 {
 }
 
 /// Draw one pointer-size button, inset within a row whose top edge is `y`.
-fn render_pointer_size_button(tree: &mut RenderTree, x: f32, y: f32, size: u8, active: bool) {
+fn render_pointer_size_button(
+    tree: &mut RenderTree,
+    pal: &Palette,
+    x: f32,
+    y: f32,
+    size: u8,
+    active: bool,
+) {
     let (bg, fg) = if active {
-        (COL_ACCENT, COL_CRUST)
+        (pal.accent, pal.crust)
     } else {
-        (COL_SURFACE1, COL_SUBTEXT0)
+        (pal.surface1, pal.subtext0)
     };
     fill_rounded(
         tree,
@@ -1771,7 +1802,14 @@ fn swatch_offset(index: usize) -> (f32, f32) {
 }
 
 /// Draw one accent swatch, ringed when it is the chosen one.
-fn render_swatch(tree: &mut RenderTree, x: f32, y: f32, color: Color, selected: bool) {
+fn render_swatch(
+    tree: &mut RenderTree,
+    pal: &Palette,
+    x: f32,
+    y: f32,
+    color: Color,
+    selected: bool,
+) {
     fill_rounded(
         tree,
         x,
@@ -1791,7 +1829,7 @@ fn render_swatch(tree: &mut RenderTree, x: f32, y: f32, color: Color, selected: 
             y: y - RING_GAP,
             width: ring,
             height: ring,
-            color: COL_TEXT,
+            color: pal.text,
             line_width: 2.0,
             corner_radii: CornerRadii::all(ring / 2.0),
         });
@@ -2061,6 +2099,19 @@ enum RowHit {
 /// provided method built from those, so a row's geometry is written down once
 /// for both sinks and cannot drift between them.
 trait PageSink {
+    /// The colours to draw with.
+    ///
+    /// Provided rather than required because only [`DrawSink`] draws anything:
+    /// [`HitSink`] and [`AnchorSink`] discard the draw closure unevaluated, so
+    /// the value they return is never read. They keep the default rather than
+    /// each carrying a palette they would never consult -- but the method is
+    /// on the trait rather than on `DrawSink` alone because the row helpers
+    /// below are shared by all three, and layout must not diverge between the
+    /// sink that paints and the sinks that measure.
+    fn palette(&self) -> Palette {
+        Palette::from_settings(&appearance::AppearanceSettings::default())
+    }
+
     /// Left edge of the content column.
     fn x(&self) -> f32;
 
@@ -2087,8 +2138,9 @@ trait PageSink {
 
     /// A section title with its divider rule.
     fn section(&mut self, title: &str) {
+        let pal = &self.palette();
         self.draw(|tree, x, y| {
-            render_section_header(tree, x, y, title);
+            render_section_header(tree, pal, x, y, title);
         });
         self.advance(SECTION_HEADER_HEIGHT);
     }
@@ -2100,7 +2152,8 @@ trait PageSink {
 
     /// A line of explanatory prose beneath a section header.
     fn note(&mut self, text: &str, height: f32) {
-        self.draw(|tree, x, y| tree.text(x, y + 4.0, text, COL_SUBTEXT0, 13.0));
+        let pal = &self.palette();
+        self.draw(|tree, x, y| tree.text(x, y + 4.0, text, pal.subtext0, 13.0));
         self.advance(height);
     }
 
@@ -2113,13 +2166,14 @@ trait PageSink {
         height: f32,
         control: impl FnOnce(&mut RenderTree, f32, f32),
     ) {
+        let pal = &self.palette();
         let control_x = self.control_x();
         if let Some(what) = what {
             let (x, y) = (self.x(), self.y());
             self.hit_rect(x - ROW_HIT_INSET, y, ROW_HIT_WIDTH, height, what);
         }
         self.draw(|tree, x, y| {
-            render_setting_row(tree, x, y, label, 0.0);
+            render_setting_row(tree, pal, x, y, label, 0.0);
             control(tree, control_x, y);
         });
         self.advance(height);
@@ -2132,6 +2186,7 @@ trait PageSink {
 
     /// A row whose control is a closed dropdown button.
     fn dropdown_row(&mut self, label: &str, id: DropdownId, value: &str) {
+        let pal = &self.palette();
         let (cx, y) = (self.control_x(), self.y());
         self.anchor(AnchorId::Dropdown(id), cx, y);
         self.row(
@@ -2139,19 +2194,20 @@ trait PageSink {
             Some(RowHit::Dropdown(id)),
             ITEM_HEIGHT,
             |tree, cx, y| {
-                render_dropdown_button(tree, cx, y, value, DROPDOWN_WIDTH);
+                render_dropdown_button(tree, pal, cx, y, value, DROPDOWN_WIDTH);
             },
         );
     }
 
     /// A row whose control is an on/off switch.
     fn toggle_row(&mut self, label: &str, id: ToggleId, on: bool) {
+        let pal = &self.palette();
         self.row(
             label,
             Some(RowHit::Toggle(id)),
             ITEM_HEIGHT,
             |tree, cx, y| {
-                render_toggle(tree, cx, y + 12.0, on);
+                render_toggle(tree, pal, cx, y + 12.0, on);
             },
         );
     }
@@ -2159,13 +2215,14 @@ trait PageSink {
     /// An indented per-application switch, as used by the permission lists.
     /// Tighter than a full row, and its own label rather than a setting row's.
     fn app_toggle_row(&mut self, label: &str, id: ToggleId, on: bool) {
+        let pal = &self.palette();
         let height = ITEM_HEIGHT - 8.0;
         let control_x = self.control_x();
         let (x, y) = (self.x(), self.y());
         self.hit_rect(x, y, ROW_HIT_WIDTH, height, RowHit::Toggle(id));
         self.draw(|tree, x, y| {
-            tree.text(x + 16.0, y + 14.0, label, COL_SUBTEXT1, 13.0);
-            render_toggle(tree, control_x, y + 12.0, on);
+            tree.text(x + 16.0, y + 14.0, label, pal.subtext1, 13.0);
+            render_toggle(tree, pal, control_x, y + 12.0, on);
         });
         self.advance(height);
     }
@@ -2186,12 +2243,13 @@ trait PageSink {
         value: f32,
         extra: impl FnOnce(&mut RenderTree, f32, f32),
     ) {
+        let pal = &self.palette();
         let (track_x, track_y) = slider_track(self.control_x(), self.y());
         self.anchor(AnchorId::Slider(id), track_x, track_y);
         let (bx, by, bw, bh) = slider_band(track_x, self.y());
         self.hit_rect(bx, by, bw, bh, RowHit::Slider(id));
         self.row(label, None, ITEM_HEIGHT, move |tree, cx, y| {
-            render_slider(tree, cx, y, value);
+            render_slider(tree, pal, cx, y, value);
             extra(tree, cx, y);
         });
     }
@@ -2205,13 +2263,15 @@ trait PageSink {
 
     /// A row whose control is a read-only text field.
     fn field_row(&mut self, label: &str, value: &str, width: f32) {
+        let pal = &self.palette();
         self.row(label, None, ITEM_HEIGHT, |tree, cx, y| {
-            render_text_field(tree, cx, y, value, width);
+            render_text_field(tree, pal, cx, y, value, width);
         });
     }
 
     /// A row whose control is a strip of pills, one of them selected.
     fn pill_row(&mut self, label: &str, id: PillId, items: &[(&str, bool)]) {
+        let pal = &self.palette();
         let pill_x = self.x() + PILL_ROW_X;
         let y = self.y();
         for idx in 0..items.len() {
@@ -2219,7 +2279,7 @@ trait PageSink {
             self.hit_rect(px, py, pw, ph, RowHit::Pill(id, idx));
         }
         self.row(label, None, ITEM_HEIGHT, |tree, _cx, y| {
-            render_pill_row(tree, pill_x, y, items);
+            render_pill_row(tree, pal, pill_x, y, items);
         });
     }
 
@@ -2239,13 +2299,16 @@ trait PageSink {
     /// feedback away and block anything drawn beneath it. Dimming is what
     /// tells the user *why* nothing happened.
     fn button_at(&mut self, dx: f32, dy: f32, label: &str, color: Color, what: Option<RowHit>) {
+        let pal = &self.palette();
         match what {
             Some(what) => {
                 let (x, y) = (self.x(), self.y());
                 self.hit_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, what);
-                self.draw(|tree, x, y| render_button(tree, x + dx, y + dy, label, color));
+                self.draw(|tree, x, y| render_button(tree, pal, x + dx, y + dy, label, color));
             }
-            None => self.draw(|tree, x, y| render_disabled_button(tree, x + dx, y + dy, label)),
+            None => {
+                self.draw(|tree, x, y| render_disabled_button(tree, pal, x + dx, y + dy, label))
+            }
         }
     }
 
@@ -2257,8 +2320,9 @@ trait PageSink {
     /// band — the button is the target, not the whole row, because the rest of
     /// the row is a label and pressing a label should do nothing.
     fn button_row(&mut self, label: &str, button: &str, color: Color, what: Option<RowHit>) {
+        let pal = &self.palette();
         self.draw(|tree, x, y| {
-            render_setting_row(tree, x, y, label, 0.0);
+            render_setting_row(tree, pal, x, y, label, 0.0);
         });
         self.button_at(CONTROL_COLUMN_DX, BUTTON_ROW_INSET_Y, button, color, what);
         self.advance(ITEM_HEIGHT);
@@ -2290,11 +2354,15 @@ trait PageSink {
 /// The sink that paints the page.
 struct DrawSink<'a> {
     tree: &'a mut RenderTree,
+    pal: Palette,
     x: f32,
     y: f32,
 }
 
 impl PageSink for DrawSink<'_> {
+    fn palette(&self) -> Palette {
+        self.pal
+    }
     fn x(&self) -> f32 {
         self.x
     }
@@ -2407,10 +2475,11 @@ impl SettingsState {
     /// trap is real: at equal arity the inherent method wins method lookup and
     /// every existing call keeps compiling while testing the other function.)
     pub fn render_tree(&self) -> RenderTree {
+        let pal = &self.palette();
         let mut tree = RenderTree::new();
 
         // Background
-        tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, COL_BASE);
+        tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, pal.base);
 
         // Sidebar
         self.render_sidebar(&mut tree);
@@ -2518,11 +2587,12 @@ impl SettingsState {
 
     /// Render the left sidebar with search bar and category list.
     fn render_sidebar(&self, tree: &mut RenderTree) {
+        let pal = &self.palette();
         // Sidebar background
-        tree.fill_rect(0.0, 0.0, SIDEBAR_WIDTH, self.window_height, COL_CRUST);
+        tree.fill_rect(0.0, 0.0, SIDEBAR_WIDTH, self.window_height, pal.crust);
 
         // App title
-        text_bold(tree, 20.0, 18.0, "Settings", COL_TEXT, 20.0);
+        text_bold(tree, 20.0, 18.0, "Settings", pal.text, 20.0);
 
         // Search bar
         let search_y = Self::search_top();
@@ -2532,7 +2602,7 @@ impl SettingsState {
             search_y,
             SIDEBAR_WIDTH - 24.0,
             SEARCH_BAR_HEIGHT,
-            COL_SURFACE0,
+            pal.surface0,
             8.0,
         );
         if self.search_query.is_empty() {
@@ -2540,7 +2610,7 @@ impl SettingsState {
                 24.0,
                 search_y + 12.0,
                 "\u{1F50D} Search settings...",
-                COL_OVERLAY0,
+                pal.overlay0,
                 13.0,
             );
         } else {
@@ -2549,7 +2619,7 @@ impl SettingsState {
                 24.0,
                 search_y + 12.0,
                 &self.search_query,
-                COL_TEXT,
+                pal.text,
                 13.0,
                 SIDEBAR_WIDTH - 52.0,
             );
@@ -2569,7 +2639,7 @@ impl SettingsState {
                     item_y,
                     SIDEBAR_WIDTH - 16.0,
                     Self::CATEGORY_ROW_PAINTED_HEIGHT,
-                    COL_SURFACE0,
+                    pal.surface0,
                     8.0,
                 );
                 // Accent bar on the left
@@ -2579,7 +2649,7 @@ impl SettingsState {
                     item_y + 8.0,
                     3.0,
                     CATEGORY_ITEM_HEIGHT - 20.0,
-                    COL_ACCENT,
+                    pal.accent,
                     2.0,
                 );
             } else if is_hovered {
@@ -2589,7 +2659,7 @@ impl SettingsState {
                     item_y,
                     SIDEBAR_WIDTH - 16.0,
                     Self::CATEGORY_ROW_PAINTED_HEIGHT,
-                    COL_SURFACE1,
+                    pal.surface1,
                     8.0,
                 );
             }
@@ -2599,25 +2669,26 @@ impl SettingsState {
                 24.0,
                 item_y + 12.0,
                 category.icon_char(),
-                COL_SUBTEXT0,
+                pal.subtext0,
                 16.0,
             );
 
             // Label
-            let label_color = if is_selected { COL_TEXT } else { COL_SUBTEXT1 };
+            let label_color = if is_selected { pal.text } else { pal.subtext1 };
             tree.text(52.0, item_y + 14.0, category.label(), label_color, 14.0);
         }
     }
 
     /// Render the page header with breadcrumb navigation.
     fn render_page_header(&self, tree: &mut RenderTree, content_x: f32) {
+        let pal = &self.palette();
         // Header background
         tree.fill_rect(
             content_x,
             0.0,
             self.window_width - content_x,
             HEADER_HEIGHT,
-            COL_BASE,
+            pal.base,
         );
 
         // Breadcrumb: Category > Page
@@ -2631,7 +2702,7 @@ impl SettingsState {
             content_x + CONTENT_PADDING,
             22.0,
             &breadcrumb,
-            COL_TEXT,
+            pal.text,
             18.0,
         );
 
@@ -2651,12 +2722,12 @@ impl SettingsState {
                     y1: tab_y + 16.0,
                     x2: tab_x + tab_width,
                     y2: tab_y + 16.0,
-                    color: COL_ACCENT,
+                    color: pal.accent,
                     width: 2.0,
                 });
-                tree.text(tab_x + 8.0, tab_y, label, COL_ACCENT, 13.0);
+                tree.text(tab_x + 8.0, tab_y, label, pal.accent, 13.0);
             } else {
-                tree.text(tab_x + 8.0, tab_y, label, COL_SUBTEXT0, 13.0);
+                tree.text(tab_x + 8.0, tab_y, label, pal.subtext0, 13.0);
             }
             tab_x += tab_width + 8.0;
         }
@@ -2707,6 +2778,7 @@ impl SettingsState {
     fn render_current_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
         let mut sink = DrawSink {
             tree,
+            pal: self.palette(),
             x,
             y: start_y,
         };
@@ -2735,6 +2807,7 @@ impl SettingsState {
         id: SliderId,
         extra: impl FnOnce(&mut RenderTree, f32, f32),
     ) {
+        let pal = &self.palette();
         let (Some(raw), Some(value)) = (self.slider_raw(id), self.slider_fraction(id)) else {
             return;
         };
@@ -2745,7 +2818,7 @@ impl SettingsState {
                     cx + SLIDER_WIDTH + 12.0,
                     y + 14.0,
                     readout,
-                    COL_SUBTEXT0,
+                    pal.subtext0,
                     12.0,
                 );
             }
@@ -2769,9 +2842,13 @@ impl SettingsState {
     // --- Display page ---
 
     fn build_display_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         s.section("Monitor Arrangement");
         let monitors = self.monitor_count;
-        s.draw(move |tree, x, y| Self::render_monitor_preview(tree, x, y, monitors));
+        // The palette is captured rather than read inside the closure: the
+        // closure outlives this borrow of `self`.
+        let pal = *pal;
+        s.draw(move |tree, x, y| Self::render_monitor_preview(tree, &pal, x, y, monitors));
         s.advance(120.0);
         s.gap();
 
@@ -2803,17 +2880,23 @@ impl SettingsState {
             // Range labels, sitting on the row boundary beneath the slider.
             s.draw(|tree, x, y| {
                 let cx = x + CONTROL_COLUMN_DX;
-                tree.text(cx, y, "Warm", COL_PEACH, 11.0);
-                tree.text(cx + SLIDER_WIDTH - 30.0, y, "Cool", COL_ACCENT, 11.0);
+                tree.text(cx, y, "Warm", pal.peach, 11.0);
+                tree.text(cx + SLIDER_WIDTH - 30.0, y, "Cool", pal.accent, 11.0);
             });
         }
     }
 
     /// Render a simplified monitor arrangement preview.
-    fn render_monitor_preview(tree: &mut RenderTree, x: f32, y: f32, monitor_count: u8) {
+    fn render_monitor_preview(
+        tree: &mut RenderTree,
+        pal: &Palette,
+        x: f32,
+        y: f32,
+        monitor_count: u8,
+    ) {
         let preview_bg_w = 500.0;
         let preview_bg_h = 110.0;
-        fill_rounded(tree, x, y, preview_bg_w, preview_bg_h, COL_SURFACE0, 8.0);
+        fill_rounded(tree, x, y, preview_bg_w, preview_bg_h, pal.surface0, 8.0);
 
         let monitor_w = 100.0;
         let monitor_h = 70.0;
@@ -2828,7 +2911,7 @@ impl SettingsState {
             #[allow(clippy::cast_precision_loss)]
             let mx = start_x + f32::from(i) * (monitor_w + spacing);
             // Monitor bezel
-            fill_rounded(tree, mx, start_y, monitor_w, monitor_h, COL_SURFACE2, 4.0);
+            fill_rounded(tree, mx, start_y, monitor_w, monitor_h, pal.surface2, 4.0);
             // Screen area
             fill_rounded(
                 tree,
@@ -2836,7 +2919,7 @@ impl SettingsState {
                 start_y + 4.0,
                 monitor_w - 8.0,
                 monitor_h - 12.0,
-                COL_ACCENT,
+                pal.accent,
                 2.0,
             );
             // Monitor number. Displays are numbered from one; `saturating_add`
@@ -2846,7 +2929,7 @@ impl SettingsState {
                 mx + monitor_w / 2.0 - 4.0,
                 start_y + monitor_h / 2.0 - 12.0,
                 &num_label,
-                COL_BASE,
+                pal.base,
                 16.0,
             );
         }
@@ -2855,6 +2938,7 @@ impl SettingsState {
     // --- Sound page ---
 
     fn build_sound_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         s.section("Output");
         let output_name = self
             .output_devices
@@ -2893,7 +2977,7 @@ impl SettingsState {
                 SliderId::AppVolume(index),
                 move |tree, cx, y| {
                     if muted {
-                        tree.text(cx + SLIDER_WIDTH + 50.0, y + 14.0, "(muted)", COL_RED, 11.0);
+                        tree.text(cx + SLIDER_WIDTH + 50.0, y + 14.0, "(muted)", pal.red, 11.0);
                     }
                 },
             );
@@ -2916,6 +3000,7 @@ impl SettingsState {
     /// `TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING` was filed about. Each
     /// gets its control here when it gets a consumer, and not before.
     fn build_mouse_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         s.section("Double-Click");
         s.note(
             "How long you have between two clicks for them to count as one double click.",
@@ -2930,12 +3015,12 @@ impl SettingsState {
         // whether a bigger number means a faster or a slower double click.
         s.draw(|tree, x, y| {
             let cx = x + CONTROL_COLUMN_DX;
-            tree.text(cx, y - 8.0, "Fast", COL_SUBTEXT0, 11.0);
+            tree.text(cx, y - 8.0, "Fast", pal.subtext0, 11.0);
             tree.text(
                 cx + SLIDER_WIDTH - 26.0,
                 y - 8.0,
                 "Slow",
-                COL_SUBTEXT0,
+                pal.subtext0,
                 11.0,
             );
         });
@@ -2945,6 +3030,7 @@ impl SettingsState {
     // --- Themes page ---
 
     fn build_themes_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         s.section("Theme Mode");
 
         let selected = self.appearance.settings.theme_mode;
@@ -2961,7 +3047,7 @@ impl SettingsState {
             );
             let mode = *mode;
             s.draw(move |tree, x, y| {
-                render_theme_card(tree, x + dx, y, mode, mode == selected);
+                render_theme_card(tree, pal, x + dx, y, mode, mode == selected);
             });
         }
         s.advance(THEME_CARD_HEIGHT);
@@ -2998,13 +3084,14 @@ impl SettingsState {
     // --- Colors page (accent color picker) ---
 
     fn build_colors_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         s.section("Accent Color");
         s.draw(|tree, x, y| {
             tree.text(
                 x,
                 y,
                 "Choose an accent color for buttons, links, and highlights:",
-                COL_SUBTEXT0,
+                pal.subtext0,
                 13.0,
             );
         });
@@ -3033,7 +3120,7 @@ impl SettingsState {
             };
             let selected = *accent == chosen;
             s.draw(move |tree, x, y| {
-                render_swatch(tree, x + dx, y + dy, color, selected);
+                render_swatch(tree, pal, x + dx, y + dy, color, selected);
             });
         }
 
@@ -3046,12 +3133,12 @@ impl SettingsState {
         let preview_color = self.appearance.settings.effective_accent();
         s.draw(move |tree, x, y| {
             fill_rounded(tree, x, y, 120.0, 36.0, preview_color, 6.0);
-            tree.text(x + 20.0, y + 10.0, "Sample Button", COL_CRUST, 13.0);
+            tree.text(x + 20.0, y + 10.0, "Sample Button", pal.crust, 13.0);
             tree.text(x + 150.0, y + 10.0, "Sample link text", preview_color, 13.0);
         });
         s.advance(50.0);
         s.draw(move |tree, x, y| {
-            fill_rounded(tree, x, y, 300.0, 8.0, COL_SURFACE1, 4.0);
+            fill_rounded(tree, x, y, 300.0, 8.0, pal.surface1, 4.0);
             fill_rounded(tree, x, y, 200.0, 8.0, preview_color, 4.0);
         });
     }
@@ -3059,6 +3146,7 @@ impl SettingsState {
     // --- Network status page ---
 
     fn build_network_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         s.section("Network Adapters");
         let control_x = s.control_x();
         for (idx, adapter) in self.adapters.iter().enumerate() {
@@ -3070,25 +3158,25 @@ impl SettingsState {
                 ITEM_HEIGHT + 4.0,
                 move |tree, x, y| {
                     let row_bg = if selected {
-                        COL_SURFACE0
+                        pal.surface0
                     } else {
                         Color::TRANSPARENT
                     };
                     fill_rounded(tree, x - 8.0, y, 600.0, ITEM_HEIGHT, row_bg, 6.0);
 
                     let status_color = if adapter.connected {
-                        COL_GREEN
+                        pal.green
                     } else {
-                        COL_OVERLAY0
+                        pal.overlay0
                     };
                     fill_rounded(tree, x, y + 18.0, 10.0, 10.0, status_color, 5.0);
 
-                    tree.text(x + 20.0, y + 8.0, &adapter.name, COL_TEXT, 14.0);
+                    tree.text(x + 20.0, y + 8.0, &adapter.name, pal.text, 14.0);
                     tree.text(
                         x + 20.0,
                         y + 26.0,
                         adapter.adapter_type.label(),
-                        COL_SUBTEXT0,
+                        pal.subtext0,
                         11.0,
                     );
 
@@ -3097,7 +3185,7 @@ impl SettingsState {
                     } else {
                         "Disconnected"
                     };
-                    tree.text(control_x, y + 14.0, status_text, COL_SUBTEXT0, 13.0);
+                    tree.text(control_x, y + 14.0, status_text, pal.subtext0, 13.0);
                 },
             );
         }
@@ -3136,6 +3224,7 @@ impl SettingsState {
     // --- Accounts page ---
 
     fn build_accounts_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         if self.current_page == SettingsPage::LoginOptions {
             self.build_login_options_page(s);
             return;
@@ -3150,7 +3239,7 @@ impl SettingsState {
             let avatar = account_picture_icon(account.picture);
             s.list_row(SelectId::Account, idx, 60.0, 64.0, move |tree, x, y| {
                 let row_bg = if selected {
-                    COL_SURFACE0
+                    pal.surface0
                 } else {
                     Color::TRANSPARENT
                 };
@@ -3164,60 +3253,61 @@ impl SettingsState {
                     y + 10.0,
                     avatar_size,
                     avatar_size,
-                    COL_SURFACE2,
+                    pal.surface2,
                     avatar_size / 2.0,
                 );
-                tree.text(x + 16.0, y + 20.0, avatar, COL_TEXT, 16.0);
+                tree.text(x + 16.0, y + 20.0, avatar, pal.text, 16.0);
 
-                text_bold(tree, x + 56.0, y + 12.0, &account.name, COL_TEXT, 14.0);
-                tree.text(x + 56.0, y + 32.0, &account.email, COL_SUBTEXT0, 12.0);
+                text_bold(tree, x + 56.0, y + 12.0, &account.name, pal.text, 14.0);
+                tree.text(x + 56.0, y + 32.0, &account.email, pal.subtext0, 12.0);
 
-                let badge_color = account.account_type.color();
+                let badge_color = account.account_type.color(pal);
                 fill_rounded(tree, control_x, y + 18.0, 90.0, 22.0, badge_color, 4.0);
                 tree.text(
                     control_x + 8.0,
                     y + 22.0,
                     account.account_type.label(),
-                    COL_CRUST,
+                    pal.crust,
                     11.0,
                 );
 
                 if account.is_current {
-                    tree.text(control_x + 100.0, y + 22.0, "(You)", COL_ACCENT, 11.0);
+                    tree.text(control_x + 100.0, y + 22.0, "(You)", pal.accent, 11.0);
                 }
             });
         }
         s.gap();
 
-        s.button_at(0.0, 0.0, "+ Add Account", COL_ACCENT, None);
-        s.button_at(140.0, 0.0, "- Remove Account", COL_RED, None);
+        s.button_at(0.0, 0.0, "+ Add Account", pal.accent, None);
+        s.button_at(140.0, 0.0, "- Remove Account", pal.red, None);
         s.advance(44.0);
         s.gap();
 
         // Current user details
         if let Some(account) = self.user_accounts.get(self.selected_account) {
             s.section("Account Details");
-            s.value_row("Name", &account.name, COL_TEXT);
-            s.value_row("Email", &account.email, COL_TEXT);
+            s.value_row("Name", &account.name, pal.text);
+            s.value_row("Email", &account.email, pal.text);
             s.value_row(
                 "Account Type",
                 account.account_type.label(),
-                account.account_type.color(),
+                account.account_type.color(pal),
             );
-            s.value_row("Login Count", &account.login_count.to_string(), COL_TEXT);
-            s.value_row("Last Login", &account.last_login, COL_TEXT);
+            s.value_row("Login Count", &account.login_count.to_string(), pal.text);
+            s.value_row("Last Login", &account.last_login, pal.text);
 
             // Family safety for child accounts
             if account.account_type == AccountType::Child {
                 s.gap();
                 s.section("Family Safety");
                 s.note("Screen time limits and content filters are active", 24.0);
-                s.button_at(0.0, 0.0, "Manage Family Settings", COL_PEACH, None);
+                s.button_at(0.0, 0.0, "Manage Family Settings", pal.peach, None);
             }
         }
     }
 
     fn build_login_options_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         s.section("Login Options");
         s.toggle_row(
             "Auto-login on startup",
@@ -3225,7 +3315,7 @@ impl SettingsState {
             self.auto_login_enabled,
         );
 
-        s.button_row("Password", "Change Password", COL_ACCENT, None);
+        s.button_row("Password", "Change Password", pal.accent, None);
         s.gap();
 
         s.section("Account Picture");
@@ -3248,7 +3338,7 @@ impl SettingsState {
             );
             let selected = chosen == Some(idx);
             s.draw(move |tree, x, y| {
-                render_account_picture(tree, x + dx, y, icon, selected);
+                render_account_picture(tree, pal, x + dx, y, icon, selected);
             });
         }
         s.advance(PICTURE_TILE_SIZE);
@@ -3259,24 +3349,25 @@ impl SettingsState {
     /// The Capabilities sub-page: a read-only summary of which apps hold
     /// which permissions. Nothing on it is clickable, so it is pure drawing.
     fn render_capabilities_summary(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
+        let pal = &self.palette();
         let mut y = start_y;
         // App permissions summary sub-page
-        y = render_section_header(tree, x, y, "App Permissions Summary");
+        y = render_section_header(tree, pal, x, y, "App Permissions Summary");
         tree.text(
             x,
             y + 4.0,
             "Overview of which apps have access to sensitive resources:",
-            COL_SUBTEXT0,
+            pal.subtext0,
             13.0,
         );
         y += 32.0;
 
         // Summary table header
-        text_bold(tree, x, y, "App", COL_TEXT, 13.0);
-        text_bold(tree, x + 200.0, y, "Location", COL_TEXT, 13.0);
-        text_bold(tree, x + 290.0, y, "Camera", COL_TEXT, 13.0);
-        text_bold(tree, x + 370.0, y, "Mic", COL_TEXT, 13.0);
-        text_bold(tree, x + 440.0, y, "Background", COL_TEXT, 13.0);
+        text_bold(tree, x, y, "App", pal.text, 13.0);
+        text_bold(tree, x + 200.0, y, "Location", pal.text, 13.0);
+        text_bold(tree, x + 290.0, y, "Camera", pal.text, 13.0);
+        text_bold(tree, x + 370.0, y, "Mic", pal.text, 13.0);
+        text_bold(tree, x + 440.0, y, "Background", pal.text, 13.0);
         y += 24.0;
 
         // Divider
@@ -3285,7 +3376,7 @@ impl SettingsState {
             y1: y,
             x2: x + 560.0,
             y2: y,
-            color: COL_SURFACE1,
+            color: pal.surface1,
             width: 1.0,
         });
         y += 8.0;
@@ -3308,7 +3399,7 @@ impl SettingsState {
             let mic = self.microphone_apps.iter().find(|a| a.app_name == app_name);
             let bg = self.background_apps.iter().find(|a| a.app_name == app_name);
 
-            tree.text(x, y + 4.0, app_name, COL_TEXT, 12.0);
+            tree.text(x, y + 4.0, app_name, pal.text, 12.0);
 
             let check = "\u{2713}";
             let cross = "\u{2717}";
@@ -3316,46 +3407,46 @@ impl SettingsState {
             // Location
             if let Some(p) = loc {
                 let (sym, col) = if p.allowed {
-                    (check, COL_GREEN)
+                    (check, pal.green)
                 } else {
-                    (cross, COL_RED)
+                    (cross, pal.red)
                 };
                 tree.text(x + 220.0, y + 4.0, sym, col, 13.0);
             } else {
-                tree.text(x + 220.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
+                tree.text(x + 220.0, y + 4.0, "-", pal.overlay0, 13.0);
             }
             // Camera
             if let Some(p) = cam {
                 let (sym, col) = if p.allowed {
-                    (check, COL_GREEN)
+                    (check, pal.green)
                 } else {
-                    (cross, COL_RED)
+                    (cross, pal.red)
                 };
                 tree.text(x + 310.0, y + 4.0, sym, col, 13.0);
             } else {
-                tree.text(x + 310.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
+                tree.text(x + 310.0, y + 4.0, "-", pal.overlay0, 13.0);
             }
             // Mic
             if let Some(p) = mic {
                 let (sym, col) = if p.allowed {
-                    (check, COL_GREEN)
+                    (check, pal.green)
                 } else {
-                    (cross, COL_RED)
+                    (cross, pal.red)
                 };
                 tree.text(x + 385.0, y + 4.0, sym, col, 13.0);
             } else {
-                tree.text(x + 385.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
+                tree.text(x + 385.0, y + 4.0, "-", pal.overlay0, 13.0);
             }
             // Background
             if let Some(p) = bg {
                 let (sym, col) = if p.allowed {
-                    (check, COL_GREEN)
+                    (check, pal.green)
                 } else {
-                    (cross, COL_RED)
+                    (cross, pal.red)
                 };
                 tree.text(x + 465.0, y + 4.0, sym, col, 13.0);
             } else {
-                tree.text(x + 465.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
+                tree.text(x + 465.0, y + 4.0, "-", pal.overlay0, 13.0);
             }
 
             y += 28.0;
@@ -3365,6 +3456,7 @@ impl SettingsState {
     // --- Privacy page ---
 
     fn build_privacy_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         if self.current_page == SettingsPage::Capabilities {
             s.draw(|tree, x, y| self.render_capabilities_summary(tree, x, y));
             return;
@@ -3419,7 +3511,7 @@ impl SettingsState {
 
         s.section("Activity History");
         s.note("Clear your activity history stored on this device.", 28.0);
-        s.button_at(0.0, 0.0, "Clear Activity History", COL_RED, None);
+        s.button_at(0.0, 0.0, "Clear Activity History", pal.red, None);
     }
 
     // --- Accessibility page ---
@@ -3433,6 +3525,7 @@ impl SettingsState {
     }
 
     fn build_audio_accessibility_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         s.section("Audio Accessibility");
         s.toggle_row("Mono audio", ToggleId::MonoAudio, self.mono_audio);
         s.toggle_row(
@@ -3453,12 +3546,12 @@ impl SettingsState {
             self.slider(s, "Voice Rate", SliderId::NarratorRate);
             s.draw(|tree, x, y| {
                 let cx = x + CONTROL_COLUMN_DX;
-                tree.text(cx, y - 12.0, "Slow", COL_SUBTEXT0, 11.0);
+                tree.text(cx, y - 12.0, "Slow", pal.subtext0, 11.0);
                 tree.text(
                     cx + SLIDER_WIDTH - 24.0,
                     y - 12.0,
                     "Fast",
-                    COL_SUBTEXT0,
+                    pal.subtext0,
                     11.0,
                 );
             });
@@ -3473,6 +3566,7 @@ impl SettingsState {
     }
 
     fn build_interaction_accessibility_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         s.section("Keyboard");
 
         for (label, id, on, hint) in [
@@ -3496,7 +3590,7 @@ impl SettingsState {
             ),
         ] {
             s.toggle_row(label, id, on);
-            s.draw(move |tree, x, y| tree.text(x + 16.0, y - 4.0, hint, COL_SUBTEXT0, 11.0));
+            s.draw(move |tree, x, y| tree.text(x + 16.0, y - 4.0, hint, pal.subtext0, 11.0));
             s.advance(12.0);
         }
 
@@ -3524,7 +3618,7 @@ impl SettingsState {
             );
             let size = pointer_size_of(idx);
             s.draw(move |tree, x, y| {
-                render_pointer_size_button(tree, x + dx, y, size, size == chosen);
+                render_pointer_size_button(tree, pal, x + dx, y, size, size == chosen);
             });
         }
         s.row("Pointer Size", None, ITEM_HEIGHT, |_tree, _cx, _y| {});
@@ -3537,18 +3631,19 @@ impl SettingsState {
     }
 
     fn build_visual_accessibility_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         s.section("Display");
 
         self.slider(s, "Text Size", SliderId::TextSize);
         // Range labels, on the boundary between this row and the next.
         s.draw(|tree, x, y| {
             let cx = x + CONTROL_COLUMN_DX;
-            tree.text(cx, y - 8.0, "50%", COL_SUBTEXT0, 11.0);
+            tree.text(cx, y - 8.0, "50%", pal.subtext0, 11.0);
             tree.text(
                 cx + SLIDER_WIDTH - 28.0,
                 y - 8.0,
                 "250%",
-                COL_SUBTEXT0,
+                pal.subtext0,
                 11.0,
             );
         });
@@ -3595,28 +3690,29 @@ impl SettingsState {
             s.advance(8.0);
             let label = self.appearance.settings.color_filter.label();
             s.draw(move |tree, x, y| {
-                fill_rounded(tree, x, y, 300.0, 40.0, COL_SURFACE0, 6.0);
+                fill_rounded(tree, x, y, 300.0, 40.0, pal.surface0, 6.0);
                 tree.text(
                     x + 12.0,
                     y + 12.0,
                     "Color filter active: ",
-                    COL_SUBTEXT0,
+                    pal.subtext0,
                     12.0,
                 );
-                tree.text(x + 150.0, y + 12.0, label, COL_ACCENT, 12.0);
+                tree.text(x + 150.0, y + 12.0, label, pal.accent, 12.0);
             });
             s.advance(40.0);
         }
     }
 
     fn build_update_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         match self.current_page {
             SettingsPage::Recovery => {
                 self.build_recovery_page(s);
                 return;
             }
             SettingsPage::Snapshots => {
-                Self::build_snapshots_page(s);
+                Self::build_snapshots_page(s, pal);
                 return;
             }
             _ => {} // SystemUpdates (default)
@@ -3625,9 +3721,9 @@ impl SettingsState {
         s.section("System Information");
         let version = self.os_version.clone();
         s.draw(move |tree, x, y| {
-            fill_rounded(tree, x, y, 580.0, 60.0, COL_SURFACE0, 8.0);
-            text_bold(tree, x + 16.0, y + 12.0, "Slate OS", COL_TEXT, 16.0);
-            tree.text(x + 16.0, y + 36.0, &version, COL_SUBTEXT0, 13.0);
+            fill_rounded(tree, x, y, 580.0, 60.0, pal.surface0, 8.0);
+            text_bold(tree, x + 16.0, y + 12.0, "Slate OS", pal.text, 16.0);
+            tree.text(x + 16.0, y + 36.0, &version, pal.subtext0, 13.0);
         });
         s.advance(72.0);
 
@@ -3645,7 +3741,7 @@ impl SettingsState {
             0.0,
             0.0,
             btn_label,
-            COL_ACCENT,
+            pal.accent,
             Some(RowHit::Press(ButtonId::CheckForUpdates)),
         );
         if !checking {
@@ -3654,7 +3750,7 @@ impl SettingsState {
                     x + 160.0,
                     y + 10.0,
                     "Your device is up to date",
-                    COL_GREEN,
+                    pal.green,
                     13.0,
                 );
             });
@@ -3672,7 +3768,7 @@ impl SettingsState {
             "{:02}:00 - {:02}:00",
             self.active_hours_start, self.active_hours_end
         );
-        s.value_row("Active hours (no restart)", &hours_label, COL_TEXT);
+        s.value_row("Active hours (no restart)", &hours_label, pal.text);
         s.gap();
 
         s.section("Advanced");
@@ -3695,14 +3791,14 @@ impl SettingsState {
                 entry.description.clone(),
                 entry.date.clone(),
             );
-            let (status_color, status_label) = (entry.status.color(), entry.status.label());
+            let (status_color, status_label) = (entry.status.color(pal), entry.status.label());
             s.draw(move |tree, x, y| {
-                fill_rounded(tree, x, y, 580.0, 44.0, COL_SURFACE0, 6.0);
-                tree.text(x + 12.0, y + 8.0, &kb, COL_TEXT, 13.0);
-                tree.text(x + 120.0, y + 8.0, &desc, COL_SUBTEXT0, 12.0);
-                tree.text(x + 12.0, y + 26.0, &date, COL_OVERLAY0, 11.0);
+                fill_rounded(tree, x, y, 580.0, 44.0, pal.surface0, 6.0);
+                tree.text(x + 12.0, y + 8.0, &kb, pal.text, 13.0);
+                tree.text(x + 120.0, y + 8.0, &desc, pal.subtext0, 12.0);
+                tree.text(x + 12.0, y + 26.0, &date, pal.overlay0, 11.0);
                 fill_rounded(tree, x + 490.0, y + 12.0, 72.0, 20.0, status_color, 4.0);
-                tree.text(x + 500.0, y + 15.0, status_label, COL_CRUST, 11.0);
+                tree.text(x + 500.0, y + 15.0, status_label, pal.crust, 11.0);
             });
             s.advance(52.0);
         }
@@ -3711,56 +3807,57 @@ impl SettingsState {
     /// The Recovery sub-page: two cards, each with a button that has no state
     /// behind it yet and so registers no click target.
     fn build_recovery_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         s.section("Recovery Options");
         s.note("If your PC isn't working well, recovering may help.", 32.0);
 
         s.draw(|tree, x, y| {
-            fill_rounded(tree, x, y, 580.0, 80.0, COL_SURFACE0, 8.0);
+            fill_rounded(tree, x, y, 580.0, 80.0, pal.surface0, 8.0);
             text_bold(
                 tree,
                 x + 16.0,
                 y + 12.0,
                 "Go Back to Previous Version",
-                COL_TEXT,
+                pal.text,
                 14.0,
             );
             tree.text(
                 x + 16.0,
                 y + 34.0,
                 "Revert to the previous OS build. Available for 10 days",
-                COL_SUBTEXT0,
+                pal.subtext0,
                 12.0,
             );
-            tree.text(x + 16.0, y + 50.0, "after an update.", COL_SUBTEXT0, 12.0);
+            tree.text(x + 16.0, y + 50.0, "after an update.", pal.subtext0, 12.0);
         });
-        s.button_at(440.0, 28.0, "Go Back", COL_PEACH, None);
+        s.button_at(440.0, 28.0, "Go Back", pal.peach, None);
         s.advance(96.0);
 
         s.draw(|tree, x, y| {
-            fill_rounded(tree, x, y, 580.0, 80.0, COL_SURFACE0, 8.0);
-            text_bold(tree, x + 16.0, y + 12.0, "Fresh Start", COL_TEXT, 14.0);
+            fill_rounded(tree, x, y, 580.0, 80.0, pal.surface0, 8.0);
+            text_bold(tree, x + 16.0, y + 12.0, "Fresh Start", pal.text, 14.0);
             tree.text(
                 x + 16.0,
                 y + 34.0,
                 "Reinstall the OS while keeping your personal files.",
-                COL_SUBTEXT0,
+                pal.subtext0,
                 12.0,
             );
             tree.text(
                 x + 16.0,
                 y + 50.0,
                 "All apps and settings will be removed.",
-                COL_SUBTEXT0,
+                pal.subtext0,
                 12.0,
             );
         });
-        s.button_at(440.0, 28.0, "Reset", COL_RED, None);
+        s.button_at(440.0, 28.0, "Reset", pal.red, None);
         s.advance(96.0);
     }
 
     /// The Snapshots sub-page: package generations available for rollback.
     /// Read-only until the package manager exposes a rollback call.
-    fn build_snapshots_page<S: PageSink>(s: &mut S) {
+    fn build_snapshots_page<S: PageSink>(s: &mut S, pal: &Palette) {
         s.section("System Snapshots");
         s.note("Package generation snapshots for safe rollback:", 32.0);
 
@@ -3776,16 +3873,16 @@ impl SettingsState {
             let is_current = desc == "Current";
             s.draw(move |tree, x, y| {
                 let bg = if is_current {
-                    COL_SURFACE1
+                    pal.surface1
                 } else {
-                    COL_SURFACE0
+                    pal.surface0
                 };
                 fill_rounded(tree, x, y, 580.0, 48.0, bg, 6.0);
-                text_bold(tree, x + 12.0, y + 8.0, name, COL_TEXT, 13.0);
-                tree.text(x + 12.0, y + 28.0, desc, COL_SUBTEXT0, 11.0);
-                tree.text(control_x, y + 16.0, date, COL_SUBTEXT0, 12.0);
+                text_bold(tree, x + 12.0, y + 8.0, name, pal.text, 13.0);
+                tree.text(x + 12.0, y + 28.0, desc, pal.subtext0, 11.0);
+                tree.text(control_x, y + 16.0, date, pal.subtext0, 12.0);
                 if is_current {
-                    tree.text(x + 520.0, y + 16.0, "\u{2713}", COL_GREEN, 16.0);
+                    tree.text(x + 520.0, y + 16.0, "\u{2713}", pal.green, 16.0);
                 }
             });
             s.advance(56.0);
@@ -3795,26 +3892,27 @@ impl SettingsState {
     // --- Placeholder for unimplemented pages ---
 
     fn build_placeholder_page<S: PageSink>(&self, s: &mut S) {
+        let pal = &self.palette();
         let page_name = self.current_page.label();
         s.draw(move |tree, x, y| {
-            text_bold(tree, x, y + 20.0, page_name, COL_TEXT, 22.0);
+            text_bold(tree, x, y + 20.0, page_name, pal.text, 22.0);
             tree.text(
                 x,
                 y + 56.0,
                 "This page is under construction.",
-                COL_SUBTEXT0,
+                pal.subtext0,
                 14.0,
             );
 
             // Visual placeholder: a card with icon
             let card_y = y + 100.0;
-            fill_rounded(tree, x, card_y, 400.0, 150.0, COL_SURFACE0, 12.0);
-            tree.text(x + 170.0, card_y + 50.0, "\u{1F6A7}", COL_PEACH, 36.0);
+            fill_rounded(tree, x, card_y, 400.0, 150.0, pal.surface0, 12.0);
+            tree.text(x + 170.0, card_y + 50.0, "\u{1F6A7}", pal.peach, 36.0);
             tree.text(
                 x + 120.0,
                 card_y + 110.0,
                 "Coming soon...",
-                COL_SUBTEXT0,
+                pal.subtext0,
                 14.0,
             );
         });
@@ -3997,6 +4095,7 @@ impl SettingsState {
     }
 
     fn render_open_dropdown(&self, tree: &mut RenderTree) {
+        let pal = &self.palette();
         let Some(layout) = self.dropdown_layout() else {
             return;
         };
@@ -4031,7 +4130,7 @@ impl SettingsState {
             dropdown_y,
             popup_w,
             popup_h,
-            COL_SURFACE0,
+            pal.surface0,
             8.0,
         );
         tree.push(RenderCommand::StrokeRect {
@@ -4039,7 +4138,7 @@ impl SettingsState {
             y: dropdown_y,
             width: popup_w,
             height: popup_h,
-            color: COL_OVERLAY0,
+            color: pal.overlay0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -4065,12 +4164,12 @@ impl SettingsState {
                     iy,
                     popup_w - 8.0,
                     DROPDOWN_ITEM_HEIGHT - 2.0,
-                    COL_SURFACE1,
+                    pal.surface1,
                     4.0,
                 );
             }
 
-            let item_color = if is_selected { COL_ACCENT } else { COL_TEXT };
+            let item_color = if is_selected { pal.accent } else { pal.text };
             text_clipped(
                 tree,
                 dropdown_x + 12.0,
@@ -4087,7 +4186,7 @@ impl SettingsState {
                     dropdown_x + popup_w - 24.0,
                     iy + 10.0,
                     "\u{2713}",
-                    COL_ACCENT,
+                    pal.accent,
                     14.0,
                 );
             }
@@ -4102,7 +4201,7 @@ impl SettingsState {
                 dropdown_x + 12.0,
                 layout.row_top(window.count) + 10.0,
                 &format!("{hidden} more"),
-                COL_OVERLAY0,
+                pal.overlay0,
                 11.0,
             );
         }
@@ -5586,12 +5685,13 @@ mod tests {
     fn a_button_looks_live_exactly_when_it_is_live() {
         let mut seen = 0_usize;
         for (page, state) in states_to_sweep() {
+            let pal = state.palette();
             for (label, bx, by, fill, ink) in painted_buttons(&state) {
                 seen += 1;
                 let cx = bx + button_width(&label) / 2.0;
                 let cy = by + BUTTON_HEIGHT / 2.0;
                 let clickable = press_band_covers(&state, cx, cy);
-                let looks_live = fill != COL_SURFACE0;
+                let looks_live = fill != pal.surface0;
                 assert_eq!(
                     looks_live,
                     clickable,
@@ -5600,14 +5700,14 @@ mod tests {
                     if looks_live { "live" } else { "dimmed" },
                     if clickable { "clickable" } else { "inert" },
                 );
-                let want_ink = if looks_live { COL_CRUST } else { COL_OVERLAY0 };
+                let want_ink = if looks_live { pal.crust } else { pal.overlay0 };
                 assert_eq!(
                     ink,
                     want_ink,
                     "on {}, \"{label}\" has a {} fill under a {} label",
                     page.label(),
                     if looks_live { "live" } else { "dimmed" },
-                    if ink == COL_CRUST { "live" } else { "dimmed" },
+                    if ink == pal.crust { "live" } else { "dimmed" },
                 );
             }
         }
@@ -5630,8 +5730,9 @@ mod tests {
     fn the_buttons_with_nothing_behind_them_are_the_ones_on_record() {
         let mut inert: Vec<String> = Vec::new();
         for (_, state) in states_to_sweep() {
+            let pal = state.palette();
             for (label, _, _, fill, _) in painted_buttons(&state) {
-                if fill == COL_SURFACE0 && !inert.contains(&label) {
+                if fill == pal.surface0 && !inert.contains(&label) {
                     inert.push(label);
                 }
             }
@@ -5663,8 +5764,9 @@ mod tests {
     fn pressing_a_dimmed_button_is_ignored_rather_than_swallowed() {
         let mut checked = 0_usize;
         for (page, state) in states_to_sweep() {
+            let pal = state.palette();
             for (label, bx, by, fill, _) in painted_buttons(&state) {
-                if fill != COL_SURFACE0 {
+                if fill != pal.surface0 {
                     continue;
                 }
                 checked += 1;
@@ -5702,6 +5804,7 @@ mod tests {
     /// instead of being silently credited to the right one.
     fn painted_picture_tiles(state: &SettingsState) -> Vec<(String, f32, f32, bool)> {
         let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+        let pal = state.palette();
         let tree = state.render_tree();
 
         let mut rings: Vec<(f32, f32)> = Vec::new();
@@ -5714,7 +5817,7 @@ mod tests {
                 color,
                 ..
             } = cmd
-                && *color == COL_ACCENT
+                && *color == pal.accent
                 && close(*width, PICTURE_TILE_SIZE)
                 && close(*height, PICTURE_TILE_SIZE)
             {
@@ -6748,6 +6851,61 @@ mod tests {
                 "the switch moved on screen but input.yaml still says off, so                  the compositor will never hear about it"
             );
         });
+    }
+
+    /// The practical test §815 states: changing a theme axis must visibly
+    /// change the settings pages too.
+    ///
+    /// This application drew itself in sixteen hardcoded Catppuccin Mocha
+    /// constants, so it stayed dark on the light theme, ignored the accent,
+    /// and ignored the high-contrast schemes -- on the very page where all
+    /// three are chosen. Asserted on the pixels the page actually emits rather
+    /// than on `palette()`, which would only prove the palette can be built.
+    #[test]
+    fn the_settings_pages_follow_the_theme_they_are_used_to_choose() {
+        fn drawn_colours(state: &SettingsState) -> Vec<Color> {
+            state
+                .render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Themes;
+        state.appearance.settings.theme_mode = ThemeMode::Dark;
+        let dark = drawn_colours(&state);
+        assert!(
+            !dark.is_empty(),
+            "the page drew no filled rectangles at all"
+        );
+
+        state.appearance.settings.theme_mode = ThemeMode::Light;
+        let light = drawn_colours(&state);
+        assert_eq!(
+            dark.len(),
+            light.len(),
+            "the theme changed the layout, not just the colours"
+        );
+        assert_ne!(
+            dark, light,
+            "the settings pages drew identically on the dark and light themes,              so they are still painting themselves from constants"
+        );
+
+        // High contrast is the case that matters most, and the one a
+        // hardcoded palette fails silently: the user asks for maximum legibility
+        // and this window alone ignores them.
+        state.appearance.settings.theme_mode = ThemeMode::Dark;
+        state.appearance.settings.high_contrast = Some(HighContrastScheme::WhiteOnBlack);
+        let contrasted = drawn_colours(&state);
+        assert_ne!(
+            dark, contrasted,
+            "high contrast changed every other surface but not this one"
+        );
     }
 
     /// The two settings files are saved independently.

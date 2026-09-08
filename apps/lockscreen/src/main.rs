@@ -1162,15 +1162,28 @@ impl LockScreen {
     /// reasonably let one through and a lock screen may not. Everything else
     /// is already decided by [`AuthOutcome::is_accepted`].
     ///
-    /// **This currently accepts it, which is the behaviour this screen has
-    /// always had, and it is an open question rather than a settled one** —
-    /// see `open-questions.md`. Refusing is the secure answer and is what lane
-    /// B recommends; it also means a user whose account has no password can
-    /// reach a screen that will never let them back in. Both are bad and the
-    /// choice is the operator's. It is one function so that changing it is one
-    /// line, and it is *not* changed as part of the refactor that introduced
-    /// it: a rework that quietly alters who can unlock a machine is two
-    /// changes wearing one commit message.
+    /// **The question this used to describe as open was answered on
+    /// 2026-09-07** — `design-decisions.md` §818, by the operator — and the
+    /// answer was neither of the two this comment used to weigh. It is not
+    /// "accept the empty password" (a lock that does not lock) and not "refuse
+    /// it" (which strands the user). It is that **an account with no password
+    /// is never locked in the first place**, so this screen should not be in
+    /// front of one at all.
+    ///
+    /// So accepting stays, and its meaning changes: it is no longer this
+    /// screen's policy on a contested case, it is the fallback for a state
+    /// §818 says cannot arise. Refusing here would strand exactly the user
+    /// §818 was decided to protect, on the one path that reaches it — an
+    /// account whose password was removed while the screen was already up.
+    ///
+    /// **§818 is not implemented, and not here is why.** "Never lock" is a
+    /// decision taken by whatever *locks* the screen, and this process only
+    /// ever runs after that decision has been made. It cannot make it: it has
+    /// no trustworthy way to learn whose session it is locking. Reading
+    /// `$USER` would be worse than the bug, since an environment variable an
+    /// attacker can set would then decide whether the machine locks. See
+    /// `known-issues.md`
+    /// `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.
     #[must_use]
     pub const fn unlocks_for(outcome: AuthOutcome) -> bool {
         matches!(outcome, AuthOutcome::Accepted | AuthOutcome::NoPassword)
@@ -2641,8 +2654,11 @@ mod tests {
         let mut ls = no_password_lockscreen();
         ls.enter_password_mode();
         // Reported as `NoPassword`, not `Accepted`: nothing was checked. The
-        // screen unlocks for it only because `unlocks_for` says so, which is
-        // the open question that function documents.
+        // screen unlocks for it because `unlocks_for` says so -- which is now
+        // a documented fallback rather than an open question. Under §818 this
+        // screen should never have been in front of a passwordless account;
+        // reaching here means something locked one anyway, and stranding the
+        // user is the one outcome that decision ruled out.
         assert_eq!(ls.submit_password(), AuthOutcome::NoPassword);
         assert!(ls.take_unlock_request());
     }

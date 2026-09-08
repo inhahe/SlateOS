@@ -79,7 +79,6 @@
 pub mod a11y;
 pub mod about;
 pub mod animations;
-pub mod appearance_settings;
 pub mod backup_settings;
 pub mod bluetooth;
 pub mod blur;
@@ -89,7 +88,6 @@ pub mod context_ext;
 pub mod datetime_settings;
 pub mod default_apps;
 pub mod device_settings;
-pub mod display_settings;
 /// The sweep that proves a module draws nothing that is immediately erased.
 ///
 /// Test-only, like [`palette_check`]: it exists to check the other modules'
@@ -104,7 +102,6 @@ pub mod input_method;
 pub mod language_settings;
 pub mod launcher;
 pub mod login_screen;
-pub mod mouse_settings;
 pub mod multimon;
 pub mod network_indicator;
 pub mod network_settings;
@@ -1451,7 +1448,7 @@ impl DesktopShell {
             menu_widget: None,
             widget_drag: None,
             widgets_dirty: false,
-            appearance_watch: config::Watcher::new(appearance_settings::CONFIG_NAME),
+            appearance_watch: config::Watcher::new(appearance::CONFIG_NAME),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),

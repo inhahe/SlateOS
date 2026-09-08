@@ -124000,15 +124000,10 @@ neither part of the three features above:
   nothing. They are not superseded — they are features never built — so the
   fields were left rather than deleted, since deleting them would remove the
   only record that they are wanted.
-- `gui/desktop/src/accessibility_settings.rs` is a 2 019-line settings panel
-  **nothing constructs**. Every one of its public types —
-  `AccessibilitySettings`, `A11yFeature`, `A11yTab`, `VisualSettings`,
-  `AudioA11ySettings`, `ContrastMode`, `TextScale`, `CursorIndicator` — has
-  zero uses outside the file. `design-decisions.md` §815 (the operator's
-  answer to C-Q6) already settles what happens to it: screens you *open* move
-  to the Settings app and the shell's copies go. This is one of those copies,
-  and the Settings app has the working version. It should be deleted as part
-  of executing §815 rather than piecemeal here.
+- ~~`gui/desktop/src/accessibility_settings.rs`, the 2 019-line panel nothing
+  constructs.~~ **Done 2026-09-08:** deleted under §815. Twelve of its sixteen
+  features were already in the Settings app; the other four are logged as
+  `TD-C-FOUR-ACCESSIBILITY-FEATURES-EXISTED-ONLY-AS-A-DEAD-PANELS-CONTROLS`.
 
 **Superseded — what was still not connected: the Settings UI.**
 `gui/desktop/src/accessibility_settings.rs` and `apps/settings` still write to
@@ -124129,3 +124124,282 @@ because nothing else is runnable.
 `kernel/src/syscall/handlers.rs` (`sys_pty_slave_read`,
 `sys_pty_slave_try_read`), `kernel/src/tty/mod.rs` (`try_read`,
 `canonical_try_read`, `raw_try_read`).
+
+---
+
+## TD-C-FOUR-DISPLAY-FEATURES-EXISTED-ONLY-IN-A-DEAD-SHELL-PANEL
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** nowhere any more. They were in `gui/desktop/src/display_settings.rs`,
+deleted under `design-decisions.md` §815 along with `appearance_settings.rs`
+and `mouse_settings.rs` — 4 814 lines between them, none of it reachable.
+
+**In short:** the shell had three settings panels nothing ever opened. §815
+says screens you open move to the Settings app and the shell's copies go, so
+they went. Almost everything they offered is in the Settings app already. Four
+display features are not, and this is the record of them.
+
+**The four.** None was working before — the panels were unreachable, so every
+one of these was a control nothing read. Nothing regressed.
+
+| feature | implemented anywhere? | note |
+|---|---|---|
+| **Gamma calibration** (`GammaSettings`, per-channel `GammaChannel`) | **No.** No `gamma_ramp`, `set_gamma` or `gamma_lut` anywhere in the tree; the `gamma` hits are sRGB colour maths and the DRM uapi's unused constants | Needs a real pipeline — a per-CRTC LUT pushed through KMS — before a slider means anything. |
+| **Colour profiles** (`ColorProfile`: sRGB / AdobeRGB / Native) | **No.** Zero matches outside the deleted file | ICC handling is a colour-management subsystem, not a dropdown. |
+| **Test patterns** (`TestPattern`: grayscale, colour bars, hue gradient, checkerboard) | **No.** Zero matches outside the deleted file | Cheap to rebuild when there is something to calibrate; pointless before that. |
+| **Night-light *schedule*** (`NightLightSchedule`: Off / AlwaysOn / SunsetToSunrise) | Partly. The Settings app has `night_light_enabled` and `night_light_temperature`, but no schedule — its only two `schedule` matches are unrelated comments about saving | The smallest of the four and the only one whose feature half already exists. Sunset/sunrise also needs a location or a manual time pair, which nothing currently supplies. |
+
+**Colour temperature is *not* on this list**, though the deleted panel had a
+`ColorTemperature` type: the Settings app carries it as
+`night_light_temperature`, which is the same control under the name a user
+would recognise.
+
+**Why they were not ported.** Adding four controls to a screen users can
+actually reach, that read nothing and change nothing, is worse than deleting
+four that nobody could reach. Three of them need a subsystem first.
+
+**Method note, because it nearly bit.** The sweep that found these panels
+counted `pub struct`, `pub enum` and `pub fn` and called a module unreachable
+at zero external references. It did **not** count `pub const` — and
+`appearance_settings.rs` re-exported a live `CONFIG_NAME` that the shell's
+config watcher used. The build caught it, but a sweep of this kind should
+enumerate *every* kind of public item, not the three that happened to come to
+mind. The constant now comes from `appearance::CONFIG_NAME`, which owns it.
+
+---
+
+## TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/desktop/src/` — `login_screen.rs` (2 417 lines), `blur.rs`
+(2 224), `input_method.rs` (1 279), `tray_dnd.rs` (1 185). 7 105 lines.
+
+**In short:** four features of the desktop shell are fully written, declared
+as modules, and constructed by nothing. Not one public item in any of them is
+referenced from anywhere else in the tree — including the shell's own
+`main.rs`. There is no login screen at runtime, no window blur, no
+input-method switching, and no drag-and-drop in the system tray, however much
+code there is for each.
+
+**These are not the settings panels, and must not be treated the same way.**
+Three unreachable `*_settings.rs` panels were deleted the same day under
+`design-decisions.md` §815 — but §815 draws its line precisely here: *"The
+volume overlay and the login screen are the desktop showing you something, so
+they stay in the shell and get wired up."* The login screen is named in the
+decision as a thing to **wire up**, not remove. The other three are the same
+kind of thing: chrome the desktop shows you, not screens you open. **Deleting
+any of these would be a misreading of §815.**
+
+**How they were found.** A sweep of all 56 shell modules counting external
+references to every public item — `struct`, `enum`, `trait`, `type`, `const`,
+`static`, `fn` and `mod`. `gui/desktop` is self-contained (its own `main.rs`,
+no other crate depends on it), so nothing outside the corpus could reach them.
+
+| module | what it holds | what is missing |
+|---|---|---|
+| `login_screen.rs` | `LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig` | Construction and a session hand-off. §815 says wire it up. *(Correction, 2026-09-08: an earlier version of this row said §818 has to take effect here. It does not — §818 is about the **lock** screen, `apps/lockscreen`, which is a separate program. See `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.)* |
+| `blur.rs` | `BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager` | A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
+| `input_method.rs` | `InputMethodManager`, `SwitchShortcut` | A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
+| `tray_dnd.rs` | `TrayDragSource`, `TrayDropTarget`, `TrayIconSlot`, `TrayIconArrangement`, `TraySlotConfig`, `TrayArrangementConfig`, `StartInTrayConfig` | A caller in the tray's event path. |
+
+**Order worth doing them in.** `login_screen` first: it is named in §815, it
+gates §818, and a machine with no login screen is a machine with no user
+accounts in any meaningful sense. Then `tray_dnd` (self-contained, one event
+path). Then `blur` (needs a compositing decision about where the pass runs —
+compare the colour-filter work, which had the same question). `input_method`
+last, because wiring is the small half of it.
+
+**Why this is being recorded rather than fixed here.** Each is a feature-sized
+job with a design question in it, and this was a dead-code sweep. What matters
+is that the sweep is written down: before it, nothing in the tree said these
+four were disconnected, and their size makes them look finished.
+
+---
+
+## TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `apps/lockscreen/src/main.rs`, `gui/desktop/src/hotkeys.rs`
+(`LOCK_COMMAND`), `gui/desktop/src/session.rs`.
+
+**In short:** the operator decided on 2026-09-07 (`design-decisions.md` §818)
+that an account with no password is never locked — the lock screen simply does
+not appear, instead of appearing and letting anyone dismiss it. That decision
+is **not implemented**, and it cannot be implemented where it naturally
+belongs, because nothing in the tree actually locks the screen.
+
+**What is true today.** Pressing the lock shortcut produces a *launch request*
+for `/usr/bin/lockscreen` and nothing executes it — the shell reports launches
+through `HotkeyOutcome::launches` / `ShellSession::take_launches` and has no
+connection to a process server. So the screen never appears at all, for any
+account. The bug §818 describes is therefore latent rather than live.
+
+**Why it cannot simply be done inside `apps/lockscreen`.** "Never lock" is a
+decision made by whatever *locks*, and that program only runs after the
+decision. It has no trustworthy way to learn whose session it is locking:
+there is no per-process user identity available to an application here, and
+the only identity mechanism (`authlib`) verifies a username the caller
+supplies. Deciding whether to lock from `$USER` would be worse than the
+original bug — an environment variable an attacker can set would decide
+whether the machine locks.
+
+**Where it does belong**, once there is a lock path at all: at the point that
+requests the lock, which knows the session. The shell already has the
+ingredients — `user_accounts::UserAccount` carries `is_current` and
+`login_options.has_password` — so the rule is one condition on a launch that
+something must first be executing.
+
+**What was done in the meantime.** `LockScreen::unlocks_for`'s doc comment
+said the passwordless case was *"an open question rather than a settled one"*
+and weighed two options. That has been false since §818, and a comment
+claiming a decision is unmade is worse than no comment: it invites the next
+reader to re-litigate a settled question, or to "fix" it by refusing the empty
+password, which is the option §818 explicitly rejected for stranding the user.
+The comment now records the decision, why accepting stays (it is the fallback
+for a state §818 says cannot arise, reachable only if a password is removed
+while the screen is already up), and why the real fix is elsewhere.
+
+**Order.** This is behind the same prerequisite as
+`TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED`: the session has no
+lock/login lifecycle. Build that, and §818 is one condition. Do not implement
+§818 by making the lock screen refuse empty passwords — that is option B,
+which the operator considered and rejected.
+
+---
+
+## TD-C-ALLOW-DEAD-CODE-IS-HIDING-WHOLE-UNWIRED-MODULES
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `apps/procexplorer/src/features.rs` (2 540 lines),
+`apps/sysinfo/src/hwquery.rs` (2 163), `apps/settings/src/remote.rs` (1 593).
+The pattern is wider: 23 files under `gui/` and `apps/` carry a crate- or
+module-level `#![allow(dead_code)]`.
+
+**In short:** three substantial modules are compiled, declared, and used by
+nothing — and the compiler already knew. Each begins with
+`#![allow(dead_code)]`, which switches off the one check that would have said
+so. Remove the line from `procexplorer/src/features.rs` and the build
+immediately reports **56** "never used / never constructed" warnings. The lint
+was not wrong; it was turned off.
+
+**Verified, not inferred.** All three crates are pure binaries — no `lib.rs`,
+no `[lib]` — so a public item that nothing references really is unreachable.
+That check matters: `apps/installer/src/grub.rs` looked identical to a
+reachability sweep and is **not** the same case, because `installer` *does*
+have a lib target, which makes its `pub` items API rather than dead code. It
+is excluded from this entry for that reason.
+
+| module | what it holds | note |
+|---|---|---|
+| `procexplorer/src/features.rs` | `WindowPicker` (crosshair "click a window to find its process"), `ProcessAction`, `BlockingInfo`/`BlockingLink` (which process is blocking which) | `mod features;` is declared in `main.rs` and never `use`d. |
+| `sysinfo/src/hwquery.rs` | hardware enumeration | same shape. |
+| `settings/src/remote.rs` | remote-settings surface | same shape. |
+
+**Why this is worth its own entry rather than three deletions.** The
+suppression is the bug. Today's sweeps found roughly 21 600 lines of
+unreachable code across the shell and the apps, and this is the mechanism that
+let a good part of it accumulate unnoticed: a module is written, the lint
+complains because nothing calls it yet, the lint is silenced *to get a clean
+build*, and the "yet" never arrives. Deleting these three without removing the
+suppression pattern leaves the trap armed for the next module.
+
+**Proper fix, in order:**
+
+1. **Remove `#![allow(dead_code)]` from these three files** and read what the
+   compiler says. That is a one-line change per file that produces an exact,
+   trustworthy inventory — far better than any sweep I can write, because it
+   is the compiler's own reachability analysis rather than an approximation of
+   it.
+2. For each item it names: wire it or delete it. `WindowPicker` and the
+   blocking analysis are real features a process explorer should have, so
+   these are probably wirings rather than deletions — unlike the settings
+   panels deleted today, which were duplicates of a working app.
+3. **Then look at the other 20 files.** Some uses of the attribute are
+   legitimate (a struct field kept for an ABI, a variant reserved by a spec);
+   each needs a reason next to it, and the ones without a reason are this bug
+   again.
+
+**A caution learned while writing this.** My first pass concluded these
+modules were unreachable and the compiler disagreed — zero warnings. The
+sweep was right and the *compiler* was silenced, but I only found that out by
+checking why they disagreed instead of trusting my own tool. A grep for the
+suppression had already run and shown eight hits, all in `alarmclock`, because
+it was piped through `head -8`. The answer was in the truncated part.
+
+---
+
+## TD-C-129-OF-135-APPLICATIONS-IGNORE-THE-THEME-ENTIRELY
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `apps/**` (135 crates that draw), and the gap that causes it:
+`gui/window` (`oswindow`), which does not depend on `appearance` at all.
+
+**In short:** pick the light theme, or an accent colour, or a high-contrast
+scheme, and it changes the desktop, the window decorations and the Settings
+window. It changes **nothing inside any other application**. 129 of the 135
+applications that draw never mention `appearance::Palette`; they each carry
+their own hardcoded Catppuccin Mocha constants. So a user who turns on high
+contrast for legibility gets it on the window borders and on the desktop
+behind, and then opens a text editor that is exactly as it was.
+
+**Why it is not just cosmetic.** High contrast is an accessibility setting,
+and `design-decisions.md` §816 made it reach every *surface* — the palette,
+the decorations, the shell. What §816 could not reach is application
+interiors, because there is no route to them. The setting therefore looks like
+it works and does not, which is the failure mode this project keeps finding.
+
+**The measurement.** Counting `Color::from_hex(0x…)` / `Color::rgb(…)` against
+mentions of `Palette`, per crate under `apps/`:
+
+| | count |
+|---|---|
+| applications that draw with colours | 135 |
+| of those, never mention `Palette` | **129** |
+| the six that do | `settings` (28 — converted 2026-09-08), `colorpicker` (3), `hearts`, `kanban`, `paint`, `stopwatch` (1 each) |
+
+Not every literal is a bug: `paint`'s 80 and `colorpicker`'s are largely
+*content* — the colours a user draws with, which must not follow the theme.
+The test is whether the **chrome** (background, panel, text, selection)
+follows it, and for the 129 it does not, because they have no palette to
+follow.
+
+**The cause is a missing route, not 129 independent oversights.** An
+application gets its window from `oswindow::app::launch` and implements
+`App::render(width, height) -> RenderTree`. Nothing in that trait, and nothing
+in `gui/window`, offers a `Palette` — the crate does not even depend on
+`appearance`. An application that wanted to follow the theme would have to
+load and parse `appearance.yaml` itself, which is why none of them does.
+
+**Half the mechanism already exists.** `oswindow::app::Reloads` has an
+`appearance: bool` field and `EventLoop::appearance_changed` already fires
+when `appearance.yaml` is rewritten — so the *notification* that the theme
+changed reaches applications today. What is missing is the palette it would
+notify them about.
+
+**Proper fix, in order.**
+
+1. **`gui/window` depends on `appearance` and resolves one `Palette`**, from
+   the same `AppearanceSettings` the shell and the compositor use, refreshed
+   on the `Reloads.appearance` edge that already exists. Applications read it
+   rather than each loading a config file — one parse per process, not 135
+   implementations of the same parse.
+2. **Convert applications to it**, deleting their private constants. The
+   Settings app is the worked example (2026-09-08): every role in those
+   constant blocks maps one-to-one onto `Palette`'s fields under the same
+   name, so the edit is mechanical once the route exists.
+3. **A test per converted app** on the pixels it emits, not on the palette
+   object — the Settings app's
+   `the_settings_pages_follow_the_theme_they_are_used_to_choose` asserts that
+   the same page draws different colours under two themes, which is the claim
+   that matters.
+
+**Do not start at step 2.** Converting an application before the route exists
+means making it load `appearance.yaml` on its own, which is 129 copies of a
+parse and 129 places for the reload edge to be got wrong.
+
+**Related and already done:** `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-
+COPY-OF-THE-PALETTE` did exactly this for the shell's 49 modules, and
+`design-decisions.md` §810 removed the toolkit's copy. `guitk::theme` even
+carries a test (`this_module_names_no_colours_of_its_own`) that fails if a
+colour literal returns to it, and its own comment names the remaining copy as
+being "in `apps/`". This entry is that copy.

@@ -7327,11 +7327,21 @@ extern "C" fn kernel_main() -> ! {
     );
 
     // Console VT100/ANSI escape sequence self-test.
-    console::self_test();
+    // §914: Diagnostic — cosmetic rendering, not structural integrity.
+    selftest::dispatch_debug(
+        "Console",
+        selftest::Severity::Diagnostic,
+        console::self_test(),
+    );
 
     // TTY/termios layer self-test (depends on the console being up so that
     // TIOCGWINSZ can report live dimensions).
-    tty::self_test();
+    // §914: Diagnostic — terminal flags and line discipline, not structural integrity.
+    selftest::dispatch_debug(
+        "TTY",
+        selftest::Severity::Diagnostic,
+        tty::self_test(),
+    );
 
     // Pseudo-terminal self-test.  Runs after `tty::self_test` because it
     // creates real terminal devices through the same table and drives the
@@ -7355,7 +7365,12 @@ extern "C" fn kernel_main() -> ! {
     );
 
     // The uname strings: glibc's start-up version gate, and single-token fields.
-    uname::self_test();
+    // §914: Diagnostic — informational strings, not structural kernel integrity.
+    selftest::dispatch_debug(
+        "uname",
+        selftest::Severity::Diagnostic,
+        uname::self_test(),
+    );
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

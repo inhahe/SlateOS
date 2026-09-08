@@ -2660,7 +2660,8 @@ pub fn dimensions() -> (u32, u32) {
 /// SGR attribute handling, scroll region, and color support without
 /// relying on visual inspection — checks internal state via the CONSOLE
 /// lock.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use crate::selftest;
     crate::serial_println!("[console] Running self-test...");
 
     // A machine with no framebuffer has no console to test, and that is a
@@ -2683,19 +2684,19 @@ pub fn self_test() {
         (con.initialized, con.cols, con.rows)
     };
     if !initialized {
-        assert!(
+        selftest::check!(
             !crate::fb::is_initialized(),
             "console not initialized despite a working framebuffer"
         );
         crate::serial_println!(
             "[console]   SKIP: no framebuffer on this machine, console is not in use"
         );
-        return;
+        return Ok(());
     }
 
     // Test 1: Basic initialization state.
     {
-        assert!(cols > 0 && rows > 0, "invalid dimensions");
+        selftest::check!(cols > 0 && rows > 0, "invalid dimensions");
         crate::serial_println!("[console]   Dimensions: {}x{} OK", cols, rows);
     }
 
@@ -2704,8 +2705,8 @@ pub fn self_test() {
         // Move to row 5, col 10 (1-based).
         write_str_no_serial("\x1b[5;10H");
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(con.cursor_row, 4, "CUP row");
-        assert_eq!(con.cursor_col, 9, "CUP col");
+        selftest::check_eq!(con.cursor_row, 4, "CUP row");
+        selftest::check_eq!(con.cursor_col, 9, "CUP col");
         crate::serial_println!("[console]   CUP cursor positioning: OK");
     }
 
@@ -2715,15 +2716,15 @@ pub fn self_test() {
         write_str_no_serial("\x1b[3B"); // Down 3
         write_str_no_serial("\x1b[5C"); // Right 5
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(con.cursor_row, 3, "CUD");
-        assert_eq!(con.cursor_col, 5, "CUF");
+        selftest::check_eq!(con.cursor_row, 3, "CUD");
+        selftest::check_eq!(con.cursor_col, 5, "CUF");
         drop(con);
 
         write_str_no_serial("\x1b[2A"); // Up 2
         write_str_no_serial("\x1b[1D"); // Left 1
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(con.cursor_row, 1, "CUU");
-        assert_eq!(con.cursor_col, 4, "CUB");
+        selftest::check_eq!(con.cursor_row, 1, "CUU");
+        selftest::check_eq!(con.cursor_col, 4, "CUB");
         crate::serial_println!("[console]   Relative cursor movement: OK");
     }
 
@@ -2732,12 +2733,12 @@ pub fn self_test() {
         write_str_no_serial("\x1b[1;1H"); // Home
         write_str_no_serial("\x1b[15G"); // Column 15
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(con.cursor_col, 14, "CHA");
+        selftest::check_eq!(con.cursor_col, 14, "CHA");
         drop(con);
 
         write_str_no_serial("\x1b[8d"); // Row 8
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(con.cursor_row, 7, "VPA");
+        selftest::check_eq!(con.cursor_row, 7, "VPA");
         crate::serial_println!("[console]   CHA/VPA absolute positioning: OK");
     }
 
@@ -2746,14 +2747,14 @@ pub fn self_test() {
         write_str_no_serial("\x1b[5;10H"); // Row 5, col 10
         write_str_no_serial("\x1b[2E"); // Next line ×2
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(con.cursor_row, 6, "CNL row");
-        assert_eq!(con.cursor_col, 0, "CNL col");
+        selftest::check_eq!(con.cursor_row, 6, "CNL row");
+        selftest::check_eq!(con.cursor_col, 0, "CNL col");
         drop(con);
 
         write_str_no_serial("\x1b[1F"); // Previous line ×1
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(con.cursor_row, 5, "CPL row");
-        assert_eq!(con.cursor_col, 0, "CPL col");
+        selftest::check_eq!(con.cursor_row, 5, "CPL row");
+        selftest::check_eq!(con.cursor_col, 0, "CPL col");
         crate::serial_println!("[console]   CNL/CPL next/prev line: OK");
     }
 
@@ -2763,18 +2764,18 @@ pub fn self_test() {
         write_str_no_serial("\x1b[0m");
         write_str_no_serial("\x1b[1;4;7m");
         let con = CONSOLE.lock_irqsave();
-        assert!(con.bold, "bold not set");
-        assert!(con.underline, "underline not set");
-        assert!(con.reverse, "reverse not set");
-        assert!(!con.dim, "dim should not be set");
+        selftest::check!(con.bold, "bold not set");
+        selftest::check!(con.underline, "underline not set");
+        selftest::check!(con.reverse, "reverse not set");
+        selftest::check!(!con.dim, "dim should not be set");
         drop(con);
 
         // Reset all.
         write_str_no_serial("\x1b[0m");
         let con = CONSOLE.lock_irqsave();
-        assert!(!con.bold, "bold not cleared");
-        assert!(!con.underline, "underline not cleared");
-        assert!(!con.reverse, "reverse not cleared");
+        selftest::check!(!con.bold, "bold not cleared");
+        selftest::check!(!con.underline, "underline not cleared");
+        selftest::check!(!con.reverse, "reverse not cleared");
         crate::serial_println!("[console]   SGR attributes: OK");
     }
 
@@ -2783,12 +2784,12 @@ pub fn self_test() {
         write_str_no_serial("\x1b[0m");
         write_str_no_serial("\x1b[31m"); // Red
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(con.fg_color, ansi_color(&con, 1), "fg should be red");
+        selftest::check_eq!(con.fg_color, ansi_color(&con, 1), "fg should be red");
         drop(con);
 
         write_str_no_serial("\x1b[94m"); // Bright blue
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(
+        selftest::check_eq!(
             con.fg_color,
             ansi_color(&con, 12),
             "fg should be bright blue"
@@ -2797,7 +2798,7 @@ pub fn self_test() {
 
         write_str_no_serial("\x1b[39m"); // Default fg
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(con.fg_color, con.default_fg, "fg should be default");
+        selftest::check_eq!(con.fg_color, con.default_fg, "fg should be default");
         crate::serial_println!("[console]   Foreground color: OK");
     }
 
@@ -2809,7 +2810,7 @@ pub fn self_test() {
         write_str_no_serial("\x1b[38;5;196m");
         let con = CONSOLE.lock_irqsave();
         let expected = color_256(&con, 196);
-        assert_eq!(con.fg_color, expected, "256-color fg");
+        selftest::check_eq!(con.fg_color, expected, "256-color fg");
         drop(con);
         write_str_no_serial("\x1b[0m");
         crate::serial_println!("[console]   256-color support: OK");
@@ -2824,18 +2825,18 @@ pub fn self_test() {
         };
         write_str_no_serial("\x1b[5;20r"); // Scroll region rows 5-20
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(con.scroll_top, 4, "scroll_top");
-        assert_eq!(con.scroll_bottom, 19, "scroll_bottom");
+        selftest::check_eq!(con.scroll_top, 4, "scroll_top");
+        selftest::check_eq!(con.scroll_bottom, 19, "scroll_bottom");
         // DECSTBM resets cursor to home.
-        assert_eq!(con.cursor_row, 0, "DECSTBM cursor row");
-        assert_eq!(con.cursor_col, 0, "DECSTBM cursor col");
+        selftest::check_eq!(con.cursor_row, 0, "DECSTBM cursor row");
+        selftest::check_eq!(con.cursor_col, 0, "DECSTBM cursor col");
         drop(con);
 
         // Reset scroll region.
         write_str_no_serial("\x1b[r");
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(con.scroll_top, 0, "scroll_top reset");
-        assert_eq!(
+        selftest::check_eq!(con.scroll_top, 0, "scroll_top reset");
+        selftest::check_eq!(
             con.scroll_bottom,
             rows.saturating_sub(1),
             "scroll_bottom reset"
@@ -2853,9 +2854,9 @@ pub fn self_test() {
 
         write_str_no_serial("\x1b8"); // Restore cursor (DECRC)
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(con.cursor_row, 9, "DECRC row");
-        assert_eq!(con.cursor_col, 19, "DECRC col");
-        assert_eq!(con.fg_color, ansi_color(&con, 2), "DECRC fg color");
+        selftest::check_eq!(con.cursor_row, 9, "DECRC row");
+        selftest::check_eq!(con.cursor_col, 19, "DECRC col");
+        selftest::check_eq!(con.fg_color, ansi_color(&con, 2), "DECRC fg color");
         crate::serial_println!("[console]   DECSC/DECRC cursor save/restore: OK");
     }
 
@@ -2866,8 +2867,8 @@ pub fn self_test() {
         write_str_no_serial("\x1b[15;30H"); // Move elsewhere
         write_str_no_serial("\x1b[u"); // Restore (RCP)
         let con = CONSOLE.lock_irqsave();
-        assert_eq!(con.cursor_row, 2, "RCP row");
-        assert_eq!(con.cursor_col, 6, "RCP col");
+        selftest::check_eq!(con.cursor_row, 2, "RCP row");
+        selftest::check_eq!(con.cursor_col, 6, "RCP col");
         crate::serial_println!("[console]   SCP/RCP cursor save/restore: OK");
     }
 
@@ -2887,19 +2888,20 @@ pub fn self_test() {
         write_str_no_serial("\x1b[1;4;7;31m"); // Bold+underline+reverse+red
         write_str_no_serial("\x1bc"); // RIS
         let con = CONSOLE.lock_irqsave();
-        assert!(!con.bold, "RIS bold");
-        assert!(!con.underline, "RIS underline");
-        assert!(!con.reverse, "RIS reverse");
-        assert!(!con.dim, "RIS dim");
-        assert_eq!(con.fg_color, con.default_fg, "RIS fg");
-        assert_eq!(con.bg_color, con.default_bg, "RIS bg");
-        assert_eq!(con.scroll_top, 0, "RIS scroll_top");
+        selftest::check!(!con.bold, "RIS bold");
+        selftest::check!(!con.underline, "RIS underline");
+        selftest::check!(!con.reverse, "RIS reverse");
+        selftest::check!(!con.dim, "RIS dim");
+        selftest::check_eq!(con.fg_color, con.default_fg, "RIS fg");
+        selftest::check_eq!(con.bg_color, con.default_bg, "RIS bg");
+        selftest::check_eq!(con.scroll_top, 0, "RIS scroll_top");
         crate::serial_println!("[console]   Full reset (RIS): OK");
     }
 
     // Clean up: reset state for normal operation.
     write_str_no_serial("\x1b[0m\x1b[r");
     crate::serial_println!("[console] Self-test PASSED");
+    Ok(())
 }
 
 /// Write a string to the console without mirroring to serial.

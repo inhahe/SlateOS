@@ -1614,37 +1614,38 @@ fn console_write_bytes(bytes: &[u8]) {
 /// (`known-issues.md` → `A-KERNEL-UNIT-TESTS-NEVER-RUN`), and every property
 /// each one asserted is in fact checked here — verified case by case rather
 /// than taken from the comment's word.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use crate::selftest;
     crate::serial_println!("[tty] Running self-test...");
 
     // Wire-format sizes must match the Linux kernel structs exactly.
-    assert_eq!(TERMIOS_BYTES, 36, "termios wire size");
-    assert_eq!(WINSIZE_BYTES, 8, "winsize wire size");
+    selftest::check_eq!(TERMIOS_BYTES, 36, "termios wire size");
+    selftest::check_eq!(WINSIZE_BYTES, 8, "winsize wire size");
 
     // Defaults: canonical line mode with echo, VMIN=1/VTIME=0.
     let t = Termios::sane_default();
-    assert!(t.is_canonical(), "default should be canonical");
-    assert!(t.echo_enabled(), "default should echo");
-    assert_eq!(t.vmin(), 1, "default VMIN");
-    assert_eq!(t.vtime(), 0, "default VTIME");
+    selftest::check!(t.is_canonical(), "default should be canonical");
+    selftest::check!(t.echo_enabled(), "default should echo");
+    selftest::check_eq!(t.vmin(), 1, "default VMIN");
+    selftest::check_eq!(t.vtime(), 0, "default VTIME");
 
     // Control characters mirror Linux INIT_C_CC.
-    assert_eq!(t.c_cc.get(cc::VINTR).copied(), Some(3), "VINTR=^C");
-    assert_eq!(t.c_cc.get(cc::VEOF).copied(), Some(4), "VEOF=^D");
-    assert_eq!(t.c_cc.get(cc::VERASE).copied(), Some(127), "VERASE=DEL");
-    assert_eq!(t.c_cc.get(cc::VKILL).copied(), Some(21), "VKILL=^U");
+    selftest::check_eq!(t.c_cc.get(cc::VINTR).copied(), Some(3), "VINTR=^C");
+    selftest::check_eq!(t.c_cc.get(cc::VEOF).copied(), Some(4), "VEOF=^D");
+    selftest::check_eq!(t.c_cc.get(cc::VERASE).copied(), Some(127), "VERASE=DEL");
+    selftest::check_eq!(t.c_cc.get(cc::VKILL).copied(), Some(21), "VKILL=^U");
 
     // termios round-trips losslessly through the 36-byte wire format.
     let back = Termios::from_bytes(&t.to_bytes());
-    assert_eq!(t, back, "termios round-trip");
+    selftest::check_eq!(t, back, "termios round-trip");
     crate::serial_println!("[tty]   termios round-trip + defaults: OK");
 
     // Raw mode: clearing ICANON|ECHO survives serialisation.
     let mut raw = Termios::sane_default();
     raw.c_lflag &= !(lflag::ICANON | lflag::ECHO);
     let raw_back = Termios::from_bytes(&raw.to_bytes());
-    assert!(!raw_back.is_canonical(), "raw clears ICANON");
-    assert!(!raw_back.echo_enabled(), "raw clears ECHO");
+    selftest::check!(!raw_back.is_canonical(), "raw clears ICANON");
+    selftest::check!(!raw_back.echo_enabled(), "raw clears ECHO");
     crate::serial_println!("[tty]   raw-mode flag clearing: OK");
 
     // winsize round-trips, and TIOCGWINSZ reports a live non-zero size.
@@ -1654,9 +1655,9 @@ pub fn self_test() {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    assert_eq!(WinSize::from_bytes(&w.to_bytes()), w, "winsize round-trip");
+    selftest::check_eq!(WinSize::from_bytes(&w.to_bytes()), w, "winsize round-trip");
     let live = get_winsize(CONSOLE);
-    assert!(
+    selftest::check!(
         live.ws_row != 0 && live.ws_col != 0,
         "TIOCGWINSZ should report a live console size"
     );
@@ -1672,49 +1673,49 @@ pub fn self_test() {
 
         // "hi\n" → a complete line of exactly "hi\n".
         let mut line = LineBuf::new();
-        assert_eq!(step(&mut line, b'h', &t), LineStep::Pending);
-        assert_eq!(step(&mut line, b'i', &t), LineStep::Pending);
-        assert_eq!(step(&mut line, b'\n', &t), LineStep::Line);
-        assert_eq!(line.as_slice(), b"hi\n", "canonical line content");
+        selftest::check_eq!(step(&mut line, b'h', &t), LineStep::Pending);
+        selftest::check_eq!(step(&mut line, b'i', &t), LineStep::Pending);
+        selftest::check_eq!(step(&mut line, b'\n', &t), LineStep::Line);
+        selftest::check_eq!(line.as_slice(), b"hi\n", "canonical line content");
 
         // VERASE (DEL) erases the last byte: "ax\x7fb\n" → "ab\n".
         let mut e = LineBuf::new();
         let _ = step(&mut e, b'a', &t);
         let _ = step(&mut e, b'x', &t);
-        assert_eq!(step(&mut e, 127, &t), LineStep::Pending); // erase 'x'
+        selftest::check_eq!(step(&mut e, 127, &t), LineStep::Pending); // erase 'x'
         let _ = step(&mut e, b'b', &t);
-        assert_eq!(step(&mut e, b'\n', &t), LineStep::Line);
-        assert_eq!(e.as_slice(), b"ab\n", "VERASE erases prior byte");
+        selftest::check_eq!(step(&mut e, b'\n', &t), LineStep::Line);
+        selftest::check_eq!(e.as_slice(), b"ab\n", "VERASE erases prior byte");
 
         // VKILL (^U) clears the whole line.
         let mut k = LineBuf::new();
         let _ = step(&mut k, b'j', &t);
         let _ = step(&mut k, b'u', &t);
-        assert_eq!(step(&mut k, 21, &t), LineStep::Pending); // ^U
-        assert_eq!(k.as_slice(), b"", "VKILL clears the line");
+        selftest::check_eq!(step(&mut k, 21, &t), LineStep::Pending); // ^U
+        selftest::check_eq!(k.as_slice(), b"", "VKILL clears the line");
 
         // VEOF (^D) on an empty line signals end-of-file.
         let mut eof = LineBuf::new();
-        assert_eq!(step(&mut eof, 4, &t), LineStep::Eof);
-        assert_eq!(eof.len, 0, "VEOF on empty line ⇒ EOF");
+        selftest::check_eq!(step(&mut eof, 4, &t), LineStep::Eof);
+        selftest::check_eq!(eof.len, 0, "VEOF on empty line ⇒ EOF");
 
         // VINTR (^C) under ISIG flushes the line and reports SIGINT.
         let mut sig = LineBuf::new();
         let _ = step(&mut sig, b'z', &t);
-        assert_eq!(step(&mut sig, 3, &t), LineStep::Signal(2));
-        assert_eq!(sig.as_slice(), b"", "VINTR flushes the line");
+        selftest::check_eq!(step(&mut sig, 3, &t), LineStep::Signal(2));
+        selftest::check_eq!(sig.as_slice(), b"", "VINTR flushes the line");
 
         // VQUIT (^\) under ISIG flushes the line and reports SIGQUIT.
         let mut q = LineBuf::new();
         let _ = step(&mut q, b'q', &t);
-        assert_eq!(step(&mut q, 28, &t), LineStep::Signal(3));
-        assert_eq!(q.as_slice(), b"", "VQUIT flushes the line");
+        selftest::check_eq!(step(&mut q, 28, &t), LineStep::Signal(3));
+        selftest::check_eq!(q.as_slice(), b"", "VQUIT flushes the line");
 
         // VSUSP (^Z) under ISIG flushes the line and reports SIGTSTP.
         let mut z = LineBuf::new();
         let _ = step(&mut z, b's', &t);
-        assert_eq!(step(&mut z, 26, &t), LineStep::Signal(20));
-        assert_eq!(z.as_slice(), b"", "VSUSP flushes the line");
+        selftest::check_eq!(step(&mut z, 26, &t), LineStep::Signal(20));
+        selftest::check_eq!(z.as_slice(), b"", "VSUSP flushes the line");
 
         // With NOFLSH set, a signal char generates the signal but preserves
         // the in-progress line (no input flush).
@@ -1723,19 +1724,19 @@ pub fn self_test() {
         let mut nf = LineBuf::new();
         let _ = step(&mut nf, b'a', &noflsh);
         let _ = step(&mut nf, b'b', &noflsh);
-        assert_eq!(step(&mut nf, 3, &noflsh), LineStep::Signal(2)); // ^C
-        assert_eq!(nf.as_slice(), b"ab", "NOFLSH preserves the line on ^C");
+        selftest::check_eq!(step(&mut nf, 3, &noflsh), LineStep::Signal(2)); // ^C
+        selftest::check_eq!(nf.as_slice(), b"ab", "NOFLSH preserves the line on ^C");
         // ...and the preserved line still completes normally afterwards.
-        assert_eq!(step(&mut nf, b'\n', &noflsh), LineStep::Line);
-        assert_eq!(nf.as_slice(), b"ab\n", "NOFLSH line completes after signal");
+        selftest::check_eq!(step(&mut nf, b'\n', &noflsh), LineStep::Line);
+        selftest::check_eq!(nf.as_slice(), b"ab\n", "NOFLSH line completes after signal");
 
         // With ISIG cleared, a ^C is just an ordinary byte in the line.
         let mut noisig = Termios::sane_default();
         noisig.c_lflag &= !lflag::ISIG;
         let mut n = LineBuf::new();
-        assert_eq!(step(&mut n, 3, &noisig), LineStep::Pending);
-        assert_eq!(step(&mut n, b'\n', &noisig), LineStep::Line);
-        assert_eq!(n.as_slice(), &[3u8, b'\n'], "ISIG off ⇒ ^C is literal");
+        selftest::check_eq!(step(&mut n, 3, &noisig), LineStep::Pending);
+        selftest::check_eq!(step(&mut n, b'\n', &noisig), LineStep::Line);
+        selftest::check_eq!(n.as_slice(), &[3u8, b'\n'], "ISIG off ⇒ ^C is literal");
 
         crate::serial_println!(
             "[tty]   line discipline (canon/erase/kill/eof/intr/quit/susp/noflsh): OK"
@@ -1752,27 +1753,27 @@ pub fn self_test() {
         // A printable byte echoes as itself; a newline is its own case so
         // ONLCR can turn it into CRLF at the backend.
         let mut l = LineBuf::new();
-        assert_eq!(feed(&mut l, b'a', &t).1, Echo::Byte(b'a'), "printable echo");
-        assert_eq!(feed(&mut l, b'\n', &t).1, Echo::Newline, "newline echo");
+        selftest::check_eq!(feed(&mut l, b'a', &t).1, Echo::Byte(b'a'), "printable echo");
+        selftest::check_eq!(feed(&mut l, b'\n', &t).1, Echo::Newline, "newline echo");
 
         // ECHOCTL renders a control byte as `^X`, and the caret letter comes
         // from `caret_letter` — the XOR mapping, so DEL shows as `^?` rather
         // than as the out-of-range byte an addition would produce.
         let mut c = LineBuf::new();
-        assert_eq!(feed(&mut c, 1, &t).1, Echo::Ctrl(1), "^A renders as Ctrl");
-        assert_eq!(caret_letter(1), b'A', "caret letter for ^A");
-        assert_eq!(caret_letter(3), b'C', "caret letter for ^C");
-        assert_eq!(caret_letter(127), b'?', "caret letter for DEL is '?'");
+        selftest::check_eq!(feed(&mut c, 1, &t).1, Echo::Ctrl(1), "^A renders as Ctrl");
+        selftest::check_eq!(caret_letter(1), b'A', "caret letter for ^A");
+        selftest::check_eq!(caret_letter(3), b'C', "caret letter for ^C");
+        selftest::check_eq!(caret_letter(127), b'?', "caret letter for DEL is '?'");
 
         // A tab is exempt from ECHOCTL: it must be echoed literally or it
         // would never reach the next tab stop.
         let mut tab = LineBuf::new();
-        assert_eq!(feed(&mut tab, b'\t', &t).1, Echo::Byte(b'\t'), "tab echo");
+        selftest::check_eq!(feed(&mut tab, b'\t', &t).1, Echo::Byte(b'\t'), "tab echo");
 
         // ECHOE rubs out the erased character, two columns for a `^X`.
         let mut e = LineBuf::new();
         let _ = step(&mut e, b'a', &t);
-        assert_eq!(
+        selftest::check_eq!(
             feed(&mut e, 127, &t).1,
             Echo::Erase(1),
             "erase a plain byte"
@@ -1783,7 +1784,7 @@ pub fn self_test() {
         ctrl.c_lflag &= !lflag::ISIG;
         let mut e2 = LineBuf::new();
         let _ = step(&mut e2, 1, &ctrl);
-        assert_eq!(
+        selftest::check_eq!(
             feed(&mut e2, 127, &ctrl).1,
             Echo::Erase(2),
             "erasing a ^X-echoed byte rubs out two columns"
@@ -1793,8 +1794,8 @@ pub fn self_test() {
         // it should rub out 8 columns, not 1 as the old code did.
         let mut et = LineBuf::new();
         let _ = step(&mut et, b'\t', &t);
-        assert_eq!(et.col, 8, "tab at col 0 advances to col 8");
-        assert_eq!(
+        selftest::check_eq!(et.col, 8, "tab at col 0 advances to col 8");
+        selftest::check_eq!(
             feed(&mut et, 127, &t).1,
             Echo::Erase(8),
             "erasing a tab at col 0 rubs out 8 columns"
@@ -1805,10 +1806,10 @@ pub fn self_test() {
         let _ = step(&mut et2, b'a', &t); // col 1
         let _ = step(&mut et2, b'b', &t); // col 2
         let _ = step(&mut et2, b'c', &t); // col 3
-        assert_eq!(et2.col, 3, "three chars at col 3");
+        selftest::check_eq!(et2.col, 3, "three chars at col 3");
         let _ = step(&mut et2, b'\t', &t); // col 8
-        assert_eq!(et2.col, 8, "tab from col 3 advances to col 8");
-        assert_eq!(
+        selftest::check_eq!(et2.col, 8, "tab from col 3 advances to col 8");
+        selftest::check_eq!(
             feed(&mut et2, 127, &t).1,
             Echo::Erase(5),
             "erasing a tab from col 3 rubs out 5 columns"
@@ -1819,8 +1820,8 @@ pub fn self_test() {
         let _ = step(&mut ek, b'a', &t); // col 1
         let _ = step(&mut ek, b'b', &t); // col 2
         let _ = step(&mut ek, b'\t', &t); // col 8
-        assert_eq!(ek.col, 8, "line col before kill");
-        assert_eq!(
+        selftest::check_eq!(ek.col, 8, "line col before kill");
+        selftest::check_eq!(
             feed(&mut ek, 21, &t).1, // ^U = VKILL
             Echo::Erase(8),
             "ECHOKE of a line with a tab rubs out 8 columns total"
@@ -1830,7 +1831,7 @@ pub fn self_test() {
         let mut off = Termios::sane_default();
         off.c_lflag &= !lflag::ECHO;
         let mut q = LineBuf::new();
-        assert_eq!(feed(&mut q, b'a', &off).1, Echo::None, "ECHO off ⇒ silent");
+        selftest::check_eq!(feed(&mut q, b'a', &off).1, Echo::None, "ECHO off ⇒ silent");
 
         crate::serial_println!("[tty]   echo rendering (printable/^X/tab/erase/tab-erase/off): OK");
     }
@@ -1840,12 +1841,12 @@ pub fn self_test() {
         let mut p = PendingLine::new();
         p.fill(b"abcdef\n");
         let mut small = [0u8; 3];
-        assert_eq!(p.drain_into(&mut small), 3);
-        assert_eq!(&small, b"abc");
+        selftest::check_eq!(p.drain_into(&mut small), 3);
+        selftest::check_eq!(&small, b"abc");
         let mut rest = [0u8; 16];
-        assert_eq!(p.drain_into(&mut rest), 4);
-        assert_eq!(rest.get(..4), Some(&b"def\n"[..]));
-        assert!(!p.has_data(), "pending fully drained");
+        selftest::check_eq!(p.drain_into(&mut rest), 4);
+        selftest::check_eq!(rest.get(..4), Some(&b"def\n"[..]));
+        selftest::check!(!p.has_data(), "pending fully drained");
         crate::serial_println!("[tty]   pending-line chunked delivery: OK");
     }
 
@@ -1856,7 +1857,7 @@ pub fn self_test() {
     // rather than caching — if this module ever reacquires storage of its
     // own, the two would drift and `^C` would go to the wrong job.
     {
-        assert_eq!(
+        selftest::check_eq!(
             foreground_pgid(CONSOLE),
             crate::proc::pcb::ctty_fg_pgrp(CONSOLE).unwrap_or(0),
             "console foreground pgrp must be a derived read of the ctty table"
@@ -1865,4 +1866,5 @@ pub fn self_test() {
     }
 
     crate::serial_println!("[tty] Self-test passed.");
+    Ok(())
 }

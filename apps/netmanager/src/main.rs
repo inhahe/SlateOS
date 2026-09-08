@@ -16,6 +16,7 @@
 //! Network I/O is performed through Slate OS syscalls; simulated with
 //! representative data for initial development.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
 use guitk::frame::Rect;
@@ -33,20 +34,6 @@ use std::process::ExitCode;
 // ============================================================================
 // Catppuccin Mocha Theme Colors
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const RED: Color = Color::from_hex(0xF38BA8);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
 // Layout Constants
@@ -137,14 +124,14 @@ impl InterfaceType {
     }
 
     /// Color used for the type indicator circle in the sidebar.
-    fn indicator_color(self) -> Color {
+    fn indicator_color(self, pal: &Palette) -> Color {
         match self {
-            Self::Ethernet => BLUE,
-            Self::WiFi => TEAL,
-            Self::VPN => PEACH,
-            Self::Bridge => YELLOW,
-            Self::Loopback => OVERLAY0,
-            Self::Virtual => SUBTEXT0,
+            Self::Ethernet => pal.blue,
+            Self::WiFi => pal.teal,
+            Self::VPN => pal.peach,
+            Self::Bridge => pal.yellow,
+            Self::Loopback => pal.overlay0,
+            Self::Virtual => pal.subtext0,
         }
     }
 }
@@ -168,12 +155,12 @@ impl ConnectionState {
         }
     }
 
-    fn color(&self) -> Color {
+    fn color(&self, pal: &Palette) -> Color {
         match self {
-            Self::Connected => GREEN,
-            Self::Disconnected => OVERLAY0,
-            Self::Connecting => YELLOW,
-            Self::Error(_) => RED,
+            Self::Connected => pal.green,
+            Self::Disconnected => pal.overlay0,
+            Self::Connecting => pal.yellow,
+            Self::Error(_) => pal.red,
         }
     }
 
@@ -356,11 +343,11 @@ impl SecurityLevel {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Private => GREEN,
-            Self::Public => YELLOW,
-            Self::Domain => BLUE,
+            Self::Private => pal.green,
+            Self::Public => pal.yellow,
+            Self::Domain => pal.blue,
         }
     }
 }
@@ -392,12 +379,12 @@ impl DiagnosticStatus {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Passed => GREEN,
-            Self::Warning => YELLOW,
-            Self::Failed => RED,
-            Self::Running => BLUE,
+            Self::Passed => pal.green,
+            Self::Warning => pal.yellow,
+            Self::Failed => pal.red,
+            Self::Running => pal.blue,
         }
     }
 }
@@ -517,6 +504,12 @@ pub struct NetManagerApp {
     /// at the size the user is actually looking at. Seeded with the requested
     /// size and corrected by the first `render`, which is handed the truth.
     pub window_size: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl NetManagerApp {
@@ -545,6 +538,7 @@ impl NetManagerApp {
             .unwrap_or_else(|| "No interfaces".into());
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             interfaces,
             selected_interface: 0,
             active_tab: DetailTab::Properties,
@@ -919,11 +913,11 @@ pub fn render_frame(app: &NetManagerApp, width: f32, height: f32) -> Frame {
         y: 0.0,
         width: frame.width,
         height: frame.height,
-        color: BASE,
+        color: app.palette.base,
         corner_radii: CornerRadii::ZERO,
     });
 
-    render_title_bar(&mut frame);
+    render_title_bar(&mut frame, &app.palette);
     render_toolbar(&mut frame, app);
     render_sidebar(&mut frame, app);
     render_detail_panel(&mut frame, app);
@@ -942,20 +936,20 @@ pub fn render_app(app: &NetManagerApp) -> RenderTree {
 }
 
 /// Render the title bar at the top of the window.
-fn render_title_bar(frame: &mut Frame) {
+fn render_title_bar(frame: &mut Frame, pal: &Palette) {
     frame.push(RenderCommand::FillRect {
         x: 0.0,
         y: 0.0,
         width: frame.width,
         height: TITLE_BAR_HEIGHT,
-        color: MANTLE,
+        color: pal.mantle,
         corner_radii: CornerRadii::ZERO,
     });
     frame.push(RenderCommand::Text {
         x: 14.0,
         y: 12.0,
         text: "Network Connections".into(),
-        color: TEXT_COLOR,
+        color: pal.text,
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -973,7 +967,7 @@ fn render_toolbar(frame: &mut Frame, app: &NetManagerApp) {
         y,
         width: frame.width,
         height: TOOLBAR_HEIGHT,
-        color: SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -992,7 +986,7 @@ fn render_toolbar(frame: &mut Frame, app: &NetManagerApp) {
             y: rect.y,
             width: rect.w,
             height: rect.h,
-            color: SURFACE1,
+            color: app.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
         frame.hit(*target, rect);
@@ -1000,7 +994,7 @@ fn render_toolbar(frame: &mut Frame, app: &NetManagerApp) {
             x: bx + 12.0,
             y: y + 10.0,
             text: label.to_string(),
-            color: TEXT_COLOR,
+            color: app.palette.text,
             font_size: TOOLBAR_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1023,7 +1017,7 @@ fn render_toolbar(frame: &mut Frame, app: &NetManagerApp) {
         y: toggle_rect.y,
         width: toggle_rect.w,
         height: toggle_rect.h,
-        color: SURFACE1,
+        color: app.palette.surface1,
         corner_radii: CornerRadii::all(4.0),
     });
     frame.hit(Target::ToggleEnabled, toggle_rect);
@@ -1031,7 +1025,7 @@ fn render_toolbar(frame: &mut Frame, app: &NetManagerApp) {
         x: tx + 12.0,
         y: y + 10.0,
         text: toggle_label.into(),
-        color: TEXT_COLOR,
+        color: app.palette.text,
         font_size: TOOLBAR_TEXT,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1051,7 +1045,7 @@ fn render_sidebar(frame: &mut Frame, app: &NetManagerApp) {
         y: sy,
         width: SIDEBAR_WIDTH,
         height: sh,
-        color: MANTLE,
+        color: app.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1060,7 +1054,7 @@ fn render_sidebar(frame: &mut Frame, app: &NetManagerApp) {
         x: sx + 12.0,
         y: sy + 10.0,
         text: "Interfaces".into(),
-        color: SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1073,7 +1067,7 @@ fn render_sidebar(frame: &mut Frame, app: &NetManagerApp) {
         y1: sy + 28.0,
         x2: sx + SIDEBAR_WIDTH - 8.0,
         y2: sy + 28.0,
-        color: SURFACE0,
+        color: app.palette.surface0,
         width: 1.0,
     });
 
@@ -1121,7 +1115,7 @@ fn render_sidebar(frame: &mut Frame, app: &NetManagerApp) {
                 y: row.y,
                 width: row.w,
                 height: row.h,
-                color: SURFACE0,
+                color: app.palette.surface0,
                 corner_radii: CornerRadii::all(6.0),
             });
         }
@@ -1134,7 +1128,7 @@ fn render_sidebar(frame: &mut Frame, app: &NetManagerApp) {
             y: circle_y,
             width: 12.0,
             height: 12.0,
-            color: iface.interface_type.indicator_color(),
+            color: iface.interface_type.indicator_color(&app.palette),
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -1143,7 +1137,7 @@ fn render_sidebar(frame: &mut Frame, app: &NetManagerApp) {
             x: sx + 36.0,
             y: item_y + 8.0,
             text: iface.name.clone(),
-            color: TEXT_COLOR,
+            color: app.palette.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 50.0),
@@ -1156,7 +1150,7 @@ fn render_sidebar(frame: &mut Frame, app: &NetManagerApp) {
             x: sx + 36.0,
             y: item_y + 26.0,
             text: status_text,
-            color: iface.state.color(),
+            color: iface.state.color(&app.palette),
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(SIDEBAR_WIDTH - 50.0),
@@ -1169,7 +1163,7 @@ fn render_sidebar(frame: &mut Frame, app: &NetManagerApp) {
             y: item_y + SIDEBAR_ITEM_HEIGHT / 2.0 - 4.0,
             width: 8.0,
             height: 8.0,
-            color: iface.state.color(),
+            color: iface.state.color(&app.palette),
             corner_radii: CornerRadii::all(4.0),
         });
     }
@@ -1183,7 +1177,7 @@ fn render_sidebar(frame: &mut Frame, app: &NetManagerApp) {
             x: sx + 12.0,
             y: list_y + window.count as f32 * SIDEBAR_ITEM_HEIGHT,
             text: format!("{hidden} more"),
-            color: OVERLAY0,
+            color: app.palette.overlay0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1205,7 +1199,7 @@ fn render_detail_panel(frame: &mut Frame, app: &NetManagerApp) {
         y: py,
         width: pw,
         height: ph,
-        color: BASE,
+        color: app.palette.base,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1245,7 +1239,7 @@ fn render_tab_bar(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, _pw:
         y: py,
         width: frame.width - px,
         height: 30.0,
-        color: SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1265,7 +1259,7 @@ fn render_tab_bar(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, _pw:
                 y: py + 2.0,
                 width: tw,
                 height: 26.0,
-                color: BASE,
+                color: app.palette.base,
                 corner_radii: CornerRadii {
                     top_left: 4.0,
                     top_right: 4.0,
@@ -1275,7 +1269,11 @@ fn render_tab_bar(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, _pw:
             });
         }
 
-        let text_color = if is_active { TEXT_COLOR } else { SUBTEXT0 };
+        let text_color = if is_active {
+            app.palette.text
+        } else {
+            app.palette.subtext0
+        };
         frame.push(RenderCommand::Text {
             x: tx + 8.0,
             y: py + 9.0,
@@ -1298,7 +1296,7 @@ fn render_tab_bar(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, _pw:
 /// Render the Properties tab content.
 fn render_tab_properties(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: f32) {
     let Some(iface) = app.selected_iface() else {
-        render_no_selection(frame, px, py, pw);
+        render_no_selection(frame, &app.palette, px, py, pw);
         return;
     };
 
@@ -1307,7 +1305,7 @@ fn render_tab_properties(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f3
     let vx = lx + FIELD_LABEL_WIDTH;
 
     // Section title
-    y = render_section_title(frame, "Interface Details", lx, y);
+    y = render_section_title(frame, &app.palette, "Interface Details", lx, y);
 
     // Fields
     let fields: &[(&str, String)] = &[
@@ -1328,13 +1326,13 @@ fn render_tab_properties(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f3
     ];
 
     for (label, value) in fields {
-        render_field_row(frame, label, value, lx, vx, y);
+        render_field_row(frame, &app.palette, label, value, lx, vx, y);
         y += FIELD_HEIGHT + 4.0;
     }
 
     // Traffic section
     y += 12.0;
-    y = render_section_title(frame, "Traffic Statistics", lx, y);
+    y = render_section_title(frame, &app.palette, "Traffic Statistics", lx, y);
 
     let traffic_fields: &[(&str, String)] = &[
         ("Received:", NetworkInterface::format_bytes(iface.rx_bytes)),
@@ -1345,13 +1343,13 @@ fn render_tab_properties(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f3
     ];
 
     for (label, value) in traffic_fields {
-        render_field_row(frame, label, value, lx, vx, y);
+        render_field_row(frame, &app.palette, label, value, lx, vx, y);
         y += FIELD_HEIGHT + 4.0;
     }
 
     // IP summary
     y += 12.0;
-    y = render_section_title(frame, "IP Configuration Summary", lx, y);
+    y = render_section_title(frame, &app.palette, "IP Configuration Summary", lx, y);
 
     let ip = &iface.ip_config;
     let ip_fields: &[(&str, &str)] = &[
@@ -1369,7 +1367,7 @@ fn render_tab_properties(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f3
     ];
 
     for (label, value) in ip_fields {
-        render_field_row(frame, label, value, lx, vx, y);
+        render_field_row(frame, &app.palette, label, value, lx, vx, y);
         y += FIELD_HEIGHT + 4.0;
     }
 }
@@ -1377,7 +1375,7 @@ fn render_tab_properties(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f3
 /// Render the IP Config tab content.
 fn render_tab_ip_config(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: f32) {
     let Some(_iface) = app.selected_iface() else {
-        render_no_selection(frame, px, py, pw);
+        render_no_selection(frame, &app.palette, px, py, pw);
         return;
     };
 
@@ -1386,7 +1384,7 @@ fn render_tab_ip_config(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32
     let lx = px + SECTION_PADDING;
     let vx = lx + FIELD_LABEL_WIDTH;
 
-    y = render_section_title(frame, "IP Configuration", lx, y);
+    y = render_section_title(frame, &app.palette, "IP Configuration", lx, y);
 
     // DHCP toggle
     let dhcp_label = if ip.dhcp_enabled {
@@ -1394,15 +1392,15 @@ fn render_tab_ip_config(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32
     } else {
         "DHCP: Disabled (Static)"
     };
-    let dhcp = render_toggle_row(frame, dhcp_label, ip.dhcp_enabled, lx, y);
+    let dhcp = render_toggle_row(frame, &app.palette, dhcp_label, ip.dhcp_enabled, lx, y);
     frame.hit(Target::DhcpToggle, dhcp);
     y += FIELD_HEIGHT + 8.0;
 
     // IP fields (dimmed if DHCP is on and not editing)
     let field_color = if ip.dhcp_enabled && !app.editing_ip {
-        OVERLAY0
+        app.palette.overlay0
     } else {
-        TEXT_COLOR
+        app.palette.text
     };
 
     let ip_fields: &[(&str, &str, Field)] = &[
@@ -1421,7 +1419,17 @@ fn render_tab_ip_config(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32
         } else {
             (*value).to_string()
         };
-        let box_rect = render_editable_field(frame, label, &value, lx, vx, y, field_color, editing);
+        let box_rect = render_editable_field(
+            frame,
+            &app.palette,
+            label,
+            &value,
+            lx,
+            vx,
+            y,
+            field_color,
+            editing,
+        );
         if editing {
             // Only while editing: outside edit mode the boxes are not drawn,
             // and a click target with nothing under it is a trap.
@@ -1433,20 +1441,39 @@ fn render_tab_ip_config(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32
     // Buttons
     y += 12.0;
     if app.editing_ip {
-        let apply = render_button(frame, "Apply", lx, y, BUTTON_WIDTH, BUTTON_HEIGHT, GREEN);
+        let apply = render_button(
+            frame,
+            &app.palette,
+            "Apply",
+            lx,
+            y,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+            app.palette.green,
+        );
         frame.hit(Target::ApplyIp, apply);
         let cancel = render_button(
             frame,
+            &app.palette,
             "Cancel",
             lx + BUTTON_WIDTH + 12.0,
             y,
             BUTTON_WIDTH,
             BUTTON_HEIGHT,
-            RED,
+            app.palette.red,
         );
         frame.hit(Target::CancelIp, cancel);
     } else {
-        let edit = render_button(frame, "Edit", lx, y, BUTTON_WIDTH, BUTTON_HEIGHT, BLUE);
+        let edit = render_button(
+            frame,
+            &app.palette,
+            "Edit",
+            lx,
+            y,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+            app.palette.blue,
+        );
         frame.hit(Target::EditIp, edit);
     }
 }
@@ -1454,14 +1481,14 @@ fn render_tab_ip_config(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32
 /// Render the DNS tab content.
 fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: f32) {
     let Some(_iface) = app.selected_iface() else {
-        render_no_selection(frame, px, py, pw);
+        render_no_selection(frame, &app.palette, px, py, pw);
         return;
     };
 
     let mut y = py + SECTION_PADDING;
     let lx = px + SECTION_PADDING;
 
-    y = render_section_title(frame, "DNS Servers", lx, y);
+    y = render_section_title(frame, &app.palette, "DNS Servers", lx, y);
 
     // DNS server list
     let dns = &app.edit_ip_config.dns_servers;
@@ -1470,7 +1497,7 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
             x: lx,
             y,
             text: "No DNS servers configured".into(),
-            color: OVERLAY0,
+            color: app.palette.overlay0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1480,7 +1507,11 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
     } else {
         for (i, server) in dns.iter().enumerate() {
             // Row background
-            let row_bg = if i % 2 == 0 { SURFACE0 } else { BASE };
+            let row_bg = if i % 2 == 0 {
+                app.palette.surface0
+            } else {
+                app.palette.base
+            };
             frame.push(RenderCommand::FillRect {
                 x: lx,
                 y,
@@ -1495,7 +1526,7 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
                 x: lx + 8.0,
                 y: y + 7.0,
                 text: format!("{}.", i.saturating_add(1)),
-                color: SUBTEXT0,
+                color: app.palette.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -1507,7 +1538,7 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
                 x: lx + 32.0,
                 y: y + 7.0,
                 text: server.clone(),
-                color: TEXT_COLOR,
+                color: app.palette.text,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1519,14 +1550,29 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
             let btn_x = lx + pw - SECTION_PADDING * 2.0 - 100.0;
 
             if i > 0 {
-                let up = render_mini_button(frame, "^", btn_x, btn_y, BLUE);
+                let up =
+                    render_mini_button(frame, &app.palette, "^", btn_x, btn_y, app.palette.blue);
                 frame.hit(Target::DnsUp(i), up);
             }
             if i.saturating_add(1) < dns.len() {
-                let down = render_mini_button(frame, "v", btn_x + 24.0, btn_y, BLUE);
+                let down = render_mini_button(
+                    frame,
+                    &app.palette,
+                    "v",
+                    btn_x + 24.0,
+                    btn_y,
+                    app.palette.blue,
+                );
                 frame.hit(Target::DnsDown(i), down);
             }
-            let remove = render_mini_button(frame, "X", btn_x + 48.0, btn_y, RED);
+            let remove = render_mini_button(
+                frame,
+                &app.palette,
+                "X",
+                btn_x + 48.0,
+                btn_y,
+                app.palette.red,
+            );
             frame.hit(Target::DnsRemove(i), remove);
 
             y += DNS_ROW_HEIGHT + 2.0;
@@ -1535,7 +1581,7 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
 
     // Add DNS input
     y += 12.0;
-    y = render_section_title(frame, "Add DNS Server", lx, y);
+    y = render_section_title(frame, &app.palette, "Add DNS Server", lx, y);
 
     // Input field
     let input = Rect::new(lx, y, FIELD_INPUT_WIDTH, FIELD_HEIGHT);
@@ -1545,7 +1591,7 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
         y: input.y,
         width: input.w,
         height: input.h,
-        color: SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::all(4.0),
     });
     frame.push(RenderCommand::StrokeRect {
@@ -1555,7 +1601,11 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
         height: input.h,
         // A focused box is outlined in the accent colour, so that typing has
         // somewhere visible to go before the first character arrives.
-        color: if focused { BLUE } else { OVERLAY0 },
+        color: if focused {
+            app.palette.blue
+        } else {
+            app.palette.overlay0
+        },
         line_width: 1.0,
         corner_radii: CornerRadii::all(4.0),
     });
@@ -1571,9 +1621,9 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
         &typed
     };
     let dns_color = if app.dns_input.is_empty() && !focused {
-        OVERLAY0
+        app.palette.overlay0
     } else {
-        TEXT_COLOR
+        app.palette.text
     };
     frame.push(RenderCommand::Text {
         x: lx + 8.0,
@@ -1587,7 +1637,16 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
     });
 
     // Add button
-    let add = render_button(frame, "Add", lx + 212.0, y, 60.0, FIELD_HEIGHT, GREEN);
+    let add = render_button(
+        frame,
+        &app.palette,
+        "Add",
+        lx + 212.0,
+        y,
+        60.0,
+        FIELD_HEIGHT,
+        app.palette.green,
+    );
     frame.hit(Target::DnsAdd, add);
 }
 
@@ -1596,14 +1655,14 @@ fn render_tab_wifi(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw:
     let mut y = py + SECTION_PADDING;
     let lx = px + SECTION_PADDING;
 
-    y = render_section_title(frame, "Available WiFi Networks", lx, y);
+    y = render_section_title(frame, &app.palette, "Available WiFi Networks", lx, y);
 
     if app.wifi_networks.is_empty() {
         frame.push(RenderCommand::Text {
             x: lx,
             y,
             text: "No WiFi networks found. Click Refresh to scan.".into(),
-            color: OVERLAY0,
+            color: app.palette.overlay0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1617,7 +1676,11 @@ fn render_tab_wifi(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw:
         let item_y = y;
 
         // Selection / hover background
-        let bg = if is_selected { SURFACE0 } else { BASE };
+        let bg = if is_selected {
+            app.palette.surface0
+        } else {
+            app.palette.base
+        };
         let row = Rect::new(lx, item_y, pw - SECTION_PADDING * 2.0, WIFI_ITEM_HEIGHT);
         frame.push(RenderCommand::FillRect {
             x: row.x,
@@ -1631,14 +1694,14 @@ fn render_tab_wifi(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw:
 
         // Signal bars
         let bars = network.signal_bars();
-        render_signal_bars(frame, bars, lx + 8.0, item_y + 8.0);
+        render_signal_bars(frame, &app.palette, bars, lx + 8.0, item_y + 8.0);
 
         // SSID
         frame.push(RenderCommand::Text {
             x: lx + 40.0,
             y: item_y + 6.0,
             text: network.ssid.clone(),
-            color: TEXT_COLOR,
+            color: app.palette.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
@@ -1657,7 +1720,7 @@ fn render_tab_wifi(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw:
             x: lx + 40.0,
             y: item_y + 22.0,
             text: detail,
-            color: SUBTEXT0,
+            color: app.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
@@ -1669,12 +1732,13 @@ fn render_tab_wifi(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw:
         if is_selected {
             let connect = render_button(
                 frame,
+                &app.palette,
                 "Connect",
                 lx + pw - SECTION_PADDING * 2.0 - 80.0,
                 item_y + 6.0,
                 70.0,
                 28.0,
-                GREEN,
+                app.palette.green,
             );
             frame.hit(Target::WifiConnect, connect);
         }
@@ -1684,11 +1748,11 @@ fn render_tab_wifi(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw:
 }
 
 /// Render WiFi signal bars.
-fn render_signal_bars(frame: &mut Frame, bars: u8, x: f32, y: f32) {
+fn render_signal_bars(frame: &mut Frame, pal: &Palette, bars: u8, x: f32, y: f32) {
     for i in 0u8..4 {
         let bar_h = 6.0 + (i as f32) * 4.0;
         let bar_y = y + 20.0 - bar_h;
-        let bar_color = if i < bars { GREEN } else { SURFACE1 };
+        let bar_color = if i < bars { pal.green } else { pal.surface1 };
         frame.push(RenderCommand::FillRect {
             x: x + i as f32 * 7.0,
             y: bar_y,
@@ -1705,14 +1769,14 @@ fn render_tab_vpn(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
     let mut y = py + SECTION_PADDING;
     let lx = px + SECTION_PADDING;
 
-    y = render_section_title(frame, "VPN Connections", lx, y);
+    y = render_section_title(frame, &app.palette, "VPN Connections", lx, y);
 
     if app.vpn_configs.is_empty() {
         frame.push(RenderCommand::Text {
             x: lx,
             y,
             text: "No VPN connections configured".into(),
-            color: OVERLAY0,
+            color: app.palette.overlay0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1735,7 +1799,7 @@ fn render_tab_vpn(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
             y: item_y,
             width: pw - SECTION_PADDING * 2.0,
             height: VPN_ITEM_HEIGHT,
-            color: SURFACE0,
+            color: app.palette.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -1745,7 +1809,7 @@ fn render_tab_vpn(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
             y: item_y + VPN_ITEM_HEIGHT / 2.0 - 5.0,
             width: 10.0,
             height: 10.0,
-            color: state.color(),
+            color: state.color(&app.palette),
             corner_radii: CornerRadii::all(5.0),
         });
 
@@ -1754,7 +1818,7 @@ fn render_tab_vpn(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
             x: lx + 30.0,
             y: item_y + 6.0,
             text: vpn.name.clone(),
-            color: TEXT_COLOR,
+            color: app.palette.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(250.0),
@@ -1772,7 +1836,7 @@ fn render_tab_vpn(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
             x: lx + 30.0,
             y: item_y + 24.0,
             text: detail,
-            color: SUBTEXT0,
+            color: app.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(350.0),
@@ -1785,9 +1849,14 @@ fn render_tab_vpn(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
         } else {
             "Connect"
         };
-        let btn_color = if state.is_connected() { RED } else { GREEN };
+        let btn_color = if state.is_connected() {
+            app.palette.red
+        } else {
+            app.palette.green
+        };
         let toggle = render_button(
             frame,
+            &app.palette,
             btn_label,
             lx + pw - SECTION_PADDING * 2.0 - 100.0,
             item_y + 8.0,
@@ -1806,7 +1875,7 @@ fn render_tab_profiles(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32,
     let mut y = py + SECTION_PADDING;
     let lx = px + SECTION_PADDING;
 
-    y = render_section_title(frame, "Network Profiles", lx, y);
+    y = render_section_title(frame, &app.palette, "Network Profiles", lx, y);
 
     // An empty list says so and then *keeps going* to the Add button below.
     // Returning here — as this did — hid the only control that can create the
@@ -1816,7 +1885,7 @@ fn render_tab_profiles(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32,
             x: lx,
             y,
             text: "No profiles configured".into(),
-            color: OVERLAY0,
+            color: app.palette.overlay0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1831,7 +1900,11 @@ fn render_tab_profiles(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32,
         let row_h = 36.0;
 
         // Row background
-        let bg = if is_selected { SURFACE0 } else { BASE };
+        let bg = if is_selected {
+            app.palette.surface0
+        } else {
+            app.palette.base
+        };
         let row = Rect::new(lx, item_y, pw - SECTION_PADDING * 2.0, row_h);
         frame.push(RenderCommand::FillRect {
             x: row.x,
@@ -1849,7 +1922,7 @@ fn render_tab_profiles(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32,
             y: item_y + row_h / 2.0 - 5.0,
             width: 10.0,
             height: 10.0,
-            color: profile.security_level.color(),
+            color: profile.security_level.color(&app.palette),
             corner_radii: CornerRadii::all(5.0),
         });
 
@@ -1858,7 +1931,7 @@ fn render_tab_profiles(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32,
             x: lx + 26.0,
             y: item_y + 6.0,
             text: profile.name.clone(),
-            color: TEXT_COLOR,
+            color: app.palette.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
@@ -1879,7 +1952,7 @@ fn render_tab_profiles(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32,
             x: lx + 26.0,
             y: item_y + 22.0,
             text: detail,
-            color: SUBTEXT0,
+            color: app.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1889,10 +1962,11 @@ fn render_tab_profiles(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32,
         // Remove button
         let remove = render_mini_button(
             frame,
+            &app.palette,
             "X",
             lx + pw - SECTION_PADDING * 2.0 - 30.0,
             item_y + 8.0,
-            RED,
+            app.palette.red,
         );
         frame.hit(Target::ProfileRemove(i), remove);
 
@@ -1901,14 +1975,23 @@ fn render_tab_profiles(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32,
 
     // Add profile button
     y += 12.0;
-    let add = render_button(frame, "Add Profile", lx, y, 120.0, BUTTON_HEIGHT, BLUE);
+    let add = render_button(
+        frame,
+        &app.palette,
+        "Add Profile",
+        lx,
+        y,
+        120.0,
+        BUTTON_HEIGHT,
+        app.palette.blue,
+    );
     frame.hit(Target::ProfileAdd, add);
 }
 
 /// Render the Traffic tab content with a simple bar chart.
 fn render_tab_traffic(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: f32) {
     let Some(iface) = app.selected_iface() else {
-        render_no_selection(frame, px, py, pw);
+        render_no_selection(frame, &app.palette, px, py, pw);
         return;
     };
 
@@ -1916,11 +1999,12 @@ fn render_tab_traffic(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, 
     let lx = px + SECTION_PADDING;
     let vx = lx + FIELD_LABEL_WIDTH;
 
-    y = render_section_title(frame, "Traffic Overview", lx, y);
+    y = render_section_title(frame, &app.palette, "Traffic Overview", lx, y);
 
     // Current stats
     render_field_row(
         frame,
+        &app.palette,
         "Received:",
         &NetworkInterface::format_bytes(iface.rx_bytes),
         lx,
@@ -1930,6 +2014,7 @@ fn render_tab_traffic(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, 
     y += FIELD_HEIGHT + 4.0;
     render_field_row(
         frame,
+        &app.palette,
         "Transmitted:",
         &NetworkInterface::format_bytes(iface.tx_bytes),
         lx,
@@ -1939,7 +2024,7 @@ fn render_tab_traffic(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, 
     y += FIELD_HEIGHT + 16.0;
 
     // Throughput graph
-    y = render_section_title(frame, "Throughput (recent)", lx, y);
+    y = render_section_title(frame, &app.palette, "Throughput (recent)", lx, y);
 
     let graph_x = lx;
     let graph_w = pw - SECTION_PADDING * 2.0;
@@ -1951,7 +2036,7 @@ fn render_tab_traffic(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, 
         y,
         width: graph_w,
         height: graph_h,
-        color: SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::all(4.0),
     });
 
@@ -1985,7 +2070,7 @@ fn render_tab_traffic(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, 
             y: y + graph_h - 4.0 - rx_h,
             width: GRAPH_BAR_WIDTH,
             height: rx_h.max(1.0),
-            color: TEAL,
+            color: app.palette.teal,
             corner_radii: CornerRadii {
                 top_left: 2.0,
                 top_right: 2.0,
@@ -2001,7 +2086,7 @@ fn render_tab_traffic(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, 
             y: y + graph_h - 4.0 - tx_h,
             width: GRAPH_BAR_WIDTH,
             height: tx_h.max(1.0),
-            color: PEACH,
+            color: app.palette.peach,
             corner_radii: CornerRadii {
                 top_left: 2.0,
                 top_right: 2.0,
@@ -2018,14 +2103,14 @@ fn render_tab_traffic(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, 
         y: legend_y,
         width: 12.0,
         height: 12.0,
-        color: TEAL,
+        color: app.palette.teal,
         corner_radii: CornerRadii::all(2.0),
     });
     frame.push(RenderCommand::Text {
         x: lx + 16.0,
         y: legend_y + 1.0,
         text: "RX".into(),
-        color: SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2036,14 +2121,14 @@ fn render_tab_traffic(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, 
         y: legend_y,
         width: 12.0,
         height: 12.0,
-        color: PEACH,
+        color: app.palette.peach,
         corner_radii: CornerRadii::all(2.0),
     });
     frame.push(RenderCommand::Text {
         x: lx + 66.0,
         y: legend_y + 1.0,
         text: "TX".into(),
-        color: SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2056,21 +2141,30 @@ fn render_tab_diagnostics(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f
     let mut y = py + SECTION_PADDING;
     let lx = px + SECTION_PADDING;
 
-    y = render_section_title(frame, "Network Diagnostics", lx, y);
+    y = render_section_title(frame, &app.palette, "Network Diagnostics", lx, y);
 
     if app.diagnostics.is_empty() {
         frame.push(RenderCommand::Text {
             x: lx,
             y,
             text: "Click 'Diagnose' in the toolbar to run diagnostics.".into(),
-            color: OVERLAY0,
+            color: app.palette.overlay0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
         y += 24.0;
-        let run = render_button(frame, "Run", lx, y, 80.0, BUTTON_HEIGHT, BLUE);
+        let run = render_button(
+            frame,
+            &app.palette,
+            "Run",
+            lx,
+            y,
+            80.0,
+            BUTTON_HEIGHT,
+            app.palette.blue,
+        );
         frame.hit(Target::RunDiagnostics, run);
         return;
     }
@@ -2084,7 +2178,7 @@ fn render_tab_diagnostics(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f
             y,
             width: pw - SECTION_PADDING * 2.0,
             height: row_h,
-            color: SURFACE0,
+            color: app.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -2094,7 +2188,7 @@ fn render_tab_diagnostics(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f
             y: y + row_h / 2.0 - 5.0,
             width: 10.0,
             height: 10.0,
-            color: diag.status.color(),
+            color: diag.status.color(&app.palette),
             corner_radii: CornerRadii::all(5.0),
         });
 
@@ -2103,7 +2197,7 @@ fn render_tab_diagnostics(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f
             x: lx + 28.0,
             y: y + 4.0,
             text: diag.name.clone(),
-            color: TEXT_COLOR,
+            color: app.palette.text,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
@@ -2125,7 +2219,7 @@ fn render_tab_diagnostics(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f
                 DIAG_DETAIL_FONT_SIZE,
                 FontWeightHint::Regular,
             ),
-            color: SUBTEXT0,
+            color: app.palette.subtext0,
             font_size: DIAG_DETAIL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(detail_width),
@@ -2137,7 +2231,7 @@ fn render_tab_diagnostics(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f
             x: lx + pw - SECTION_PADDING * 2.0 - 60.0,
             y: y + 10.0,
             text: diag.status.label().to_string(),
-            color: diag.status.color(),
+            color: diag.status.color(&app.palette),
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2158,7 +2252,7 @@ fn render_status_bar(frame: &mut Frame, app: &NetManagerApp) {
         y: sy,
         width: frame.width,
         height: STATUS_BAR_HEIGHT,
-        color: MANTLE,
+        color: app.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -2168,7 +2262,7 @@ fn render_status_bar(frame: &mut Frame, app: &NetManagerApp) {
         y1: sy,
         x2: frame.width,
         y2: sy,
-        color: SURFACE0,
+        color: app.palette.surface0,
         width: 1.0,
     });
 
@@ -2177,7 +2271,7 @@ fn render_status_bar(frame: &mut Frame, app: &NetManagerApp) {
         x: 12.0,
         y: sy + 8.0,
         text: app.status_message.clone(),
-        color: SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(frame.width - 200.0),
@@ -2190,7 +2284,7 @@ fn render_status_bar(frame: &mut Frame, app: &NetManagerApp) {
         x: frame.width - 120.0,
         y: sy + 8.0,
         text: iface_count,
-        color: OVERLAY0,
+        color: app.palette.overlay0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2203,12 +2297,12 @@ fn render_status_bar(frame: &mut Frame, app: &NetManagerApp) {
 // ============================================================================
 
 /// Render a section title with underline.
-fn render_section_title(frame: &mut Frame, title: &str, x: f32, y: f32) -> f32 {
+fn render_section_title(frame: &mut Frame, pal: &Palette, title: &str, x: f32, y: f32) -> f32 {
     frame.push(RenderCommand::Text {
         x,
         y,
         text: title.to_string(),
-        color: BLUE,
+        color: pal.blue,
         font_size: SECTION_TEXT,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -2222,19 +2316,27 @@ fn render_section_title(frame: &mut Frame, title: &str, x: f32, y: f32) -> f32 {
         // one, and did both worse the moment the title held an accent.
         x2: x + text::measure(title, SECTION_TEXT, FontWeightHint::Bold),
         y2: y + 18.0,
-        color: SURFACE1,
+        color: pal.surface1,
         width: 1.0,
     });
     y + 26.0
 }
 
 /// Render a label-value field row.
-fn render_field_row(frame: &mut Frame, label: &str, value: &str, lx: f32, vx: f32, y: f32) {
+fn render_field_row(
+    frame: &mut Frame,
+    pal: &Palette,
+    label: &str,
+    value: &str,
+    lx: f32,
+    vx: f32,
+    y: f32,
+) {
     frame.push(RenderCommand::Text {
         x: lx,
         y,
         text: label.to_string(),
-        color: SUBTEXT0,
+        color: pal.subtext0,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2244,7 +2346,7 @@ fn render_field_row(frame: &mut Frame, label: &str, value: &str, lx: f32, vx: f3
         x: vx,
         y,
         text: value.to_string(),
-        color: TEXT_COLOR,
+        color: pal.text,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2261,6 +2363,7 @@ fn render_field_row(frame: &mut Frame, label: &str, value: &str, lx: f32, vx: f3
 #[allow(clippy::too_many_arguments)]
 fn render_editable_field(
     frame: &mut Frame,
+    pal: &Palette,
     label: &str,
     value: &str,
     lx: f32,
@@ -2273,7 +2376,7 @@ fn render_editable_field(
         x: lx,
         y: y + 6.0,
         text: label.to_string(),
-        color: SUBTEXT0,
+        color: pal.subtext0,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2288,7 +2391,7 @@ fn render_editable_field(
             y: box_rect.y,
             width: box_rect.w,
             height: box_rect.h,
-            color: SURFACE0,
+            color: pal.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         frame.push(RenderCommand::StrokeRect {
@@ -2296,7 +2399,7 @@ fn render_editable_field(
             y: box_rect.y,
             width: box_rect.w,
             height: box_rect.h,
-            color: BLUE,
+            color: pal.blue,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -2321,11 +2424,18 @@ fn render_editable_field(
 ///
 /// Returns the track — the part that looks like a switch, and so the part a
 /// user expects to be able to click.
-fn render_toggle_row(frame: &mut Frame, label: &str, enabled: bool, x: f32, y: f32) -> Rect {
+fn render_toggle_row(
+    frame: &mut Frame,
+    pal: &Palette,
+    label: &str,
+    enabled: bool,
+    x: f32,
+    y: f32,
+) -> Rect {
     // Toggle track
     let track_w = 36.0;
     let track_h = 18.0;
-    let track_color = if enabled { GREEN } else { SURFACE1 };
+    let track_color = if enabled { pal.green } else { pal.surface1 };
 
     frame.push(RenderCommand::FillRect {
         x,
@@ -2347,7 +2457,7 @@ fn render_toggle_row(frame: &mut Frame, label: &str, enabled: bool, x: f32, y: f
         y: y + 2.0,
         width: track_h - 4.0,
         height: track_h - 4.0,
-        color: TEXT_COLOR,
+        color: pal.text,
         corner_radii: CornerRadii::all(7.0),
     });
 
@@ -2356,7 +2466,7 @@ fn render_toggle_row(frame: &mut Frame, label: &str, enabled: bool, x: f32, y: f
         x: x + track_w + 10.0,
         y: y + 2.0,
         text: label.to_string(),
-        color: TEXT_COLOR,
+        color: pal.text,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2372,6 +2482,7 @@ fn render_toggle_row(frame: &mut Frame, label: &str, enabled: bool, x: f32, y: f
 /// was drawn — the click area and the painted area are one value.
 fn render_button(
     frame: &mut Frame,
+    pal: &Palette,
     label: &str,
     x: f32,
     y: f32,
@@ -2405,7 +2516,7 @@ fn render_button(
         x: text_x,
         y: text_y,
         text: label.to_string(),
-        color: TEXT_COLOR,
+        color: pal.text,
         font_size: TOOLBAR_TEXT,
         font_weight: FontWeightHint::Bold,
         max_width: Some(w - 8.0),
@@ -2418,14 +2529,21 @@ fn render_button(
 /// Render a small inline button (for DNS reorder/remove).
 ///
 /// Returns the square it drew, for the caller to record as a click target.
-fn render_mini_button(frame: &mut Frame, label: &str, x: f32, y: f32, color: Color) -> Rect {
+fn render_mini_button(
+    frame: &mut Frame,
+    pal: &Palette,
+    label: &str,
+    x: f32,
+    y: f32,
+    color: Color,
+) -> Rect {
     let size = MINI_BUTTON_SIZE;
     frame.push(RenderCommand::FillRect {
         x,
         y,
         width: size,
         height: size,
-        color: SURFACE1,
+        color: pal.surface1,
         corner_radii: CornerRadii::all(3.0),
     });
     frame.push(RenderCommand::Text {
@@ -2443,13 +2561,13 @@ fn render_mini_button(frame: &mut Frame, label: &str, x: f32, y: f32, color: Col
 }
 
 /// Render a "no interface selected" placeholder.
-fn render_no_selection(frame: &mut Frame, px: f32, py: f32, pw: f32) {
+fn render_no_selection(frame: &mut Frame, pal: &Palette, px: f32, py: f32, pw: f32) {
     let empty = "No interface selected";
     frame.push(RenderCommand::Text {
         x: text::center_x(empty, px + pw / 2.0, 14.0, FontWeightHint::Regular),
         y: py + 40.0,
         text: empty.into(),
-        color: OVERLAY0,
+        color: pal.overlay0,
         font_size: 14.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -3105,6 +3223,10 @@ fn sample_throughput_history() -> VecDeque<ThroughputSample> {
 // ============================================================================
 
 impl App for NetManagerApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Network Manager".to_string()
     }
@@ -3201,6 +3323,7 @@ mod tests {
 
     #[test]
     fn test_interface_type_indicator_colors_are_distinct() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let types = [
             InterfaceType::Ethernet,
             InterfaceType::WiFi,
@@ -3212,8 +3335,8 @@ mod tests {
         // Each type should have a unique color
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
-                let c1 = types[i].indicator_color();
-                let c2 = types[j].indicator_color();
+                let c1 = types[i].indicator_color(&pal);
+                let c2 = types[j].indicator_color(&pal);
                 assert!(
                     c1 != c2,
                     "{:?} and {:?} should have different colors",
@@ -3244,9 +3367,10 @@ mod tests {
 
     #[test]
     fn test_connection_state_colors_differ() {
-        let c = ConnectionState::Connected.color();
-        let d = ConnectionState::Disconnected.color();
-        let e = ConnectionState::Error("x".into()).color();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let c = ConnectionState::Connected.color(&pal);
+        let d = ConnectionState::Disconnected.color(&pal);
+        let e = ConnectionState::Error("x".into()).color(&pal);
         assert_ne!(c, d);
         assert_ne!(c, e);
     }
@@ -3485,9 +3609,10 @@ mod tests {
 
     #[test]
     fn test_security_level_colors_differ() {
-        let p = SecurityLevel::Private.color();
-        let pub_c = SecurityLevel::Public.color();
-        let d = SecurityLevel::Domain.color();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let p = SecurityLevel::Private.color(&pal);
+        let pub_c = SecurityLevel::Public.color(&pal);
+        let d = SecurityLevel::Domain.color(&pal);
         assert_ne!(p, pub_c);
         assert_ne!(p, d);
         assert_ne!(pub_c, d);
@@ -3505,6 +3630,7 @@ mod tests {
 
     #[test]
     fn test_diagnostic_status_colors_differ() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let statuses = [
             DiagnosticStatus::Passed,
             DiagnosticStatus::Warning,
@@ -3514,8 +3640,8 @@ mod tests {
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {
                 assert_ne!(
-                    statuses[i].color(),
-                    statuses[j].color(),
+                    statuses[i].color(&pal),
+                    statuses[j].color(&pal),
                     "{:?} and {:?} should differ",
                     statuses[i],
                     statuses[j],
@@ -4291,6 +4417,7 @@ mod tests {
     /// windowing is exactly the mistake this rules out.
     #[test]
     fn the_selection_highlight_tracks_the_selected_interface_not_the_screen_row() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut app = app_with_interfaces(60);
         app.selected_interface = 20;
         app.sidebar_scroll = 20;
@@ -4300,13 +4427,13 @@ mod tests {
         let mut frame = Frame::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         render_sidebar(&mut frame, &app);
         let cmds = frame.commands();
-        // The highlight is the only rounded full-width row rect in SURFACE0.
+        // The highlight is the only rounded full-width row rect in pal.surface0.
         let highlights: Vec<f32> = cmds
             .iter()
             .filter_map(|c| match c {
                 RenderCommand::FillRect {
                     y, width, color, ..
-                } if *color == SURFACE0 && (*width - (SIDEBAR_WIDTH - 8.0)).abs() < 0.01 => {
+                } if *color == pal.surface0 && (*width - (SIDEBAR_WIDTH - 8.0)).abs() < 0.01 => {
                     Some(*y)
                 }
                 _ => None,
@@ -5250,6 +5377,65 @@ mod tests {
         assert_eq!(
             app.selected_profile, None,
             "a click on the status bar selected a profile drawn behind it"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut NetManagerApp) -> Vec<Color> {
+            app.render(1200.0, 800.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = NetManagerApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

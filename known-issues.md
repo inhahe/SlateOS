@@ -124291,3 +124291,81 @@ sweep was right and the *compiler* was silenced, but I only found that out by
 checking why they disagreed instead of trusting my own tool. A grep for the
 suppression had already run and shown eight hits, all in `alarmclock`, because
 it was piped through `head -8`. The answer was in the truncated part.
+
+---
+
+## TD-C-129-OF-135-APPLICATIONS-IGNORE-THE-THEME-ENTIRELY
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `apps/**` (135 crates that draw), and the gap that causes it:
+`gui/window` (`oswindow`), which does not depend on `appearance` at all.
+
+**In short:** pick the light theme, or an accent colour, or a high-contrast
+scheme, and it changes the desktop, the window decorations and the Settings
+window. It changes **nothing inside any other application**. 129 of the 135
+applications that draw never mention `appearance::Palette`; they each carry
+their own hardcoded Catppuccin Mocha constants. So a user who turns on high
+contrast for legibility gets it on the window borders and on the desktop
+behind, and then opens a text editor that is exactly as it was.
+
+**Why it is not just cosmetic.** High contrast is an accessibility setting,
+and `design-decisions.md` §816 made it reach every *surface* — the palette,
+the decorations, the shell. What §816 could not reach is application
+interiors, because there is no route to them. The setting therefore looks like
+it works and does not, which is the failure mode this project keeps finding.
+
+**The measurement.** Counting `Color::from_hex(0x…)` / `Color::rgb(…)` against
+mentions of `Palette`, per crate under `apps/`:
+
+| | count |
+|---|---|
+| applications that draw with colours | 135 |
+| of those, never mention `Palette` | **129** |
+| the six that do | `settings` (28 — converted 2026-09-08), `colorpicker` (3), `hearts`, `kanban`, `paint`, `stopwatch` (1 each) |
+
+Not every literal is a bug: `paint`'s 80 and `colorpicker`'s are largely
+*content* — the colours a user draws with, which must not follow the theme.
+The test is whether the **chrome** (background, panel, text, selection)
+follows it, and for the 129 it does not, because they have no palette to
+follow.
+
+**The cause is a missing route, not 129 independent oversights.** An
+application gets its window from `oswindow::app::launch` and implements
+`App::render(width, height) -> RenderTree`. Nothing in that trait, and nothing
+in `gui/window`, offers a `Palette` — the crate does not even depend on
+`appearance`. An application that wanted to follow the theme would have to
+load and parse `appearance.yaml` itself, which is why none of them does.
+
+**Half the mechanism already exists.** `oswindow::app::Reloads` has an
+`appearance: bool` field and `EventLoop::appearance_changed` already fires
+when `appearance.yaml` is rewritten — so the *notification* that the theme
+changed reaches applications today. What is missing is the palette it would
+notify them about.
+
+**Proper fix, in order.**
+
+1. **`gui/window` depends on `appearance` and resolves one `Palette`**, from
+   the same `AppearanceSettings` the shell and the compositor use, refreshed
+   on the `Reloads.appearance` edge that already exists. Applications read it
+   rather than each loading a config file — one parse per process, not 135
+   implementations of the same parse.
+2. **Convert applications to it**, deleting their private constants. The
+   Settings app is the worked example (2026-09-08): every role in those
+   constant blocks maps one-to-one onto `Palette`'s fields under the same
+   name, so the edit is mechanical once the route exists.
+3. **A test per converted app** on the pixels it emits, not on the palette
+   object — the Settings app's
+   `the_settings_pages_follow_the_theme_they_are_used_to_choose` asserts that
+   the same page draws different colours under two themes, which is the claim
+   that matters.
+
+**Do not start at step 2.** Converting an application before the route exists
+means making it load `appearance.yaml` on its own, which is 129 copies of a
+parse and 129 places for the reload edge to be got wrong.
+
+**Related and already done:** `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-
+COPY-OF-THE-PALETTE` did exactly this for the shell's 49 modules, and
+`design-decisions.md` §810 removed the toolkit's copy. `guitk::theme` even
+carries a test (`this_module_names_no_colours_of_its_own`) that fails if a
+colour literal returns to it, and its own comment names the remaining copy as
+being "in `apps/`". This entry is that copy.

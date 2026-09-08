@@ -76,7 +76,8 @@ use super::number::{
     SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ,
     SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
     SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE,
-    SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_WRITE, SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_PROFILE,
+    SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ, SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE,
+    SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_PROFILE,
     SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE,
     SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT,
     SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT,
@@ -507,6 +508,12 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PTY_READABLE_BYTES as usize] = Some(handlers::sys_pty_readable_bytes);
     handlers[SYS_PTY_GET_PGRP as usize] = Some(handlers::sys_pty_get_pgrp);
     handlers[SYS_PTY_SET_PGRP as usize] = Some(handlers::sys_pty_set_pgrp);
+    // 872/873: slave-side reads, mirroring 546/547 for the master. The slave
+    // *write* (548) has always taken a terminal argument; the slave *read* went
+    // through SYS_TTY_READ (543) which hardcodes current_tty(), misdirecting
+    // reads to the console when the caller's ctty differs from the pty slave.
+    handlers[SYS_PTY_SLAVE_READ as usize] = Some(handlers::sys_pty_slave_read);
+    handlers[SYS_PTY_SLAVE_TRY_READ as usize] = Some(handlers::sys_pty_slave_try_read);
 
     // Resource limits (557–558). The native counterpart of the Linux shim's
     // `prlimit64`, sharing `pcb::get_rlimit`/`pcb::set_rlimit` with it so the
@@ -2090,6 +2097,8 @@ fn test_dispatch_pty_syscalls() -> KernelResult<()> {
         (SYS_PTY_SLAVE_ID, "SYS_PTY_SLAVE_ID"),
         (SYS_PTY_POLL, "SYS_PTY_POLL"),
         (SYS_PTY_READABLE_BYTES, "SYS_PTY_READABLE_BYTES"),
+        (SYS_PTY_SLAVE_READ, "SYS_PTY_SLAVE_READ"),
+        (SYS_PTY_SLAVE_TRY_READ, "SYS_PTY_SLAVE_TRY_READ"),
     ] {
         let got = dispatch(nr, &args_for(m.raw())).value;
         if got != invalid && got != no_proc {

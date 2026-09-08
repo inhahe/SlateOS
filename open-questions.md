@@ -918,8 +918,6 @@ that let them through is untouched.
 
 The cost grows with the number of app crates, which is growing.
 
-# Resolved
-
 ## A-Q4 — [A]+[C] Desktop icon layout exists in two places: `fs::deskicons` (kernel) and `gui/desktop/src/icons.rs` (shell). Which is the authority? — Status: OPEN
 
 **In short:** A user's desktop icons have positions on screen. Two independent
@@ -960,6 +958,8 @@ Response at
 `a-c-deskicons-is-a-persistence-layer-the-shell-is-the-layout-authority.md`.
 
 ---
+
+# Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,
 write it up in `design-decisions.md` as a `Decided by: Operator` entry,

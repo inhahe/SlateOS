@@ -5646,6 +5646,10 @@ pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
                 super::linux::restart::ERESTARTSYS,
             ));
         }
+        // `tty::read` (blocking) never returns WouldBlock, but exhaustiveness
+        // requires the arm.  Treat it as zero bytes read — the caller can
+        // retry.
+        crate::tty::ConsoleRead::WouldBlock => 0,
     };
     if n == 0 {
         return TtyReadOutcome::Bytes(0);
@@ -5998,6 +6002,95 @@ pub fn sys_pty_slave_write(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
     tty_write_from_user(tty, args.arg1, args.arg2 as usize)
+}
+
+/// `SYS_PTY_SLAVE_READ` — read from a pty slave (blocking).
+///
+/// `arg0`: terminal, under the [`resolve_tty_arg`] convention (`0` = the
+/// caller's controlling terminal, `>= 2` = an owned pty handle).
+/// `arg1`: pointer to the output buffer.
+/// `arg2`: capacity in bytes.
+///
+/// This is the slave-side counterpart of [`sys_pty_master_read`].  Unlike
+/// [`tty_read_into_user`] (which hardcodes `current_tty()`), this resolves the
+/// terminal from `arg0`, so the read targets the correct pty even when the
+/// caller's controlling terminal is something else.
+///
+/// The read honours the slave's own termios (canonical line editing, raw
+/// `VMIN`/`VTIME`, `ISIG` signal generation).  Job control (`SIGTTIN`) is
+/// applied against the *named* terminal, not the caller's ctty.
+pub fn sys_pty_slave_read(args: &SyscallArgs) -> SyscallResult {
+    pty_slave_read_common(args, false)
+}
+
+/// `SYS_PTY_SLAVE_TRY_READ` — non-blocking [`sys_pty_slave_read`].
+///
+/// Same arguments.  Returns `WouldBlock` (`EAGAIN`) if no data is immediately
+/// available.
+pub fn sys_pty_slave_try_read(args: &SyscallArgs) -> SyscallResult {
+    pty_slave_read_common(args, true)
+}
+
+/// Body shared by the blocking and non-blocking slave reads.
+fn pty_slave_read_common(args: &SyscallArgs, non_blocking: bool) -> SyscallResult {
+    let tty = match resolve_tty_arg(args.arg0) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // Job control: a background process reading a terminal gets SIGTTIN.
+    // Use the terminal-targeted check rather than `tty_job_control_check`,
+    // because the named terminal may differ from the caller's ctty (a
+    // terminal emulator reading a pty it owns but has not joined).
+    match tty_job_control_check_for(tty, crate::proc::signal::SIGTTIN) {
+        TtyCtlOutcome::Done => {}
+        TtyCtlOutcome::Restart(r) => return r,
+        TtyCtlOutcome::Fail(e) => return SyscallResult::err(e),
+    }
+    let cap = args.arg2 as usize;
+    if cap == 0 {
+        return SyscallResult::ok(0);
+    }
+    if args.arg1 == 0 && cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let want = cap.min(crate::tty::MAX_CANON);
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, want) {
+        return SyscallResult::err(e);
+    }
+
+    let mut kbuf = [0u8; crate::tty::MAX_CANON];
+    let dst = kbuf.get_mut(..want).unwrap_or(&mut []);
+    let outcome = if non_blocking {
+        crate::tty::try_read(tty, dst)
+    } else {
+        crate::tty::read(tty, dst)
+    };
+    match outcome {
+        crate::tty::ConsoleRead::Data(n) => {
+            if n == 0 {
+                return SyscallResult::ok(0);
+            }
+            // SAFETY: `want` bytes at `arg1` were validated writable above and
+            // `n <= want`; copy_to_user re-validates and performs the SMAP
+            // dance.
+            match unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), args.arg1, n) } {
+                #[allow(clippy::cast_possible_wrap)]
+                Ok(()) => SyscallResult::ok(n as i64),
+                Err(e) => SyscallResult::err(e),
+            }
+        }
+        crate::tty::ConsoleRead::Signal(sig) => {
+            deliver_console_signal(tty, sig)
+        }
+        crate::tty::ConsoleRead::Interrupted => {
+            super::linux::restart::restart_result(
+                super::linux::restart::ERESTARTSYS,
+            )
+        }
+        crate::tty::ConsoleRead::WouldBlock => {
+            SyscallResult::err(KernelError::WouldBlock)
+        }
+    }
 }
 
 /// `SYS_PTY_CLOSE` — drop one reference to one end.

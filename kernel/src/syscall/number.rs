@@ -4868,6 +4868,61 @@ pub const SYS_PTY_GET_PGRP: u64 = 870;
 pub const SYS_PTY_SET_PGRP: u64 = 871;
 
 // ---------------------------------------------------------------------------
+// Slave-side reads (872–873)
+// ---------------------------------------------------------------------------
+//
+// The missing half of the slave I/O family.  [`SYS_PTY_SLAVE_WRITE`] (548) has
+// existed since the pty was born, but the slave *read* went through
+// [`SYS_TTY_READ`] (543), which hardcodes `current_tty()`.  For a process whose
+// controlling terminal is the pty slave, `current_tty()` returns the slave's
+// `TtyId` and the read works.  For one that holds a slave *handle* but whose
+// controlling terminal is still the console (i.e. the fixture before `forkpty`
+// calls `login_tty`), `current_tty()` is the console — and the console's
+// canonical-mode `VMIN=1` read blocks forever on keyboard input that never
+// arrives.  That is the root cause of the `ctest-pty` hang.
+//
+// These two syscalls mirror [`SYS_PTY_MASTER_READ`] (546) and
+// [`SYS_PTY_MASTER_TRY_READ`] (547): one blocking, one non-blocking, both
+// taking a terminal argument under the [`resolve_tty_arg`] convention (`0` =
+// the caller's controlling terminal, `>= 2` = an owned pty handle).  The
+// blocking variant calls [`crate::tty::read`], which already works for pty
+// backends.  The non-blocking variant calls [`crate::tty::try_read`], which
+// returns `WouldBlock` instead of parking the caller.
+
+/// Read from the slave end of a pty (blocking).
+///
+/// `arg0`: terminal, under the family's naming convention — `0` is the caller's
+/// controlling terminal, `>= 2` is an owned pty handle.
+/// `arg1`: pointer to the output buffer.
+/// `arg2`: capacity in bytes.
+///
+/// This is what `read(slave_fd, ...)` should dispatch to.  Unlike
+/// [`SYS_TTY_READ`] (543), this resolves the terminal from the argument rather
+/// than hardcoding `current_tty()`, so the read targets the correct pty even
+/// when the caller's controlling terminal is something else (the console, or no
+/// terminal at all).
+///
+/// The read honours the slave's own termios: canonical mode returns a complete
+/// line, raw mode honours `VMIN`/`VTIME`.  `ISIG` characters generate signals
+/// and abort the read, just as on the console.
+///
+/// Returns: bytes read; `InvalidHandle`; `ChannelClosed` (EIO) on hangup;
+/// the restart sentinel on a signal.  Chosen number 872.
+pub const SYS_PTY_SLAVE_READ: u64 = 872;
+
+/// Non-blocking [`SYS_PTY_SLAVE_READ`].
+///
+/// Same arguments.  Returns immediately with `WouldBlock` if no data is
+/// available (raw mode: no bytes buffered; canonical mode: no complete line
+/// buffered).  In raw mode with `VMIN=0, VTIME=0` this is equivalent to the
+/// blocking variant (which is already a pure poll in that case).
+///
+/// Returns: bytes read (may be 0 in raw `VMIN=0` mode); `WouldBlock` if no
+/// data is available; `InvalidHandle`; `ChannelClosed` on hangup.
+/// Chosen number 873.
+pub const SYS_PTY_SLAVE_TRY_READ: u64 = 873;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

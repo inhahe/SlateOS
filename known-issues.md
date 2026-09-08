@@ -123961,6 +123961,40 @@ part is the piece that does not exist anywhere: there is currently no hook in
 the input path at all, which is why nothing could have been wired even if the
 models agreed.
 
+**Update, 2026-09-07 — the keyboard half is done; the Settings half is not.**
+
+The three features now work. `inputsettings` owns the settings and persists
+them (`AccessibilityKeysConfig`, under `accessibility:` in `input.yaml`), the
+compositor owns the live state machines (`compositor::a11ykeys`) and applies
+them in `handle_key`, and `set_input_settings` is the single road between the
+two. Sticky Shift capitalises the next letter; bounce keys drops a repeat;
+slow keys holds a press until its threshold expires with the key still down
+(`design-decisions.md` §821); the keypad drives the pointer. Eleven
+integration tests go in through `handle_input` as the input driver does,
+because the previous implementation had thorough unit tests *and did nothing*,
+so a test that calls the state machines directly proves only what was already
+known.
+
+Three defects were found in the old logic while moving it, all now fixed: a
+refused keystroke used to start a bounce window (so one tremor silenced that
+key for the whole window after it — the opposite of the feature's purpose);
+switching sticky keys off stranded whatever was held; and `release_on_two_keys`
+was in the config and implemented nowhere.
+
+**What is still not connected: the Settings UI.** This entry stays open for it.
+`gui/desktop/src/accessibility_settings.rs` and `apps/settings` still write to
+their own `StickyKeysConfig`/`FilterKeysConfig`/`MouseKeysConfig` and to
+`A11yFeature`/`ToggleId`, none of which is `inputsettings`. So the toggle in
+Settings still changes nothing — a user who edits `input.yaml` by hand gets
+all three features, and a user who uses the settings screen gets none. That is
+a smaller and much more ordinary job than the one above: point those panels at
+`inputsettings::AccessibilityKeysConfig` and delete the duplicates, along with
+`desktop::a11y`'s now-superseded state machines and the ten dead
+`AccessibilityConfig` fields.
+
+**Also still open from the census:** `caret_width` and `focus_indicator` reach
+nothing and are not part of the above.
+
 **Where the hook goes, since that was the unknown.** There is exactly one
 funnel: `Compositor::handle_key(scancode, pressed, character)` at
 `gui/compositor/src/lib.rs:6913`, reached only from `InputEvent::KeyDown` and

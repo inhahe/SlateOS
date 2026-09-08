@@ -12585,8 +12585,10 @@ dependencies = [
 name = "oswindow"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guiremote",
  "guitk",
+ "settingsfile",
 ]
 
 [[package]]

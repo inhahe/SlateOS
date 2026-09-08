@@ -9,7 +9,22 @@ path = "src/lib.rs"
 
 [dependencies]
 guitk = { path = "../toolkit" }
+# The palette. Applications draw their own interiors, so without this the
+# theme reaches the window decorations and stops at the frame -- see
+# known-issues TD-C-129-OF-135-APPLICATIONS-IGNORE-THE-THEME-ENTIRELY.
+# It is this crate and not `guitk` that depends on `appearance`, because
+# `guitk` deliberately has no palette (design-decisions 810) and a test
+# that fails if a colour literal returns to it.
+appearance = { path = "../appearance" }
 guiremote = { path = "../remote" }
+
+[dev-dependencies]
+# `settingsfile::testing` -- reached here as `appearance::config::testing` --
+# so the theme-route tests run against a scratch configuration directory
+# rather than the developer's own. Cargo unifies this with `appearance`'s
+# ordinary dependency when building tests, so the module exists for
+# `cargo test` and nowhere else.
+settingsfile = { path = "../settingsfile", features = ["testing"] }
 
 [lints]
 workspace = true

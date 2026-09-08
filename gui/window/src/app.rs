@@ -92,6 +92,7 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
+use appearance::{AppearanceSettings, Palette};
 use guiremote::client::Transport;
 
 use crate::{
@@ -318,6 +319,31 @@ pub trait App {
     /// full frame per mouse move.
     fn on_event(&mut self, event: &Event) -> Response;
 
+    /// The user's colours have changed, or are being given for the first time.
+    ///
+    /// Called once before the first frame and again whenever
+    /// `appearance.yaml` is rewritten, so an application that stores the
+    /// palette and draws from it follows the light/dark switch, the accent
+    /// colour and the high-contrast schemes without doing anything else.
+    ///
+    /// Defaulted to nothing, because most applications in this tree do not yet
+    /// read it: 129 of the 135 that draw carry their own hardcoded Catppuccin
+    /// Mocha and ignore the theme entirely — `known-issues.md`
+    /// `TD-C-129-OF-135-APPLICATIONS-IGNORE-THE-THEME-ENTIRELY`. A default of
+    /// nothing is what lets them be converted one at a time instead of in one
+    /// commit touching every application in the tree.
+    ///
+    /// **Why a trait method and not an `Event`.** `Event` belongs to `guitk`,
+    /// which deliberately owns no palette — `design-decisions.md` §810 deleted
+    /// its theme system and left a test that fails if a colour literal returns
+    /// to it. Putting a `Palette` in `guitk::Event` would give that crate the
+    /// dependency §810 removed. It is also not an input event: nothing about
+    /// it is a user acting on this window, and an application matching
+    /// exhaustively on `Event` should not have to grow an arm for it.
+    fn theme_changed(&mut self, palette: &Palette) {
+        let _ = palette;
+    }
+
     /// Which shared configuration files have been rewritten since last asked.
     ///
     /// Draining, not peeking: the loop asks after every event and announces
@@ -449,6 +475,17 @@ pub fn drive<T: Transport, A: App + ?Sized>(
     window: u64,
     app: &mut A,
 ) -> Result<(), Error<T>> {
+    // Told before the first frame, not after it: an application that paints
+    // from the palette would otherwise draw one frame in whatever it defaults
+    // to and correct itself, which reads as a flash of the wrong theme every
+    // time a window opens.
+    //
+    // One watcher for both the initial read and every later one — its first
+    // `poll` reports the current contents by design, so there is no separate
+    // load path that could disagree with the reload path.
+    let mut theme = ThemeWatch::new();
+    theme.deliver(app);
+
     // Nothing has happened yet, so no event is going to ask for the first
     // frame, and a window that has never been drawn is blank.
     let (width, height) = client_size(events, window, app);
@@ -526,6 +563,15 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             // declared an interval, without giving up the property that an
             // idle desktop parks for ever.
             sync_clock(events, window, app);
+            // At the batch boundary rather than per event: a theme change is
+            // not something the user did to this window, and re-reading a file
+            // once per mouse move to answer "no" is the cost `Watcher` exists
+            // to avoid. A change marks the frame dirty itself, because an
+            // application that repaints only on input would otherwise keep the
+            // old colours until something was clicked.
+            if theme.poll(app) {
+                dirty = true;
+            }
             if !std::mem::take(&mut dirty) {
                 return EventResponse::Continue;
             }
@@ -759,6 +805,60 @@ pub fn launch<A: App + ?Sized>(program: &str, app: &mut A) -> ExitCode {
     launch_with(program, args.display.as_deref(), app)
 }
 
+/// The user's palette, and the file it comes from.
+///
+/// One per process, held by [`drive`]. Applications receive the palette
+/// through [`App::theme_changed`] rather than reading `appearance.yaml`
+/// themselves — 135 copies of that parse would be 135 places for the reload
+/// edge to be wrong, and most of them would simply never do it.
+struct ThemeWatch {
+    watcher: appearance::config::Watcher,
+    settings: AppearanceSettings,
+}
+
+impl ThemeWatch {
+    fn new() -> Self {
+        Self {
+            watcher: appearance::config::Watcher::new(appearance::CONFIG_NAME),
+            settings: AppearanceSettings::default(),
+        }
+    }
+
+    /// Read the file if it has changed, and tell the application if it had.
+    ///
+    /// Answers whether anything changed, so the caller can mark the frame
+    /// dirty. The first call always reports the current contents, which is why
+    /// [`Self::deliver`] can share this path with every later poll.
+    fn poll<A: App + ?Sized>(&mut self, app: &mut A) -> bool {
+        let Some(doc) = self.watcher.poll() else {
+            return false;
+        };
+        let settings = AppearanceSettings::read_from(&doc);
+        if settings == self.settings {
+            // The file was rewritten and says the same thing. Saving a
+            // settings window with nothing changed does this, and repainting
+            // every window on the desktop for it would be visible work in
+            // answer to nothing.
+            return false;
+        }
+        self.settings = settings;
+        app.theme_changed(&Palette::from_settings(&self.settings));
+        true
+    }
+
+    /// Hand over the opening palette, whether or not a file exists.
+    ///
+    /// Unconditional, unlike [`Self::poll`]: an application must be given
+    /// *some* palette before its first frame, and on a machine with no
+    /// `appearance.yaml` the poll reports no change because there is nothing
+    /// to report.
+    fn deliver<A: App + ?Sized>(&mut self, app: &mut A) {
+        if !self.poll(app) {
+            app.theme_changed(&Palette::from_settings(&self.settings));
+        }
+    }
+}
+
 /// What to say about arguments an application has no use for, if there are any.
 ///
 /// Refused rather than ignored: an application reached through [`launch`] takes
@@ -805,7 +905,15 @@ pub fn launch_with<A: App + ?Sized>(program: &str, display: Option<&str>, app: &
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it. The defensive lints exist to keep panics out of code
+    // that runs on a user's machine, which this is not.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -832,6 +940,12 @@ mod tests {
         /// the ordering rule — pixels up before the frame that names them — is
         /// under test rather than trivially satisfied.
         queue_while_drawing: Option<Vec<ImageChange>>,
+        /// Every palette handed over, in order, interleaved with `drawn` by
+        /// the shared `order` log below so the "before the first frame" claim
+        /// can be checked rather than assumed.
+        themes: Rc<RefCell<Vec<Palette>>>,
+        /// `"theme"` and `"render"` in the order they happened.
+        order: Rc<RefCell<Vec<&'static str>>>,
     }
 
     impl Recorder {
@@ -844,6 +958,8 @@ mod tests {
                 reloads: Rc::new(RefCell::new(Reloads::default())),
                 images: Rc::new(RefCell::new(Vec::new())),
                 queue_while_drawing: None,
+                themes: Rc::new(RefCell::new(Vec::new())),
+                order: Rc::new(RefCell::new(Vec::new())),
             }
         }
 
@@ -899,6 +1015,11 @@ mod tests {
             self.answer
         }
 
+        fn theme_changed(&mut self, palette: &Palette) {
+            self.themes.borrow_mut().push(*palette);
+            self.order.borrow_mut().push("theme");
+        }
+
         fn take_reloads(&mut self) -> Reloads {
             std::mem::take(&mut *self.reloads.borrow_mut())
         }
@@ -909,6 +1030,7 @@ mod tests {
 
         fn render(&mut self, width: f32, height: f32) -> RenderTree {
             self.drawn.borrow_mut().push((width, height));
+            self.order.borrow_mut().push("render");
             if let Some(changes) = self.queue_while_drawing.take() {
                 self.images.borrow_mut().extend(changes);
             }
@@ -1998,5 +2120,114 @@ mod tests {
         drive(&mut events, window, &mut app).expect("the loop should have run");
 
         assert_eq!(seen.borrow().first(), Some(&Event::Tick { elapsed_ms: 7 }));
+    }
+
+    // -- The theme route ------------------------------------------------------
+    //
+    // Applications draw their own interiors, so a palette that stops at the
+    // window frame is a theme the user only half gets. These cover the route
+    // from `appearance.yaml` to `App::theme_changed`; the applications that
+    // read it are converted one at a time.
+
+    /// An application is given its colours before it is asked to draw.
+    ///
+    /// The other order would be a visible flash of the wrong theme every time
+    /// a window opened: one frame in whatever the application defaults to,
+    /// corrected on the next.
+    #[test]
+    fn the_palette_arrives_before_the_first_frame() {
+        appearance::config::testing::with_scratch_config("oswindow-theme-first", |_| {
+            let app = Recorder::new(Response::Idle);
+            let order = Rc::clone(&app.order);
+            let themes = Rc::clone(&app.themes);
+            let mut app = app;
+            let (mut events, window) = opened(&app);
+            drive(&mut events, window, &mut app).unwrap();
+
+            assert_eq!(
+                order.borrow().first().copied(),
+                Some("theme"),
+                "the first thing that happened was not the palette arriving"
+            );
+            assert_eq!(
+                themes.borrow().len(),
+                1,
+                "an unchanged theme was announced more than once"
+            );
+        });
+    }
+
+    /// Rewriting `appearance.yaml` reaches the application, and repaints.
+    ///
+    /// The repaint is the half that is easy to leave out: an application that
+    /// draws only in response to input would otherwise keep the old colours
+    /// until something happened to be clicked.
+    #[test]
+    fn a_theme_change_reaches_the_application_and_repaints() {
+        appearance::config::testing::with_scratch_config("oswindow-theme-change", |_| {
+            let mut watch = ThemeWatch::new();
+            let mut app = Recorder::new(Response::Idle);
+            watch.deliver(&mut app);
+            let first = app.themes.borrow().len();
+            assert_eq!(first, 1, "the opening palette was not delivered");
+
+            // What Settings does when the user picks the light theme.
+            let mut file = appearance::AppearanceFile::load();
+            file.settings.theme_mode = appearance::ThemeMode::Light;
+            file.save().unwrap();
+
+            assert!(
+                watch.poll(&mut app),
+                "the rewritten file did not reach the application"
+            );
+            let themes = app.themes.borrow();
+            assert_eq!(themes.len(), 2);
+            assert_ne!(
+                themes[0], themes[1],
+                "the application was handed the same colours twice"
+            );
+        });
+    }
+
+    /// Saving the settings without changing them repaints nothing.
+    ///
+    /// `Watcher` reports that the file was rewritten; whether it *says*
+    /// anything different is this layer's question. Every window on the
+    /// desktop repainting because a settings window was saved with nothing
+    /// altered is visible work in answer to nothing.
+    #[test]
+    fn a_rewrite_that_changes_nothing_is_not_a_theme_change() {
+        appearance::config::testing::with_scratch_config("oswindow-theme-noop", |_| {
+            let mut watch = ThemeWatch::new();
+            let mut app = Recorder::new(Response::Idle);
+            watch.deliver(&mut app);
+
+            let mut file = appearance::AppearanceFile::load();
+            file.save().unwrap();
+
+            assert!(
+                !watch.poll(&mut app),
+                "an identical rewrite was reported as a theme change"
+            );
+            assert_eq!(app.themes.borrow().len(), 1);
+        });
+    }
+
+    /// A machine with no `appearance.yaml` still gets a palette.
+    ///
+    /// The defaults, rather than nothing: an application must have colours
+    /// before its first frame, and a fresh install has no file.
+    #[test]
+    fn an_absent_settings_file_still_yields_the_default_palette() {
+        appearance::config::testing::with_scratch_config("oswindow-theme-absent", |_| {
+            let mut watch = ThemeWatch::new();
+            let mut app = Recorder::new(Response::Idle);
+            watch.deliver(&mut app);
+            assert_eq!(
+                app.themes.borrow().len(),
+                1,
+                "no file meant no palette, so the first frame would be undrawn"
+            );
+        });
     }
 }

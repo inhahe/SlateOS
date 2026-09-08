@@ -82,11 +82,7 @@ pub enum Severity {
 /// // Diagnostic — logs and continues:
 /// dispatch("ACPI", Severity::Diagnostic, acpi::self_test());
 /// ```
-pub fn dispatch<E: core::fmt::Display>(
-    name: &str,
-    severity: Severity,
-    result: Result<(), E>,
-) {
+pub fn dispatch<E: core::fmt::Display>(name: &str, severity: Severity, result: Result<(), E>) {
     if let Err(e) = result {
         match severity {
             Severity::Integrity => {

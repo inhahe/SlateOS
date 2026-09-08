@@ -789,11 +789,7 @@ extern "C" fn kernel_main() -> ! {
             // mapping, which is not a failure any later test would attribute
             // correctly.  Runs here because page_table::self_test has just proven the
             // mapping machinery this depends on.
-            selftest::dispatch(
-                "PAT",
-                selftest::Severity::Integrity,
-                mm::pat::self_test(),
-            );
+            selftest::dispatch("PAT", selftest::Severity::Integrity, mm::pat::self_test());
 
             // Initialize KASAN shadow memory (heap-corruption detector). Records the
             // HHDM offset so shadow addresses can be computed; shadow pages are lazily

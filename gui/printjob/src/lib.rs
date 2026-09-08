@@ -74,14 +74,32 @@ impl PageRange {
     ///
     /// Ignores it, span by span, rather than failing the whole input. A user
     /// typing `1-3, x, 7` means the two ranges they got right; refusing all of
-    /// it teaches them to distrust the box. A span that begins past the last
-    /// page names no pages and is dropped for the same reason.
+    /// it teaches them to distrust the box.
     ///
     /// A reversed span (`9-7`) is read as the span it plainly means. Refusing
     /// it would be technically defensible and useless: nobody types `9-7`
     /// meaning nothing.
+    ///
+    /// # Why this does not take a page count
+    ///
+    /// It could: the sender has the document open, so it knows how many pages
+    /// there are. But the *service* is what resolves the range, against the
+    /// document as it finds it, and the two counts need not agree -- that is
+    /// the shape of any format that travels. A parser that clamped `1-100`
+    /// down to the sender's ten pages would bake one end's belief into the
+    /// message and lose the user's actual words, and
+    /// [`resolve`](Self::resolve) would then clamp the same bound a second
+    /// time against the count that is authoritative.
+    ///
+    /// The PDF viewer this parser came from learned that the hard way and
+    /// says so in its own comment: *"Clamping in both places is the same bound
+    /// written twice, and the two copies disagreed"* -- its parse-time clamp
+    /// had turned "50-60" of a ten-page document into "page 10" rather than
+    /// into nothing. Nothing is lost by leaving the count out: a span naming
+    /// only pages that do not exist resolves to no pages, which is the same
+    /// answer, reached by the end entitled to give it.
     #[must_use]
-    pub fn parse(input: &str, page_count: usize) -> Self {
+    pub fn parse(input: &str) -> Self {
         let trimmed = input.trim();
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
             return Self::All;
@@ -99,10 +117,7 @@ impl PageRange {
             // One-based to zero-based, once, here.
             let (lo, hi) = (lo.saturating_sub(1), hi.saturating_sub(1));
             let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
-            if lo >= page_count {
-                continue;
-            }
-            spans.push((lo, hi.min(page_count.saturating_sub(1))));
+            spans.push((lo, hi));
         }
 
         if spans.is_empty() {
@@ -368,7 +383,7 @@ mod tests {
     fn the_range_the_desktop_could_not_express_round_trips() {
         // The example from design-decisions 540, which is the reason this
         // format is not just the desktop's `(start, end)` pair.
-        let range = PageRange::parse("1-3, 5, 7-9", 20);
+        let range = PageRange::parse("1-3, 5, 7-9");
         assert_eq!(range.resolve(20, 0), vec![0, 1, 2, 4, 6, 7, 8]);
         assert_eq!(
             range.as_single_span(),
@@ -380,21 +395,21 @@ mod tests {
     #[test]
     fn an_empty_box_means_every_page() {
         for input in ["", "   ", "all", "ALL"] {
-            assert_eq!(PageRange::parse(input, 5), PageRange::All, "{input:?}");
+            assert_eq!(PageRange::parse(input), PageRange::All, "{input:?}");
         }
     }
 
     /// Nonsense is ignored span by span, not fatal to the whole input.
     #[test]
     fn a_bad_span_does_not_throw_away_the_good_ones() {
-        let range = PageRange::parse("1-3, x, 7", 10);
+        let range = PageRange::parse("1-3, x, 7");
         assert_eq!(range.resolve(10, 0), vec![0, 1, 2, 6]);
     }
 
     /// But input that is *entirely* unusable prints nothing, not everything.
     #[test]
     fn wholly_unusable_input_prints_nothing_rather_than_the_document() {
-        let range = PageRange::parse("x, y, 0", 10);
+        let range = PageRange::parse("x, y, 0");
         assert!(
             range.resolve(10, 0).is_empty(),
             "unreadable input fell back to printing the whole document, which \
@@ -403,30 +418,30 @@ mod tests {
     }
 
     #[test]
-    fn a_span_past_the_end_is_dropped_and_one_that_straddles_is_clipped() {
-        assert!(PageRange::parse("50-60", 10).resolve(10, 0).is_empty());
-        assert_eq!(PageRange::parse("8-60", 10).resolve(10, 0), vec![7, 8, 9]);
+    fn a_span_past_the_end_names_no_pages_and_one_that_straddles_is_clipped() {
+        assert!(PageRange::parse("50-60").resolve(10, 0).is_empty());
+        assert_eq!(PageRange::parse("8-60").resolve(10, 0), vec![7, 8, 9]);
     }
 
     #[test]
     fn a_reversed_span_is_read_as_what_it_plainly_means() {
-        assert_eq!(PageRange::parse("9-7", 10).resolve(10, 0), vec![6, 7, 8]);
+        assert_eq!(PageRange::parse("9-7").resolve(10, 0), vec![6, 7, 8]);
     }
 
     /// Overlapping spans print each page once.
     #[test]
     fn overlapping_spans_do_not_print_a_page_twice() {
         assert_eq!(
-            PageRange::parse("1-5, 3-7", 10).resolve(10, 0),
+            PageRange::parse("1-5, 3-7").resolve(10, 0),
             vec![0, 1, 2, 3, 4, 5, 6]
         );
     }
 
     #[test]
     fn page_numbers_are_one_based_going_in_and_zero_based_coming_out() {
-        assert_eq!(PageRange::parse("1", 10).resolve(10, 0), vec![0]);
+        assert_eq!(PageRange::parse("1").resolve(10, 0), vec![0]);
         assert_eq!(
-            PageRange::parse("0", 10).resolve(10, 0),
+            PageRange::parse("0").resolve(10, 0),
             Vec::<usize>::new(),
             "there is no page zero, and it must not become page one"
         );
@@ -456,7 +471,7 @@ mod tests {
     fn a_job_whose_range_names_no_page_is_refused() {
         let job = PrintJob {
             page_count: 5,
-            range: PageRange::parse("50-60", 5),
+            range: PageRange::parse("50-60"),
             ..PrintJob::default()
         };
         assert_eq!(job.validate(), Err(Invalid::NoPages));
@@ -467,7 +482,7 @@ mod tests {
         let job = PrintJob {
             document_name: "report.pdf".to_string(),
             page_count: 10,
-            range: PageRange::parse("1-3", 10),
+            range: PageRange::parse("1-3"),
             ..PrintJob::default()
         };
         assert_eq!(job.validate(), Ok(()));
@@ -493,6 +508,22 @@ mod tests {
             ..PrintJob::default()
         };
         assert_eq!(job.sheets(), 12);
+    }
+
+    /// One parsed range, resolved against two different documents.
+    ///
+    /// The property that made `parse` stop taking a page count: the sender
+    /// parses, the service resolves, and only the service has the document.
+    #[test]
+    fn a_parsed_range_is_not_bound_to_the_senders_page_count() {
+        let range = PageRange::parse("1-100");
+        assert_eq!(
+            range,
+            PageRange::Custom(vec![(0, 99)]),
+            "the user's words were rewritten before they were sent"
+        );
+        assert_eq!(range.resolve(3, 0), vec![0, 1, 2]);
+        assert_eq!(range.resolve(10, 0), (0..10).collect::<Vec<_>>());
     }
 
     #[test]
@@ -540,7 +571,7 @@ mod tests {
     #[test]
     fn a_single_span_can_still_be_read_as_the_old_pair() {
         assert_eq!(
-            PageRange::parse("3-7", 10).as_single_span(),
+            PageRange::parse("3-7").as_single_span(),
             Some((2, 6)),
             "the old from/to form must still be recoverable"
         );

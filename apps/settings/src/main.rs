@@ -917,6 +917,13 @@ impl SettingsState {
 
     /// The palette this application draws itself with.
     ///
+    /// Bound as `pal` at every use site, not `p` as the shell names it. This
+    /// file already binds `p` to a permission inside one loop, and the first
+    /// conversion produced eight wrong-field errors there because `p.green`
+    /// resolved to that shadowing binding instead. It compiled everywhere the
+    /// field names happened not to collide, which is the kind of near-miss
+    /// worth spending a three-letter name to avoid.
+    ///
     /// Derived from the same `AppearanceSettings` the shell uses, so the
     /// Settings window follows the theme, accent, high-contrast scheme and
     /// colour filter chosen *in it* -- which it did not, when its colours were

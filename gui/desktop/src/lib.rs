@@ -4519,7 +4519,20 @@ impl DesktopShell {
         self.hotkeys.unregister(&old);
         match self.hotkeys.register(chord, action.clone()) {
             Ok(()) => {
-                self.shortcut_message = Some(format!("{} is now {label}", chord.display_name()));
+                // Written now rather than on shutdown: a desktop that lost
+                // power between the two would forget the rebind, and the user
+                // has no way to know saving was still pending.
+                let saved = self.save_shortcuts();
+                self.shortcut_message = Some(match saved {
+                    Ok(()) => format!("{} is now {label}", chord.display_name()),
+                    // The rebind *worked*; only keeping it did not. Saying so
+                    // is the difference between a shortcut that will be gone
+                    // tomorrow and one the user believes is set.
+                    Err(e) => format!(
+                        "{} is now {label}, but could not be saved: {e}",
+                        chord.display_name()
+                    ),
+                });
             }
             Err(e) => {
                 // Put the old one back rather than leaving the action with no
@@ -4790,6 +4803,57 @@ impl DesktopShell {
     }
 
     /// The settings group the widget layout lives in.
+    /// The file the user's keyboard shortcuts live in.
+    pub const SHORTCUTS_CONFIG_NAME: &'static str = "shortcuts";
+
+    /// Read the saved shortcuts over the defaults.
+    ///
+    /// Kept out of [`new`](Self::new) for the reason
+    /// [`load_widgets`](Self::load_widgets) is: a constructor that reads the
+    /// user's home directory gives every test a machine-dependent result.
+    ///
+    /// **Applied over the default table, not in place of it.** A file written
+    /// by an older desktop names the shortcuts that existed then, and replacing
+    /// the table with it would silently drop every shortcut added since. The
+    /// defaults are the floor; the file moves what it mentions.
+    ///
+    /// Each saved binding *moves* its action rather than adding a second chord
+    /// for it -- otherwise a rebound shortcut would answer to both its old
+    /// chord and its new one after a restart, which is not what the user asked
+    /// for and is invisible until they press the old one.
+    pub fn load_shortcuts(&mut self) {
+        let doc = config::load(Self::SHORTCUTS_CONFIG_NAME);
+        let Ok(saved) = hotkeys::HotkeyConfig::read_from(&doc) else {
+            // An unparseable file is left alone rather than rewritten: the user
+            // still has whatever they typed, and the defaults still work.
+            return;
+        };
+
+        for (chord, action) in saved.bindings() {
+            let stale: Vec<_> = self
+                .hotkeys
+                .all_bindings()
+                .filter(|(h, a)| *a == action && *h != chord)
+                .map(|(h, _)| *h)
+                .collect();
+            for old in stale {
+                self.hotkeys.unregister(&old);
+            }
+            drop(self.hotkeys.register(*chord, action.clone()));
+        }
+    }
+
+    /// Write the shortcuts back.
+    ///
+    /// # Errors
+    ///
+    /// If there is no configuration directory, or the file cannot be written.
+    pub fn save_shortcuts(&self) -> std::io::Result<()> {
+        let mut doc = config::load(Self::SHORTCUTS_CONFIG_NAME);
+        hotkeys::HotkeyConfig::from_registry(&self.hotkeys).write_into(&mut doc);
+        config::store(Self::SHORTCUTS_CONFIG_NAME, &doc)
+    }
+
     pub const WIDGETS_CONFIG_NAME: &'static str = "widgets";
 
     /// Read the saved widget layout.
@@ -9266,121 +9330,141 @@ mod run_box_wiring_tests {
     /// shell ran them, rebinding "show the desktop" would show the desktop.
     #[test]
     fn a_chord_pressed_while_recording_does_not_also_run() {
-        let mut shell = card_shell();
-        drop(shell.handle_hotkey(&tap(Key::Enter)));
-        assert!(shell.shortcut_capture.is_some(), "recording");
+        settingsfile::testing::with_scratch_config(
+            "hk-a-chord-pressed-while-recording-does-not",
+            |_root| {
+                let mut shell = card_shell();
+                drop(shell.handle_hotkey(&tap(Key::Enter)));
+                assert!(shell.shortcut_capture.is_some(), "recording");
 
-        // Super+D is Show Desktop by default: run, it asks the compositor to
-        // minimise every window on the glass. Pressed as data it must ask for
-        // nothing at all.
-        let outcome = shell.handle_hotkey(&tap_with(Key::D, Modifiers::super_key()));
+                // Super+D is Show Desktop by default: run, it asks the compositor to
+                // minimise every window on the glass. Pressed as data it must ask for
+                // nothing at all.
+                let outcome = shell.handle_hotkey(&tap_with(Key::D, Modifiers::super_key()));
 
-        assert!(
-            outcome.requests.is_empty(),
-            "the chord being recorded must not also be obeyed, got {:?}",
-            outcome.requests
+                assert!(
+                    outcome.requests.is_empty(),
+                    "the chord being recorded must not also be obeyed, got {:?}",
+                    outcome.requests
+                );
+                assert!(outcome.launches.is_empty(), "and must start nothing");
+                assert!(shell.shortcut_capture.is_none(), "and recording ends");
+            },
         );
-        assert!(outcome.launches.is_empty(), "and must start nothing");
-        assert!(shell.shortcut_capture.is_none(), "and recording ends");
     }
 
     #[test]
     fn recording_moves_the_action_onto_the_new_chord() {
-        let mut shell = card_shell();
-        let (old, action) = shell
-            .hotkeys
-            .all_bindings()
-            .next()
-            .map(|(h, a)| (*h, a.clone()))
-            .expect("a first binding");
+        settingsfile::testing::with_scratch_config(
+            "hk-recording-moves-the-action-onto-the-new-",
+            |_root| {
+                let mut shell = card_shell();
+                let (old, action) = shell
+                    .hotkeys
+                    .all_bindings()
+                    .next()
+                    .map(|(h, a)| (*h, a.clone()))
+                    .expect("a first binding");
 
-        drop(shell.handle_hotkey(&tap(Key::Enter)));
-        let chord = crate::hotkeys::Hotkey::new(Key::F9, Modifiers::ctrl());
-        drop(shell.handle_hotkey(&tap_with(Key::F9, Modifiers::ctrl())));
+                drop(shell.handle_hotkey(&tap(Key::Enter)));
+                let chord = crate::hotkeys::Hotkey::new(Key::F9, Modifiers::ctrl());
+                drop(shell.handle_hotkey(&tap_with(Key::F9, Modifiers::ctrl())));
 
-        assert_eq!(
-            shell.hotkeys.conflicts_with(&chord),
-            Some(&action),
-            "the new chord must run what the row named"
-        );
-        assert!(
-            shell.hotkeys.conflicts_with(&old).is_none(),
-            "and the old chord must stop doing it"
+                assert_eq!(
+                    shell.hotkeys.conflicts_with(&chord),
+                    Some(&action),
+                    "the new chord must run what the row named"
+                );
+                assert!(
+                    shell.hotkeys.conflicts_with(&old).is_none(),
+                    "and the old chord must stop doing it"
+                );
+            },
         );
     }
 
     /// A chord already in use is refused, and the refusal names the holder.
     #[test]
     fn a_chord_that_is_taken_is_refused_and_says_by_what() {
-        let mut shell = card_shell();
-        let mut bindings = shell.hotkeys.all_bindings();
-        let (first, first_action) = bindings
-            .next()
-            .map(|(h, a)| (*h, a.clone()))
-            .expect("first");
-        // Skips any binding on a bare modifier. There is no such binding in
-        // the default table -- the first two rows are Escape and PrintScreen --
-        // so this currently skips nothing; it is here because `capture_chord`
-        // ignores bare modifiers by design, and a future default bound to one
-        // would otherwise make this test assert on a rebind that never
-        // happened, and pass for the wrong reason.
-        let second = bindings
-            .map(|(h, _)| *h)
-            .find(|h| {
-                !matches!(
-                    h.key,
-                    Key::LeftCtrl
-                        | Key::RightCtrl
-                        | Key::LeftAlt
-                        | Key::RightAlt
-                        | Key::LeftShift
-                        | Key::RightShift
-                        | Key::LeftSuper
-                        | Key::RightSuper
-                )
-            })
-            .expect("a second binding on a real key");
+        settingsfile::testing::with_scratch_config(
+            "hk-a-chord-that-is-taken-is-refused-and-say",
+            |_root| {
+                let mut shell = card_shell();
+                let mut bindings = shell.hotkeys.all_bindings();
+                let (first, first_action) = bindings
+                    .next()
+                    .map(|(h, a)| (*h, a.clone()))
+                    .expect("first");
+                // Skips any binding on a bare modifier. There is no such binding in
+                // the default table -- the first two rows are Escape and PrintScreen --
+                // so this currently skips nothing; it is here because `capture_chord`
+                // ignores bare modifiers by design, and a future default bound to one
+                // would otherwise make this test assert on a rebind that never
+                // happened, and pass for the wrong reason.
+                let second = bindings
+                    .map(|(h, _)| *h)
+                    .find(|h| {
+                        !matches!(
+                            h.key,
+                            Key::LeftCtrl
+                                | Key::RightCtrl
+                                | Key::LeftAlt
+                                | Key::RightAlt
+                                | Key::LeftShift
+                                | Key::RightShift
+                                | Key::LeftSuper
+                                | Key::RightSuper
+                        )
+                    })
+                    .expect("a second binding on a real key");
 
-        // Row 0 is `first`; try to give it `second`'s chord.
-        drop(shell.handle_hotkey(&tap(Key::Enter)));
-        let ev = KeyEvent {
-            key: second.key,
-            pressed: true,
-            modifiers: second.modifiers(),
-            text: String::new(),
-        };
-        drop(shell.handle_hotkey(&ev));
+                // Row 0 is `first`; try to give it `second`'s chord.
+                drop(shell.handle_hotkey(&tap(Key::Enter)));
+                let ev = KeyEvent {
+                    key: second.key,
+                    pressed: true,
+                    modifiers: second.modifiers(),
+                    text: String::new(),
+                };
+                drop(shell.handle_hotkey(&ev));
 
-        assert_eq!(
-            shell.hotkeys.conflicts_with(&first),
-            Some(&first_action),
-            "a refused rebind must leave the original binding alone"
+                assert_eq!(
+                    shell.hotkeys.conflicts_with(&first),
+                    Some(&first_action),
+                    "a refused rebind must leave the original binding alone"
+                );
+                let msg = shell.shortcut_message.clone().unwrap_or_default();
+                assert!(msg.contains("already"), "and must say so, got {msg:?}");
+            },
         );
-        let msg = shell.shortcut_message.clone().unwrap_or_default();
-        assert!(msg.contains("already"), "and must say so, got {msg:?}");
     }
 
     /// Escape cancels the recording rather than closing the card.
     #[test]
     fn escape_while_recording_cancels_the_rebind() {
-        let mut shell = card_shell();
-        let before: Vec<_> = shell
-            .hotkeys
-            .all_bindings()
-            .map(|(h, a)| (*h, a.clone()))
-            .collect();
+        settingsfile::testing::with_scratch_config(
+            "hk-escape-while-recording-cancels-the-rebin",
+            |_root| {
+                let mut shell = card_shell();
+                let before: Vec<_> = shell
+                    .hotkeys
+                    .all_bindings()
+                    .map(|(h, a)| (*h, a.clone()))
+                    .collect();
 
-        drop(shell.handle_hotkey(&tap(Key::Enter)));
-        drop(shell.handle_hotkey(&tap(Key::Escape)));
+                drop(shell.handle_hotkey(&tap(Key::Enter)));
+                drop(shell.handle_hotkey(&tap(Key::Escape)));
 
-        assert!(shell.shortcut_capture.is_none(), "recording stopped");
-        assert!(shell.shortcut_card_open, "but the card stays open");
-        let after: Vec<_> = shell
-            .hotkeys
-            .all_bindings()
-            .map(|(h, a)| (*h, a.clone()))
-            .collect();
-        assert_eq!(before, after, "and nothing was rebound");
+                assert!(shell.shortcut_capture.is_none(), "recording stopped");
+                assert!(shell.shortcut_card_open, "but the card stays open");
+                let after: Vec<_> = shell
+                    .hotkeys
+                    .all_bindings()
+                    .map(|(h, a)| (*h, a.clone()))
+                    .collect();
+                assert_eq!(before, after, "and nothing was rebound");
+            },
+        );
     }
 
     /// A bare modifier is not a chord.
@@ -9389,16 +9473,119 @@ mod run_box_wiring_tests {
     /// Ctrl the instant the finger lands.
     #[test]
     fn a_modifier_on_its_own_does_not_end_the_recording() {
-        let mut shell = card_shell();
-        drop(shell.handle_hotkey(&tap(Key::Enter)));
+        settingsfile::testing::with_scratch_config(
+            "hk-a-modifier-on-its-own-does-not-end-the-r",
+            |_root| {
+                let mut shell = card_shell();
+                drop(shell.handle_hotkey(&tap(Key::Enter)));
 
-        for key in [Key::LeftCtrl, Key::LeftAlt, Key::LeftShift, Key::LeftSuper] {
-            drop(shell.handle_hotkey(&tap(key)));
-            assert!(
-                shell.shortcut_capture.is_some(),
-                "{key:?} alone must not be taken as the answer"
+                for key in [Key::LeftCtrl, Key::LeftAlt, Key::LeftShift, Key::LeftSuper] {
+                    drop(shell.handle_hotkey(&tap(key)));
+                    assert!(
+                        shell.shortcut_capture.is_some(),
+                        "{key:?} alone must not be taken as the answer"
+                    );
+                }
+            },
+        );
+    }
+
+    /// A rebind survives a restart.
+    #[test]
+    fn a_rebound_shortcut_is_still_bound_in_a_fresh_shell() {
+        settingsfile::testing::with_scratch_config("hk-persist", |_root| {
+            let mut shell = card_shell();
+            let (old, action) = shell
+                .hotkeys
+                .all_bindings()
+                .next()
+                .map(|(h, a)| (*h, a.clone()))
+                .expect("a binding");
+
+            drop(shell.handle_hotkey(&tap(Key::Enter)));
+            let chord = crate::hotkeys::Hotkey::new(Key::F12, Modifiers::ctrl());
+            drop(shell.handle_hotkey(&tap_with(Key::F12, Modifiers::ctrl())));
+            assert_eq!(shell.hotkeys.conflicts_with(&chord), Some(&action));
+
+            // A new shell starts from the defaults and then reads the file.
+            let mut fresh = DesktopShell::new(1920, 1080);
+            assert_eq!(
+                fresh.hotkeys.conflicts_with(&chord),
+                None,
+                "the defaults must not already have it, or this proves nothing"
             );
-        }
+            fresh.load_shortcuts();
+
+            assert_eq!(
+                fresh.hotkeys.conflicts_with(&chord),
+                Some(&action),
+                "the rebind must survive a restart"
+            );
+            assert_eq!(
+                fresh.hotkeys.conflicts_with(&old),
+                None,
+                "and must have moved rather than been added beside the old chord"
+            );
+        });
+    }
+
+    /// A saved file names only what the user changed; everything else keeps
+    /// working. A file from an older desktop must not delete newer shortcuts.
+    #[test]
+    fn loading_shortcuts_keeps_the_defaults_it_does_not_mention() {
+        settingsfile::testing::with_scratch_config("hk-floor", |_root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            let before = shell.hotkeys.len();
+
+            // A file mentioning exactly one binding.
+            let mut doc = appearance::config::load(DesktopShell::SHORTCUTS_CONFIG_NAME);
+            doc.set_seq(&["shortcuts"], &["Ctrl+F12=show_desktop"]);
+            appearance::config::store(DesktopShell::SHORTCUTS_CONFIG_NAME, &doc).expect("store");
+
+            shell.load_shortcuts();
+
+            assert_eq!(
+                shell.hotkeys.len(),
+                before,
+                "one moved shortcut must not change how many there are"
+            );
+            assert!(
+                shell
+                    .hotkeys
+                    .conflicts_with(&crate::hotkeys::Hotkey::new(Key::F12, Modifiers::ctrl()))
+                    .is_some(),
+                "and the one it named must have moved"
+            );
+        });
+    }
+
+    /// An unreadable file leaves the defaults alone rather than clearing them.
+    #[test]
+    fn an_unparseable_shortcuts_file_is_ignored() {
+        settingsfile::testing::with_scratch_config("hk-bad", |_root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            let before: Vec<_> = shell
+                .hotkeys
+                .all_bindings()
+                .map(|(h, a)| (*h, a.clone()))
+                .collect();
+
+            let mut doc = appearance::config::load(DesktopShell::SHORTCUTS_CONFIG_NAME);
+            doc.set_seq(&["shortcuts"], &["this is not a binding"]);
+            appearance::config::store(DesktopShell::SHORTCUTS_CONFIG_NAME, &doc).expect("store");
+
+            shell.load_shortcuts();
+
+            let after: Vec<_> = shell
+                .hotkeys
+                .all_bindings()
+                .map(|(h, a)| (*h, a.clone()))
+                .collect();
+            assert_eq!(
+                before, after,
+                "a bad file must not cost the user the defaults"
+            );
+        });
     }
 
     #[test]

@@ -78,6 +78,7 @@ use guitk::text;
 
 use std::collections::BTreeMap;
 use std::fmt;
+use yamldoc::Document;
 
 // ============================================================================
 // Rendering constants
@@ -1021,31 +1022,94 @@ impl HotkeyConfig {
             // number reported for an implausibly long file is wrong by one
             // rather than wrapping to zero.
             let line_number = line_idx.saturating_add(1);
-            let (key_part, value_part) =
-                line.split_once('=')
-                    .ok_or_else(|| HotkeyError::ParseError {
-                        line_number,
-                        message: "expected '=' separator".to_string(),
-                    })?;
-            let key_part = key_part.trim();
-            let value_part = value_part.trim();
-
-            let hotkey = parse_hotkey_string(key_part).map_err(|e| HotkeyError::ParseError {
-                line_number,
-                message: format!("{}", e),
-            })?;
-
-            let action = HotkeyAction::from_config_value(value_part).map_err(|e| {
-                HotkeyError::ParseError {
-                    line_number,
-                    message: format!("{}", e),
-                }
-            })?;
-
-            bindings.push((hotkey, action));
+            bindings.push(Self::parse_line(line, line_number)?);
         }
 
         Ok(Self { bindings })
+    }
+
+    /// Parse one `chord=action` line.
+    ///
+    /// Shared by the text form and the YAML one, which carries a sequence of
+    /// exactly these strings. Two parsers for one line format is how the two
+    /// come to disagree about what `Ctrl+ +` means.
+    fn parse_line(line: &str, line_number: usize) -> Result<(Hotkey, HotkeyAction), HotkeyError> {
+        let (key_part, value_part) =
+            line.split_once('=')
+                .ok_or_else(|| HotkeyError::ParseError {
+                    line_number,
+                    message: "expected '=' separator".to_string(),
+                })?;
+
+        let hotkey = parse_hotkey_string(key_part.trim()).map_err(|e| HotkeyError::ParseError {
+            line_number,
+            message: format!("{e}"),
+        })?;
+        let action = HotkeyAction::from_config_value(value_part.trim()).map_err(|e| {
+            HotkeyError::ParseError {
+                line_number,
+                message: format!("{e}"),
+            }
+        })?;
+        Ok((hotkey, action))
+    }
+
+    /// The bindings, as the lines a configuration file carries.
+    fn lines(&self) -> Vec<String> {
+        self.bindings
+            .iter()
+            .map(|(hotkey, action)| {
+                format!("{}={}", hotkey.display_name(), action.to_config_value())
+            })
+            .collect()
+    }
+
+    /// Write the bindings into a configuration document.
+    ///
+    /// A YAML sequence of `chord=action` strings under `shortcuts`, because
+    /// `design.txt` says configuration files are YAML and this was the one
+    /// setting in the shell with a format of its own.
+    ///
+    /// A sequence rather than a `chord: action` mapping, and the reason is not
+    /// taste: two actions carry a parameter -- `switch_desktop:3` and
+    /// `launch:/usr/bin/explorer` -- so an *action*-keyed mapping would put a
+    /// colon and a path in a YAML key. Keying by chord instead would work, but
+    /// nothing in `yamldoc` can enumerate the keys of a mapping, so it could be
+    /// written and never read back.
+    pub fn write_into(&self, doc: &mut Document) {
+        let lines = self.lines();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        doc.set_seq(&["shortcuts"], &refs);
+    }
+
+    /// Read bindings back out of a configuration document.
+    ///
+    /// # Errors
+    ///
+    /// [`HotkeyError::ParseError`] naming the offending entry. An absent
+    /// `shortcuts` key is not an error -- it is a file that has never had a
+    /// shortcut changed, and yields no bindings.
+    pub fn read_from(doc: &Document) -> Result<Self, HotkeyError> {
+        let Some(entries) = doc.get_seq(&["shortcuts"]) else {
+            return Ok(Self {
+                bindings: Vec::new(),
+            });
+        };
+
+        let mut bindings = Vec::new();
+        for (index, entry) in entries.iter().enumerate() {
+            let line = entry.trim();
+            if line.is_empty() {
+                continue;
+            }
+            bindings.push(Self::parse_line(line, index.saturating_add(1))?);
+        }
+        Ok(Self { bindings })
+    }
+
+    /// The bindings this config holds.
+    pub fn bindings(&self) -> &[(Hotkey, HotkeyAction)] {
+        &self.bindings
     }
 
     /// Serialize the configuration to text.

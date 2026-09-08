@@ -91089,7 +91089,7 @@ minimum:
 Until then the renderer is dead code that passes its tests, which is the state
 this project has repeatedly found to be worse than absent code: it looks done.
 
-## `TD-C-THE-SHORTCUT-CARD-IS-READ-ONLY` (lane C, 2026-08-26) -- **partly fixed 2026-09-07**
+## `TD-C-THE-SHORTCUT-CARD-IS-READ-ONLY` (lane C, 2026-08-26) -- **CLOSED 2026-09-07**
 
 **Two of the three missing parts are done.** The card's rows can be walked with
 the arrow keys, Enter starts recording, and the next chord becomes the binding.
@@ -91112,12 +91112,32 @@ with no chord at all.
 7 tests. Mutation-checked: removing the capture gate -- which is exactly the
 old behaviour -- fails four of them.
 
-**Still missing, and it is the row this entry listed last:** nowhere to save
-to. The rebind lives for the session only. `HotkeyConfig::save()` returns a
-`String` and `load()` parses one, so the format is done and tested; what is
-absent is a config name and the read/write around it. The shell now has that
-machinery -- `settingsfile`, a `config::Watcher`, and two files of its own
-already -- so this is wiring, not design.
+**Persistence: done 2026-09-07, and it removed a format rather than adding
+one.** `HotkeyConfig`'s bespoke text file had **no caller outside its own
+tests**, and `design.txt` says configuration files are YAML. So the shell does
+not use it: `HotkeyConfig::write_into`/`read_from` put the bindings in a
+`Document` under `shortcuts`, saved to `shortcuts.yaml` beside the desktop's
+other settings, and the one line parser is shared with the text form so the two
+cannot disagree about what `Ctrl+ +` means.
+
+A YAML *sequence* of `chord=action` strings rather than a mapping, and not by
+taste: two actions carry a parameter (`switch_desktop:3`,
+`launch:/usr/bin/explorer`), so an action-keyed mapping would put a colon and a
+path in a YAML key -- and a chord-keyed one could be written but never read
+back, because nothing in `yamldoc` enumerates a mapping's keys.
+
+**Loading applies over the defaults rather than replacing them.** A file
+written by an older desktop names the shortcuts that existed then; replacing
+the table with it would silently drop every shortcut added since. Each saved
+binding *moves* its action rather than adding a second chord for it, so a
+rebound shortcut does not answer to both its old and new chords after a
+restart. An unparseable file is ignored rather than costing the user the
+defaults.
+
+The save happens on the rebind, not on shutdown -- a desktop that lost power
+between the two would forget it, and the user has no way to know saving was
+pending. If the write fails the card says so, because "Ctrl+F12 is now Show
+Desktop" and "...but could not be saved" are different promises.
 
 **Re-grabbing: done 2026-09-07.** `ShellSession::reconcile_global_grabs` runs
 once per pump, on the same unconditional footing as the existing

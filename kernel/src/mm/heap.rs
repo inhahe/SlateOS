@@ -2183,7 +2183,7 @@ fn corrupt_and_realloc(slot_addr: usize, layout: Layout) -> *mut u8 {
     unsafe { alloc::alloc::alloc(layout) }
 }
 
-pub fn poison_self_test() {
+pub fn poison_self_test() -> crate::error::KernelResult<()> {
     serial_println!("[heap] Running slab poison self-test...");
 
     // Enable poisoning for the test.
@@ -2372,4 +2372,5 @@ pub fn poison_self_test() {
     POISON_ENABLED.store(was_enabled, Ordering::Relaxed);
 
     serial_println!("[heap] Slab poison self-test PASSED");
+    Ok(())
 }

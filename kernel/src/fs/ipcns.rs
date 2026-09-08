@@ -342,7 +342,7 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("ipcns::self_test() — running tests...");
     // Start from a clean, empty state so the assertions below are exact and no
     // fixtures leak into the live namespace table afterwards.
@@ -474,4 +474,5 @@ pub fn self_test() {
     *STATE.lock() = None;
     init_defaults();
     crate::serial_println!("ipcns::self_test() — all 10 tests passed");
+    Ok(())
 }

@@ -574,7 +574,7 @@ fn parse_elf_symbols(elf: &'static [u8]) -> Option<usize> {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the kernel symbol table.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[ksyms] Running self-test...");
 
     // Test 1: Check if symbols loaded.
@@ -585,7 +585,7 @@ pub fn self_test() {
     if !loaded {
         serial_println!("[ksyms]   (symbols not available — skipping lookup tests)");
         serial_println!("[ksyms] Self-test PASSED (no symbols)");
-        return;
+        return Ok(());
     }
 
     // Test 2: Resolve the address of this function.
@@ -619,4 +619,5 @@ pub fn self_test() {
     serial_println!("[ksyms]   Invalid high address: OK (None)");
 
     serial_println!("[ksyms] Self-test PASSED");
+    Ok(())
 }

@@ -275,7 +275,7 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("wqstat::self_test() — running tests...");
     // Begin from a clean, EMPTY table and build every fixture via the real
     // API, so the test exercises genuine accounting paths and never relies on
@@ -355,4 +355,5 @@ pub fn self_test() {
     init_defaults();
 
     crate::serial_println!("wqstat::self_test() — all 8 tests passed");
+    Ok(())
 }

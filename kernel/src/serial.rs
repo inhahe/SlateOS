@@ -363,7 +363,7 @@ impl fmt::Display for FaultWhileFormatting {
 /// stall detector, and the last line on the wire names this test, so a
 /// regression is immediately attributable rather than appearing as a mystery
 /// wedge thousands of lines later.
-pub fn reentrancy_self_test() {
+pub fn reentrancy_self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("[serial] Running print re-entrancy self-test...");
     crate::serial_println!(
         "[serial]   (the #BP line below is emitted from inside this line's own \
@@ -385,6 +385,7 @@ pub fn reentrancy_self_test() {
 
     crate::serial_println!("[serial]   nested print completed without deadlock: OK");
     crate::serial_println!("[serial] Print re-entrancy self-test PASSED");
+    Ok(())
 }
 
 /// Print to the serial console (COM1).

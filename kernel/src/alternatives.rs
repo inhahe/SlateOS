@@ -498,7 +498,7 @@ pub fn apply() {
 /// feature, leaving the default in place *is* the correct outcome.  What it
 /// checks is that each site's state agrees with CPUID, which is the property
 /// that actually matters and is wrong in both failure directions.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[alt] Running alternatives self-test...");
 
     assert!(
@@ -560,4 +560,5 @@ pub fn self_test() {
     );
 
     serial_println!("[alt] Alternatives self-test PASSED");
+    Ok(())
 }

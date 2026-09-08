@@ -717,7 +717,7 @@ pub unsafe fn restore(state: *const FpuState) {
 /// 2. Verify default state has correct FCW/MXCSR values.
 /// 3. Write a known pattern to XMM registers, save, modify, restore, verify.
 /// 4. (If AVX) Test YMM register round-trip.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[fpu] Running FPU/SSE self-test...");
     serial_println!(
         "[fpu]   Strategy: {}, area: {}B",
@@ -772,6 +772,7 @@ pub fn self_test() {
     }
 
     serial_println!("[fpu] FPU/SSE self-test PASSED");
+    Ok(())
 }
 
 /// Test that XMM register state survives a save/restore cycle.

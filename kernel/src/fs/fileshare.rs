@@ -530,7 +530,7 @@ pub fn stats() -> (usize, usize, bool, usize, u64) {
 // ---------------------------------------------------------------------------
 
 /// Run self-tests for the file sharing module.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[fileshare] Running self-tests...");
@@ -722,4 +722,5 @@ pub fn self_test() {
     init_defaults();
 
     serial_println!("[fileshare] All self-tests passed.");
+    Ok(())
 }

@@ -1907,12 +1907,12 @@ pub fn stats() -> KasanStats {
 /// Verifies (with values distinct from all defaults, so nothing can
 /// false-pass): a live object reads clean, its redzone and a partial granule
 /// are flagged out-of-bounds, and a freed object is flagged use-after-free.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use alloc::alloc::{Layout, alloc, dealloc};
 
     if !INITED.load(Ordering::Acquire) {
         serial_println!("[kasan] self-test SKIPPED (not initialized)");
-        return;
+        return Ok(());
     }
     serial_println!("[kasan] Running self-test...");
     let mut skips = crate::fs::selftest::Skips::new();
@@ -1950,7 +1950,7 @@ pub fn self_test() {
         if !was_enabled {
             disable();
         }
-        return;
+        return Ok(());
     }
 
     // Body is fully accessible.
@@ -2270,4 +2270,5 @@ pub fn self_test() {
 
     skips.report("[kasan]");
     serial_println!("[kasan] Self-test PASSED{}", skips.suffix());
+    Ok(())
 }

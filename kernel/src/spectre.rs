@@ -370,7 +370,7 @@ pub fn status() -> SpectreStatus {
 // ---------------------------------------------------------------------------
 
 /// Boot-time self-test for speculation mitigations.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[spectre] Running self-test...");
 
     // Test 1: Status query works.
@@ -427,4 +427,5 @@ pub fn self_test() {
     serial_println!("[spectre]   ibpb_barrier(): OK (no fault)");
 
     serial_println!("[spectre] Self-test PASSED");
+    Ok(())
 }

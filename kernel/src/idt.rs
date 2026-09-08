@@ -2502,7 +2502,7 @@ static BP_ENTRY_AC: AtomicBool = AtomicBool::new(false);
 /// kernel binary cannot be built for the host harness (duplicate `panic_impl`
 /// lang item), and because the property is about real IDT delivery, which no
 /// host test could exercise anyway.
-pub fn df_on_entry_self_test() {
+pub fn df_on_entry_self_test() -> crate::error::KernelResult<()> {
     serial_println!("[idt] Running direction-flag self-test...");
 
     // Both `int3`s below are on purpose; annotate their serial lines.
@@ -2555,6 +2555,7 @@ pub fn df_on_entry_self_test() {
     serial_println!("[idt]   iretq restores the caller's DF: OK");
 
     serial_println!("[idt] Direction-flag self-test PASSED");
+    Ok(())
 }
 
 /// Boot self-test: check whether an IDT gate clears `EFLAGS.AC`, and hold that
@@ -2576,7 +2577,7 @@ pub fn df_on_entry_self_test() {
 ///   enforces nothing;
 /// - adding `clac` to the stubs without flipping the constant also fails here,
 ///   so the mitigation cannot sit unused.
-pub fn ac_on_entry_self_test() {
+pub fn ac_on_entry_self_test() -> crate::error::KernelResult<()> {
     serial_println!("[idt] Running alignment-check-flag (SMAP override) self-test...");
 
     let expected_clear = crate::smep_smap::entry_paths_clear_ac();
@@ -2627,6 +2628,7 @@ pub fn ac_on_entry_self_test() {
     }
 
     serial_println!("[idt] Alignment-check-flag self-test PASSED");
+    Ok(())
 }
 
 /// Handle #OF (Overflow, vector 4).
@@ -2806,7 +2808,7 @@ pub(crate) fn sanitizer_trap_name(reason: u8) -> Option<&'static str> {
 /// `cfi-icall` respectively.  They are copied verbatim, so if a toolchain
 /// bump changes the encoding this test fails at boot instead of the kernel
 /// quietly mis-naming faults forever.
-pub fn ud_trap_decode_self_test() {
+pub fn ud_trap_decode_self_test() -> crate::error::KernelResult<()> {
     serial_println!("[idt] Running #UD trap-decode self-test...");
 
     // `ud2` — what rustc and `__builtin_trap()` emit.
@@ -2904,6 +2906,7 @@ pub fn ud_trap_decode_self_test() {
     assert_eq!(sanitizer_trap_name(200), None, "idt: named a bogus ordinal");
 
     serial_println!("[idt]   ud2 / ud1 sanitizer trap decode: OK");
+    Ok(())
 }
 
 /// Print a one-line diagnosis for a trap already decoded by

@@ -457,7 +457,7 @@ impl<T: Copy, const N: usize> KChannel<T, N> {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the kernel channel.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[kchannel] Running self-test...");
@@ -637,4 +637,5 @@ pub fn self_test() {
     serial_println!("[kchannel]   send_timeout_ns (full, timeout): OK");
 
     serial_println!("[kchannel] Self-test PASSED");
+    Ok(())
 }

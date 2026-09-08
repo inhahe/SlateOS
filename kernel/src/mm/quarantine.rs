@@ -435,7 +435,7 @@ pub fn stats() -> QuarantineStats {
 /// eviction / poison-verify logic without perturbing the real allocator. It
 /// does not enable the global `ENABLED` flag (so it can't affect concurrent
 /// allocations); it drives `on_free`/`scan_all` directly.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[quarantine] Running self-test...");
 
     let baseline = stats();
@@ -549,4 +549,5 @@ pub fn self_test() {
     );
 
     serial_println!("[quarantine] Self-test PASSED");
+    Ok(())
 }

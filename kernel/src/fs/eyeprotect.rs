@@ -349,7 +349,7 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("eyeprotect::self_test() — running tests...");
     // Start from a clean, freshly-defaulted state so the assertions below are
     // exact and the break/snooze/skip activity counters and the interval change
@@ -415,4 +415,5 @@ pub fn self_test() {
     *STATE.lock() = None;
     init_defaults();
     crate::serial_println!("eyeprotect::self_test() — all 8 tests passed");
+    Ok(())
 }

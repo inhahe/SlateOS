@@ -580,7 +580,7 @@ pub fn active_count() -> usize {
 // ---------------------------------------------------------------------------
 
 /// Comprehensive self-test for PID namespaces.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[pidns] Running self-test...");
 
     // Test 1: Root namespace exists.
@@ -749,4 +749,5 @@ pub fn self_test() {
     serial_println!("[pidns]   Cleanup: OK");
 
     serial_println!("[pidns] Self-test PASSED (18 tests)");
+    Ok(())
 }

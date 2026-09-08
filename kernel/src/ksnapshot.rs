@@ -324,7 +324,7 @@ pub fn clear() {
 // ---------------------------------------------------------------------------
 
 /// Self-test for kernel snapshots.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[ksnapshot] Running self-test...");
 
     // Test 1: Clear state.
@@ -377,4 +377,5 @@ pub fn self_test() {
     clear();
 
     serial_println!("[ksnapshot] Self-test PASSED");
+    Ok(())
 }

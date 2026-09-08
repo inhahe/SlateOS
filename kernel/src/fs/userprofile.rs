@@ -393,7 +393,7 @@ pub fn stats() -> (usize, u64, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("userprofile::self_test() — running tests...");
     init_defaults();
 
@@ -502,4 +502,5 @@ pub fn self_test() {
     crate::serial_println!("  [9/9] stats: OK");
 
     crate::serial_println!("userprofile::self_test() — all 9 tests passed");
+    Ok(())
 }

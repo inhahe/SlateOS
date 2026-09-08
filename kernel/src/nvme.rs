@@ -1122,7 +1122,7 @@ pub fn is_available() -> bool {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the NVMe subsystem.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[nvme] Running self-test...");
 
     let s = stats();
@@ -1137,13 +1137,13 @@ pub fn self_test() {
             "[nvme]   No controller found — self-test SKIPPED (OK for non-NVMe systems)"
         );
         serial_println!("[nvme] Self-test PASSED (no hardware)");
-        return;
+        return Ok(());
     }
 
     if s.device_count == 0 {
         serial_println!("[nvme]   Controller found but no namespaces — PASSED");
         serial_println!("[nvme] Self-test PASSED (no namespaces)");
-        return;
+        return Ok(());
     }
 
     // Verify block device is registered and readable.
@@ -1175,4 +1175,5 @@ pub fn self_test() {
     }
 
     serial_println!("[nvme] Self-test PASSED");
+    Ok(())
 }

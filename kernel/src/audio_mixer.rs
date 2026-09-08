@@ -648,7 +648,7 @@ pub fn list_streams() -> alloc::vec::Vec<(StreamId, u8, bool, usize)> {
 // ---------------------------------------------------------------------------
 
 /// Self-test: verify stream open/close, volume control, and mixing.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[mixer] Running self-test...");
 
     // Test 1: Open a stream.
@@ -657,7 +657,7 @@ pub fn self_test() {
         Err(e) => {
             serial_println!("[mixer]   Failed to open stream: {:?}", e);
             serial_println!("[mixer] Self-test FAILED");
-            return;
+            return Ok(());
         }
     };
     serial_println!("[mixer]   Open stream: OK (id={})", id);
@@ -745,4 +745,5 @@ pub fn self_test() {
     );
 
     serial_println!("[mixer] Self-test PASSED");
+    Ok(())
 }

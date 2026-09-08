@@ -274,7 +274,7 @@ pub fn recent(max: usize) -> alloc::vec::Vec<(alloc::string::String, u64, u64, u
 // ---------------------------------------------------------------------------
 
 /// Self-test: verify history recording and querying.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[soundhist] Running self-test...");
 
     // Test 1: Record an open event.
@@ -324,4 +324,5 @@ pub fn self_test() {
     }
 
     serial_println!("[soundhist] Self-test PASSED");
+    Ok(())
 }

@@ -128,7 +128,7 @@ impl OnceEvent {
 
 /// Self-test for the one-shot event.
 #[allow(unused_variables)] // Test statics used for multi-task coordination.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[once_event] Running self-test...");
@@ -287,4 +287,5 @@ pub fn self_test() {
     serial_println!("[once_event]   Multi-task signal: OK");
 
     serial_println!("[once_event] Self-test PASSED");
+    Ok(())
 }

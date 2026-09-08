@@ -137,7 +137,7 @@ pub fn compact(bytes: u64) -> String {
 /// Pure functions with no state, so there is nothing to make pristine and no
 /// `crate::fs::selftest` wrapper: every case here is a literal in and a
 /// literal out.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("[bytesize] Running self-tests...");
 
     // Below a KiB the count is exact and stays in bytes.
@@ -203,4 +203,5 @@ pub fn self_test() {
     crate::serial_println!("[bytesize]   3. compact: OK");
 
     crate::serial_println!("[bytesize] All 3 self-tests passed.");
+    Ok(())
 }

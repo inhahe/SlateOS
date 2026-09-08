@@ -409,7 +409,7 @@ pub fn all_pool_stats() -> alloc::vec::Vec<PoolStats> {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the mempool subsystem.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[mempool] Running self-test...");
 
     // Create a small test pool.
@@ -476,4 +476,5 @@ pub fn self_test() {
     serial_println!("[mempool]   Null free rejected: OK");
 
     serial_println!("[mempool] Self-test PASSED");
+    Ok(())
 }

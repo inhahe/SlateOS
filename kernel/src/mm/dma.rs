@@ -431,7 +431,7 @@ fn find_user_vaddr(pml4_phys: u64, size: usize) -> KernelResult<u64> {
 // ---------------------------------------------------------------------------
 
 /// Test DMA buffer allocation.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[dma] Running self-test...");
 
     // Test 1: size_to_order correctness.
@@ -512,4 +512,5 @@ pub fn self_test() {
     serial_println!("[dma]   constrained 64K Below16M: OK");
 
     serial_println!("[dma] Self-test PASSED");
+    Ok(())
 }

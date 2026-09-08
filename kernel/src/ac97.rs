@@ -740,13 +740,13 @@ fn busy_wait_us(us: u64) {
 /// Self-test: verify AC97 device detection and basic register access.
 ///
 /// If no AC97 device is present, gracefully reports "no device" and passes.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[ac97] Running self-test...");
 
     if !is_available() {
         serial_println!("[ac97]   No device (skipped — add -device AC97 to QEMU)");
         serial_println!("[ac97] Self-test PASSED (no device)");
-        return;
+        return Ok(());
     }
 
     let (available, rate, playing, vendor) = status_info();
@@ -791,4 +791,5 @@ pub fn self_test() {
     }
 
     serial_println!("[ac97] Self-test PASSED");
+    Ok(())
 }

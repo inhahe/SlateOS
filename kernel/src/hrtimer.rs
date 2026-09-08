@@ -1059,7 +1059,7 @@ fn tsc_ns_fallback() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Boot-time self-test for high-resolution timers.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use core::sync::atomic::AtomicU64;
 
     serial_println!("[hrtimer] Running self-test...");
@@ -1496,4 +1496,5 @@ pub fn self_test() {
     }
 
     serial_println!("[hrtimer] Self-test PASSED");
+    Ok(())
 }

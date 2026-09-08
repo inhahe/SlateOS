@@ -474,7 +474,7 @@ pub fn clear() {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the kernel trace buffer.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[ktrace] Running self-test...");
@@ -570,4 +570,5 @@ pub fn self_test() {
     }
 
     serial_println!("[ktrace] Self-test PASSED");
+    Ok(())
 }

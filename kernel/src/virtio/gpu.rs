@@ -1660,7 +1660,7 @@ pub fn status_info() -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// Self-test: verify detection and basic operations.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[virtio-gpu] Running self-test...");
 
     let available = is_available();
@@ -1668,7 +1668,7 @@ pub fn self_test() {
 
     if !available {
         serial_println!("[virtio-gpu] Self-test PASSED (no device)");
-        return;
+        return Ok(());
     }
 
     let (w, h) = dimensions();
@@ -1753,6 +1753,7 @@ pub fn self_test() {
     }
 
     serial_println!("[virtio-gpu] Self-test PASSED");
+    Ok(())
 }
 
 /// Self-test for the render-node resource manager.

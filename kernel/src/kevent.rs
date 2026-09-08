@@ -386,7 +386,7 @@ pub struct EventBusStats {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the kernel event bus.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[kevent] Running self-test...");
 
     // Test 1: Subscribe.
@@ -465,4 +465,5 @@ pub fn self_test() {
     unsubscribe(EventKind::MemoryPressure, handler_high);
 
     serial_println!("[kevent] Self-test PASSED");
+    Ok(())
 }

@@ -675,7 +675,7 @@ fn run_filtered(suites: &[TestSuite]) -> TestResults {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the test runner infrastructure.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[selftest] Running self-test...");
 
     // Test 1: List returns suites.
@@ -694,4 +694,5 @@ pub fn self_test() {
     serial_println!("[selftest]   Lookup: OK");
 
     serial_println!("[selftest] Self-test PASSED");
+    Ok(())
 }

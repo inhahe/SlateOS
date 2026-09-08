@@ -931,7 +931,7 @@ pub fn replay_on_mount(mount_path: &Path) {
 /// Exercise the deferred-ops module.  Run at boot after the root filesystem
 /// is mounted.
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[deferred-ops] Running self-test...");
@@ -1081,4 +1081,5 @@ pub fn self_test() {
     );
 
     serial_println!("[deferred-ops] Self-test PASSED");
+    Ok(())
 }

@@ -463,7 +463,7 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 // ---------------------------------------------------------------------------
 
 /// Run self-tests for the task monitor module.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[taskmon] Running self-tests...");
@@ -606,4 +606,5 @@ pub fn self_test() {
     *STATE.lock() = None;
     init_defaults();
     serial_println!("[taskmon] All 11 self-tests passed.");
+    Ok(())
 }

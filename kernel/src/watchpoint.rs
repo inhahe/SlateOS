@@ -360,7 +360,7 @@ pub fn total_events() -> u32 {
 // ---------------------------------------------------------------------------
 
 /// Self-test for watchpoints.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[watchpoint] Running self-test...");
 
     // Test 1: Clear state.
@@ -457,4 +457,5 @@ pub fn self_test() {
     clear();
 
     serial_println!("[watchpoint] Self-test PASSED");
+    Ok(())
 }

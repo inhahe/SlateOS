@@ -293,7 +293,7 @@ pub fn stats() -> PoisonStats {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the poison subsystem.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[poison] Running self-test...");
 
     // SAFETY (group — covers all unsafe calls in self_test): every
@@ -365,4 +365,5 @@ pub fn self_test() {
     );
 
     serial_println!("[poison] Self-test PASSED");
+    Ok(())
 }

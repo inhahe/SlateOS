@@ -420,7 +420,7 @@ pub fn stats() -> RmapStats {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the rmap subsystem.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[rmap] Running self-test...");
 
     // Use fake frame addresses for testing (not real frames/PML4s).
@@ -517,4 +517,5 @@ pub fn self_test() {
     );
 
     serial_println!("[rmap] Self-test PASSED");
+    Ok(())
 }

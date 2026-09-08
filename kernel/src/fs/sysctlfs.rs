@@ -310,7 +310,7 @@ pub fn stats() -> (usize, u64, u64, usize, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("sysctlfs::self_test() — running tests...");
 
     // Residue-free: start from a clean, controlled default config so the
@@ -373,4 +373,5 @@ pub fn self_test() {
     init_defaults();
 
     crate::serial_println!("sysctlfs::self_test() — all 8 tests passed");
+    Ok(())
 }

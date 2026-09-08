@@ -553,7 +553,7 @@ fn calculate_backoff(restart_count: u32, base_delay: u64, max_delay: u64) -> u64
 /// Tests policy creation, backoff calculation, and registration.
 /// Full restart testing requires spawning a task that exits, which
 /// is timing-dependent — covered in integration tests.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[supervisor] Running self-test...");
 
     // --- 1. Policy creation ---
@@ -693,4 +693,5 @@ pub fn self_test() {
     }
 
     serial_println!("[supervisor] Self-test PASSED");
+    Ok(())
 }

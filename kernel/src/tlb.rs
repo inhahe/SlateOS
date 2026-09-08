@@ -278,7 +278,7 @@ fn local_flush_all() {
 // ---------------------------------------------------------------------------
 
 /// Verify TLB shootdown infrastructure.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[tlb] Running self-test...");
 
     let online = crate::smp::cpu_count();
@@ -301,4 +301,5 @@ pub fn self_test() {
     serial_println!("[tlb]   Shootdown flush_all: OK ({} CPUs)", online);
 
     serial_println!("[tlb] Self-test PASSED");
+    Ok(())
 }

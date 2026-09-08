@@ -1052,7 +1052,7 @@ pub fn deregister_waiter(handle: PtyHandle, task: TaskId) {
 ///
 /// On any assertion failure — this runs during bring-up, where a broken
 /// terminal layer is not something to continue past.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("[pty] Running self-test...");
 
     let (m, s) = create().expect("pty create");
@@ -1377,4 +1377,5 @@ pub fn self_test() {
     assert!(!tty::exists(id), "device removed after both ends closed");
 
     crate::serial_println!("[pty] Self-test PASSED");
+    Ok(())
 }

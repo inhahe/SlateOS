@@ -565,7 +565,7 @@ pub fn stats() -> RcuStats {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the RCU subsystem.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[rcu] Running self-test...");
 
     // Test 1: Read lock/unlock doesn't panic.
@@ -650,4 +650,5 @@ pub fn self_test() {
     );
 
     serial_println!("[rcu] Self-test PASSED");
+    Ok(())
 }

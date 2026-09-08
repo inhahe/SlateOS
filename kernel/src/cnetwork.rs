@@ -861,7 +861,7 @@ pub fn disconnect_container(network: &str, container_id: u32) -> KernelResult<()
 /// (explicit + default subnet), inspect/list, allocation ordering and gateway
 /// skipping, release, container-scoped release, in-use removal refusal, and
 /// prune. Panics on any invariant violation (the boot self-test convention).
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
     serial_println!("[cnetwork] Running self-test...");
 
@@ -1208,4 +1208,5 @@ pub fn self_test() {
     }
 
     serial_println!("[cnetwork] Self-test PASSED");
+    Ok(())
 }

@@ -534,7 +534,7 @@ const fn const_str_eq(a: &str, b: &str) -> bool {
     true
 }
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("netdev::self_test() — running tests...");
     // Begin from a clean, EMPTY table and build every fixture via the real API,
     // so the test exercises genuine accounting paths and never relies on
@@ -669,4 +669,5 @@ pub fn self_test() {
     init_defaults();
 
     crate::serial_println!("netdev::self_test() — all 9 tests passed");
+    Ok(())
 }

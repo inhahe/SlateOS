@@ -1354,7 +1354,7 @@ impl core::fmt::Display for AddrDesc {
 /// 3. Cycle detection catches AB/BA inversions.
 /// 4. Non-cyclic orderings are allowed.
 /// 5. Release removes from held stack.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[lockdep] Running self-test...");
 
     // Save and reset state for testing.
@@ -1794,6 +1794,7 @@ pub fn self_test() {
         VIOLATIONS.load(Ordering::Relaxed)
     );
     serial_println!("[lockdep] Self-test PASSED");
+    Ok(())
 }
 
 /// Verify the O(1) class index against the O(n) scan it replaced.

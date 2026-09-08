@@ -361,7 +361,7 @@ pub fn all_regions() -> &'static [Region] {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the kernel virtual address space layout.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[kvspace] Running self-test...");
 
     // Test 1: the overlap predicate the build gate rests on.
@@ -482,4 +482,5 @@ pub fn self_test() {
     serial_println!("[kvspace]   KASAN shadow mapping covers kernel VA: OK");
 
     serial_println!("[kvspace] Self-test PASSED");
+    Ok(())
 }

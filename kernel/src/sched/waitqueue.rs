@@ -473,7 +473,7 @@ static TOTAL_WAKE_ALLS: AtomicU64 = AtomicU64::new(0);
 /// Tests the basic API (wake_one on empty queue, waiter count).
 /// Full multi-task testing requires spawning tasks, which is done
 /// separately in the scheduler's integration tests.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[waitqueue] Running self-test...");
 
     // --- 1. Empty queue operations ---
@@ -564,4 +564,5 @@ pub fn self_test() {
     serial_println!("[waitqueue]   wait_timeout_ns (long, already true): OK");
 
     serial_println!("[waitqueue] Self-test PASSED");
+    Ok(())
 }

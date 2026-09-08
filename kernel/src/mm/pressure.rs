@@ -374,7 +374,7 @@ pub struct PressureInfo {
 
 /// Self-test for the memory pressure notification system.
 #[allow(clippy::expect_used)] // Tests panic on unexpected state.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use core::sync::atomic::AtomicUsize;
 
     serial_println!("[pressure] Running self-test...");
@@ -448,4 +448,5 @@ pub fn self_test() {
     );
 
     serial_println!("[pressure] Self-test PASSED");
+    Ok(())
 }

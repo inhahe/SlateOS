@@ -497,7 +497,7 @@ pub fn try_tracked_count() -> Option<usize> {
 /// 5. `largest_rss` selects the biggest.
 /// 6. `destroy_address_space` frees the slot.
 /// 7. Kernel PML4 is excluded from tracking.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[accounting] Running self-test...");
 
     // Use fake PML4 addresses that won't collide with real ones.
@@ -626,6 +626,7 @@ pub fn self_test() {
     serial_println!("[accounting]   Tracked count: {} (after cleanup)", count);
 
     serial_println!("[accounting] Self-test PASSED");
+    Ok(())
 }
 
 // Implement PartialEq for query result comparison in tests.

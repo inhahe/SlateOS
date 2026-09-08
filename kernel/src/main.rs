@@ -652,10 +652,11 @@ extern "C" fn kernel_main() -> ! {
             }
 
             // Verify basic allocator functionality before proceeding.
-            if let Err(e) = mm::frame::self_test() {
-                serial_println!("FATAL: Frame allocator self-test failed: {}", e);
-                cpu::halt_loop();
-            }
+            selftest::dispatch(
+                "Frame allocator",
+                selftest::Severity::Integrity,
+                mm::frame::self_test(),
+            );
 
             boot_timing::mark(boot_timing::Milestone::FrameAlloc);
 
@@ -684,10 +685,11 @@ extern "C" fn kernel_main() -> ! {
             console::notify_heap_available();
 
             // Verify heap allocations work.
-            if let Err(e) = mm::heap::self_test() {
-                serial_println!("FATAL: Heap allocator self-test failed: {}", e);
-                cpu::halt_loop();
-            }
+            selftest::dispatch(
+                "Heap allocator",
+                selftest::Severity::Integrity,
+                mm::heap::self_test(),
+            );
             boot_timing::mark(boot_timing::Milestone::Heap);
 
             // Verify the self-test skip ledger allocates nothing.
@@ -775,10 +777,11 @@ extern "C" fn kernel_main() -> ! {
             mm::page_table::init(boot_info.hhdm_offset);
 
             // Verify page table operations work (translate HHDM, map/unmap).
-            if let Err(e) = mm::page_table::self_test() {
-                serial_println!("FATAL: Page table self-test failed: {}", e);
-                cpu::halt_loop();
-            }
+            selftest::dispatch(
+                "Page table",
+                selftest::Severity::Integrity,
+                mm::page_table::self_test(),
+            );
 
             // Verify IA32_PAT reads back as programmed and that the PageFlags memory
             // types decode to what the rest of the kernel assumes.  Fatal: a wrong
@@ -786,10 +789,11 @@ extern "C" fn kernel_main() -> ! {
             // mapping, which is not a failure any later test would attribute
             // correctly.  Runs here because page_table::self_test has just proven the
             // mapping machinery this depends on.
-            if let Err(e) = mm::pat::self_test() {
-                serial_println!("FATAL: PAT self-test failed: {}", e);
-                cpu::halt_loop();
-            }
+            selftest::dispatch(
+                "PAT",
+                selftest::Severity::Integrity,
+                mm::pat::self_test(),
+            );
 
             // Initialize KASAN shadow memory (heap-corruption detector). Records the
             // HHDM offset so shadow addresses can be computed; shadow pages are lazily
@@ -803,18 +807,20 @@ extern "C" fn kernel_main() -> ! {
             mm::fault::init();
 
             // Verify demand paging works (register VMA, trigger fault, verify).
-            if let Err(e) = mm::fault::self_test() {
-                serial_println!("FATAL: Demand paging self-test failed: {}", e);
-                cpu::halt_loop();
-            }
+            selftest::dispatch(
+                "Demand paging",
+                selftest::Severity::Integrity,
+                mm::fault::self_test(),
+            );
 
             // Step 8b: Verify userspace pointer validation logic.
             // Validates that kernel rejects null, kernel-space, wrapping, and
             // unmapped user-space pointers before any syscall handler uses them.
-            if let Err(e) = mm::user::self_test() {
-                serial_println!("FATAL: User memory validation self-test failed: {}", e);
-                cpu::halt_loop();
-            }
+            selftest::dispatch(
+                "User memory validation",
+                selftest::Severity::Integrity,
+                mm::user::self_test(),
+            );
 
             // Step 8c: Initialize kernel stack allocator with hardware guard pages.
             // Must be after fault::init() since it registers Guard VMAs.
@@ -835,10 +841,11 @@ extern "C" fn kernel_main() -> ! {
             sched::init();
 
             // Verify cooperative scheduling works (spawn tasks, yield, verify).
-            if let Err(e) = sched::self_test() {
-                serial_println!("FATAL: Scheduler self-test failed: {}", e);
-                cpu::halt_loop();
-            }
+            selftest::dispatch(
+                "Scheduler",
+                selftest::Severity::Integrity,
+                sched::self_test(),
+            );
 
             // Process accounting (after self-test, which fills/empties the hook table).
             pacct::init();
@@ -886,24 +893,27 @@ extern "C" fn kernel_main() -> ! {
             // global channel table is lazily populated).  Run self-tests to
             // verify send, recv, blocking, close detection, and backpressure.
             console::boot_step(console::BootStatus::Running, "IPC subsystem");
-            if let Err(e) = ipc::channel::self_test() {
-                serial_println!("FATAL: IPC channel self-test failed: {}", e);
-                cpu::halt_loop();
-            }
+            selftest::dispatch(
+                "IPC channel",
+                selftest::Severity::Integrity,
+                ipc::channel::self_test(),
+            );
 
             // Step 11: Initialize syscall dispatch.
             // The versioned dispatch table maps syscall numbers to handlers.
             // No explicit init needed (table is a const static), but we run
             // self-tests to verify dispatch, yield, task_id, and IPC roundtrip
             // all work through the syscall interface.
-            if let Err(e) = syscall::self_test() {
-                serial_println!("FATAL: Syscall dispatch self-test failed: {}", e);
-                cpu::halt_loop();
-            }
-            if let Err(e) = syscall::linux::self_test() {
-                serial_println!("FATAL: Linux ABI translation self-test failed: {}", e);
-                cpu::halt_loop();
-            }
+            selftest::dispatch(
+                "Syscall dispatch",
+                selftest::Severity::Integrity,
+                syscall::self_test(),
+            );
+            selftest::dispatch(
+                "Linux ABI translation",
+                selftest::Severity::Integrity,
+                syscall::linux::self_test(),
+            );
             // The translation self-test is the deepest single frame that runs on the
             // boot stack (a monolithic function whose unoptimized frame is ~480 KiB
             // and grows with each ABI batch).  Verify it did not breach the redzone;
@@ -1137,9 +1147,7 @@ extern "C" fn kernel_main() -> ! {
                 }
 
                 // RAN-IF: "[acpi] Running self-test..."
-                if let Err(e) = acpi::self_test() {
-                    serial_println!("WARNING: ACPI self-test failed: {} — using defaults", e);
-                }
+                selftest::dispatch("ACPI", selftest::Severity::Diagnostic, acpi::self_test());
             } else {
                 // No RSDP from Limine — try scanning memory directly.
                 serial_println!("[acpi] No RSDP from bootloader — scanning memory...");
@@ -1150,9 +1158,7 @@ extern "C" fn kernel_main() -> ! {
                 }
 
                 // RAN-IF: "[acpi] Running self-test..."
-                if let Err(e) = acpi::self_test() {
-                    serial_println!("WARNING: ACPI self-test failed: {} — using defaults", e);
-                }
+                selftest::dispatch("ACPI", selftest::Severity::Diagnostic, acpi::self_test());
             }
 
             // Step 19c: Initialize HPET (High Precision Event Timer).

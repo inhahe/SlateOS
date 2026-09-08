@@ -69481,7 +69481,7 @@ their slot (8 empty + 8 oversized): OK` and **zero** occurrences of `[frag]
 Evicting reassembly entry`, which is the observable the fix is about — the
 sixteen junk fragments forced no eviction at all.
 
-## `TD-A-MOST-BOOT-SELF-TESTS-PANIC-THE-KERNEL-INSTEAD-OF-REPORTING` — open, found 2026-08-22 (lane A)
+## `TD-A-MOST-BOOT-SELF-TESTS-PANIC-THE-KERNEL-INSTEAD-OF-REPORTING` — in progress, found 2026-08-22 (lane A)
 
 **In short:** The kernel runs its own test suite on every single boot, and most
 of those tests are written so that a failure **halts the machine** rather than

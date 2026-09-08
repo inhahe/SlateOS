@@ -31,6 +31,76 @@ use crate::serial_println;
 use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
+// Severity classification (§914)
+// ---------------------------------------------------------------------------
+
+/// Severity of a self-test: determines kernel behaviour on failure.
+///
+/// Introduced by design-decisions.md §914 (operator decision): structural-
+/// integrity tests halt the machine; diagnostic tests log a WARNING and
+/// let the boot continue.  The default is `Integrity` — the safe side —
+/// so an unclassified test never silently degrades a kernel invariant.
+///
+/// A test whose `run` function uses `assert!` internally panics on failure
+/// regardless of this field (panics are uncatchable in `no_std`).  To make
+/// a test truly `Diagnostic`, it must return `Result<(), E>` so the caller
+/// can choose how to handle the error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+    /// Kernel structural integrity — halt on failure.
+    ///
+    /// Use for: memory manager, page tables, scheduler invariants,
+    /// capability enforcement, IPC channels, boot-stack checks.
+    Integrity,
+    /// Informational / diagnostic — log and continue.
+    ///
+    /// Use for: terminal flags, cosmetic checks, filesystem feature
+    /// probes, optional hardware detection (ACPI, CET), userspace-
+    /// facing conformance tests.
+    Diagnostic,
+}
+
+/// Run a self-test that returns `Result` and dispatch on severity.
+///
+/// - [`Severity::Integrity`]: prints `FATAL: {name} self-test failed: {e}`
+///   and halts the kernel.
+/// - [`Severity::Diagnostic`]: prints `WARNING: {name} self-test failed: {e}`
+///   and returns normally so boot continues.
+///
+/// Replaces the ad-hoc `serial_println!("FATAL/WARNING: ...")` +
+/// `cpu::halt_loop()` pattern scattered across `main.rs` with a single
+/// dispatch point that cannot misclassify a test's severity.
+///
+/// # Examples
+///
+/// ```ignore
+/// use crate::selftest::{Severity, dispatch};
+///
+/// // Integrity — halts on failure:
+/// dispatch("Frame allocator", Severity::Integrity, mm::frame::self_test());
+///
+/// // Diagnostic — logs and continues:
+/// dispatch("ACPI", Severity::Diagnostic, acpi::self_test());
+/// ```
+pub fn dispatch<E: core::fmt::Display>(
+    name: &str,
+    severity: Severity,
+    result: Result<(), E>,
+) {
+    if let Err(e) = result {
+        match severity {
+            Severity::Integrity => {
+                serial_println!("FATAL: {} self-test failed: {}", name, e);
+                crate::cpu::halt_loop();
+            }
+            Severity::Diagnostic => {
+                serial_println!("WARNING: {} self-test failed: {}", name, e);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test suite registry
 // ---------------------------------------------------------------------------
 
@@ -46,6 +116,9 @@ pub struct TestSuite {
     pub run: fn() -> bool,
     /// Subsystem category for filtering.
     pub category: &'static str,
+    /// Severity classification (§914).  Defaults to [`Severity::Integrity`]
+    /// for tests registered before the classification was introduced.
+    pub severity: Severity,
 }
 
 // ---------------------------------------------------------------------------
@@ -65,6 +138,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "mm",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "alloc_trace",
@@ -74,6 +148,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "mm",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "alloc_lat",
@@ -83,6 +158,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "mm",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "heap_profile",
@@ -92,6 +168,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "mm",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "alloc_checkpoint",
@@ -101,6 +178,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "mm",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "frag_history",
@@ -110,6 +188,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "mm",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "fault_inject",
@@ -119,6 +198,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "mm",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "watermark",
@@ -128,6 +208,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "mm",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "poison",
@@ -137,6 +218,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "mm",
+        severity: Severity::Diagnostic,
     });
 
     // Syscall subsystem
@@ -148,6 +230,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "syscall",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "syscall_trace",
@@ -157,6 +240,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "syscall",
+        severity: Severity::Diagnostic,
     });
 
     // Capability subsystem
@@ -168,6 +252,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "cap",
+        severity: Severity::Diagnostic,
     });
 
     // IPC subsystem
@@ -179,6 +264,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "ipc",
+        severity: Severity::Diagnostic,
     });
 
     // Kernel infrastructure
@@ -190,6 +276,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "kernel",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "kevent",
@@ -199,6 +286,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "kernel",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "sysctl",
@@ -208,6 +296,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "kernel",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "watchpoint",
@@ -217,6 +306,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "kernel",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "ksnapshot",
@@ -226,6 +316,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "kernel",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "rip_sample",
@@ -235,6 +326,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "kernel",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "invariant",
@@ -244,6 +336,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "kernel",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "sched_migrate",
@@ -253,6 +346,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "sched",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "wchan",
@@ -262,6 +356,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "sched",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "kdiag",
@@ -271,6 +366,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "kernel",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "hypervisor",
@@ -280,6 +376,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "kernel",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "sched_fairness",
@@ -289,18 +386,21 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "sched",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "eevdf",
         description: "EEVDF scheduler algorithm (vruntime, deadlines, fairness)",
         run: || crate::sched::eevdf::self_test().is_ok(),
         category: "sched",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "deadline",
         description: "Deadline scheduler (EDF, admission control, throttling)",
         run: || crate::sched::deadline::self_test().is_ok(),
         category: "sched",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "sched_backend",
@@ -310,6 +410,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "sched",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "cet",
@@ -319,6 +420,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "security",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "smep_smap",
@@ -328,6 +430,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "security",
+        severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "spectre",
@@ -337,6 +440,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "security",
+        severity: Severity::Diagnostic,
     });
 
     // Timers
@@ -348,6 +452,7 @@ fn all_suites() -> Vec<TestSuite> {
             true
         },
         category: "kernel",
+        severity: Severity::Diagnostic,
     });
 
     suites

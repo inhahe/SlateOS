@@ -706,12 +706,15 @@ pub struct SettingsState {
     pub reduce_transparency: bool,
     pub mono_audio: bool,
     pub visual_alerts: bool,
-    pub sticky_keys: bool,
-    pub filter_keys: bool,
+    // sticky_keys, filter_keys and mouse_keys are NOT here. They live on
+    // `input.settings.accessibility`, so that toggling one is saved to
+    // `input.yaml` by `handle_event`'s whole-struct comparison and re-read by
+    // the compositor. As plain fields here they were three more switches that
+    // reached nothing -- see `known-issues.md`
+    // `TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING`.
     pub toggle_keys: bool,
     pub onscreen_keyboard: bool,
     pub pointer_size: u8, // 1-5
-    pub mouse_keys: bool,
     pub narrator_enabled: bool,
     /// Slow at 0.0, fast at 1.0. Range stated by [`SliderId::range`].
     pub narrator_rate: f32,
@@ -1191,12 +1194,9 @@ impl SettingsState {
             reduce_transparency: false,
             mono_audio: false,
             visual_alerts: false,
-            sticky_keys: false,
-            filter_keys: false,
             toggle_keys: false,
             onscreen_keyboard: false,
             pointer_size: 1,
-            mouse_keys: false,
             narrator_enabled: false,
             narrator_rate: 0.5,
             narrator_verbosity: NarratorVerbosity::Medium,
@@ -3479,13 +3479,13 @@ impl SettingsState {
             (
                 "Sticky Keys",
                 ToggleId::StickyKeys,
-                self.sticky_keys,
+                self.input.settings.accessibility.sticky.enabled,
                 "Press modifier keys one at a time",
             ),
             (
                 "Filter Keys",
                 ToggleId::FilterKeys,
-                self.filter_keys,
+                self.input.settings.accessibility.filter.enabled,
                 "Ignore brief or repeated keystrokes",
             ),
             (
@@ -3532,7 +3532,7 @@ impl SettingsState {
         s.toggle_row(
             "Mouse Keys (numpad controls pointer)",
             ToggleId::MouseKeys,
-            self.mouse_keys,
+            self.input.settings.accessibility.mouse.enabled,
         );
     }
 
@@ -4542,11 +4542,11 @@ impl SettingsState {
             ToggleId::MonoAudio => &mut self.mono_audio,
             ToggleId::VisualAlerts => &mut self.visual_alerts,
             ToggleId::NarratorEnabled => &mut self.narrator_enabled,
-            ToggleId::StickyKeys => &mut self.sticky_keys,
-            ToggleId::FilterKeys => &mut self.filter_keys,
+            ToggleId::StickyKeys => &mut self.input.settings.accessibility.sticky.enabled,
+            ToggleId::FilterKeys => &mut self.input.settings.accessibility.filter.enabled,
             ToggleId::ToggleKeys => &mut self.toggle_keys,
             ToggleId::OnscreenKeyboard => &mut self.onscreen_keyboard,
-            ToggleId::MouseKeys => &mut self.mouse_keys,
+            ToggleId::MouseKeys => &mut self.input.settings.accessibility.mouse.enabled,
             ToggleId::ReduceAnimations => &mut self.reduce_animations,
             ToggleId::ReduceTransparency => &mut self.reduce_transparency,
             ToggleId::AutoUpdate => &mut self.auto_update_enabled,
@@ -6706,6 +6706,47 @@ mod tests {
             let saved =
                 InputSettings::read_from(&inputsettings::config::load(inputsettings::CONFIG_NAME));
             assert_eq!(saved.mouse.double_click_ms, MIN_DOUBLE_CLICK_MS);
+        });
+    }
+
+    /// Turning on Sticky Keys reaches the file the compositor reads.
+    ///
+    /// Checked by reading `input.yaml` back off disk, not by asking this
+    /// process's own model, which would agree with itself whether or not
+    /// anything was written. That distinction is the whole point here: these
+    /// three switches were plain `bool` fields on the settings window for
+    /// months, so they flipped on screen, persisted nowhere, and reached no
+    /// keyboard.
+    #[test]
+    fn switching_on_sticky_keys_reaches_the_file_the_compositor_reads() {
+        with_scratch_config("settings-sticky-keys-file", |root| {
+            // Not `fully_expanded`: that helper turns every switch on to
+            // reveal the rows nested under them, which would leave nothing for
+            // the click to change. Sticky Keys is a top-level row and needs no
+            // expanding.
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Interaction;
+            assert!(
+                !state.input.settings.accessibility.sticky.enabled,
+                "the test's premise is that it starts off"
+            );
+            let (cx, cy) = center_of(&state, RowHit::Toggle(ToggleId::StickyKeys))
+                .expect("the interaction page draws a Sticky Keys row");
+            // Through `handle_event`, not `handle_click`: the save is the
+            // whole-struct comparison `handle_event` does around the dispatch,
+            // so a test that called the inner handler would prove the switch
+            // moves and nothing about whether it is kept.
+            click(&mut state, cx, cy);
+
+            let path = scratch_path(root, inputsettings::CONFIG_NAME);
+            assert!(path.is_file(), "the click should have written {path:?}");
+
+            let saved =
+                InputSettings::read_from(&inputsettings::config::load(inputsettings::CONFIG_NAME));
+            assert!(
+                saved.accessibility.sticky.enabled,
+                "the switch moved on screen but input.yaml still says off, so                  the compositor will never hear about it"
+            );
         });
     }
 

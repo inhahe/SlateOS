@@ -74,14 +74,32 @@ impl PageRange {
     ///
     /// Ignores it, span by span, rather than failing the whole input. A user
     /// typing `1-3, x, 7` means the two ranges they got right; refusing all of
-    /// it teaches them to distrust the box. A span that begins past the last
-    /// page names no pages and is dropped for the same reason.
+    /// it teaches them to distrust the box.
     ///
     /// A reversed span (`9-7`) is read as the span it plainly means. Refusing
     /// it would be technically defensible and useless: nobody types `9-7`
     /// meaning nothing.
+    ///
+    /// # Why this does not take a page count
+    ///
+    /// It could: the sender has the document open, so it knows how many pages
+    /// there are. But the *service* is what resolves the range, against the
+    /// document as it finds it, and the two counts need not agree -- that is
+    /// the shape of any format that travels. A parser that clamped `1-100`
+    /// down to the sender's ten pages would bake one end's belief into the
+    /// message and lose the user's actual words, and
+    /// [`resolve`](Self::resolve) would then clamp the same bound a second
+    /// time against the count that is authoritative.
+    ///
+    /// The PDF viewer this parser came from learned that the hard way and
+    /// says so in its own comment: *"Clamping in both places is the same bound
+    /// written twice, and the two copies disagreed"* -- its parse-time clamp
+    /// had turned "50-60" of a ten-page document into "page 10" rather than
+    /// into nothing. Nothing is lost by leaving the count out: a span naming
+    /// only pages that do not exist resolves to no pages, which is the same
+    /// answer, reached by the end entitled to give it.
     #[must_use]
-    pub fn parse(input: &str, page_count: usize) -> Self {
+    pub fn parse(input: &str) -> Self {
         let trimmed = input.trim();
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
             return Self::All;
@@ -99,10 +117,7 @@ impl PageRange {
             // One-based to zero-based, once, here.
             let (lo, hi) = (lo.saturating_sub(1), hi.saturating_sub(1));
             let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
-            if lo >= page_count {
-                continue;
-            }
-            spans.push((lo, hi.min(page_count.saturating_sub(1))));
+            spans.push((lo, hi));
         }
 
         if spans.is_empty() {
@@ -167,16 +182,31 @@ impl PageRange {
     ///
     /// For talking to code that predates this format. `None` when the range
     /// cannot be said that way -- which is most of why this format exists.
+    ///
+    /// **One-based `u32`, matching that pair, not this type.** The desktop's
+    /// field is `Option<(u32, u32)>` counting from one -- its validator
+    /// rejects a start of zero -- while a `PageRange` counts from zero like
+    /// the document it indexes. Returning this type's own numbering would
+    /// have made every use of this helper an off-by-one, which is the exact
+    /// mistake a conversion helper exists to prevent.
     #[must_use]
-    pub fn as_single_span(&self) -> Option<(usize, usize)> {
-        match self {
-            Self::Custom(spans) if spans.len() == 1 => spans.first().copied(),
-            _ => None,
-        }
+    pub fn as_single_span(&self) -> Option<(u32, u32)> {
+        let Self::Custom(spans) = self else {
+            return None;
+        };
+        let &(lo, hi) = spans.first().filter(|_| spans.len() == 1)?;
+        // Zero-based back to one-based, and only if it fits the older field.
+        let lo = u32::try_from(lo.checked_add(1)?).ok()?;
+        let hi = u32::try_from(hi.checked_add(1)?).ok()?;
+        Some((lo, hi))
     }
 }
 
 /// Paper size, in the vocabulary the desktop already uses.
+///
+/// All eight of the desktop's sizes, because a format that could express only
+/// six of them would be one the desktop cannot migrate onto without taking
+/// choices away from a dialog that already offers them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PaperSize {
     A3,
@@ -186,6 +216,58 @@ pub enum PaperSize {
     Letter,
     Legal,
     Tabloid,
+    /// #10 envelope.
+    Envelope,
+    /// A size the user gave, in tenths of a millimetre.
+    ///
+    /// Tenths of a millimetre rather than `f32` so the whole format can stay
+    /// `Eq` -- two jobs either are the same job or are not, and a paper size
+    /// is not a quantity anyone needs sub-0.1 mm precision in.
+    ///
+    /// The dimensions are carried here rather than left to the receiver
+    /// because the desktop's own `Custom` does not carry them: its
+    /// `width_mm`/`height_mm` return 210x297 for it, which is A4. A message
+    /// saying "custom" and meaning "A4" is a message that lies, so this
+    /// variant cannot be constructed without saying custom *what*.
+    Custom {
+        width_tenths_mm: u32,
+        height_tenths_mm: u32,
+    },
+}
+
+impl PaperSize {
+    /// Width in tenths of a millimetre.
+    #[must_use]
+    pub fn width_tenths_mm(self) -> u32 {
+        match self {
+            Self::A3 => 2970,
+            Self::A4 => 2100,
+            Self::A5 => 1480,
+            Self::Letter | Self::Legal => 2159,
+            Self::Tabloid => 2794,
+            Self::Envelope => 1048,
+            Self::Custom {
+                width_tenths_mm, ..
+            } => width_tenths_mm,
+        }
+    }
+
+    /// Height in tenths of a millimetre.
+    #[must_use]
+    pub fn height_tenths_mm(self) -> u32 {
+        match self {
+            Self::A3 => 4200,
+            Self::A4 => 2970,
+            Self::A5 => 2100,
+            Self::Letter => 2794,
+            Self::Legal => 3556,
+            Self::Tabloid => 4318,
+            Self::Envelope => 2413,
+            Self::Custom {
+                height_tenths_mm, ..
+            } => height_tenths_mm,
+        }
+    }
 }
 
 /// How much ink and time to spend.
@@ -212,6 +294,34 @@ pub enum ColorMode {
     Color,
     Grayscale,
     Monochrome,
+}
+
+/// How big to print each page.
+///
+/// Two shapes rather than a percentage, because the two halves this format
+/// joins each had one of them and neither could say the other. The PDF viewer
+/// had `scale_to_fit: bool`, which is the option a user actually picks; the
+/// desktop had `scale_percent: u32`, which is the one a printer driver wants.
+/// A format carrying only the percentage would have had to encode "fit" as a
+/// number it cannot know -- the fit depends on the paper *and* the page, which
+/// is the service's business, not the sender's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScaleMode {
+    /// Shrink or grow each page to fill the paper, preserving its shape.
+    #[default]
+    FitToPage,
+    /// A fixed percentage; 100 is actual size.
+    Percent(u32),
+}
+
+impl ScaleMode {
+    /// The largest percentage a printer is asked to honour.
+    ///
+    /// 400, which is `gui/desktop`'s existing limit. Matched deliberately
+    /// rather than chosen: the desktop's number is the one with a capability
+    /// check behind it, and a format that allowed more would produce jobs the
+    /// half that has to print them would refuse.
+    pub const MAX_PERCENT: u32 = 400;
 }
 
 /// Everything an application says about how it wants a document printed.
@@ -245,8 +355,8 @@ pub struct PrintJob {
     pub duplex: bool,
     /// Collate multi-copy output (1,2,3 / 1,2,3 rather than 1,1 / 2,2 / 3,3).
     pub collate: bool,
-    /// Percentage scale; 100 is actual size.
-    pub scale_percent: u32,
+    /// How big to print each page.
+    pub scale: ScaleMode,
 }
 
 impl Default for PrintJob {
@@ -263,7 +373,7 @@ impl Default for PrintJob {
             color: ColorMode::default(),
             duplex: false,
             collate: true,
-            scale_percent: 100,
+            scale: ScaleMode::FitToPage,
         }
     }
 }
@@ -273,7 +383,7 @@ impl Default for PrintJob {
 pub enum Invalid {
     /// Zero copies, which is a request to do nothing rather than to print.
     NoCopies,
-    /// A scale of zero, or one so large the page cannot hold any of it.
+    /// A percentage of zero, or one past [`ScaleMode::MAX_PERCENT`].
     ImpossibleScale,
     /// The range names no page of this document.
     NoPages,
@@ -300,7 +410,9 @@ impl PrintJob {
         if self.copies == 0 {
             return Err(Invalid::NoCopies);
         }
-        if self.scale_percent == 0 || self.scale_percent > 1000 {
+        if let ScaleMode::Percent(pct) = self.scale
+            && (pct == 0 || pct > ScaleMode::MAX_PERCENT)
+        {
             return Err(Invalid::ImpossibleScale);
         }
         if self.pages().is_empty() {
@@ -338,7 +450,7 @@ mod tests {
     fn the_range_the_desktop_could_not_express_round_trips() {
         // The example from design-decisions 540, which is the reason this
         // format is not just the desktop's `(start, end)` pair.
-        let range = PageRange::parse("1-3, 5, 7-9", 20);
+        let range = PageRange::parse("1-3, 5, 7-9");
         assert_eq!(range.resolve(20, 0), vec![0, 1, 2, 4, 6, 7, 8]);
         assert_eq!(
             range.as_single_span(),
@@ -350,21 +462,21 @@ mod tests {
     #[test]
     fn an_empty_box_means_every_page() {
         for input in ["", "   ", "all", "ALL"] {
-            assert_eq!(PageRange::parse(input, 5), PageRange::All, "{input:?}");
+            assert_eq!(PageRange::parse(input), PageRange::All, "{input:?}");
         }
     }
 
     /// Nonsense is ignored span by span, not fatal to the whole input.
     #[test]
     fn a_bad_span_does_not_throw_away_the_good_ones() {
-        let range = PageRange::parse("1-3, x, 7", 10);
+        let range = PageRange::parse("1-3, x, 7");
         assert_eq!(range.resolve(10, 0), vec![0, 1, 2, 6]);
     }
 
     /// But input that is *entirely* unusable prints nothing, not everything.
     #[test]
     fn wholly_unusable_input_prints_nothing_rather_than_the_document() {
-        let range = PageRange::parse("x, y, 0", 10);
+        let range = PageRange::parse("x, y, 0");
         assert!(
             range.resolve(10, 0).is_empty(),
             "unreadable input fell back to printing the whole document, which \
@@ -373,30 +485,44 @@ mod tests {
     }
 
     #[test]
-    fn a_span_past_the_end_is_dropped_and_one_that_straddles_is_clipped() {
-        assert!(PageRange::parse("50-60", 10).resolve(10, 0).is_empty());
-        assert_eq!(PageRange::parse("8-60", 10).resolve(10, 0), vec![7, 8, 9]);
+    fn a_span_past_the_end_names_no_pages_and_one_that_straddles_is_clipped() {
+        assert!(PageRange::parse("50-60").resolve(10, 0).is_empty());
+        assert_eq!(PageRange::parse("8-60").resolve(10, 0), vec![7, 8, 9]);
+    }
+
+    /// A document with no pages has no page zero.
+    ///
+    /// The clamp saturates: `page_count - 1` is `0` at zero pages, so every
+    /// span became `lo..=0` and one starting at zero yielded `[0]` -- a page
+    /// index into an empty document, handed to a caller with every reason to
+    /// trust it. `All` and `CurrentPage` both return nothing there; `Custom`
+    /// was the odd one out. The `lo < page_count` filter is what says so.
+    #[test]
+    fn a_span_over_an_empty_document_names_no_pages() {
+        assert!(PageRange::Custom(vec![(0, 4)]).resolve(0, 0).is_empty());
+        assert!(PageRange::All.resolve(0, 0).is_empty());
+        assert!(PageRange::CurrentPage.resolve(0, 0).is_empty());
     }
 
     #[test]
     fn a_reversed_span_is_read_as_what_it_plainly_means() {
-        assert_eq!(PageRange::parse("9-7", 10).resolve(10, 0), vec![6, 7, 8]);
+        assert_eq!(PageRange::parse("9-7").resolve(10, 0), vec![6, 7, 8]);
     }
 
     /// Overlapping spans print each page once.
     #[test]
     fn overlapping_spans_do_not_print_a_page_twice() {
         assert_eq!(
-            PageRange::parse("1-5, 3-7", 10).resolve(10, 0),
+            PageRange::parse("1-5, 3-7").resolve(10, 0),
             vec![0, 1, 2, 3, 4, 5, 6]
         );
     }
 
     #[test]
     fn page_numbers_are_one_based_going_in_and_zero_based_coming_out() {
-        assert_eq!(PageRange::parse("1", 10).resolve(10, 0), vec![0]);
+        assert_eq!(PageRange::parse("1").resolve(10, 0), vec![0]);
         assert_eq!(
-            PageRange::parse("0", 10).resolve(10, 0),
+            PageRange::parse("0").resolve(10, 0),
             Vec::<usize>::new(),
             "there is no page zero, and it must not become page one"
         );
@@ -426,7 +552,7 @@ mod tests {
     fn a_job_whose_range_names_no_page_is_refused() {
         let job = PrintJob {
             page_count: 5,
-            range: PageRange::parse("50-60", 5),
+            range: PageRange::parse("50-60"),
             ..PrintJob::default()
         };
         assert_eq!(job.validate(), Err(Invalid::NoPages));
@@ -437,7 +563,7 @@ mod tests {
         let job = PrintJob {
             document_name: "report.pdf".to_string(),
             page_count: 10,
-            range: PageRange::parse("1-3", 10),
+            range: PageRange::parse("1-3"),
             ..PrintJob::default()
         };
         assert_eq!(job.validate(), Ok(()));
@@ -465,13 +591,92 @@ mod tests {
         assert_eq!(job.sheets(), 12);
     }
 
+    /// One parsed range, resolved against two different documents.
+    ///
+    /// The property that made `parse` stop taking a page count: the sender
+    /// parses, the service resolves, and only the service has the document.
+    #[test]
+    fn a_parsed_range_is_not_bound_to_the_senders_page_count() {
+        let range = PageRange::parse("1-100");
+        assert_eq!(
+            range,
+            PageRange::Custom(vec![(0, 99)]),
+            "the user's words were rewritten before they were sent"
+        );
+        assert_eq!(range.resolve(3, 0), vec![0, 1, 2]);
+        assert_eq!(range.resolve(10, 0), (0..10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn fit_to_page_is_the_default_and_is_not_a_percentage() {
+        let job = PrintJob {
+            page_count: 3,
+            ..PrintJob::default()
+        };
+        assert_eq!(job.scale, ScaleMode::FitToPage);
+        assert_eq!(
+            job.validate(),
+            Ok(()),
+            "fitting has no number to be out of range"
+        );
+    }
+
+    #[test]
+    fn a_percentage_outside_what_the_desktop_accepts_is_refused() {
+        for pct in [0, ScaleMode::MAX_PERCENT + 1, 1000] {
+            let job = PrintJob {
+                page_count: 3,
+                scale: ScaleMode::Percent(pct),
+                ..PrintJob::default()
+            };
+            assert_eq!(
+                job.validate(),
+                Err(Invalid::ImpossibleScale),
+                "{pct}% was accepted, and the half that has to print it caps at {}",
+                ScaleMode::MAX_PERCENT
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_percentage_is_accepted() {
+        let job = PrintJob {
+            page_count: 3,
+            scale: ScaleMode::Percent(100),
+            ..PrintJob::default()
+        };
+        assert_eq!(job.validate(), Ok(()));
+    }
+
+    /// Every paper size knows its own dimensions, including a custom one.
+    #[test]
+    fn a_custom_paper_size_carries_the_size_it_is() {
+        let custom = PaperSize::Custom {
+            width_tenths_mm: 1000,
+            height_tenths_mm: 1500,
+        };
+        assert_eq!(custom.width_tenths_mm(), 1000);
+        assert_eq!(custom.height_tenths_mm(), 1500);
+        // The desktop's `Custom` reports A4's dimensions; ours cannot, because
+        // it cannot be built without them.
+        assert_ne!(
+            (custom.width_tenths_mm(), custom.height_tenths_mm()),
+            (
+                PaperSize::A4.width_tenths_mm(),
+                PaperSize::A4.height_tenths_mm()
+            )
+        );
+        assert_eq!(PaperSize::Envelope.width_tenths_mm(), 1048);
+        assert_eq!(PaperSize::A4.height_tenths_mm(), 2970);
+    }
+
     /// The desktop's single-pair form survives the trip when it is expressible.
     #[test]
     fn a_single_span_can_still_be_read_as_the_old_pair() {
         assert_eq!(
-            PageRange::parse("3-7", 10).as_single_span(),
-            Some((2, 6)),
-            "the old from/to form must still be recoverable"
+            PageRange::parse("3-7").as_single_span(),
+            Some((3, 7)),
+            "the old from/to form counts from one, as the user typed it"
         );
         assert_eq!(
             PageRange::All.as_single_span(),

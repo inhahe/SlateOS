@@ -351,7 +351,12 @@ pub fn resolves_through_alt_gr(layout: &Layout, scancode: u32, level: Level) -> 
 ///
 /// Used to keep [`ModifierState`] in step; kept next to the table it reads so
 /// the two cannot drift.
-const fn modifier_of(scancode: u32) -> Option<ModifierBit> {
+/// Which of the four modifiers a scancode is, if it is one.
+///
+/// Public because sticky keys needs the same mapping and a second copy of this
+/// table would be a second answer to "is this Shift". Both sides of a modifier
+/// map to one kind here; where the *side* matters, `ModifierState` tracks it.
+pub const fn modifier_of(scancode: u32) -> Option<ModifierBit> {
     match scancode {
         0x2A | 0x36 => Some(ModifierBit::Shift),
         0x1D | 0xE01D => Some(ModifierBit::Ctrl),
@@ -361,8 +366,9 @@ const fn modifier_of(scancode: u32) -> Option<ModifierBit> {
     }
 }
 
+/// One of the four modifiers, without regard to which side it is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ModifierBit {
+pub enum ModifierBit {
     Shift,
     Ctrl,
     Alt,

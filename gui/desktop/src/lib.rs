@@ -78,7 +78,6 @@
 
 pub mod a11y;
 pub mod about;
-pub mod accessibility_settings;
 pub mod animations;
 pub mod appearance_settings;
 pub mod backup_settings;

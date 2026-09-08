@@ -123846,3 +123846,252 @@ photographs would not, which is worse than doing nothing.
 **How you would notice.** Settings -> Accessibility -> Visual -> Color
 Filter, choose Deuteranopia. The label changes; the screen does not.
 
+
+---
+
+## TD-C-THE-PDF-VIEWER-PRINTS-EVERY-PAGE-OR-NOTHING
+
+**Date:** 2026-09-07. **Lane:** C.
+**Where:** `apps/pdfviewer/src/main.rs` — `print_job`, `print_active`,
+`Target::Print`.
+
+**In short:** The PDF viewer has a Print button and no print dialog. There is
+nowhere to say which pages, how many copies, double-sided or not, colour or
+grey. Pressing Print sends the whole document, one copy, every time. All the
+settings exist in the code and none of them can be reached.
+
+**How this came to light.** Moving the page-range parser out into
+`gui/printjob` left `PageRange` imported and unused in the viewer's own
+source: nothing outside the tests ever *builds* a range. The parser has been
+there for months, is the best one in the tree, and has never had a caller
+that was not a test — which is the same "a feature whose only caller is its
+own test does not exist" shape found twice before in this lane.
+
+The four sibling fields are worse: `copies`, `duplex`, `color` and `scale`
+had no reader *and* no writer. They are no longer dead in the same way, since
+they are now fields of the message the printing service will receive rather
+than of a private struct, but nothing sets them either.
+
+**What a user sees.** Print a 400-page manual to read one page of it, and you
+get 400 pages. There is no way to say otherwise short of editing the file.
+
+**The proper fix.** A print dialog: page range box, copies spinner, and the
+duplex/colour/scale controls, writing into `print_job`. The range box wants
+`PageRange::parse`, which already accepts `1-3, 5, 7-9` and is tested. The
+dialog is the whole of the work; the model behind it is finished.
+
+**Why it is not done here.** A print dialog is a feature, and this change was
+a refactor — folding one in would have hidden a behaviour change inside a
+move. Also worth doing *after* the printing service exists (§540), since the
+dialog should show the printers the service reports rather than a list the
+viewer invents, and there is no service yet.
+
+**Not blocking.** Printing works; it just always prints everything. Nothing
+regressed here — this is a gap that was invisible until the parser moved out
+and left an unused import pointing straight at it.
+
+---
+
+## TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING
+
+**Date:** 2026-09-07. **Lane:** C.
+**Where:** `gui/desktop/src/a11y.rs` — `StickyKeys` (317), `FilterKeys` (467),
+`MouseKeys` (545); `gui/desktop/src/accessibility_settings.rs`;
+`apps/settings/src/main.rs`.
+
+**In short:** Sticky keys, filter keys (slow/bounce keys) and mouse keys are
+fully written and thoroughly tested, and none of them is connected to the
+keyboard. A user who turns sticky keys on gets nothing — no error, and the
+toggle stays on. These are the accessibility features people *depend* on to
+use a computer at all, not preferences, and all three are inert.
+
+**The evidence, from the uniquely-named methods** (the ones that cannot be
+confused with a same-named method on another type — `is_active` and
+`is_locked` are useless for this because dozens of unrelated types have them):
+
+| method | owner | production callers | calls from its own tests |
+|---|---|---|---|
+| `on_modifier_press` | `StickyKeys` | **none** | 9 |
+| `on_key_press` | `StickyKeys` | **none** | 2 |
+| `should_accept` | `FilterKeys` | **none** | 8 |
+| `move_delta` | `MouseKeys` | **none** | 9 |
+
+`FilterKeys::new()` is constructed only inside the test module. The logic is
+real — `should_accept` implements both the slow-keys hold threshold and the
+bounce-keys repeat window — and nothing ever asks it.
+
+**There are three parallel models of the same settings, and none of them meet.**
+
+1. `a11y.rs` — the *implementations* above.
+2. `a11y.rs` — `AccessibilityConfig`'s flat fields (`sticky_keys_enabled`,
+   `slow_keys_ms`, `bounce_keys_ms`, `mouse_keys_enabled`, `mouse_keys_speed`,
+   `filter_keys_enabled`). These are **parsed and serialized and read by
+   nothing else**: their only non-test appearances in the whole tree are the
+   two lines that write them to the config file and the two that read them
+   back.
+3. `accessibility_settings.rs` — `StickyKeysConfig`, `FilterKeysConfig`,
+   `MouseKeysConfig`, plus an `A11yFeature` enum; and `apps/settings` has a
+   third set again under `ToggleId`. `accessibility_settings.rs` does not
+   import `a11y` at all.
+
+So a toggle in Settings writes model 3, the config file round-trips model 2,
+and the code that would actually change key handling is model 1, which nobody
+constructs.
+
+**A field-by-field census of `AccessibilityConfig`** (18 fields): 8 reach
+something — `high_contrast`, `color_filter`, `reduced_motion`, `magnifier`,
+`cursor`, `screen_reader`, `text_scale`, `visual_alerts`. 10 do not:
+`sticky_keys_enabled`, `sticky_keys_sound`, `sticky_keys_double_lock`,
+`filter_keys_enabled`, `slow_keys_ms`, `bounce_keys_ms`, `mouse_keys_enabled`,
+`mouse_keys_speed`, `caret_width`, `focus_indicator`. Of those, three
+(`sticky_keys_sound`, `sticky_keys_double_lock`, `focus_indicator`) are not
+even in the serializer — they are read and written by no code whatsoever.
+
+**How you would notice.** Settings → Accessibility → turn on Sticky Keys.
+Press and release Shift, then press A. You get `a`, not `A`. Same for Slow
+Keys (no hold delay is enforced) and Mouse Keys (the numeric keypad does not
+move the pointer).
+
+**The proper fix**, and it is a design decision, not a patch: pick *one* model
+and delete the other two. The natural shape is that `AccessibilityConfig` is
+the persisted truth, the Settings pages edit it, and the compositor owns live
+`StickyKeys`/`FilterKeys`/`MouseKeys` instances rebuilt from it whenever it
+changes — with the key-event path consulting them before dispatch. That last
+part is the piece that does not exist anywhere: there is currently no hook in
+the input path at all, which is why nothing could have been wired even if the
+models agreed.
+
+**Update, 2026-09-07 — the keyboard half is done; the Settings half is not.**
+
+The three features now work. `inputsettings` owns the settings and persists
+them (`AccessibilityKeysConfig`, under `accessibility:` in `input.yaml`), the
+compositor owns the live state machines (`compositor::a11ykeys`) and applies
+them in `handle_key`, and `set_input_settings` is the single road between the
+two. Sticky Shift capitalises the next letter; bounce keys drops a repeat;
+slow keys holds a press until its threshold expires with the key still down
+(`design-decisions.md` §821); the keypad drives the pointer. Eleven
+integration tests go in through `handle_input` as the input driver does,
+because the previous implementation had thorough unit tests *and did nothing*,
+so a test that calls the state machines directly proves only what was already
+known.
+
+Three defects were found in the old logic while moving it, all now fixed: a
+refused keystroke used to start a bounce window (so one tremor silenced that
+key for the whole window after it — the opposite of the feature's purpose);
+switching sticky keys off stranded whatever was held; and `release_on_two_keys`
+was in the config and implemented nowhere.
+
+**Update 2, 2026-09-07 — closed for the three features.** The Settings app's
+toggles now write `input.settings.accessibility`, which `handle_event`'s
+whole-struct comparison saves to `input.yaml` and the compositor re-reads. A
+test clicks the Sticky Keys row and reads the file back off disk. The
+superseded copies are deleted: 543 lines from `desktop::a11y` (the state
+machines, the six config fields, their serialiser and parser, their sixteen
+tests) and the duplicate config structs in
+`desktop::accessibility_settings`, which now re-exports `inputsettings`'.
+
+So the road is whole and single: Settings window -> `input.yaml` ->
+`Compositor::set_input_settings` -> `compositor::a11ykeys` -> `handle_key`.
+
+**Two things this entry stays open for**, both from the original census and
+neither part of the three features above:
+
+- `caret_width` and `focus_indicator` on `AccessibilityConfig` still reach
+  nothing. They are not superseded — they are features never built — so the
+  fields were left rather than deleted, since deleting them would remove the
+  only record that they are wanted.
+- `gui/desktop/src/accessibility_settings.rs` is a 2 019-line settings panel
+  **nothing constructs**. Every one of its public types —
+  `AccessibilitySettings`, `A11yFeature`, `A11yTab`, `VisualSettings`,
+  `AudioA11ySettings`, `ContrastMode`, `TextScale`, `CursorIndicator` — has
+  zero uses outside the file. `design-decisions.md` §815 (the operator's
+  answer to C-Q6) already settles what happens to it: screens you *open* move
+  to the Settings app and the shell's copies go. This is one of those copies,
+  and the Settings app has the working version. It should be deleted as part
+  of executing §815 rather than piecemeal here.
+
+**Superseded — what was still not connected: the Settings UI.**
+`gui/desktop/src/accessibility_settings.rs` and `apps/settings` still write to
+their own `StickyKeysConfig`/`FilterKeysConfig`/`MouseKeysConfig` and to
+`A11yFeature`/`ToggleId`, none of which is `inputsettings`. So the toggle in
+Settings still changes nothing — a user who edits `input.yaml` by hand gets
+all three features, and a user who uses the settings screen gets none. That is
+a smaller and much more ordinary job than the one above: point those panels at
+`inputsettings::AccessibilityKeysConfig` and delete the duplicates, along with
+`desktop::a11y`'s now-superseded state machines and the ten dead
+`AccessibilityConfig` fields.
+
+**Also still open from the census:** `caret_width` and `focus_indicator` reach
+nothing and are not part of the above.
+
+**Where the hook goes, since that was the unknown.** There is exactly one
+funnel: `Compositor::handle_key(scancode, pressed, character)` at
+`gui/compositor/src/lib.rs:6913`, reached only from `InputEvent::KeyDown` and
+`InputEvent::KeyUp` (lines 6532-6533). Both accessibility filters fit inside
+it, in an order the existing code already implies:
+
+- **Filter keys** first, at the very top, before `self.modifiers.update()` —
+  a rejected keystroke must not move the modifier state either. It needs a
+  press timestamp and a hold duration, which `handle_key` does not currently
+  receive; that is the one signature change the work requires.
+- **Sticky keys** folded into the modifier step, since `self.modifiers` is
+  already the thing that decides whether Shift is down when `A` arrives, and
+  sticky keys are precisely a rule about how long that stays true.
+- **Mouse keys** is separate and easier: it turns key events into pointer
+  motion, so it belongs beside the existing pointer handling rather than in
+  the modifier path.
+
+`handle_key` already consults window grabs "after the chord is known, before
+the event is delivered", so the structure for intercepting is there; nothing
+about this needs new architecture, only a decision about which config model
+feeds it.
+
+**Why this is not fixed here.** The keyboard event path is the compositor's,
+the fix spans three files that each hold a competing model, and choosing which
+model survives is exactly the "band-aid accumulation — stop and redesign"
+case in `CLAUDE.md`. It wants its own task, not a corner of a print-format
+change. Logged now because it was found while checking a *different* stale
+"what remains" claim, and an undocumented bug is an invisible one.
+
+**How it was found.** §816 ended "What remains is that no Settings control
+sets it yet", which was stale — the high-contrast control does exist. Checking
+whether the *other* accessibility settings were wired turned up this instead.
+
+---
+
+## TD-C-FOUR-ACCESSIBILITY-FEATURES-EXISTED-ONLY-AS-A-DEAD-PANELS-CONTROLS
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** nowhere any more — that is the point. They were in
+`gui/desktop/src/accessibility_settings.rs`, deleted under
+`design-decisions.md` §815.
+
+**In short:** the shell carried a 2 019-line accessibility settings panel that
+nothing ever opened. §815 says screens you open move to the Settings app and
+the shell's copies go, so it went. Twelve of the sixteen things it offered
+already exist in the Settings app. Four do not, and this is the record of them
+so that deleting the panel does not quietly delete the idea.
+
+**The four, and what each would actually take.** None of them was working
+before — the panel was unreachable, so every one of these was a control with
+no reader. Nothing regressed.
+
+| feature | implementation anywhere? | what it needs |
+|---|---|---|
+| **Magnifier settings** | The feature exists (`apps/magnifier`), the settings do not reach it | A settings page *and* a config route. `a11y::MagnifierConfig` is read only inside `a11y.rs`; `apps/magnifier` keeps its own and never consults it. So this is the same disconnection as the sticky-keys one, one layer along. |
+| **Auto-click / dwell click** | **None.** Zero matches for `auto_click` or `dwell` outside the deleted panel | The feature first: hold the pointer still for *n* ms and a click is synthesised. That is compositor work, in the pointer path, and it wants the same treatment sticky keys just got. |
+| **Flash screen on system sound** | **None** | The feature first. It needs a signal that a system sound played, which nothing currently emits. |
+| **Closed captions** | **None.** The 254 `caption` matches in the tree are window titles and UI subtitles, not subtitle tracks | A media-subtitle pipeline, which is a far larger job than a settings toggle and belongs to whatever plays video. |
+
+**Why they were not ported instead.** §815 says "moves to the Settings app",
+and for the twelve that had somewhere to move to, that had already happened.
+Porting these four would have meant adding four controls to the Settings app
+that read nothing and change nothing — which is exactly the fault the whole
+of this session has been spent removing, and it would have put them somewhere
+a user can actually reach, making it worse rather than better.
+
+**The order to do them in, if they are wanted:** magnifier first (the feature
+exists and only the wiring is missing), then auto-click (self-contained, in
+the compositor's pointer path, and the closest analogue to the sticky-keys
+work just finished). Flash-screen needs a system-sound event to hang off.
+Captions are not really an accessibility-settings job at all.

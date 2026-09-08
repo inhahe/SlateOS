@@ -48,7 +48,8 @@ use guitk::render::RenderTree;
 
 use crate::DecodeError;
 use crate::control::{
-    BufferFormat, Request, RequestBody, ResponseBody, ShellControlAction, encode_requests_into,
+    BufferFormat, Request, RequestBody, ResponseBody, ShellControlAction, StackTier, WindowPolicy,
+    encode_requests_into,
 };
 use crate::frame::{Frame, try_decode_any};
 use crate::input::InputEvent;
@@ -739,6 +740,82 @@ impl<T: Transport> Connection<T> {
         opacity: f32,
     ) -> Result<(), ClientError<T::Error>> {
         self.confirm(RequestBody::ShellSetOpacity { window, opacity })
+    }
+
+    /// Move another client's window. Shell only.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::confirm`], plus a refusal if this link is not a shell.
+    pub fn shell_move(&mut self, window: u64, x: i32, y: i32) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::ShellMove { window, x, y })
+    }
+
+    /// Resize another client's window. Shell only.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::confirm`], plus a refusal if this link is not a shell.
+    /// Put another client's window in a stacking tier. Shell only.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::confirm`], plus a refusal if this link is not a shell.
+    /// Constrain another client's window size. Shell only.
+    ///
+    /// Zero in either pair means "no limit"; see
+    /// [`RequestBody::ShellSetSizeLimits`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::confirm`], plus a refusal if this link is not a shell.
+    /// Say what the user may not do to another client's window. Shell only.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::confirm`], plus a refusal if this link is not a shell.
+    pub fn shell_set_window_policy(
+        &mut self,
+        window: u64,
+        policy: WindowPolicy,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::ShellSetWindowPolicy { window, policy })
+    }
+
+    pub fn shell_set_size_limits(
+        &mut self,
+        window: u64,
+        min: (u32, u32),
+        max: (u32, u32),
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::ShellSetSizeLimits {
+            window,
+            min_width: min.0,
+            min_height: min.1,
+            max_width: max.0,
+            max_height: max.1,
+        })
+    }
+
+    pub fn shell_set_stack_tier(
+        &mut self,
+        window: u64,
+        tier: StackTier,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::ShellSetStackTier { window, tier })
+    }
+
+    pub fn shell_resize(
+        &mut self,
+        window: u64,
+        width: u32,
+        height: u32,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::ShellResize {
+            window,
+            width,
+            height,
+        })
     }
 
     pub fn upload_image(

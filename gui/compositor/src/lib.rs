@@ -111,7 +111,7 @@ pub use guiremote::control::Layer;
 // Same reason: `CompositorRequest::ShellControl` carries one, so a caller
 // building that request must be able to name it.
 pub use guiremote::control::ShellControlAction;
-use guiremote::control::WindowSpec;
+use guiremote::control::{StackTier, WindowPolicy, WindowSpec};
 // Re-exported for the same reason as `WindowInfo` below: `Window::reserved_edge`
 // holds one and `reserve_edge` takes one, and a panel that has to reach past the
 // compositor to name the edge it is anchored to is naming a different type from
@@ -240,6 +240,12 @@ impl WindowId {
 pub enum CompositorError {
     /// The specified window does not exist.
     WindowNotFound(WindowId),
+    /// A window rule forbids the operation.
+    ///
+    /// A `&'static str` where the errors below carry `String`, and
+    /// deliberately: every refusal here is a fixed sentence about a policy,
+    /// not a report about a value, so there is nothing to format in.
+    Refused(&'static str),
     /// Invalid framebuffer dimensions.
     InvalidDimensions { width: u32, height: u32 },
     /// The framebuffer exceeds maximum supported size.
@@ -278,6 +284,7 @@ impl std::fmt::Display for CompositorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::WindowNotFound(id) => write!(f, "window not found: {}", id.raw()),
+            Self::Refused(why) => write!(f, "{why}"),
             Self::InvalidDimensions { width, height } => {
                 write!(f, "invalid dimensions: {}x{}", width, height)
             }
@@ -860,6 +867,17 @@ pub struct Window {
     /// the band is a role rather than a starting z-order: a starting depth is
     /// something the first raise destroys.
     pub layer: Layer,
+    /// What the user may not do to this window, as a window rule says.
+    ///
+    /// Empty unless a shell has set it. See [`WindowPolicy`] -- it restrains
+    /// the user, never the program.
+    pub policy: WindowPolicy,
+    /// Where this window sits within its layer.
+    ///
+    /// Set by the shell from a window rule, never by the window's own client:
+    /// a program that could put itself in `Top` would be an "always on top"
+    /// nobody asked for. See [`StackTier`].
+    pub tier: StackTier,
     /// Window opacity (0.0 = fully transparent, 1.0 = fully opaque).
     pub opacity: f32,
     /// Process ID of the client that owns this window.
@@ -1035,6 +1053,11 @@ impl Window {
     fn from_spec(spec: &WindowSpec, x: i32, y: i32, client_pid: u64) -> Self {
         Self {
             id: WindowId::allocate(),
+            // Every window starts in the ordinary tier. Only a shell applying
+            // a user's rule moves it, which is the whole point of the field.
+            tier: StackTier::Normal,
+            // And unrestrained: a rule adds restrictions, never the default.
+            policy: WindowPolicy::default(),
             title: spec.title.clone(),
             app_id: spec.app_id.clone(),
             x,
@@ -1129,10 +1152,21 @@ impl Window {
     /// Nothing depended on it being one.
     pub fn frame_insets(&self) -> (u32, u32, u32) {
         if self.is_framed() {
+            let border = scale_dimension(BORDER_WIDTH, self.scale_factor);
             (
-                scale_dimension(TITLE_BAR_HEIGHT, self.scale_factor),
-                scale_dimension(BORDER_WIDTH, self.scale_factor),
-                scale_dimension(BORDER_WIDTH, self.scale_factor),
+                // Border *and* title bar. The top inset used to be the bar
+                // alone while `render_border` stroked a row above the frame to
+                // compensate, so the drawing and the measurement disagreed by
+                // a pixel and every derived quantity followed the measurement.
+                //
+                // Summed as two scaled values rather than scaling the sum:
+                // `scale_dimension` rounds, so `scale(a + b)` and
+                // `scale(a) + scale(b)` can differ by one, and `title_bar_rect`
+                // below subtracts the border back out to get the bar's own
+                // height. Doing it this way makes that subtraction exact.
+                scale_dimension(TITLE_BAR_HEIGHT, self.scale_factor).saturating_add(border),
+                border,
+                border,
             )
         } else {
             (0, 0, 0)
@@ -1251,9 +1285,19 @@ impl Window {
         if !self.is_framed() {
             return None;
         }
-        let top = self.frame_insets().0;
+        let (top, side, _) = self.frame_insets();
         let frame = self.frame_rect();
-        Some(Rect::new(frame.x, frame.y, frame.width, top))
+        // Below the top border, not filling the whole top inset: the inset is
+        // border + bar, and the border is drawn in the row above. A bar that
+        // started at `frame.y` would be painted over the outline, which is
+        // exactly what used to happen and why the border was stroked outside
+        // the frame to escape it.
+        Some(Rect::new(
+            frame.x,
+            frame.y.saturating_add(side as i32),
+            frame.width,
+            top.saturating_sub(side),
+        ))
     }
 
     /// The rectangle of the title-bar button in the given slot, counting from
@@ -2917,6 +2961,22 @@ pub enum CompositorRequest {
     },
     /// Set window opacity.
     SetOpacity { window_id: WindowId, opacity: f32 },
+    /// Put a window in a stacking tier within its layer.
+    SetStackTier {
+        window_id: WindowId,
+        tier: StackTier,
+    },
+    /// Say what the user may not do to a window.
+    SetWindowPolicy {
+        window_id: WindowId,
+        policy: WindowPolicy,
+    },
+    /// Constrain a window's size. `None` in either pair means "no limit".
+    SetSizeLimits {
+        window_id: WindowId,
+        min_size: Option<(u32, u32)>,
+        max_size: Option<(u32, u32)>,
+    },
     /// Query display information.
     GetDisplayInfo,
     /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
@@ -6133,6 +6193,19 @@ impl Compositor {
     /// check is what stops a notification being queued for an id nothing will
     /// ever deliver.
     pub fn request_close(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        // A window rule may refuse this. It refuses the *request* -- the thing
+        // a close button and a taskbar menu send -- and not the program's own
+        // exit, which goes through `destroy_window` and is none of a rule's
+        // business. A rule that could stop a process exiting would be a way to
+        // make one unkillable from a text file.
+        if self
+            .window_ref(window_id)
+            .is_some_and(|w| w.policy.prevent_close)
+        {
+            return Err(CompositorError::Refused(
+                "a window rule prevents this window from being closed",
+            ));
+        }
         if self.window_ref(window_id).is_none() {
             return Err(CompositorError::WindowNotFound(window_id));
         }
@@ -6761,7 +6834,16 @@ impl Compositor {
                         // record is a write to `self`, and `win` borrows it.
                         let start_window_pos = Point::new(win.x, win.y);
                         let start_window_size = (win.width, win.height);
+                        let pinned = win.policy.prevent_move;
                         self.last_title_press = Some((window_id, now));
+                        // The press is still *recorded* -- it focused and
+                        // raised the window above, and a double-click still
+                        // counts -- but no drag begins. Returning earlier
+                        // would make a pinned window unfocusable by its own
+                        // title bar, which is not what the rule asks for.
+                        if pinned {
+                            return;
+                        }
                         self.drag = Some(DragState {
                             window_id,
                             mode: DragMode::MoveWindow,
@@ -6773,6 +6855,9 @@ impl Compositor {
                     }
                     // Border resize?
                     if let Some(mode) = self.detect_border_drag(win, x, y) {
+                        if win.policy.prevent_resize {
+                            return;
+                        }
                         self.drag = Some(DragState {
                             window_id,
                             mode,
@@ -7974,12 +8059,11 @@ impl Compositor {
     /// `TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS`.
     fn render_border(&mut self, frame: Rect, scale: f32, color: u32, opacity: f32) {
         let width = scale_dimension(BORDER_WIDTH, scale);
-        let border = Rect::new(
-            frame.x,
-            frame.y.saturating_sub(width as i32),
-            frame.width,
-            frame.height.saturating_add(width),
-        );
+        // The frame as measured. `frame_insets` now reserves the border row
+        // above the title bar, so the outline has somewhere of its own to be
+        // drawn and no longer has to be pushed outside the frame to avoid
+        // being painted over.
+        let border = frame;
         // The border traces the outside of the frame, so it takes the frame's
         // radius as-is — the same curve the title bar's top corners are drawn
         // with, from the same call, which is what keeps the two from parting
@@ -8214,6 +8298,32 @@ impl Compositor {
             }
             CompositorRequest::SetCursor { window_id, cursor } => {
                 match self.set_cursor(window_id, cursor) {
+                    Ok(()) => CompositorResponse::Ok,
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+            CompositorRequest::SetWindowPolicy { window_id, policy } => {
+                match self.set_window_policy(window_id, policy) {
+                    Ok(()) => CompositorResponse::Ok,
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+            CompositorRequest::SetSizeLimits {
+                window_id,
+                min_size,
+                max_size,
+            } => match self.set_size_limits(window_id, min_size, max_size) {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            CompositorRequest::SetStackTier { window_id, tier } => {
+                match self.set_stack_tier(window_id, tier) {
                     Ok(()) => CompositorResponse::Ok,
                     Err(e) => CompositorResponse::Error {
                         message: e.to_string(),
@@ -8925,6 +9035,19 @@ impl Compositor {
         self.window_ref(id).map_or(Layer::Normal, |w| w.layer)
     }
 
+    /// Where a window sorts in the stack: its layer first, then its tier.
+    ///
+    /// A pair rather than a single ordering because the two answer different
+    /// questions. The layer is the client's, chosen at creation, and separates
+    /// the desktop's furniture from applications. The tier is the *shell's*,
+    /// applied from a user's rule, and orders applications against each other
+    /// -- so an always-on-top window is above its neighbours and still below
+    /// the taskbar, which is what a user means by it.
+    fn stack_key(&self, id: WindowId) -> (Layer, StackTier) {
+        self.window_ref(id)
+            .map_or((Layer::Normal, StackTier::Normal), |w| (w.layer, w.tier))
+    }
+
     /// Where in `z_stack` a window of `layer` goes when it is raised to the top
     /// of its own band.
     ///
@@ -8933,20 +9056,112 @@ impl Compositor {
     /// of them, before the first window of any higher band. That partitioning
     /// is the invariant this whole layering rests on, and it is maintained by
     /// this function being the *only* way anything enters the stack.
-    fn stack_insertion_index(&self, layer: Layer) -> usize {
+    fn stack_insertion_index(&self, key: (Layer, StackTier)) -> usize {
         self.z_stack
             .iter()
-            .filter(|&&id| self.layer_of(id) <= layer)
+            .filter(|&&id| self.stack_key(id) <= key)
             .count()
     }
 
     /// Put `id` at the top of its own band, removing it from wherever it was.
     fn raise_within_layer(&mut self, id: WindowId) {
-        let layer = self.layer_of(id);
+        let key = self.stack_key(id);
         self.z_stack.retain(|&other| other != id);
-        let at = self.stack_insertion_index(layer);
+        let at = self.stack_insertion_index(key);
         self.z_stack.insert(at, id);
         self.update_z_orders();
+    }
+
+    /// Move a window into a stacking tier and restack it.
+    ///
+    /// Restacking through [`raise_within_layer`](Self::raise_within_layer)
+    /// rather than by editing `z_stack` here: a window that changed tier
+    /// without moving would be sorted into a band it is no longer in, and the
+    /// next raise would appear to teleport it.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window has gone.
+    /// Say what the user may not do to a window.
+    ///
+    /// Replaces the whole policy rather than merging: the three flags are one
+    /// rule's worth of answer, and a merge would make a rule that stops
+    /// naming `prevent_close` unable to take it back.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window has gone.
+    pub fn set_window_policy(
+        &mut self,
+        id: WindowId,
+        policy: WindowPolicy,
+    ) -> CompositorResult<()> {
+        let win = self
+            .windows
+            .iter_mut()
+            .find(|w| w.id == id)
+            .ok_or(CompositorError::WindowNotFound(id))?;
+        win.policy = policy;
+        Ok(())
+    }
+
+    /// Constrain a window's size, and bring it inside the new bounds now.
+    ///
+    /// `None` in either pair means "leave that limit as it is", not "clear
+    /// it" -- see [`RequestBody::ShellSetSizeLimits`] for why the distinction
+    /// matters.
+    ///
+    /// Applying the clamp immediately rather than waiting for the next resize
+    /// is the difference between a rule and a suggestion: a rule that says
+    /// "this window is at most 400 wide" and leaves a 900-wide window alone
+    /// until the user happens to drag its edge has not been applied.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window has gone.
+    pub fn set_size_limits(
+        &mut self,
+        id: WindowId,
+        min_size: Option<(u32, u32)>,
+        max_size: Option<(u32, u32)>,
+    ) -> CompositorResult<()> {
+        let win = self
+            .windows
+            .iter_mut()
+            .find(|w| w.id == id)
+            .ok_or(CompositorError::WindowNotFound(id))?;
+        // `None` is "the rule said nothing about this one", not "clear it".
+        // A rule naming only a maximum must not discard the minimum the
+        // program asked for -- nothing in the rule vocabulary can request
+        // that, so nothing here should perform it.
+        if min_size.is_some() {
+            win.min_size = min_size;
+        }
+        if max_size.is_some() {
+            win.max_size = max_size;
+        }
+        let (width, height) = win.clamp_size(win.width, win.height);
+        if (width, height) != (win.width, win.height) {
+            win.width = width;
+            win.height = height;
+            self.full_recomposite = true;
+        }
+        Ok(())
+    }
+
+    pub fn set_stack_tier(&mut self, id: WindowId, tier: StackTier) -> CompositorResult<()> {
+        let win = self
+            .windows
+            .iter_mut()
+            .find(|w| w.id == id)
+            .ok_or(CompositorError::WindowNotFound(id))?;
+        if win.tier == tier {
+            return Ok(());
+        }
+        win.tier = tier;
+        self.raise_within_layer(id);
+        self.full_recomposite = true;
+        Ok(())
     }
 
     /// The desktop's windows as a shell sees them, bottom-to-top.
@@ -10660,6 +10875,75 @@ mod tests {
         }
     }
 
+    /// The row above the title bar resizes; the title bar moves.
+    ///
+    /// This boundary is what moved when `frame_insets` grew to include the
+    /// border above the title bar, and the known-issues entry warned that it
+    /// would. Before the change the two were the same row and the border had
+    /// nowhere of its own to be, so there was nothing to draw the line
+    /// between. Both sides are asserted because only the pair says where the
+    /// line is -- either alone passes if the whole top of the window does one
+    /// thing.
+    #[test]
+    fn the_border_row_resizes_and_the_title_bar_below_it_moves() {
+        let (mut comp, id) = with_one_window();
+        let frame = comp.window_ref(id).expect("w").frame_rect();
+        let bar = comp
+            .window_ref(id)
+            .expect("w")
+            .title_bar_rect()
+            .expect("framed");
+        assert_eq!(
+            bar.y - frame.y,
+            BORDER_WIDTH as i32,
+            "the fixture has no border row to test"
+        );
+
+        let mid_x = frame.x + (frame.width / 2) as i32;
+
+        // The border row: a resize drag begins.
+        let before = (
+            comp.window_ref(id).expect("w").width,
+            comp.window_ref(id).expect("w").height,
+        );
+        comp.handle_mouse_button(MouseButton::Left, true, mid_x, frame.y);
+        comp.handle_mouse_move(mid_x, frame.y - 20);
+        comp.handle_mouse_button(MouseButton::Left, false, mid_x, frame.y - 20);
+        let grew = comp.window_ref(id).expect("w").height;
+        assert!(
+            grew > before.1,
+            "dragging the top border did not resize: {before:?} -> {grew}"
+        );
+
+        // One row lower, in the title bar: a move drag begins instead.
+        let frame = comp.window_ref(id).expect("w").frame_rect();
+        let bar = comp
+            .window_ref(id)
+            .expect("w")
+            .title_bar_rect()
+            .expect("framed");
+        let size_before = (
+            comp.window_ref(id).expect("w").width,
+            comp.window_ref(id).expect("w").height,
+        );
+        let pos_before = (
+            comp.window_ref(id).expect("w").x,
+            comp.window_ref(id).expect("w").y,
+        );
+        let bar_y = bar.y + (bar.height / 2) as i32;
+        comp.handle_mouse_button(MouseButton::Left, true, frame.x + 40, bar_y);
+        comp.handle_mouse_move(frame.x + 60, bar_y + 15);
+        comp.handle_mouse_button(MouseButton::Left, false, frame.x + 60, bar_y + 15);
+
+        let win = comp.window_ref(id).expect("w");
+        assert_eq!(
+            (win.width, win.height),
+            size_before,
+            "dragging the title bar resized the window"
+        );
+        assert_ne!((win.x, win.y), pos_before, "and it did not move it either");
+    }
+
     #[test]
     fn the_outer_rect_is_the_frame_rect_plus_the_shadow() {
         // outer_rect is now defined as frame_rect().inflate(shadow_extent()).
@@ -10667,14 +10951,30 @@ mod tests {
         // out from the constants so a change to either helper has to be
         // deliberate rather than merely compile.
         let win = plain_window(100, 100, 200, 150);
-        assert_eq!(win.frame_rect(), Rect::new(99, 70, 202, 181));
-        assert_eq!(win.outer_rect(), Rect::new(91, 62, 218, 197));
+        // One row taller at the top than it used to be: `frame_insets` now
+        // reserves the border above the title bar, which is where the outline
+        // is drawn. The bottom edge and both sides are unchanged.
+        assert_eq!(win.frame_rect(), Rect::new(99, 69, 202, 182));
+        assert_eq!(win.outer_rect(), Rect::new(91, 61, 218, 198));
         assert_eq!(win.frame_rect().inflate(SHADOW_SIZE), win.outer_rect());
-        // The title bar occupies the top inset of the frame box exactly.
+
+        // The title bar sits *below* the top border rather than filling the
+        // top inset. The row above it is the border's, and a bar that took it
+        // would be painted over the outline -- which is what used to happen.
         let bar = win.title_bar_rect().expect("framed");
         assert_eq!(bar, Rect::new(99, 70, 202, TITLE_BAR_HEIGHT));
         assert_eq!(bar.x, win.frame_rect().x);
         assert_eq!(bar.width, win.frame_rect().width);
+        assert_eq!(
+            bar.y - win.frame_rect().y,
+            BORDER_WIDTH as i32,
+            "the gap above the title bar is exactly the border"
+        );
+        assert_eq!(
+            win.frame_insets().0,
+            TITLE_BAR_HEIGHT + BORDER_WIDTH,
+            "the top inset is border plus bar"
+        );
     }
 
     #[test]
@@ -11183,6 +11483,253 @@ mod tests {
             Err(CompositorError::WindowNotFound(_))
         ));
         assert_eq!(comp.pending_notifications.len(), before);
+    }
+
+    /// `prevent_close` refuses the *request*, not the program's own exit.
+    ///
+    /// The distinction is the whole safety argument for the field. A rule that
+    /// could stop a process exiting would be a way to make one unkillable from
+    /// a text file; what it stops is a close *button*.
+    #[test]
+    fn prevent_close_refuses_the_button_and_not_the_program() {
+        let (mut comp, id) = with_one_window();
+        comp.set_window_policy(
+            id,
+            WindowPolicy {
+                prevent_close: true,
+                ..WindowPolicy::default()
+            },
+        )
+        .expect("policy");
+
+        assert!(
+            matches!(comp.request_close(id), Err(CompositorError::Refused(_))),
+            "a close request must be refused while the rule is in force"
+        );
+        assert!(comp.window_ref(id).is_some(), "and the window must survive");
+
+        // The program's own exit is not a request and is not refused.
+        comp.destroy_window(id).expect("a program may always exit");
+        assert!(comp.window_ref(id).is_none());
+    }
+
+    /// `prevent_move` stops the drag without stopping the click.
+    ///
+    /// A pinned window must still focus and raise when its title bar is
+    /// pressed -- refusing the press outright would make it unfocusable by the
+    /// only part of it a user reliably aims at, which is not what the rule
+    /// asks for.
+    #[test]
+    fn prevent_move_stops_the_drag_but_not_the_focus() {
+        let (mut comp, id) = with_one_window();
+        // Placed clear of the pinned window: the fixture's window is at
+        // (100, 100), and a second one at the default position would sit on
+        // top of it, so the press below would land on the wrong window and
+        // the test would fail for a reason that has nothing to do with the
+        // policy.
+        let mut other_spec = WindowSpec::new("Other", 200, 150);
+        other_spec.position = Some((500, 400));
+        let other = comp.create_window_from_spec(&other_spec, 1);
+        comp.activate_window(other).expect("raise the other one");
+        comp.set_window_policy(
+            id,
+            WindowPolicy {
+                prevent_move: true,
+                ..WindowPolicy::default()
+            },
+        )
+        .expect("policy");
+
+        // Aimed at the title bar the window actually draws, not at an offset
+        // guessed from its client origin. The first version of this test
+        // pressed at `y + 5`, which is *inside* the client area -- no drag
+        // starts there, so the test passed with the guard removed. Mutation
+        // testing found it; the fix is to ask the window where its title bar
+        // is.
+        let bar = comp
+            .window_ref(id)
+            .expect("w")
+            .title_bar_rect()
+            .expect("a framed window has a title bar");
+        #[expect(clippy::cast_possible_wrap, reason = "test geometry is small")]
+        let (x, y) = (
+            bar.x + (bar.width / 2) as i32,
+            bar.y + (bar.height / 2) as i32,
+        );
+        let before = (
+            comp.window_ref(id).expect("w").x,
+            comp.window_ref(id).expect("w").y,
+        );
+        comp.handle_mouse_button(MouseButton::Left, true, x, y);
+        comp.handle_mouse_move(x + 100, y + 100);
+        comp.handle_mouse_button(MouseButton::Left, false, x + 100, y + 100);
+
+        let win = comp.window_ref(id).expect("w");
+        assert_eq!((win.x, win.y), before, "a pinned window was dragged");
+        assert_eq!(comp.focused_window, Some(id), "and it must still focus");
+    }
+
+    /// `prevent_resize` stops an edge drag.
+    #[test]
+    fn prevent_resize_stops_an_edge_drag() {
+        let (mut comp, id) = with_one_window();
+        comp.set_window_policy(
+            id,
+            WindowPolicy {
+                prevent_resize: true,
+                ..WindowPolicy::default()
+            },
+        )
+        .expect("policy");
+
+        let win = comp.window_ref(id).expect("w");
+        let before = (win.width, win.height);
+        #[expect(clippy::cast_possible_wrap, reason = "test geometry is small")]
+        let edge_x = win.x + win.width as i32;
+        let mid_y = win.y + 20;
+        comp.handle_mouse_button(MouseButton::Left, true, edge_x, mid_y);
+        comp.handle_mouse_move(edge_x + 120, mid_y);
+        comp.handle_mouse_button(MouseButton::Left, false, edge_x + 120, mid_y);
+
+        let win = comp.window_ref(id).expect("w");
+        assert_eq!(
+            (win.width, win.height),
+            before,
+            "a pinned window was resized"
+        );
+    }
+
+    /// An unrestricted policy leaves everything working.
+    #[test]
+    fn the_default_policy_restrains_nothing() {
+        let (mut comp, id) = with_one_window();
+        assert!(comp.window_ref(id).expect("w").policy.is_unrestricted());
+        assert!(comp.request_close(id).is_ok());
+    }
+
+    /// A rule naming only a maximum must not discard the program's minimum.
+    ///
+    /// The failure this prevents is quiet and nasty: a user writes "this
+    /// window is at most 400 wide", and the program's own "never below 300"
+    /// disappears with it, so the window can then be dragged down to nothing.
+    /// Nothing in the rule vocabulary asks for that.
+    #[test]
+    fn setting_one_size_limit_leaves_the_other_alone() {
+        let (mut comp, id) = with_one_window();
+        comp.set_size_limits(id, Some((300, 200)), None)
+            .expect("min");
+        comp.set_size_limits(id, None, Some((900, 700)))
+            .expect("max");
+
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!(win.min_size, Some((300, 200)), "the minimum was discarded");
+        assert_eq!(win.max_size, Some((900, 700)));
+    }
+
+    /// A new maximum takes effect at once, not at the next resize.
+    ///
+    /// A rule that leaves a too-large window alone until the user happens to
+    /// drag its edge has not been applied.
+    #[test]
+    fn a_new_maximum_shrinks_the_window_immediately() {
+        let (mut comp, id) = with_one_window();
+        comp.set_size_limits(id, None, Some((120, 90)))
+            .expect("max");
+
+        let win = comp.window_ref(id).expect("window");
+        assert!(
+            win.width <= 120 && win.height <= 90,
+            "the window is still {}x{} after being capped at 120x90",
+            win.width,
+            win.height
+        );
+    }
+
+    /// An always-on-top window sits above its neighbours and below the shell.
+    ///
+    /// Both halves matter and only the pair distinguishes the design from the
+    /// obvious wrong one. Reusing `Layer::Overlay` for "always on top" would
+    /// pass the first assertion and fail the second: the window would sit
+    /// above the taskbar, which is not what a user means and is not something
+    /// an application should be able to ask for at all.
+    #[test]
+    fn an_always_on_top_window_is_above_its_neighbours_and_below_the_shell() {
+        let (mut comp, first) = with_one_window();
+        let second = comp.create_window_from_spec(&WindowSpec::new("Second", 200, 150), 1);
+        let mut panel_spec = WindowSpec::new("Taskbar", 800, 40);
+        panel_spec.layer = Layer::Overlay;
+        let panel = comp.create_window_from_spec(&panel_spec, 1);
+
+        comp.set_stack_tier(first, StackTier::Top).expect("tier");
+
+        let above = |lower: WindowId, upper: WindowId| {
+            let l = comp.z_stack.iter().position(|&w| w == lower);
+            let u = comp.z_stack.iter().position(|&w| w == upper);
+            l < u
+        };
+        assert!(
+            above(second, first),
+            "an always-on-top window must be above an ordinary one"
+        );
+        assert!(
+            above(first, panel),
+            "and still below the shell's own overlay -- a window rule must not \
+             be able to cover the taskbar"
+        );
+    }
+
+    /// And raising an ordinary window does not lift it past one.
+    ///
+    /// This is what "always" means: clicking another window must not defeat
+    /// the rule. Without the tier in the sort key, `raise_within_layer` would
+    /// put the clicked window on top of everything in its layer.
+    #[test]
+    fn raising_an_ordinary_window_does_not_lift_it_over_an_always_on_top_one() {
+        let (mut comp, pinned) = with_one_window();
+        let other = comp.create_window_from_spec(&WindowSpec::new("Other", 200, 150), 1);
+        comp.set_stack_tier(pinned, StackTier::Top).expect("tier");
+
+        comp.activate_window(other).expect("raise");
+
+        let pos = |w: WindowId| comp.z_stack.iter().position(|&x| x == w);
+        assert!(
+            pos(other) < pos(pinned),
+            "raising an ordinary window put it over a pinned one"
+        );
+    }
+
+    /// Always-on-bottom is the same mechanism in the other direction.
+    #[test]
+    fn an_always_on_bottom_window_stays_under_its_neighbours() {
+        let (mut comp, sunk) = with_one_window();
+        let other = comp.create_window_from_spec(&WindowSpec::new("Other", 200, 150), 1);
+        comp.set_stack_tier(sunk, StackTier::Bottom).expect("tier");
+
+        comp.activate_window(sunk).expect("raise");
+
+        let pos = |w: WindowId| comp.z_stack.iter().position(|&x| x == w);
+        assert!(
+            pos(sunk) < pos(other),
+            "activating a pinned-to-bottom window lifted it out of its tier"
+        );
+    }
+
+    /// Returning a window to the ordinary tier releases it.
+    #[test]
+    fn clearing_the_tier_lets_a_window_raise_again() {
+        let (mut comp, pinned) = with_one_window();
+        let other = comp.create_window_from_spec(&WindowSpec::new("Other", 200, 150), 1);
+        comp.set_stack_tier(pinned, StackTier::Bottom)
+            .expect("down");
+        comp.set_stack_tier(pinned, StackTier::Normal).expect("up");
+
+        comp.activate_window(pinned).expect("raise");
+
+        let pos = |w: WindowId| comp.z_stack.iter().position(|&x| x == w);
+        assert!(
+            pos(other) < pos(pinned),
+            "a window returned to the ordinary tier must raise normally again"
+        );
     }
 
     /// Every action reaches the operation it names.
@@ -14312,10 +14859,17 @@ mod tests {
         let (top, side, _) = win.frame_insets();
         assert_eq!(
             top,
-            TITLE_BAR_HEIGHT * 2,
+            (TITLE_BAR_HEIGHT + BORDER_WIDTH) * 2,
             "the title bar is still the 96dpi height"
         );
         assert_eq!(side, BORDER_WIDTH * 2);
+        // The bar itself, with the border taken back out, is what doubled.
+        let bar = win.title_bar_rect().expect("framed");
+        assert_eq!(
+            bar.height,
+            TITLE_BAR_HEIGHT * 2,
+            "the bar inside the inset is not the 2x height"
+        );
         assert_eq!(win.shadow_extent(), SHADOW_SIZE * 2);
 
         let close = win.close_button_rect().expect("a decorated window closes");
@@ -14503,7 +15057,7 @@ mod tests {
             (win.scale_factor - 1.0).abs() < f32::EPSILON,
             "off-screen windows are drawn at the primary display's scale"
         );
-        assert_eq!(win.frame_insets().0, TITLE_BAR_HEIGHT);
+        assert_eq!(win.frame_insets().0, TITLE_BAR_HEIGHT + BORDER_WIDTH);
     }
 
     #[test]
@@ -14656,7 +15210,7 @@ mod tests {
         );
         assert_eq!(
             comp.window_ref(id).expect("window").frame_insets().0,
-            TITLE_BAR_HEIGHT * 2
+            (TITLE_BAR_HEIGHT + BORDER_WIDTH) * 2
         );
     }
 
@@ -15423,18 +15977,16 @@ mod tests {
         let border_at_the_corner = |corners| {
             let (comp, id) = decorated(with_corners(corners));
             let frame = comp.window_ref(id).expect("window").frame_rect();
-            let width = scale_dimension(
-                BORDER_WIDTH,
-                comp.window_ref(id).expect("window").scale_factor,
-            );
-            // The border box starts one stroke above the frame; see
-            // `render_border`. Its own top-left is the pixel a square stroke
-            // paints and a rounded one leaves alone.
+            // The border box *is* the frame: `frame_insets` reserves the
+            // border row above the title bar, so the outline is drawn inside
+            // the measured frame rather than a stroke above it. The frame's
+            // own top-left is the pixel a square stroke paints and a rounded
+            // one leaves alone.
             #[allow(
                 clippy::cast_sign_loss,
                 reason = "the window is placed well inside the 400x300 buffer"
             )]
-            let probe = (frame.x as u32, (frame.y - width as i32) as u32);
+            let probe = (frame.x as u32, frame.y as u32);
             let focused = comp.window_ref(id).expect("window").focused;
             let expected = if focused {
                 comp.theme.border_focused
@@ -17696,7 +18248,8 @@ mod tests {
         // exactly its original size.
         assert_eq!(
             (frame.width, frame.height),
-            (302, 181),
+            // 182, not 181: the top inset gained the border row.
+            (302, 182),
             "the restored window was resized rather than moved"
         );
         assert_eq!(

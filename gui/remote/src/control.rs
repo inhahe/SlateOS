@@ -96,7 +96,7 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// same reason 3 did, and worse: the new field's own length prefix would be
 /// read by a version-3 decoder as the window's *width*, so the failure is not a
 /// wrong flag but a window several hundred million pixels across.
-pub const CONTROL_VERSION: u8 = 6;
+pub const CONTROL_VERSION: u8 = 10;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -344,6 +344,85 @@ impl Layer {
 /// `Move { x, y, w, h }` — a client-supplied rectangle — and that is still
 /// absent, which is the distinction to preserve when adding to this enum: if
 /// the shell has to compute pixels to use a verb, the verb is wrong.
+/// What the *user* may not do to a window, as a window rule says.
+///
+/// Enforced by the compositor, and it has to be: the shell is not in the path
+/// when somebody drags a title bar or presses a close button, so a policy the
+/// shell tried to apply would be one the pointer walks straight past.
+///
+/// **These restrain the user, never the program.** A window whose
+/// `prevent_close` is set still exits when its own code decides to -- what is
+/// refused is the *request* to close it, which is what a title-bar button and
+/// a taskbar menu send. A rule that could stop a program exiting would be a
+/// way to make a process unkillable from a text file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowPolicy {
+    /// The close button and the shell's Close action are refused.
+    pub prevent_close: bool,
+    /// A title-bar drag does not move the window.
+    pub prevent_move: bool,
+    /// An edge drag does not resize the window.
+    pub prevent_resize: bool,
+}
+
+impl WindowPolicy {
+    /// Whether this policy restrains anything at all.
+    #[must_use]
+    pub const fn is_unrestricted(self) -> bool {
+        !self.prevent_close && !self.prevent_move && !self.prevent_resize
+    }
+}
+
+/// Where a window sits *within* its layer.
+///
+/// Deliberately not more [`Layer`] variants. A layer is chosen by the client
+/// when it creates the window, so an `AboveNormal` layer would let any program
+/// put itself above the taskbar simply by asking. A tier is set by the shell,
+/// applying a rule the user wrote, and it orders windows only against their
+/// neighbours in the same layer -- "always on top" means above the other
+/// applications, not above the desktop's own furniture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StackTier {
+    /// Below its neighbours: `always_on_bottom`.
+    Bottom,
+    /// The ordinary tier, where raising and focusing decide the order.
+    #[default]
+    Normal,
+    /// Above its neighbours: `always_on_top`.
+    Top,
+}
+
+impl StackTier {
+    /// Every tier, low to high.
+    pub const ALL: [Self; 3] = [Self::Bottom, Self::Normal, Self::Top];
+
+    /// The wire byte for this tier.
+    #[must_use]
+    pub const fn as_byte(self) -> u8 {
+        match self {
+            Self::Bottom => 0,
+            Self::Normal => 1,
+            Self::Top => 2,
+        }
+    }
+
+    /// The tier a wire byte names, or `None` if it names none of them.
+    ///
+    /// `None` rather than defaulting to [`Normal`](Self::Normal), for
+    /// [`Layer::from_byte`]'s reason: a byte we do not recognise means the
+    /// peer speaks a protocol we do not, and quietly filing its window in the
+    /// ordinary tier would be a wrong desktop rather than a refused request.
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Bottom),
+            1 => Some(Self::Normal),
+            2 => Some(Self::Top),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ShellControlAction {
     /// Un-minimise if minimised, then focus and raise within the window's band.
@@ -711,6 +790,64 @@ pub enum RequestBody {
     /// privileged path is a different tag on the wire and cannot be reached by
     /// getting a boolean wrong.
     ShellSetOpacity { window: u64, opacity: f32 },
+    /// Move *another client's* window. Shell only.
+    ///
+    /// The privileged counterpart of [`Move`](Self::Move), for the reason
+    /// [`ShellSetOpacity`](Self::ShellSetOpacity) gives: a window rule placing
+    /// a program's window is the shell acting on somebody else's, which the
+    /// ordinary request refuses by design.
+    ShellMove { window: u64, x: i32, y: i32 },
+    /// Resize *another client's* window. Shell only.
+    ///
+    /// As [`ShellMove`](Self::ShellMove). The size is the client area, the
+    /// same quantity [`Resize`](Self::Resize) names, so a rule and a client
+    /// asking for "800 wide" mean the same 800.
+    ShellResize {
+        window: u64,
+        width: u32,
+        height: u32,
+    },
+    /// Put *another client's* window in a stacking tier. Shell only.
+    ///
+    /// How `always_on_top` and `always_on_bottom` are applied. See
+    /// [`StackTier`] for why this is not a layer.
+    ShellSetStackTier { window: u64, tier: StackTier },
+    /// Constrain *another client's* window size. Shell only.
+    ///
+    /// How `min_size` and `max_size` window rules are applied. The compositor
+    /// already stores and enforces both -- `Window::clamp_size` is consulted
+    /// by every resize, by maximise, and at creation -- but until now they
+    /// could only be set by the window's own client in its `WindowSpec`, so a
+    /// rule naming them had nowhere to go.
+    ///
+    /// A pair of **zeroes means "leave this one as it is"**, not "no limit".
+    ///
+    /// That is the direction a window rule can actually express. The rule
+    /// vocabulary has `min_size` and `max_size` as *optional* fields: a rule
+    /// either names one or says nothing about it, and there is no way to write
+    /// "remove the minimum this program asked for". A request whose zeroes
+    /// meant "no limit" would make a rule that names only a maximum silently
+    /// discard the program's own minimum, which the user never asked for and
+    /// would only notice when the window collapsed.
+    ///
+    /// Zero is safe as the sentinel because a window may not be zero wide or
+    /// zero tall, so it cannot collide with a real constraint -- and it keeps
+    /// the frame four plain `u32`s rather than growing presence flags that
+    /// could disagree with the numbers beside them.
+    ShellSetSizeLimits {
+        window: u64,
+        min_width: u32,
+        min_height: u32,
+        max_width: u32,
+        max_height: u32,
+    },
+    /// Say what the user may not do to *another client's* window. Shell only.
+    ///
+    /// How `prevent_close`, `prevent_move` and `prevent_resize` are applied.
+    /// One request rather than three because they are one rule's worth of
+    /// answer: a shell that sent them separately could leave a window
+    /// half-restrained if the second frame were refused.
+    ShellSetWindowPolicy { window: u64, policy: WindowPolicy },
     /// Ask about the display. Answered with [`ResponseBody::DisplayInfo`].
     GetDisplayInfo,
     /// Start or stop receiving the desktop's window list.
@@ -1025,6 +1162,11 @@ enum RequestTag {
     GrabKey = 0x17,
     UngrabKey = 0x18,
     ShellSetOpacity = 0x19,
+    ShellMove = 0x1A,
+    ShellResize = 0x1B,
+    ShellSetStackTier = 0x1C,
+    ShellSetSizeLimits = 0x1D,
+    ShellSetWindowPolicy = 0x1E,
 }
 
 impl RequestTag {
@@ -1055,6 +1197,11 @@ impl RequestTag {
             0x17 => Self::GrabKey,
             0x18 => Self::UngrabKey,
             0x19 => Self::ShellSetOpacity,
+            0x1A => Self::ShellMove,
+            0x1B => Self::ShellResize,
+            0x1C => Self::ShellSetStackTier,
+            0x1D => Self::ShellSetSizeLimits,
+            0x1E => Self::ShellSetWindowPolicy,
             _ => return None,
         })
     }
@@ -1291,6 +1438,51 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::ShellSetOpacity as u8);
             write_u64(out, *window);
             write_f32(out, *opacity);
+        }
+        RequestBody::ShellMove { window, x, y } => {
+            out.push(RequestTag::ShellMove as u8);
+            write_u64(out, *window);
+            write_i32(out, *x);
+            write_i32(out, *y);
+        }
+        RequestBody::ShellResize {
+            window,
+            width,
+            height,
+        } => {
+            out.push(RequestTag::ShellResize as u8);
+            write_u64(out, *window);
+            write_u32(out, *width);
+            write_u32(out, *height);
+        }
+        RequestBody::ShellSetStackTier { window, tier } => {
+            out.push(RequestTag::ShellSetStackTier as u8);
+            write_u64(out, *window);
+            out.push(tier.as_byte());
+        }
+        RequestBody::ShellSetSizeLimits {
+            window,
+            min_width,
+            min_height,
+            max_width,
+            max_height,
+        } => {
+            out.push(RequestTag::ShellSetSizeLimits as u8);
+            write_u64(out, *window);
+            write_u32(out, *min_width);
+            write_u32(out, *min_height);
+            write_u32(out, *max_width);
+            write_u32(out, *max_height);
+        }
+        RequestBody::ShellSetWindowPolicy { window, policy } => {
+            out.push(RequestTag::ShellSetWindowPolicy as u8);
+            write_u64(out, *window);
+            // A byte each rather than a bitmask. The frame is not short of
+            // room, and three named reads decode into three named fields
+            // without a table of bit positions to keep in step with them.
+            out.push(u8::from(policy.prevent_close));
+            out.push(u8::from(policy.prevent_move));
+            out.push(u8::from(policy.prevent_resize));
         }
         RequestBody::GetDisplayInfo => out.push(RequestTag::GetDisplayInfo as u8),
         RequestBody::SubscribeWindowList { subscribe } => {
@@ -1604,6 +1796,51 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             RequestBody::ShellSetOpacity {
                 window,
                 opacity: r.read_f32()?,
+            }
+        }
+        RequestTag::ShellMove => {
+            let window = r.read_u64()?;
+            RequestBody::ShellMove {
+                window,
+                x: r.read_i32()?,
+                y: r.read_i32()?,
+            }
+        }
+        RequestTag::ShellResize => {
+            let window = r.read_u64()?;
+            RequestBody::ShellResize {
+                window,
+                width: r.read_u32()?,
+                height: r.read_u32()?,
+            }
+        }
+        RequestTag::ShellSetStackTier => {
+            let window = r.read_u64()?;
+            let b = r.read_u8()?;
+            RequestBody::ShellSetStackTier {
+                window,
+                tier: StackTier::from_byte(b).ok_or(DecodeError::BadStackTier(b))?,
+            }
+        }
+        RequestTag::ShellSetSizeLimits => {
+            let window = r.read_u64()?;
+            RequestBody::ShellSetSizeLimits {
+                window,
+                min_width: r.read_u32()?,
+                min_height: r.read_u32()?,
+                max_width: r.read_u32()?,
+                max_height: r.read_u32()?,
+            }
+        }
+        RequestTag::ShellSetWindowPolicy => {
+            let window = r.read_u64()?;
+            RequestBody::ShellSetWindowPolicy {
+                window,
+                policy: WindowPolicy {
+                    prevent_close: r.read_u8()? != 0,
+                    prevent_move: r.read_u8()? != 0,
+                    prevent_resize: r.read_u8()? != 0,
+                },
             }
         }
         RequestTag::GetDisplayInfo => RequestBody::GetDisplayInfo,
@@ -2044,8 +2281,28 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x1A),
+            Some(RequestTag::ShellMove),
+            "0x1A was taken by ShellMove in control version 7"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x1C),
+            Some(RequestTag::ShellSetStackTier),
+            "0x1C was taken by ShellSetStackTier in control version 8"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x1D),
+            Some(RequestTag::ShellSetSizeLimits),
+            "0x1D was taken by ShellSetSizeLimits in control version 9"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x1E),
+            Some(RequestTag::ShellSetWindowPolicy),
+            "0x1E was taken by ShellSetWindowPolicy in control version 10"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x1F),
             None,
-            "0x1A is the next free tag"
+            "0x1F is the next free tag"
         );
     }
 

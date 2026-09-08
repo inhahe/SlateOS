@@ -1424,12 +1424,6 @@ impl ExplorerState {
             return result;
         }
 
-        if result.operation == DropOperation::Link {
-            result.valid = false;
-            result.invalid_reason = Some("Links are not supported yet".to_string());
-            return result;
-        }
-
         if result.operation == DropOperation::Move {
             let target = result.target_dir.clone();
             result
@@ -1476,9 +1470,23 @@ impl ExplorerState {
                 ),
                 "Copied",
             ),
-            // `evaluate_drop` refuses both of these, so reaching here would
-            // mean the caller executed a result it was told was invalid.
-            DropOperation::Link | DropOperation::None => return,
+            DropOperation::Link => (
+                Ok(OperationPlan::plan_link(
+                    &result.sources,
+                    &result.target_dir,
+                    ConflictPolicy::Rename,
+                    // The same policy the other two use, and for a reason
+                    // specific to links: a filesystem that refuses them
+                    // refuses each one separately -- Windows needs a
+                    // privilege -- so a batch must report which failed rather
+                    // than abandoning the ones that would have worked.
+                    ErrorPolicy::SkipAndContinue,
+                )),
+                "Linked",
+            ),
+            // `evaluate_drop` refuses this, so reaching here would mean the
+            // caller executed a result it was told was invalid.
+            DropOperation::None => return,
         };
 
         let plan = match plan {
@@ -4462,10 +4470,18 @@ mod tests {
         );
     }
 
-    /// `fileops` has no link operation, so Alt-drag is refused up front instead
-    /// of being reported as `Link` and then quietly not performed.
+    /// An Alt-drag makes a link, or says it could not -- never a copy.
+    ///
+    /// Both outcomes are accepted because only one of them is available on a
+    /// given machine: Windows needs a privilege to create a symbolic link, so
+    /// a host without it gets a per-file failure, which is the behaviour
+    /// `ErrorPolicy::SkipAndContinue` was chosen for. What is asserted in
+    /// *both* cases is the thing that must never happen -- a second
+    /// independent file. Silently copying would give the user a duplicate that
+    /// drifts out of step with the original with no sign it was ever meant to
+    /// be a stand-in, which is worse than the gesture failing.
     #[test]
-    fn an_alt_drag_is_refused_rather_than_silently_doing_nothing() {
+    fn an_alt_drag_makes_a_link_or_reports_that_it_could_not() {
         let scratch = temp_dir("dz_link");
         let root = scratch.dir().to_path_buf();
         fs::create_dir(root.join("target")).unwrap();
@@ -4483,13 +4499,33 @@ mod tests {
         state.drag_over(x, y, alt);
 
         let drag = state.drag().expect("a drag is in flight");
-        assert!(!drag.is_valid(), "the feedback is red before the release");
-        assert_eq!(drag.invalid_reason(), Some("Links are not supported yet"));
+        assert!(drag.is_valid(), "an Alt-drag is a supported gesture now");
 
         let result = state.drop_at(x, y, alt).expect("drop");
-        assert!(!result.valid);
-        assert!(!root.join("target/note.txt").exists());
-        assert_eq!(state.status_message, "Links are not supported yet");
+        assert!(result.valid);
+
+        let made = root.join("target/note.txt");
+        match fs::symlink_metadata(&made) {
+            Ok(meta) => {
+                assert!(
+                    meta.file_type().is_symlink(),
+                    "an Alt-drag produced a real file, not a link -- the exact \
+                     silent downgrade this gesture must never do"
+                );
+                assert_eq!(
+                    fs::read_to_string(&made).expect("the link resolves"),
+                    "hello"
+                );
+            }
+            Err(_) => {
+                assert!(
+                    state.status_message.contains("failed")
+                        || state.status_message.contains("Linked 0"),
+                    "no link was made and nothing said so: {:?}",
+                    state.status_message
+                );
+            }
+        }
     }
 
     #[test]

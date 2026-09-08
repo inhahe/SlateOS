@@ -173,7 +173,7 @@ use appearance::{
 // below so a caller wiring the shell to a compositor need not name `guiremote`
 // itself. `Layer` arrives with them because the list carries the shell's own
 // surfaces too, and telling those apart is the whole reason the field exists.
-pub use guiremote::control::{Layer, ShellControlAction};
+pub use guiremote::control::{Layer, ShellControlAction, StackTier, WindowPolicy};
 // `WindowList` comes with it because a window's own desktop and the desktop
 // being shown arrive together, in one frame, and comparing them is the only way
 // to know what the user can see. Taking the windows without the header is what
@@ -750,6 +750,47 @@ pub enum ShellRequest {
         /// with an eight-bit alpha, so a finer opacity is discarded a layer
         /// below this one.
         alpha: u8,
+    },
+    /// Put a window at a place, as a window rule asks.
+    MoveWindow {
+        /// The window to move.
+        window: WindowId,
+        /// Top-left corner, in display coordinates.
+        x: i32,
+        /// Top-left corner, in display coordinates.
+        y: i32,
+    },
+    /// Say what the user may not do to a window, as a window rule asks.
+    SetWindowPolicy {
+        /// The window to restrain.
+        window: WindowId,
+        /// What the user may not do.
+        policy: WindowPolicy,
+    },
+    /// Constrain a window's size, as a window rule asks.
+    SetSizeLimits {
+        /// The window to constrain.
+        window: WindowId,
+        /// Smallest client area; `(0, 0)` for no minimum.
+        min: (u32, u32),
+        /// Largest client area; `(0, 0)` for no maximum.
+        max: (u32, u32),
+    },
+    /// Keep a window above or below its neighbours, as a window rule asks.
+    SetStackTier {
+        /// The window to re-file.
+        window: WindowId,
+        /// Where it goes within its layer.
+        tier: StackTier,
+    },
+    /// Give a window a size, as a window rule asks.
+    ResizeWindow {
+        /// The window to resize.
+        window: WindowId,
+        /// Client-area width.
+        width: u32,
+        /// Client-area height.
+        height: u32,
     },
 }
 
@@ -2703,7 +2744,13 @@ impl DesktopShell {
                 let actions = self.rules.evaluate(&info.title, &info.app_id);
                 skip_taskbar = actions.skip_taskbar.unwrap_or(false);
                 skip_alt_tab = actions.skip_alt_tab.unwrap_or(false);
-                requests.extend(Self::rule_requests(id, info, &actions, self.num_desktops));
+                requests.extend(Self::rule_requests(
+                    id,
+                    info,
+                    &actions,
+                    self.num_desktops,
+                    (self.screen_width, self.screen_height),
+                ));
             }
 
             // Recorded on every list, not only on arrival: "remember last
@@ -2802,6 +2849,10 @@ impl DesktopShell {
         info: &WindowInfo,
         actions: &window_rules::RuleActions,
         num_desktops: u32,
+        // Passed rather than read off `self`, like `num_desktops` beside it:
+        // this stays an associated function so a test can drive one rule
+        // without standing a whole shell up around it.
+        screen: (u32, u32),
     ) -> Vec<ShellRequest> {
         let mut out = Vec::new();
 
@@ -2837,6 +2888,74 @@ impl DesktopShell {
                 out.push(ShellRequest::window(id, ShellControlAction::Fullscreen));
             }
             Some(window_rules::InitialState::Normal) | None => {}
+        }
+
+        // What the user may not do. Sent whenever the rule names any of the
+        // three, and it names them as a set: a rule that stops saying
+        // `prevent_close` is taking it back, so the policy is replaced whole
+        // rather than merged into whatever was there.
+        let policy = WindowPolicy {
+            prevent_close: actions.prevent_close.unwrap_or(false),
+            prevent_move: actions.prevent_move.unwrap_or(false),
+            prevent_resize: actions.prevent_resize.unwrap_or(false),
+        };
+        if actions.prevent_close.is_some()
+            || actions.prevent_move.is_some()
+            || actions.prevent_resize.is_some()
+        {
+            out.push(ShellRequest::SetWindowPolicy { window: id, policy });
+        }
+
+        // Size limits before the size itself, so a rule that sets both does
+        // not resize to something its own maximum then claws back.
+        if actions.min_size.is_some() || actions.max_size.is_some() {
+            out.push(ShellRequest::SetSizeLimits {
+                window: id,
+                // `(0, 0)` is "this rule says nothing about that limit", which
+                // leaves whatever the program asked for in place. A rule that
+                // names only a maximum must not discard the program's own
+                // minimum.
+                min: actions.min_size.unwrap_or((0, 0)),
+                max: actions.max_size.unwrap_or((0, 0)),
+            });
+        }
+
+        // Size before position, and both before the state match below. A
+        // window resized after being placed keeps its top-left corner, so the
+        // order does not change where it lands -- but a *centred* placement is
+        // computed from the size, so the size has to be settled first.
+        if let Some(size) = actions.size {
+            if let Some((width, height)) = Self::rule_size_px(size, screen) {
+                out.push(ShellRequest::ResizeWindow {
+                    window: id,
+                    width,
+                    height,
+                });
+            }
+        }
+
+        if let Some(position) = actions.position {
+            if let Some((x, y)) = Self::rule_position_px(position, actions.size, screen) {
+                out.push(ShellRequest::MoveWindow { window: id, x, y });
+            }
+        }
+
+        // "Always on top" and "always on bottom" are one setting with three
+        // values, not two independent flags: a rule asking for both would be
+        // asking for a window to be above and below its neighbours at once.
+        // `always_on_top` wins that argument here rather than the compositor
+        // being handed a contradiction to resolve.
+        let tier = match (actions.always_on_top, actions.always_on_bottom) {
+            (Some(true), _) => Some(StackTier::Top),
+            (_, Some(true)) => Some(StackTier::Bottom),
+            // An explicit `false` is a rule saying "ordinary", which is a
+            // request: it undoes a tier a higher-priority rule set. `None` is
+            // a rule that says nothing, and says nothing here too.
+            (Some(false), _) | (_, Some(false)) => Some(StackTier::Normal),
+            (None, None) => None,
+        };
+        if let Some(tier) = tier {
+            out.push(ShellRequest::SetStackTier { window: id, tier });
         }
 
         // Opacity is independent of state and zone -- a window can be
@@ -4835,6 +4954,72 @@ impl DesktopShell {
     }
 
     /// The settings group the widget layout lives in.
+    /// A rule's size in pixels, or `None` if this build cannot work it out.
+    ///
+    /// `RememberLast` never reaches here -- `resolve_remembered` has already
+    /// turned it into `Exact` or dropped it.
+    fn rule_size_px(size: window_rules::SizeSpec, screen: (u32, u32)) -> Option<(u32, u32)> {
+        match size {
+            window_rules::SizeSpec::Exact { width, height } => Some((width, height)),
+            window_rules::SizeSpec::Percentage { w_pct, h_pct } => Some((
+                Self::fraction_of(screen.0, w_pct),
+                Self::fraction_of(screen.1, h_pct),
+            )),
+            // Already resolved away; reaching here means the resolution was
+            // skipped, and guessing a size would be worse than leaving the
+            // window where the program put it.
+            window_rules::SizeSpec::RememberLast => None,
+        }
+    }
+
+    /// A rule's position in pixels, or `None` if this build cannot work it out.
+    ///
+    /// `size` is the rule's own size, needed only to centre: centring is a
+    /// function of how big the window will be, and the rule's size is the size
+    /// it is about to be given. A rule that centres without setting a size
+    /// cannot be honoured here -- the shell is told window *positions* in the
+    /// window list but not the size a program is about to choose -- so it is
+    /// declined rather than centred against a guess.
+    fn rule_position_px(
+        position: window_rules::PositionSpec,
+        size: Option<window_rules::SizeSpec>,
+        screen: (u32, u32),
+    ) -> Option<(i32, i32)> {
+        match position {
+            window_rules::PositionSpec::Absolute { x, y } => Some((x, y)),
+            window_rules::PositionSpec::Percentage { x_pct, y_pct } => Some((
+                Self::fraction_of(screen.0, x_pct).cast_signed(),
+                Self::fraction_of(screen.1, y_pct).cast_signed(),
+            )),
+            // Monitor 0 is the display this shell was built for, which is the
+            // only one it has bounds for. A rule naming a second monitor is
+            // declined rather than centred on the first: putting a window on
+            // the wrong screen is a worse answer than leaving it alone, and
+            // multi-monitor placement is tracked separately.
+            window_rules::PositionSpec::CenterOnMonitor(0) => {
+                let (w, h) = Self::rule_size_px(size?, screen)?;
+                Some((
+                    screen.0.saturating_sub(w).cast_signed() / 2,
+                    screen.1.saturating_sub(h).cast_signed() / 2,
+                ))
+            }
+            window_rules::PositionSpec::CenterOnMonitor(_)
+            | window_rules::PositionSpec::RememberLast => None,
+        }
+    }
+
+    /// `pct` of `whole`, clamped to the display and rounded.
+    fn fraction_of(whole: u32, pct: f32) -> u32 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to 0.0..=1.0 first, so the product is within the \
+                      u32 it was taken from"
+        )]
+        let scaled = (f64::from(whole) * f64::from(pct.clamp(0.0, 1.0))).round() as u32;
+        scaled
+    }
+
     /// The file the user's keyboard shortcuts live in.
     pub const SHORTCUTS_CONFIG_NAME: &'static str = "shortcuts";
 
@@ -6398,6 +6583,349 @@ mod window_manager_tests {
         again(&mut shell);
         again(&mut shell);
         assert!(shell.taskbar_windows().is_empty());
+    }
+
+    #[test]
+    fn a_rule_forbidding_something_says_so_once() {
+        let mut shell = shell();
+        rule(&mut shell, "kiosk", |a| {
+            a.prevent_close = Some(true);
+            a.prevent_resize = Some(true);
+        });
+
+        let asked = arrive(&mut shell, 1, "kiosk");
+        assert!(asked.contains(&ShellRequest::SetWindowPolicy {
+            window: WindowId(1),
+            policy: crate::WindowPolicy {
+                prevent_close: true,
+                prevent_move: false,
+                prevent_resize: true,
+            },
+        }));
+        assert_eq!(
+            asked
+                .iter()
+                .filter(|r| matches!(r, ShellRequest::SetWindowPolicy { .. }))
+                .count(),
+            1,
+            "the three flags are one rule's worth of answer, not three requests"
+        );
+    }
+
+    /// A rule that says nothing about restrictions imposes none.
+    #[test]
+    fn a_rule_silent_on_restrictions_asks_for_no_policy() {
+        let mut shell = shell();
+        rule(&mut shell, "kiosk", |a| {
+            a.opacity = Some(1.0);
+        });
+
+        assert!(
+            !arrive(&mut shell, 1, "kiosk")
+                .iter()
+                .any(|r| matches!(r, ShellRequest::SetWindowPolicy { .. })),
+            "silence must not be read as a restriction"
+        );
+    }
+
+    /// An explicit `false` takes a restriction back.
+    #[test]
+    fn a_rule_can_lift_a_restriction_it_previously_set() {
+        let mut shell = shell();
+        rule(&mut shell, "kiosk", |a| {
+            a.prevent_close = Some(false);
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "kiosk").contains(&ShellRequest::SetWindowPolicy {
+                window: WindowId(1),
+                policy: crate::WindowPolicy::default(),
+            }),
+            "an explicit false is a request to be unrestrained, not silence"
+        );
+    }
+
+    /// A rule naming only one limit sends zeroes for the other.
+    ///
+    /// The zeroes mean "say nothing about that one", which is what stops a
+    /// maximum-only rule from discarding the program's own minimum.
+    #[test]
+    fn a_rule_naming_one_size_limit_says_nothing_about_the_other() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.max_size = Some((900, 700));
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "chat").contains(&ShellRequest::SetSizeLimits {
+                window: WindowId(1),
+                min: (0, 0),
+                max: (900, 700),
+            })
+        );
+    }
+
+    #[test]
+    fn a_rule_naming_both_size_limits_sends_both() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.min_size = Some((300, 200));
+            a.max_size = Some((900, 700));
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "chat").contains(&ShellRequest::SetSizeLimits {
+                window: WindowId(1),
+                min: (300, 200),
+                max: (900, 700),
+            })
+        );
+    }
+
+    /// The limits are asked for before the size, so a sized-and-limited rule
+    /// clamps on the way in rather than being corrected afterwards.
+    #[test]
+    fn size_limits_are_asked_for_before_the_size() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.min_size = Some((300, 200));
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 100,
+                height: 100,
+            });
+        });
+
+        let asked = arrive(&mut shell, 1, "chat");
+        let limits = asked
+            .iter()
+            .position(|r| matches!(r, ShellRequest::SetSizeLimits { .. }))
+            .expect("limits");
+        let resize = asked
+            .iter()
+            .position(|r| matches!(r, ShellRequest::ResizeWindow { .. }))
+            .expect("resize");
+        assert!(limits < resize);
+    }
+
+    #[test]
+    fn a_rule_silent_on_size_limits_asks_for_none() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.opacity = Some(1.0);
+        });
+
+        assert!(
+            !arrive(&mut shell, 1, "chat")
+                .iter()
+                .any(|r| matches!(r, ShellRequest::SetSizeLimits { .. }))
+        );
+    }
+
+    #[test]
+    fn a_rule_can_pin_a_window_above_or_below_its_neighbours() {
+        for (top, bottom, expected) in [
+            (Some(true), None, crate::StackTier::Top),
+            (None, Some(true), crate::StackTier::Bottom),
+            (Some(false), None, crate::StackTier::Normal),
+        ] {
+            let mut shell = shell();
+            rule(&mut shell, "chat", |a| {
+                a.always_on_top = top;
+                a.always_on_bottom = bottom;
+            });
+            assert!(
+                arrive(&mut shell, 1, "chat").contains(&ShellRequest::SetStackTier {
+                    window: WindowId(1),
+                    tier: expected,
+                }),
+                "top={top:?} bottom={bottom:?}"
+            );
+        }
+    }
+
+    /// A rule asking for both is resolved here, not sent as a contradiction.
+    #[test]
+    fn a_rule_asking_for_both_top_and_bottom_picks_top() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.always_on_top = Some(true);
+            a.always_on_bottom = Some(true);
+        });
+
+        let asked = arrive(&mut shell, 1, "chat");
+        assert!(asked.contains(&ShellRequest::SetStackTier {
+            window: WindowId(1),
+            tier: crate::StackTier::Top,
+        }));
+        assert_eq!(
+            asked
+                .iter()
+                .filter(|r| matches!(r, ShellRequest::SetStackTier { .. }))
+                .count(),
+            1,
+            "the compositor must not be handed two tiers to choose between"
+        );
+    }
+
+    /// A rule that says nothing about stacking asks for nothing.
+    #[test]
+    fn a_rule_silent_on_stacking_leaves_the_window_alone() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.opacity = Some(1.0);
+        });
+
+        assert!(
+            !arrive(&mut shell, 1, "chat")
+                .iter()
+                .any(|r| matches!(r, ShellRequest::SetStackTier { .. })),
+            "silence is not an instruction"
+        );
+    }
+
+    /// A rule can place and size a window.
+    #[test]
+    fn a_rule_giving_a_position_and_a_size_is_carried_out() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::Absolute { x: 40, y: 60 });
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 800,
+                height: 600,
+            });
+        });
+
+        let asked = arrive(&mut shell, 1, "editor");
+        assert!(
+            asked.contains(&ShellRequest::ResizeWindow {
+                window: WindowId(1),
+                width: 800,
+                height: 600,
+            }),
+            "the size was lost: {asked:?}"
+        );
+        assert!(
+            asked.contains(&ShellRequest::MoveWindow {
+                window: WindowId(1),
+                x: 40,
+                y: 60,
+            }),
+            "the position was lost: {asked:?}"
+        );
+    }
+
+    /// The size is asked for before the position.
+    ///
+    /// Not cosmetic: a centred placement is computed *from* the size, so a
+    /// window sized after being centred would be centred for the size it used
+    /// to have.
+    #[test]
+    fn a_rule_sizes_before_it_places() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::Absolute { x: 0, y: 0 });
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 100,
+                height: 100,
+            });
+        });
+
+        let asked = arrive(&mut shell, 1, "editor");
+        let resize = asked
+            .iter()
+            .position(|r| matches!(r, ShellRequest::ResizeWindow { .. }))
+            .expect("a resize");
+        let mv = asked
+            .iter()
+            .position(|r| matches!(r, ShellRequest::MoveWindow { .. }))
+            .expect("a move");
+        assert!(resize < mv, "size must be settled before the placement");
+    }
+
+    /// A percentage rule is resolved against the display the shell knows.
+    #[test]
+    fn a_percentage_rule_is_resolved_against_the_screen() {
+        let mut shell = DesktopShell::new(1000, 800);
+        rule(&mut shell, "editor", |a| {
+            a.size = Some(window_rules::SizeSpec::Percentage {
+                w_pct: 0.5,
+                h_pct: 0.25,
+            });
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "editor").contains(&ShellRequest::ResizeWindow {
+                window: WindowId(1),
+                width: 500,
+                height: 200,
+            })
+        );
+    }
+
+    /// Centring needs a size, and says so by declining.
+    ///
+    /// The shell is told window positions in the window list but not the size
+    /// a program is about to choose, so a rule that centres without setting a
+    /// size cannot be honoured. Declining leaves the window where the program
+    /// put it; centring against a guess would move it somewhere wrong.
+    #[test]
+    fn centring_without_a_size_is_declined_rather_than_guessed() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::CenterOnMonitor(0));
+        });
+
+        let asked = arrive(&mut shell, 1, "editor");
+        assert!(
+            !asked
+                .iter()
+                .any(|r| matches!(r, ShellRequest::MoveWindow { .. })),
+            "centred against a size nobody knows: {asked:?}"
+        );
+    }
+
+    #[test]
+    fn centring_with_a_size_puts_the_window_in_the_middle() {
+        let mut shell = DesktopShell::new(1000, 800);
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::CenterOnMonitor(0));
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 400,
+                height: 200,
+            });
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "editor").contains(&ShellRequest::MoveWindow {
+                window: WindowId(1),
+                x: 300,
+                y: 300,
+            })
+        );
+    }
+
+    /// A second monitor is declined, not centred on the first.
+    ///
+    /// Putting a window on the wrong screen is a worse answer than leaving it
+    /// alone, and this shell has bounds for one display.
+    #[test]
+    fn a_rule_naming_a_second_monitor_is_declined() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::CenterOnMonitor(1));
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 100,
+                height: 100,
+            });
+        });
+
+        let asked = arrive(&mut shell, 1, "editor");
+        assert!(
+            !asked
+                .iter()
+                .any(|r| matches!(r, ShellRequest::MoveWindow { .. })),
+            "placed on a monitor this shell has no bounds for: {asked:?}"
+        );
     }
 
     /// An opacity rule now reaches the compositor.

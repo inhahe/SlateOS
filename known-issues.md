@@ -1734,9 +1734,38 @@ once, since `compare` is the single place case-insensitive ordering is decided.
 Nothing is unsafe and nothing is blocked; the sort is total and stable, just
 not idiomatic for the locale.
 
-## TD-EXPLORER-UNREADABLE-RECYCLE-ENTRY
+## TD-EXPLORER-UNREADABLE-RECYCLE-ENTRY -- **FIXED 2026-09-07**
 
-**Status: OPEN 2026-08-16** (lane C). `apps/explorer/src/fileops.rs`,
+**Fixed 2026-09-07 (lane C).** A damaged entry is listed instead of skipped.
+`RecycleEntry::original_path` and `recycled_at` are `Option`, `None` meaning
+"this entry's metadata would not parse" -- the one thing genuinely unknown is
+marked unknown, rather than the whole row being hidden because part of it is.
+
+What a caller may do follows from the field and needed no second flag:
+restoring wants somewhere to restore *to*, so it is refused with a reason;
+deleting wants only the id, so emptying the bin now reclaims the space.
+
+Three details that are not incidental:
+
+- **The size is still measured**, from the data on disk rather than from
+  `meta.txt`, because space is usually what brings a user to the recycle bin
+  at all. A row that said "unknown item, unknown size" would answer none of
+  the question they came with.
+- **`display_name` never falls back to the id.** The id is a hash; shown in a
+  name column it would read as though it were the file's name.
+- **`purge_old` skips it.** Its age is unknown, and unknown must not be read
+  as old -- ageing it out on a guess would delete a user's file in order to
+  tidy up a metadata problem.
+
+The UI decision the original entry was waiting on turned out to be the one it
+had already proposed, and small enough to take: "Unknown item (damaged entry)",
+delete available, restore refused.
+
+Six tests. Mutation-checked: restoring the old skip fails four of them.
+
+Original entry follows.
+
+**Status: ~~OPEN~~ FIXED 2026-08-16** (lane C). `apps/explorer/src/fileops.rs`,
 `RecycleBin::list`.
 
 The recycle-bin listing skips any entry whose `meta.txt` will not parse, rather
@@ -36676,7 +36705,16 @@ explaining what used to be there. `apps/explorer/src/thumbs.rs` keeps a
 character count on purpose, and says so: its synthetic text-file minimap has no
 font in the path at all, so a character count is the honest unit there.
 
-## TD-GUI-AND-APPS-HAVE-DRIFTED-FROM-RUSTFMT (lane C, 2026-08-17)
+## TD-GUI-AND-APPS-HAVE-DRIFTED-FROM-RUSTFMT (lane C, 2026-08-17) -- **CLOSED; entry was stale**
+
+**Closed 2026-09-07 (lane C), on measuring it.** `cargo fmt --all --check`
+reports **zero** diffs across the workspace, against the 270 files this entry
+describes. The pre-push `rustfmt` gate is presumably what keeps it that way --
+it refused a push of mine earlier today, which is the gate working.
+
+**Nothing was done to the code for this closure.**
+
+Original entry follows.
 
 **What.** `CLAUDE.md` says "Formatting: rustfmt defaults. No manual formatting
 overrides." The tree does not meet that. `cargo fmt -p osfont -p guitk --check`
@@ -37170,7 +37208,36 @@ a value into a log message is not the same as checking it; where a device tells
 you what it accepts, check the request against it rather than printing both and
 trusting the constant.
 
-## TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS (lane C, 2026-08-17)
+## TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS (lane C, 2026-08-17) -- **FIXED 2026-09-07**
+
+**Fixed 2026-09-07 (lane C), by the first of the two options below.**
+`frame_insets` returns `top = TITLE_BAR_HEIGHT + BORDER_WIDTH`,
+`title_bar_rect` starts `BORDER_WIDTH` down from the frame, and
+`render_border` strokes `frame_rect` unmodified. Drawing and measurement now
+name the same box.
+
+**The second option was eliminated first, on evidence** -- see the update
+below. Stroking `frame_rect` while the bar filled the whole top inset put the
+outline under the title bar, which paints over it. That is why the border was
+drawn outside the frame in the first place.
+
+**The top inset is summed as two scaled values, not a scaled sum.**
+`scale_dimension` rounds, so `scale(bar + border)` and
+`scale(bar) + scale(border)` can differ by one, and `title_bar_rect` subtracts
+the border back out to get the bar's own height. Summing the scaled parts makes
+that subtraction exact at every scale factor -- a 2x display gets a 2x bar and
+a 2x border, and the bar is still exactly `TITLE_BAR_HEIGHT * 2`.
+
+**The drag boundary moved, as the entry warned, and now has a test.**
+`the_border_row_resizes_and_the_title_bar_below_it_moves` presses the border
+row and asserts the window resizes, then presses one row lower and asserts it
+moves without resizing. Both halves, because either alone passes if the whole
+top of the window does one thing.
+
+Six existing tests pinned the old geometry and were updated with the reason
+rather than the number: the frame is one row taller at the top, the bottom and
+both sides are unchanged. Mutation-checked -- putting the title bar back at
+the frame's top edge fails six.
 
 **In short:** the 1-pixel line the compositor draws around a window is drawn
 one pixel higher than the space the layout reserved for it. Nobody sees a
@@ -37196,6 +37263,27 @@ grab band — hence no visible symptom today.
 open-coded constants that merely happened not to match. `frame_insets` is at
 `gui/compositor/src/lib.rs`; `nothing_a_window_draws_falls_outside_its_damage_extent`
 pins the containment that keeps it harmless.
+
+### Update 2026-09-07: one of the two options below is eliminated, on evidence
+
+**Stroking `frame_rect` unmodified does not work.** I tried it, and the top
+edge of the outline disappears: the title bar is painted *over* the frame's
+first row, so a border drawn there is covered. Measured rather than reasoned --
+the pixel at the frame's top-left corner reads `FF313244`, which is exactly
+`theme.title_bar_focused`, where the border colour would be `FF585B70`. The
+existing test `the_border_rounds_with_the_frame_it_traces` fails on the
+"a square border did not paint its own corner pixel" assertion.
+
+So the one-row-above draw is not a slip: it is compensating for the title bar
+covering the row the outline would otherwise occupy. That makes the second
+option below wrong and leaves the first as the fix -- `frame_insets.top`
+becomes `TITLE_BAR_HEIGHT + BORDER_WIDTH` and `title_bar_rect` starts
+`BORDER_WIDTH` down, with the drag tests reviewed because the boundary between
+"title bar, drag to move" and "top border, drag to resize" moves with it.
+
+The attempt was reverted rather than shipped: a window that measures correctly
+and has no visible top edge is worse than the one-pixel disagreement, which
+nobody can see.
 
 **Proper fix:** decide which is right and make both agree.
 - If the border above the title bar is wanted (it is what a real window frame
@@ -70743,7 +70831,28 @@ a crate with no dev-dependencies cannot be using the shared fixture.
 
 ---
 
-## TD-C-THREE-OF-THE-CALENDARS-COLOUR-PAIRINGS-ARE-BELOW-THE-CONTRAST-FLOOR (lane C, 2026-08-23)
+## TD-C-THREE-OF-THE-CALENDARS-COLOUR-PAIRINGS-ARE-BELOW-THE-CONTRAST-FLOOR (lane C, 2026-08-23) -- **CLOSED; entry was stale**
+
+**Closed 2026-09-07 (lane C), on verifying it.** All three fixes are in
+`calendar.rs`, and its module doc records them with the measured numbers:
+adjacent-month day numbers moved `surface2` → `subtext0`, the selected day's
+disc `surface1` → `surface0`, and the event-detail body `subtext0` → `text`.
+The role-category diagnosis this entry made -- a *fill* role used as an *ink*
+is guaranteed low-contrast, so 2.46 and 1.91 were not unlucky values -- is
+quoted in the code where the choice is made.
+
+**The test the entry insisted on is there too, and in the form it insisted
+on.** `every_pairing_the_calendar_draws_clears_the_contrast_floor` iterates
+both modes, reads the roles off `Palette::for_mode`, and *computes* each
+ratio -- the numbers in the table above are not copied into any assertion, as
+this entry required. It covers eighteen pairings, not the three that were
+broken.
+
+**Nothing was done to the code for this closure.** Sixth stale entry closed
+today; `todo.txt` carries the note about what that costs and two preventions
+neither of which is mine to make.
+
+Original entry follows.
 
 **In short:** Three places in the calendar draw text too close in brightness to
 what is behind it to be comfortably readable. The worst is the greyed-out day
@@ -71419,7 +71528,47 @@ it sits.
   It still needs a caller of its own, for the transient messages an OSD is
   actually right for.
 
-## TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE (lane C, 2026-08-25)
+## TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE (lane C, 2026-08-25) -- **FIXED 2026-09-07, with one path unverified here**
+
+**Fixed 2026-09-07 (lane C).** `FileOperation::Link`, `OperationPlan::plan_link`
+and `execute_link_action` exist with the apparatus every other operation has,
+and the refusal in `evaluate_drop` is gone -- an Alt-drag now makes a link.
+
+**A link plan makes one action per source and never walks a directory.**
+Linking a folder means one link *to* the folder; a plan that recursed would
+produce a tree of links to each file inside it, which is not the gesture and is
+not undoable as one thing. `total_bytes` is zero, because counting the target's
+size would put a progress bar on a transfer that is not going to happen.
+
+**Undo removes the link and never the target.** This is the dangerous case the
+entry named, and it needed its own code rather than the copy undo: `is_dir()`
+*follows* a symlink, so the copy arm would reach through a link to a folder.
+`remove_link_or_file` asks `symlink_metadata`, which does not follow. The same
+helper guards replacing an existing link on conflict, where following one would
+delete what the old link pointed at to make room for a new one.
+
+**`OverwriteIfNewer` is treated as plain overwrite** and says so at the arm: the
+comparison is between contents' timestamps and a link has no contents of its
+own.
+
+### The honest part: two tests cannot run on this machine
+
+Windows refuses `symlink_file` without a privilege (error 1314, confirmed by
+probing rather than assumed), so **the link-creation success path is
+unverified on this host**. Two tests --
+`a_link_action_creates_a_link_that_resolves` and
+`undoing_a_link_removes_the_link_and_not_its_target` -- probe for symlink
+support, print `SKIPPED` with the reason, and return. They are not `#[ignore]`d
+and not silently absent: a run on a host that can make links is visibly a
+stronger run than one that cannot, and the output says which happened.
+
+What *is* verified here: the plan shape, the zero byte count, both
+`remove_link_or_file` branches that do not involve a link, and that an Alt-drag
+either produces a symlink or reports a failure -- never a plain copy, which is
+the silent downgrade the entry says is worse than doing nothing.
+
+Original entry follows.
+
 
 **In short:** Holding Alt while dragging a file is the standard way to ask for
 a *symbolic link* — a small stand-in file that points at the real one, so the
@@ -89233,7 +89382,41 @@ is the generic file glyph. Neither reports an error.
 
 ---
 
-## `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE` (lane C, 2026-08-26)
+## `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE` (lane C, 2026-08-26) -- **halved 2026-09-07; still open for the other half**
+
+**Update 2026-09-07: the peak is halved, and the remaining half is not
+reachable from this lane.** `imagecodec::decode_scaled` box-filters during
+scanline reconstruction, exactly as this entry proposed, and the thumbnailer
+uses it. The full-size `Vec<u32>` between decode and downscale is gone -- for a
+24-megapixel photograph, 96 MB of the roughly 190 MB.
+
+**What still costs 96 MB, and why it stays.** The *decompressed scanlines*.
+`zlib_inflate_limited` inflates the whole stream in one call before any
+reconstruction happens, because `deflate` exposes only `inflate` and
+`inflate_limited` over a complete buffer -- there is no incremental API to feed
+rows from. Adding one is what would let `ThumbConfig::max_source_pixels` go
+away entirely, and `deflate/` is not in lane C's globs. That is the piece to
+ask for, not to work around.
+
+**Interlaced files keep the old path**, as the entry predicted: Adam7's passes
+arrive scattered across the image, so a row-by-row accumulator has nothing
+coherent to accumulate. `decode_scaled` falls back rather than refusing, so a
+caller never has to know which case a file is.
+
+**The test that carries the design** asserts a scaled decode gives the same
+answer as decoding and *then* averaging, computed independently in the test
+rather than read back from the code. Two averaging rules would make the same
+photograph look different depending on which path it took. Four more cover the
+edges: a picture smaller than the box is not enlarged, the aspect ratio
+survives, a 400x3 panorama still yields at least one row rather than rounding
+to an empty picture, and every destination cell receives at least one source
+pixel -- an off-by-one leaving the last row untouched is almost invisible by
+eye on a dark image.
+
+Original entry follows.
+
+---
+
 
 **In short:** to draw a 128×128 preview of a photograph, the file manager
 decodes the photograph at full size first and then shrinks it. A 24-megapixel
@@ -90847,7 +91030,38 @@ are recorded as `design-decisions.md` §608.
 
 ---
 
-## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) — **open**, tech debt
+## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) -- **now one of seventeen**
+
+**Update 2026-09-07: sixteen of the seventeen work.** Eleven of the twelve
+this entry describes were built in one session, in the order the entry's own
+increment list proposed. What remains is `target_monitor`, which waits on
+multi-monitor support and is the one the entry always put last.
+
+The title is left as it was written. It is wrong now and that is the point:
+renaming it would lose the thing worth remembering, which is that a settings
+page can accept, save and *display* twelve settings that do nothing, and that
+the only way a user finds out is by writing one and watching nothing happen.
+
+**What the twelve needed, in the end.** Four new privileged requests
+(`ShellSetOpacity`, `ShellMove`/`ShellResize`, `ShellSetStackTier`,
+`ShellSetSizeLimits`, `ShellSetWindowPolicy`), one new verb
+(`ShellControlAction::Fullscreen`), and `CONTROL_VERSION` 4 → 10. Every one
+follows the same shape: a separate wire tag, `require_shell()` rather than
+`link.resolve()`, and -- where an equivalent self-only operation already
+existed -- the *same* `CompositorRequest`, because only the right to ask
+differs.
+
+**Two of the entry's own reasons turned out to be wrong**, and both cost
+investigation before the work could start:
+
+- "the compositor has no per-window constraint store at all" -- it had one,
+  enforced by every resize, by maximise, and at creation. Only the setter was
+  missing.
+- "a per-window layer override" for `always_on_top` -- a layer is the
+  client's, chosen at creation, so an `AboveNormal` layer would let any
+  program put itself above the taskbar. It needed a *tier within* a layer.
+
+## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) -- original entry follows — **open**, tech debt
 
 **In short:** The Settings panel has a "Window rules" page where you can say
 things like *"the editor should always open maximised on desktop 2"* or *"chat
@@ -90885,14 +91099,14 @@ client's windows around.
 
 | Field | What it would need |
 |---|---|
-| `position` (incl. `RememberLast`, `CenterOnMonitor`) | a `ShellMove { window, x, y }` request |
-| `size` (incl. `RememberLast`) | a `ShellResize { window, w, h }` request |
-| `min_size`, `max_size` | a size-constraint request; the compositor has no per-window constraint store at all |
+| ~~`position`~~ | **Done 2026-09-07**, except `CenterOnMonitor(n>0)`. `RequestBody::ShellMove`, tag `0x1A`. |
+| ~~`size`~~ | **Done 2026-09-07.** `RequestBody::ShellResize`, tag `0x1B`. |
+| ~~`min_size`, `max_size`~~ | **Done 2026-09-07.** The store existed all along — see increment 4. |
 | ~~`opacity`~~ | **Done 2026-09-07.** `RequestBody::ShellSetOpacity`, tag `0x19`, `CONTROL_VERSION` 5 → 6. |
-| `always_on_top`, `always_on_bottom` | a per-window layer override; today `Layer` is fixed at creation by the client |
+| ~~`always_on_top`, `always_on_bottom`~~ | **Done 2026-09-07.** A `StackTier` within the layer, not a layer override — see increment 3. |
 | `target_monitor` | multi-monitor placement, which the compositor does not model yet |
 | `no_decorations` | decorations are the client's own; there is no request to strip them |
-| `prevent_close`, `prevent_move`, `prevent_resize` | a per-window policy the *compositor* enforces — these cannot be shell-side, because the shell is not in the path when the user drags a title bar |
+| ~~`prevent_close`, `prevent_move`, `prevent_resize`~~ | **Done 2026-09-07.** `WindowPolicy`, enforced in the compositor exactly where the entry said it had to be. |
 | ~~`initial_state: Fullscreen`~~ | **Done 2026-09-07.** `ShellControlAction::Fullscreen`, `CONTROL_VERSION` 4 → 5. |
 
 **The proper fix**, and why it is not one commit: the eight-verb
@@ -90901,8 +91115,31 @@ cheap — but `CONTROL_VERSION` is a wire version and each addition costs a bump
 plus a compositor-side implementation, and three of the twelve (`prevent_*`)
 need a policy store the compositor does not have. The honest increments are:
 
-1. `ShellMove` + `ShellResize` (unblocks `position`, `size`, and the
-   already-working `remember_state` bookkeeping that currently feeds nothing).
+1. ~~`ShellMove` + `ShellResize`~~ — **done 2026-09-07**, `CONTROL_VERSION`
+   6 → 7. Both follow `ShellSetOpacity` exactly: a separate tag, gated on
+   `require_shell` and naming the window directly, mapping to the *existing*
+   `CompositorRequest::Move`/`Resize`. `RememberLast` needed nothing new --
+   `resolve_remembered` already turns it into `Absolute`/`Exact` before the
+   requests are built, so the bookkeeping that "currently feeds nothing" now
+   feeds these.
+
+   **Size is asked for before position, and that is not cosmetic**: a centred
+   placement is computed *from* the size, so a window sized after being
+   centred would be centred for the size it used to have. There is a test on
+   the ordering.
+
+   **Two cases are declined rather than guessed**, and the declining is the
+   part worth reading:
+
+   - *Centring with no size in the rule.* The shell is told window positions
+     in the window list but not the size a program is about to choose, so
+     there is nothing to centre. Declining leaves the window where the program
+     put it; centring against a guess moves it somewhere wrong.
+   - *`CenterOnMonitor(n)` for n > 0.* This shell has bounds for one display.
+     Putting a window on the wrong screen is a worse answer than leaving it
+     alone, so it waits for multi-monitor with `target_monitor`.
+
+   Percentages *are* resolved, against the display the shell was built for.
 2. ~~`ShellSetOpacity` and a `Fullscreen` verb~~ — **half done 2026-09-07**:
    the `Fullscreen` verb is in. It took a wire byte *past* the zone range
    rather than the free slot at 7, because the zone bytes are
@@ -90944,9 +91181,74 @@ need a policy store the compositor does not have. The honest increments are:
    The privilege test drives the *same foreign window* through both requests
    and asserts the shell one is accepted and the ordinary one refused. Either
    half alone would pass while the distinction was broken.
-3. A per-window layer override for `always_on_top` / `always_on_bottom`.
-4. A compositor-side policy store for `prevent_close` / `prevent_move` /
-   `prevent_resize`, and constraints for `min_size` / `max_size`.
+3. ~~A per-window layer override for `always_on_top` / `always_on_bottom`.~~
+   **Done 2026-09-07**, `CONTROL_VERSION` 7 → 8, and *not* as a layer
+   override — that framing turned out to be the wrong one.
+
+   **A layer is the client's; a tier is the shell's.** `Layer` is chosen by
+   the window's own client at creation, so an `AboveNormal` layer would let
+   any program put itself above the taskbar simply by asking. `StackTier`
+   (`Bottom` / `Normal` / `Top`) is set only by a shell applying a user's
+   rule, and orders windows against their neighbours *within* a layer. The
+   stacking key became `(Layer, StackTier)`, so an always-on-top window is
+   above the other applications and still below the desktop's own furniture.
+
+   The test that pins this asserts **both** halves, because only the pair
+   rules out the obvious wrong implementation: reusing `Layer::Overlay` for
+   "always on top" passes "above its neighbours" and fails "below the shell".
+
+   `raise_within_layer` sorts on the same key, which is what makes "always"
+   mean always -- clicking another window cannot lift it past a pinned one.
+   Mutation-checked: dropping the tier from the sort key fails two tests.
+
+   The shell resolves `always_on_top` + `always_on_bottom` set together into
+   one tier rather than sending the compositor a contradiction, and a rule
+   silent on stacking asks for nothing at all.
+4. **Done 2026-09-07.** `min_size`/`max_size` at `CONTROL_VERSION` 9;
+   `prevent_close`/`prevent_move`/`prevent_resize` at 10, as one
+   `WindowPolicy` carried by `ShellSetWindowPolicy` (tag `0x1E`).
+
+   The entry was right that these could not be shell-side, and the three
+   enforcement points are exactly where it said: `request_close`, the
+   title-bar drag, and the edge drag.
+
+   **They restrain the user, never the program.** `prevent_close` refuses the
+   *request* -- what a close button and a taskbar menu send -- and not
+   `destroy_window`, which is how a program exits. A rule that could stop a
+   process exiting would be a way to make one unkillable from a text file.
+
+   **`prevent_move` stops the drag without stopping the press.** A pinned
+   window still focuses and raises from its title bar; refusing the press
+   outright would make it unfocusable by the one part of it a user reliably
+   aims at.
+
+   One request rather than three: the flags are one rule's worth of answer,
+   and sending them separately could leave a window half-restrained if the
+   second frame were refused. An explicit `false` in a rule takes a
+   restriction back; silence imposes none.
+
+   **This entry's claim that "the compositor has no per-window constraint
+   store at all" was wrong when I read it.** `Window::min_size`/`max_size` and
+   `Window::clamp_size` already existed and were already consulted by every
+   resize, by maximise, and at creation. What was missing was only the ability
+   for a *shell* to set them: they came from the client's `WindowSpec` and
+   nowhere else. `RequestBody::ShellSetSizeLimits` (tag `0x1D`) is that.
+
+   **Zeroes on the wire mean "leave this one as it is", not "no limit"**, and
+   that distinction is the whole design. The rule vocabulary has `min_size`
+   and `max_size` as *optional* fields — a rule either names one or says
+   nothing, and there is no way to write "remove the minimum this program
+   asked for". Had zero meant "no limit", a rule naming only a maximum would
+   silently discard the program's own minimum, and the user would find out
+   when the window collapsed under a drag. Mutation-checked: making `None`
+   clear instead of skip fails the test.
+
+   The new limits are applied to the window immediately rather than at the
+   next resize. A rule that says "at most 400 wide" and leaves a 900-wide
+   window alone until somebody drags its edge has not been applied.
+
+   The limits are asked for before the size, so a rule setting both clamps on
+   the way in rather than being corrected afterwards.
 5. `target_monitor` last, behind multi-monitor support.
 
 **Severity while open:** low but *dishonest*, which is the part that matters.

@@ -989,6 +989,64 @@ impl<T: Transport> EventLoop<T> {
         self.conn.shell_set_opacity(window, opacity)
     }
 
+    /// Move another client's window, as a window rule does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn shell_move(&mut self, window: u64, x: i32, y: i32) -> Result<(), Error<T>> {
+        self.conn.shell_move(window, x, y)
+    }
+
+    /// Resize another client's window, as a window rule does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    /// Put another client's window in a stacking tier, as a window rule does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    /// Constrain another client's window size, as a window rule does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    /// Say what the user may not do to another client's window.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn shell_set_window_policy(
+        &mut self,
+        window: u64,
+        policy: guiremote::control::WindowPolicy,
+    ) -> Result<(), Error<T>> {
+        self.conn.shell_set_window_policy(window, policy)
+    }
+
+    pub fn shell_set_size_limits(
+        &mut self,
+        window: u64,
+        min: (u32, u32),
+        max: (u32, u32),
+    ) -> Result<(), Error<T>> {
+        self.conn.shell_set_size_limits(window, min, max)
+    }
+
+    pub fn shell_set_stack_tier(
+        &mut self,
+        window: u64,
+        tier: guiremote::control::StackTier,
+    ) -> Result<(), Error<T>> {
+        self.conn.shell_set_stack_tier(window, tier)
+    }
+
+    pub fn shell_resize(&mut self, window: u64, width: u32, height: u32) -> Result<(), Error<T>> {
+        self.conn.shell_resize(window, width, height)
+    }
+
     /// Claim a keyboard chord, so that it arrives here wherever the focus is.
     ///
     /// The third of the shell privileges, with
@@ -1794,6 +1852,11 @@ pub mod testing {
                 RequestBody::SetFullscreen { .. } => "SetFullscreen",
                 RequestBody::SetOpacity { .. } => "SetOpacity",
                 RequestBody::ShellSetOpacity { .. } => "ShellSetOpacity",
+                RequestBody::ShellMove { .. } => "ShellMove",
+                RequestBody::ShellResize { .. } => "ShellResize",
+                RequestBody::ShellSetStackTier { .. } => "ShellSetStackTier",
+                RequestBody::ShellSetSizeLimits { .. } => "ShellSetSizeLimits",
+                RequestBody::ShellSetWindowPolicy { .. } => "ShellSetWindowPolicy",
                 RequestBody::GetDisplayInfo => "GetDisplayInfo",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::ReloadAppearance => "ReloadAppearance",

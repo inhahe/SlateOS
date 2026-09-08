@@ -124423,9 +124423,15 @@ which makes step 1 below larger than one dependency line.
   `finance`, `slides`, `worldclock`, `camera`, `compass`, `diskanalyzer`,
   `jsonviewer`, `logviewer`, `passwordgen`, `podcast`, `regextester`,
   `stickynotes`, `taskscheduler`, `contacts`, `habits`, `fontmanager` and
-  `automator`, `sysmonitor`, `undelete` and `ircclient`. Each has a test on the
-  rectangles it emits, and each was mutation-checked by making `theme_changed`
-  ignore its argument.
+  `automator`, `sysmonitor`, `undelete`, `ircclient`, `dictionary`,
+  `reminders` and `weather`. Each has a test on the rectangles it emits, and
+  each was mutation-checked by making `theme_changed` ignore its argument.
+
+**Adding a reference can make an elided lifetime ambiguous.**
+`reminders::detail_prose(text: &str, …) -> text::Paragraph<'_>` compiled while
+`&str` was its only reference; adding `pal: &Palette` made `'_` ambiguous and
+the signature needed a named lifetime. Rare, but it is a *signature* change
+rather than a call-site one, so it does not look like the others.
 
 **Several types per application share one colour method.** `undelete` has
 three (`FileSignatureKind`, `FileCategory`, `RecoveryConfidence`),

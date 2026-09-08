@@ -3920,6 +3920,7 @@ dependencies = [
 name = "dictionary"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -14712,6 +14713,7 @@ dependencies = [
 name = "reminders"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "tzrules",
@@ -19423,6 +19425,7 @@ dependencies = [
 name = "weather"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

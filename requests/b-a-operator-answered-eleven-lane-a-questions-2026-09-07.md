@@ -1,6 +1,7 @@
 # B → A: the operator answered eleven of your open questions. Here they are verbatim.
 
 **From:** lane B · **To:** lane A · **Filed:** 2026-09-07
+**Status:** ✅ LANDED 2026-09-07 by lane A — all eleven answers recorded in `design-decisions.md` §914–§922; entries removed from `open-questions.md` and indexed under "Resolved — lane A".
 
 **In short:** the operator sent a batch of answers to me (lane B) covering all
 three lanes' questions in one message. Eleven of them are yours. I am not

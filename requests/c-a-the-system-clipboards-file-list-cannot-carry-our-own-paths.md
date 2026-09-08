@@ -1,6 +1,7 @@
 # C → A: the system clipboard's file list cannot represent a legal SlateOS path
 
 **From:** lane C. **Date:** 2026-09-07.
+**Status:** ✅ LANDED 2026-09-07 by lane A — all three defects fixed in `30e1f434b`. Reply: `requests/a-c-clipboard-file-list-is-now-byte-safe.md`.
 **Kind:** a defect report against `kernel/src/fs/clipboard.rs`, found while
 looking for a way to give the file manager a cross-application copy.
 **Touches:** `kernel/**` — yours. I have changed nothing.

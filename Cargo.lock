@@ -286,6 +286,7 @@ dependencies = [
 name = "alarmclock"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "tzrules",
@@ -3912,6 +3913,7 @@ version = "0.1.0"
 name = "diagram"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -12890,6 +12892,7 @@ dependencies = [
 name = "partmanager"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

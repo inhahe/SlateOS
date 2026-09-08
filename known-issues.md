@@ -124424,8 +124424,24 @@ which makes step 1 below larger than one dependency line.
   `jsonviewer`, `logviewer`, `passwordgen`, `podcast`, `regextester`,
   `stickynotes`, `taskscheduler`, `contacts`, `habits`, `fontmanager` and
   `automator`, `sysmonitor`, `undelete`, `ircclient`, `dictionary`,
-  `reminders` and `weather`. Each has a test on the rectangles it emits, and
-  each was mutation-checked by making `theme_changed` ignore its argument.
+  `reminders`, `weather`, `alarmclock`, `diagram` and `partmanager`. Each has a
+  test on the rectangles it emits, and each was mutation-checked by making
+  `theme_changed` ignore its argument.
+
+**Run the shape-2 fixer on every application, not just the ones the survey
+flags.** The survey lists functions needing a *parameter*; it does not list
+the ones that already take the app struct, because those need no signature
+change. Skipping that pass on `partmanager` produced 113 errors that looked
+like a catastrophe and were one missing step.
+
+**Two attributes on one item after a deletion.** `alarmclock` had
+`#[allow(dead_code)]` on `SKY`, a comment about `SKY`, then
+`#[allow(dead_code)]` on `MAROON`. Converting `SKY` left its attribute
+stranded *above a comment*, which the sweep deliberately skips — and the
+result is two attributes on `MAROON`, which is
+`clippy::duplicated_attributes`, an error. The general rule stands (an
+attribute followed by a comment is usually fine); this is the exception, and
+it is caught by clippy rather than by the sweep.
 
 **Adding a reference can make an elided lifetime ambiguous.**
 `reminders::detail_prose(text: &str, …) -> text::Paragraph<'_>` compiled while

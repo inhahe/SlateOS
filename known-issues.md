@@ -114379,7 +114379,7 @@ a structure the loader has to read to know which platform it is for.
 
 ---
 
-## A-EDITING-BOOT-TEST-SH-MID-RUN-KILLS-THE-RUN-WITH-A-LIE — OPEN 2026-09-02
+## A-EDITING-BOOT-TEST-SH-MID-RUN-KILLS-THE-RUN-WITH-A-LIE — FIXED 2026-09-08
 
 **Lane:** A. **Severity:** costs a 20–45 minute run, and — the part that
 matters — blames a line that is innocent, so the first response to it is to
@@ -114460,6 +114460,14 @@ written down rather than left as "obvious":
 
 **Where it is:** `scripts/boot-test.sh` (the whole file is the subject; the
 re-exec belongs immediately after the `set -u`/`SCRIPT_DIR` preamble).
+
+**Fixed 2026-09-08.** The re-exec is in place at lines 302–325 of
+`boot-test.sh`. It copies itself to a temp file via `mktemp`, sets
+`BOOT_TEST_REEXEC=1` and `BOOT_TEST_ORIG_DIR` (so `SCRIPT_DIR` still points
+at the checkout, not the temp directory), and execs the snapshot. The parent
+shell installs a `trap … EXIT INT TERM` that removes the snapshot on every
+exit path. Both details the entry called out — preserving `SCRIPT_DIR` and
+cleaning up the copy — are handled.
 
 ---
 

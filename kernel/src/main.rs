@@ -1198,11 +1198,7 @@ extern "C" fn kernel_main() -> ! {
                 hpet::init();
             }
             // §914: Diagnostic — optional hardware timer, system works with PIT/TSC.
-            selftest::dispatch_debug(
-                "HPET",
-                selftest::Severity::Diagnostic,
-                hpet::self_test(),
-            );
+            selftest::dispatch_debug("HPET", selftest::Severity::Diagnostic, hpet::self_test());
 
             // Capture the real boot timestamp now that HPET is running, so the
             // `sysuptime` command reports uptime since actual boot rather than since
@@ -1279,11 +1275,7 @@ extern "C" fn kernel_main() -> ! {
             // This finds virtio, USB, NVMe, and other PCI devices.
             console::boot_step(console::BootStatus::Running, "PCI & device drivers");
             // §914: Diagnostic — PCI bus scan is optional hardware.
-            selftest::dispatch(
-                "PCI",
-                selftest::Severity::Diagnostic,
-                pci::self_test(),
-            );
+            selftest::dispatch("PCI", selftest::Severity::Diagnostic, pci::self_test());
 
             // Step 20d: virtio-net probe is done first (it doesn't need the
             // blkdev registry).  virtio-blk devices are discovered in the
@@ -6721,11 +6713,7 @@ extern "C" fn kernel_main() -> ! {
     }
 
     // §914: Diagnostic — optional hardware, system works without a mouse.
-    selftest::dispatch(
-        "Mouse",
-        selftest::Severity::Diagnostic,
-        mouse::self_test(),
-    );
+    selftest::dispatch("Mouse", selftest::Severity::Diagnostic, mouse::self_test());
 
     // Step 21b: Bootstrap Application Processors (SMP).
     // Discovers APs via ACPI MADT, copies the real-mode trampoline to
@@ -6981,11 +6969,7 @@ extern "C" fn kernel_main() -> ! {
     // Step 22e⅞++++n2: TCP server (bind/listen/accept) self-test.
     // Validates listener lifecycle without needing network hardware.
     // §914: Diagnostic — network stack, optional hardware.
-    selftest::dispatch_debug(
-        "TCP",
-        selftest::Severity::Diagnostic,
-        net::tcp::self_test(),
-    );
+    selftest::dispatch_debug("TCP", selftest::Severity::Diagnostic, net::tcp::self_test());
 
     // Step 22e⅞++++n3: Firewall self-test.
     // Stateful packet filtering with rules and connection tracking.
@@ -7000,11 +6984,7 @@ extern "C" fn kernel_main() -> ! {
     // Exercises protocol parsing/building for ethernet, IPv4, ICMP, ARP,
     // UDP, DNS, DHCP, fragmentation, and interface modules.
     // §914: Diagnostic — network stack, optional hardware.
-    selftest::dispatch_debug(
-        "net",
-        selftest::Severity::Diagnostic,
-        net::self_test(),
-    );
+    selftest::dispatch_debug("net", selftest::Severity::Diagnostic, net::self_test());
 
     // Step 22e⅞++++o: Kernel object tracking self-test.
     // Lifecycle counters for all kernel object types.
@@ -7115,19 +7095,11 @@ extern "C" fn kernel_main() -> ! {
     // Step 22e⅞++++p8d: NAT/masquerade self-test.
     // Source NAT for container traffic traversing namespace boundaries.
     // §914: Diagnostic — network stack, optional hardware.
-    selftest::dispatch_debug(
-        "NAT",
-        selftest::Severity::Diagnostic,
-        net::nat::self_test(),
-    );
+    selftest::dispatch_debug("NAT", selftest::Severity::Diagnostic, net::nat::self_test());
 
     // SSH server self-test (binary packet protocol, encryption, key derivation).
     // §914: Diagnostic — network service, optional.
-    selftest::dispatch_debug(
-        "SSH",
-        selftest::Severity::Diagnostic,
-        net::ssh::self_test(),
-    );
+    selftest::dispatch_debug("SSH", selftest::Severity::Diagnostic, net::ssh::self_test());
 
     // Raw-NIC claim self-test: unclaimed reads clean, a non-owner's release is
     // a no-op, and a claim held by a dead process self-heals.
@@ -7166,20 +7138,12 @@ extern "C" fn kernel_main() -> ! {
     // Step 22e⅞++++p10a: JSON parser self-test.
     // Minimal recursive-descent JSON parser for OCI image manifests.
     // §914: Diagnostic — parser utility, not structural kernel integrity.
-    selftest::dispatch_debug(
-        "JSON",
-        selftest::Severity::Diagnostic,
-        json::self_test(),
-    );
+    selftest::dispatch_debug("JSON", selftest::Severity::Diagnostic, json::self_test());
 
     // Step 22e⅞++++p10b: OCI image format parser self-test.
     // Parses OCI image index, manifest, config, and verifies digests.
     // §914: Diagnostic — container image format, not structural kernel integrity.
-    selftest::dispatch_debug(
-        "OCI",
-        selftest::Severity::Diagnostic,
-        oci::self_test(),
-    );
+    selftest::dispatch_debug("OCI", selftest::Severity::Diagnostic, oci::self_test());
 
     // Step 22e⅞++++p10: Syscall filter (seccomp-equivalent) init + self-test.
     // Per-process bitmap-based syscall allow/deny lists for container
@@ -7252,11 +7216,7 @@ extern "C" fn kernel_main() -> ! {
     // Step 22e⅞+++++d: IOMMU detection self-test.
     // Verifies API consistency (available ↔ vendor ↔ unit_count).
     // §914: Integrity — IOMMU is a security boundary for DMA isolation.
-    selftest::dispatch_debug(
-        "IOMMU",
-        selftest::Severity::Integrity,
-        iommu::self_test(),
-    );
+    selftest::dispatch_debug("IOMMU", selftest::Severity::Integrity, iommu::self_test());
 
     // Step 22e⅞+++++d½: IOMMU DMA remapping self-test.
     // Tests page table manipulation (domain create/map/unmap/destroy).
@@ -7294,11 +7254,7 @@ extern "C" fn kernel_main() -> ! {
 
     // Intel HD Audio self-test.
     // §914: Diagnostic — optional audio hardware.
-    selftest::dispatch_debug(
-        "HDA",
-        selftest::Severity::Diagnostic,
-        hda::self_test(),
-    );
+    selftest::dispatch_debug("HDA", selftest::Severity::Diagnostic, hda::self_test());
 
     // PC speaker self-test.
     pcspk::self_test();
@@ -7362,11 +7318,7 @@ extern "C" fn kernel_main() -> ! {
 
     // DRM/KMS subsystem self-test.
     // §914: Diagnostic — optional display hardware.
-    selftest::dispatch_debug(
-        "DRM",
-        selftest::Severity::Diagnostic,
-        drm::self_test(),
-    );
+    selftest::dispatch_debug("DRM", selftest::Severity::Diagnostic, drm::self_test());
 
     // DRM Linux-uAPI ABI self-test (Linux graphics-compat foundation).
     selftest::dispatch(
@@ -7414,11 +7366,7 @@ extern "C" fn kernel_main() -> ! {
     // TTY/termios layer self-test (depends on the console being up so that
     // TIOCGWINSZ can report live dimensions).
     // §914: Diagnostic — terminal flags and line discipline, not structural integrity.
-    selftest::dispatch_debug(
-        "TTY",
-        selftest::Severity::Diagnostic,
-        tty::self_test(),
-    );
+    selftest::dispatch_debug("TTY", selftest::Severity::Diagnostic, tty::self_test());
 
     // Pseudo-terminal self-test.  Runs after `tty::self_test` because it
     // creates real terminal devices through the same table and drives the
@@ -7446,11 +7394,7 @@ extern "C" fn kernel_main() -> ! {
 
     // The uname strings: glibc's start-up version gate, and single-token fields.
     // §914: Diagnostic — informational strings, not structural kernel integrity.
-    selftest::dispatch_debug(
-        "uname",
-        selftest::Severity::Diagnostic,
-        uname::self_test(),
-    );
+    selftest::dispatch_debug("uname", selftest::Severity::Diagnostic, uname::self_test());
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

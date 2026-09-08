@@ -123846,3 +123846,46 @@ photographs would not, which is worse than doing nothing.
 **How you would notice.** Settings -> Accessibility -> Visual -> Color
 Filter, choose Deuteranopia. The label changes; the screen does not.
 
+
+---
+
+## TD-C-THE-PDF-VIEWER-PRINTS-EVERY-PAGE-OR-NOTHING
+
+**Date:** 2026-09-07. **Lane:** C.
+**Where:** `apps/pdfviewer/src/main.rs` — `print_job`, `print_active`,
+`Target::Print`.
+
+**In short:** The PDF viewer has a Print button and no print dialog. There is
+nowhere to say which pages, how many copies, double-sided or not, colour or
+grey. Pressing Print sends the whole document, one copy, every time. All the
+settings exist in the code and none of them can be reached.
+
+**How this came to light.** Moving the page-range parser out into
+`gui/printjob` left `PageRange` imported and unused in the viewer's own
+source: nothing outside the tests ever *builds* a range. The parser has been
+there for months, is the best one in the tree, and has never had a caller
+that was not a test — which is the same "a feature whose only caller is its
+own test does not exist" shape found twice before in this lane.
+
+The four sibling fields are worse: `copies`, `duplex`, `color` and `scale`
+had no reader *and* no writer. They are no longer dead in the same way, since
+they are now fields of the message the printing service will receive rather
+than of a private struct, but nothing sets them either.
+
+**What a user sees.** Print a 400-page manual to read one page of it, and you
+get 400 pages. There is no way to say otherwise short of editing the file.
+
+**The proper fix.** A print dialog: page range box, copies spinner, and the
+duplex/colour/scale controls, writing into `print_job`. The range box wants
+`PageRange::parse`, which already accepts `1-3, 5, 7-9` and is tested. The
+dialog is the whole of the work; the model behind it is finished.
+
+**Why it is not done here.** A print dialog is a feature, and this change was
+a refactor — folding one in would have hidden a behaviour change inside a
+move. Also worth doing *after* the printing service exists (§540), since the
+dialog should show the printers the service reports rather than a list the
+viewer invents, and there is no service yet.
+
+**Not blocking.** Printing works; it just always prints everything. Nothing
+regressed here — this is a gap that was invisible until the parser moved out
+and left an unused import pointing straight at it.

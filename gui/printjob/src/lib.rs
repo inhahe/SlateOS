@@ -423,6 +423,20 @@ mod tests {
         assert_eq!(PageRange::parse("8-60").resolve(10, 0), vec![7, 8, 9]);
     }
 
+    /// A document with no pages has no page zero.
+    ///
+    /// The clamp saturates: `page_count - 1` is `0` at zero pages, so every
+    /// span became `lo..=0` and one starting at zero yielded `[0]` -- a page
+    /// index into an empty document, handed to a caller with every reason to
+    /// trust it. `All` and `CurrentPage` both return nothing there; `Custom`
+    /// was the odd one out. The `lo < page_count` filter is what says so.
+    #[test]
+    fn a_span_over_an_empty_document_names_no_pages() {
+        assert!(PageRange::Custom(vec![(0, 4)]).resolve(0, 0).is_empty());
+        assert!(PageRange::All.resolve(0, 0).is_empty());
+        assert!(PageRange::CurrentPage.resolve(0, 0).is_empty());
+    }
+
     #[test]
     fn a_reversed_span_is_read_as_what_it_plainly_means() {
         assert_eq!(PageRange::parse("9-7").resolve(10, 0), vec![6, 7, 8]);

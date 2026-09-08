@@ -111,7 +111,7 @@ pub use guiremote::control::Layer;
 // Same reason: `CompositorRequest::ShellControl` carries one, so a caller
 // building that request must be able to name it.
 pub use guiremote::control::ShellControlAction;
-use guiremote::control::WindowSpec;
+use guiremote::control::{StackTier, WindowSpec};
 // Re-exported for the same reason as `WindowInfo` below: `Window::reserved_edge`
 // holds one and `reserve_edge` takes one, and a panel that has to reach past the
 // compositor to name the edge it is anchored to is naming a different type from
@@ -860,6 +860,12 @@ pub struct Window {
     /// the band is a role rather than a starting z-order: a starting depth is
     /// something the first raise destroys.
     pub layer: Layer,
+    /// Where this window sits within its layer.
+    ///
+    /// Set by the shell from a window rule, never by the window's own client:
+    /// a program that could put itself in `Top` would be an "always on top"
+    /// nobody asked for. See [`StackTier`].
+    pub tier: StackTier,
     /// Window opacity (0.0 = fully transparent, 1.0 = fully opaque).
     pub opacity: f32,
     /// Process ID of the client that owns this window.
@@ -1035,6 +1041,9 @@ impl Window {
     fn from_spec(spec: &WindowSpec, x: i32, y: i32, client_pid: u64) -> Self {
         Self {
             id: WindowId::allocate(),
+            // Every window starts in the ordinary tier. Only a shell applying
+            // a user's rule moves it, which is the whole point of the field.
+            tier: StackTier::Normal,
             title: spec.title.clone(),
             app_id: spec.app_id.clone(),
             x,
@@ -2917,6 +2926,11 @@ pub enum CompositorRequest {
     },
     /// Set window opacity.
     SetOpacity { window_id: WindowId, opacity: f32 },
+    /// Put a window in a stacking tier within its layer.
+    SetStackTier {
+        window_id: WindowId,
+        tier: StackTier,
+    },
     /// Query display information.
     GetDisplayInfo,
     /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
@@ -8220,6 +8234,14 @@ impl Compositor {
                     },
                 }
             }
+            CompositorRequest::SetStackTier { window_id, tier } => {
+                match self.set_stack_tier(window_id, tier) {
+                    Ok(()) => CompositorResponse::Ok,
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
             CompositorRequest::SetOpacity { window_id, opacity } => {
                 match self.set_opacity(window_id, opacity) {
                     Ok(()) => CompositorResponse::Ok,
@@ -8925,6 +8947,19 @@ impl Compositor {
         self.window_ref(id).map_or(Layer::Normal, |w| w.layer)
     }
 
+    /// Where a window sorts in the stack: its layer first, then its tier.
+    ///
+    /// A pair rather than a single ordering because the two answer different
+    /// questions. The layer is the client's, chosen at creation, and separates
+    /// the desktop's furniture from applications. The tier is the *shell's*,
+    /// applied from a user's rule, and orders applications against each other
+    /// -- so an always-on-top window is above its neighbours and still below
+    /// the taskbar, which is what a user means by it.
+    fn stack_key(&self, id: WindowId) -> (Layer, StackTier) {
+        self.window_ref(id)
+            .map_or((Layer::Normal, StackTier::Normal), |w| (w.layer, w.tier))
+    }
+
     /// Where in `z_stack` a window of `layer` goes when it is raised to the top
     /// of its own band.
     ///
@@ -8933,20 +8968,45 @@ impl Compositor {
     /// of them, before the first window of any higher band. That partitioning
     /// is the invariant this whole layering rests on, and it is maintained by
     /// this function being the *only* way anything enters the stack.
-    fn stack_insertion_index(&self, layer: Layer) -> usize {
+    fn stack_insertion_index(&self, key: (Layer, StackTier)) -> usize {
         self.z_stack
             .iter()
-            .filter(|&&id| self.layer_of(id) <= layer)
+            .filter(|&&id| self.stack_key(id) <= key)
             .count()
     }
 
     /// Put `id` at the top of its own band, removing it from wherever it was.
     fn raise_within_layer(&mut self, id: WindowId) {
-        let layer = self.layer_of(id);
+        let key = self.stack_key(id);
         self.z_stack.retain(|&other| other != id);
-        let at = self.stack_insertion_index(layer);
+        let at = self.stack_insertion_index(key);
         self.z_stack.insert(at, id);
         self.update_z_orders();
+    }
+
+    /// Move a window into a stacking tier and restack it.
+    ///
+    /// Restacking through [`raise_within_layer`](Self::raise_within_layer)
+    /// rather than by editing `z_stack` here: a window that changed tier
+    /// without moving would be sorted into a band it is no longer in, and the
+    /// next raise would appear to teleport it.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window has gone.
+    pub fn set_stack_tier(&mut self, id: WindowId, tier: StackTier) -> CompositorResult<()> {
+        let win = self
+            .windows
+            .iter_mut()
+            .find(|w| w.id == id)
+            .ok_or(CompositorError::WindowNotFound(id))?;
+        if win.tier == tier {
+            return Ok(());
+        }
+        win.tier = tier;
+        self.raise_within_layer(id);
+        self.full_recomposite = true;
+        Ok(())
     }
 
     /// The desktop's windows as a shell sees them, bottom-to-top.
@@ -11183,6 +11243,93 @@ mod tests {
             Err(CompositorError::WindowNotFound(_))
         ));
         assert_eq!(comp.pending_notifications.len(), before);
+    }
+
+    /// An always-on-top window sits above its neighbours and below the shell.
+    ///
+    /// Both halves matter and only the pair distinguishes the design from the
+    /// obvious wrong one. Reusing `Layer::Overlay` for "always on top" would
+    /// pass the first assertion and fail the second: the window would sit
+    /// above the taskbar, which is not what a user means and is not something
+    /// an application should be able to ask for at all.
+    #[test]
+    fn an_always_on_top_window_is_above_its_neighbours_and_below_the_shell() {
+        let (mut comp, first) = with_one_window();
+        let second = comp.create_window_from_spec(&WindowSpec::new("Second", 200, 150), 1);
+        let mut panel_spec = WindowSpec::new("Taskbar", 800, 40);
+        panel_spec.layer = Layer::Overlay;
+        let panel = comp.create_window_from_spec(&panel_spec, 1);
+
+        comp.set_stack_tier(first, StackTier::Top).expect("tier");
+
+        let above = |lower: WindowId, upper: WindowId| {
+            let l = comp.z_stack.iter().position(|&w| w == lower);
+            let u = comp.z_stack.iter().position(|&w| w == upper);
+            l < u
+        };
+        assert!(
+            above(second, first),
+            "an always-on-top window must be above an ordinary one"
+        );
+        assert!(
+            above(first, panel),
+            "and still below the shell's own overlay -- a window rule must not \
+             be able to cover the taskbar"
+        );
+    }
+
+    /// And raising an ordinary window does not lift it past one.
+    ///
+    /// This is what "always" means: clicking another window must not defeat
+    /// the rule. Without the tier in the sort key, `raise_within_layer` would
+    /// put the clicked window on top of everything in its layer.
+    #[test]
+    fn raising_an_ordinary_window_does_not_lift_it_over_an_always_on_top_one() {
+        let (mut comp, pinned) = with_one_window();
+        let other = comp.create_window_from_spec(&WindowSpec::new("Other", 200, 150), 1);
+        comp.set_stack_tier(pinned, StackTier::Top).expect("tier");
+
+        comp.activate_window(other).expect("raise");
+
+        let pos = |w: WindowId| comp.z_stack.iter().position(|&x| x == w);
+        assert!(
+            pos(other) < pos(pinned),
+            "raising an ordinary window put it over a pinned one"
+        );
+    }
+
+    /// Always-on-bottom is the same mechanism in the other direction.
+    #[test]
+    fn an_always_on_bottom_window_stays_under_its_neighbours() {
+        let (mut comp, sunk) = with_one_window();
+        let other = comp.create_window_from_spec(&WindowSpec::new("Other", 200, 150), 1);
+        comp.set_stack_tier(sunk, StackTier::Bottom).expect("tier");
+
+        comp.activate_window(sunk).expect("raise");
+
+        let pos = |w: WindowId| comp.z_stack.iter().position(|&x| x == w);
+        assert!(
+            pos(sunk) < pos(other),
+            "activating a pinned-to-bottom window lifted it out of its tier"
+        );
+    }
+
+    /// Returning a window to the ordinary tier releases it.
+    #[test]
+    fn clearing_the_tier_lets_a_window_raise_again() {
+        let (mut comp, pinned) = with_one_window();
+        let other = comp.create_window_from_spec(&WindowSpec::new("Other", 200, 150), 1);
+        comp.set_stack_tier(pinned, StackTier::Bottom)
+            .expect("down");
+        comp.set_stack_tier(pinned, StackTier::Normal).expect("up");
+
+        comp.activate_window(pinned).expect("raise");
+
+        let pos = |w: WindowId| comp.z_stack.iter().position(|&x| x == w);
+        assert!(
+            pos(other) < pos(pinned),
+            "a window returned to the ordinary tier must raise normally again"
+        );
     }
 
     /// Every action reaches the operation it names.

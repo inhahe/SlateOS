@@ -443,6 +443,8 @@ pub enum DecodeError {
     /// A [`ShellControlAction`](control::ShellControlAction) byte is not in this
     /// decoder's table.
     BadShellAction(u8),
+    /// A stacking tier byte no version of this protocol has issued.
+    BadStackTier(u8),
     /// An [`UploadImage`](control::RequestBody::UploadImage) byte payload
     /// exceeds [`MAX_IMAGE_BYTES`].
     ///
@@ -513,6 +515,7 @@ impl core::fmt::Display for DecodeError {
                 )
             }
             Self::BadShellAction(b) => write!(f, "unknown shell control action {b:#04x}"),
+            Self::BadStackTier(b) => write!(f, "unknown stacking tier {b:#04x}"),
             Self::ImageTooLarge(n) => {
                 write!(f, "image byte length {n} exceeds limit {MAX_IMAGE_BYTES}")
             }

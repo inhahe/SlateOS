@@ -90889,7 +90889,7 @@ client's windows around.
 | ~~`size`~~ | **Done 2026-09-07.** `RequestBody::ShellResize`, tag `0x1B`. |
 | `min_size`, `max_size` | a size-constraint request; the compositor has no per-window constraint store at all |
 | ~~`opacity`~~ | **Done 2026-09-07.** `RequestBody::ShellSetOpacity`, tag `0x19`, `CONTROL_VERSION` 5 → 6. |
-| `always_on_top`, `always_on_bottom` | a per-window layer override; today `Layer` is fixed at creation by the client |
+| ~~`always_on_top`, `always_on_bottom`~~ | **Done 2026-09-07.** A `StackTier` within the layer, not a layer override — see increment 3. |
 | `target_monitor` | multi-monitor placement, which the compositor does not model yet |
 | `no_decorations` | decorations are the client's own; there is no request to strip them |
 | `prevent_close`, `prevent_move`, `prevent_resize` | a per-window policy the *compositor* enforces — these cannot be shell-side, because the shell is not in the path when the user drags a title bar |
@@ -90967,7 +90967,29 @@ need a policy store the compositor does not have. The honest increments are:
    The privilege test drives the *same foreign window* through both requests
    and asserts the shell one is accepted and the ordinary one refused. Either
    half alone would pass while the distinction was broken.
-3. A per-window layer override for `always_on_top` / `always_on_bottom`.
+3. ~~A per-window layer override for `always_on_top` / `always_on_bottom`.~~
+   **Done 2026-09-07**, `CONTROL_VERSION` 7 → 8, and *not* as a layer
+   override — that framing turned out to be the wrong one.
+
+   **A layer is the client's; a tier is the shell's.** `Layer` is chosen by
+   the window's own client at creation, so an `AboveNormal` layer would let
+   any program put itself above the taskbar simply by asking. `StackTier`
+   (`Bottom` / `Normal` / `Top`) is set only by a shell applying a user's
+   rule, and orders windows against their neighbours *within* a layer. The
+   stacking key became `(Layer, StackTier)`, so an always-on-top window is
+   above the other applications and still below the desktop's own furniture.
+
+   The test that pins this asserts **both** halves, because only the pair
+   rules out the obvious wrong implementation: reusing `Layer::Overlay` for
+   "always on top" passes "above its neighbours" and fails "below the shell".
+
+   `raise_within_layer` sorts on the same key, which is what makes "always"
+   mean always -- clicking another window cannot lift it past a pinned one.
+   Mutation-checked: dropping the tier from the sort key fails two tests.
+
+   The shell resolves `always_on_top` + `always_on_bottom` set together into
+   one tier rather than sending the compositor a contradiction, and a rule
+   silent on stacking asks for nothing at all.
 4. A compositor-side policy store for `prevent_close` / `prevent_move` /
    `prevent_resize`, and constraints for `min_size` / `max_size`.
 5. `target_monitor` last, behind multi-monitor support.

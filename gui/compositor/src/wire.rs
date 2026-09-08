@@ -466,6 +466,13 @@ fn to_compositor_request(
                 height,
             }
         }
+        RequestBody::ShellSetStackTier { window, tier } => {
+            link.require_shell()?;
+            CompositorRequest::SetStackTier {
+                window_id: WindowId::from_raw(window),
+                tier,
+            }
+        }
         RequestBody::GetDisplayInfo => CompositorRequest::GetDisplayInfo,
         // Unlike every window request above there is no `link.resolve` on
         // either of these, and nothing to resolve: a reload names no window and

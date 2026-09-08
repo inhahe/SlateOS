@@ -1544,6 +1544,9 @@ impl<T: Transport> ShellSession<T> {
             ShellRequest::MoveWindowToDesktop { window, desktop } => {
                 self.events.move_window_to_desktop(window.0, desktop)
             }
+            ShellRequest::SetStackTier { window, tier } => {
+                self.events.shell_set_stack_tier(window.0, tier)
+            }
             ShellRequest::MoveWindow { window, x, y } => self.events.shell_move(window.0, x, y),
             ShellRequest::ResizeWindow {
                 window,

@@ -1003,6 +1003,19 @@ impl<T: Transport> EventLoop<T> {
     /// # Errors
     ///
     /// As [`Connection::confirm`].
+    /// Put another client's window in a stacking tier, as a window rule does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn shell_set_stack_tier(
+        &mut self,
+        window: u64,
+        tier: guiremote::control::StackTier,
+    ) -> Result<(), Error<T>> {
+        self.conn.shell_set_stack_tier(window, tier)
+    }
+
     pub fn shell_resize(&mut self, window: u64, width: u32, height: u32) -> Result<(), Error<T>> {
         self.conn.shell_resize(window, width, height)
     }
@@ -1814,6 +1827,7 @@ pub mod testing {
                 RequestBody::ShellSetOpacity { .. } => "ShellSetOpacity",
                 RequestBody::ShellMove { .. } => "ShellMove",
                 RequestBody::ShellResize { .. } => "ShellResize",
+                RequestBody::ShellSetStackTier { .. } => "ShellSetStackTier",
                 RequestBody::GetDisplayInfo => "GetDisplayInfo",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::ReloadAppearance => "ReloadAppearance",

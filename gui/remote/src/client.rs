@@ -48,7 +48,8 @@ use guitk::render::RenderTree;
 
 use crate::DecodeError;
 use crate::control::{
-    BufferFormat, Request, RequestBody, ResponseBody, ShellControlAction, encode_requests_into,
+    BufferFormat, Request, RequestBody, ResponseBody, ShellControlAction, StackTier,
+    encode_requests_into,
 };
 use crate::frame::{Frame, try_decode_any};
 use crate::input::InputEvent;
@@ -755,6 +756,19 @@ impl<T: Transport> Connection<T> {
     /// # Errors
     ///
     /// As [`Self::confirm`], plus a refusal if this link is not a shell.
+    /// Put another client's window in a stacking tier. Shell only.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::confirm`], plus a refusal if this link is not a shell.
+    pub fn shell_set_stack_tier(
+        &mut self,
+        window: u64,
+        tier: StackTier,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::ShellSetStackTier { window, tier })
+    }
+
     pub fn shell_resize(
         &mut self,
         window: u64,

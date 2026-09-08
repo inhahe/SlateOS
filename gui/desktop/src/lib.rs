@@ -173,7 +173,7 @@ use appearance::{
 // below so a caller wiring the shell to a compositor need not name `guiremote`
 // itself. `Layer` arrives with them because the list carries the shell's own
 // surfaces too, and telling those apart is the whole reason the field exists.
-pub use guiremote::control::{Layer, ShellControlAction};
+pub use guiremote::control::{Layer, ShellControlAction, StackTier};
 // `WindowList` comes with it because a window's own desktop and the desktop
 // being shown arrive together, in one frame, and comparing them is the only way
 // to know what the user can see. Taking the windows without the header is what
@@ -759,6 +759,13 @@ pub enum ShellRequest {
         x: i32,
         /// Top-left corner, in display coordinates.
         y: i32,
+    },
+    /// Keep a window above or below its neighbours, as a window rule asks.
+    SetStackTier {
+        /// The window to re-file.
+        window: WindowId,
+        /// Where it goes within its layer.
+        tier: StackTier,
     },
     /// Give a window a size, as a window rule asks.
     ResizeWindow {
@@ -2885,6 +2892,24 @@ impl DesktopShell {
             if let Some((x, y)) = Self::rule_position_px(position, actions.size, screen) {
                 out.push(ShellRequest::MoveWindow { window: id, x, y });
             }
+        }
+
+        // "Always on top" and "always on bottom" are one setting with three
+        // values, not two independent flags: a rule asking for both would be
+        // asking for a window to be above and below its neighbours at once.
+        // `always_on_top` wins that argument here rather than the compositor
+        // being handed a contradiction to resolve.
+        let tier = match (actions.always_on_top, actions.always_on_bottom) {
+            (Some(true), _) => Some(StackTier::Top),
+            (_, Some(true)) => Some(StackTier::Bottom),
+            // An explicit `false` is a rule saying "ordinary", which is a
+            // request: it undoes a tier a higher-priority rule set. `None` is
+            // a rule that says nothing, and says nothing here too.
+            (Some(false), _) | (_, Some(false)) => Some(StackTier::Normal),
+            (None, None) => None,
+        };
+        if let Some(tier) = tier {
+            out.push(ShellRequest::SetStackTier { window: id, tier });
         }
 
         // Opacity is independent of state and zone -- a window can be
@@ -6512,6 +6537,68 @@ mod window_manager_tests {
         again(&mut shell);
         again(&mut shell);
         assert!(shell.taskbar_windows().is_empty());
+    }
+
+    #[test]
+    fn a_rule_can_pin_a_window_above_or_below_its_neighbours() {
+        for (top, bottom, expected) in [
+            (Some(true), None, crate::StackTier::Top),
+            (None, Some(true), crate::StackTier::Bottom),
+            (Some(false), None, crate::StackTier::Normal),
+        ] {
+            let mut shell = shell();
+            rule(&mut shell, "chat", |a| {
+                a.always_on_top = top;
+                a.always_on_bottom = bottom;
+            });
+            assert!(
+                arrive(&mut shell, 1, "chat").contains(&ShellRequest::SetStackTier {
+                    window: WindowId(1),
+                    tier: expected,
+                }),
+                "top={top:?} bottom={bottom:?}"
+            );
+        }
+    }
+
+    /// A rule asking for both is resolved here, not sent as a contradiction.
+    #[test]
+    fn a_rule_asking_for_both_top_and_bottom_picks_top() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.always_on_top = Some(true);
+            a.always_on_bottom = Some(true);
+        });
+
+        let asked = arrive(&mut shell, 1, "chat");
+        assert!(asked.contains(&ShellRequest::SetStackTier {
+            window: WindowId(1),
+            tier: crate::StackTier::Top,
+        }));
+        assert_eq!(
+            asked
+                .iter()
+                .filter(|r| matches!(r, ShellRequest::SetStackTier { .. }))
+                .count(),
+            1,
+            "the compositor must not be handed two tiers to choose between"
+        );
+    }
+
+    /// A rule that says nothing about stacking asks for nothing.
+    #[test]
+    fn a_rule_silent_on_stacking_leaves_the_window_alone() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.opacity = Some(1.0);
+        });
+
+        assert!(
+            !arrive(&mut shell, 1, "chat")
+                .iter()
+                .any(|r| matches!(r, ShellRequest::SetStackTier { .. })),
+            "silence is not an instruction"
+        );
     }
 
     /// A rule can place and size a window.

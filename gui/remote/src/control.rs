@@ -96,7 +96,7 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// same reason 3 did, and worse: the new field's own length prefix would be
 /// read by a version-3 decoder as the window's *width*, so the failure is not a
 /// wrong flag but a window several hundred million pixels across.
-pub const CONTROL_VERSION: u8 = 7;
+pub const CONTROL_VERSION: u8 = 8;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -344,6 +344,56 @@ impl Layer {
 /// `Move { x, y, w, h }` — a client-supplied rectangle — and that is still
 /// absent, which is the distinction to preserve when adding to this enum: if
 /// the shell has to compute pixels to use a verb, the verb is wrong.
+/// Where a window sits *within* its layer.
+///
+/// Deliberately not more [`Layer`] variants. A layer is chosen by the client
+/// when it creates the window, so an `AboveNormal` layer would let any program
+/// put itself above the taskbar simply by asking. A tier is set by the shell,
+/// applying a rule the user wrote, and it orders windows only against their
+/// neighbours in the same layer -- "always on top" means above the other
+/// applications, not above the desktop's own furniture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StackTier {
+    /// Below its neighbours: `always_on_bottom`.
+    Bottom,
+    /// The ordinary tier, where raising and focusing decide the order.
+    #[default]
+    Normal,
+    /// Above its neighbours: `always_on_top`.
+    Top,
+}
+
+impl StackTier {
+    /// Every tier, low to high.
+    pub const ALL: [Self; 3] = [Self::Bottom, Self::Normal, Self::Top];
+
+    /// The wire byte for this tier.
+    #[must_use]
+    pub const fn as_byte(self) -> u8 {
+        match self {
+            Self::Bottom => 0,
+            Self::Normal => 1,
+            Self::Top => 2,
+        }
+    }
+
+    /// The tier a wire byte names, or `None` if it names none of them.
+    ///
+    /// `None` rather than defaulting to [`Normal`](Self::Normal), for
+    /// [`Layer::from_byte`]'s reason: a byte we do not recognise means the
+    /// peer speaks a protocol we do not, and quietly filing its window in the
+    /// ordinary tier would be a wrong desktop rather than a refused request.
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Bottom),
+            1 => Some(Self::Normal),
+            2 => Some(Self::Top),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ShellControlAction {
     /// Un-minimise if minimised, then focus and raise within the window's band.
@@ -728,6 +778,11 @@ pub enum RequestBody {
         width: u32,
         height: u32,
     },
+    /// Put *another client's* window in a stacking tier. Shell only.
+    ///
+    /// How `always_on_top` and `always_on_bottom` are applied. See
+    /// [`StackTier`] for why this is not a layer.
+    ShellSetStackTier { window: u64, tier: StackTier },
     /// Ask about the display. Answered with [`ResponseBody::DisplayInfo`].
     GetDisplayInfo,
     /// Start or stop receiving the desktop's window list.
@@ -1044,6 +1099,7 @@ enum RequestTag {
     ShellSetOpacity = 0x19,
     ShellMove = 0x1A,
     ShellResize = 0x1B,
+    ShellSetStackTier = 0x1C,
 }
 
 impl RequestTag {
@@ -1076,6 +1132,7 @@ impl RequestTag {
             0x19 => Self::ShellSetOpacity,
             0x1A => Self::ShellMove,
             0x1B => Self::ShellResize,
+            0x1C => Self::ShellSetStackTier,
             _ => return None,
         })
     }
@@ -1328,6 +1385,11 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             write_u64(out, *window);
             write_u32(out, *width);
             write_u32(out, *height);
+        }
+        RequestBody::ShellSetStackTier { window, tier } => {
+            out.push(RequestTag::ShellSetStackTier as u8);
+            write_u64(out, *window);
+            out.push(tier.as_byte());
         }
         RequestBody::GetDisplayInfo => out.push(RequestTag::GetDisplayInfo as u8),
         RequestBody::SubscribeWindowList { subscribe } => {
@@ -1657,6 +1719,14 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 window,
                 width: r.read_u32()?,
                 height: r.read_u32()?,
+            }
+        }
+        RequestTag::ShellSetStackTier => {
+            let window = r.read_u64()?;
+            let b = r.read_u8()?;
+            RequestBody::ShellSetStackTier {
+                window,
+                tier: StackTier::from_byte(b).ok_or(DecodeError::BadStackTier(b))?,
             }
         }
         RequestTag::GetDisplayInfo => RequestBody::GetDisplayInfo,
@@ -2102,8 +2172,13 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x1C),
+            Some(RequestTag::ShellSetStackTier),
+            "0x1C was taken by ShellSetStackTier in control version 8"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x1D),
             None,
-            "0x1C is the next free tag"
+            "0x1D is the next free tag"
         );
     }
 

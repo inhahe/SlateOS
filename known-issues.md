@@ -123981,7 +123981,36 @@ key for the whole window after it — the opposite of the feature's purpose);
 switching sticky keys off stranded whatever was held; and `release_on_two_keys`
 was in the config and implemented nowhere.
 
-**What is still not connected: the Settings UI.** This entry stays open for it.
+**Update 2, 2026-09-07 — closed for the three features.** The Settings app's
+toggles now write `input.settings.accessibility`, which `handle_event`'s
+whole-struct comparison saves to `input.yaml` and the compositor re-reads. A
+test clicks the Sticky Keys row and reads the file back off disk. The
+superseded copies are deleted: 543 lines from `desktop::a11y` (the state
+machines, the six config fields, their serialiser and parser, their sixteen
+tests) and the duplicate config structs in
+`desktop::accessibility_settings`, which now re-exports `inputsettings`'.
+
+So the road is whole and single: Settings window -> `input.yaml` ->
+`Compositor::set_input_settings` -> `compositor::a11ykeys` -> `handle_key`.
+
+**Two things this entry stays open for**, both from the original census and
+neither part of the three features above:
+
+- `caret_width` and `focus_indicator` on `AccessibilityConfig` still reach
+  nothing. They are not superseded — they are features never built — so the
+  fields were left rather than deleted, since deleting them would remove the
+  only record that they are wanted.
+- `gui/desktop/src/accessibility_settings.rs` is a 2 019-line settings panel
+  **nothing constructs**. Every one of its public types —
+  `AccessibilitySettings`, `A11yFeature`, `A11yTab`, `VisualSettings`,
+  `AudioA11ySettings`, `ContrastMode`, `TextScale`, `CursorIndicator` — has
+  zero uses outside the file. `design-decisions.md` §815 (the operator's
+  answer to C-Q6) already settles what happens to it: screens you *open* move
+  to the Settings app and the shell's copies go. This is one of those copies,
+  and the Settings app has the working version. It should be deleted as part
+  of executing §815 rather than piecemeal here.
+
+**Superseded — what was still not connected: the Settings UI.**
 `gui/desktop/src/accessibility_settings.rs` and `apps/settings` still write to
 their own `StickyKeysConfig`/`FilterKeysConfig`/`MouseKeysConfig` and to
 `A11yFeature`/`ToggleId`, none of which is `inputsettings`. So the toggle in

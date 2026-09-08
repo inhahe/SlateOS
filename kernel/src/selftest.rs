@@ -508,10 +508,7 @@ fn all_suites() -> Vec<TestSuite> {
     suites.push(TestSuite {
         name: "sched_fairness",
         description: "Scheduler fairness (Jain's Index)",
-        run: || {
-            crate::sched_fairness::self_test();
-            true
-        },
+        run: || crate::sched_fairness::self_test().is_ok(),
         category: "sched",
         severity: Severity::Diagnostic,
     });
@@ -532,40 +529,28 @@ fn all_suites() -> Vec<TestSuite> {
     suites.push(TestSuite {
         name: "sched_backend",
         description: "Scheduler backend enum (selectable PriorityRR/EEVDF/Deadline)",
-        run: || {
-            crate::sched::backend::self_test();
-            true
-        },
+        run: || crate::sched::backend::self_test().is_ok(),
         category: "sched",
         severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "cet",
         description: "Intel CET (shadow stacks + IBT) detection",
-        run: || {
-            crate::cet::self_test();
-            true
-        },
+        run: || crate::cet::self_test().is_ok(),
         category: "security",
         severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "smep_smap",
         description: "SMEP/SMAP (user page execution/access prevention)",
-        run: || {
-            crate::smep_smap::self_test();
-            true
-        },
+        run: || crate::smep_smap::self_test().is_ok(),
         category: "security",
         severity: Severity::Diagnostic,
     });
     suites.push(TestSuite {
         name: "spectre",
         description: "Spectre/Meltdown mitigations (IBRS/STIBP/SSBD/IBPB)",
-        run: || {
-            crate::spectre::self_test();
-            true
-        },
+        run: || crate::spectre::self_test().is_ok(),
         category: "security",
         severity: Severity::Diagnostic,
     });
@@ -574,10 +559,7 @@ fn all_suites() -> Vec<TestSuite> {
     suites.push(TestSuite {
         name: "hrtimer",
         description: "High-resolution timers (nanosecond scheduling, HPET-backed)",
-        run: || {
-            crate::hrtimer::self_test();
-            true
-        },
+        run: || crate::hrtimer::self_test().is_ok(),
         category: "kernel",
         severity: Severity::Diagnostic,
     });

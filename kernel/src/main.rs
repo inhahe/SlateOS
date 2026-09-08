@@ -1096,19 +1096,28 @@ extern "C" fn kernel_main() -> ! {
             cap::audit::self_test();
 
             // Step 17a¾: Capability groups self-test.
-            if let Err(e) = cap::groups::self_test() {
-                serial_println!("[WARN] Capability groups self-test failed: {:?}", e);
-            }
+            // §914: Integrity — capability system is a kernel structural invariant.
+            selftest::dispatch_debug(
+                "cap groups",
+                selftest::Severity::Integrity,
+                cap::groups::self_test(),
+            );
 
             // Step 17a⅞: File capability tags self-test.
-            if let Err(e) = cap::file_tags::self_test() {
-                serial_println!("[WARN] File capability tags self-test failed: {:?}", e);
-            }
+            // §914: Integrity — capability system is a kernel structural invariant.
+            selftest::dispatch_debug(
+                "cap file_tags",
+                selftest::Severity::Integrity,
+                cap::file_tags::self_test(),
+            );
 
             // Step 17a⅞+: Capability request broker self-test.
-            if let Err(e) = cap::request::self_test() {
-                serial_println!("[WARN] Capability request broker self-test failed: {:?}", e);
-            }
+            // §914: Integrity — capability system is a kernel structural invariant.
+            selftest::dispatch_debug(
+                "cap request",
+                selftest::Severity::Integrity,
+                cap::request::self_test(),
+            );
 
             // Step 17b: Initialize structured logging subsystem.
             // JSON-lines log entries go to serial and a kernel ring buffer.
@@ -1188,9 +1197,12 @@ extern "C" fn kernel_main() -> ! {
             unsafe {
                 hpet::init();
             }
-            if let Err(e) = hpet::self_test() {
-                serial_println!("[hpet] WARNING: Self-test failed: {:?}", e);
-            }
+            // §914: Diagnostic — optional hardware timer, system works with PIT/TSC.
+            selftest::dispatch_debug(
+                "HPET",
+                selftest::Severity::Diagnostic,
+                hpet::self_test(),
+            );
 
             // Capture the real boot timestamp now that HPET is running, so the
             // `sysuptime` command reports uptime since actual boot rather than since
@@ -1266,9 +1278,12 @@ extern "C" fn kernel_main() -> ! {
             // Step 20c: Scan PCI bus for device discovery.
             // This finds virtio, USB, NVMe, and other PCI devices.
             console::boot_step(console::BootStatus::Running, "PCI & device drivers");
-            if let Err(e) = pci::self_test() {
-                serial_println!("WARNING: PCI scan failed: {}", e);
-            }
+            // §914: Diagnostic — PCI bus scan is optional hardware.
+            selftest::dispatch(
+                "PCI",
+                selftest::Severity::Diagnostic,
+                pci::self_test(),
+            );
 
             // Step 20d: virtio-net probe is done first (it doesn't need the
             // blkdev registry).  virtio-blk devices are discovered in the
@@ -6705,10 +6720,12 @@ extern "C" fn kernel_main() -> ! {
         mouse::init();
     }
 
-    if let Err(e) = mouse::self_test() {
-        serial_println!("[mouse] Self-test failed: {} (non-fatal)", e);
-        // Non-fatal: system can boot without a mouse.
-    }
+    // §914: Diagnostic — optional hardware, system works without a mouse.
+    selftest::dispatch(
+        "Mouse",
+        selftest::Severity::Diagnostic,
+        mouse::self_test(),
+    );
 
     // Step 21b: Bootstrap Application Processors (SMP).
     // Discovers APs via ACPI MADT, copies the real-mode trampoline to
@@ -6954,28 +6971,40 @@ extern "C" fn kernel_main() -> ! {
     // corrupt TCP, UDP, ICMP, ICMPv6 and the IPv4 header check at once.
     // Verified at boot rather than only under `cargo test`, because the
     // kernel's #[cfg(test)] modules never execute on the target.
-    if let Err(e) = net::checksum::self_test() {
-        serial_println!("[WARN] Checksum self-test failed: {:?}", e);
-    }
+    // §914: Diagnostic — network stack, optional hardware.
+    selftest::dispatch_debug(
+        "net checksum",
+        selftest::Severity::Diagnostic,
+        net::checksum::self_test(),
+    );
 
     // Step 22e⅞++++n2: TCP server (bind/listen/accept) self-test.
     // Validates listener lifecycle without needing network hardware.
-    if let Err(e) = net::tcp::self_test() {
-        serial_println!("[WARN] TCP self-test failed: {:?}", e);
-    }
+    // §914: Diagnostic — network stack, optional hardware.
+    selftest::dispatch_debug(
+        "TCP",
+        selftest::Severity::Diagnostic,
+        net::tcp::self_test(),
+    );
 
     // Step 22e⅞++++n3: Firewall self-test.
     // Stateful packet filtering with rules and connection tracking.
-    if let Err(e) = net::firewall::self_test() {
-        serial_println!("[WARN] Firewall self-test failed: {:?}", e);
-    }
+    // §914: Diagnostic — network stack, optional hardware.
+    selftest::dispatch_debug(
+        "firewall",
+        selftest::Severity::Diagnostic,
+        net::firewall::self_test(),
+    );
 
     // Step 22e⅞++++n4: Network stack per-module self-tests.
     // Exercises protocol parsing/building for ethernet, IPv4, ICMP, ARP,
     // UDP, DNS, DHCP, fragmentation, and interface modules.
-    if let Err(e) = net::self_test() {
-        serial_println!("[WARN] Network self-test failed: {:?}", e);
-    }
+    // §914: Diagnostic — network stack, optional hardware.
+    selftest::dispatch_debug(
+        "net",
+        selftest::Severity::Diagnostic,
+        net::self_test(),
+    );
 
     // Step 22e⅞++++o: Kernel object tracking self-test.
     // Lifecycle counters for all kernel object types.
@@ -7021,9 +7050,12 @@ extern "C" fn kernel_main() -> ! {
 
     // Verify the root-namespace routing table feeds resolve_next_hop (the
     // SYS_NET_ROUTE_ADD path). Runs here because it needs netns::init().
-    if let Err(e) = net::ipv4::root_route_next_hop_self_test() {
-        serial_println!("[WARN] IPv4 root route next-hop self-test failed: {:?}", e);
-    }
+    // §914: Diagnostic — network routing, optional hardware.
+    selftest::dispatch_debug(
+        "IPv4 route",
+        selftest::Severity::Diagnostic,
+        net::ipv4::root_route_next_hop_self_test(),
+    );
 
     // Step 22e⅞++++p8b: Virtual Ethernet (veth) pairs init + self-test.
     // Connected virtual links between namespaces — frame sent on one
@@ -7031,9 +7063,12 @@ extern "C" fn kernel_main() -> ! {
     // networking isolation (per-namespace ARP, independent routing).
     // Runs after netns::init() because veth tests create child namespaces.
     net::veth::init();
-    if let Err(e) = net::veth::self_test() {
-        serial_println!("[WARN] Veth self-test failed: {:?}", e);
-    }
+    // §914: Diagnostic — virtual networking, optional.
+    selftest::dispatch_debug(
+        "veth",
+        selftest::Severity::Diagnostic,
+        net::veth::self_test(),
+    );
 
     // Step 22e⅞++++p8b′: Simulated 802.11 radios (hwsim) init + self-test.
     // A shared virtual medium that several stations attach to: a frame
@@ -7045,9 +7080,12 @@ extern "C" fn kernel_main() -> ! {
     // this reason and which Linux keeps permanently for regression testing.
     // Heap only, no hardware, so it runs anywhere the kernel boots.
     net::hwsim::init();
-    if let Err(e) = net::hwsim::self_test() {
-        serial_println!("[WARN] hwsim self-test failed: {:?}", e);
-    }
+    // §914: Diagnostic — simulated wireless, optional hardware.
+    selftest::dispatch_debug(
+        "hwsim",
+        selftest::Severity::Diagnostic,
+        net::hwsim::self_test(),
+    );
     // The other end of that medium: a simulated WPA2-PSK access point, so that
     // lane C's `net80211::assoc::Association` -- the station half of a join --
     // can be *run* rather than only unit-tested.  Without an AP it sits in
@@ -7058,26 +7096,38 @@ extern "C" fn kernel_main() -> ! {
     // the key schedule; it does NOT prove confidentiality, because hwsim does
     // not encrypt.  See net::hwsim_ap's module docs and design-decisions.md
     // section 677.
-    if let Err(e) = net::hwsim_ap::self_test() {
-        serial_println!("[WARN] hwsim association self-test failed: {:?}", e);
-    }
+    // §914: Diagnostic — simulated wireless AP, optional hardware.
+    selftest::dispatch_debug(
+        "hwsim AP",
+        selftest::Severity::Diagnostic,
+        net::hwsim_ap::self_test(),
+    );
 
     // Step 22e⅞++++p8c: Per-namespace ARP cache self-test.
     // Isolated MAC resolution per namespace — requires netns::init().
-    if let Err(e) = net::arp::ns_self_test() {
-        serial_println!("[WARN] Per-namespace ARP self-test failed: {:?}", e);
-    }
+    // §914: Diagnostic — network stack, optional hardware.
+    selftest::dispatch_debug(
+        "ARP ns",
+        selftest::Severity::Diagnostic,
+        net::arp::ns_self_test(),
+    );
 
     // Step 22e⅞++++p8d: NAT/masquerade self-test.
     // Source NAT for container traffic traversing namespace boundaries.
-    if let Err(e) = net::nat::self_test() {
-        serial_println!("[WARN] NAT self-test failed: {:?}", e);
-    }
+    // §914: Diagnostic — network stack, optional hardware.
+    selftest::dispatch_debug(
+        "NAT",
+        selftest::Severity::Diagnostic,
+        net::nat::self_test(),
+    );
 
     // SSH server self-test (binary packet protocol, encryption, key derivation).
-    if let Err(e) = net::ssh::self_test() {
-        serial_println!("[WARN] SSH self-test failed: {:?}", e);
-    }
+    // §914: Diagnostic — network service, optional.
+    selftest::dispatch_debug(
+        "SSH",
+        selftest::Severity::Diagnostic,
+        net::ssh::self_test(),
+    );
 
     // Raw-NIC claim self-test: unclaimed reads clean, a non-owner's release is
     // a no-op, and a claim held by a dead process self-heals.
@@ -7087,9 +7137,12 @@ extern "C" fn kernel_main() -> ! {
     // kernel` builds nothing (known-issues.md A-KERNEL-UNIT-TESTS-NEVER-RUN).
     // Runs here, before userspace exists, so no real claim can be outstanding —
     // the test checks that anyway and skips rather than disturbing a live one.
-    if let Err(e) = net::raw::self_test() {
-        serial_println!("[WARN] Raw-NIC claim self-test failed: {:?}", e);
-    }
+    // §914: Diagnostic — network stack, optional hardware.
+    selftest::dispatch_debug(
+        "raw NIC",
+        selftest::Severity::Diagnostic,
+        net::raw::self_test(),
+    );
 
     {
         #[inline(never)]
@@ -7112,15 +7165,21 @@ extern "C" fn kernel_main() -> ! {
 
     // Step 22e⅞++++p10a: JSON parser self-test.
     // Minimal recursive-descent JSON parser for OCI image manifests.
-    if let Err(e) = json::self_test() {
-        serial_println!("[WARN] JSON self-test failed: {:?}", e);
-    }
+    // §914: Diagnostic — parser utility, not structural kernel integrity.
+    selftest::dispatch_debug(
+        "JSON",
+        selftest::Severity::Diagnostic,
+        json::self_test(),
+    );
 
     // Step 22e⅞++++p10b: OCI image format parser self-test.
     // Parses OCI image index, manifest, config, and verifies digests.
-    if let Err(e) = oci::self_test() {
-        serial_println!("[WARN] OCI self-test failed: {:?}", e);
-    }
+    // §914: Diagnostic — container image format, not structural kernel integrity.
+    selftest::dispatch_debug(
+        "OCI",
+        selftest::Severity::Diagnostic,
+        oci::self_test(),
+    );
 
     // Step 22e⅞++++p10: Syscall filter (seccomp-equivalent) init + self-test.
     // Per-process bitmap-based syscall allow/deny lists for container
@@ -7192,15 +7251,21 @@ extern "C" fn kernel_main() -> ! {
 
     // Step 22e⅞+++++d: IOMMU detection self-test.
     // Verifies API consistency (available ↔ vendor ↔ unit_count).
-    if let Err(e) = iommu::self_test() {
-        serial_println!("[WARN] IOMMU self-test failed: {:?}", e);
-    }
+    // §914: Integrity — IOMMU is a security boundary for DMA isolation.
+    selftest::dispatch_debug(
+        "IOMMU",
+        selftest::Severity::Integrity,
+        iommu::self_test(),
+    );
 
     // Step 22e⅞+++++d½: IOMMU DMA remapping self-test.
     // Tests page table manipulation (domain create/map/unmap/destroy).
-    if let Err(e) = iommu_remap::self_test() {
-        serial_println!("[WARN] IOMMU remap self-test failed: {:?}", e);
-    }
+    // §914: Integrity — DMA remapping is a security boundary.
+    selftest::dispatch_debug(
+        "IOMMU remap",
+        selftest::Severity::Integrity,
+        iommu_remap::self_test(),
+    );
 
     // AHCI/SATA driver self-test.
     ahci::self_test();
@@ -7220,14 +7285,20 @@ extern "C" fn kernel_main() -> ! {
     // Virtio-net self-test.  Sited with the other two NICs rather than among
     // the virtio devices below, because all three now transmit a frame and
     // their datapath results are worth reading as one block.
-    if let Err(e) = virtio::net::self_test() {
-        serial_println!("[virtio-net] Self-test failed: {e:?} (non-fatal)");
-    }
+    // §914: Diagnostic — optional network hardware.
+    selftest::dispatch_debug(
+        "virtio-net",
+        selftest::Severity::Diagnostic,
+        virtio::net::self_test(),
+    );
 
     // Intel HD Audio self-test.
-    if let Err(e) = hda::self_test() {
-        serial_println!("[hda] Self-test failed: {:?} (non-fatal)", e);
-    }
+    // §914: Diagnostic — optional audio hardware.
+    selftest::dispatch_debug(
+        "HDA",
+        selftest::Severity::Diagnostic,
+        hda::self_test(),
+    );
 
     // PC speaker self-test.
     pcspk::self_test();
@@ -7282,14 +7353,20 @@ extern "C" fn kernel_main() -> ! {
     audio_history::self_test();
 
     // Framebuffer graphics self-test.
-    if let Err(e) = fb::self_test() {
-        serial_println!("[fb] Self-test failed: {} (non-fatal)", e);
-    }
+    // §914: Diagnostic — optional display hardware.
+    selftest::dispatch(
+        "Framebuffer",
+        selftest::Severity::Diagnostic,
+        fb::self_test(),
+    );
 
     // DRM/KMS subsystem self-test.
-    if let Err(e) = drm::self_test() {
-        serial_println!("[drm] Self-test failed: {:?} (non-fatal)", e);
-    }
+    // §914: Diagnostic — optional display hardware.
+    selftest::dispatch_debug(
+        "DRM",
+        selftest::Severity::Diagnostic,
+        drm::self_test(),
+    );
 
     // DRM Linux-uAPI ABI self-test (Linux graphics-compat foundation).
     selftest::dispatch(

@@ -338,6 +338,53 @@ Main text is mostly fine. Secondary text passes *only* on the bare page, at
 4.64 — because that is the one place it was ever checked when it was chosen.
 Put it on any card and it fails.
 
+### Correction, 2026-09-07 — the table is missing an ink, and option A is flatter than stated
+
+Two measured findings, both of which change the choice. Ratios recomputed
+independently here; the three numbers above are confirmed exactly.
+
+**1. There is a fourth text ink, and it fails too.** The table's "secondary
+text" is `LIGHT_SUBTEXT0` (`#686B80`). The palette has a *second* grey below
+main text, `LIGHT_SUBTEXT1` (`#5C5F77`) — and `gui/appearance`'s own struct
+documents that one, not the other, as "Secondary text: the second line of a
+list row, a caption, a hint". It draws text in **58 places** and was never
+measured. On the page it is fine (5.53); on the greyest card it is **2.89**,
+which fails exactly like the others.
+
+So option A is **four constants, not three**. Darkening `LIGHT_SUBTEXT1`
+until it clears 4.5 on the greyest card puts it at about `#414354`.
+
+**2. Option A makes the three inks the same colour.** The cost column says the
+hierarchy goes "a little flatter". Measured, it goes completely flat:
+
+| separation between two inks | today | under option A |
+|---|---|---|
+| main text vs secondary text | 1.52 | **1.00** |
+| main text vs the accent blue | 1.53 | **1.00** |
+
+1.00 means *identical luminance*. Body text, captions and links would all
+weigh the same; a link would stop looking like a link to anyone reading by
+brightness, which is precisely the reader option A is meant to help — hue is
+the channel colour-blind vision cannot use, and it would be the only channel
+left. Everything is squeezed into the narrow band the greyest card allows:
+that card gives only 9.71:1 even against pure black, so any ink clearing 4.5
+on it must be nearly black, and four nearly-black inks are one ink.
+
+**What this does to the options.** It is an argument against A as drawn, not
+against fixing the problem. Worth considering instead:
+
+- **A′ — darken the greys, but not the accent.** Keeps the accent readable as
+  a *different* thing by leaving it lighter, and accepts that the accent needs
+  the card restriction (C) rather than a colour change. Splits the problem by
+  ink instead of solving it with one hammer.
+- **A+C — darken the greys, and stop putting text on the two greyest cards.**
+  The greyest card is what forces near-black. Remove that constraint and the
+  inks have room to stay distinct while still passing on the cards that remain.
+
+**If you would rather not decide:** my earlier note said I would take A. I
+withdraw that. A as measured trades one accessibility defect for another, and
+I would not ship it without you seeing these numbers.
+
 ### The options
 
 | | *What changes* | Cost |

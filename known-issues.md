@@ -123889,3 +123889,85 @@ viewer invents, and there is no service yet.
 **Not blocking.** Printing works; it just always prints everything. Nothing
 regressed here — this is a gap that was invisible until the parser moved out
 and left an unused import pointing straight at it.
+
+---
+
+## TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING
+
+**Date:** 2026-09-07. **Lane:** C.
+**Where:** `gui/desktop/src/a11y.rs` — `StickyKeys` (317), `FilterKeys` (467),
+`MouseKeys` (545); `gui/desktop/src/accessibility_settings.rs`;
+`apps/settings/src/main.rs`.
+
+**In short:** Sticky keys, filter keys (slow/bounce keys) and mouse keys are
+fully written and thoroughly tested, and none of them is connected to the
+keyboard. A user who turns sticky keys on gets nothing — no error, and the
+toggle stays on. These are the accessibility features people *depend* on to
+use a computer at all, not preferences, and all three are inert.
+
+**The evidence, from the uniquely-named methods** (the ones that cannot be
+confused with a same-named method on another type — `is_active` and
+`is_locked` are useless for this because dozens of unrelated types have them):
+
+| method | owner | production callers | calls from its own tests |
+|---|---|---|---|
+| `on_modifier_press` | `StickyKeys` | **none** | 9 |
+| `on_key_press` | `StickyKeys` | **none** | 2 |
+| `should_accept` | `FilterKeys` | **none** | 8 |
+| `move_delta` | `MouseKeys` | **none** | 9 |
+
+`FilterKeys::new()` is constructed only inside the test module. The logic is
+real — `should_accept` implements both the slow-keys hold threshold and the
+bounce-keys repeat window — and nothing ever asks it.
+
+**There are three parallel models of the same settings, and none of them meet.**
+
+1. `a11y.rs` — the *implementations* above.
+2. `a11y.rs` — `AccessibilityConfig`'s flat fields (`sticky_keys_enabled`,
+   `slow_keys_ms`, `bounce_keys_ms`, `mouse_keys_enabled`, `mouse_keys_speed`,
+   `filter_keys_enabled`). These are **parsed and serialized and read by
+   nothing else**: their only non-test appearances in the whole tree are the
+   two lines that write them to the config file and the two that read them
+   back.
+3. `accessibility_settings.rs` — `StickyKeysConfig`, `FilterKeysConfig`,
+   `MouseKeysConfig`, plus an `A11yFeature` enum; and `apps/settings` has a
+   third set again under `ToggleId`. `accessibility_settings.rs` does not
+   import `a11y` at all.
+
+So a toggle in Settings writes model 3, the config file round-trips model 2,
+and the code that would actually change key handling is model 1, which nobody
+constructs.
+
+**A field-by-field census of `AccessibilityConfig`** (18 fields): 8 reach
+something — `high_contrast`, `color_filter`, `reduced_motion`, `magnifier`,
+`cursor`, `screen_reader`, `text_scale`, `visual_alerts`. 10 do not:
+`sticky_keys_enabled`, `sticky_keys_sound`, `sticky_keys_double_lock`,
+`filter_keys_enabled`, `slow_keys_ms`, `bounce_keys_ms`, `mouse_keys_enabled`,
+`mouse_keys_speed`, `caret_width`, `focus_indicator`. Of those, three
+(`sticky_keys_sound`, `sticky_keys_double_lock`, `focus_indicator`) are not
+even in the serializer — they are read and written by no code whatsoever.
+
+**How you would notice.** Settings → Accessibility → turn on Sticky Keys.
+Press and release Shift, then press A. You get `a`, not `A`. Same for Slow
+Keys (no hold delay is enforced) and Mouse Keys (the numeric keypad does not
+move the pointer).
+
+**The proper fix**, and it is a design decision, not a patch: pick *one* model
+and delete the other two. The natural shape is that `AccessibilityConfig` is
+the persisted truth, the Settings pages edit it, and the compositor owns live
+`StickyKeys`/`FilterKeys`/`MouseKeys` instances rebuilt from it whenever it
+changes — with the key-event path consulting them before dispatch. That last
+part is the piece that does not exist anywhere: there is currently no hook in
+the input path at all, which is why nothing could have been wired even if the
+models agreed.
+
+**Why this is not fixed here.** The keyboard event path is the compositor's,
+the fix spans three files that each hold a competing model, and choosing which
+model survives is exactly the "band-aid accumulation — stop and redesign"
+case in `CLAUDE.md`. It wants its own task, not a corner of a print-format
+change. Logged now because it was found while checking a *different* stale
+"what remains" claim, and an undocumented bug is an invisible one.
+
+**How it was found.** §816 ended "What remains is that no Settings control
+sets it yet", which was stale — the high-contrast control does exist. Checking
+whether the *other* accessibility settings were wired turned up this instead.

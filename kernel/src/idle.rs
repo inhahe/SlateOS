@@ -330,7 +330,8 @@ fn idle_hlt() {
 // ---------------------------------------------------------------------------
 
 /// Run idle subsystem self-test.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use crate::selftest;
     crate::serial_println!("[idle] Running self-test...");
 
     let has_mwait = cpu::features().is_some_and(|f| f.mwait);
@@ -339,11 +340,11 @@ pub fn self_test() {
     // Test 1: signal/clear/pending cycle.
     let cpu = smp::current_cpu_index();
     clear_resched();
-    assert!(!resched_pending(), "should not be pending after clear");
+    selftest::check!(!resched_pending(), "should not be pending after clear");
     signal_resched(cpu);
-    assert!(resched_pending(), "should be pending after signal");
+    selftest::check!(resched_pending(), "should be pending after signal");
     clear_resched();
-    assert!(
+    selftest::check!(
         !resched_pending(),
         "should not be pending after second clear"
     );
@@ -353,7 +354,7 @@ pub fn self_test() {
     let before = stats().total_entries;
     idle_once();
     let after = stats().total_entries;
-    assert!(after > before, "idle_once should increment entry counter");
+    selftest::check!(after > before, "idle_once should increment entry counter");
     crate::serial_println!("[idle]   idle_once increments stats: OK");
 
     // Test 3: If MWAIT available, verify MWAIT entries counter.
@@ -364,9 +365,10 @@ pub fn self_test() {
         idle_once();
         clear_resched();
         let mw_after = stats().mwait_entries;
-        assert!(mw_after > mw_before, "MWAIT entry should be counted");
+        selftest::check!(mw_after > mw_before, "MWAIT entry should be counted");
         crate::serial_println!("[idle]   MWAIT idle path: OK");
     }
 
     crate::serial_println!("[idle] Self-test PASSED");
+    Ok(())
 }

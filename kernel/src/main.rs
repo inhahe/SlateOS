@@ -7195,7 +7195,8 @@ extern "C" fn kernel_main() -> ! {
 
     // Step 22e⅞++++y: Hypervisor detection self-test.
     // Verifies CPUID-based VM detection and signature matching.
-    hypervisor::self_test();
+    // §914: Diagnostic — informational VM detection, not structural integrity.
+    selftest::dispatch_debug("hypervisor", selftest::Severity::Diagnostic, hypervisor::self_test());
 
     // Step 22e⅞++++z: Scheduler fairness measurement self-test.
     // Computes Jain's Fairness Index for CPU time distribution.
@@ -7257,7 +7258,8 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug("HDA", selftest::Severity::Diagnostic, hda::self_test());
 
     // PC speaker self-test.
-    pcspk::self_test();
+    // §914: Diagnostic — optional audio hardware.
+    selftest::dispatch_debug("PC speaker", selftest::Severity::Diagnostic, pcspk::self_test());
 
     // Virtio-sound self-test.
     virtio::sound::self_test();
@@ -7410,16 +7412,19 @@ extern "C" fn kernel_main() -> ! {
     // Must be after SMP bootstrap so cpu_count() is accurate.
     // Monitors per-CPU heartbeats and warns if any CPU stops responding.
     watchdog::init();
-    watchdog::self_test();
+    // §914: Diagnostic — monitoring infrastructure, not structural integrity.
+    selftest::dispatch_debug("watchdog", selftest::Severity::Diagnostic, watchdog::self_test());
 
     // Step 22f1.5: Initialize MWAIT-based idle (power-efficient CPU sleep).
     idle::init();
-    idle::self_test();
+    // §914: Diagnostic — power optimization, not structural integrity.
+    selftest::dispatch_debug("idle", selftest::Severity::Diagnostic, idle::self_test());
 
     // Step 22f2: Stack backtrace self-test.
     // Verifies frame pointer chain walking works (requires -C force-frame-pointers=yes).
     // Gracefully skips if frame pointers are missing (e.g., optimized-out in release).
-    backtrace::self_test();
+    // §914: Diagnostic — debugging aid, not structural integrity.
+    selftest::dispatch_debug("backtrace", selftest::Severity::Diagnostic, backtrace::self_test());
 
     // Step 22f3: lockdep is initialized far earlier -- see the block just
     // before Step 21. It used to live here, after SMP init, on the stated

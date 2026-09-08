@@ -30,6 +30,7 @@
 
 #![allow(clippy::too_many_arguments)]
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -48,21 +49,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // ============================================================================
 // Catppuccin Mocha palette
 // ============================================================================
-
-const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
-const COLOR_MANTLE: Color = Color::from_hex(0x181825);
-const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
-const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
-const COLOR_SURFACE2: Color = Color::from_hex(0x585B70);
-const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COLOR_SUBTEXT: Color = Color::from_hex(0xA6ADC8);
-const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
-const COLOR_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COLOR_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COLOR_RED: Color = Color::from_hex(0xF38BA8);
-const COLOR_PEACH: Color = Color::from_hex(0xFAB387);
-const COLOR_MAUVE: Color = Color::from_hex(0xCBA6F7);
-const COLOR_TEAL: Color = Color::from_hex(0x94E2D5);
 
 // ============================================================================
 // Layout constants
@@ -1834,11 +1820,18 @@ pub struct SchedulerUI {
     /// and the tab switch resets it -- a fraction earned while scrolling the
     /// task list has no business delivering a row in the history.
     wheel: wheel::Accumulator,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl SchedulerUI {
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             tab: UiTab::Tasks,
             dialog: UiDialog::None,
             scheduler: TaskScheduler::new(),
@@ -2210,7 +2203,7 @@ impl SchedulerUI {
             y: 0.0,
             width: layout.window.w,
             height: layout.window.h,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -2273,7 +2266,7 @@ impl SchedulerUI {
             y: band.y,
             width,
             height: band.h,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii {
                 top_left: CORNER_RADIUS,
                 top_right: CORNER_RADIUS,
@@ -2290,7 +2283,7 @@ impl SchedulerUI {
                 x,
                 y,
                 text: String::from("Task Scheduler"),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE_HEADING,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(w),
@@ -2315,7 +2308,7 @@ impl SchedulerUI {
                 x,
                 y,
                 text: count_text,
-                color: COLOR_SUBTEXT,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w),
@@ -2332,7 +2325,7 @@ impl SchedulerUI {
             y: band.y,
             width: band.w,
             height: band.h,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2364,7 +2357,7 @@ impl SchedulerUI {
             if selected.is_some() {
                 on
             } else {
-                COLOR_SURFACE2
+                self.palette.surface2
             }
         };
         let gate = |t: Target| selected.map(|_| t);
@@ -2379,13 +2372,13 @@ impl SchedulerUI {
         };
 
         let buttons = [
-            button(Some(Target::Add), "Add", COLOR_GREEN),
-            button(gate(Target::Edit), "Edit", enabled_bg(COLOR_BLUE)),
-            button(gate(Target::Remove), "Remove", enabled_bg(COLOR_RED)),
+            button(Some(Target::Add), "Add", self.palette.green),
+            button(gate(Target::Edit), "Edit", enabled_bg(self.palette.blue)),
+            button(gate(Target::Remove), "Remove", enabled_bg(self.palette.red)),
             button(
                 gate(Target::ToggleEnabled),
                 toggle_label,
-                enabled_bg(COLOR_PEACH),
+                enabled_bg(self.palette.peach),
             ),
         ];
         for (target, label, bg, rect) in buttons {
@@ -2401,7 +2394,7 @@ impl SchedulerUI {
             y: band.y,
             width: band.w,
             height: band.h,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2413,7 +2406,7 @@ impl SchedulerUI {
                 y1: sep_y,
                 x2: band.w,
                 y2: sep_y,
-                color: COLOR_SURFACE1,
+                color: self.palette.surface1,
                 width: sep_h,
             });
         }
@@ -2430,7 +2423,11 @@ impl SchedulerUI {
                     x: tx,
                     y,
                     text: label.to_string(),
-                    color: if selected { COLOR_BLUE } else { COLOR_SUBTEXT },
+                    color: if selected {
+                        self.palette.blue
+                    } else {
+                        self.palette.subtext0
+                    },
                     font_size: FONT_SIZE,
                     font_weight: if selected {
                         FontWeightHint::Bold
@@ -2449,7 +2446,7 @@ impl SchedulerUI {
                     y: uy,
                     width: uw,
                     height: uh,
-                    color: COLOR_BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::all(1.5),
                 });
             }
@@ -2479,7 +2476,7 @@ impl SchedulerUI {
             y: head.y,
             width: head.w,
             height: head.h,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2501,7 +2498,7 @@ impl SchedulerUI {
                     x,
                     w: 140.0,
                     size: FONT_SIZE_SMALL,
-                    color: COLOR_SUBTEXT,
+                    color: self.palette.subtext0,
                     weight: FontWeightHint::Bold,
                 },
                 label.to_string(),
@@ -2539,7 +2536,7 @@ impl SchedulerUI {
             let Some(row) = Rect::new(area.x, row_y, area.w, ROW_HEIGHT).intersect(area) else {
                 continue;
             };
-            Self::draw_task_row(frame, row, task, i % 2 == 0, is_selected);
+            Self::draw_task_row(frame, &self.palette, row, task, i % 2 == 0, is_selected);
         }
 
         // A list hiding tasks says how many. The band is the line's own box,
@@ -2562,7 +2559,7 @@ impl SchedulerUI {
                     x: PADDING,
                     w: width - PADDING * 2.0,
                     size: FONT_SIZE_SMALL,
-                    color: COLOR_SUBTEXT,
+                    color: self.palette.subtext0,
                     weight: FontWeightHint::Regular,
                 },
                 format!("{hidden} more"),
@@ -2581,7 +2578,7 @@ impl SchedulerUI {
                     x: width / 2.0 - 80.0,
                     w: 200.0,
                     size: FONT_SIZE,
-                    color: COLOR_SUBTEXT,
+                    color: self.palette.subtext0,
                     weight: FontWeightHint::Regular,
                 },
                 String::from("No tasks scheduled"),
@@ -2600,6 +2597,7 @@ impl SchedulerUI {
     /// lets the suite hand it a three-point one.
     fn draw_task_row(
         frame: &mut Frame,
+        pal: &Palette,
         row: Rect,
         task: &ScheduledTask,
         even: bool,
@@ -2614,11 +2612,11 @@ impl SchedulerUI {
 
         // Row background.
         let row_bg = if selected {
-            COLOR_SURFACE1
+            pal.surface1
         } else if even {
-            COLOR_BASE
+            pal.base
         } else {
-            COLOR_SURFACE0
+            pal.surface0
         };
         frame.push(RenderCommand::FillRect {
             x: row.x,
@@ -2664,7 +2662,7 @@ impl SchedulerUI {
                 y: cb.y,
                 width: cb.w,
                 height: cb.h,
-                color: COLOR_SUBTEXT,
+                color: pal.subtext0,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(3.0),
             });
@@ -2677,26 +2675,22 @@ impl SchedulerUI {
                     y: tick.y,
                     width: tick.w,
                     height: tick.h,
-                    color: COLOR_GREEN,
+                    color: pal.green,
                     corner_radii: CornerRadii::all(2.0),
                 });
             }
         }
 
-        let name_color = if task.enabled {
-            COLOR_TEXT
-        } else {
-            COLOR_SUBTEXT
-        };
+        let name_color = if task.enabled { pal.text } else { pal.subtext0 };
         let next_run_text = if task.next_run_timestamp == u64::MAX {
             String::from("--")
         } else {
             format_timestamp(task.next_run_timestamp)
         };
         let result_color = match &task.last_result {
-            None => COLOR_SUBTEXT,
-            Some(TaskResult::Ok) => COLOR_GREEN,
-            Some(TaskResult::Error(_)) => COLOR_RED,
+            None => pal.subtext0,
+            Some(TaskResult::Ok) => pal.green,
+            Some(TaskResult::Error(_)) => pal.red,
         };
         for (run, text) in [
             (
@@ -2714,7 +2708,7 @@ impl SchedulerUI {
                     x: COL_TASK_COMMAND_X,
                     w: 215.0,
                     size: FONT_SIZE,
-                    color: COLOR_SUBTEXT,
+                    color: pal.subtext0,
                     weight: FontWeightHint::Regular,
                 },
                 task.command.clone(),
@@ -2724,7 +2718,7 @@ impl SchedulerUI {
                     x: COL_TASK_FREQ_X,
                     w: 135.0,
                     size: FONT_SIZE_SMALL,
-                    color: COLOR_MAUVE,
+                    color: pal.mauve,
                     weight: FontWeightHint::Regular,
                 },
                 task.frequency.display_name(),
@@ -2734,7 +2728,7 @@ impl SchedulerUI {
                     x: COL_TASK_NEXT_X,
                     w: 135.0,
                     size: FONT_SIZE_SMALL,
-                    color: COLOR_TEAL,
+                    color: pal.teal,
                     weight: FontWeightHint::Regular,
                 },
                 next_run_text,
@@ -2773,7 +2767,7 @@ impl SchedulerUI {
             y: head.y,
             width: head.w,
             height: head.h,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2791,7 +2785,7 @@ impl SchedulerUI {
                     x,
                     w: 180.0,
                     size: FONT_SIZE_SMALL,
-                    color: COLOR_SUBTEXT,
+                    color: self.palette.subtext0,
                     weight: FontWeightHint::Bold,
                 },
                 label.to_string(),
@@ -2824,7 +2818,7 @@ impl SchedulerUI {
             let Some(row) = Rect::new(area.x, row_y, area.w, ROW_HEIGHT).intersect(area) else {
                 continue;
             };
-            Self::draw_history_row(frame, row, entry, i % 2 == 0);
+            Self::draw_history_row(frame, &self.palette, row, entry, i % 2 == 0);
         }
 
         // A list hiding entries says how many.
@@ -2845,7 +2839,7 @@ impl SchedulerUI {
                     x: PADDING,
                     w: width - PADDING * 2.0,
                     size: FONT_SIZE_SMALL,
-                    color: COLOR_SUBTEXT,
+                    color: self.palette.subtext0,
                     weight: FontWeightHint::Regular,
                 },
                 format!("{hidden} more"),
@@ -2864,7 +2858,7 @@ impl SchedulerUI {
                     x: width / 2.0 - 60.0,
                     w: 200.0,
                     size: FONT_SIZE,
-                    color: COLOR_SUBTEXT,
+                    color: self.palette.subtext0,
                     weight: FontWeightHint::Regular,
                 },
                 String::from("No history yet"),
@@ -2877,12 +2871,18 @@ impl SchedulerUI {
     /// A function of its row for the same reason as [`Self::draw_task_row`]:
     /// the list only ever hands out whole rows, so a bound that lives here can
     /// only be tested by a caller that hands it a partial one.
-    fn draw_history_row(frame: &mut Frame, row: Rect, entry: &TaskHistoryEntry, even: bool) {
+    fn draw_history_row(
+        frame: &mut Frame,
+        pal: &Palette,
+        row: Rect,
+        entry: &TaskHistoryEntry,
+        even: bool,
+    ) {
         // See `Self::draw_task_row`.
         if row.is_empty() {
             return;
         }
-        let row_bg = if even { COLOR_BASE } else { COLOR_SURFACE0 };
+        let row_bg = if even { pal.base } else { pal.surface0 };
         frame.push(RenderCommand::FillRect {
             x: row.x,
             y: row.y,
@@ -2893,9 +2893,9 @@ impl SchedulerUI {
         });
 
         let (status_text, status_color) = if entry.success {
-            ("OK", COLOR_GREEN)
+            ("OK", pal.green)
         } else {
-            ("Failed", COLOR_RED)
+            ("Failed", pal.red)
         };
         for (run, text) in [
             (
@@ -2903,7 +2903,7 @@ impl SchedulerUI {
                     x: COL_RUN_TIME_X,
                     w: 165.0,
                     size: FONT_SIZE_SMALL,
-                    color: COLOR_TEAL,
+                    color: pal.teal,
                     weight: FontWeightHint::Regular,
                 },
                 format_timestamp(entry.timestamp),
@@ -2913,7 +2913,7 @@ impl SchedulerUI {
                     x: COL_RUN_NAME_X,
                     w: 195.0,
                     size: FONT_SIZE,
-                    color: COLOR_TEXT,
+                    color: pal.text,
                     weight: FontWeightHint::Regular,
                 },
                 entry.task_name.clone(),
@@ -2933,7 +2933,7 @@ impl SchedulerUI {
                     x: COL_RUN_DURATION_X,
                     w: 115.0,
                     size: FONT_SIZE_SMALL,
-                    color: COLOR_SUBTEXT,
+                    color: pal.subtext0,
                     weight: FontWeightHint::Regular,
                 },
                 format_duration_ms(entry.duration_ms),
@@ -2950,7 +2950,7 @@ impl SchedulerUI {
                     x: COL_RUN_ERROR_X,
                     w: 195.0,
                     size: FONT_SIZE_SMALL,
-                    color: COLOR_RED,
+                    color: pal.red,
                     weight: FontWeightHint::Regular,
                 },
                 err.clone(),
@@ -2993,7 +2993,7 @@ impl SchedulerUI {
             y,
             width,
             height: bar_h,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii {
                 top_left: 0.0,
                 top_right: 0.0,
@@ -3009,7 +3009,7 @@ impl SchedulerUI {
                 x: PADDING,
                 w: width - PADDING * 2.0,
                 size: FONT_SIZE_SMALL,
-                color: COLOR_YELLOW,
+                color: self.palette.yellow,
                 weight: FontWeightHint::Regular,
             },
             message.to_string(),
@@ -3051,7 +3051,7 @@ impl SchedulerUI {
             y: dialog.y,
             width: dialog.w,
             height: dialog.h,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -3060,7 +3060,7 @@ impl SchedulerUI {
             y: dialog.y,
             width: dialog.w,
             height: dialog.h,
-            color: COLOR_SURFACE2,
+            color: self.palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -3077,7 +3077,7 @@ impl SchedulerUI {
                     x: dialog.x + PADDING,
                     w: dialog.w - PADDING * 2.0,
                     size: FONT_SIZE_HEADING,
-                    color: COLOR_TEXT,
+                    color: self.palette.text,
                     weight: FontWeightHint::Bold,
                 },
                 title.to_string(),
@@ -3113,7 +3113,7 @@ impl SchedulerUI {
                         x: label_x,
                         w: 100.0,
                         size: FONT_SIZE,
-                        color: COLOR_SUBTEXT,
+                        color: self.palette.subtext0,
                         weight: FontWeightHint::Regular,
                     },
                     text.to_string(),
@@ -3202,7 +3202,7 @@ impl SchedulerUI {
                 y: cb.y,
                 width: cb.w,
                 height: cb.h,
-                color: COLOR_SUBTEXT,
+                color: self.palette.subtext0,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(3.0),
             });
@@ -3220,7 +3220,7 @@ impl SchedulerUI {
                     y: tick.y,
                     width: tick.w,
                     height: tick.h,
-                    color: COLOR_GREEN,
+                    color: self.palette.green,
                     corner_radii: CornerRadii::all(2.0),
                 });
             }
@@ -3257,9 +3257,9 @@ impl SchedulerUI {
             cut(Rect::new(save_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT)),
             "Save",
             if can_save {
-                COLOR_GREEN
+                self.palette.green
             } else {
-                COLOR_SURFACE2
+                self.palette.surface2
             },
         );
         self.render_button(
@@ -3267,7 +3267,7 @@ impl SchedulerUI {
             Some(Target::DialogCancel),
             cut(Rect::new(cancel_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT)),
             "Cancel",
-            COLOR_SURFACE2,
+            self.palette.surface2,
         );
     }
 
@@ -3298,7 +3298,7 @@ impl SchedulerUI {
             y: dialog.y,
             width: dialog.w,
             height: dialog.h,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -3307,7 +3307,7 @@ impl SchedulerUI {
             y: dialog.y,
             width: dialog.w,
             height: dialog.h,
-            color: COLOR_SURFACE2,
+            color: self.palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -3321,14 +3321,14 @@ impl SchedulerUI {
             (
                 PADDING,
                 FONT_SIZE_HEADING,
-                COLOR_TEXT,
+                self.palette.text,
                 FontWeightHint::Bold,
                 String::from("Confirm Delete"),
             ),
             (
                 52.0,
                 FONT_SIZE,
-                COLOR_SUBTEXT,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
                 format!("Delete task '{task_name}'? This cannot be undone."),
             ),
@@ -3358,14 +3358,14 @@ impl SchedulerUI {
             Some(Target::DeleteConfirm),
             cut(Rect::new(delete_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT)),
             "Delete",
-            COLOR_RED,
+            self.palette.red,
         );
         self.render_button(
             frame,
             Some(Target::DialogCancel),
             cut(Rect::new(cancel_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT)),
             "Cancel",
-            COLOR_SURFACE2,
+            self.palette.surface2,
         );
     }
 
@@ -3391,7 +3391,7 @@ impl SchedulerUI {
             y: rect.y,
             width: rect.w,
             height: rect.h,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(4.0),
         });
         frame.push(RenderCommand::StrokeRect {
@@ -3399,7 +3399,11 @@ impl SchedulerUI {
             y: rect.y,
             width: rect.w,
             height: rect.h,
-            color: if focused { COLOR_BLUE } else { COLOR_SURFACE2 },
+            color: if focused {
+                self.palette.blue
+            } else {
+                self.palette.surface2
+            },
             line_width: if focused { 2.0 } else { 1.0 },
             corner_radii: CornerRadii::all(4.0),
         });
@@ -3411,7 +3415,7 @@ impl SchedulerUI {
                 x,
                 y,
                 text: value.to_string(),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w),
@@ -3441,7 +3445,7 @@ impl SchedulerUI {
                 y,
                 width: 1.5,
                 height: FONT_SIZE,
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -3461,7 +3465,7 @@ impl SchedulerUI {
             y: rect.y,
             width: rect.w,
             height: rect.h,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
         frame.push(RenderCommand::StrokeRect {
@@ -3469,7 +3473,7 @@ impl SchedulerUI {
             y: rect.y,
             width: rect.w,
             height: rect.h,
-            color: COLOR_SURFACE2,
+            color: self.palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -3483,7 +3487,7 @@ impl SchedulerUI {
                 x,
                 y,
                 text: value.to_string(),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w),
@@ -3496,7 +3500,7 @@ impl SchedulerUI {
                 x,
                 y,
                 text: String::from("\u{25be}"),
-                color: COLOR_SUBTEXT,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w),
@@ -3548,7 +3552,7 @@ impl SchedulerUI {
                 x,
                 y,
                 text: label.to_string(),
-                color: COLOR_BASE,
+                color: self.palette.base,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(w),
@@ -3944,6 +3948,10 @@ fn handle_event(ui: &mut SchedulerUI, event: &Event) -> EventResult {
 }
 
 impl App for SchedulerUI {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Task Scheduler")
     }
@@ -6122,16 +6130,16 @@ mod tests {
                     u.render_picker(f, Target::FrequencyCycle, r, "Every N minutes");
                 }),
                 ("button", |u, f, r| {
-                    u.render_button(f, Some(Target::DialogSave), r, "Save", COLOR_GREEN);
+                    u.render_button(f, Some(Target::DialogSave), r, "Save", u.palette.green);
                 }),
                 ("task row", |u, f, r| {
                     if let Some(task) = u.scheduler.list_tasks().first() {
-                        SchedulerUI::draw_task_row(f, r, task, true, true);
+                        SchedulerUI::draw_task_row(f, &u.palette, r, task, true, true);
                     }
                 }),
                 ("history row", |u, f, r| {
                     if let Some(entry) = u.scheduler.history.recent(1).first() {
-                        SchedulerUI::draw_history_row(f, r, entry, false);
+                        SchedulerUI::draw_history_row(f, &u.palette, r, entry, false);
                     }
                 }),
             ];
@@ -6199,5 +6207,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut SchedulerUI) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = SchedulerUI::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

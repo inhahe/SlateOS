@@ -124421,9 +124421,25 @@ which makes step 1 below larger than one dependency line.
   `qrcode`, `notes`, `rssreader`, `spreadsheet`, `paint`, `defrag`, `netscan`,
   `photomanager`, `renamer`, `mediaconvert`, `radio`, `flashcards`, `calendar`
   `finance`, `slides`, `worldclock`, `camera`, `compass`, `diskanalyzer`,
-  `jsonviewer`, `logviewer`, `passwordgen`, `podcast` and `regextester`. Each
-  has a test on the rectangles it emits, and each was mutation-checked by
-  making `theme_changed` ignore its argument.
+  `jsonviewer`, `logviewer`, `passwordgen`, `podcast`, `regextester`,
+  `stickynotes` and `taskscheduler`. Each has a test on the rectangles it
+  emits, and each was mutation-checked by making `theme_changed` ignore its
+  argument.
+
+**Content that only *looks* like chrome, a third time.** `stickynotes`'
+`note_palette` reads two constants — but only as the fallback for an
+out-of-range note colour, and a note's colour is the swatch the user picked,
+not chrome. It keeps fixed colours, like `paint`'s swatches and
+`whiteboard`'s default ink. The tell each time was the same: the constant is
+read somewhere that has no window in scope (a `Default` impl, a lookup table,
+a fallback arm), which is a hint that it is describing *content* rather than
+the surface the content sits on.
+
+**Closures rebind the window.** A call-site rewrite to `&self.palette` is
+wrong inside `|u, f, r|`, where the window is `u` — three sites in
+`taskscheduler`'s test helpers. The compiler names them, but it is worth
+knowing that "the window is always `self`" fails in closures as well as in
+other types' methods.
 
 **The one conversion bug that a test would not have caught.** A script that
 gives `#[test]` functions a local palette matched a *production* function too

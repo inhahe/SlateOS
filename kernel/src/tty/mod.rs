@@ -1197,12 +1197,7 @@ pub fn try_read(id: TtyId, out: &mut [u8]) -> ConsoleRead {
 /// Non-blocking canonical read: feed any immediately-available characters
 /// into the line editor.  If a complete line results, deliver it; otherwise
 /// return `WouldBlock`.
-fn canonical_try_read(
-    id: TtyId,
-    backend: Backend,
-    t: &Termios,
-    out: &mut [u8],
-) -> ConsoleRead {
+fn canonical_try_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> ConsoleRead {
     loop {
         let raw = match backend_try_read_char(id, backend) {
             Input::Byte(b) => b,
@@ -1228,12 +1223,7 @@ fn canonical_try_read(
 }
 
 /// Non-blocking raw read: pure poll regardless of `VMIN`/`VTIME`.
-fn raw_try_read(
-    id: TtyId,
-    backend: Backend,
-    t: &Termios,
-    out: &mut [u8],
-) -> ConsoleRead {
+fn raw_try_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> ConsoleRead {
     let cap = out.len();
     if cap == 0 {
         return ConsoleRead::Data(0);

@@ -6079,17 +6079,11 @@ fn pty_slave_read_common(args: &SyscallArgs, non_blocking: bool) -> SyscallResul
                 Err(e) => SyscallResult::err(e),
             }
         }
-        crate::tty::ConsoleRead::Signal(sig) => {
-            deliver_console_signal(tty, sig)
-        }
+        crate::tty::ConsoleRead::Signal(sig) => deliver_console_signal(tty, sig),
         crate::tty::ConsoleRead::Interrupted => {
-            super::linux::restart::restart_result(
-                super::linux::restart::ERESTARTSYS,
-            )
+            super::linux::restart::restart_result(super::linux::restart::ERESTARTSYS)
         }
-        crate::tty::ConsoleRead::WouldBlock => {
-            SyscallResult::err(KernelError::WouldBlock)
-        }
+        crate::tty::ConsoleRead::WouldBlock => SyscallResult::err(KernelError::WouldBlock),
     }
 }
 

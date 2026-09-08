@@ -99,11 +99,7 @@ pub fn dispatch<E: core::fmt::Display>(name: &str, severity: Severity, result: R
 /// Like [`dispatch`] but formats the error with `Debug` (`{:?}`) instead of
 /// `Display`.  Many subsystem self-tests return error types that derive
 /// `Debug` but do not implement `Display` — this variant covers those.
-pub fn dispatch_debug<E: core::fmt::Debug>(
-    name: &str,
-    severity: Severity,
-    result: Result<(), E>,
-) {
+pub fn dispatch_debug<E: core::fmt::Debug>(name: &str, severity: Severity, result: Result<(), E>) {
     if let Err(e) = result {
         match severity {
             Severity::Integrity => {

@@ -2398,7 +2398,7 @@ mod tests {
         let (x, y, width) = (2usize, 1usize, 4usize);
         let at = (y * width + x) * 4;
         assert_eq!(
-            &bytes[at..at + 4],
+            &bytes.as_slice()[at..at + 4],
             &[0x40, 1, 2, 0xFF],
             "b, g, r, a in memory order — the picture was not decoded"
         );

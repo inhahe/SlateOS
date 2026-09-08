@@ -38,6 +38,7 @@
 //! sidebar rows that clicked to nothing; see `known-issues.md` ->
 //! `C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY`.
 
+use appearance::Palette;
 use std::process::ExitCode;
 
 use guitk::color::Color;
@@ -65,29 +66,10 @@ use std::collections::BTreeMap;
 // Catppuccin Mocha palette
 // ============================================================================
 
-const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
-const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
-const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
 // Part of the complete Catppuccin Mocha palette, kept whole even though no
 // widget currently paints with these three: a named palette with a hole in it is
 // not the palette it is named after, and the next widget to want one would
 // otherwise re-derive the hex by hand.
-#[allow(dead_code, reason = "the palette is kept complete")]
-const COLOR_SURFACE2: Color = Color::from_hex(0x585B70);
-const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COLOR_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COLOR_SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const COLOR_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const COLOR_MANTLE: Color = Color::from_hex(0x181825);
-const COLOR_CRUST: Color = Color::from_hex(0x11111B);
-const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
-const COLOR_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COLOR_RED: Color = Color::from_hex(0xF38BA8);
-const COLOR_YELLOW: Color = Color::from_hex(0xF9E2AF);
-#[allow(dead_code, reason = "the palette is kept complete")]
-const COLOR_PEACH: Color = Color::from_hex(0xFAB387);
-#[allow(dead_code, reason = "the palette is kept complete")]
-const COLOR_LAVENDER: Color = Color::from_hex(0xB4BEFE);
 
 // ============================================================================
 // Layout constants
@@ -367,14 +349,14 @@ pub enum BlockState {
 
 impl BlockState {
     /// Color for this block state in the visualization.
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Free => COLOR_SURFACE0,
-            Self::Contiguous => COLOR_GREEN,
-            Self::Fragmented => COLOR_RED,
-            Self::System => COLOR_BLUE,
-            Self::Moving => COLOR_YELLOW,
-            Self::Reserved => COLOR_OVERLAY0,
+            Self::Free => pal.surface0,
+            Self::Contiguous => pal.green,
+            Self::Fragmented => pal.red,
+            Self::System => pal.blue,
+            Self::Moving => pal.yellow,
+            Self::Reserved => pal.overlay0,
         }
     }
 
@@ -1495,6 +1477,12 @@ pub struct DefragUI {
     /// button is *absent* rather than present-and-dead. See `known-issues.md`
     /// -> `C-DEFRAG-HAS-NO-WAY-TO-SCAN-A-DRIVE`.
     pub scan: Option<ScanFn>,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 /// Reads a drive's block layout and per-file fragmentation.
@@ -1514,6 +1502,7 @@ impl DefragUI {
     /// Create a new UI with default state.
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             drives: Vec::new(),
             selected_drive: 0,
             view_tab: ViewTab::DiskMap,
@@ -1951,6 +1940,10 @@ fn handle_event(ui: &mut DefragUI, event: &Event) -> EventResult {
 }
 
 impl App for DefragUI {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Disk Defragmenter".to_string()
     }
@@ -2033,7 +2026,7 @@ impl DefragUI {
             y: 0.0,
             width: layout.window.w,
             height: layout.window.h,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2095,7 +2088,7 @@ impl DefragUI {
             y: 0.0,
             width: bar.w,
             height: bar.h,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2109,7 +2102,7 @@ impl DefragUI {
             x: PADDING,
             y: 14.0,
             text: "Disk Defragmenter".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
@@ -2125,14 +2118,14 @@ impl DefragUI {
             let btn_w = mode_button_width(label);
             btn_x -= btn_w + 4.0;
             let bg_color = if self.optimization_mode == *mode {
-                COLOR_BLUE
+                self.palette.blue
             } else {
-                COLOR_SURFACE0
+                self.palette.surface0
             };
             let text_color = if self.optimization_mode == *mode {
-                COLOR_CRUST
+                self.palette.crust
             } else {
-                COLOR_SUBTEXT0
+                self.palette.subtext0
             };
             frame.hit(
                 Target::Mode(*mode),
@@ -2165,23 +2158,23 @@ impl DefragUI {
             DefragState::Idle | DefragState::Completed | DefragState::Error => {
                 if self.analysis.is_some() {
                     action_label = "Defragment";
-                    action_color = COLOR_GREEN;
+                    action_color = self.palette.green;
                 } else {
                     action_label = "Analyze";
-                    action_color = COLOR_BLUE;
+                    action_color = self.palette.blue;
                 }
             }
             DefragState::Analyzing => {
                 action_label = "Analyzing...";
-                action_color = COLOR_OVERLAY0;
+                action_color = self.palette.overlay0;
             }
             DefragState::Running => {
                 action_label = "Pause";
-                action_color = COLOR_YELLOW;
+                action_color = self.palette.yellow;
             }
             DefragState::Paused => {
                 action_label = "Resume";
-                action_color = COLOR_GREEN;
+                action_color = self.palette.green;
             }
         }
 
@@ -2206,7 +2199,7 @@ impl DefragUI {
             color: if available {
                 action_color
             } else {
-                COLOR_SURFACE0
+                self.palette.surface0
             },
             corner_radii: CornerRadii::all(4.0),
         });
@@ -2214,7 +2207,7 @@ impl DefragUI {
             x: action_x + 10.0,
             y: 16.0,
             text: action_label.to_string(),
-            color: COLOR_CRUST,
+            color: self.palette.crust,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(action_w - 20.0),
@@ -2235,7 +2228,7 @@ impl DefragUI {
             y: sidebar_y,
             width: layout.sidebar.w,
             height: layout.sidebar.h,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2249,7 +2242,7 @@ impl DefragUI {
             x: PADDING,
             y: sidebar_y + PADDING,
             text: "Drives".to_string(),
-            color: COLOR_SUBTEXT1,
+            color: self.palette.subtext1,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 2.0 * PADDING),
@@ -2261,9 +2254,9 @@ impl DefragUI {
         for (i, drive) in self.drives.iter().enumerate() {
             let is_selected = i == self.selected_drive;
             let row_color = if is_selected {
-                COLOR_SURFACE0
+                self.palette.surface0
             } else {
-                COLOR_MANTLE
+                self.palette.mantle
             };
             let row_h = 64.0;
 
@@ -2292,9 +2285,9 @@ impl DefragUI {
                 y: dy + 6.0,
                 text: drive.label.clone(),
                 color: if is_selected {
-                    COLOR_TEXT
+                    self.palette.text
                 } else {
-                    COLOR_SUBTEXT0
+                    self.palette.subtext0
                 },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
@@ -2312,7 +2305,7 @@ impl DefragUI {
                     drive.storage_type.label(),
                     drive.mount_point,
                 ),
-                color: COLOR_OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 2.0 * PADDING - 8.0),
@@ -2329,17 +2322,17 @@ impl DefragUI {
                 y: bar_y,
                 width: bar_w,
                 height: bar_h,
-                color: COLOR_SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::all(4.0),
             });
             // Used portion
             let used_w = bar_w * (drive.used_percent() / 100.0);
             let bar_color = if drive.used_percent() > 90.0 {
-                COLOR_RED
+                self.palette.red
             } else if drive.used_percent() > 70.0 {
-                COLOR_YELLOW
+                self.palette.yellow
             } else {
-                COLOR_BLUE
+                self.palette.blue
             };
             if used_w > 0.5 {
                 frame.push(RenderCommand::FillRect {
@@ -2361,7 +2354,7 @@ impl DefragUI {
                     format_size(drive.used_bytes),
                     format_size(drive.total_bytes),
                 ),
-                color: COLOR_OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bar_w),
@@ -2381,14 +2374,19 @@ impl DefragUI {
                 y: dy,
                 width: SIDEBAR_WIDTH - 8.0,
                 height: 28.0,
-                color: Color::rgba(COLOR_YELLOW.r, COLOR_YELLOW.g, COLOR_YELLOW.b, 40),
+                color: Color::rgba(
+                    self.palette.yellow.r,
+                    self.palette.yellow.g,
+                    self.palette.yellow.b,
+                    40,
+                ),
                 corner_radii: CornerRadii::all(4.0),
             });
             frame.push(RenderCommand::Text {
                 x: PADDING + 4.0,
                 y: dy + 7.0,
                 text: "SSD - TRIM recommended".to_string(),
-                color: COLOR_YELLOW,
+                color: self.palette.yellow,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(SIDEBAR_WIDTH - 2.0 * PADDING - 8.0),
@@ -2410,7 +2408,7 @@ impl DefragUI {
             y: strip.y,
             width: strip.w,
             height: strip.h,
-            color: COLOR_CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2432,7 +2430,7 @@ impl DefragUI {
                     y: tabs_y,
                     width: tab_w,
                     height: TAB_HEIGHT,
-                    color: COLOR_BASE,
+                    color: self.palette.base,
                     corner_radii: CornerRadii::ZERO,
                 });
                 // Bottom accent
@@ -2441,7 +2439,7 @@ impl DefragUI {
                     y: tabs_y + TAB_HEIGHT - 2.0,
                     width: tab_w,
                     height: 2.0,
-                    color: COLOR_BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -2451,9 +2449,9 @@ impl DefragUI {
                 y: tabs_y + 10.0,
                 text: label.to_string(),
                 color: if is_active {
-                    COLOR_TEXT
+                    self.palette.text
                 } else {
-                    COLOR_OVERLAY0
+                    self.palette.overlay0
                 },
                 font_size: FONT_SIZE,
                 font_weight: if is_active {
@@ -2499,7 +2497,7 @@ impl DefragUI {
                 y: map_y,
                 width: map_w,
                 height: map_h,
-                color: COLOR_CRUST,
+                color: self.palette.crust,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -2534,7 +2532,7 @@ impl DefragUI {
                         y: by,
                         width: BLOCK_SIZE,
                         height: BLOCK_SIZE,
-                        color: state.color(),
+                        color: state.color(&self.palette),
                         corner_radii: CornerRadii::ZERO,
                     });
 
@@ -2566,7 +2564,7 @@ impl DefragUI {
                     y: legend_y + 8.0,
                     width: 12.0,
                     height: 12.0,
-                    color: state.color(),
+                    color: state.color(&self.palette),
                     corner_radii: CornerRadii::all(2.0),
                 });
                 // Label
@@ -2574,7 +2572,7 @@ impl DefragUI {
                     x: lx + 16.0,
                     y: legend_y + 8.0,
                     text: label.to_string(),
-                    color: COLOR_SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -2596,7 +2594,7 @@ impl DefragUI {
                 ),
                 y: y + h / 2.0,
                 text: "Click Analyze to scan the drive".to_string(),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_HEADING,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2628,7 +2626,7 @@ impl DefragUI {
             y,
             width: 280.0,
             height: 120.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -2658,7 +2656,7 @@ impl DefragUI {
                 x: x + 10.0,
                 y: ly,
                 text: label.to_string(),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
@@ -2668,7 +2666,7 @@ impl DefragUI {
                 x: x + 140.0,
                 y: ly,
                 text: value.clone(),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(130.0),
@@ -2693,7 +2691,7 @@ impl DefragUI {
             y,
             width: w,
             height: PROGRESS_BAR_HEIGHT,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -2701,11 +2699,11 @@ impl DefragUI {
         let fill_w = w * progress.fraction();
         if fill_w > 0.5 {
             let fill_color = match progress.state {
-                DefragState::Running => COLOR_BLUE,
-                DefragState::Paused => COLOR_YELLOW,
-                DefragState::Completed => COLOR_GREEN,
-                DefragState::Error => COLOR_RED,
-                _ => COLOR_BLUE,
+                DefragState::Running => self.palette.blue,
+                DefragState::Paused => self.palette.yellow,
+                DefragState::Completed => self.palette.green,
+                DefragState::Error => self.palette.red,
+                _ => self.palette.blue,
             };
             frame.push(RenderCommand::FillRect {
                 x,
@@ -2723,7 +2721,7 @@ impl DefragUI {
             x: text::center_x(&percent, x + w / 2.0, FONT_SIZE_SMALL, FontWeightHint::Bold),
             y: y + 3.0,
             text: percent,
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2753,7 +2751,7 @@ impl DefragUI {
                 x,
                 y: y + PROGRESS_BAR_HEIGHT + 4.0,
                 text: status,
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w),
@@ -2778,7 +2776,7 @@ impl DefragUI {
                 ),
                 y: y + h / 2.0,
                 text: "Analyze a drive to see file details".to_string(),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_HEADING,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2794,13 +2792,13 @@ impl DefragUI {
             y: header_y,
             width: w,
             height: ROW_HEIGHT,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
         let columns = file_list_columns(w);
         let table = Table::with_gap(&columns, x, PADDING);
-        frame.draw_with(|c| table.header(c, header_y + 6.0, COLOR_TEXT, FONT_SIZE));
+        frame.draw_with(|c| table.header(c, header_y + 6.0, self.palette.text, FONT_SIZE));
 
         // Each header is a sort control. Its box comes from the same `Table`
         // that drew the label, via `column_x`, rather than from a second sum
@@ -2858,18 +2856,18 @@ impl DefragUI {
                     y: ry,
                     width: w,
                     height: ROW_HEIGHT,
-                    color: COLOR_SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
 
             // Excluded indicator
             let path_color = if is_excluded(&file.path, &self.excludes) {
-                COLOR_OVERLAY0
+                self.palette.overlay0
             } else if file.is_fragmented() {
-                COLOR_RED
+                self.palette.red
             } else {
-                COLOR_TEXT
+                self.palette.text
             };
 
             // A path is cut at the *front*. This list is sorted by
@@ -2895,7 +2893,7 @@ impl DefragUI {
                     FILE_SIZE,
                     ry + 6.0,
                     &format_size(file.size_bytes),
-                    COLOR_SUBTEXT0,
+                    self.palette.subtext0,
                     FONT_SIZE,
                     Fit::Start,
                 );
@@ -2903,11 +2901,11 @@ impl DefragUI {
 
             // Fragment count
             let frag_color = if file.fragment_count > 10 {
-                COLOR_RED
+                self.palette.red
             } else if file.fragment_count > 3 {
-                COLOR_YELLOW
+                self.palette.yellow
             } else {
-                COLOR_SUBTEXT0
+                self.palette.subtext0
             };
             frame.draw_with(|c| {
                 table.cell(
@@ -2924,11 +2922,11 @@ impl DefragUI {
             // Severity
             let severity = file.severity();
             let sev_color = if severity > 10.0 {
-                COLOR_RED
+                self.palette.red
             } else if severity > 3.0 {
-                COLOR_YELLOW
+                self.palette.yellow
             } else {
-                COLOR_GREEN
+                self.palette.green
             };
             frame.draw_with(|c| {
                 table.cell(
@@ -2952,7 +2950,7 @@ impl DefragUI {
                 x: x + PADDING,
                 y: row_area_y + window.count as f32 * ROW_HEIGHT + 2.0,
                 text: format!("{hidden} more"),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 2.0 * PADDING),
@@ -2993,7 +2991,7 @@ impl DefragUI {
                 y: card_y,
                 width: card_w,
                 height: 200.0,
-                color: COLOR_SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
 
@@ -3001,7 +2999,7 @@ impl DefragUI {
                 x: card_x + PADDING,
                 y: card_y + PADDING,
                 text: "Live Statistics".to_string(),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE_HEADING,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -3031,7 +3029,7 @@ impl DefragUI {
                     x: card_x + PADDING,
                     y: ly,
                     text: label.to_string(),
-                    color: COLOR_SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(200.0),
@@ -3041,7 +3039,7 @@ impl DefragUI {
                     x: card_x + 220.0,
                     y: ly,
                     text: value.clone(),
-                    color: COLOR_TEXT,
+                    color: self.palette.text,
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(card_w - 240.0),
@@ -3060,7 +3058,7 @@ impl DefragUI {
                 ),
                 y: y + h / 2.0,
                 text: "No statistics yet".to_string(),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_HEADING,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3080,7 +3078,7 @@ impl DefragUI {
             y: card_y,
             width: card_w,
             height: 260.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -3088,7 +3086,7 @@ impl DefragUI {
             x: card_x + PADDING,
             y: card_y + PADDING,
             text: "Defragmentation Results".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3105,7 +3103,7 @@ impl DefragUI {
             x: card_x + PADDING,
             y: before_y + 2.0,
             text: "Before:".to_string(),
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(150.0),
@@ -3116,7 +3114,7 @@ impl DefragUI {
             y: before_y,
             width: bar_max_w,
             height: 18.0,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(3.0),
         });
         let before_w = bar_max_w * (stats.before_fragmentation / 100.0).min(1.0);
@@ -3126,7 +3124,7 @@ impl DefragUI {
                 y: before_y,
                 width: before_w,
                 height: 18.0,
-                color: COLOR_RED,
+                color: self.palette.red,
                 corner_radii: CornerRadii::all(3.0),
             });
         }
@@ -3134,7 +3132,7 @@ impl DefragUI {
             x: bar_x + bar_max_w + 8.0,
             y: before_y + 2.0,
             text: format_percent(stats.before_fragmentation),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3147,7 +3145,7 @@ impl DefragUI {
             x: card_x + PADDING,
             y: after_y + 2.0,
             text: "After:".to_string(),
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(150.0),
@@ -3158,7 +3156,7 @@ impl DefragUI {
             y: after_y,
             width: bar_max_w,
             height: 18.0,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(3.0),
         });
         let after_w = bar_max_w * (stats.after_fragmentation / 100.0).min(1.0);
@@ -3168,7 +3166,7 @@ impl DefragUI {
                 y: after_y,
                 width: after_w,
                 height: 18.0,
-                color: COLOR_GREEN,
+                color: self.palette.green,
                 corner_radii: CornerRadii::all(3.0),
             });
         }
@@ -3176,7 +3174,7 @@ impl DefragUI {
             x: bar_x + bar_max_w + 8.0,
             y: after_y + 2.0,
             text: format_percent(stats.after_fragmentation),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3204,7 +3202,7 @@ impl DefragUI {
                 x: card_x + PADDING,
                 y: ly,
                 text: label.to_string(),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(160.0),
@@ -3214,7 +3212,7 @@ impl DefragUI {
                 x: card_x + 180.0,
                 y: ly,
                 text: value.clone(),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(card_w - 200.0),
@@ -3236,7 +3234,7 @@ impl DefragUI {
             y: card_y,
             width: card_w,
             height: 220.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -3244,7 +3242,7 @@ impl DefragUI {
             x: card_x + PADDING,
             y: card_y + PADDING,
             text: "Defrag Schedule".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3254,9 +3252,9 @@ impl DefragUI {
         // Enabled toggle
         let toggle_y = card_y + 40.0;
         let toggle_color = if self.schedule.enabled {
-            COLOR_GREEN
+            self.palette.green
         } else {
-            COLOR_SURFACE1
+            self.palette.surface1
         };
         // The label is inside the target as well as the switch. A 44x22 switch
         // is a small thing to hit, and "Enabled" next to it reads as part of
@@ -3285,7 +3283,7 @@ impl DefragUI {
             y: toggle_y + 2.0,
             width: 18.0,
             height: 18.0,
-            color: COLOR_TEXT,
+            color: self.palette.text,
             corner_radii: CornerRadii::all(9.0),
         });
         frame.push(RenderCommand::Text {
@@ -3297,7 +3295,7 @@ impl DefragUI {
                 "Disabled"
             }
             .to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -3323,7 +3321,7 @@ impl DefragUI {
                 x: card_x + PADDING,
                 y: ly,
                 text: label.to_string(),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
@@ -3333,7 +3331,7 @@ impl DefragUI {
                 x: card_x + 120.0,
                 y: ly,
                 text: value.clone(),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(card_w - 140.0),
@@ -3350,7 +3348,7 @@ impl DefragUI {
             y: excl_y,
             width: card_w,
             height: 40.0 + self.excludes.len() as f32 * 24.0 + editor_h,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -3358,7 +3356,7 @@ impl DefragUI {
             x: card_x + PADDING,
             y: excl_y + PADDING,
             text: "Exclude Patterns".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3379,9 +3377,9 @@ impl DefragUI {
             width: add_w,
             height: 22.0,
             color: if self.show_exclude_editor {
-                COLOR_BLUE
+                self.palette.blue
             } else {
-                COLOR_SURFACE1
+                self.palette.surface1
             },
             corner_radii: CornerRadii::all(4.0),
         });
@@ -3390,9 +3388,9 @@ impl DefragUI {
             y: excl_y + 10.0,
             text: "+ Add".to_string(),
             color: if self.show_exclude_editor {
-                COLOR_CRUST
+                self.palette.crust
             } else {
-                COLOR_TEXT
+                self.palette.text
             },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
@@ -3409,9 +3407,9 @@ impl DefragUI {
         for (i, excl) in self.excludes.iter().enumerate() {
             let ey = excl_y + 34.0 + i as f32 * 24.0;
             let text_color = if excl.enabled {
-                COLOR_TEXT
+                self.palette.text
             } else {
-                COLOR_OVERLAY0
+                self.palette.overlay0
             };
 
             // The whole row toggles; the `x` deletes. Recorded in that order,
@@ -3429,9 +3427,9 @@ impl DefragUI {
                 width: 14.0,
                 height: 14.0,
                 color: if excl.enabled {
-                    COLOR_GREEN
+                    self.palette.green
                 } else {
-                    COLOR_SURFACE1
+                    self.palette.surface1
                 },
                 corner_radii: CornerRadii::all(2.0),
             });
@@ -3455,7 +3453,7 @@ impl DefragUI {
                 x: remove_x + 6.0,
                 y: ey + 2.0,
                 text: "x".to_string(),
-                color: COLOR_RED,
+                color: self.palette.red,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(remove_w),
@@ -3475,7 +3473,7 @@ impl DefragUI {
                 y: ey,
                 width: field_w,
                 height: 22.0,
-                color: COLOR_CRUST,
+                color: self.palette.crust,
                 corner_radii: CornerRadii::all(4.0),
             });
             // A caret, so an empty field does not look like a dead box: this
@@ -3490,9 +3488,9 @@ impl DefragUI {
                     format!("{}|", self.exclude_input)
                 },
                 color: if self.exclude_input.is_empty() {
-                    COLOR_OVERLAY0
+                    self.palette.overlay0
                 } else {
-                    COLOR_TEXT
+                    self.palette.text
                 },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -3544,7 +3542,7 @@ impl DefragUI {
             y: dy,
             width: dw,
             height: dh,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -3553,7 +3551,7 @@ impl DefragUI {
             x: dx + PADDING,
             y: dy + PADDING,
             text: "SSD Detected".to_string(),
-            color: COLOR_YELLOW,
+            color: self.palette.yellow,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dw - 2.0 * PADDING),
@@ -3565,7 +3563,7 @@ impl DefragUI {
             x: dx + PADDING,
             y: dy + 40.0,
             text: "Defragmentation is not recommended for SSDs.".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - 2.0 * PADDING),
@@ -3575,7 +3573,7 @@ impl DefragUI {
             x: dx + PADDING,
             y: dy + 58.0,
             text: "It can reduce SSD lifespan without performance benefit.".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - 2.0 * PADDING),
@@ -3585,7 +3583,7 @@ impl DefragUI {
             x: dx + PADDING,
             y: dy + 76.0,
             text: "Consider using TRIM instead.".to_string(),
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dw - 2.0 * PADDING),
@@ -3612,14 +3610,14 @@ impl DefragUI {
             y: dy + dh - BUTTON_HEIGHT - PADDING,
             width: BUTTON_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
         frame.push(RenderCommand::Text {
             x: cancel_x + 28.0,
             y: dy + dh - BUTTON_HEIGHT - PADDING + 8.0,
             text: "Cancel".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(BUTTON_WIDTH - 10.0),
@@ -3632,14 +3630,14 @@ impl DefragUI {
             y: dy + dh - BUTTON_HEIGHT - PADDING,
             width: BUTTON_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_RED,
+            color: self.palette.red,
             corner_radii: CornerRadii::all(4.0),
         });
         frame.push(RenderCommand::Text {
             x: proceed_x + 18.0,
             y: dy + dh - BUTTON_HEIGHT - PADDING + 8.0,
             text: "Proceed".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(BUTTON_WIDTH - 10.0),
@@ -3659,7 +3657,7 @@ impl DefragUI {
             y,
             width: bar.w,
             height: bar.h,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         frame.clip(bar);
@@ -3680,7 +3678,7 @@ impl DefragUI {
             x: PADDING,
             y: y + 7.0,
             text: left_text,
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bar.w / 2.0),
@@ -3710,7 +3708,7 @@ impl DefragUI {
             x: (bar.w - 250.0).max(PADDING),
             y: y + 7.0,
             text: right_text,
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(240.0),
@@ -5763,6 +5761,7 @@ mod tests {
 
     #[test]
     fn test_block_state_colors() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         // Each state should have a distinct color
         let states = [
             BlockState::Free,
@@ -5773,7 +5772,7 @@ mod tests {
             BlockState::Reserved,
         ];
         for state in &states {
-            let _color = state.color(); // Should not panic
+            let _color = state.color(&pal); // Should not panic
         }
     }
 
@@ -6097,5 +6096,64 @@ mod tests {
         assert_eq!(ScheduleInterval::Daily.label(), "Daily");
         assert_eq!(ScheduleInterval::Weekly.label(), "Weekly");
         assert_eq!(ScheduleInterval::Monthly.label(), "Monthly");
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut DefragUI) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = DefragUI::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

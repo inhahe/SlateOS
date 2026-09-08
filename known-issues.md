@@ -124416,11 +124416,18 @@ which makes step 1 below larger than one dependency line.
   new defaulted `App::theme_changed` — before the first frame, and again on
   every change. `design-decisions.md` §822 records why it is a trait method
   and not an `Event`.
-- **Step 2: 14 done.** `calculator`, `diskcleanup`, `charmap`, `clipmanager`,
+- **Step 2: 19 done.** `calculator`, `diskcleanup`, `charmap`, `clipmanager`,
   `fileassoc`, `startupmanager`, `magnifier`, `systemrestore`, `videoplayer`,
-  `qrcode`, `notes`, `rssreader`, `spreadsheet` and `paint`. Each has a test on
-  the rectangles it emits, and each was mutation-checked by making
+  `qrcode`, `notes`, `rssreader`, `spreadsheet`, `paint`, `defrag`, `netscan`,
+  `photomanager`, `renamer` and `mediaconvert`. Each has a test on the
+  rectangles it emits, and each was mutation-checked by making
   `theme_changed` ignore its argument.
+
+**The single-helper case is now scripted too.** Every application that needs
+one function threaded needs the *same* one: a `color()` method on a domain
+enum (`BlockState`, `PortState`, `JobStatus`, `RenameOp`, `ColorLabel`). One
+script handles signature, body and call sites; only the calls inside `#[test]`
+functions need a hand, and the compiler names them.
 
 **The "129" in this entry's own table was wrong, and the real number is
 smaller.** That figure counted crates containing a hardcoded colour, which is

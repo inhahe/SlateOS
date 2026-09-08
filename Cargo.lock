@@ -3772,6 +3772,7 @@ dependencies = [
 name = "defrag"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -10366,6 +10367,7 @@ dependencies = [
 name = "mediaconvert"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -11528,6 +11530,7 @@ dependencies = [
 name = "netscan"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -13240,6 +13243,7 @@ dependencies = [
 name = "photomanager"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -14734,6 +14738,7 @@ dependencies = [
 name = "renamer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

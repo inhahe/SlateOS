@@ -49,8 +49,8 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textfind;
 use guitk::wheel;
-use printjob::PrintJob;
 use oswindow::app::{self, App, Response};
+use printjob::PrintJob;
 
 use std::path::{Path, PathBuf};
 

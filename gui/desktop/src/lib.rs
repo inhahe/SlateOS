@@ -736,6 +736,21 @@ pub enum ShellRequest {
         /// Where to file it, counting from zero.
         desktop: u32,
     },
+    /// Make a window translucent, as a window rule asks.
+    SetOpacity {
+        /// The window to fade.
+        window: WindowId,
+        /// 0 is invisible, 255 fully opaque.
+        ///
+        /// A byte rather than the `f32` the rule stores and the wire carries,
+        /// for two reasons. It keeps `Eq` on this enum -- `f32` is not `Eq`,
+        /// and dropping it here would cascade through `ShellAction` and
+        /// `HotkeyOutcome`, neither of which has any business losing it over
+        /// one field. And it is what survives anyway: the compositor blends
+        /// with an eight-bit alpha, so a finer opacity is discarded a layer
+        /// below this one.
+        alpha: u8,
+    },
 }
 
 impl ShellRequest {
@@ -2822,6 +2837,19 @@ impl DesktopShell {
                 out.push(ShellRequest::window(id, ShellControlAction::Fullscreen));
             }
             Some(window_rules::InitialState::Normal) | None => {}
+        }
+
+        // Opacity is independent of state and zone -- a window can be
+        // maximised *and* translucent -- so it is not part of the match above
+        // and does not compete with it for ordering.
+        if let Some(opacity) = actions.opacity {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "clamped to 0.0..=1.0 first, so the product is 0.0..=255.0                           and rounds into a u8 exactly"
+            )]
+            let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+            out.push(ShellRequest::SetOpacity { window: id, alpha });
         }
 
         // Last, so that a rule setting both a state and a zone lands in the
@@ -6370,6 +6398,79 @@ mod window_manager_tests {
         again(&mut shell);
         again(&mut shell);
         assert!(shell.taskbar_windows().is_empty());
+    }
+
+    /// An opacity rule now reaches the compositor.
+    ///
+    /// `opacity` was one of the twelve rule fields accepted, saved, listed and
+    /// then dropped -- the shell had no request it could send about another
+    /// client's window, because the ordinary `SetOpacity` resolves against the
+    /// sender's own.
+    #[test]
+    fn a_rule_asking_for_transparency_is_carried_out() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.opacity = Some(0.8);
+        });
+
+        assert_eq!(
+            arrive(&mut shell, 1, "chat"),
+            vec![ShellRequest::SetOpacity {
+                window: WindowId(1),
+                // 0.8 * 255 rounds to 204.
+                alpha: 204,
+            }]
+        );
+    }
+
+    /// The ends of the range survive the conversion exactly.
+    ///
+    /// A byte carries the opacity because the compositor blends with an
+    /// eight-bit alpha; what must not happen is 1.0 arriving as 254, which
+    /// would make "fully opaque" faintly transparent and be almost impossible
+    /// to see.
+    #[test]
+    fn a_fully_opaque_rule_is_fully_opaque() {
+        for (opacity, expected) in [(0.0_f32, 0_u8), (1.0, 255), (0.5, 128)] {
+            let mut shell = shell();
+            rule(&mut shell, "chat", |a| {
+                a.opacity = Some(opacity);
+            });
+            assert_eq!(
+                arrive(&mut shell, 1, "chat"),
+                vec![ShellRequest::SetOpacity {
+                    window: WindowId(1),
+                    alpha: expected,
+                }],
+                "opacity {opacity}"
+            );
+        }
+    }
+
+    /// A rule can ask for both a state and a transparency.
+    #[test]
+    fn opacity_does_not_displace_the_other_rule_actions() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.opacity = Some(1.0);
+            a.initial_state = Some(window_rules::InitialState::Maximized);
+        });
+
+        let asked = arrive(&mut shell, 1, "chat");
+        assert!(
+            asked.contains(&ShellRequest::window(
+                WindowId(1),
+                ShellControlAction::Maximize
+            )),
+            "the state was lost: {asked:?}"
+        );
+        assert!(
+            asked.contains(&ShellRequest::SetOpacity {
+                window: WindowId(1),
+                alpha: 255,
+            }),
+            "the opacity was lost: {asked:?}"
+        );
     }
 
     /// A fullscreen rule now reaches the compositor.

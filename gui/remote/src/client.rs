@@ -724,6 +724,23 @@ impl<T: Transport> Connection<T> {
     /// connection over its image budget. In every one of those cases nothing
     /// changed: an id that was registered before is still registered, with the
     /// pixels it had.
+    /// Set another client's window opacity. Shell only.
+    ///
+    /// The privileged counterpart of the self-only opacity request: a window
+    /// rule saying "chat windows are 80% transparent" is the shell acting on
+    /// somebody else's window, which the ordinary request refuses by design.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::confirm`], plus a refusal if this link is not a shell.
+    pub fn shell_set_opacity(
+        &mut self,
+        window: u64,
+        opacity: f32,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::ShellSetOpacity { window, opacity })
+    }
+
     pub fn upload_image(
         &mut self,
         window: u64,

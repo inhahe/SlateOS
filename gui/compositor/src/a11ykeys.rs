@@ -39,6 +39,21 @@ pub enum StickyModifier {
 impl StickyModifier {
     /// Every modifier, for iterating without naming them four times.
     pub const ALL: [Self; 4] = [Self::Ctrl, Self::Alt, Self::Shift, Self::Super];
+
+    /// Which modifier a scancode is, if it is one.
+    ///
+    /// Delegates to `keymap::modifier_of` rather than carrying its own table:
+    /// two answers to "is this Shift" is how the left and right keys come to
+    /// behave differently for no reason anyone intended.
+    #[must_use]
+    pub fn from_scancode(scancode: u32) -> Option<Self> {
+        Some(match crate::keymap::modifier_of(scancode)? {
+            crate::keymap::ModifierBit::Shift => Self::Shift,
+            crate::keymap::ModifierBit::Ctrl => Self::Ctrl,
+            crate::keymap::ModifierBit::Alt => Self::Alt,
+            crate::keymap::ModifierBit::Super => Self::Super,
+        })
+    }
 }
 
 /// State of one sticky modifier.

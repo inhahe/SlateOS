@@ -751,13 +751,21 @@ impl Server {
             for event in events {
                 compositor.handle_input(event);
             }
+            // A keystroke held back by slow keys is delivered here, once its
+            // threshold has expired with the key still down -- see
+            // `design-decisions.md` §821.
+            let delivered = compositor.poll_deferred_key();
             self.tick(compositor)?;
             let composed = self.compose(compositor);
             if composed {
                 self.show(compositor, present);
             }
 
-            let wait = self.settle(composed, had_input, interval);
+            let wait = self.settle(
+                composed,
+                frame_was_busy(had_input, delivered, compositor),
+                interval,
+            );
 
             // Whatever is left of the interval. Subtracting the work already
             // done rather than sleeping a flat one, so a tick that took eight
@@ -768,6 +776,19 @@ impl Server {
         }
         Ok(())
     }
+}
+
+/// Whether this frame counts as activity for the idle backoff.
+///
+/// A keystroke waiting out its slow-keys threshold counts, and that is the
+/// whole reason this is a named function rather than an expression inline in
+/// the loop. To the backoff such a key is perfect quiet -- no input arrived,
+/// nothing was damaged, nothing needs drawing -- so it would settle and start
+/// polling every [`IdleBackoff::IDLE_INTERVAL`], delivering the key late by a
+/// varying amount on top of a threshold that defaults to 300 ms. See
+/// `design-decisions.md` §821.
+fn frame_was_busy(had_input: bool, delivered: bool, compositor: &Compositor) -> bool {
+    had_input || delivered || compositor.has_deferred_key()
 }
 
 #[cfg(test)]
@@ -1495,6 +1516,45 @@ mod tests {
     const FRAME: Duration = Duration::from_micros(16_667);
 
     /// Drive `n` consecutive idle ticks at `frame` and return the last wait.
+    /// A frame with a keystroke waiting out its slow-keys threshold is not an
+    /// idle frame, however quiet it looks.
+    ///
+    /// Without this the backoff settles and polls every 100 ms, so the key --
+    /// which is supposed to land exactly when its threshold expires -- arrives
+    /// late by a different amount each time. `design-decisions.md` §821.
+    #[test]
+    fn a_keystroke_waiting_on_its_threshold_keeps_the_frame_busy() {
+        let mut comp = Compositor::new(320, 240, 60).unwrap();
+        comp.create_window("Editor".to_string(), 200, 150, 1);
+        comp.set_accessibility_keys(inputsettings::AccessibilityKeysConfig {
+            filter: inputsettings::FilterKeysConfig {
+                enabled: true,
+                slow_keys_ms: 300,
+                ..inputsettings::FilterKeysConfig::default()
+            },
+            ..inputsettings::AccessibilityKeysConfig::default()
+        });
+
+        assert!(
+            !frame_was_busy(false, false, &comp),
+            "a genuinely idle frame must still be allowed to back off"
+        );
+
+        // 0x1E is A. Pressing it starts the threshold rather than typing.
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1E,
+            character: None,
+        });
+        assert!(
+            comp.has_deferred_key(),
+            "the test premise: a key is waiting"
+        );
+        assert!(
+            frame_was_busy(false, false, &comp),
+            "a frame with a keystroke pending was treated as idle, so the              backoff would deliver it up to IDLE_INTERVAL late"
+        );
+    }
+
     fn idle_for(backoff: &mut IdleBackoff, n: u32, frame: Duration) -> Duration {
         let mut wait = frame;
         for _ in 0..n {

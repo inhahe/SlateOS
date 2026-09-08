@@ -563,6 +563,28 @@ pub enum MouseButton {
     Forward,
 }
 
+/// A keystroke waiting out the slow-keys threshold.
+///
+/// See `design-decisions.md` §821 for why it waits rather than being answered
+/// on release.
+#[derive(Debug, Clone, Copy)]
+struct DeferredKey {
+    scancode: u32,
+    character: Option<char>,
+    pressed_at_ms: u64,
+}
+
+/// Which mouse button a mouse-keys action presses, or `None` if it moves.
+const fn mouse_key_button(action: a11ykeys::MouseKeyAction) -> Option<MouseButton> {
+    match action {
+        a11ykeys::MouseKeyAction::Click | a11ykeys::MouseKeyAction::DoubleClick => {
+            Some(MouseButton::Left)
+        }
+        a11ykeys::MouseKeyAction::RightClick => Some(MouseButton::Right),
+        _ => None,
+    }
+}
+
 /// Input event received from the input subsystem.
 #[derive(Clone, Debug)]
 pub enum InputEvent {
@@ -4677,6 +4699,11 @@ pub struct Compositor {
     /// Frame timing statistics.
     frame_stats: FrameStats,
     /// Current mouse cursor position.
+    /// When this compositor started, as the base for a monotonic millisecond
+    /// clock. Slow keys and bounce keys both measure intervals, and a wall
+    /// clock adjusted underneath them would silence a key for the length of
+    /// the adjustment.
+    started_at: Instant,
     cursor_x: i32,
     /// Current mouse cursor position.
     cursor_y: i32,
@@ -4773,6 +4800,20 @@ pub struct Compositor {
     /// state spanning two events, and one answer for the whole desktop is the
     /// point. See the [`deadkey`] module docs for the rules.
     dead_keys: deadkey::DeadKeys,
+    /// Sticky, filter and mouse keys: what is stuck down, what was accepted
+    /// when, how far a held keypad arrow has accelerated.
+    ///
+    /// Beside [`Self::modifiers`] for the same reason: it is keyboard state
+    /// spanning several events, and the compositor is the only place every
+    /// keystroke passes through.
+    a11y_keys: a11ykeys::AccessibilityKeys,
+    /// A keystroke held back while it serves out the slow-keys threshold.
+    ///
+    /// `design-decisions.md` §821: the key is delivered when the threshold
+    /// expires *while still held*, not when it is released, so it has to wait
+    /// somewhere. Released before then, it is dropped — that is precisely the
+    /// accidental tap the feature exists to discard.
+    deferred_key: Option<DeferredKey>,
     /// Whether a full recomposite is needed (e.g., after display resize).
     full_recomposite: bool,
     /// Whether [`render_all_windows`](Self::render_all_windows) may skip the
@@ -4867,6 +4908,7 @@ impl Compositor {
             display_manager,
             damage: DamageRegion::new(),
             frame_stats: FrameStats::new(frame_interval),
+            started_at: Instant::now(),
             cursor_x: width as i32 / 2,
             cursor_y: height as i32 / 2,
             cursor_shape: CursorShape::Arrow,
@@ -4890,6 +4932,8 @@ impl Compositor {
             window_list_scratch: Vec::new(),
             modifiers: ModifierState::new(),
             dead_keys: deadkey::DeadKeys::new(),
+            a11y_keys: a11ykeys::AccessibilityKeys::default(),
+            deferred_key: None,
             full_recomposite: true,
             occlusion_cull: true,
             scanout: Scanout::Composited,
@@ -6915,7 +6959,210 @@ impl Compositor {
         }
     }
 
+    /// Every keystroke enters here.
+    ///
+    /// Split from [`Self::dispatch_key`] so that a keystroke held back by slow
+    /// keys can be delivered later without running the accessibility filters a
+    /// second time — it already passed them, and re-running the bounce check
+    /// on the way out would refuse the key for being too soon after itself.
     fn handle_key(&mut self, scancode: u32, pressed: bool, character: Option<char>) {
+        if self.a11y_keys.any_enabled()
+            && self.accessibility_intercept(scancode, pressed, character)
+        {
+            return;
+        }
+        self.dispatch_key(scancode, pressed, character);
+    }
+
+    /// Sticky, filter and mouse keys, before anything else looks at the key.
+    ///
+    /// Answers whether the keystroke was consumed. Runs above
+    /// `self.modifiers.update` on purpose: a keystroke these filters refuse
+    /// must not move the modifier state either, or a rejected Shift would
+    /// leave every later key shifted.
+    fn accessibility_intercept(
+        &mut self,
+        scancode: u32,
+        pressed: bool,
+        character: Option<char>,
+    ) -> bool {
+        // Mouse keys first: while it owns the keypad, those scancodes are
+        // pointer control and are not keystrokes at all, so none of the
+        // keyboard filtering below applies to them.
+        if self.a11y_keys.mouse.intercepts_keypad()
+            && let Some(action) = a11ykeys::MouseKeyAction::from_keypad_scancode(scancode)
+        {
+            self.apply_mouse_key(action, pressed);
+            return true;
+        }
+
+        if let Some(modifier) = a11ykeys::StickyModifier::from_scancode(scancode) {
+            if pressed {
+                self.a11y_keys.sticky.on_modifier_press(modifier);
+            }
+            // Not consumed: the modifier key is still physically down and
+            // every client is entitled to hear about it. Sticky keys adds a
+            // second, longer life to it rather than replacing the first.
+            return false;
+        }
+
+        if !pressed {
+            // A release cancels a keystroke still serving out its slow-keys
+            // threshold: it was a tap, which is what the threshold is for.
+            if self
+                .deferred_key
+                .as_ref()
+                .is_some_and(|d| d.scancode == scancode)
+            {
+                self.deferred_key = None;
+                return true;
+            }
+            return false;
+        }
+
+        // Two keys held at once is the standard way out of sticky keys for
+        // someone who turned it on by accident — checked here, where a
+        // non-modifier press is known to have arrived with a modifier
+        // physically down rather than merely stuck.
+        if self.modifiers.modifiers() != Modifiers::NONE && self.a11y_keys.sticky.on_chord_held() {
+            return false;
+        }
+
+        let filter = self.a11y_keys.filter.config();
+        if !filter.enabled {
+            return false;
+        }
+
+        let now = self.monotonic_ms();
+        if filter.slow_keys_ms > 0 {
+            // Held back until the threshold expires; `poll_deferred_key` is
+            // what finishes the job. Only one at a time: a second key pressed
+            // while the first is waiting replaces it, which matches what the
+            // hardware does to a user who cannot press two keys deliberately.
+            self.deferred_key = Some(DeferredKey {
+                scancode,
+                character,
+                pressed_at_ms: now,
+            });
+            return true;
+        }
+
+        // No slow-keys threshold, so the bounce check can answer immediately.
+        let key_code = u16::try_from(scancode & 0xFFFF).unwrap_or(u16::MAX);
+        self.a11y_keys.filter.on_press(key_code, 0, now).is_err()
+    }
+
+    /// Deliver a keystroke whose slow-keys threshold has now expired.
+    ///
+    /// Answers whether one was delivered. Called once per frame by the server
+    /// loop, which also keeps the idle backoff awake while one is pending —
+    /// see `design-decisions.md` §821.
+    pub fn poll_deferred_key(&mut self) -> bool {
+        let Some(deferred) = self.deferred_key.as_ref() else {
+            return false;
+        };
+        let (scancode, character, pressed_at) = (
+            deferred.scancode,
+            deferred.character,
+            deferred.pressed_at_ms,
+        );
+        let now = self.monotonic_ms();
+        let held = now.saturating_sub(pressed_at);
+        let Ok(held_ms) = u32::try_from(held) else {
+            // Held for over forty-nine days. Not a keystroke; drop it rather
+            // than saturate, which would deliver it.
+            self.deferred_key = None;
+            return false;
+        };
+        if held_ms < self.a11y_keys.filter.slow_keys_ms() {
+            return false;
+        }
+        self.deferred_key = None;
+
+        let key_code = u16::try_from(scancode & 0xFFFF).unwrap_or(u16::MAX);
+        if self
+            .a11y_keys
+            .filter
+            .on_press(key_code, held_ms, now)
+            .is_err()
+        {
+            return false;
+        }
+        self.dispatch_key(scancode, true, character);
+        true
+    }
+
+    /// Whether a keystroke is waiting out its slow-keys threshold.
+    ///
+    /// The server loop treats this as activity: to the idle backoff a waiting
+    /// key looks like perfect quiet, and backing off would deliver it late by
+    /// up to `IdleBackoff::IDLE_INTERVAL`, differently each time.
+    #[must_use]
+    pub fn has_deferred_key(&self) -> bool {
+        self.deferred_key.is_some()
+    }
+
+    /// Replace the accessibility settings.
+    pub fn set_accessibility_keys(&mut self, config: inputsettings::AccessibilityKeysConfig) {
+        self.a11y_keys.set_config(config);
+        if !self.a11y_keys.filter.config().enabled {
+            // A keystroke waiting on a threshold that no longer exists would
+            // otherwise wait for ever.
+            self.deferred_key = None;
+        }
+    }
+
+    /// The accessibility settings in force.
+    #[must_use]
+    pub fn accessibility_keys(&self) -> &a11ykeys::AccessibilityKeys {
+        &self.a11y_keys
+    }
+
+    /// Turn a keypad action into pointer movement or a click.
+    fn apply_mouse_key(&mut self, action: a11ykeys::MouseKeyAction, pressed: bool) {
+        if !pressed {
+            // Releasing a direction key drops the accumulated acceleration, so
+            // the next press starts from the configured speed again.
+            self.a11y_keys.mouse.release();
+            if let Some(button) = mouse_key_button(action) {
+                self.handle_mouse_button(button, false, self.cursor_x, self.cursor_y);
+            }
+            return;
+        }
+        if let Some(button) = mouse_key_button(action) {
+            let (x, y) = (self.cursor_x, self.cursor_y);
+            self.handle_mouse_button(button, true, x, y);
+            if action == a11ykeys::MouseKeyAction::DoubleClick {
+                // The second click of the pair, at the same place: a
+                // double-click is two presses, and the click detector times
+                // them, so sending one event with a flag would not be seen.
+                self.handle_mouse_button(button, false, x, y);
+                self.handle_mouse_button(button, true, x, y);
+            }
+            return;
+        }
+        let (dx, dy) = self.a11y_keys.mouse.move_delta(action);
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        // Rounded rather than truncated: truncation would make a speed below
+        // one pixel per repeat move nothing at all, and `validate` allows a
+        // speed of exactly 1.0.
+        let x = self.cursor_x.saturating_add(dx.round() as i32);
+        let y = self.cursor_y.saturating_add(dy.round() as i32);
+        self.handle_mouse_move(x, y);
+    }
+
+    /// Milliseconds since this compositor started.
+    ///
+    /// A monotonic clock, so it cannot run backwards when the wall clock is
+    /// adjusted — a bounce window measured against a clock that jumped would
+    /// silence a key for as long as the jump.
+    fn monotonic_ms(&self) -> u64 {
+        self.started_at.elapsed().as_millis() as u64
+    }
+
+    fn dispatch_key(&mut self, scancode: u32, pressed: bool, character: Option<char>) {
         // Folded *before* the notification is built, so a client told about
         // Shift+A sees `shift: true`. Folding afterwards would report the state
         // as it was before the chord completed, which for the modifier key's
@@ -6924,7 +7171,26 @@ impl Compositor {
         // event behind.
         self.modifiers.update(scancode, pressed);
 
-        let level = self.modifiers.level();
+        // Sticky keys are consumed *before* the layout is consulted, because a
+        // stuck Shift has to reach `Level`: reporting `shift: true` while
+        // handing the client a lowercase `a` would be a worse feature than not
+        // having one. Only on a non-modifier press -- a modifier key is what
+        // *sets* the sticky state, and consuming it here would clear it before
+        // the key it was meant for arrived.
+        let stuck = if pressed
+            && self.a11y_keys.sticky.config().enabled
+            && !ModifierState::is_modifier(scancode)
+        {
+            self.a11y_keys.sticky.on_key_press()
+        } else {
+            a11ykeys::StickyModifiers::default()
+        };
+
+        let mut level = self.modifiers.level();
+        // Shift only. A stuck Alt is a plain Alt chord, not AltGr: AltGr is
+        // specifically the right-hand key, and treating a stuck Alt as one
+        // would make sticky keys type `@` where the user meant Alt+Q.
+        level.shift |= stuck.shift;
         let (key, laid_out) = keymap::key_for_layout(self.layout, scancode, level);
         let mut modifiers = self.modifiers.modifiers();
         if keymap::resolves_through_alt_gr(self.layout, scancode, level) {
@@ -6936,6 +7202,16 @@ impl Compositor {
             // Alt+Q shortcut must keep working from either side.
             modifiers.alt = self.modifiers.left_alt();
         }
+
+        // Applied after the AltGr fold, which exists to undo AltGr's *physical*
+        // Alt and must not clear an Alt the user stuck deliberately. Grabs are
+        // consulted below with these merged in, so Alt+Tab works with Alt
+        // merely stuck -- someone who cannot hold two keys still needs the
+        // window switcher.
+        modifiers.ctrl |= stuck.ctrl;
+        modifiers.alt |= stuck.alt;
+        modifiers.shift |= stuck.shift;
+        modifiers.super_key |= stuck.super_key;
 
         // Grabs are consulted *here*: after the chord is known, before the
         // focused window is looked up. Both halves matter. After, because a grab
@@ -9689,6 +9965,285 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Sticky, filter and mouse keys, through the real key path
+    //
+    // These are integration tests on purpose. The state machines had thorough
+    // unit tests for months while being wired to nothing at all, so a test
+    // that calls them directly proves the one thing already known. Everything
+    // below goes in through `handle_input`, as the input driver does.
+    //
+    // Scancodes, set 1: 0x2A left Shift, 0x1E A, 0x1F S, 0x4D keypad 6.
+    // -----------------------------------------------------------------------
+
+    /// One window, focused, so delivered keys have somewhere to go.
+    fn typing_compositor(cfg: inputsettings::AccessibilityKeysConfig) -> Compositor {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Editor".to_string(), 400, 300, 1);
+        comp.set_accessibility_keys(cfg);
+        comp.drain_notifications();
+        comp
+    }
+
+    /// Key events with their modifiers, which `key_events` drops.
+    fn key_events_with_mods(comp: &mut Compositor) -> Vec<(Key, bool, String, Modifiers)> {
+        comp.drain_notifications()
+            .into_iter()
+            .filter_map(|n| match n {
+                EventNotification::KeyEvent {
+                    key,
+                    pressed,
+                    text,
+                    modifiers,
+                    ..
+                } => Some((key, pressed, text, modifiers)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn sticky_enabled() -> inputsettings::AccessibilityKeysConfig {
+        inputsettings::AccessibilityKeysConfig {
+            sticky: inputsettings::StickyKeysConfig {
+                enabled: true,
+                ..inputsettings::StickyKeysConfig::default()
+            },
+            ..inputsettings::AccessibilityKeysConfig::default()
+        }
+    }
+
+    fn press(comp: &mut Compositor, scancode: u32) {
+        comp.handle_input(InputEvent::KeyDown {
+            scancode,
+            character: None,
+        });
+    }
+
+    fn release(comp: &mut Compositor, scancode: u32) {
+        comp.handle_input(InputEvent::KeyUp { scancode });
+    }
+
+    /// The whole feature, end to end: press Shift, let go, press A, get `A`.
+    ///
+    /// The capital letter is the part that matters. Reporting `shift: true`
+    /// while handing the client a lowercase `a` would be a worse feature than
+    /// none -- the modifier has to reach the *layout*, not just the event.
+    #[test]
+    fn a_stuck_shift_capitalises_the_next_letter() {
+        let mut comp = typing_compositor(sticky_enabled());
+        press(&mut comp, 0x2A);
+        release(&mut comp, 0x2A);
+        press(&mut comp, 0x1E);
+
+        let a = key_events_with_mods(&mut comp)
+            .into_iter()
+            .find(|(key, pressed, _, _)| *key == Key::A && *pressed)
+            .expect("the letter never reached the window");
+        assert!(a.3.shift, "the client was not told Shift applied");
+        assert_eq!(
+            a.2, "A",
+            "sticky Shift reported itself but still typed lowercase"
+        );
+    }
+
+    /// Sticky means one key, then gone.
+    #[test]
+    fn a_stuck_modifier_applies_to_one_key_only() {
+        let mut comp = typing_compositor(sticky_enabled());
+        press(&mut comp, 0x2A);
+        release(&mut comp, 0x2A);
+        press(&mut comp, 0x1E);
+        release(&mut comp, 0x1E);
+        press(&mut comp, 0x1F);
+
+        let events = key_events_with_mods(&mut comp);
+        let second = events
+            .iter()
+            .find(|(key, pressed, _, _)| *key == Key::S && *pressed)
+            .expect("the second letter never arrived");
+        assert!(
+            !second.3.shift,
+            "the stuck Shift applied to a second key as well"
+        );
+        assert_eq!(second.2, "s");
+    }
+
+    /// With nothing switched on, the key path must be exactly what it was.
+    #[test]
+    fn with_no_feature_enabled_typing_is_untouched() {
+        let mut comp = typing_compositor(inputsettings::AccessibilityKeysConfig::default());
+        press(&mut comp, 0x2A);
+        release(&mut comp, 0x2A);
+        press(&mut comp, 0x1E);
+
+        let a = key_events_with_mods(&mut comp)
+            .into_iter()
+            .find(|(key, pressed, _, _)| *key == Key::A && *pressed)
+            .expect("an ordinary keystroke went missing");
+        assert!(!a.3.shift, "a released Shift stuck without the feature on");
+        assert_eq!(a.2, "a");
+    }
+
+    fn filter_config(slow: u32, bounce: u32) -> inputsettings::AccessibilityKeysConfig {
+        inputsettings::AccessibilityKeysConfig {
+            filter: inputsettings::FilterKeysConfig {
+                enabled: true,
+                slow_keys_ms: slow,
+                bounce_keys_ms: bounce,
+                ..inputsettings::FilterKeysConfig::default()
+            },
+            ..inputsettings::AccessibilityKeysConfig::default()
+        }
+    }
+
+    /// Bounce keys needs no timer: it looks only backwards.
+    #[test]
+    fn bounce_keys_drops_an_immediate_repeat_of_the_same_key() {
+        let mut comp = typing_compositor(filter_config(0, 5_000));
+        press(&mut comp, 0x1E);
+        release(&mut comp, 0x1E);
+        press(&mut comp, 0x1E);
+
+        let presses = key_events_with_mods(&mut comp)
+            .into_iter()
+            .filter(|(key, pressed, _, _)| *key == Key::A && *pressed)
+            .count();
+        assert_eq!(presses, 1, "the bounced repeat was delivered anyway");
+    }
+
+    /// A different key is not blocked by the first one's window.
+    #[test]
+    fn bounce_keys_does_not_block_a_different_key() {
+        let mut comp = typing_compositor(filter_config(0, 5_000));
+        press(&mut comp, 0x1E);
+        press(&mut comp, 0x1F);
+
+        let events = key_events_with_mods(&mut comp);
+        assert!(events.iter().any(|(k, p, _, _)| *k == Key::A && *p));
+        assert!(
+            events.iter().any(|(k, p, _, _)| *k == Key::S && *p),
+            "a different key was swallowed by the first key's bounce window"
+        );
+    }
+
+    /// Move the compositor's clock forward by rewinding its epoch.
+    fn advance(comp: &mut Compositor, ms: u64) {
+        comp.started_at = comp
+            .started_at
+            .checked_sub(Duration::from_millis(ms))
+            .expect("clock rewind");
+    }
+
+    /// §821: the key appears when the threshold expires, still held.
+    #[test]
+    fn a_slow_key_arrives_when_its_threshold_expires_not_before() {
+        let mut comp = typing_compositor(filter_config(300, 0));
+        press(&mut comp, 0x1E);
+        assert!(
+            key_events_with_mods(&mut comp).is_empty(),
+            "the keystroke was delivered before its threshold"
+        );
+        assert!(comp.has_deferred_key(), "nothing is waiting");
+
+        advance(&mut comp, 100);
+        assert!(!comp.poll_deferred_key(), "delivered a third of the way in");
+
+        advance(&mut comp, 250);
+        assert!(
+            comp.poll_deferred_key(),
+            "the threshold passed and nothing came"
+        );
+        let a = key_events_with_mods(&mut comp)
+            .into_iter()
+            .find(|(key, pressed, _, _)| *key == Key::A && *pressed)
+            .expect("the held key never arrived");
+        assert_eq!(a.2, "a");
+        assert!(
+            !comp.has_deferred_key(),
+            "the key is still pending after delivery"
+        );
+    }
+
+    /// A tap -- exactly what slow keys exists to discard.
+    #[test]
+    fn a_slow_key_released_early_is_never_delivered() {
+        let mut comp = typing_compositor(filter_config(300, 0));
+        press(&mut comp, 0x1E);
+        advance(&mut comp, 50);
+        release(&mut comp, 0x1E);
+
+        assert!(!comp.has_deferred_key(), "the tap is still waiting to fire");
+        advance(&mut comp, 1_000);
+        assert!(!comp.poll_deferred_key());
+        assert!(
+            !key_events_with_mods(&mut comp)
+                .iter()
+                .any(|(key, pressed, _, _)| *key == Key::A && *pressed),
+            "a key tapped for 50 ms of a 300 ms threshold was typed anyway"
+        );
+    }
+
+    /// Turning the filter off must not strand a keystroke waiting on a
+    /// threshold that no longer exists.
+    #[test]
+    fn disabling_filter_keys_drops_what_was_waiting() {
+        let mut comp = typing_compositor(filter_config(300, 0));
+        press(&mut comp, 0x1E);
+        assert!(comp.has_deferred_key());
+        comp.set_accessibility_keys(inputsettings::AccessibilityKeysConfig::default());
+        assert!(
+            !comp.has_deferred_key(),
+            "a keystroke was left waiting for ever"
+        );
+    }
+
+    fn mouse_keys_config() -> inputsettings::AccessibilityKeysConfig {
+        inputsettings::AccessibilityKeysConfig {
+            mouse: inputsettings::MouseKeysConfig {
+                enabled: true,
+                speed: 10.0,
+                acceleration: 2.0,
+                max_speed: 40.0,
+                use_numpad: true,
+            },
+            ..inputsettings::AccessibilityKeysConfig::default()
+        }
+    }
+
+    /// Keypad 6 moves the pointer right, and is not typed as a `6`.
+    #[test]
+    fn mouse_keys_moves_the_pointer_and_swallows_the_keystroke() {
+        let mut comp = typing_compositor(mouse_keys_config());
+        let before = comp.cursor_x;
+        press(&mut comp, 0x4D);
+
+        assert!(
+            comp.cursor_x > before,
+            "keypad 6 did not move the pointer: {before} -> {}",
+            comp.cursor_x
+        );
+        assert!(
+            key_events_with_mods(&mut comp).is_empty(),
+            "the keypad key was also delivered as a keystroke"
+        );
+    }
+
+    /// With mouse keys off, the keypad types again.
+    #[test]
+    fn the_keypad_is_left_alone_when_mouse_keys_is_off() {
+        let mut comp = typing_compositor(inputsettings::AccessibilityKeysConfig::default());
+        let before = comp.cursor_x;
+        press(&mut comp, 0x4D);
+        assert_eq!(
+            comp.cursor_x, before,
+            "the pointer moved with the feature off"
+        );
+        assert!(
+            !key_events_with_mods(&mut comp).is_empty(),
+            "the keypad key was swallowed with the feature off"
+        );
     }
 
     /// The entire point of the mechanism, stated as the thing that was broken:

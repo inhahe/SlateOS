@@ -308,328 +308,14 @@ impl Default for Magnifier {
     }
 }
 
-// ============================================================================
-// Sticky keys
-// ============================================================================
-
-/// Sticky keys state — modifier keys stay active until next non-modifier key.
-#[derive(Debug, Clone)]
-pub struct StickyKeys {
-    pub enabled: bool,
-    /// Whether to play a sound when a sticky key is activated.
-    pub play_sound: bool,
-    /// Whether double-tap locks the modifier.
-    pub double_tap_lock: bool,
-    // State tracking for each modifier.
-    ctrl: StickyState,
-    alt: StickyState,
-    shift: StickyState,
-    super_key: StickyState,
-}
-
-/// State of a single sticky modifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StickyState {
-    /// Modifier is inactive.
-    Off,
-    /// Modifier is sticky (will apply to next keypress, then turn off).
-    Sticky,
-    /// Modifier is locked (stays on until pressed again).
-    Locked,
-}
-
-/// Which modifier was pressed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StickyModifier {
-    Ctrl,
-    Alt,
-    Shift,
-    Super,
-}
-
-impl StickyKeys {
-    pub fn new() -> Self {
-        Self {
-            enabled: false,
-            play_sound: true,
-            double_tap_lock: true,
-            ctrl: StickyState::Off,
-            alt: StickyState::Off,
-            shift: StickyState::Off,
-            super_key: StickyState::Off,
-        }
-    }
-
-    /// Handle a modifier key press. Returns true if state changed.
-    pub fn on_modifier_press(&mut self, modifier: StickyModifier) -> bool {
-        if !self.enabled {
-            return false;
-        }
-        let double_lock = self.double_tap_lock;
-        let state = self.state_mut(modifier);
-        match *state {
-            StickyState::Off => {
-                *state = StickyState::Sticky;
-                true
-            }
-            StickyState::Sticky if double_lock => {
-                *state = StickyState::Locked;
-                true
-            }
-            StickyState::Sticky => {
-                *state = StickyState::Off;
-                true
-            }
-            StickyState::Locked => {
-                *state = StickyState::Off;
-                true
-            }
-        }
-    }
-
-    /// Handle a non-modifier key press. Resets any sticky (not locked) modifiers.
-    /// Returns which modifiers were active.
-    pub fn on_key_press(&mut self) -> (bool, bool, bool, bool) {
-        if !self.enabled {
-            return (false, false, false, false);
-        }
-        let ctrl = self.ctrl != StickyState::Off;
-        let alt = self.alt != StickyState::Off;
-        let shift = self.shift != StickyState::Off;
-        let sup = self.super_key != StickyState::Off;
-
-        // Release sticky (not locked) modifiers.
-        if self.ctrl == StickyState::Sticky {
-            self.ctrl = StickyState::Off;
-        }
-        if self.alt == StickyState::Sticky {
-            self.alt = StickyState::Off;
-        }
-        if self.shift == StickyState::Sticky {
-            self.shift = StickyState::Off;
-        }
-        if self.super_key == StickyState::Sticky {
-            self.super_key = StickyState::Off;
-        }
-
-        (ctrl, alt, shift, sup)
-    }
-
-    /// Check if a modifier is currently active (sticky or locked).
-    pub fn is_active(&self, modifier: StickyModifier) -> bool {
-        *self.state_ref(modifier) != StickyState::Off
-    }
-
-    /// Check if a modifier is locked.
-    pub fn is_locked(&self, modifier: StickyModifier) -> bool {
-        *self.state_ref(modifier) == StickyState::Locked
-    }
-
-    /// Reset all modifiers.
-    pub fn reset(&mut self) {
-        self.ctrl = StickyState::Off;
-        self.alt = StickyState::Off;
-        self.shift = StickyState::Off;
-        self.super_key = StickyState::Off;
-    }
-
-    fn state_mut(&mut self, m: StickyModifier) -> &mut StickyState {
-        match m {
-            StickyModifier::Ctrl => &mut self.ctrl,
-            StickyModifier::Alt => &mut self.alt,
-            StickyModifier::Shift => &mut self.shift,
-            StickyModifier::Super => &mut self.super_key,
-        }
-    }
-
-    fn state_ref(&self, m: StickyModifier) -> &StickyState {
-        match m {
-            StickyModifier::Ctrl => &self.ctrl,
-            StickyModifier::Alt => &self.alt,
-            StickyModifier::Shift => &self.shift,
-            StickyModifier::Super => &self.super_key,
-        }
-    }
-}
-
-impl Default for StickyKeys {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ============================================================================
-// Filter keys
-// ============================================================================
-
-/// Filter keys — ignore brief or repeated keystrokes (for motor impairment).
-#[derive(Debug, Clone)]
-pub struct FilterKeys {
-    pub enabled: bool,
-    /// Minimum key hold duration to register (milliseconds).
-    pub slow_keys_ms: u32,
-    /// Minimum interval between same-key repeats (milliseconds).
-    pub bounce_keys_ms: u32,
-    /// Whether to play a sound on key acceptance.
-    pub play_sound: bool,
-    /// Last accepted key timestamp per key code (for bounce detection).
-    last_key_time: Vec<(u16, u64)>,
-    /// Maximum tracked keys.
-    max_tracked: usize,
-}
-
-impl FilterKeys {
-    pub fn new() -> Self {
-        Self {
-            enabled: false,
-            slow_keys_ms: 300,
-            bounce_keys_ms: 500,
-            play_sound: true,
-            last_key_time: Vec::new(),
-            max_tracked: 64,
-        }
-    }
-
-    /// Check if a key press should be accepted.
-    /// `key_code`: key identifier, `hold_ms`: how long the key was held,
-    /// `now_ms`: current timestamp in milliseconds.
-    pub fn should_accept(&mut self, key_code: u16, hold_ms: u32, now_ms: u64) -> bool {
-        if !self.enabled {
-            return true;
-        }
-
-        // Slow keys: reject if held less than threshold.
-        if hold_ms < self.slow_keys_ms {
-            return false;
-        }
-
-        // Bounce keys: reject if same key pressed too quickly.
-        if let Some(entry) = self.last_key_time.iter().find(|(k, _)| *k == key_code) {
-            let elapsed = now_ms.saturating_sub(entry.1);
-            if elapsed < self.bounce_keys_ms as u64 {
-                return false;
-            }
-        }
-
-        // Accept and record time.
-        if let Some(entry) = self.last_key_time.iter_mut().find(|(k, _)| *k == key_code) {
-            entry.1 = now_ms;
-        } else {
-            if self.last_key_time.len() >= self.max_tracked {
-                self.last_key_time.remove(0);
-            }
-            self.last_key_time.push((key_code, now_ms));
-        }
-
-        true
-    }
-
-    /// Reset all tracked key times.
-    pub fn reset(&mut self) {
-        self.last_key_time.clear();
-    }
-}
-
-impl Default for FilterKeys {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ============================================================================
-// Mouse keys
-// ============================================================================
-
-/// Mouse keys — control cursor via keyboard (numpad).
-#[derive(Debug, Clone)]
-pub struct MouseKeys {
-    pub enabled: bool,
-    /// Cursor speed in pixels per key repeat.
-    pub speed: f32,
-    /// Acceleration factor (speed increases with held duration).
-    pub acceleration: f32,
-    /// Maximum speed after acceleration.
-    pub max_speed: f32,
-    /// Current accumulated speed (resets when no movement key is held).
-    current_speed: f32,
-}
-
-/// Mouse key action (numpad mapping).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MouseKeyAction {
-    /// Move cursor up-left (Numpad 7).
-    MoveUpLeft,
-    /// Move cursor up (Numpad 8).
-    MoveUp,
-    /// Move cursor up-right (Numpad 9).
-    MoveUpRight,
-    /// Move cursor left (Numpad 4).
-    MoveLeft,
-    /// Left click (Numpad 5).
-    Click,
-    /// Move cursor right (Numpad 6).
-    MoveRight,
-    /// Move cursor down-left (Numpad 1).
-    MoveDownLeft,
-    /// Move cursor down (Numpad 2).
-    MoveDown,
-    /// Move cursor down-right (Numpad 3).
-    MoveDownRight,
-    /// Double-click (Numpad +).
-    DoubleClick,
-    /// Right-click (Numpad 0).
-    RightClick,
-}
-
-impl MouseKeys {
-    pub fn new() -> Self {
-        Self {
-            enabled: false,
-            speed: 5.0,
-            acceleration: 1.2,
-            max_speed: 30.0,
-            current_speed: 0.0,
-        }
-    }
-
-    /// Calculate cursor delta for a movement action.
-    /// Call repeatedly while key is held; speed accelerates.
-    pub fn move_delta(&mut self, action: MouseKeyAction) -> (f32, f32) {
-        if !self.enabled {
-            return (0.0, 0.0);
-        }
-
-        // Accelerate.
-        self.current_speed = (self.current_speed * self.acceleration).max(self.speed);
-        if self.current_speed > self.max_speed {
-            self.current_speed = self.max_speed;
-        }
-
-        let s = self.current_speed;
-        match action {
-            MouseKeyAction::MoveUpLeft => (-s, -s),
-            MouseKeyAction::MoveUp => (0.0, -s),
-            MouseKeyAction::MoveUpRight => (s, -s),
-            MouseKeyAction::MoveLeft => (-s, 0.0),
-            MouseKeyAction::MoveRight => (s, 0.0),
-            MouseKeyAction::MoveDownLeft => (-s, s),
-            MouseKeyAction::MoveDown => (0.0, s),
-            MouseKeyAction::MoveDownRight => (s, s),
-            _ => (0.0, 0.0), // Click actions don't move.
-        }
-    }
-
-    /// Reset speed (call when no movement key is held).
-    pub fn reset_speed(&mut self) {
-        self.current_speed = 0.0;
-    }
-}
-
-impl Default for MouseKeys {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Sticky, filter and mouse keys are not here any more.
+//
+// They were state machines in this file, with thorough tests, constructed by
+// nothing but those tests -- turning on Sticky Keys did nothing at all. The
+// settings now live in `inputsettings::AccessibilityKeysConfig` and the live
+// state in `compositor::a11ykeys`, where the key events are, and the settings
+// window writes them to `input.yaml`. See `known-issues.md`
+// `TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING`.
 
 // ============================================================================
 // Cursor customization
@@ -798,17 +484,6 @@ pub struct AccessibilityConfig {
     pub reduced_motion: bool,
     /// Screen magnifier settings.
     pub magnifier: MagnifierConfig,
-    /// Sticky keys settings.
-    pub sticky_keys_enabled: bool,
-    pub sticky_keys_sound: bool,
-    pub sticky_keys_double_lock: bool,
-    /// Filter keys settings.
-    pub filter_keys_enabled: bool,
-    pub slow_keys_ms: u32,
-    pub bounce_keys_ms: u32,
-    /// Mouse keys settings.
-    pub mouse_keys_enabled: bool,
-    pub mouse_keys_speed: f32,
     /// Cursor settings.
     pub cursor: CursorSettings,
     /// Focus indicator settings.
@@ -830,14 +505,6 @@ impl Default for AccessibilityConfig {
             color_filter: ColorFilter::None,
             reduced_motion: false,
             magnifier: MagnifierConfig::default(),
-            sticky_keys_enabled: false,
-            sticky_keys_sound: true,
-            sticky_keys_double_lock: true,
-            filter_keys_enabled: false,
-            slow_keys_ms: 300,
-            bounce_keys_ms: 500,
-            mouse_keys_enabled: false,
-            mouse_keys_speed: 5.0,
             cursor: CursorSettings::default(),
             focus_indicator: FocusIndicator::default(),
             screen_reader: false,
@@ -883,12 +550,6 @@ impl AccessibilityConfig {
         out.push_str(&format!("reduced_motion={}\n", self.reduced_motion));
         out.push_str(&format!("magnifier_enabled={}\n", self.magnifier.enabled));
         out.push_str(&format!("magnifier_zoom={}\n", self.magnifier.zoom));
-        out.push_str(&format!("sticky_keys={}\n", self.sticky_keys_enabled));
-        out.push_str(&format!("filter_keys={}\n", self.filter_keys_enabled));
-        out.push_str(&format!("slow_keys_ms={}\n", self.slow_keys_ms));
-        out.push_str(&format!("bounce_keys_ms={}\n", self.bounce_keys_ms));
-        out.push_str(&format!("mouse_keys={}\n", self.mouse_keys_enabled));
-        out.push_str(&format!("mouse_keys_speed={}\n", self.mouse_keys_speed));
         out.push_str(&format!("screen_reader={}\n", self.screen_reader));
         out.push_str(&format!("text_scale={}\n", self.text_scale));
         out.push_str(&format!("caret_width={}\n", self.caret_width));
@@ -935,24 +596,6 @@ impl AccessibilityConfig {
                     "magnifier_zoom" => {
                         if let Ok(z) = val.parse::<f32>() {
                             cfg.magnifier.zoom = z.clamp(1.5, 10.0);
-                        }
-                    }
-                    "sticky_keys" => cfg.sticky_keys_enabled = val == "true",
-                    "filter_keys" => cfg.filter_keys_enabled = val == "true",
-                    "slow_keys_ms" => {
-                        if let Ok(v) = val.parse::<u32>() {
-                            cfg.slow_keys_ms = v;
-                        }
-                    }
-                    "bounce_keys_ms" => {
-                        if let Ok(v) = val.parse::<u32>() {
-                            cfg.bounce_keys_ms = v;
-                        }
-                    }
-                    "mouse_keys" => cfg.mouse_keys_enabled = val == "true",
-                    "mouse_keys_speed" => {
-                        if let Ok(v) = val.parse::<f32>() {
-                            cfg.mouse_keys_speed = v.clamp(1.0, 50.0);
                         }
                     }
                     "screen_reader" => cfg.screen_reader = val == "true",
@@ -1181,176 +824,11 @@ mod tests {
 
     // -- Sticky Keys --
 
-    #[test]
-    fn test_sticky_keys_disabled() {
-        let mut sk = StickyKeys::new();
-        assert!(!sk.on_modifier_press(StickyModifier::Ctrl));
-    }
-
-    #[test]
-    fn test_sticky_keys_basic_cycle() {
-        let mut sk = StickyKeys::new();
-        sk.enabled = true;
-
-        // Press Ctrl → becomes sticky.
-        assert!(sk.on_modifier_press(StickyModifier::Ctrl));
-        assert!(sk.is_active(StickyModifier::Ctrl));
-        assert!(!sk.is_locked(StickyModifier::Ctrl));
-
-        // Press a regular key → Ctrl is consumed and turned off.
-        let (ctrl, _, _, _) = sk.on_key_press();
-        assert!(ctrl);
-        assert!(!sk.is_active(StickyModifier::Ctrl));
-    }
-
-    #[test]
-    fn test_sticky_keys_double_tap_lock() {
-        let mut sk = StickyKeys::new();
-        sk.enabled = true;
-
-        sk.on_modifier_press(StickyModifier::Shift);
-        sk.on_modifier_press(StickyModifier::Shift); // Double-tap → locked.
-        assert!(sk.is_locked(StickyModifier::Shift));
-
-        // Regular key press doesn't clear locked modifier.
-        let (_, _, shift, _) = sk.on_key_press();
-        assert!(shift);
-        assert!(sk.is_active(StickyModifier::Shift)); // Still locked.
-    }
-
-    #[test]
-    fn test_sticky_keys_unlock() {
-        let mut sk = StickyKeys::new();
-        sk.enabled = true;
-
-        sk.on_modifier_press(StickyModifier::Alt);
-        sk.on_modifier_press(StickyModifier::Alt); // Lock.
-        assert!(sk.is_locked(StickyModifier::Alt));
-
-        sk.on_modifier_press(StickyModifier::Alt); // Unlock.
-        assert!(!sk.is_active(StickyModifier::Alt));
-    }
-
-    #[test]
-    fn test_sticky_keys_reset() {
-        let mut sk = StickyKeys::new();
-        sk.enabled = true;
-        sk.on_modifier_press(StickyModifier::Ctrl);
-        sk.on_modifier_press(StickyModifier::Alt);
-        sk.reset();
-        assert!(!sk.is_active(StickyModifier::Ctrl));
-        assert!(!sk.is_active(StickyModifier::Alt));
-    }
-
-    // -- Filter Keys --
-
-    #[test]
-    fn test_filter_keys_disabled() {
-        let mut fk = FilterKeys::new();
-        assert!(fk.should_accept(42, 10, 1000));
-    }
-
-    #[test]
-    fn test_filter_keys_slow_reject() {
-        let mut fk = FilterKeys::new();
-        fk.enabled = true;
-        fk.slow_keys_ms = 300;
-        assert!(!fk.should_accept(42, 100, 1000)); // Held 100ms < 300ms.
-    }
-
-    #[test]
-    fn test_filter_keys_slow_accept() {
-        let mut fk = FilterKeys::new();
-        fk.enabled = true;
-        fk.slow_keys_ms = 300;
-        assert!(fk.should_accept(42, 400, 1000)); // Held 400ms >= 300ms.
-    }
-
-    #[test]
-    fn test_filter_keys_bounce_reject() {
-        let mut fk = FilterKeys::new();
-        fk.enabled = true;
-        fk.slow_keys_ms = 0;
-        fk.bounce_keys_ms = 500;
-
-        assert!(fk.should_accept(42, 10, 1000)); // First press.
-        assert!(!fk.should_accept(42, 10, 1200)); // 200ms later — too fast.
-        assert!(fk.should_accept(42, 10, 1600)); // 400ms later (600ms total) — OK.
-    }
-
-    #[test]
-    fn test_filter_keys_reset() {
-        let mut fk = FilterKeys::new();
-        fk.enabled = true;
-        fk.slow_keys_ms = 0;
-        fk.bounce_keys_ms = 500;
-        fk.should_accept(42, 10, 1000);
-        fk.reset();
-        assert!(fk.should_accept(42, 10, 1001)); // Immediate re-press OK after reset.
-    }
-
-    // -- Mouse Keys --
-
-    #[test]
-    fn test_mouse_keys_disabled() {
-        let mut mk = MouseKeys::new();
-        let (dx, dy) = mk.move_delta(MouseKeyAction::MoveUp);
-        assert!((dx).abs() < f32::EPSILON);
-        assert!((dy).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn test_mouse_keys_movement() {
-        let mut mk = MouseKeys::new();
-        mk.enabled = true;
-        let (dx, dy) = mk.move_delta(MouseKeyAction::MoveUp);
-        assert!((dx).abs() < f32::EPSILON);
-        assert!(dy < 0.0); // Moving up = negative Y.
-    }
-
-    #[test]
-    fn test_mouse_keys_acceleration() {
-        let mut mk = MouseKeys::new();
-        mk.enabled = true;
-        let (_, dy1) = mk.move_delta(MouseKeyAction::MoveDown);
-        let (_, dy2) = mk.move_delta(MouseKeyAction::MoveDown);
-        assert!(dy2 >= dy1); // Second move should be at least as fast.
-    }
-
-    #[test]
-    fn test_mouse_keys_max_speed() {
-        let mut mk = MouseKeys::new();
-        mk.enabled = true;
-        mk.max_speed = 10.0;
-        for _ in 0..100 {
-            mk.move_delta(MouseKeyAction::MoveRight);
-        }
-        let (dx, _) = mk.move_delta(MouseKeyAction::MoveRight);
-        assert!(dx <= mk.max_speed + f32::EPSILON);
-    }
-
-    #[test]
-    fn test_mouse_keys_reset_speed() {
-        let mut mk = MouseKeys::new();
-        mk.enabled = true;
-        for _ in 0..10 {
-            mk.move_delta(MouseKeyAction::MoveRight);
-        }
-        mk.reset_speed();
-        let (dx, _) = mk.move_delta(MouseKeyAction::MoveRight);
-        assert!((dx - mk.speed).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn test_mouse_keys_click_no_movement() {
-        let mut mk = MouseKeys::new();
-        mk.enabled = true;
-        let (dx, dy) = mk.move_delta(MouseKeyAction::Click);
-        assert!((dx).abs() < f32::EPSILON);
-        assert!((dy).abs() < f32::EPSILON);
-    }
-
-    // -- Cursor Settings --
+    // The sticky/filter/mouse-key tests moved with the code they test, to
+    // `compositor::a11ykeys`, where they were also rewritten to cover the
+    // three behaviours the originals missed: a refused keystroke starting a
+    // bounce window, switching sticky keys off stranding a held modifier,
+    // and `release_on_two_keys`, which had never been implemented.
 
     #[test]
     fn test_cursor_default() {
@@ -1404,10 +882,6 @@ mod tests {
         cfg.reduced_motion = true;
         cfg.magnifier.enabled = true;
         cfg.magnifier.zoom = 3.5;
-        cfg.sticky_keys_enabled = true;
-        cfg.filter_keys_enabled = true;
-        cfg.slow_keys_ms = 500;
-        cfg.mouse_keys_enabled = true;
         cfg.screen_reader = true;
         cfg.text_scale = 1.5;
         cfg.visual_alerts = true;
@@ -1422,10 +896,6 @@ mod tests {
         assert!(parsed.reduced_motion);
         assert!(parsed.magnifier.enabled);
         assert!((parsed.magnifier.zoom - 3.5).abs() < f32::EPSILON);
-        assert!(parsed.sticky_keys_enabled);
-        assert!(parsed.filter_keys_enabled);
-        assert_eq!(parsed.slow_keys_ms, 500);
-        assert!(parsed.mouse_keys_enabled);
         assert!(parsed.screen_reader);
         assert!((parsed.text_scale - 1.5).abs() < f32::EPSILON);
         assert!(parsed.visual_alerts);

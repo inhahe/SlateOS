@@ -808,9 +808,13 @@ impl<'a> InflateStream<'a> {
         let avail = self.buf.len().saturating_sub(self.cursor);
         if avail > 0 {
             let n = avail.min(out.len());
-            let src = self.buf.get(self.cursor..self.cursor.wrapping_add(n))
+            let src = self
+                .buf
+                .get(self.cursor..self.cursor.wrapping_add(n))
                 .ok_or(Error::UnexpectedEnd)?;
-            out.get_mut(..n).ok_or(Error::UnexpectedEnd)?.copy_from_slice(src);
+            out.get_mut(..n)
+                .ok_or(Error::UnexpectedEnd)?
+                .copy_from_slice(src);
             self.cursor = self.cursor.wrapping_add(n);
             self.compact();
             return Ok(n);
@@ -827,9 +831,13 @@ impl<'a> InflateStream<'a> {
         let avail = self.buf.len().saturating_sub(self.cursor);
         if avail > 0 {
             let n = avail.min(out.len());
-            let src = self.buf.get(self.cursor..self.cursor.wrapping_add(n))
+            let src = self
+                .buf
+                .get(self.cursor..self.cursor.wrapping_add(n))
                 .ok_or(Error::UnexpectedEnd)?;
-            out.get_mut(..n).ok_or(Error::UnexpectedEnd)?.copy_from_slice(src);
+            out.get_mut(..n)
+                .ok_or(Error::UnexpectedEnd)?
+                .copy_from_slice(src);
             self.cursor = self.cursor.wrapping_add(n);
             self.compact();
             Ok(n)

@@ -20,6 +20,7 @@
 // list documented in the root Cargo.toml. This keeps the discipline
 // centralised rather than diverging per-crate.
 
+use appearance::Palette;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -33,23 +34,6 @@ use std::time::Duration;
 // ============================================================================
 // Catppuccin Mocha theme
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
 
 // ============================================================================
 // Layout constants
@@ -107,6 +91,7 @@ fn rows_that_fit(top: f32, bottom: f32, row_height: f32) -> usize {
 /// cannot disagree with it about how much space was used.
 fn render_pattern_list(
     cmds: &mut Vec<RenderCommand>,
+    pal: &Palette,
     patterns: &[PatternMatch],
     x: f32,
     top: f32,
@@ -128,7 +113,7 @@ fn render_pattern_list(
             x,
             y: cy,
             text: format!("[{}] {}", pattern.kind.label(), pattern.description),
-            color: PEACH,
+            color: pal.peach,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_width),
@@ -141,7 +126,7 @@ fn render_pattern_list(
             x,
             y: cy,
             text: format!("+{} more", total.saturating_sub(shown)),
-            color: OVERLAY0,
+            color: pal.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_width),
@@ -612,13 +597,13 @@ impl StrengthRating {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::VeryWeak => RED,
-            Self::Weak => PEACH,
-            Self::Fair => YELLOW,
-            Self::Strong => GREEN,
-            Self::VeryStrong => TEAL,
+            Self::VeryWeak => pal.red,
+            Self::Weak => pal.peach,
+            Self::Fair => pal.yellow,
+            Self::Strong => pal.green,
+            Self::VeryStrong => pal.teal,
         }
     }
 
@@ -1160,6 +1145,12 @@ pub struct PasswordApp {
     pub last_error: Option<String>,
     rng: AppRandom,
     timestamp: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 /// What the user is told when there is no entropy to generate from.
@@ -1193,6 +1184,7 @@ impl PasswordApp {
 
     fn with_random(rng: AppRandom) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             password_opts: PasswordOptions::default(),
             passphrase_opts: PassphraseOptions::default(),
             current_password: String::new(),
@@ -1524,7 +1516,7 @@ impl PasswordApp {
             y: 0.0,
             width,
             height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1551,7 +1543,7 @@ impl PasswordApp {
             y: 0.0,
             width,
             height: TOOLBAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1559,7 +1551,7 @@ impl PasswordApp {
             x: 12.0,
             y: 12.0,
             text: "Password Generator".to_owned(),
-            color: BLUE,
+            color: self.palette.blue,
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
@@ -1581,14 +1573,22 @@ impl PasswordApp {
                 y: 8.0,
                 width: btn_w,
                 height: 24.0,
-                color: if is_active { SURFACE1 } else { SURFACE0 },
+                color: if is_active {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
             cmds.push(RenderCommand::Text {
                 x: tx + 10.0,
                 y: 14.0,
                 text: tab.label().to_owned(),
-                color: if is_active { BLUE } else { SUBTEXT0 },
+                color: if is_active {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 11.0,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -1606,7 +1606,7 @@ impl PasswordApp {
             y1: TOOLBAR_HEIGHT,
             x2: width,
             y2: TOOLBAR_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -1618,7 +1618,7 @@ impl PasswordApp {
             y: bar_y,
             width,
             height: STATUS_BAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1635,7 +1635,7 @@ impl PasswordApp {
             x: 12.0,
             y: bar_y + 6.0,
             text: status,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
@@ -1649,7 +1649,7 @@ impl PasswordApp {
             y,
             width: LEFT_PANEL_WIDTH,
             height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1658,7 +1658,7 @@ impl PasswordApp {
             y1: y,
             x2: LEFT_PANEL_WIDTH,
             y2: y + height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -1671,7 +1671,7 @@ impl PasswordApp {
             x: lx,
             y: cy,
             text: "GENERATED PASSWORD".to_owned(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
@@ -1684,16 +1684,19 @@ impl PasswordApp {
             y: cy,
             width: max_w,
             height: 32.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         // A refusal takes this slot: the user pressed Generate, so the answer
         // to "where is my password" belongs where the password would be, not
         // in a corner they have no reason to look at.
         let (pw_display, pw_color) = match (&self.last_error, self.current_password.is_empty()) {
-            (Some(message), _) => (message.clone(), RED),
-            (None, true) => ("Click Generate to create a password".to_owned(), OVERLAY0),
-            (None, false) => (self.current_password.clone(), TEXT),
+            (Some(message), _) => (message.clone(), self.palette.red),
+            (None, true) => (
+                "Click Generate to create a password".to_owned(),
+                self.palette.overlay0,
+            ),
+            (None, false) => (self.current_password.clone(), self.palette.text),
         };
         cmds.push(RenderCommand::Text {
             x: lx + 8.0,
@@ -1709,10 +1712,10 @@ impl PasswordApp {
 
         // Generation buttons
         let buttons = [
-            ("Generate Password", GREEN),
-            ("Generate Passphrase", TEAL),
-            ("Generate PIN", YELLOW),
-            ("Pronounceable", MAUVE),
+            ("Generate Password", self.palette.green),
+            ("Generate Passphrase", self.palette.teal),
+            ("Generate PIN", self.palette.yellow),
+            ("Pronounceable", self.palette.mauve),
         ];
 
         for (label, color) in &buttons {
@@ -1722,7 +1725,7 @@ impl PasswordApp {
                 y: cy,
                 width: btn_w.min(max_w),
                 height: 28.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
             cmds.push(RenderCommand::Text {
@@ -1745,7 +1748,7 @@ impl PasswordApp {
             x: lx,
             y: cy,
             text: "OPTIONS".to_owned(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
@@ -1813,7 +1816,11 @@ impl PasswordApp {
         ];
 
         for (label, active) in &options {
-            let text_color = if *active { TEXT } else { OVERLAY0 };
+            let text_color = if *active {
+                self.palette.text
+            } else {
+                self.palette.overlay0
+            };
             cmds.push(RenderCommand::Text {
                 x: lx + 8.0,
                 y: cy,
@@ -1847,7 +1854,7 @@ impl PasswordApp {
                     x: lx,
                     y: cy,
                     text: "STRENGTH ANALYSIS".to_owned(),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(max_w),
@@ -1868,14 +1875,14 @@ impl PasswordApp {
                         y: cy,
                         width: badge_w,
                         height: 28.0,
-                        color: analysis.rating.color(),
+                        color: analysis.rating.color(&self.palette),
                         corner_radii: CornerRadii::all(CORNER_RADIUS),
                     });
                     cmds.push(RenderCommand::Text {
                         x: lx + 10.0,
                         y: cy + 8.0,
                         text: analysis.rating.label().to_owned(),
-                        color: CRUST,
+                        color: self.palette.crust,
                         font_size: 13.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(badge_w - 16.0),
@@ -1887,7 +1894,7 @@ impl PasswordApp {
                         x: lx + badge_w + 12.0,
                         y: cy + 8.0,
                         text: format!("Score: {}/5", analysis.score),
-                        color: TEXT,
+                        color: self.palette.text,
                         font_size: 13.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -1906,7 +1913,7 @@ impl PasswordApp {
                             x: lx,
                             y: cy,
                             text: line.clone(),
-                            color: TEXT,
+                            color: self.palette.text,
                             font_size: 12.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(max_w),
@@ -1921,7 +1928,7 @@ impl PasswordApp {
                         x: lx,
                         y: cy,
                         text: "CRACK TIME ESTIMATES".to_owned(),
-                        color: OVERLAY0,
+                        color: self.palette.overlay0,
                         font_size: 10.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(max_w),
@@ -1940,7 +1947,7 @@ impl PasswordApp {
                             x: lx,
                             y: cy,
                             text: (*label).to_owned(),
-                            color: SUBTEXT0,
+                            color: self.palette.subtext0,
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(150.0),
@@ -1950,7 +1957,7 @@ impl PasswordApp {
                             x: lx + 160.0,
                             y: cy,
                             text: (*value).clone(),
-                            color: TEXT,
+                            color: self.palette.text,
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(max_w - 170.0),
@@ -1966,7 +1973,7 @@ impl PasswordApp {
                             x: lx,
                             y: cy,
                             text: "PATTERNS DETECTED".to_owned(),
-                            color: OVERLAY0,
+                            color: self.palette.overlay0,
                             font_size: 10.0,
                             font_weight: FontWeightHint::Bold,
                             max_width: Some(max_w),
@@ -1981,6 +1988,7 @@ impl PasswordApp {
                         // guess at how tall it was.
                         let _list_bottom = render_pattern_list(
                             cmds,
+                            &self.palette,
                             &analysis.patterns_found,
                             lx + 4.0,
                             cy,
@@ -1993,7 +2001,7 @@ impl PasswordApp {
                         x: lx,
                         y: cy,
                         text: "Generate a password to see analysis".to_owned(),
-                        color: OVERLAY0,
+                        color: self.palette.overlay0,
                         font_size: 13.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_w),
@@ -2006,7 +2014,7 @@ impl PasswordApp {
                     x: lx,
                     y: cy,
                     text: format!("HISTORY ({} entries)", self.history.len()),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(max_w),
@@ -2033,7 +2041,7 @@ impl PasswordApp {
                         y: cy,
                         width: max_w,
                         height: ITEM_HEIGHT,
-                        color: SURFACE0,
+                        color: self.palette.surface0,
                         corner_radii: CornerRadii::all(CORNER_RADIUS),
                     });
 
@@ -2043,7 +2051,7 @@ impl PasswordApp {
                         y: cy + 10.0,
                         width: 8.0,
                         height: 8.0,
-                        color: entry.strength.color(),
+                        color: entry.strength.color(&self.palette),
                         corner_radii: CornerRadii::all(4.0),
                     });
 
@@ -2061,7 +2069,7 @@ impl PasswordApp {
                             11.0,
                             FontWeightHint::Regular,
                         ),
-                        color: TEXT,
+                        color: self.palette.text,
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_w - 140.0),
@@ -2072,7 +2080,7 @@ impl PasswordApp {
                         x: lx + max_w - 110.0,
                         y: cy + 8.0,
                         text: format!("[{}] {:.0}b", entry.gen_type, entry.entropy),
-                        color: SUBTEXT1,
+                        color: self.palette.subtext1,
                         font_size: 10.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(100.0),
@@ -2086,7 +2094,7 @@ impl PasswordApp {
                         x: lx + 4.0,
                         y: cy + 8.0,
                         text: format!("+{} older", total.saturating_sub(shown)),
-                        color: OVERLAY0,
+                        color: self.palette.overlay0,
                         font_size: 10.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_w - 8.0),
@@ -2103,6 +2111,10 @@ impl PasswordApp {
 // ============================================================================
 
 impl App for PasswordApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Password Generator".to_owned()
     }
@@ -3027,11 +3039,12 @@ mod tests {
     /// The refusal goes where the password would have gone, so it is seen.
     #[test]
     fn the_refusal_is_rendered_in_place_of_the_password() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut app = PasswordApp::with_random(AppRandom::Unavailable);
         app.gen_password();
         let shown = app.render_commands(1100.0, 700.0).into_iter().any(|cmd| {
             matches!(cmd, RenderCommand::Text { ref text, color, .. }
-                if text == NO_ENTROPY_MESSAGE && color == RED)
+                if text == NO_ENTROPY_MESSAGE && color == pal.red)
         });
         assert!(
             shown,
@@ -3065,5 +3078,65 @@ mod tests {
         assert!(is_common_password("123456"));
         assert!(is_common_password("Password")); // Case-insensitive
         assert!(!is_common_password("xK9mQ2pL7nR4"));
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        use oswindow::app::App as _;
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut PasswordApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = PasswordApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

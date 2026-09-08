@@ -124428,8 +124428,153 @@ which makes step 1 below larger than one dependency line.
   `fileassoc`, `startupmanager`, `magnifier`, `systemrestore`, `videoplayer`,
   `qrcode`, `notes`, `rssreader`, `spreadsheet`, `paint`, `defrag`, `netscan`,
   `photomanager`, `renamer`, `mediaconvert`, `radio`, `flashcards`, `calendar`
-  and `finance`. Each has a test on the rectangles it emits, and each was
-  mutation-checked by making `theme_changed` ignore its argument.
+  `finance`, `slides`, `worldclock`, `camera`, `compass`, `diskanalyzer`,
+  `jsonviewer`, `logviewer`, `passwordgen`, `podcast`, `regextester`,
+  `stickynotes`, `taskscheduler`, `contacts`, `habits`, `fontmanager` and
+  `automator`, `sysmonitor`, `undelete`, `ircclient`, `dictionary`,
+  `reminders`, `weather`, `alarmclock`, `diagram`, `partmanager` and
+  `credmanager`, `vpnmanager`, `dbviewer`, `whiteboard` and `mindmap`. Each has
+  a test on the rectangles it emits, and each was mutation-checked by making
+  `theme_changed` ignore its argument.
+
+**`whiteboard` and `mindmap` are the clearest content cases yet**, and both
+were deferred earlier for exactly the right reason. `whiteboard`'s constant is
+the default *ink*; `mindmap`'s `NODE_COLORS` is the eight colours a node cycles
+through. Both are saved with the document, so following the theme would mean a
+saved drawing or map changing colour when the user changed theme. Both keep
+fixed values, with the reasoning written where they are defined — and the rest
+of each application (56 and 40-odd chrome uses) converted normally.
+
+**The worst bug this conversion has produced: substitution inside string
+literals.** `dbviewer` names a colour constant `TEXT`. The word-boundary
+substitution therefore rewrote the *SQL type name* `"TEXT"` to
+`"self.palette.text"` in seven places, including inside longer statements like
+`"CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"`. The parser
+stopped recognising `TEXT` columns. It compiles, clippy is clean, and only one
+test — `test_parse_create_table`, which happens to cover `CREATE TABLE` —
+failed.
+
+Two things follow, both done:
+
+- **The converter now skips string literals** when substituting.
+- **The whole tree was audited** for a palette path inside any string literal,
+  not just the exact literal the first grep matched: `"…name TEXT NOT NULL)"`
+  contains the substring but is not equal to it, and a naive search missed two
+  of the seven. `dbviewer` was the only affected application, and it is clean.
+
+This is the argument for converting one application at a time and running its
+own suite: a batch pass would have buried a logic change in a diff of colour
+substitutions.
+
+**A `const` table of colours cannot hold a palette, and the fix is a role
+selector.** `vpnmanager`'s `TOOLBAR_BUTTONS` was
+`&[(&str, Color, Target)]` — a top-level constant, so no runtime palette can
+reach it. Changing the middle field to `fn(&Palette) -> Color` keeps the table
+declarative and picks the role out at draw time; function pointers are
+const-constructible and `|p| p.green` is one. Clippy then wants a `type` alias
+for the tuple. This is the shape behind every "`<top level>` use" the survey
+reports.
+
+**The shape-2 fixer must handle both spellings of the palette.** The constant
+substitution produces `self.palette.<role>`; the `.color()` call-site rewrites
+produce `&self.palette` passed on to another function. A fixer that rewrote
+only the first left 22 errors in `credmanager` that read as a new problem and
+were the same one. It now rewrites both.
+
+**Run the shape-2 fixer on every application, not just the ones the survey
+flags.** The survey lists functions needing a *parameter*; it does not list
+the ones that already take the app struct, because those need no signature
+change. Skipping that pass on `partmanager` produced 113 errors that looked
+like a catastrophe and were one missing step.
+
+**Two attributes on one item after a deletion.** `alarmclock` had
+`#[allow(dead_code)]` on `SKY`, a comment about `SKY`, then
+`#[allow(dead_code)]` on `MAROON`. Converting `SKY` left its attribute
+stranded *above a comment*, which the sweep deliberately skips — and the
+result is two attributes on `MAROON`, which is
+`clippy::duplicated_attributes`, an error. The general rule stands (an
+attribute followed by a comment is usually fine); this is the exception, and
+it is caught by clippy rather than by the sweep.
+
+**Adding a reference can make an elided lifetime ambiguous.**
+`reminders::detail_prose(text: &str, …) -> text::Paragraph<'_>` compiled while
+`&str` was its only reference; adding `pal: &Palette` made `'_` ambiguous and
+the signature needed a named lifetime. Rare, but it is a *signature* change
+rather than a call-site one, so it does not look like the others.
+
+**Several types per application share one colour method.** `undelete` has
+three (`FileSignatureKind`, `FileCategory`, `RecoveryConfidence`),
+`sysmonitor` two, `ircclient` two. The threader now handles every occurrence
+rather than the first. Its first version had a subtle bug worth avoiding: it
+located each rewritten signature with `s.index(new)`, and since the types
+share an identical signature string, `index` returned the *first* every time,
+so the body rewrite landed on the same method repeatedly while the others were
+left half-converted. Use the match position.
+
+**Wrapper methods propagate the requirement.** `sysmonitor`'s `cpu_color`,
+`mem_color` and `disk_color` do nothing but call `color_for_value`, so giving
+that one a palette gives all three one. Expect a small cascade whenever the
+colour method has callers of its own inside the same type.
+
+**A fourth content case, and the tell held again.** `contacts` sets a new
+group's colour in `Group::new` — the swatch that group is shown with, chosen
+by the user. Fixed colour, not the theme. As with `paint`, `whiteboard` and
+`stickynotes`, the constant was read where no window is in scope.
+
+**Where the remaining time actually goes.** Not the substitution, which is
+reliable, but four kinds of call site the scripts cannot rewrite safely:
+generic signatures (`fn f<T: PartialEq + Copy>(…)`, which the parameter regex
+does not match), calls whose first argument is an expression rather than an
+identifier, calls spanning several lines, and *argument order* — a parameter
+inserted second must be passed second, and the compiler reports that as a type
+error rather than an arity one. All are compiler-visible; none is automatable
+without the risk that produced 91 errors in one application earlier.
+
+**Content that only *looks* like chrome, a third time.** `stickynotes`'
+`note_palette` reads two constants — but only as the fallback for an
+out-of-range note colour, and a note's colour is the swatch the user picked,
+not chrome. It keeps fixed colours, like `paint`'s swatches and
+`whiteboard`'s default ink. The tell each time was the same: the constant is
+read somewhere that has no window in scope (a `Default` impl, a lookup table,
+a fallback arm), which is a hint that it is describing *content* rather than
+the surface the content sits on.
+
+**Closures rebind the window.** A call-site rewrite to `&self.palette` is
+wrong inside `|u, f, r|`, where the window is `u` — three sites in
+`taskscheduler`'s test helpers. The compiler names them, but it is worth
+knowing that "the window is always `self`" fails in closures as well as in
+other types' methods.
+
+**The one conversion bug that a test would not have caught.** A script that
+gives `#[test]` functions a local palette matched a *production* function too
+and inserted `let pal = Palette::from_settings(&default())` inside
+`jsonviewer::highlight_json_text` — **shadowing the parameter**. The function
+then ignored the palette it was handed and always drew in the defaults: it
+compiles, every test passes, and the only symptom is JSON syntax highlighting
+that does not follow the theme while everything around it does.
+
+It surfaced as `unused variable: pal` from clippy, not from any test. Two
+things follow. Any script that inserts a binding must check that the enclosing
+function does not already have one of that name. And the whole set is worth
+auditing for it: `grep` every converted application for a `let pal =` inside a
+function whose signature already says `pal: &Palette`. That audit found this
+one and no others.
+
+**One application refused conversion, correctly: `whiteboard`.** Its
+`MOCHA_TEXT` is read in a `Default::default()` — the default *pen* colour — and
+a `Default` impl cannot take a palette. The colour is also content rather than
+chrome: it is the ink the user draws with, like `paint`'s swatches. Reverted
+rather than forced. The general rule this makes concrete: a constant used in a
+`Default` impl is usually content, and the hex-value match cannot tell the two
+apart when the chrome and the ink happen to be the same colour.
+
+**Two more shapes met here.** A *recursive* free helper
+(`diskanalyzer::squarify_layout`) needs the palette threaded through its own
+recursive call as well as its callers, and the public entry point above it
+(`compute_treemap`) too. And a helper reached only from a constructor
+(`slides::SlideTheme::mocha`, called by `SlidesApp::new`) cannot take the live
+palette at all, because none exists yet — it takes the defaults, and
+`theme_changed` replaces the result before the first frame.
 
 **A nested case the blanket call-site rewrite gets wrong.** `.color()` becomes
 `.color(&self.palette)` everywhere, which is right in the window's methods and

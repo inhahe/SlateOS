@@ -16,6 +16,7 @@
 // of them -- and in a program whose `main` rendered into a `Vec` and dropped
 // it, "dead" described most of the file. It is gone.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
@@ -31,22 +32,6 @@ use std::process::ExitCode;
 // ============================================================================
 // Catppuccin Mocha palette
 // ============================================================================
-
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
 // The window
@@ -383,12 +368,12 @@ impl CameraStatus {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Connected => GREEN,
-            Self::Disconnected => OVERLAY0,
-            Self::Recording => RED,
-            Self::Error => YELLOW,
+            Self::Connected => pal.green,
+            Self::Disconnected => pal.overlay0,
+            Self::Recording => pal.red,
+            Self::Error => pal.yellow,
         }
     }
 
@@ -1369,11 +1354,18 @@ pub struct CameraApp {
 
     // Flash effect simulation
     pub flash_remaining_ms: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl CameraApp {
     pub fn new(width: f32, height: f32) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
             cameras: default_cameras(),
@@ -1663,7 +1655,7 @@ impl CameraApp {
         let l = Layout::solve(w, h);
         let mut f = Frame::new(w, h);
 
-        fill(&mut f, l.window, CRUST, CornerRadii::ZERO);
+        fill(&mut f, l.window, self.palette.crust, CornerRadii::ZERO);
 
         self.draw_toolbar(&mut f, &l);
         self.draw_viewfinder(&mut f, &l);
@@ -1711,13 +1703,13 @@ impl CameraApp {
         if bar.is_empty() {
             return;
         }
-        fill(f, bar, MANTLE, CornerRadii::ZERO);
+        fill(f, bar, self.palette.mantle, CornerRadii::ZERO);
         f.push(RenderCommand::Line {
             x1: bar.x,
             y1: bar.bottom(),
             x2: bar.right(),
             y2: bar.bottom(),
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -1732,8 +1724,15 @@ impl CameraApp {
                 .min(bar.w * 0.3);
             let r = Rect::new(right - bw, bar.y + l.pad * 0.6, bw, l.button);
             if r.x > bar.x {
-                fill(f, r, MAUVE, CornerRadii::all(6.0));
-                centred(f, r, label, CRUST, l.small, FontWeightHint::Bold);
+                fill(f, r, self.palette.mauve, CornerRadii::all(6.0));
+                centred(
+                    f,
+                    r,
+                    label,
+                    self.palette.crust,
+                    l.small,
+                    FontWeightHint::Bold,
+                );
                 right = r.x - l.pad * 0.5;
             }
         }
@@ -1752,14 +1751,22 @@ impl CameraApp {
             fill(
                 f,
                 r,
-                if on { SURFACE1 } else { SURFACE0 },
+                if on {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
                 CornerRadii::all(6.0),
             );
             centred(
                 f,
                 r,
                 label,
-                if on { BLUE } else { SUBTEXT0 },
+                if on {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext0
+                },
                 l.small,
                 FontWeightHint::Bold,
             );
@@ -1778,7 +1785,7 @@ impl CameraApp {
                 f,
                 Rect::new(x, bar.y, tw, bar.h),
                 title,
-                BLUE,
+                self.palette.blue,
                 l.heading,
                 FontWeightHint::Bold,
             );
@@ -1796,7 +1803,14 @@ impl CameraApp {
                 .active_camera()
                 .map_or_else(|| "No Camera".to_string(), |c| c.name.clone());
             let r = Rect::new(x, bar.y, name_w, bar.h);
-            bounded(f, r, &name, TEXT, l.font, FontWeightHint::Regular);
+            bounded(
+                f,
+                r,
+                &name,
+                self.palette.text,
+                l.font,
+                FontWeightHint::Regular,
+            );
             f.hit(Target::NextCamera, r);
             x += name_w + l.pad;
         }
@@ -1812,7 +1826,11 @@ impl CameraApp {
             fill(
                 f,
                 photo,
-                if on_photo { BLUE } else { SURFACE0 },
+                if on_photo {
+                    self.palette.blue
+                } else {
+                    self.palette.surface0
+                },
                 CornerRadii {
                     top_left: 6.0,
                     top_right: 0.0,
@@ -1824,7 +1842,11 @@ impl CameraApp {
                 f,
                 photo,
                 "Photo",
-                if on_photo { CRUST } else { TEXT },
+                if on_photo {
+                    self.palette.crust
+                } else {
+                    self.palette.text
+                },
                 l.small,
                 FontWeightHint::Bold,
             );
@@ -1834,7 +1856,11 @@ impl CameraApp {
             fill(
                 f,
                 video,
-                if on_video { RED } else { SURFACE0 },
+                if on_video {
+                    self.palette.red
+                } else {
+                    self.palette.surface0
+                },
                 CornerRadii {
                     top_left: 0.0,
                     top_right: 6.0,
@@ -1846,7 +1872,11 @@ impl CameraApp {
                 f,
                 video,
                 "Video",
-                if on_video { CRUST } else { TEXT },
+                if on_video {
+                    self.palette.crust
+                } else {
+                    self.palette.text
+                },
                 l.small,
                 FontWeightHint::Bold,
             );
@@ -1859,9 +1889,9 @@ impl CameraApp {
         if d > 0.0 {
             let r = Rect::new(x, bar.y + (bar.h - d) / 2.0, d, d);
             let colour = match self.capture_mode {
-                CaptureMode::Photo => BLUE,
-                CaptureMode::Video if self.is_recording() => RED,
-                CaptureMode::Video => PEACH,
+                CaptureMode::Photo => self.palette.blue,
+                CaptureMode::Video if self.is_recording() => self.palette.red,
+                CaptureMode::Video => self.palette.peach,
             };
             fill(f, r, colour, CornerRadii::all(d / 2.0));
             let inner = inset(r, d * 0.18);
@@ -1873,9 +1903,16 @@ impl CameraApp {
                     CornerRadii::all(inner.w / 2.0),
                 ),
                 CaptureMode::Video if self.is_recording() => {
-                    fill(f, inset(r, d * 0.3), CRUST, CornerRadii::all(3.0));
+                    fill(
+                        f,
+                        inset(r, d * 0.3),
+                        self.palette.crust,
+                        CornerRadii::all(3.0),
+                    );
                 }
-                CaptureMode::Video => fill(f, inner, RED, CornerRadii::all(inner.w / 2.0)),
+                CaptureMode::Video => {
+                    fill(f, inner, self.palette.red, CornerRadii::all(inner.w / 2.0));
+                }
             }
             f.hit(Target::Shutter, r);
             x += d + l.pad;
@@ -1887,9 +1924,9 @@ impl CameraApp {
                 Target::Timer,
                 self.timer_mode.label(),
                 self.timer_mode != TimerMode::Off,
-                YELLOW,
+                self.palette.yellow,
             ),
-            (Target::Grid, "#", self.show_grid_overlay, BLUE),
+            (Target::Grid, "#", self.show_grid_overlay, self.palette.blue),
         ] {
             let bw =
                 (text::measure(label, l.small, FontWeightHint::Bold) + l.pad * 1.6).max(l.button);
@@ -1900,14 +1937,18 @@ impl CameraApp {
             fill(
                 f,
                 r,
-                if on { SURFACE1 } else { SURFACE0 },
+                if on {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
                 CornerRadii::all(6.0),
             );
             centred(
                 f,
                 r,
                 label,
-                if on { colour } else { SUBTEXT0 },
+                if on { colour } else { self.palette.subtext0 },
                 l.small,
                 FontWeightHint::Bold,
             );
@@ -1923,7 +1964,7 @@ impl CameraApp {
                 f,
                 Rect::new(x, bar.y, zw, bar.h),
                 &zoom,
-                SUBTEXT0,
+                self.palette.subtext0,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -1947,7 +1988,7 @@ impl CameraApp {
         if v.is_empty() {
             return;
         }
-        fill(f, v, CRUST, CornerRadii::ZERO);
+        fill(f, v, self.palette.crust, CornerRadii::ZERO);
         f.hit(Target::Viewfinder, v);
 
         // The picture itself. There is no camera, so what is drawn is the
@@ -1984,7 +2025,7 @@ impl CameraApp {
                     CameraStatus::Disconnected => "Camera disconnected",
                     _ => "Camera error",
                 },
-                status.color(),
+                status.color(&self.palette),
                 l.font,
                 FontWeightHint::Bold,
             );
@@ -2008,10 +2049,21 @@ impl CameraApp {
                 fill(
                     f,
                     r,
-                    if live { RED } else { PEACH },
+                    if live {
+                        self.palette.red
+                    } else {
+                        self.palette.peach
+                    },
                     CornerRadii::all(bh / 2.0),
                 );
-                centred(f, r, &label, CRUST, l.small, FontWeightHint::Bold);
+                centred(
+                    f,
+                    r,
+                    &label,
+                    self.palette.crust,
+                    l.small,
+                    FontWeightHint::Bold,
+                );
             }
         }
 
@@ -2029,7 +2081,14 @@ impl CameraApp {
                     Color::rgba(17, 17, 27, 190),
                     CornerRadii::all(bh / 2.0),
                 );
-                centred(f, r, &label, TEXT, l.small, FontWeightHint::Bold);
+                centred(
+                    f,
+                    r,
+                    &label,
+                    self.palette.text,
+                    l.small,
+                    FontWeightHint::Bold,
+                );
             }
         }
 
@@ -2111,7 +2170,7 @@ impl CameraApp {
                     (bw - 1.0).max(1.0),
                     bh,
                 ),
-                TEAL,
+                self.palette.teal,
                 CornerRadii::ZERO,
             );
         }
@@ -2120,7 +2179,7 @@ impl CameraApp {
             y: r.y,
             width: r.w,
             height: r.h,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
             line_width: 1.0,
         });
@@ -2141,13 +2200,13 @@ impl CameraApp {
         if s.is_empty() {
             return;
         }
-        fill(f, s, MANTLE, CornerRadii::ZERO);
+        fill(f, s, self.palette.mantle, CornerRadii::ZERO);
         f.push(RenderCommand::Line {
             x1: s.x,
             y1: s.y,
             x2: s.right(),
             y2: s.y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2156,7 +2215,7 @@ impl CameraApp {
                 f,
                 Rect::new(s.x + l.pad, s.y, s.w - l.pad * 2.0, s.h),
                 "No photos yet -- press Space to take one",
-                OVERLAY0,
+                self.palette.overlay0,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -2204,7 +2263,11 @@ impl CameraApp {
             fill(
                 f,
                 r,
-                if chosen { SURFACE1 } else { SURFACE0 },
+                if chosen {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
                 CornerRadii::all(4.0),
             );
             if chosen {
@@ -2213,7 +2276,7 @@ impl CameraApp {
                     y: r.y,
                     width: r.w,
                     height: r.h,
-                    color: BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::all(4.0),
                     line_width: 2.0,
                 });
@@ -2226,7 +2289,7 @@ impl CameraApp {
                     f,
                     Rect::new(r.right() - d - 2.0, r.y + 1.0, d, d),
                     "*",
-                    YELLOW,
+                    self.palette.yellow,
                     l.small,
                     FontWeightHint::Bold,
                 );
@@ -2235,7 +2298,11 @@ impl CameraApp {
                 f,
                 Rect::new(r.x + 3.0, r.y, r.w - 6.0, r.h),
                 &photo.display_name(),
-                if chosen { TEXT } else { SUBTEXT0 },
+                if chosen {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -2258,13 +2325,13 @@ impl CameraApp {
         if s.is_empty() {
             return;
         }
-        fill(f, s, MANTLE, CornerRadii::ZERO);
+        fill(f, s, self.palette.mantle, CornerRadii::ZERO);
         f.push(RenderCommand::Line {
             x1: s.x,
             y1: s.y,
             x2: s.right(),
             y2: s.y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2284,7 +2351,7 @@ impl CameraApp {
                 f,
                 Rect::new(s.right() - l.pad - fw, s.y, fw, s.h),
                 &facts,
-                SUBTEXT0,
+                self.palette.subtext0,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -2294,16 +2361,16 @@ impl CameraApp {
         let (msg, colour) = match (&self.status_message, self.timer_countdown.active) {
             (_, true) => (
                 format!("Timer: {}s", self.timer_countdown.remaining_seconds()),
-                YELLOW,
+                self.palette.yellow,
             ),
-            (Some(m), _) => (m.clone(), TEXT),
+            (Some(m), _) => (m.clone(), self.palette.text),
             (None, _) => (
                 match self.capture_mode {
                     CaptureMode::Photo => "Ready".to_string(),
                     CaptureMode::Video if self.is_recording() => "Recording".to_string(),
                     CaptureMode::Video => "Ready to record".to_string(),
                 },
-                SUBTEXT0,
+                self.palette.subtext0,
             ),
         };
         if left_w > 0.0 {
@@ -2344,7 +2411,7 @@ impl CameraApp {
             y: r.y,
             width: r.w,
             height: r.h,
-            color: YELLOW,
+            color: self.palette.yellow,
             corner_radii: CornerRadii::all(d / 2.0),
             line_width: 3.0,
         });
@@ -2354,7 +2421,7 @@ impl CameraApp {
             f,
             r,
             &self.timer_countdown.display(),
-            YELLOW,
+            self.palette.yellow,
             (d * 0.45).max(l.font),
             FontWeightHint::Bold,
         );
@@ -2392,13 +2459,13 @@ impl CameraApp {
         if s.is_empty() {
             return;
         }
-        fill(f, s, MANTLE, CornerRadii::ZERO);
+        fill(f, s, self.palette.mantle, CornerRadii::ZERO);
         f.push(RenderCommand::Line {
             x1: s.x,
             y1: s.y,
             x2: s.x,
             y2: s.bottom(),
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2408,12 +2475,21 @@ impl CameraApp {
         for (i, panel) in tabs.iter().enumerate() {
             let r = Rect::new(s.x + usize_f32(i) * tab_w, s.y, tab_w, tab_h);
             let on = self.sidebar_panel == *panel;
-            fill(f, r, if on { SURFACE1 } else { MANTLE }, CornerRadii::ZERO);
+            fill(
+                f,
+                r,
+                if on {
+                    self.palette.surface1
+                } else {
+                    self.palette.mantle
+                },
+                CornerRadii::ZERO,
+            );
             if on {
                 fill(
                     f,
                     Rect::new(r.x, r.bottom() - 2.0, r.w, 2.0),
-                    BLUE,
+                    self.palette.blue,
                     CornerRadii::ZERO,
                 );
             }
@@ -2424,7 +2500,11 @@ impl CameraApp {
                 f,
                 r,
                 panel.label(),
-                if on { TEXT } else { SUBTEXT0 },
+                if on {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 l.small,
                 if on {
                     FontWeightHint::Bold
@@ -2470,7 +2550,7 @@ impl CameraApp {
                 f,
                 Rect::new(row.x, row.y, row.w, name_h),
                 setting.label(),
-                SUBTEXT0,
+                self.palette.subtext0,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -2479,8 +2559,15 @@ impl CameraApp {
             let down = Rect::new(lower.x, lower.y, bw, lower.h);
             let up = Rect::new(lower.right() - bw, lower.y, bw, lower.h);
             for (r, label, nudge) in [(down, "-", Nudge::Down), (up, "+", Nudge::Up)] {
-                fill(f, r, SURFACE0, CornerRadii::all(3.0));
-                centred(f, r, label, TEXT, l.small, FontWeightHint::Bold);
+                fill(f, r, self.palette.surface0, CornerRadii::all(3.0));
+                centred(
+                    f,
+                    r,
+                    label,
+                    self.palette.text,
+                    l.small,
+                    FontWeightHint::Bold,
+                );
                 f.hit(Target::Setting(*setting, nudge), r);
             }
 
@@ -2495,18 +2582,18 @@ impl CameraApp {
                 // user that 62 is nearly two thirds without their having to
                 // remember the range.
                 let frac = self.setting_fraction(*setting);
-                fill(f, mid, SURFACE0, CornerRadii::all(2.0));
+                fill(f, mid, self.palette.surface0, CornerRadii::all(2.0));
                 fill(
                     f,
                     Rect::new(mid.x, mid.y, mid.w * frac, mid.h),
-                    LAVENDER,
+                    self.palette.lavender,
                     CornerRadii::all(2.0),
                 );
                 centred(
                     f,
                     mid,
                     &self.setting_value(*setting),
-                    CRUST,
+                    self.palette.crust,
                     l.small,
                     FontWeightHint::Bold,
                 );
@@ -2531,7 +2618,11 @@ impl CameraApp {
                 f,
                 r,
                 &format!("{} {}", if on { "[x]" } else { "[ ]" }, label),
-                if on { TEXT } else { OVERLAY0 },
+                if on {
+                    self.palette.text
+                } else {
+                    self.palette.overlay0
+                },
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -2547,7 +2638,7 @@ impl CameraApp {
                 f,
                 Rect::new(body.x + l.pad, body.y, body.w - l.pad * 2.0, l.row),
                 "No camera",
-                OVERLAY0,
+                self.palette.overlay0,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -2564,7 +2655,7 @@ impl CameraApp {
                 f,
                 Rect::new(body.x + l.pad * 0.5, y, body.w - l.pad, line_h),
                 &line,
-                SUBTEXT0,
+                self.palette.subtext0,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -2580,6 +2671,7 @@ impl CameraApp {
             .collect();
         y = draw_choices(
             f,
+            &self.palette,
             l,
             body,
             y,
@@ -2596,6 +2688,7 @@ impl CameraApp {
             .unwrap_or(usize::MAX);
         let _ = draw_choices(
             f,
+            &self.palette,
             l,
             body,
             y,
@@ -2618,14 +2711,22 @@ impl CameraApp {
             fill(
                 f,
                 r,
-                if on { SURFACE1 } else { SURFACE0 },
+                if on {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
                 CornerRadii::all(4.0),
             );
             bounded(
                 f,
                 Rect::new(r.x + l.pad * 0.5, r.y, r.w - l.pad, r.h),
                 filter.label(),
-                if on { MAUVE } else { SUBTEXT0 },
+                if on {
+                    self.palette.mauve
+                } else {
+                    self.palette.subtext0
+                },
                 l.small,
                 if on {
                     FontWeightHint::Bold
@@ -2661,7 +2762,7 @@ impl CameraApp {
                     f,
                     Rect::new(body.x + l.pad * 0.5, y, body.w - l.pad, line_h),
                     &line,
-                    SUBTEXT0,
+                    self.palette.subtext0,
                     l.small,
                     FontWeightHint::Regular,
                 );
@@ -2676,20 +2777,35 @@ impl CameraApp {
                 fill(
                     f,
                     fav,
-                    if photo.favorite { YELLOW } else { SURFACE0 },
+                    if photo.favorite {
+                        self.palette.yellow
+                    } else {
+                        self.palette.surface0
+                    },
                     CornerRadii::all(4.0),
                 );
                 centred(
                     f,
                     fav,
                     "Favourite",
-                    if photo.favorite { CRUST } else { TEXT },
+                    if photo.favorite {
+                        self.palette.crust
+                    } else {
+                        self.palette.text
+                    },
                     l.small,
                     FontWeightHint::Bold,
                 );
                 f.hit(Target::Favorite, fav);
-                fill(f, del, SURFACE0, CornerRadii::all(4.0));
-                centred(f, del, "Delete", RED, l.small, FontWeightHint::Bold);
+                fill(f, del, self.palette.surface0, CornerRadii::all(4.0));
+                centred(
+                    f,
+                    del,
+                    "Delete",
+                    self.palette.red,
+                    l.small,
+                    FontWeightHint::Bold,
+                );
                 f.hit(Target::Delete, del);
                 y += bh + l.pad * 0.5;
             }
@@ -2701,7 +2817,7 @@ impl CameraApp {
                 f,
                 Rect::new(body.x + l.pad * 0.5, y, body.w - l.pad, line_h),
                 "No photo selected",
-                OVERLAY0,
+                self.palette.overlay0,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -2728,7 +2844,7 @@ impl CameraApp {
             let r = Rect::new(body.x + l.pad * 0.5, y, body.w - l.pad, l.row);
             let on = self.gallery.selected_idx == Some(idx);
             if on {
-                fill(f, r, SURFACE1, CornerRadii::all(3.0));
+                fill(f, r, self.palette.surface1, CornerRadii::all(3.0));
             }
             bounded(
                 f,
@@ -2738,7 +2854,11 @@ impl CameraApp {
                     if photo.favorite { "* " } else { "" },
                     photo.display_name()
                 ),
-                if on { TEXT } else { SUBTEXT0 },
+                if on {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -3277,6 +3397,7 @@ fn draw_thirds(f: &mut Frame<Target>, r: Rect) {
 )]
 fn draw_choices(
     f: &mut Frame<Target>,
+    pal: &Palette,
     l: &Layout,
     body: Rect,
     mut y: f32,
@@ -3293,7 +3414,7 @@ fn draw_choices(
         f,
         Rect::new(body.x + l.pad * 0.5, y, body.w - l.pad, line_h),
         heading,
-        TEXT,
+        pal.text,
         l.small,
         FontWeightHint::Bold,
     );
@@ -3305,13 +3426,13 @@ fn draw_choices(
         let r = Rect::new(body.x + l.pad * 0.5, y, body.w - l.pad, line_h);
         let on = i == chosen;
         if on {
-            fill(f, r, SURFACE1, CornerRadii::all(3.0));
+            fill(f, r, pal.surface1, CornerRadii::all(3.0));
         }
         bounded(
             f,
             Rect::new(r.x + l.pad * 0.5, r.y, r.w - l.pad, r.h),
             label,
-            if on { BLUE } else { SUBTEXT0 },
+            if on { pal.blue } else { pal.subtext0 },
             l.small,
             FontWeightHint::Regular,
         );
@@ -3403,6 +3524,10 @@ fn step_u32(v: u32, up: bool, by: u32, max: u32) -> u32 {
 // ============================================================================
 
 impl App for CameraApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Camera")
     }
@@ -5436,5 +5561,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut CameraApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = CameraApp::new(1000.0, 700.0);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

@@ -26,6 +26,7 @@
 //! it paints, which is what makes the thing seen and the thing clicked one
 //! fact rather than two kept equal by hand.
 
+use appearance::Palette;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -39,22 +40,6 @@ use guitk::text;
 use oswindow::app::{self, App, Response};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
 
 // ── Constants ───────────────────────────────────────────────────────
 const PI: f64 = core::f64::consts::PI;
@@ -498,11 +483,18 @@ struct CompassApp {
     /// of all -- answers a click against a window that is not on the screen.
     width: f32,
     height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl CompassApp {
     fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             heading: 0.0,
             declination: 0.0,
             position: Coordinate::new(40.7128, -74.0060), // New York City
@@ -882,7 +874,7 @@ impl CompassApp {
     fn frame(&self, w: f32, h: f32) -> Frame<Target> {
         let l = Layout::solve(w, h);
         let mut f = Frame::new(l.window.w, l.window.h);
-        f.push(fill(l.window, BASE, 0.0));
+        f.push(fill(l.window, self.palette.base, 0.0));
 
         self.draw_header(&mut f, &l);
 
@@ -911,7 +903,7 @@ impl CompassApp {
         if l.header.is_empty() {
             return;
         }
-        f.push(fill(l.header, MANTLE, 0.0));
+        f.push(fill(l.header, self.palette.mantle, 0.0));
         f.clip(l.header);
 
         let units_w = (l.small * 4.0).min(l.header.w * 0.22).max(0.0);
@@ -927,12 +919,24 @@ impl CompassApp {
                 l.row,
             );
             let active = self.view == *view;
-            f.push(fill(r, if active { SURFACE1 } else { SURFACE0 }, 4.0));
+            f.push(fill(
+                r,
+                if active {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
+                4.0,
+            ));
             centred(
                 f,
                 r,
                 name,
-                if active { LAVENDER } else { SUBTEXT0 },
+                if active {
+                    self.palette.lavender
+                } else {
+                    self.palette.subtext0
+                },
                 l.small,
                 if active {
                     FontWeightHint::Bold
@@ -944,12 +948,12 @@ impl CompassApp {
         }
 
         let units = Rect::new(l.header.right() - l.pad - units_w, y, units_w, l.row);
-        f.push(fill(units, SURFACE0, 4.0));
+        f.push(fill(units, self.palette.surface0, 4.0));
         centred(
             f,
             units,
             unit_label(self.distance_unit),
-            TEAL,
+            self.palette.teal,
             l.small,
             FontWeightHint::Bold,
         );
@@ -963,13 +967,13 @@ impl CompassApp {
         if l.status.is_empty() {
             return;
         }
-        f.push(fill(l.status, CRUST, 0.0));
+        f.push(fill(l.status, self.palette.crust, 0.0));
         f.clip(l.status);
         bounded(
             f,
             inset(l.status, l.pad * 0.5),
             self.status.clone(),
-            SUBTEXT0,
+            self.palette.subtext0,
             l.small,
             FontWeightHint::Regular,
         );
@@ -997,12 +1001,12 @@ impl CompassApp {
         if r <= 0.0 {
             return;
         }
-        f.push(fill(l.rose, MANTLE, r));
-        f.push(stroke(l.rose, SURFACE1, r, 2.0));
+        f.push(fill(l.rose, self.palette.mantle, r));
+        f.push(stroke(l.rose, self.palette.surface1, r, 2.0));
         let inner = r * 0.88;
         f.push(stroke(
             Rect::new(l.cx - inner, l.cy - inner, inner * 2.0, inner * 2.0),
-            SURFACE0,
+            self.palette.surface0,
             inner,
             1.0,
         ));
@@ -1018,7 +1022,11 @@ impl CompassApp {
                 y1: l.cy - cos_deg(angle) * from,
                 x2: l.cx + sin_deg(angle) * to,
                 y2: l.cy - cos_deg(angle) * to,
-                color: if major { TEXT_COLOR } else { OVERLAY0 },
+                color: if major {
+                    self.palette.text
+                } else {
+                    self.palette.overlay0
+                },
                 width: if major { 2.0 } else { 1.0 },
             });
         }
@@ -1057,7 +1065,7 @@ impl CompassApp {
                     f,
                     Rect::new(cx - wide * 0.5, cy - deg_size, wide, deg_size * 2.0),
                     label,
-                    SUBTEXT0,
+                    self.palette.subtext0,
                     deg_size,
                     FontWeightHint::Regular,
                 );
@@ -1081,11 +1089,11 @@ impl CompassApp {
                 FontWeightHint::Regular
             };
             let color = if deg == 0 {
-                RED
+                self.palette.red
             } else if principal {
-                TEXT_COLOR
+                self.palette.text
             } else {
-                SUBTEXT0
+                self.palette.subtext0
             };
             let angle = deg as f32 - heading;
             let ring = r * 0.64;
@@ -1111,7 +1119,7 @@ impl CompassApp {
             y1: l.cy,
             x2: l.cx + sin_deg(angle) * len,
             y2: l.cy - cos_deg(angle) * len,
-            color: RED,
+            color: self.palette.red,
             width: 3.0,
         });
         f.push(RenderCommand::Line {
@@ -1119,13 +1127,13 @@ impl CompassApp {
             y1: l.cy,
             x2: l.cx - sin_deg(angle) * len * 0.6,
             y2: l.cy + cos_deg(angle) * len * 0.6,
-            color: SURFACE2,
+            color: self.palette.surface2,
             width: 2.0,
         });
         let dot = (l.radius * 0.03).max(2.0);
         f.push(fill(
             Rect::new(l.cx - dot, l.cy - dot, dot * 2.0, dot * 2.0),
-            RED,
+            self.palette.red,
             dot,
         ));
 
@@ -1141,7 +1149,7 @@ impl CompassApp {
                 y1,
                 x2,
                 y2,
-                color: PEACH,
+                color: self.palette.peach,
                 width: 2.0,
             });
         }
@@ -1156,12 +1164,12 @@ impl CompassApp {
             l.body.w,
             (l.heading * 1.6).min(l.body.h),
         );
-        f.push(fill(inset(strip, l.pad * 0.4), MANTLE, 4.0));
+        f.push(fill(inset(strip, l.pad * 0.4), self.palette.mantle, 4.0));
         centred(
             f,
             strip,
             &format!("{h:.0}  {}", cardinal_direction(h)),
-            BLUE,
+            self.palette.blue,
             l.heading,
             FontWeightHint::Bold,
         );
@@ -1178,14 +1186,22 @@ impl CompassApp {
         let area = inset(l.panel, l.pad);
         let mut y = area.y;
 
-        if let Some(b) = card(f, l, area, &mut y, "HEADING", l.heading * 1.3) {
+        if let Some(b) = card(
+            f,
+            &self.palette,
+            l,
+            area,
+            &mut y,
+            "HEADING",
+            l.heading * 1.3,
+        ) {
             let h = self.true_heading();
             let split = b.w * 0.52;
             bounded(
                 f,
                 Rect::new(b.x, b.y, split, b.h),
                 format!("{h:.0}"),
-                BLUE,
+                self.palette.blue,
                 l.heading,
                 FontWeightHint::Bold,
             );
@@ -1193,19 +1209,19 @@ impl CompassApp {
                 f,
                 Rect::new(b.x + split, b.y, (b.w - split).max(0.0), b.h),
                 cardinal_direction(h),
-                GREEN,
+                self.palette.green,
                 l.heading * 0.8,
                 FontWeightHint::Bold,
             );
         }
 
-        if let Some(b) = card(f, l, area, &mut y, "POSITION", l.font * 2.8) {
+        if let Some(b) = card(f, &self.palette, l, area, &mut y, "POSITION", l.font * 2.8) {
             let line = b.h * 0.5;
             bounded(
                 f,
                 Rect::new(b.x, b.y, b.w, line),
                 self.position.format_lat(),
-                TEXT_COLOR,
+                self.palette.text,
                 l.font,
                 FontWeightHint::Regular,
             );
@@ -1213,7 +1229,7 @@ impl CompassApp {
                 f,
                 Rect::new(b.x, b.y + line, b.w, line),
                 self.position.format_lon(),
-                TEXT_COLOR,
+                self.palette.text,
                 l.font,
                 FontWeightHint::Regular,
             );
@@ -1222,7 +1238,7 @@ impl CompassApp {
         self.draw_declination_card(f, l, area, &mut y);
         self.draw_waypoint_card(f, l, area, &mut y);
         self.draw_mark_button(f, l, area, &mut y);
-        draw_help(f, l, area, y);
+        draw_help(f, &self.palette, l, area, y);
 
         f.unclip();
     }
@@ -1233,7 +1249,7 @@ impl CompassApp {
     /// and by no other means, and `D` alone *decreased* it -- a control whose
     /// only mention on screen was a help line reading "D: Declination -1".
     fn draw_declination_card(&self, f: &mut Frame<Target>, l: &Layout, area: Rect, y: &mut f32) {
-        let Some(b) = card(f, l, area, y, "DECLINATION", l.row) else {
+        let Some(b) = card(f, &self.palette, l, area, y, "DECLINATION", l.row) else {
             return;
         };
         let step = l.row.min(b.w * 0.28);
@@ -1243,20 +1259,20 @@ impl CompassApp {
             f,
             Rect::new(b.x, b.y, (minus.x - b.x).max(0.0), b.h),
             format!("{:+.0}", self.declination),
-            YELLOW,
+            self.palette.yellow,
             l.font,
             FontWeightHint::Bold,
         );
         for (r, sign, nudge) in [(minus, "-", Nudge::Down), (plus, "+", Nudge::Up)] {
-            f.push(fill(r, SURFACE2, 4.0));
-            centred(f, r, sign, TEXT_COLOR, l.font, FontWeightHint::Bold);
+            f.push(fill(r, self.palette.surface2, 4.0));
+            centred(f, r, sign, self.palette.text, l.font, FontWeightHint::Bold);
             f.hit(Target::Declination(nudge), r);
         }
     }
 
     /// Name, position, bearing and distance for the selected waypoint.
     fn draw_waypoint_card(&self, f: &mut Frame<Target>, l: &Layout, area: Rect, y: &mut f32) {
-        let Some(b) = card(f, l, area, y, "WAYPOINT", l.font * 4.4) else {
+        let Some(b) = card(f, &self.palette, l, area, y, "WAYPOINT", l.font * 4.4) else {
             return;
         };
         let line = b.h * 0.25;
@@ -1265,7 +1281,7 @@ impl CompassApp {
                 f,
                 Rect::new(b.x, b.y, b.w, line),
                 "No waypoint selected",
-                OVERLAY0,
+                self.palette.overlay0,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -1275,7 +1291,7 @@ impl CompassApp {
             f,
             Rect::new(b.x, b.y, b.w, line),
             wp.name.clone(),
-            TEAL,
+            self.palette.teal,
             l.font,
             FontWeightHint::Bold,
         );
@@ -1283,7 +1299,7 @@ impl CompassApp {
             f,
             Rect::new(b.x, b.y + line, b.w, line),
             format!("{} {}", wp.coord.format_lat(), wp.coord.format_lon()),
-            TEXT_COLOR,
+            self.palette.text,
             l.small,
             FontWeightHint::Regular,
         );
@@ -1293,7 +1309,7 @@ impl CompassApp {
                 f,
                 Rect::new(b.x, b.y + line * 2.0, b.w, line),
                 format!("BRG {brg:.0}"),
-                PEACH,
+                self.palette.peach,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -1301,7 +1317,7 @@ impl CompassApp {
                 f,
                 Rect::new(b.x, b.y + line * 3.0, b.w, line),
                 format!("DST {dist:.1} {}", unit_label(self.distance_unit)),
-                PEACH,
+                self.palette.peach,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -1319,12 +1335,24 @@ impl CompassApp {
         }
         let r = Rect::new(area.x, *y, area.w, l.row);
         let full = self.waypoints.len() >= MAX_WAYPOINTS;
-        f.push(fill(r, if full { SURFACE0 } else { SURFACE2 }, 6.0));
+        f.push(fill(
+            r,
+            if full {
+                self.palette.surface0
+            } else {
+                self.palette.surface2
+            },
+            6.0,
+        ));
         centred(
             f,
             r,
             if full { "List full" } else { "Mark here (M)" },
-            if full { OVERLAY0 } else { TEXT_COLOR },
+            if full {
+                self.palette.overlay0
+            } else {
+                self.palette.text
+            },
             l.small,
             FontWeightHint::Bold,
         );
@@ -1342,14 +1370,21 @@ impl CompassApp {
 
         let head = Rect::new(area.x, area.y, area.w, l.row);
         for (r, (name, _)) in wp_columns(head, l.pad * 0.4).iter().zip(WP_COLUMNS) {
-            bounded(f, *r, name, SUBTEXT0, l.small, FontWeightHint::Bold);
+            bounded(
+                f,
+                *r,
+                name,
+                self.palette.subtext0,
+                l.small,
+                FontWeightHint::Bold,
+            );
         }
         f.push(RenderCommand::Line {
             x1: area.x,
             y1: head.bottom(),
             x2: area.right(),
             y2: head.bottom(),
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
 
@@ -1362,7 +1397,7 @@ impl CompassApp {
                 f,
                 Rect::new(list.x, list.y, list.w, l.row.min(list.h)),
                 "No waypoints. Press C to add one, or Esc to go back.",
-                OVERLAY0,
+                self.palette.overlay0,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -1397,11 +1432,15 @@ impl CompassApp {
             if selected {
                 f.push(fill(
                     Rect::new(row.x, row.y, row.w, (row.h - WP_ROW_GAP).max(0.0)),
-                    SURFACE0,
+                    self.palette.surface0,
                     4.0,
                 ));
             }
-            let color = if selected { BLUE } else { TEXT_COLOR };
+            let color = if selected {
+                self.palette.blue
+            } else {
+                self.palette.text
+            };
             let weight = if selected {
                 FontWeightHint::Bold
             } else {
@@ -1439,12 +1478,24 @@ impl CompassApp {
         let btn_w = (l.small * 5.0).min(bar.w * 0.4);
         let btn = Rect::new(bar.right() - btn_w, bar.y, btn_w, l.row.min(bar.h));
         let armed = self.selected_waypoint.is_some();
-        f.push(fill(btn, if armed { RED } else { SURFACE0 }, 6.0));
+        f.push(fill(
+            btn,
+            if armed {
+                self.palette.red
+            } else {
+                self.palette.surface0
+            },
+            6.0,
+        ));
         centred(
             f,
             btn,
             "Delete",
-            if armed { CRUST } else { OVERLAY0 },
+            if armed {
+                self.palette.crust
+            } else {
+                self.palette.overlay0
+            },
             l.small,
             FontWeightHint::Bold,
         );
@@ -1463,7 +1514,7 @@ impl CompassApp {
                 l.row.min(bar.h),
             ),
             "Up/Down: select  |  Del: remove  |  C: add new  |  Enter/Esc: back",
-            OVERLAY0,
+            self.palette.overlay0,
             l.small * 0.9,
             FontWeightHint::Regular,
         );
@@ -1504,20 +1555,20 @@ impl CompassApp {
                 f,
                 Rect::new(area.x, y, area.w, caption_h),
                 format!("{} {}", field.label(), field.hint()),
-                SUBTEXT0,
+                self.palette.subtext0,
                 l.small,
                 FontWeightHint::Regular,
             );
             let entry = Rect::new(area.x, y + caption_h, area.w.min(l.font * 22.0), l.row);
-            f.push(fill(entry, SURFACE1, 6.0));
+            f.push(fill(entry, self.palette.surface1, 6.0));
             if self.active_coord_field == field {
-                f.push(stroke(entry, BLUE, 6.0, 2.0));
+                f.push(stroke(entry, self.palette.blue, 6.0, 2.0));
             }
             let typed = self.buffer_of(field);
             let (shown, color) = if typed.is_empty() {
-                (placeholder(field), OVERLAY0)
+                (placeholder(field), self.palette.overlay0)
             } else {
-                (typed, TEXT_COLOR)
+                (typed, self.palette.text)
             };
             bounded(
                 f,
@@ -1536,8 +1587,15 @@ impl CompassApp {
 
         if y + l.row <= area.bottom() {
             let btn = Rect::new(area.x, y, (l.font * 8.0).min(area.w), l.row);
-            f.push(fill(btn, GREEN, 6.0));
-            centred(f, btn, "Add (Enter)", CRUST, l.small, FontWeightHint::Bold);
+            f.push(fill(btn, self.palette.green, 6.0));
+            centred(
+                f,
+                btn,
+                "Add (Enter)",
+                self.palette.crust,
+                l.small,
+                FontWeightHint::Bold,
+            );
             f.hit(Target::AddWaypoint, btn);
             y = btn.bottom() + l.pad * 0.6;
         }
@@ -1547,7 +1605,7 @@ impl CompassApp {
                 f,
                 Rect::new(area.x, y, area.w, caption_h),
                 "Tab: switch field  |  Enter: add waypoint  |  Esc: cancel",
-                OVERLAY0,
+                self.palette.overlay0,
                 l.small * 0.9,
                 FontWeightHint::Regular,
             );
@@ -1704,6 +1762,7 @@ fn centred(
 /// contents and hit boxes together.
 fn card(
     f: &mut Frame<Target>,
+    pal: &Palette,
     l: &Layout,
     area: Rect,
     y: &mut f32,
@@ -1716,14 +1775,14 @@ fn card(
         return None;
     }
     let r = Rect::new(area.x, *y, area.w, h);
-    f.push(fill(r, SURFACE0, 8.0));
+    f.push(fill(r, pal.surface0, 8.0));
     let inner_x = r.x + l.pad * 0.6;
     let inner_w = (r.w - l.pad * 1.2).max(0.0);
     bounded(
         f,
         Rect::new(inner_x, r.y, inner_w, caption_h),
         caption,
-        SUBTEXT0,
+        pal.subtext0,
         l.small * 0.85,
         FontWeightHint::Regular,
     );
@@ -1732,7 +1791,7 @@ fn card(
 }
 
 /// The key help at the foot of the readouts panel, as many lines as fit.
-fn draw_help(f: &mut Frame<Target>, l: &Layout, area: Rect, y: f32) {
+fn draw_help(f: &mut Frame<Target>, pal: &Palette, l: &Layout, area: Rect, y: f32) {
     let lines = [
         "Left/Right: rotate",
         "Shift+arrows: rotate 10",
@@ -1751,7 +1810,7 @@ fn draw_help(f: &mut Frame<Target>, l: &Layout, area: Rect, y: f32) {
             f,
             Rect::new(area.x, y + i as f32 * pitch, area.w, pitch),
             *line,
-            OVERLAY0,
+            pal.overlay0,
             l.small * 0.9,
             FontWeightHint::Regular,
         );
@@ -1786,6 +1845,10 @@ fn accepts_char(field: CoordField, c: char) -> bool {
 // ── The window ─────────────────────────────────────────────────────
 
 impl App for CompassApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Compass")
     }
@@ -3788,5 +3851,64 @@ mod tests {
             );
         }
         assert!(seen > 0, "no size in the grid draws a panel");
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut CompassApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = CompassApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

@@ -3,6 +3,7 @@
 //! Implements IRC protocol message parsing, channel management,
 //! user tracking, message history, and a multi-panel chat UI.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -86,27 +87,6 @@ impl SidebarRow {
 // Catppuccin Mocha palette
 // ============================================================================
 
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-#[allow(dead_code)]
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-#[allow(dead_code)]
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const SKY: Color = Color::from_hex(0x89DCEB);
 const PINK: Color = Color::from_hex(0xF5C2E7);
 
 // ============================================================================
@@ -478,14 +458,14 @@ impl UserPrefix {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Owner => RED,
-            Self::Admin => PEACH,
-            Self::Op => GREEN,
-            Self::HalfOp => YELLOW,
-            Self::Voice => BLUE,
-            Self::None => TEXT,
+            Self::Owner => pal.red,
+            Self::Admin => pal.peach,
+            Self::Op => pal.green,
+            Self::HalfOp => pal.yellow,
+            Self::Voice => pal.blue,
+            Self::None => pal.text,
         }
     }
 
@@ -762,15 +742,25 @@ impl ChatMessage {
         }
     }
 
-    pub fn color_for_nick(nick: &str) -> Color {
+    pub fn color_for_nick(nick: &str, pal: &Palette) -> Color {
         // Deterministic color based on nick hash
         let mut hash: u32 = 5381;
         for byte in nick.bytes() {
             hash = hash.wrapping_mul(33).wrapping_add(byte as u32);
         }
-        let colors = [BLUE, GREEN, PEACH, MAUVE, TEAL, SKY, PINK, LAVENDER, YELLOW];
+        let colors = [
+            pal.blue,
+            pal.green,
+            pal.peach,
+            pal.mauve,
+            pal.teal,
+            pal.sky,
+            PINK,
+            pal.lavender,
+            pal.yellow,
+        ];
         let idx = (hash as usize).checked_rem(colors.len()).unwrap_or(0);
-        colors.get(idx).copied().unwrap_or(TEXT)
+        colors.get(idx).copied().unwrap_or(pal.text)
     }
 }
 
@@ -799,11 +789,11 @@ impl ConnectionState {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Disconnected => RED,
-            Self::Connecting | Self::Registering | Self::Reconnecting => YELLOW,
-            Self::Connected => GREEN,
+            Self::Disconnected => pal.red,
+            Self::Connecting | Self::Registering | Self::Reconnecting => pal.yellow,
+            Self::Connected => pal.green,
         }
     }
 }
@@ -919,11 +909,18 @@ pub struct IrcClientApp {
     pub highlight_words: Vec<String>,
     pub notification_sound: bool,
     pub flash_on_mention: bool,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl IrcClientApp {
     pub fn new(width: f32, height: f32) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
             connection: ConnectionState::Disconnected,
@@ -1869,7 +1866,7 @@ impl IrcClientApp {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1913,7 +1910,7 @@ impl IrcClientApp {
             y: 0.0,
             width: self.width,
             height: 30.0,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1923,7 +1920,7 @@ impl IrcClientApp {
             y: 8.0,
             width: 10.0,
             height: 10.0,
-            color: self.connection.color(),
+            color: self.connection.color(&self.palette),
             corner_radii: CornerRadii::all(5.0),
         });
 
@@ -1936,7 +1933,7 @@ impl IrcClientApp {
                 self.connection.label()
             ),
             font_size: 12.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -1948,7 +1945,7 @@ impl IrcClientApp {
             y: 8.0,
             text: format!("Nick: {}", self.my_nick),
             font_size: 12.0,
-            color: BLUE,
+            color: self.palette.blue,
             font_weight: FontWeightHint::Bold,
             max_width: Some(180.0),
             overflow: TextOverflow::Ellipsis,
@@ -1963,7 +1960,7 @@ impl IrcClientApp {
                 y: 8.0,
                 text: ch.topic.clone(),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - 600.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1975,7 +1972,7 @@ impl IrcClientApp {
             y1: 30.0,
             x2: self.width,
             y2: 30.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -1988,7 +1985,7 @@ impl IrcClientApp {
             y: top_y,
             width: sidebar_w,
             height: self.height - top_y,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2003,7 +2000,7 @@ impl IrcClientApp {
                     y: row_y,
                     text: (*text).to_owned(),
                     font_size: 9.0,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(sidebar_w - 24.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2021,7 +2018,7 @@ impl IrcClientApp {
             y1: top_y,
             x2: sidebar_w,
             y2: self.height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -2041,14 +2038,22 @@ impl IrcClientApp {
             y: row_y,
             width: sidebar_w - 8.0,
             height: SIDEBAR_ROW_HEIGHT,
-            color: if is_active { SURFACE0 } else { MANTLE },
+            color: if is_active {
+                self.palette.surface0
+            } else {
+                self.palette.mantle
+            },
             corner_radii: CornerRadii::all(4.0),
         });
 
         let (label, color, weight, badge) = match panel {
             ActivePanel::Server => (
                 "Server".to_owned(),
-                if is_active { TEXT } else { SUBTEXT0 },
+                if is_active {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 FontWeightHint::Bold,
                 None,
             ),
@@ -2058,13 +2063,13 @@ impl IrcClientApp {
                 let mentions = ch.map_or(0, |c| c.unread_mentions);
                 let has_unread = ch.is_some_and(Channel::has_unread);
                 let color = if mentions > 0 {
-                    RED
+                    self.palette.red
                 } else if has_unread {
-                    TEXT
+                    self.palette.text
                 } else if is_active {
-                    BLUE
+                    self.palette.blue
                 } else {
-                    SUBTEXT0
+                    self.palette.subtext0
                 };
                 (
                     name.clone(),
@@ -2084,11 +2089,11 @@ impl IrcClientApp {
                     .find(|p| p.nick == *nick)
                     .map_or(0, |p| p.unread_count);
                 let color = if unread > 0 {
-                    TEXT
+                    self.palette.text
                 } else if is_active {
-                    BLUE
+                    self.palette.blue
                 } else {
-                    SUBTEXT0
+                    self.palette.subtext0
                 };
                 (
                     nick.clone(),
@@ -2124,7 +2129,11 @@ impl IrcClientApp {
             } else {
                 unread.to_string()
             };
-            let badge_color = if mentions > 0 { RED } else { SURFACE2 };
+            let badge_color = if mentions > 0 {
+                self.palette.red
+            } else {
+                self.palette.surface2
+            };
             cmds.push(RenderCommand::FillRect {
                 x: sidebar_w - 36.0,
                 y: row_y + 4.0,
@@ -2138,7 +2147,11 @@ impl IrcClientApp {
                 y: row_y + 6.0,
                 text: badge_text,
                 font_size: 9.0,
-                color: if mentions > 0 { CRUST } else { TEXT },
+                color: if mentions > 0 {
+                    self.palette.crust
+                } else {
+                    self.palette.text
+                },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2176,7 +2189,7 @@ impl IrcClientApp {
                 y: y + h / 2.0,
                 text: "No messages".to_string(),
                 font_size: 14.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2214,7 +2227,7 @@ impl IrcClientApp {
                 y: y + 2.0,
                 text: msg.timestamp.clone(),
                 font_size: 10.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(60.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2224,7 +2237,7 @@ impl IrcClientApp {
 
         match &msg.kind {
             ChatMessageKind::Normal => {
-                let nick_color = ChatMessage::color_for_nick(&msg.sender);
+                let nick_color = ChatMessage::color_for_nick(&msg.sender, &self.palette);
                 cmds.push(RenderCommand::Text {
                     x: tx,
                     y: y + 2.0,
@@ -2241,7 +2254,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: msg.text.clone(),
                     font_size: 11.0,
-                    color: TEXT,
+                    color: self.palette.text,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2253,7 +2266,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("* {} {}", msg.sender, msg.text),
                     font_size: 11.0,
-                    color: MAUVE,
+                    color: self.palette.mauve,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2265,7 +2278,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("-{}- {}", msg.sender, msg.text),
                     font_size: 11.0,
-                    color: PEACH,
+                    color: self.palette.peach,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2277,7 +2290,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("--> {} has joined", msg.sender),
                     font_size: 10.0,
-                    color: GREEN,
+                    color: self.palette.green,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2294,7 +2307,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("<-- {} has left{reason_str}", msg.sender),
                     font_size: 10.0,
-                    color: RED,
+                    color: self.palette.red,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2311,7 +2324,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("<-- {} has quit{reason_str}", msg.sender),
                     font_size: 10.0,
-                    color: RED,
+                    color: self.palette.red,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2323,7 +2336,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("*** {} was kicked by {} ({})", msg.sender, by, reason),
                     font_size: 10.0,
-                    color: RED,
+                    color: self.palette.red,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2335,7 +2348,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("*** {old} is now known as {}", msg.sender),
                     font_size: 10.0,
-                    color: TEAL,
+                    color: self.palette.teal,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2347,7 +2360,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("*** {by} changed the topic to: {}", msg.text),
                     font_size: 10.0,
-                    color: YELLOW,
+                    color: self.palette.yellow,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2359,7 +2372,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("*** {by} sets mode {mode}"),
                     font_size: 10.0,
-                    color: TEAL,
+                    color: self.palette.teal,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2371,7 +2384,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: msg.text.clone(),
                     font_size: 10.0,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2386,7 +2399,7 @@ impl IrcClientApp {
             y,
             width: w,
             height: h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2395,7 +2408,7 @@ impl IrcClientApp {
             y1: y,
             x2: x,
             y2: y + h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2405,7 +2418,7 @@ impl IrcClientApp {
                 y: y + 6.0,
                 text: format!("Users ({})", ch.user_count()),
                 font_size: 10.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(w - 16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2423,7 +2436,7 @@ impl IrcClientApp {
                         y: row_y,
                         text: user.prefix.label().to_string(),
                         font_size: 9.0,
-                        color: OVERLAY0,
+                        color: self.palette.overlay0,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(w - 16.0),
                         overflow: TextOverflow::Ellipsis,
@@ -2433,9 +2446,9 @@ impl IrcClientApp {
                 }
 
                 let color = if user.away {
-                    OVERLAY0
+                    self.palette.overlay0
                 } else {
-                    user.prefix.color()
+                    user.prefix.color(&self.palette)
                 };
                 cmds.push(RenderCommand::Text {
                     x: x + 12.0,
@@ -2458,7 +2471,7 @@ impl IrcClientApp {
             y,
             width: w,
             height: h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2467,7 +2480,7 @@ impl IrcClientApp {
             y1: y,
             x2: x + w,
             y2: y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2477,7 +2490,7 @@ impl IrcClientApp {
             y: y + 6.0,
             width: w - 16.0,
             height: h - 12.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -2488,9 +2501,9 @@ impl IrcClientApp {
         };
 
         let text_color = if self.input_text.is_empty() {
-            OVERLAY0
+            self.palette.overlay0
         } else {
-            TEXT
+            self.palette.text
         };
 
         cmds.push(RenderCommand::Text {
@@ -2583,6 +2596,10 @@ fn seeded_client() -> IrcClientApp {
 }
 
 impl App for IrcClientApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // Where you are talking, and how much you have not read, because that
         // is what a chat window is left open for.
@@ -2938,8 +2955,9 @@ mod tests {
     // Chat message
     #[test]
     fn test_nick_color_deterministic() {
-        let c1 = ChatMessage::color_for_nick("alice");
-        let c2 = ChatMessage::color_for_nick("alice");
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let c1 = ChatMessage::color_for_nick("alice", &pal);
+        let c2 = ChatMessage::color_for_nick("alice", &pal);
         assert_eq!(c1.r, c2.r);
         assert_eq!(c1.g, c2.g);
         assert_eq!(c1.b, c2.b);
@@ -2947,8 +2965,9 @@ mod tests {
 
     #[test]
     fn test_nick_color_varies() {
-        let c1 = ChatMessage::color_for_nick("alice");
-        let c2 = ChatMessage::color_for_nick("bob");
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let c1 = ChatMessage::color_for_nick("alice", &pal);
+        let c2 = ChatMessage::color_for_nick("bob", &pal);
         // Different nicks should (usually) get different colors
         // Not guaranteed but very likely with different names
         let _ = (c1, c2);
@@ -3901,6 +3920,65 @@ mod tests {
         assert!(
             !app.handle_event(&key(Key::Down)),
             "past the newest there is nowhere further to go, so the key              costs no frame"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut IrcClientApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = IrcClientApp::new(1000.0, 700.0);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

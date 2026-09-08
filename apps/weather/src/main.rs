@@ -13,6 +13,7 @@
 //! All weather data is simulated locally (no network required).
 //! Uses the guitk library for rendering.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -25,22 +26,6 @@ use std::time::Duration;
 // ============================================================================
 // Catppuccin Mocha palette
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
 // Alert card metrics
@@ -215,17 +200,17 @@ impl WeatherCondition {
     }
 
     /// Color hint for the weather condition icon.
-    pub fn icon_color(self) -> Color {
+    pub fn icon_color(self, pal: &Palette) -> Color {
         match self {
-            Self::Clear => YELLOW,
-            Self::PartlyCloudy => SUBTEXT1,
-            Self::Cloudy | Self::Overcast | Self::Haze => OVERLAY0,
-            Self::LightRain | Self::Rain | Self::HeavyRain => BLUE,
-            Self::Thunderstorm => PEACH,
-            Self::Snow | Self::LightSnow | Self::Sleet => LAVENDER,
-            Self::Fog => SURFACE2,
-            Self::Windy => SUBTEXT0,
-            Self::Tornado | Self::Hurricane => RED,
+            Self::Clear => pal.yellow,
+            Self::PartlyCloudy => pal.subtext1,
+            Self::Cloudy | Self::Overcast | Self::Haze => pal.overlay0,
+            Self::LightRain | Self::Rain | Self::HeavyRain => pal.blue,
+            Self::Thunderstorm => pal.peach,
+            Self::Snow | Self::LightSnow | Self::Sleet => pal.lavender,
+            Self::Fog => pal.surface2,
+            Self::Windy => pal.subtext0,
+            Self::Tornado | Self::Hurricane => pal.red,
         }
     }
 }
@@ -393,12 +378,12 @@ impl UvSeverity {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Low => GREEN,
-            Self::Moderate => YELLOW,
-            Self::High => PEACH,
-            Self::VeryHigh => RED,
+            Self::Low => pal.green,
+            Self::Moderate => pal.yellow,
+            Self::High => pal.peach,
+            Self::VeryHigh => pal.red,
             Self::Extreme => Color::from_hex(0xCBA6F7), // Mauve
         }
     }
@@ -443,12 +428,12 @@ impl AirQuality {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Good => GREEN,
-            Self::Moderate => YELLOW,
-            Self::UnhealthySensitive => PEACH,
-            Self::Unhealthy => RED,
+            Self::Good => pal.green,
+            Self::Moderate => pal.yellow,
+            Self::UnhealthySensitive => pal.peach,
+            Self::Unhealthy => pal.red,
             Self::VeryUnhealthy => Color::from_hex(0xCBA6F7),
             Self::Hazardous => Color::from_hex(0x7F1D1D),
         }
@@ -506,11 +491,11 @@ impl AlertSeverity {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Advisory => YELLOW,
-            Self::Watch => PEACH,
-            Self::Warning => RED,
+            Self::Advisory => pal.yellow,
+            Self::Watch => pal.peach,
+            Self::Warning => pal.red,
         }
     }
 }
@@ -897,12 +882,19 @@ pub struct WeatherApp {
     pub hourly_scroll_offset: f32,
     pub width: f32,
     pub height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl WeatherApp {
     /// Create a new app with sample data.
     pub fn new(width: f32, height: f32) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             current: sample_current_weather(),
             hourly: sample_hourly_forecast(),
             daily: sample_daily_forecast(),
@@ -1204,7 +1196,7 @@ impl WeatherApp {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1236,7 +1228,7 @@ impl WeatherApp {
         let banner_height = 36.0;
         for (i, alert) in self.alerts.iter().enumerate() {
             let by = y + i as f32 * banner_height;
-            let bg_color = alert.severity.color();
+            let bg_color = alert.severity.color(&self.palette);
 
             cmds.push(RenderCommand::FillRect {
                 x: 0.0,
@@ -1287,7 +1279,7 @@ impl WeatherApp {
             y,
             width: self.width,
             height: title_height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1297,7 +1289,7 @@ impl WeatherApp {
             y: y + 15.0,
             text: "Weather".to_string(),
             font_size: 20.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1309,7 +1301,7 @@ impl WeatherApp {
             y: y + 19.0,
             text: self.active_location_name().to_string(),
             font_size: 14.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1344,7 +1336,7 @@ impl WeatherApp {
                     y: y + 8.0,
                     width: text_width + 24.0,
                     height: 30.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(6.0),
                 });
             }
@@ -1354,7 +1346,11 @@ impl WeatherApp {
                 y: y + 16.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: if is_active { BLUE } else { SUBTEXT0 },
+                color: if is_active {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -1418,7 +1414,7 @@ impl WeatherApp {
             y,
             width: card_w,
             height: card_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(12.0),
         });
 
@@ -1431,7 +1427,7 @@ impl WeatherApp {
             y: inner_y,
             text: "Current Weather".to_string(),
             font_size: 12.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1443,7 +1439,7 @@ impl WeatherApp {
             y: inner_y + 24.0,
             text: format_temp(self.current.temp_c, self.settings.temp_unit),
             font_size: 48.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1458,7 +1454,7 @@ impl WeatherApp {
                 format_temp(self.current.feels_like_c, self.settings.temp_unit)
             ),
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1470,7 +1466,7 @@ impl WeatherApp {
             y: inner_y + 100.0,
             text: self.current.condition.description().to_string(),
             font_size: 14.0,
-            color: SUBTEXT1,
+            color: self.palette.subtext1,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1478,7 +1474,7 @@ impl WeatherApp {
 
         // Weather icon (ASCII art rendered as text lines)
         let icon_x = inner_x + 200.0;
-        let icon_color = self.current.condition.icon_color();
+        let icon_color = self.current.condition.icon_color(&self.palette);
         for (i, line) in self.current.condition.icon_lines().iter().enumerate() {
             cmds.push(RenderCommand::Text {
                 x: icon_x,
@@ -1506,7 +1502,7 @@ impl WeatherApp {
                 y: dy,
                 text: label.to_string(),
                 font_size: 11.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1516,7 +1512,7 @@ impl WeatherApp {
                 y: dy + 14.0,
                 text: value.to_owned(),
                 font_size: 13.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1587,7 +1583,7 @@ impl WeatherApp {
             y,
             width: strip_w,
             height: strip_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(12.0),
         });
 
@@ -1597,7 +1593,7 @@ impl WeatherApp {
             y: y + 12.0,
             text: "Hourly Forecast".to_string(),
             font_size: 12.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1627,7 +1623,7 @@ impl WeatherApp {
                 y: scroll_y + 4.0,
                 width: item_w,
                 height: scroll_h - 8.0,
-                color: SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::all(8.0),
             });
 
@@ -1637,7 +1633,7 @@ impl WeatherApp {
                 y: scroll_y + 10.0,
                 text: format_hour(hf.hour, self.settings.time_format),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(item_w - 16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1649,7 +1645,7 @@ impl WeatherApp {
                 y: scroll_y + 28.0,
                 text: format_temp(hf.temp_c, self.settings.temp_unit),
                 font_size: 16.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(item_w - 16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1663,7 +1659,7 @@ impl WeatherApp {
                     y: scroll_y + 48.0,
                     text: first_line.to_string(),
                     font_size: 9.0,
-                    color: hf.condition.icon_color(),
+                    color: hf.condition.icon_color(&self.palette),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(item_w - 8.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1677,7 +1673,7 @@ impl WeatherApp {
                     y: scroll_y + 64.0,
                     text: format!("{}%", hf.precip_pct),
                     font_size: 11.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(item_w - 16.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1705,7 +1701,7 @@ impl WeatherApp {
             y,
             width: graph_w,
             height: graph_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(12.0),
         });
 
@@ -1715,7 +1711,7 @@ impl WeatherApp {
             y: y + 12.0,
             text: "Temperature (24h)".to_string(),
             font_size: 12.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1749,7 +1745,7 @@ impl WeatherApp {
                 y: ly - 6.0,
                 text: format_temp(temp, self.settings.temp_unit),
                 font_size: 10.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(40.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1761,7 +1757,12 @@ impl WeatherApp {
                 y1: ly,
                 x2: plot_x + plot_w,
                 y2: ly,
-                color: Color::rgba(OVERLAY0.r, OVERLAY0.g, OVERLAY0.b, 30),
+                color: Color::rgba(
+                    self.palette.overlay0.r,
+                    self.palette.overlay0.g,
+                    self.palette.overlay0.b,
+                    30,
+                ),
                 width: 1.0,
             });
         }
@@ -1799,7 +1800,7 @@ impl WeatherApp {
                     y1,
                     x2,
                     y2,
-                    color: BLUE,
+                    color: self.palette.blue,
                     width: 2.0,
                 });
             }
@@ -1823,7 +1824,7 @@ impl WeatherApp {
                 y: plot_y + plot_h + 6.0,
                 text: format_hour(hour.hour, self.settings.time_format),
                 font_size: 10.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(40.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1846,7 +1847,7 @@ impl WeatherApp {
             y,
             width: table_w,
             height: table_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(12.0),
         });
 
@@ -1856,7 +1857,7 @@ impl WeatherApp {
             y: y + 12.0,
             text: "7-Day Forecast".to_string(),
             font_size: 12.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1886,7 +1887,7 @@ impl WeatherApp {
                 y: hy,
                 text: label.to_string(),
                 font_size: 11.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1899,7 +1900,7 @@ impl WeatherApp {
             y1: hy + 16.0,
             x2: x + table_w - 12.0,
             y2: hy + 16.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
 
@@ -1914,7 +1915,12 @@ impl WeatherApp {
                     y: ry - 4.0,
                     width: table_w - 16.0,
                     height: row_h,
-                    color: Color::rgba(SURFACE1.r, SURFACE1.g, SURFACE1.b, 40),
+                    color: Color::rgba(
+                        self.palette.surface1.r,
+                        self.palette.surface1.g,
+                        self.palette.surface1.b,
+                        40,
+                    ),
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -1924,7 +1930,7 @@ impl WeatherApp {
                 y: ry,
                 text: day.day_name.clone(),
                 font_size: 13.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1935,7 +1941,7 @@ impl WeatherApp {
                 y: ry,
                 text: day.condition.description().to_string(),
                 font_size: 13.0,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(130.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1946,7 +1952,7 @@ impl WeatherApp {
                 y: ry,
                 text: format_temp(day.high_c, self.settings.temp_unit),
                 font_size: 13.0,
-                color: PEACH,
+                color: self.palette.peach,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1957,7 +1963,7 @@ impl WeatherApp {
                 y: ry,
                 text: format_temp(day.low_c, self.settings.temp_unit),
                 font_size: 13.0,
-                color: BLUE,
+                color: self.palette.blue,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1968,7 +1974,11 @@ impl WeatherApp {
                 y: ry,
                 text: format!("{}%", day.precip_pct),
                 font_size: 13.0,
-                color: if day.precip_pct > 50 { BLUE } else { SUBTEXT0 },
+                color: if day.precip_pct > 50 {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1983,7 +1993,7 @@ impl WeatherApp {
                     day.wind_dir.as_str()
                 ),
                 font_size: 13.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2005,7 +2015,7 @@ impl WeatherApp {
             y,
             width: card_w,
             height: card_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(12.0),
         });
 
@@ -2015,7 +2025,7 @@ impl WeatherApp {
             y: y + 12.0,
             text: "Air Quality".to_string(),
             font_size: 12.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2027,7 +2037,7 @@ impl WeatherApp {
             y: y + 34.0,
             text: format!("AQI: {}", self.current.aqi),
             font_size: 24.0,
-            color: aq.color(),
+            color: aq.color(&self.palette),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2039,7 +2049,7 @@ impl WeatherApp {
             y: y + 40.0,
             text: aq.label().to_string(),
             font_size: 16.0,
-            color: aq.color(),
+            color: aq.color(&self.palette),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2057,7 +2067,7 @@ impl WeatherApp {
             y: bar_y,
             width: bar_w,
             height: bar_h,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -2070,7 +2080,7 @@ impl WeatherApp {
                 y: bar_y,
                 width: fill_w,
                 height: bar_h,
-                color: aq.color(),
+                color: aq.color(&self.palette),
                 corner_radii: CornerRadii::all(3.0),
             });
         }
@@ -2088,7 +2098,7 @@ impl WeatherApp {
             y: cy,
             text: "Hourly Forecast Detail".to_string(),
             font_size: 18.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2113,7 +2123,7 @@ impl WeatherApp {
                 y: cy,
                 text: label.to_string(),
                 font_size: 12.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2126,7 +2136,7 @@ impl WeatherApp {
             y1: cy,
             x2: self.width - padding,
             y2: cy,
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
         cy += 8.0;
@@ -2137,7 +2147,7 @@ impl WeatherApp {
                 y: cy,
                 text: format_hour(hf.hour, self.settings.time_format),
                 font_size: 13.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2147,7 +2157,7 @@ impl WeatherApp {
                 y: cy,
                 text: format_temp(hf.temp_c, self.settings.temp_unit),
                 font_size: 13.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2157,7 +2167,7 @@ impl WeatherApp {
                 y: cy,
                 text: hf.condition.description().to_string(),
                 font_size: 13.0,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(170.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2167,7 +2177,11 @@ impl WeatherApp {
                 y: cy,
                 text: format!("{}%", hf.precip_pct),
                 font_size: 13.0,
-                color: if hf.precip_pct > 30 { BLUE } else { SUBTEXT0 },
+                color: if hf.precip_pct > 30 {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2186,7 +2200,7 @@ impl WeatherApp {
             y: cy,
             text: "7-Day Forecast Detail".to_string(),
             font_size: 18.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2201,7 +2215,7 @@ impl WeatherApp {
                 y: cy,
                 width: self.width - padding * 2.0,
                 height: card_h,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(10.0),
             });
 
@@ -2210,7 +2224,7 @@ impl WeatherApp {
                 y: cy + 12.0,
                 text: day.day_name.clone(),
                 font_size: 16.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2221,7 +2235,7 @@ impl WeatherApp {
                 y: cy + 36.0,
                 text: day.condition.description().to_string(),
                 font_size: 13.0,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2236,7 +2250,7 @@ impl WeatherApp {
                     format_temp(day.low_c, self.settings.temp_unit)
                 ),
                 font_size: 14.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2252,7 +2266,7 @@ impl WeatherApp {
                     day.wind_dir.as_str()
                 ),
                 font_size: 13.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width - padding * 2.0 - 220.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2260,7 +2274,7 @@ impl WeatherApp {
 
             // Render condition icon lines
             let icon_x = self.width - padding - 160.0;
-            let icon_color = day.condition.icon_color();
+            let icon_color = day.condition.icon_color(&self.palette);
             for (j, line) in day.condition.icon_lines().iter().enumerate() {
                 cmds.push(RenderCommand::Text {
                     x: icon_x,
@@ -2288,7 +2302,7 @@ impl WeatherApp {
             y: cy,
             text: "Weather Alerts".to_string(),
             font_size: 18.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2301,7 +2315,7 @@ impl WeatherApp {
                 y: cy,
                 text: "No active alerts.".to_string(),
                 font_size: 14.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2327,7 +2341,7 @@ impl WeatherApp {
             // 90.0 keeps the familiar card size for the one- and two-line
             // descriptions that are the common case.
             let card_h = (ALERT_BODY_TOP + body_height + 12.0).max(90.0);
-            let severity_color = alert.severity.color();
+            let severity_color = alert.severity.color(&self.palette);
 
             // Card background
             cmds.push(RenderCommand::FillRect {
@@ -2335,7 +2349,7 @@ impl WeatherApp {
                 y: cy,
                 width: self.width - padding * 2.0,
                 height: card_h,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(10.0),
             });
 
@@ -2377,7 +2391,7 @@ impl WeatherApp {
                     y: cy + ALERT_BODY_TOP + n as f32 * ALERT_BODY_LINE_HEIGHT,
                     text: line.clone(),
                     font_size: ALERT_BODY_FONT_SIZE,
-                    color: SUBTEXT1,
+                    color: self.palette.subtext1,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(text_width),
                     overflow: TextOverflow::Ellipsis,
@@ -2398,7 +2412,7 @@ impl WeatherApp {
             y: cy,
             text: "Saved Locations".to_string(),
             font_size: 18.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2415,7 +2429,11 @@ impl WeatherApp {
                 y: cy,
                 width: self.width - padding * 2.0,
                 height: row_h,
-                color: if is_active { SURFACE1 } else { SURFACE0 },
+                color: if is_active {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii::all(8.0),
             });
 
@@ -2426,7 +2444,7 @@ impl WeatherApp {
                     y: cy,
                     width: 4.0,
                     height: row_h,
-                    color: BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii {
                         top_left: 8.0,
                         top_right: 0.0,
@@ -2442,7 +2460,7 @@ impl WeatherApp {
                 y: cy + 8.0,
                 text: loc.name.clone(),
                 font_size: 15.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -2459,7 +2477,12 @@ impl WeatherApp {
                     y: cy + 28.0,
                     width: 56.0,
                     height: 16.0,
-                    color: Color::rgba(BLUE.r, BLUE.g, BLUE.b, 40),
+                    color: Color::rgba(
+                        self.palette.blue.r,
+                        self.palette.blue.g,
+                        self.palette.blue.b,
+                        40,
+                    ),
                     corner_radii: CornerRadii::all(4.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -2467,7 +2490,7 @@ impl WeatherApp {
                     y: cy + 30.0,
                     text: "Default".to_string(),
                     font_size: 10.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2488,7 +2511,7 @@ impl WeatherApp {
             y: cy,
             text: "Settings".to_string(),
             font_size: 18.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2532,7 +2555,7 @@ impl WeatherApp {
                 y: cy,
                 width: self.width - padding * 2.0,
                 height: row_h,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(8.0),
             });
 
@@ -2541,7 +2564,7 @@ impl WeatherApp {
                 y: cy + 10.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2552,7 +2575,7 @@ impl WeatherApp {
                 y: cy + 28.0,
                 text: value.clone(),
                 font_size: 15.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2568,6 +2591,10 @@ impl WeatherApp {
 // ============================================================================
 
 impl App for WeatherApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         format!("Weather — {}", self.active_location_name())
     }
@@ -2878,13 +2905,14 @@ mod tests {
 
     #[test]
     fn test_condition_icon_color_is_opaque() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let conditions = [
             WeatherCondition::Clear,
             WeatherCondition::Rain,
             WeatherCondition::Tornado,
         ];
         for cond in &conditions {
-            let c = cond.icon_color();
+            let c = cond.icon_color(&pal);
             assert_eq!(c.a, 255, "{cond:?} icon color should be fully opaque");
         }
     }
@@ -3133,6 +3161,7 @@ mod tests {
 
     #[test]
     fn test_uv_severity_colors_are_opaque() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         for sev in &[
             UvSeverity::Low,
             UvSeverity::Moderate,
@@ -3140,7 +3169,7 @@ mod tests {
             UvSeverity::VeryHigh,
             UvSeverity::Extreme,
         ] {
-            assert_eq!(sev.color().a, 255);
+            assert_eq!(sev.color(&pal).a, 255);
         }
     }
 
@@ -3194,6 +3223,7 @@ mod tests {
 
     #[test]
     fn test_aqi_colors_are_opaque() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         for aq in &[
             AirQuality::Good,
             AirQuality::Moderate,
@@ -3202,7 +3232,7 @@ mod tests {
             AirQuality::VeryUnhealthy,
             AirQuality::Hazardous,
         ] {
-            assert_eq!(aq.color().a, 255);
+            assert_eq!(aq.color(&pal).a, 255);
         }
     }
 
@@ -3229,10 +3259,11 @@ mod tests {
 
     #[test]
     fn test_alert_severity_colors() {
-        // Advisory = YELLOW, Watch = PEACH, Warning = RED
-        assert_eq!(AlertSeverity::Advisory.color(), YELLOW);
-        assert_eq!(AlertSeverity::Watch.color(), PEACH);
-        assert_eq!(AlertSeverity::Warning.color(), RED);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        // Advisory = pal.yellow, Watch = pal.peach, Warning = pal.red
+        assert_eq!(AlertSeverity::Advisory.color(&pal), pal.yellow);
+        assert_eq!(AlertSeverity::Watch.color(&pal), pal.peach);
+        assert_eq!(AlertSeverity::Warning.color(&pal), pal.red);
     }
 
     // --- Sample data tests ---
@@ -3528,13 +3559,14 @@ mod tests {
 
     #[test]
     fn test_render_starts_with_background() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let app = WeatherApp::new(900.0, 800.0);
         let cmds = app.render_commands();
         match &cmds[0] {
             RenderCommand::FillRect { x, y, color, .. } => {
                 assert_eq!(*x, 0.0);
                 assert_eq!(*y, 0.0);
-                assert_eq!(*color, BASE);
+                assert_eq!(*color, pal.base);
             }
             _ => panic!("First command should be a FillRect background"),
         }
@@ -3668,6 +3700,7 @@ mod tests {
 
     /// The `(y, text)` of every alert-description line drawn.
     fn alert_body_lines(app: &WeatherApp) -> Vec<(f32, String)> {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         app.render_commands()
             .into_iter()
             .filter_map(|c| match c {
@@ -3677,7 +3710,7 @@ mod tests {
                     font_size,
                     color,
                     ..
-                } if (font_size - ALERT_BODY_FONT_SIZE).abs() < 0.01 && color == SUBTEXT1 => {
+                } if (font_size - ALERT_BODY_FONT_SIZE).abs() < 0.01 && color == pal.subtext1 => {
                     Some((y, text))
                 }
                 _ => None,
@@ -3709,6 +3742,7 @@ mod tests {
 
     #[test]
     fn an_alert_card_grows_to_hold_its_description() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         // Alerts are a stacked list, so a card that did not grow would be
         // overlapped by the next one drawn beneath it.
         //
@@ -3733,7 +3767,7 @@ mod tests {
                         height,
                         color,
                         ..
-                    } if color == SURFACE0 && width > 400.0 => Some(height),
+                    } if color == pal.surface0 && width > 400.0 => Some(height),
                     _ => None,
                 })
                 .expect("the alerts view drew no card")
@@ -3763,7 +3797,7 @@ mod tests {
             .find_map(|c| match c {
                 RenderCommand::FillRect {
                     y, width, color, ..
-                } if color == SURFACE0 && width > 400.0 => Some(y),
+                } if color == pal.surface0 && width > 400.0 => Some(y),
                 _ => None,
             })
             .expect("the alerts view drew no card");
@@ -3972,5 +4006,64 @@ mod tests {
                 "View {view:?} should produce render commands"
             );
         }
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut WeatherApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = WeatherApp::new(1000.0, 700.0);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

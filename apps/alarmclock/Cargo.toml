@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS alarm clock, countdown timers and stopwatch"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 # The window and its event loop. Without this, `fn main` was empty: the alarms,
 # the timers and the stopwatch existed only for the tests to call, and — worse

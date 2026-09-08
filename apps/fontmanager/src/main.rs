@@ -7,6 +7,7 @@
 //!
 //! Uses the guitk library for rendering. Dark theme (Catppuccin Mocha).
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -18,49 +19,6 @@ use std::process::ExitCode;
 // ============================================================================
 // Catppuccin Mocha theme colors
 // ============================================================================
-
-/// Background (base)
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-/// Surface layer 0
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-/// Surface layer 1 (sidebar)
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-/// Surface layer 2 (hover)
-#[allow(dead_code)]
-const COL_SURFACE2: Color = Color::from_hex(0x585B70);
-/// Overlay 0
-#[allow(dead_code)]
-const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
-/// Main text
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-/// Subtext (dimmer)
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-/// Subtext (dimmest)
-#[allow(dead_code)]
-const COL_SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-/// Accent (blue)
-const COL_ACCENT: Color = Color::from_hex(0x89B4FA);
-/// Green
-#[allow(dead_code)]
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-/// Red (for destructive actions)
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-/// Peach
-#[allow(dead_code)]
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
-/// Lavender
-#[allow(dead_code)]
-const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
-/// Teal
-#[allow(dead_code)]
-const COL_TEAL: Color = Color::from_hex(0x94E2D5);
-/// Mauve
-#[allow(dead_code)]
-const COL_MAUVE: Color = Color::from_hex(0xCBA6F7);
-/// Crust (darkest)
-const COL_CRUST: Color = Color::from_hex(0x11111B);
-/// Mantle (between crust and base)
-const COL_MANTLE: Color = Color::from_hex(0x181825);
 
 // ============================================================================
 // Layout constants
@@ -748,6 +706,12 @@ pub struct FontManagerState {
     /// Window dimensions.
     pub window_width: f32,
     pub window_height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for FontManagerState {
@@ -763,6 +727,7 @@ impl FontManagerState {
         // Select the first font by default.
         let first_id = collection.fonts.first().map(|f| f.id);
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             collection,
             render_settings: RenderSettings::default(),
             preview: FontPreview::default(),
@@ -1050,7 +1015,13 @@ impl FontManagerState {
         let mut tree = RenderTree::new();
 
         // Window background
-        tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, COL_BASE);
+        tree.fill_rect(
+            0.0,
+            0.0,
+            self.window_width,
+            self.window_height,
+            self.palette.base,
+        );
 
         // Layout regions
         self.render_toolbar(&mut tree);
@@ -1069,7 +1040,13 @@ impl FontManagerState {
     /// Render the top toolbar with action buttons and search.
     fn render_toolbar(&self, tree: &mut RenderTree) {
         // Toolbar background
-        tree.fill_rect(0.0, 0.0, self.window_width, TOOLBAR_HEIGHT, COL_MANTLE);
+        tree.fill_rect(
+            0.0,
+            0.0,
+            self.window_width,
+            TOOLBAR_HEIGHT,
+            self.palette.mantle,
+        );
 
         // Divider line below toolbar
         tree.push(RenderCommand::Line {
@@ -1077,12 +1054,12 @@ impl FontManagerState {
             y1: TOOLBAR_HEIGHT,
             x2: self.window_width,
             y2: TOOLBAR_HEIGHT,
-            color: COL_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
         // Title
-        text_bold(tree, 16.0, 14.0, "Font Manager", COL_TEXT, 18.0);
+        text_bold(tree, 16.0, 14.0, "Font Manager", self.palette.text, 18.0);
 
         // Action buttons (right-aligned)
         let btn_y = 10.0;
@@ -1090,15 +1067,36 @@ impl FontManagerState {
 
         // Settings button
         btn_x -= 80.0;
-        render_toolbar_button(tree, btn_x, btn_y, "Settings", COL_SURFACE1);
+        render_toolbar_button(
+            tree,
+            &self.palette,
+            btn_x,
+            btn_y,
+            "Settings",
+            self.palette.surface1,
+        );
 
         // Uninstall button
         btn_x -= 90.0;
-        render_toolbar_button(tree, btn_x, btn_y, "Uninstall", COL_RED);
+        render_toolbar_button(
+            tree,
+            &self.palette,
+            btn_x,
+            btn_y,
+            "Uninstall",
+            self.palette.red,
+        );
 
         // Install button
         btn_x -= 80.0;
-        render_toolbar_button(tree, btn_x, btn_y, "Install", COL_ACCENT);
+        render_toolbar_button(
+            tree,
+            &self.palette,
+            btn_x,
+            btn_y,
+            "Install",
+            self.palette.blue,
+        );
 
         // Search box
         let search_x = 180.0;
@@ -1111,7 +1109,7 @@ impl FontManagerState {
             search_y,
             search_w,
             search_h,
-            COL_SURFACE0,
+            self.palette.surface0,
             6.0,
         );
         if self.search_query.is_empty() {
@@ -1119,7 +1117,7 @@ impl FontManagerState {
                 search_x + 10.0,
                 search_y + 7.0,
                 "Search fonts...",
-                COL_SUBTEXT0,
+                self.palette.subtext0,
                 13.0,
             );
         } else {
@@ -1127,7 +1125,7 @@ impl FontManagerState {
                 search_x + 10.0,
                 search_y + 7.0,
                 &self.search_query,
-                COL_TEXT,
+                self.palette.text,
                 13.0,
             );
         }
@@ -1139,7 +1137,7 @@ impl FontManagerState {
         let sidebar_h = self.window_height - TOOLBAR_HEIGHT;
 
         // Sidebar background
-        tree.fill_rect(0.0, sidebar_y, SIDEBAR_WIDTH, sidebar_h, COL_CRUST);
+        tree.fill_rect(0.0, sidebar_y, SIDEBAR_WIDTH, sidebar_h, self.palette.crust);
 
         // Divider line
         tree.push(RenderCommand::Line {
@@ -1147,7 +1145,7 @@ impl FontManagerState {
             y1: sidebar_y,
             x2: SIDEBAR_WIDTH,
             y2: self.window_height,
-            color: COL_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -1161,7 +1159,7 @@ impl FontManagerState {
             SIDEBAR_PADDING + 4.0,
             filter_top - 24.0 + 4.0,
             "FILTER",
-            COL_SUBTEXT0,
+            self.palette.subtext0,
             10.0,
         );
 
@@ -1177,7 +1175,7 @@ impl FontManagerState {
             y1: separator_y,
             x2: SIDEBAR_WIDTH - SIDEBAR_PADDING,
             y2: separator_y,
-            color: COL_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
         text_bold(
@@ -1185,7 +1183,7 @@ impl FontManagerState {
             SIDEBAR_PADDING + 4.0,
             category_top - 24.0 + 4.0,
             "CATEGORIES",
-            COL_SUBTEXT0,
+            self.palette.subtext0,
             10.0,
         );
 
@@ -1198,13 +1196,13 @@ impl FontManagerState {
                         FilterMode::User => "User",
                         FilterMode::Category => continue,
                     };
-                    render_sidebar_item(tree, y, label, self.filter_mode == mode);
+                    render_sidebar_item(tree, &self.palette, y, label, self.filter_mode == mode);
                 }
                 SidebarRow::Category(cat) => {
                     let is_selected = self.filter_mode == FilterMode::Category
                         && self.selected_category == Some(cat);
                     let display = format!("{}  {}", cat.icon(), cat.label());
-                    render_sidebar_item(tree, y, &display, is_selected);
+                    render_sidebar_item(tree, &self.palette, y, &display, is_selected);
                 }
             }
         }
@@ -1227,7 +1225,13 @@ impl FontManagerState {
 
         // Font count header
         let count_str = format!("{} families", families.len());
-        tree.text(list_x + CONTENT_PADDING, y, &count_str, COL_SUBTEXT0, 12.0);
+        tree.text(
+            list_x + CONTENT_PADDING,
+            y,
+            &count_str,
+            self.palette.subtext0,
+            12.0,
+        );
         y += 24.0;
 
         for family in &families {
@@ -1250,13 +1254,17 @@ impl FontManagerState {
                     y,
                     list_w - 16.0,
                     FONT_LIST_ITEM_HEIGHT,
-                    COL_SURFACE0,
+                    self.palette.surface0,
                     6.0,
                 );
             }
 
             // Family name
-            let name_color = if is_selected { COL_ACCENT } else { COL_TEXT };
+            let name_color = if is_selected {
+                self.palette.blue
+            } else {
+                self.palette.text
+            };
             text_bold(
                 tree,
                 list_x + CONTENT_PADDING,
@@ -1278,7 +1286,7 @@ impl FontManagerState {
                 list_x + CONTENT_PADDING,
                 y + 28.0,
                 &meta,
-                COL_SUBTEXT0,
+                self.palette.subtext0,
                 11.0,
             );
 
@@ -1289,7 +1297,7 @@ impl FontManagerState {
                     disabled_x,
                     y + 16.0,
                     "partially disabled",
-                    COL_SUBTEXT0,
+                    self.palette.subtext0,
                     10.0,
                 );
             }
@@ -1306,7 +1314,7 @@ impl FontManagerState {
             y1: list_y,
             x2: divider_x,
             y2: self.window_height,
-            color: COL_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -1318,7 +1326,13 @@ impl FontManagerState {
         let panel_h = self.window_height - TOOLBAR_HEIGHT;
 
         // Panel background
-        tree.fill_rect(panel_x, panel_y, PREVIEW_PANEL_WIDTH, panel_h, COL_MANTLE);
+        tree.fill_rect(
+            panel_x,
+            panel_y,
+            PREVIEW_PANEL_WIDTH,
+            panel_h,
+            self.palette.mantle,
+        );
 
         // Clip to the panel region
         tree.clip(panel_x, panel_y, PREVIEW_PANEL_WIDTH, panel_h);
@@ -1332,14 +1346,20 @@ impl FontManagerState {
                 panel_x + CONTENT_PADDING,
                 y,
                 &font.family,
-                COL_TEXT,
+                self.palette.text,
                 18.0,
             );
             y += 28.0;
 
             // Style and format
             let info_str = format!("{} -- {}", font.style.label(), font.format.label());
-            tree.text(panel_x + CONTENT_PADDING, y, &info_str, COL_SUBTEXT0, 12.0);
+            tree.text(
+                panel_x + CONTENT_PADDING,
+                y,
+                &info_str,
+                self.palette.subtext0,
+                12.0,
+            );
             y += 20.0;
 
             // Version and glyph count
@@ -1348,7 +1368,7 @@ impl FontManagerState {
                 panel_x + CONTENT_PADDING,
                 y,
                 &detail_str,
-                COL_SUBTEXT0,
+                self.palette.subtext0,
                 11.0,
             );
             y += 20.0;
@@ -1359,7 +1379,11 @@ impl FontManagerState {
             } else {
                 "User Font"
             };
-            let badge_color = if font.system { COL_ACCENT } else { COL_TEAL };
+            let badge_color = if font.system {
+                self.palette.blue
+            } else {
+                self.palette.teal
+            };
             let badge_w = text::padded_width(badge, 8.0, 11.0, FontWeightHint::Regular);
             fill_rounded(
                 tree,
@@ -1374,7 +1398,7 @@ impl FontManagerState {
                 panel_x + CONTENT_PADDING + 8.0,
                 y + 4.0,
                 badge,
-                COL_CRUST,
+                self.palette.crust,
                 11.0,
             );
             y += 36.0;
@@ -1385,7 +1409,7 @@ impl FontManagerState {
                 y1: y,
                 x2: panel_x + PREVIEW_PANEL_WIDTH - CONTENT_PADDING,
                 y2: y,
-                color: COL_SURFACE0,
+                color: self.palette.surface0,
                 width: 1.0,
             });
             y += 16.0;
@@ -1396,7 +1420,7 @@ impl FontManagerState {
                 panel_x + CONTENT_PADDING,
                 y,
                 "Preview",
-                COL_TEXT,
+                self.palette.text,
                 14.0,
             );
             y += 24.0;
@@ -1408,7 +1432,7 @@ impl FontManagerState {
                     panel_x + CONTENT_PADDING,
                     y,
                     &size_label,
-                    COL_SUBTEXT0,
+                    self.palette.subtext0,
                     10.0,
                 );
                 y += 14.0;
@@ -1418,7 +1442,7 @@ impl FontManagerState {
                     x: panel_x + CONTENT_PADDING,
                     y,
                     text: self.preview.text.clone(),
-                    color: COL_TEXT,
+                    color: self.palette.text,
                     font_size: *size,
                     font_weight: match font.style {
                         FontStyle::Bold | FontStyle::BoldItalic | FontStyle::SemiBold => {
@@ -1439,7 +1463,7 @@ impl FontManagerState {
                 panel_x + CONTENT_PADDING,
                 y + 40.0,
                 "Select a font to preview",
-                COL_SUBTEXT0,
+                self.palette.subtext0,
                 14.0,
             );
         }
@@ -1478,26 +1502,42 @@ impl FontManagerState {
         });
 
         // Panel background
-        fill_rounded(tree, panel_x, panel_y, panel_w, panel_h, COL_SURFACE0, 12.0);
+        fill_rounded(
+            tree,
+            panel_x,
+            panel_y,
+            panel_w,
+            panel_h,
+            self.palette.surface0,
+            12.0,
+        );
 
         let mut y = panel_y + 20.0;
         let label_x = panel_x + 24.0;
         let value_x = panel_x + 200.0;
 
         // Title
-        text_bold(tree, label_x, y, "Font Rendering Settings", COL_TEXT, 16.0);
+        text_bold(
+            tree,
+            label_x,
+            y,
+            "Font Rendering Settings",
+            self.palette.text,
+            16.0,
+        );
         y += 36.0;
 
         // Default size
-        tree.text(label_x, y, "Default Size", COL_TEXT, 13.0);
+        tree.text(label_x, y, "Default Size", self.palette.text, 13.0);
         let size_str = format!("{:.1} pt", self.render_settings.default_size_pt);
-        tree.text(value_x, y, &size_str, COL_ACCENT, 13.0);
+        tree.text(value_x, y, &size_str, self.palette.blue, 13.0);
         y += 32.0;
 
         // Hinting
-        tree.text(label_x, y, "Hinting", COL_TEXT, 13.0);
+        tree.text(label_x, y, "Hinting", self.palette.text, 13.0);
         render_setting_options(
             tree,
+            &self.palette,
             value_x,
             y,
             HintMode::ALL,
@@ -1507,9 +1547,10 @@ impl FontManagerState {
         y += 32.0;
 
         // Antialiasing
-        tree.text(label_x, y, "Antialiasing", COL_TEXT, 13.0);
+        tree.text(label_x, y, "Antialiasing", self.palette.text, 13.0);
         render_setting_options(
             tree,
+            &self.palette,
             value_x,
             y,
             AntialiasingMode::ALL,
@@ -1519,9 +1560,10 @@ impl FontManagerState {
         y += 32.0;
 
         // Subpixel order
-        tree.text(label_x, y, "Subpixel Order", COL_TEXT, 13.0);
+        tree.text(label_x, y, "Subpixel Order", self.palette.text, 13.0);
         render_setting_options(
             tree,
+            &self.palette,
             value_x,
             y,
             SubpixelOrder::ALL,
@@ -1533,8 +1575,8 @@ impl FontManagerState {
         // Close button
         let close_w = 60.0;
         let close_x = panel_x + (panel_w - close_w) / 2.0;
-        fill_rounded(tree, close_x, y, close_w, 28.0, COL_ACCENT, 6.0);
-        tree.text(close_x + 14.0, y + 7.0, "Close", COL_CRUST, 12.0);
+        fill_rounded(tree, close_x, y, close_w, 28.0, self.palette.blue, 6.0);
+        tree.text(close_x + 14.0, y + 7.0, "Close", self.palette.crust, 12.0);
     }
 }
 
@@ -1562,16 +1604,23 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
 }
 
 /// Render a toolbar button.
-fn render_toolbar_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) -> f32 {
+fn render_toolbar_button(
+    tree: &mut RenderTree,
+    pal: &Palette,
+    x: f32,
+    y: f32,
+    label: &str,
+    color: Color,
+) -> f32 {
     let w = text::padded_width(label, 10.0, 12.0, FontWeightHint::Regular);
     let h = 28.0;
     fill_rounded(tree, x, y, w, h, color, 6.0);
-    tree.text(x + 10.0, y + 7.0, label, COL_CRUST, 12.0);
+    tree.text(x + 10.0, y + 7.0, label, pal.crust, 12.0);
     w
 }
 
 /// Render a sidebar item.
-fn render_sidebar_item(tree: &mut RenderTree, y: f32, label: &str, selected: bool) {
+fn render_sidebar_item(tree: &mut RenderTree, pal: &Palette, y: f32, label: &str, selected: bool) {
     let item_x = SIDEBAR_PADDING;
     let item_w = SIDEBAR_WIDTH - SIDEBAR_PADDING * 2.0;
 
@@ -1582,26 +1631,21 @@ fn render_sidebar_item(tree: &mut RenderTree, y: f32, label: &str, selected: boo
             y,
             item_w,
             CATEGORY_ITEM_HEIGHT,
-            COL_SURFACE1,
+            pal.surface1,
             6.0,
         );
         // Left accent bar
-        tree.fill_rect(
-            item_x,
-            y + 6.0,
-            3.0,
-            CATEGORY_ITEM_HEIGHT - 12.0,
-            COL_ACCENT,
-        );
+        tree.fill_rect(item_x, y + 6.0, 3.0, CATEGORY_ITEM_HEIGHT - 12.0, pal.blue);
     }
 
-    let text_color = if selected { COL_ACCENT } else { COL_TEXT };
+    let text_color = if selected { pal.blue } else { pal.text };
     tree.text(item_x + 14.0, y + 10.0, label, text_color, 13.0);
 }
 
 /// Render a row of selectable option labels (for settings panel).
 fn render_setting_options<T: PartialEq + Copy>(
     tree: &mut RenderTree,
+    pal: &Palette,
     x: f32,
     y: f32,
     options: &[T],
@@ -1612,7 +1656,7 @@ fn render_setting_options<T: PartialEq + Copy>(
     for opt in options {
         let lbl = label_fn(*opt);
         let is_sel = *opt == selected;
-        let color = if is_sel { COL_ACCENT } else { COL_SUBTEXT0 };
+        let color = if is_sel { pal.blue } else { pal.subtext0 };
         tree.text(ox, y, lbl, color, 12.0);
         ox += text::measure(lbl, 12.0, FontWeightHint::Regular) + 12.0;
     }
@@ -1623,6 +1667,10 @@ fn render_setting_options<T: PartialEq + Copy>(
 // ============================================================================
 
 impl App for FontManagerState {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Font Manager".to_string()
     }
@@ -1694,9 +1742,10 @@ mod tests {
 
     #[test]
     fn a_toolbar_button_reports_the_width_it_drew() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut tree = RenderTree::new();
         for label in ["Install", "Remove", "Schriftart installieren"] {
-            let w = render_toolbar_button(&mut tree, 0.0, 0.0, label, COL_ACCENT);
+            let w = render_toolbar_button(&mut tree, &pal, 0.0, 0.0, label, pal.blue);
             assert!(
                 w >= text::measure(label, 12.0, FontWeightHint::Regular) + 20.0,
                 "{label} overflows its button"
@@ -1717,11 +1766,12 @@ mod tests {
 
     #[test]
     fn setting_options_do_not_overlap() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         // The row advances by the width of the label it just drew, so no two
         // labels can land on top of each other however long they are.
         let mut tree = RenderTree::new();
         let opts = [0_usize, 1, 2];
-        render_setting_options(&mut tree, 0.0, 0.0, &opts, 0, |i| match i {
+        render_setting_options(&mut tree, &pal, 0.0, 0.0, &opts, 0, |i| match i {
             0 => "Alphabetisch",
             1 => "Nach Familie",
             _ => "Zuletzt hinzugef\u{fc}gt",
@@ -2556,5 +2606,64 @@ mod tests {
         }));
         assert_eq!(result, EventResult::Ignored);
         assert_eq!(state.filter_mode, before);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut FontManagerState) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = FontManagerState::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

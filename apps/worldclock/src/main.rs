@@ -24,6 +24,7 @@
 //! have to be separate: a single field would have the once-a-second tick
 //! silently throw away every step the user had taken.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -48,23 +49,6 @@ const DEFAULT_WIDTH: f32 = 1100.0;
 const DEFAULT_HEIGHT: f32 = 750.0;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ── Layout ─────────────────────────────────────────────────────────
 const HEADER_H: f32 = 50.0;
@@ -473,6 +457,12 @@ pub struct WorldClockApp {
     status_msg: String,
     /// Cleared by a close request, which is what ends `App::on_event`.
     running: bool,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl WorldClockApp {
@@ -511,6 +501,7 @@ impl WorldClockApp {
         ];
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
             base_epoch: utc_epoch,
@@ -675,11 +666,11 @@ impl WorldClockApp {
         (6..18).contains(&h)
     }
 
-    fn day_night_color(h: u32) -> Color {
+    fn day_night_color(h: u32, pal: &Palette) -> Color {
         if (6..18).contains(&h) {
-            YELLOW
+            pal.yellow
         } else {
-            LAVENDER
+            pal.lavender
         }
     }
 
@@ -932,7 +923,7 @@ impl WorldClockApp {
         let mut frame = Frame::new(width, height);
         let layout = Layout::new(width, height);
 
-        fill(&mut frame, layout.window, BASE, 0.0);
+        fill(&mut frame, layout.window, self.palette.base, 0.0);
         self.draw_header(&mut frame, &layout);
 
         // Clip first, then translate: `Frame` keeps each command's own
@@ -959,14 +950,14 @@ impl WorldClockApp {
     }
 
     fn draw_header(&self, frame: &mut Frame, layout: &Layout) {
-        fill(frame, layout.header, MANTLE, 0.0);
+        fill(frame, layout.header, self.palette.mantle, 0.0);
         label(
             frame,
             16.0,
             14.0,
             "\u{1F30D} World Clock",
             20.0,
-            TEXT_COLOR,
+            self.palette.text,
             FontWeightHint::Bold,
             Some((layout.run_x - 24.0).max(24.0)),
         );
@@ -979,11 +970,11 @@ impl WorldClockApp {
             let rect = Rect::new(bx, 10.0, w, 30.0);
             let primary = target == Target::AddCity;
             let (bg, fg) = if primary {
-                (BLUE, CRUST)
+                (self.palette.blue, self.palette.crust)
             } else if active {
-                (SURFACE1, TEXT_COLOR)
+                (self.palette.surface1, self.palette.text)
             } else {
-                (SURFACE0, TEXT_COLOR)
+                (self.palette.surface0, self.palette.text)
             };
             fill(frame, rect, bg, 4.0);
             label(
@@ -1012,7 +1003,7 @@ impl WorldClockApp {
                 readout.y,
                 format!("UTC {uh:02}:{um:02}:{us:02}"),
                 16.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
                 Some(readout.w),
             );
@@ -1056,23 +1047,23 @@ impl WorldClockApp {
         let is_day = Self::is_daytime(h);
         let selected = index == self.selected_clock;
         let strip_color = if selected {
-            BLUE
+            self.palette.blue
         } else if is_day {
-            YELLOW
+            self.palette.yellow
         } else {
-            LAVENDER
+            self.palette.lavender
         };
         let card_bg = if is_day {
             Color::from_hex(0x2A2A3E)
         } else {
-            SURFACE0
+            self.palette.surface0
         };
 
         if selected {
             stroke(
                 frame,
                 Rect::new(x - 1.0, y - 1.0, CARD_W + 2.0, CARD_H + 2.0),
-                BLUE,
+                self.palette.blue,
                 2.0,
                 9.0,
             );
@@ -1116,7 +1107,7 @@ impl WorldClockApp {
             y + 12.0,
             tz.city,
             16.0,
-            TEXT_COLOR,
+            self.palette.text,
             FontWeightHint::Bold,
             Some(CARD_W - 32.0 - GLYPH_RUN_W),
         );
@@ -1126,7 +1117,7 @@ impl WorldClockApp {
             y + 32.0,
             tz.country,
             11.0,
-            SUBTEXT0,
+            self.palette.subtext0,
             FontWeightHint::Regular,
             Some(CARD_W - 24.0),
         );
@@ -1139,7 +1130,7 @@ impl WorldClockApp {
                     y + 56.0,
                     self.format_time(h, m, s),
                     28.0,
-                    TEXT_COLOR,
+                    self.palette.text,
                     FontWeightHint::Bold,
                     Some(CARD_W - 24.0),
                 );
@@ -1149,7 +1140,7 @@ impl WorldClockApp {
                     y + 60.0,
                     Self::day_night_icon(h),
                     20.0,
-                    Self::day_night_color(h),
+                    Self::day_night_color(h, &self.palette),
                     FontWeightHint::Regular,
                     Some(30.0),
                 );
@@ -1165,7 +1156,7 @@ impl WorldClockApp {
             y + CARD_H - 30.0,
             format!("{} ({})", self.format_offset(&rule), self.abbrev(&rule)),
             11.0,
-            OVERLAY0,
+            self.palette.overlay0,
             FontWeightHint::Regular,
             Some(CARD_W / 2.0 - 16.0),
         );
@@ -1175,7 +1166,7 @@ impl WorldClockApp {
             y + CARD_H - 30.0,
             self.diff_from_home(&rule),
             11.0,
-            TEAL,
+            self.palette.teal,
             FontWeightHint::Regular,
             Some(CARD_W / 2.0 - 20.0),
         );
@@ -1185,7 +1176,7 @@ impl WorldClockApp {
             y + CARD_H - 14.0,
             if is_day { "Daytime" } else { "Nighttime" },
             10.0,
-            Self::day_night_color(h),
+            Self::day_night_color(h, &self.palette),
             FontWeightHint::Regular,
             Some(80.0),
         );
@@ -1200,7 +1191,7 @@ impl WorldClockApp {
                 y + CARD_H - 14.0,
                 day_label,
                 10.0,
-                PEACH,
+                self.palette.peach,
                 FontWeightHint::Bold,
                 Some(64.0),
             );
@@ -1215,9 +1206,19 @@ impl WorldClockApp {
     fn draw_entry_glyphs(&self, frame: &mut Frame, run: Rect, entry: &ClockEntry, index: usize) {
         let is_home = entry.tz_idx == self.home_tz_idx;
         let buttons = [
-            ("\u{1F4CC}", entry.pinned, PEACH, Target::Pin(index)),
-            ("\u{1F3E0}", is_home, GREEN, Target::SetHome(index)),
-            ("\u{2715}", false, RED, Target::Remove(index)),
+            (
+                "\u{1F4CC}",
+                entry.pinned,
+                self.palette.peach,
+                Target::Pin(index),
+            ),
+            (
+                "\u{1F3E0}",
+                is_home,
+                self.palette.green,
+                Target::SetHome(index),
+            ),
+            ("\u{2715}", false, self.palette.red, Target::Remove(index)),
         ];
         for (i, (glyph, on, accent, target)) in buttons.into_iter().enumerate() {
             let rect = Rect::new(
@@ -1226,14 +1227,23 @@ impl WorldClockApp {
                 GLYPH_W,
                 GLYPH_W,
             );
-            fill(frame, rect, if on { SURFACE1 } else { SURFACE0 }, 4.0);
+            fill(
+                frame,
+                rect,
+                if on {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
+                4.0,
+            );
             label(
                 frame,
                 rect.x + 4.0,
                 rect.y + 4.0,
                 glyph,
                 11.0,
-                if on { accent } else { OVERLAY0 },
+                if on { accent } else { self.palette.overlay0 },
                 FontWeightHint::Regular,
                 Some(GLYPH_W),
             );
@@ -1252,8 +1262,8 @@ impl WorldClockApp {
         s: u32,
     ) {
         let face = Rect::new(cx - radius, cy - radius, radius * 2.0, radius * 2.0);
-        fill(frame, face, CRUST, radius);
-        stroke(frame, face, SURFACE2, 1.5, radius);
+        fill(frame, face, self.palette.crust, radius);
+        stroke(frame, face, self.palette.surface2, 1.5, radius);
 
         // Hour markers
         for i in 0..12_u32 {
@@ -1267,7 +1277,7 @@ impl WorldClockApp {
                 cy + inner_r * angle.sin(),
                 cx + outer_r * angle.cos(),
                 cy + outer_r * angle.sin(),
-                TEXT_COLOR,
+                self.palette.text,
                 if quarter { 2.0 } else { 1.0 },
             );
         }
@@ -1281,7 +1291,7 @@ impl WorldClockApp {
             cy,
             (radius * 0.5).mul_add(h_angle.cos(), cx),
             (radius * 0.5).mul_add(h_angle.sin(), cy),
-            TEXT_COLOR,
+            self.palette.text,
             3.0,
         );
 
@@ -1293,7 +1303,7 @@ impl WorldClockApp {
             cy,
             (radius * 0.7).mul_add(m_angle.cos(), cx),
             (radius * 0.7).mul_add(m_angle.sin(), cy),
-            SUBTEXT1,
+            self.palette.subtext1,
             2.0,
         );
 
@@ -1305,7 +1315,7 @@ impl WorldClockApp {
                 cy,
                 (radius * 0.8).mul_add(s_angle.cos(), cx),
                 (radius * 0.8).mul_add(s_angle.sin(), cy),
-                RED,
+                self.palette.red,
                 1.0,
             );
         }
@@ -1313,7 +1323,7 @@ impl WorldClockApp {
         fill(
             frame,
             Rect::new(cx - 2.0, cy - 2.0, 4.0, 4.0),
-            TEXT_COLOR,
+            self.palette.text,
             2.0,
         );
     }
@@ -1326,7 +1336,7 @@ impl WorldClockApp {
         fill(
             frame,
             Rect::new(area.x, head_y, area.w, LIST_HEADER_H),
-            CRUST,
+            self.palette.crust,
             0.0,
         );
         for (hx, text) in
@@ -1339,7 +1349,7 @@ impl WorldClockApp {
                 head_y + 6.0,
                 text,
                 12.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Bold,
                 Some(150.0),
             );
@@ -1357,11 +1367,11 @@ impl WorldClockApp {
             let row = Rect::new(area.x, ry, area.w, LIST_ROW_H);
             let (h, m, s) = self.local_hms(&rule);
             let bg = if i == self.selected_clock {
-                SURFACE1
+                self.palette.surface1
             } else if i % 2 == 0 {
-                SURFACE0
+                self.palette.surface0
             } else {
-                BASE
+                self.palette.base
             };
             fill(frame, row, bg, 0.0);
             frame.hit(Target::Clock(i), row);
@@ -1373,7 +1383,7 @@ impl WorldClockApp {
                 ry + 8.0,
                 tz.city,
                 14.0,
-                TEXT_COLOR,
+                self.palette.text,
                 FontWeightHint::Bold,
                 Some(name_w),
             );
@@ -1383,7 +1393,7 @@ impl WorldClockApp {
                 ry + 28.0,
                 tz.country,
                 11.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
                 Some(name_w),
             );
@@ -1393,7 +1403,7 @@ impl WorldClockApp {
                 ry + 12.0,
                 self.format_time(h, m, s),
                 20.0,
-                TEXT_COLOR,
+                self.palette.text,
                 FontWeightHint::Bold,
                 Some((cols[2] - cols[1] - 10.0).max(40.0)),
             );
@@ -1403,7 +1413,7 @@ impl WorldClockApp {
                 ry + 16.0,
                 format!("{} ({})", self.format_offset(&rule), self.abbrev(&rule)),
                 13.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
                 Some((cols[3] - cols[2] - 10.0).max(40.0)),
             );
@@ -1413,7 +1423,7 @@ impl WorldClockApp {
                 ry + 16.0,
                 self.diff_from_home(&rule),
                 13.0,
-                TEAL,
+                self.palette.teal,
                 FontWeightHint::Regular,
                 Some((cols[4] - cols[3] - 10.0).max(30.0)),
             );
@@ -1425,7 +1435,7 @@ impl WorldClockApp {
                 ry + 16.0,
                 format!("{dn_icon} {dn_label}"),
                 13.0,
-                Self::day_night_color(h),
+                Self::day_night_color(h, &self.palette),
                 FontWeightHint::Regular,
                 Some((cols[5] - cols[4] - 10.0).max(30.0)),
             );
@@ -1437,7 +1447,7 @@ impl WorldClockApp {
                     ry + 16.0,
                     day_label,
                     13.0,
-                    PEACH,
+                    self.palette.peach,
                     FontWeightHint::Bold,
                     Some(90.0),
                 );
@@ -1459,21 +1469,21 @@ impl WorldClockApp {
 
     fn draw_status(&self, frame: &mut Frame, layout: &Layout) {
         let bar = layout.status;
-        fill(frame, bar, MANTLE, 0.0);
+        fill(frame, bar, self.palette.mantle, 0.0);
 
         let count_x = (bar.right() - 110.0).max(8.0);
         let mut msg_limit = count_x;
         if let Some(shift) = self.shift_label() {
             let chip = Rect::new(count_x - 158.0, bar.y + 4.0, 150.0, 20.0);
             if chip.x > 8.0 {
-                fill(frame, chip, SURFACE1, 4.0);
+                fill(frame, chip, self.palette.surface1, 4.0);
                 label(
                     frame,
                     chip.x + 6.0,
                     chip.y + 4.0,
                     format!("{shift} \u{21BA}"),
                     11.0,
-                    PEACH,
+                    self.palette.peach,
                     FontWeightHint::Bold,
                     Some(chip.w - 12.0),
                 );
@@ -1488,7 +1498,7 @@ impl WorldClockApp {
             bar.y + 6.0,
             self.status_msg.clone(),
             12.0,
-            SUBTEXT1,
+            self.palette.subtext1,
             FontWeightHint::Regular,
             Some((msg_limit - 16.0).max(40.0)),
         );
@@ -1498,7 +1508,7 @@ impl WorldClockApp {
             bar.y + 6.0,
             format!("{} clocks", self.clocks.len()),
             11.0,
-            OVERLAY0,
+            self.palette.overlay0,
             FontWeightHint::Regular,
             Some(102.0),
         );
@@ -1520,45 +1530,45 @@ impl WorldClockApp {
                 layout.window.h / 2.0,
                 "Window too small to pick a city",
                 14.0,
-                TEXT_COLOR,
+                self.palette.text,
                 FontWeightHint::Bold,
                 Some((layout.window.w - 32.0).max(1.0)),
             );
             return;
         };
 
-        fill(frame, panel, MANTLE, 12.0);
+        fill(frame, panel, self.palette.mantle, 12.0);
         label(
             frame,
             panel.x + 16.0,
             panel.y + 14.0,
             "Add City",
             18.0,
-            TEXT_COLOR,
+            self.palette.text,
             FontWeightHint::Bold,
             Some(panel.w - 64.0),
         );
 
         let close = Rect::new(panel.right() - 34.0, panel.y + 10.0, 24.0, 24.0);
-        fill(frame, close, SURFACE0, 4.0);
+        fill(frame, close, self.palette.surface0, 4.0);
         label(
             frame,
             close.x + 7.0,
             close.y + 5.0,
             "\u{2715}",
             12.0,
-            SUBTEXT0,
+            self.palette.subtext0,
             FontWeightHint::Regular,
             Some(20.0),
         );
         frame.hit(Target::PickerClose, close);
 
         let search = Rect::new(panel.x + 12.0, panel.y + 44.0, panel.w - 24.0, 32.0);
-        fill(frame, search, SURFACE0, 6.0);
+        fill(frame, search, self.palette.surface0, 6.0);
         let (search_text, search_color) = if self.picker_search.is_empty() {
-            (String::from("Search cities..."), OVERLAY0)
+            (String::from("Search cities..."), self.palette.overlay0)
         } else {
-            (format!("{}|", self.picker_search), TEXT_COLOR)
+            (format!("{}|", self.picker_search), self.palette.text)
         };
         label(
             frame,
@@ -1593,7 +1603,16 @@ impl WorldClockApp {
             let iy = list.y + vis_i as f32 * PICKER_ITEM_H;
             let already = self.clocks.iter().any(|c| c.tz_idx == tz_idx);
             let row = Rect::new(panel.x + 8.0, iy, panel.w - 16.0, PICKER_ITEM_H - 2.0);
-            fill(frame, row, if already { SURFACE1 } else { SURFACE0 }, 4.0);
+            fill(
+                frame,
+                row,
+                if already {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
+                4.0,
+            );
             frame.hit(Target::PickerCity(tz_idx), row);
 
             label(
@@ -1602,7 +1621,11 @@ impl WorldClockApp {
                 iy + 6.0,
                 format!("{}, {}", tz.city, tz.country),
                 13.0,
-                if already { OVERLAY0 } else { TEXT_COLOR },
+                if already {
+                    self.palette.overlay0
+                } else {
+                    self.palette.text
+                },
                 FontWeightHint::Bold,
                 Some(row.w - 80.0),
             );
@@ -1615,7 +1638,7 @@ impl WorldClockApp {
                     |r| format!("{} ({})", self.format_offset(&r), self.abbrev(&r)),
                 ),
                 11.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
                 Some(200.0),
             );
@@ -1626,7 +1649,7 @@ impl WorldClockApp {
                     iy + 12.0,
                     "Added",
                     11.0,
-                    GREEN,
+                    self.palette.green,
                     FontWeightHint::Regular,
                     Some(50.0),
                 );
@@ -1646,7 +1669,7 @@ impl WorldClockApp {
                     filtered.len()
                 ),
                 10.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
                 Some(120.0),
             );
@@ -1880,6 +1903,10 @@ fn handle_mouse(state: &mut WorldClockApp, mouse: &MouseEvent) -> EventResult {
 
 // ── Window ──────────────────────────────────────────────────────────
 impl App for WorldClockApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("World Clock")
     }
@@ -3159,5 +3186,64 @@ mod tests {
             app.on_event(&Event::Key(probe::press(Key::F7))),
             Response::Idle
         ));
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut WorldClockApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = WorldClockApp::new(1000.0, 700.0, 1_757_000_000);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

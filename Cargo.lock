@@ -286,6 +286,7 @@ dependencies = [
 name = "alarmclock"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "tzrules",
@@ -948,6 +949,7 @@ dependencies = [
 name = "automator"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -2079,6 +2081,7 @@ version = "0.1.0"
 name = "camera"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -2934,6 +2937,7 @@ dependencies = [
 name = "compass"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -3081,6 +3085,7 @@ dependencies = [
 name = "contacts"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -3284,6 +3289,7 @@ dependencies = [
 name = "credmanager"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "pwkdf",
@@ -3704,6 +3710,7 @@ version = "0.1.0"
 name = "dbviewer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -3908,6 +3915,7 @@ version = "0.1.0"
 name = "diagram"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -3916,6 +3924,7 @@ dependencies = [
 name = "dictionary"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -4010,6 +4019,7 @@ dependencies = [
 name = "diskanalyzer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "scratchdir",
@@ -5645,6 +5655,7 @@ dependencies = [
 name = "fontmanager"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -6964,6 +6975,7 @@ dependencies = [
 name = "habits"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -7938,6 +7950,7 @@ version = "0.1.0"
 name = "ircclient"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -8213,6 +8226,7 @@ dependencies = [
 name = "jsonviewer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -9526,6 +9540,7 @@ dependencies = [
 name = "logviewer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -10645,6 +10660,7 @@ dependencies = [
 name = "mindmap"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -12879,6 +12895,7 @@ dependencies = [
 name = "partmanager"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -12920,6 +12937,7 @@ dependencies = [
 name = "passwordgen"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -13526,6 +13544,7 @@ dependencies = [
 name = "podcast"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -14691,6 +14710,7 @@ dependencies = [
 name = "regextester"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -14699,6 +14719,7 @@ dependencies = [
 name = "reminders"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "tzrules",
@@ -16160,6 +16181,7 @@ version = "0.1.0"
 name = "slides"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -17009,6 +17031,7 @@ dependencies = [
 name = "stickynotes"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "safeio",
@@ -17498,6 +17521,7 @@ dependencies = [
 name = "sysmonitor"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -17614,6 +17638,7 @@ dependencies = [
 name = "taskscheduler"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -18576,6 +18601,7 @@ dependencies = [
 name = "undelete"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -19199,6 +19225,7 @@ dependencies = [
 name = "vpnmanager"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "scratchdir",
@@ -19405,6 +19432,7 @@ dependencies = [
 name = "weather"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -19523,6 +19551,7 @@ dependencies = [
 name = "whiteboard"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -19844,6 +19873,7 @@ dependencies = [
 name = "worldclock"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "tzrules",

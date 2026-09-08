@@ -44,6 +44,7 @@
 #![allow(clippy::arithmetic_side_effects)]
 #![allow(clippy::indexing_slicing)]
 
+use appearance::Palette;
 use guitk::Color;
 use guitk::event::{Event, EventResult, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -57,23 +58,6 @@ use std::time::Duration;
 // ============================================================================
 // Catppuccin Mocha theme
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
 
 // ============================================================================
 // Layout constants
@@ -1016,14 +1000,14 @@ enum ValueType {
 }
 
 impl ValueType {
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Null => OVERLAY0,
-            Self::Bool => BLUE,
-            Self::Number => PEACH,
-            Self::Str => GREEN,
-            Self::Array => LAVENDER,
-            Self::Object => MAUVE,
+            Self::Null => pal.overlay0,
+            Self::Bool => pal.blue,
+            Self::Number => pal.peach,
+            Self::Str => pal.green,
+            Self::Array => pal.lavender,
+            Self::Object => pal.mauve,
         }
     }
 }
@@ -1557,7 +1541,7 @@ struct HighlightedSpan {
 }
 
 /// Generate syntax-highlighted spans for formatted JSON.
-fn highlight_json_text(formatted: &str) -> Vec<Vec<HighlightedSpan>> {
+fn highlight_json_text(formatted: &str, pal: &Palette) -> Vec<Vec<HighlightedSpan>> {
     let mut lines: Vec<Vec<HighlightedSpan>> = Vec::new();
     let mut current_line: Vec<HighlightedSpan> = Vec::new();
     let chars: Vec<char> = formatted.chars().collect();
@@ -1576,7 +1560,7 @@ fn highlight_json_text(formatted: &str) -> Vec<Vec<HighlightedSpan>> {
                 // Look ahead past the string to see if there's a ':'
                 let (string_content, end_idx) = extract_string(&chars, i);
                 let is_key = is_key_position(&chars, end_idx);
-                let color = if is_key { BLUE } else { GREEN };
+                let color = if is_key { pal.blue } else { pal.green };
                 current_line.push(HighlightedSpan {
                     text: string_content,
                     color,
@@ -1610,14 +1594,14 @@ fn highlight_json_text(formatted: &str) -> Vec<Vec<HighlightedSpan>> {
                 let num_text: String = chars[start..i].iter().collect();
                 current_line.push(HighlightedSpan {
                     text: num_text,
-                    color: PEACH,
+                    color: pal.peach,
                     bold: false,
                 });
             }
             't' if i + 4 <= len && chars[i..i + 4].iter().collect::<String>() == "true" => {
                 current_line.push(HighlightedSpan {
                     text: String::from("true"),
-                    color: BLUE,
+                    color: pal.blue,
                     bold: false,
                 });
                 i += 4;
@@ -1625,7 +1609,7 @@ fn highlight_json_text(formatted: &str) -> Vec<Vec<HighlightedSpan>> {
             'f' if i + 5 <= len && chars[i..i + 5].iter().collect::<String>() == "false" => {
                 current_line.push(HighlightedSpan {
                     text: String::from("false"),
-                    color: BLUE,
+                    color: pal.blue,
                     bold: false,
                 });
                 i += 5;
@@ -1633,7 +1617,7 @@ fn highlight_json_text(formatted: &str) -> Vec<Vec<HighlightedSpan>> {
             'n' if i + 4 <= len && chars[i..i + 4].iter().collect::<String>() == "null" => {
                 current_line.push(HighlightedSpan {
                     text: String::from("null"),
-                    color: OVERLAY0,
+                    color: pal.overlay0,
                     bold: false,
                 });
                 i += 4;
@@ -1641,7 +1625,7 @@ fn highlight_json_text(formatted: &str) -> Vec<Vec<HighlightedSpan>> {
             '{' | '}' | '[' | ']' => {
                 current_line.push(HighlightedSpan {
                     text: ch.to_string(),
-                    color: TEXT_COLOR,
+                    color: pal.text,
                     bold: true,
                 });
                 i += 1;
@@ -1649,7 +1633,7 @@ fn highlight_json_text(formatted: &str) -> Vec<Vec<HighlightedSpan>> {
             ':' => {
                 current_line.push(HighlightedSpan {
                     text: String::from(": "),
-                    color: SUBTEXT0,
+                    color: pal.subtext0,
                     bold: false,
                 });
                 // Skip the space after colon if present
@@ -1661,7 +1645,7 @@ fn highlight_json_text(formatted: &str) -> Vec<Vec<HighlightedSpan>> {
             ',' => {
                 current_line.push(HighlightedSpan {
                     text: String::from(","),
-                    color: SUBTEXT0,
+                    color: pal.subtext0,
                     bold: false,
                 });
                 i += 1;
@@ -1674,7 +1658,7 @@ fn highlight_json_text(formatted: &str) -> Vec<Vec<HighlightedSpan>> {
                 let ws: String = chars[start..i].iter().collect();
                 current_line.push(HighlightedSpan {
                     text: ws,
-                    color: TEXT_COLOR,
+                    color: pal.text,
                     bold: false,
                 });
             }
@@ -1684,7 +1668,7 @@ fn highlight_json_text(formatted: &str) -> Vec<Vec<HighlightedSpan>> {
             _ => {
                 current_line.push(HighlightedSpan {
                     text: ch.to_string(),
-                    color: TEXT_COLOR,
+                    color: pal.text,
                     bold: false,
                 });
                 i += 1;
@@ -1875,12 +1859,12 @@ impl Document {
         formatted
     }
 
-    fn get_highlighted(&mut self) -> Vec<Vec<HighlightedSpan>> {
+    fn get_highlighted(&mut self, pal: &Palette) -> Vec<Vec<HighlightedSpan>> {
         if let Some(ref cached) = self.highlighted_cache {
             return cached.clone();
         }
         let formatted = self.get_formatted();
-        let highlighted = highlight_json_text(&formatted);
+        let highlighted = highlight_json_text(&formatted, pal);
         self.highlighted_cache = Some(highlighted.clone());
         highlighted
     }
@@ -1963,6 +1947,12 @@ struct App {
     width: f32,
     /// Height of the window.
     height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 // ============================================================================
@@ -2061,6 +2051,7 @@ impl App {
         doc.reparse();
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             documents: vec![doc],
             active_tab: 0,
             next_tab_id: 2,
@@ -2794,7 +2785,7 @@ impl App {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2819,7 +2810,7 @@ impl App {
             y: 0.0,
             width: self.width,
             height: TOOLBAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2828,7 +2819,7 @@ impl App {
             x: PADDING,
             y: 14.0,
             text: String::from("JSON Viewer"),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: TITLE_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2837,9 +2828,16 @@ impl App {
 
         // Toolbar buttons
         let buttons = [
-            ("New", BLUE),
-            ("Search", TEAL),
-            ("Edit", if self.edit_mode { GREEN } else { SUBTEXT0 }),
+            ("New", self.palette.blue),
+            ("Search", self.palette.teal),
+            (
+                "Edit",
+                if self.edit_mode {
+                    self.palette.green
+                } else {
+                    self.palette.subtext0
+                },
+            ),
         ];
         let mut bx = 200.0;
         for (label, color) in &buttons {
@@ -2849,7 +2847,7 @@ impl App {
                 y: 8.0,
                 width: bw,
                 height: 28.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -2871,7 +2869,7 @@ impl App {
             y1: TOOLBAR_HEIGHT,
             x2: self.width,
             y2: TOOLBAR_HEIGHT,
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
     }
@@ -2885,7 +2883,7 @@ impl App {
             y,
             width: self.width,
             height: TAB_BAR_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2900,7 +2898,11 @@ impl App {
                 y: y + 4.0,
                 width: tab_width,
                 height: TAB_BAR_HEIGHT - 4.0,
-                color: if is_active { BASE } else { SURFACE0 },
+                color: if is_active {
+                    self.palette.base
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii {
                     top_left: 6.0,
                     top_right: 6.0,
@@ -2915,7 +2917,11 @@ impl App {
                 x: tab_x + 10.0,
                 y: y + 16.0,
                 text: label,
-                color: if is_active { TEXT_COLOR } else { SUBTEXT0 },
+                color: if is_active {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: SMALL_TEXT,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -2932,7 +2938,7 @@ impl App {
                     x: tab_x + tab_width - 18.0,
                     y: y + 16.0,
                     text: String::from("x"),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: SMALL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -2949,14 +2955,14 @@ impl App {
             y: y + 6.0,
             width: 28.0,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
             x: tab_x + 8.0,
             y: y + 16.0,
             text: String::from("+"),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: NORMAL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2969,7 +2975,7 @@ impl App {
             y1: y + TAB_BAR_HEIGHT,
             x2: self.width,
             y2: y + TAB_BAR_HEIGHT,
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
     }
@@ -2982,7 +2988,7 @@ impl App {
             y,
             width: self.width,
             height: 30.0,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2998,7 +3004,7 @@ impl App {
                     y: y + 3.0,
                     width: mode_width,
                     height: 24.0,
-                    color: SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -3007,7 +3013,11 @@ impl App {
                 x: mode_x + 10.0,
                 y: y + 14.0,
                 text: mode.label().to_string(),
-                color: if is_active { TEXT_COLOR } else { SUBTEXT0 },
+                color: if is_active {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: SMALL_TEXT,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -3027,7 +3037,7 @@ impl App {
             y1: y + 30.0,
             x2: self.width,
             y2: y + 30.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -3043,7 +3053,7 @@ impl App {
             y: top,
             width: content_width,
             height: content_height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3070,7 +3080,7 @@ impl App {
                     x: PADDING,
                     y: top + 30.0,
                     text: String::from("No document open"),
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -3100,7 +3110,7 @@ impl App {
                     x: PADDING,
                     y: top + 30.0,
                     text: String::from("Enter JSON in the input area or paste a document"),
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - PADDING * 2.0),
@@ -3129,7 +3139,7 @@ impl App {
                         y: row_y,
                         width,
                         height: LINE_HEIGHT,
-                        color: SURFACE0,
+                        color: self.palette.surface0,
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
@@ -3153,7 +3163,7 @@ impl App {
                         x: indent_x - TREE_ICON_SIZE,
                         y: row_y + 14.0,
                         text: arrow.to_string(),
-                        color: SUBTEXT0,
+                        color: self.palette.subtext0,
                         font_size: SMALL_TEXT,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -3167,7 +3177,11 @@ impl App {
                     x: indent_x,
                     y: row_y + 14.0,
                     text: node.label.clone(),
-                    color: if node.expandable { MAUVE } else { BLUE },
+                    color: if node.expandable {
+                        self.palette.mauve
+                    } else {
+                        self.palette.blue
+                    },
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width * 0.4),
@@ -3180,7 +3194,7 @@ impl App {
                     x: colon_x,
                     y: row_y + 14.0,
                     text: String::from(":"),
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -3193,7 +3207,7 @@ impl App {
                     x: value_x,
                     y: row_y + 14.0,
                     text: node.value_display.clone(),
-                    color: node.value_type.color(),
+                    color: node.value_type.color(&self.palette),
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - value_x - PADDING),
@@ -3214,7 +3228,7 @@ impl App {
                 x: PADDING,
                 y: top + height - 6.0,
                 text: info,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3241,7 +3255,7 @@ impl App {
             return;
         }
 
-        let highlighted = doc.get_highlighted();
+        let highlighted = doc.get_highlighted(&self.palette);
         let scroll = doc.raw_scroll;
         let first_visible = (scroll / LINE_HEIGHT) as usize;
         let visible_count = (height / LINE_HEIGHT) as usize + 2;
@@ -3254,7 +3268,7 @@ impl App {
             y: top,
             width: gutter_width,
             height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3266,7 +3280,7 @@ impl App {
                 x: 4.0,
                 y: row_y + 14.0,
                 text: format!("{}", i + 1),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(gutter_width - 8.0),
@@ -3313,7 +3327,7 @@ impl App {
                 x: PADDING,
                 y: top + height - 6.0,
                 text: info,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3339,7 +3353,7 @@ impl App {
                 x: PADDING,
                 y: top + 30.0,
                 text: String::from("No valid JSON to convert to YAML"),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: NORMAL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3362,11 +3376,11 @@ impl App {
 
                 // Simple YAML highlighting
                 let (color, bold) = if line.trim_start().starts_with('-') {
-                    (TEAL, false)
+                    (self.palette.teal, false)
                 } else if line.contains(':') {
-                    (BLUE, true)
+                    (self.palette.blue, true)
                 } else {
-                    (TEXT_COLOR, false)
+                    (self.palette.text, false)
                 };
 
                 cmds.push(RenderCommand::Text {
@@ -3400,7 +3414,7 @@ impl App {
                     x: PADDING,
                     y: top + 30.0,
                     text: String::from("No valid JSON to analyze"),
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -3425,7 +3439,7 @@ impl App {
             width - PADDING * 2.0,
             row_y,
             "Document Statistics",
-            LAVENDER,
+            self.palette.lavender,
             HEADER_TEXT,
             Fit::Start,
             FontWeightHint::Bold,
@@ -3434,10 +3448,14 @@ impl App {
 
         // General stats
         let stats = [
-            ("Total Nodes", format!("{node_count}"), PEACH),
-            ("Max Depth", format!("{depth}"), YELLOW),
-            ("Approx Size", format_size(approx_bytes), TEAL),
-            ("Root Type", value.type_name().to_string(), BLUE),
+            ("Total Nodes", format!("{node_count}"), self.palette.peach),
+            ("Max Depth", format!("{depth}"), self.palette.yellow),
+            ("Approx Size", format_size(approx_bytes), self.palette.teal),
+            (
+                "Root Type",
+                value.type_name().to_string(),
+                self.palette.blue,
+            ),
         ];
 
         let stats_cols = stats_columns(width);
@@ -3449,7 +3467,7 @@ impl App {
                 y: row_y - 10.0,
                 width: stats_card_width(width),
                 height: 28.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             general.cell_weighted(
@@ -3457,7 +3475,7 @@ impl App {
                 STATS_LABEL,
                 row_y + 4.0,
                 label,
-                TEXT_COLOR,
+                self.palette.text,
                 NORMAL_TEXT,
                 Fit::Start,
                 FontWeightHint::Bold,
@@ -3485,7 +3503,7 @@ impl App {
             width - PADDING * 2.0,
             row_y,
             "Type Distribution",
-            LAVENDER,
+            self.palette.lavender,
             HEADER_TEXT,
             Fit::Start,
             FontWeightHint::Bold,
@@ -3494,12 +3512,12 @@ impl App {
 
         let total = counts.total().max(1) as f32;
         let type_rows = [
-            ("Objects", counts.objects, MAUVE),
-            ("Arrays", counts.arrays, LAVENDER),
-            ("Strings", counts.strings, GREEN),
-            ("Numbers", counts.numbers, PEACH),
-            ("Booleans", counts.bools, BLUE),
-            ("Nulls", counts.nulls, OVERLAY0),
+            ("Objects", counts.objects, self.palette.mauve),
+            ("Arrays", counts.arrays, self.palette.lavender),
+            ("Strings", counts.strings, self.palette.green),
+            ("Numbers", counts.numbers, self.palette.peach),
+            ("Booleans", counts.bools, self.palette.blue),
+            ("Nulls", counts.nulls, self.palette.overlay0),
         ];
 
         let type_cols = type_columns(width);
@@ -3516,7 +3534,7 @@ impl App {
                 TYPE_LABEL,
                 row_y + 4.0,
                 label,
-                TEXT_COLOR,
+                self.palette.text,
                 NORMAL_TEXT,
                 Fit::Start,
             );
@@ -3540,7 +3558,7 @@ impl App {
                 y: row_y - 4.0,
                 width: bar_max_width,
                 height: 16.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(3.0),
             });
 
@@ -3564,7 +3582,7 @@ impl App {
                 TYPE_PCT,
                 row_y + 4.0,
                 &format!("{:.1}%", pct * 100.0),
-                SUBTEXT0,
+                self.palette.subtext0,
                 SMALL_TEXT,
                 Fit::Start,
             );
@@ -3590,7 +3608,7 @@ impl App {
                 x: PADDING,
                 y: top + 30.0,
                 text: String::from("Parse the primary document first to enable diff"),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: NORMAL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3606,7 +3624,7 @@ impl App {
             x: PADDING,
             y: top + 20.0,
             text: format!("Diff Results: {} difference(s)", diff_results.len()),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: HEADER_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3623,7 +3641,7 @@ impl App {
                 x: PADDING,
                 y: top + 50.0,
                 text: msg.to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: NORMAL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3644,10 +3662,10 @@ impl App {
                 let row_y = start_y + (i as f32 * row_height) - scroll;
 
                 let (indicator, ind_color) = match entry.kind {
-                    DiffKind::Added => ("+", GREEN),
-                    DiffKind::Removed => ("-", RED),
-                    DiffKind::Changed => ("~", YELLOW),
-                    DiffKind::TypeChanged => ("!", PEACH),
+                    DiffKind::Added => ("+", self.palette.green),
+                    DiffKind::Removed => ("-", self.palette.red),
+                    DiffKind::Changed => ("~", self.palette.yellow),
+                    DiffKind::TypeChanged => ("!", self.palette.peach),
                 };
 
                 // Background
@@ -3684,7 +3702,7 @@ impl App {
                     x: PADDING + 30.0,
                     y: row_y + 14.0,
                     text: entry.path.clone(),
-                    color: BLUE,
+                    color: self.palette.blue,
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width * 0.6),
@@ -3697,7 +3715,7 @@ impl App {
                         x: PADDING + 30.0,
                         y: row_y + 32.0,
                         text: format!("L: {}", entry.left),
-                        color: RED,
+                        color: self.palette.red,
                         font_size: SMALL_TEXT,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width * 0.4),
@@ -3709,7 +3727,7 @@ impl App {
                         x: width * 0.45,
                         y: row_y + 32.0,
                         text: format!("R: {}", entry.right),
-                        color: GREEN,
+                        color: self.palette.green,
                         font_size: SMALL_TEXT,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width * 0.4),
@@ -3731,7 +3749,7 @@ impl App {
             y: top,
             width: SIDEBAR_WIDTH,
             height: sidebar_height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3741,7 +3759,7 @@ impl App {
             y1: top,
             x2: sidebar_x,
             y2: top + sidebar_height,
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
 
@@ -3757,7 +3775,7 @@ impl App {
             x: sidebar_x + PADDING,
             y: section_y + 4.0,
             text: String::from("JSONPath"),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3774,14 +3792,14 @@ impl App {
                     y: section_y - 4.0,
                     width: SIDEBAR_WIDTH - PADDING * 2.0,
                     height: 22.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(3.0),
                 });
                 cmds.push(RenderCommand::Text {
                     x: sidebar_x + PADDING + 6.0,
                     y: section_y + 8.0,
                     text: json_path,
-                    color: TEAL,
+                    color: self.palette.teal,
                     font_size: SMALL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 12.0),
@@ -3797,7 +3815,7 @@ impl App {
             y1: section_y,
             x2: sidebar_x + SIDEBAR_WIDTH - PADDING,
             y2: section_y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
         section_y += PADDING;
@@ -3806,7 +3824,7 @@ impl App {
             x: sidebar_x + PADDING,
             y: section_y + 4.0,
             text: String::from("Validation"),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3827,7 +3845,7 @@ impl App {
                 x: sidebar_x + PADDING + 6.0,
                 y: section_y + 8.0,
                 text: String::from("Invalid JSON"),
-                color: RED,
+                color: self.palette.red,
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -3837,7 +3855,7 @@ impl App {
                 x: sidebar_x + PADDING + 6.0,
                 y: section_y + 24.0,
                 text: format!("Ln {}, Col {}", error.line, error.column),
-                color: RED,
+                color: self.palette.red,
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 12.0),
@@ -3857,7 +3875,7 @@ impl App {
                 x: sidebar_x + PADDING + 6.0,
                 y: section_y + 8.0,
                 text: String::from("Valid JSON"),
-                color: GREEN,
+                color: self.palette.green,
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -3869,7 +3887,7 @@ impl App {
                 x: sidebar_x + PADDING + 6.0,
                 y: section_y + 8.0,
                 text: String::from("No input"),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3884,7 +3902,7 @@ impl App {
             y1: section_y,
             x2: sidebar_x + SIDEBAR_WIDTH - PADDING,
             y2: section_y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
         section_y += PADDING;
@@ -3893,7 +3911,7 @@ impl App {
             x: sidebar_x + PADDING,
             y: section_y + 4.0,
             text: String::from("Quick Info"),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3914,7 +3932,7 @@ impl App {
                     x: sidebar_x + PADDING + 6.0,
                     y: section_y + 4.0,
                     text: format!("{label}:"),
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: SMALL_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -3924,7 +3942,7 @@ impl App {
                     x: sidebar_x + PADDING + 80.0,
                     y: section_y + 4.0,
                     text: val.clone(),
-                    color: TEXT_COLOR,
+                    color: self.palette.text,
                     font_size: SMALL_TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
@@ -3941,7 +3959,7 @@ impl App {
             y1: section_y,
             x2: sidebar_x + SIDEBAR_WIDTH - PADDING,
             y2: section_y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
         section_y += PADDING;
@@ -3950,7 +3968,7 @@ impl App {
             x: sidebar_x + PADDING,
             y: section_y + 4.0,
             text: String::from("Shortcuts"),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3973,7 +3991,7 @@ impl App {
                 x: sidebar_x + PADDING + 6.0,
                 y: section_y + 4.0,
                 text: (*key).to_string(),
-                color: YELLOW,
+                color: self.palette.yellow,
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -3983,7 +4001,7 @@ impl App {
                 x: sidebar_x + PADDING + 80.0,
                 y: section_y + 4.0,
                 text: (*desc).to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -4001,7 +4019,7 @@ impl App {
             y,
             width: self.width,
             height: STATUS_BAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4011,7 +4029,7 @@ impl App {
             y1: y,
             x2: self.width,
             y2: y,
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
 
@@ -4028,7 +4046,11 @@ impl App {
         } else {
             "Empty"
         };
-        let status_color = if doc.error.is_some() { RED } else { GREEN };
+        let status_color = if doc.error.is_some() {
+            self.palette.red
+        } else {
+            self.palette.green
+        };
 
         cmds.push(RenderCommand::Text {
             x: PADDING,
@@ -4047,7 +4069,7 @@ impl App {
                 x: self.width * 0.4,
                 y: y + 16.0,
                 text: String::from("EDIT MODE"),
-                color: YELLOW,
+                color: self.palette.yellow,
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -4061,7 +4083,7 @@ impl App {
             x: self.width - 120.0,
             y: y + 16.0,
             text: size_info,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -4079,7 +4101,7 @@ impl App {
             y: bar_y,
             width: self.width - SIDEBAR_WIDTH,
             height: bar_height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4088,7 +4110,7 @@ impl App {
             x: PADDING,
             y: bar_y + 18.0,
             text: String::from("Find:"),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -4101,7 +4123,7 @@ impl App {
             y: bar_y + 4.0,
             width: 300.0,
             height: 28.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -4113,9 +4135,9 @@ impl App {
                 self.search_query.clone()
             },
             color: if self.search_query.is_empty() {
-                OVERLAY0
+                self.palette.overlay0
             } else {
-                TEXT_COLOR
+                self.palette.text
             },
             font_size: NORMAL_TEXT,
             font_weight: FontWeightHint::Regular,
@@ -4133,7 +4155,7 @@ impl App {
                     self.search_index + 1,
                     self.search_results.len()
                 ),
-                color: TEAL,
+                color: self.palette.teal,
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -4144,7 +4166,7 @@ impl App {
                 x: 370.0,
                 y: bar_y + 18.0,
                 text: String::from("No matches"),
-                color: RED,
+                color: self.palette.red,
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -4159,9 +4181,9 @@ impl App {
             width: 28.0,
             height: 24.0,
             color: if self.search_case_sensitive {
-                BLUE
+                self.palette.blue
             } else {
-                SURFACE1
+                self.palette.surface1
             },
             corner_radii: CornerRadii::all(3.0),
         });
@@ -4170,9 +4192,9 @@ impl App {
             y: bar_y + 18.0,
             text: String::from("Aa"),
             color: if self.search_case_sensitive {
-                CRUST
+                self.palette.crust
             } else {
-                SUBTEXT0
+                self.palette.subtext0
             },
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Bold,
@@ -4185,7 +4207,7 @@ impl App {
             x: self.width - SIDEBAR_WIDTH - 30.0,
             y: bar_y + 18.0,
             text: String::from("Esc"),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -4198,7 +4220,7 @@ impl App {
             y1: bar_y + bar_height,
             x2: self.width - SIDEBAR_WIDTH,
             y2: bar_y + bar_height,
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
     }
@@ -4226,7 +4248,7 @@ impl App {
             y: top + PADDING,
             width: width - PADDING * 2.0,
             height: 60.0,
-            color: RED,
+            color: self.palette.red,
             line_width: 1.0,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -4236,7 +4258,7 @@ impl App {
             x: PADDING + 12.0,
             y: top + PADDING + 20.0,
             text: String::from("Parse Error"),
-            color: RED,
+            color: self.palette.red,
             font_size: NORMAL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -4251,7 +4273,7 @@ impl App {
                 "Line {}, Col {}: {}",
                 error.line, error.column, error.message
             ),
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PADDING * 2.0 - 24.0),
@@ -4319,6 +4341,10 @@ const SAMPLE_JSON: &str = r#"{
 // ============================================================================
 
 impl oswindow::app::App for App {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "JSON Viewer".to_owned()
     }
@@ -5306,15 +5332,17 @@ mod tests {
 
     #[test]
     fn highlight_simple() {
-        let lines = highlight_json_text("{\"key\": 42}\n");
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let lines = highlight_json_text("{\"key\": 42}\n", &pal);
         assert!(!lines.is_empty());
     }
 
     #[test]
     fn highlight_preserves_structure() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let v = parse_json("{\"a\": 1}").unwrap();
         let formatted = format_json(&v, IndentStyle::Spaces2);
-        let lines = highlight_json_text(&formatted);
+        let lines = highlight_json_text(&formatted, &pal);
         // Should have multiple lines (opening brace, key-value, closing brace)
         assert!(lines.len() >= 3);
     }
@@ -5461,11 +5489,12 @@ mod tests {
 
     #[test]
     fn value_type_colors_distinct() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let colors = [
-            ValueType::Null.color(),
-            ValueType::Bool.color(),
-            ValueType::Number.color(),
-            ValueType::Str.color(),
+            ValueType::Null.color(&pal),
+            ValueType::Bool.color(&pal),
+            ValueType::Number.color(&pal),
+            ValueType::Str.color(&pal),
         ];
         // All should be different
         for i in 0..colors.len() {
@@ -5694,6 +5723,7 @@ mod tests {
     /// narrow panel it walked left of its own bar and onto the count cell.
     #[test]
     fn the_percentage_is_drawn_right_of_its_bar() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         for width in [120.0_f32, 240.0, 320.0, 480.0, 499.0, 880.0] {
             let cmds = stats_commands(width);
             let bars: Vec<(f32, f32)> = cmds
@@ -5705,7 +5735,7 @@ mod tests {
                         height,
                         color,
                         ..
-                    } if (height - 16.0).abs() < 0.01 && color == SURFACE0 => Some((x, w)),
+                    } if (height - 16.0).abs() < 0.01 && color == pal.surface0 => Some((x, w)),
                     _ => None,
                 })
                 .collect();
@@ -5779,6 +5809,66 @@ mod tests {
         assert!(
             types.iter().any(|(_, t, _, _)| t == "Objects"),
             "the type distribution was not drawn"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        use oswindow::app::App as _;
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut App) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = App::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

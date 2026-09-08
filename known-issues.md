@@ -36705,7 +36705,16 @@ explaining what used to be there. `apps/explorer/src/thumbs.rs` keeps a
 character count on purpose, and says so: its synthetic text-file minimap has no
 font in the path at all, so a character count is the honest unit there.
 
-## TD-GUI-AND-APPS-HAVE-DRIFTED-FROM-RUSTFMT (lane C, 2026-08-17)
+## TD-GUI-AND-APPS-HAVE-DRIFTED-FROM-RUSTFMT (lane C, 2026-08-17) -- **CLOSED; entry was stale**
+
+**Closed 2026-09-07 (lane C), on measuring it.** `cargo fmt --all --check`
+reports **zero** diffs across the workspace, against the 270 files this entry
+describes. The pre-push `rustfmt` gate is presumably what keeps it that way --
+it refused a push of mine earlier today, which is the gate working.
+
+**Nothing was done to the code for this closure.**
+
+Original entry follows.
 
 **What.** `CLAUDE.md` says "Formatting: rustfmt defaults. No manual formatting
 overrides." The tree does not meet that. `cargo fmt -p osfont -p guitk --check`
@@ -37225,6 +37234,27 @@ grab band — hence no visible symptom today.
 open-coded constants that merely happened not to match. `frame_insets` is at
 `gui/compositor/src/lib.rs`; `nothing_a_window_draws_falls_outside_its_damage_extent`
 pins the containment that keeps it harmless.
+
+### Update 2026-09-07: one of the two options below is eliminated, on evidence
+
+**Stroking `frame_rect` unmodified does not work.** I tried it, and the top
+edge of the outline disappears: the title bar is painted *over* the frame's
+first row, so a border drawn there is covered. Measured rather than reasoned --
+the pixel at the frame's top-left corner reads `FF313244`, which is exactly
+`theme.title_bar_focused`, where the border colour would be `FF585B70`. The
+existing test `the_border_rounds_with_the_frame_it_traces` fails on the
+"a square border did not paint its own corner pixel" assertion.
+
+So the one-row-above draw is not a slip: it is compensating for the title bar
+covering the row the outline would otherwise occupy. That makes the second
+option below wrong and leaves the first as the fix -- `frame_insets.top`
+becomes `TITLE_BAR_HEIGHT + BORDER_WIDTH` and `title_bar_rect` starts
+`BORDER_WIDTH` down, with the drag tests reviewed because the boundary between
+"title bar, drag to move" and "top border, drag to resize" moves with it.
+
+The attempt was reverted rather than shipped: a window that measures correctly
+and has no visible top edge is worse than the one-pixel disagreement, which
+nobody can see.
 
 **Proper fix:** decide which is right and make both agree.
 - If the border above the title bar is wanted (it is what a real window frame
@@ -70772,7 +70802,28 @@ a crate with no dev-dependencies cannot be using the shared fixture.
 
 ---
 
-## TD-C-THREE-OF-THE-CALENDARS-COLOUR-PAIRINGS-ARE-BELOW-THE-CONTRAST-FLOOR (lane C, 2026-08-23)
+## TD-C-THREE-OF-THE-CALENDARS-COLOUR-PAIRINGS-ARE-BELOW-THE-CONTRAST-FLOOR (lane C, 2026-08-23) -- **CLOSED; entry was stale**
+
+**Closed 2026-09-07 (lane C), on verifying it.** All three fixes are in
+`calendar.rs`, and its module doc records them with the measured numbers:
+adjacent-month day numbers moved `surface2` → `subtext0`, the selected day's
+disc `surface1` → `surface0`, and the event-detail body `subtext0` → `text`.
+The role-category diagnosis this entry made -- a *fill* role used as an *ink*
+is guaranteed low-contrast, so 2.46 and 1.91 were not unlucky values -- is
+quoted in the code where the choice is made.
+
+**The test the entry insisted on is there too, and in the form it insisted
+on.** `every_pairing_the_calendar_draws_clears_the_contrast_floor` iterates
+both modes, reads the roles off `Palette::for_mode`, and *computes* each
+ratio -- the numbers in the table above are not copied into any assertion, as
+this entry required. It covers eighteen pairings, not the three that were
+broken.
+
+**Nothing was done to the code for this closure.** Sixth stale entry closed
+today; `todo.txt` carries the note about what that costs and two preventions
+neither of which is mine to make.
+
+Original entry follows.
 
 **In short:** Three places in the calendar draw text too close in brightness to
 what is behind it to be comfortably readable. The worst is the greyed-out day

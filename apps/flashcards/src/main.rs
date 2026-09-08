@@ -19,6 +19,7 @@
 //! - Import/export (simple text format)
 //! - Three sample decks pre-loaded
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::kv;
@@ -32,21 +33,6 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ── Card-list type sizes ────────────────────────────────────────────
 // Named because eliding text and drawing it must agree on the size: a cell
@@ -94,12 +80,12 @@ impl Rating {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Again => RED,
-            Self::Hard => PEACH,
-            Self::Good => BLUE,
-            Self::Easy => GREEN,
+            Self::Again => pal.red,
+            Self::Hard => pal.peach,
+            Self::Good => pal.blue,
+            Self::Easy => pal.green,
         }
     }
 }
@@ -711,6 +697,12 @@ struct FlashcardsApp {
     /// app owns the generator rather than a seed because nothing here ever
     /// replays one.
     rng: SeededRng,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 /// Seed used when the kernel's entropy source cannot be reached.
@@ -729,6 +721,7 @@ impl FlashcardsApp {
         ];
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width: 1000.0,
             height: 700.0,
             view: AppView::DeckList,
@@ -1514,7 +1507,7 @@ impl FlashcardsApp {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1538,7 +1531,7 @@ impl FlashcardsApp {
             y: 0.0,
             width: self.width,
             height: Self::HEADER_H,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1547,7 +1540,7 @@ impl FlashcardsApp {
             y: 14.0,
             text: String::from("Flashcards"),
             font_size: 20.0,
-            color: BLUE,
+            color: self.palette.blue,
             font_weight: FontWeightHint::Bold,
             max_width: Some(160.0),
             overflow: TextOverflow::Ellipsis,
@@ -1566,7 +1559,7 @@ impl FlashcardsApp {
             y: 18.0,
             text: String::from(view_label),
             font_size: 14.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
@@ -1578,7 +1571,7 @@ impl FlashcardsApp {
             y: 18.0,
             text: Self::day_label(self.current_day),
             font_size: 14.0,
-            color: TEAL,
+            color: self.palette.teal,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
@@ -1590,7 +1583,7 @@ impl FlashcardsApp {
             y1: Self::HEADER_H,
             x2: self.width,
             y2: Self::HEADER_H,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -1602,7 +1595,7 @@ impl FlashcardsApp {
             y,
             width: self.width,
             height: Self::STATUS_H,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
@@ -1610,7 +1603,7 @@ impl FlashcardsApp {
             y: y + 7.0,
             text: self.status_msg.clone(),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - 32.0),
             overflow: TextOverflow::Ellipsis,
@@ -1626,7 +1619,7 @@ impl FlashcardsApp {
             y: top,
             text: String::from("Your Decks"),
             font_size: 18.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -1637,7 +1630,7 @@ impl FlashcardsApp {
             y: top + 26.0,
             text: String::from("[N]ew deck  [Enter] open  [X] delete  [Up/Down] navigate"),
             font_size: 11.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w),
             overflow: TextOverflow::Ellipsis,
@@ -1650,7 +1643,11 @@ impl FlashcardsApp {
             let y = list_top + (i as f32) * (row_h + 8.0);
             let is_selected = i == self.selected_deck;
 
-            let bg = if is_selected { SURFACE1 } else { SURFACE0 };
+            let bg = if is_selected {
+                self.palette.surface1
+            } else {
+                self.palette.surface0
+            };
             cmds.push(RenderCommand::FillRect {
                 x: Self::PADDING,
                 y,
@@ -1666,7 +1663,7 @@ impl FlashcardsApp {
                     y,
                     width: content_w,
                     height: row_h,
-                    color: BLUE,
+                    color: self.palette.blue,
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(8.0),
                 });
@@ -1677,7 +1674,7 @@ impl FlashcardsApp {
                 y: y + 12.0,
                 text: deck.name.clone(),
                 font_size: 16.0,
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(content_w - 200.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1693,7 +1690,7 @@ impl FlashcardsApp {
                     deck.average_accuracy()
                 ),
                 font_size: 12.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 48.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1708,7 +1705,7 @@ impl FlashcardsApp {
                     y: y + 14.0,
                     width: 72.0,
                     height: 24.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::all(12.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -1716,7 +1713,7 @@ impl FlashcardsApp {
                     y: y + 18.0,
                     text: format!("{due_count} due"),
                     font_size: 12.0,
-                    color: CRUST,
+                    color: self.palette.crust,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(60.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1729,7 +1726,7 @@ impl FlashcardsApp {
                     y: y + 52.0,
                     text: deck.description.clone(),
                     font_size: 11.0,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_w - 48.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1753,7 +1750,7 @@ impl FlashcardsApp {
             y: top,
             text: deck.name.clone(),
             font_size: 18.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
             overflow: TextOverflow::Ellipsis,
@@ -1765,7 +1762,7 @@ impl FlashcardsApp {
             y: top + 24.0,
             text: String::from("[S]tudy due  [Shift+S] all  [N]ew  [E]dit  [X] delete  [R]andom  [T]ag  [I]nfo  [D]ay+  [Esc] back"),
             font_size: 10.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w),
             overflow: TextOverflow::Ellipsis,
@@ -1778,7 +1775,7 @@ impl FlashcardsApp {
             y: search_y,
             width: content_w * 0.6,
             height: 28.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         let search_display = match (self.search_active, self.search_query.is_empty()) {
@@ -1787,9 +1784,9 @@ impl FlashcardsApp {
             (_, false) => self.search_query.clone(),
         };
         let search_color = if self.search_query.is_empty() {
-            OVERLAY0
+            self.palette.overlay0
         } else {
-            TEXT_COLOR
+            self.palette.text
         };
         cmds.push(RenderCommand::Text {
             x: Self::PADDING + 8.0,
@@ -1819,7 +1816,7 @@ impl FlashcardsApp {
                     y: search_y + 2.0,
                     width: pill_w,
                     height: 24.0,
-                    color: MAUVE,
+                    color: self.palette.mauve,
                     corner_radii: CornerRadii::all(12.0),
                 });
                 Table::fitted(
@@ -1828,7 +1825,7 @@ impl FlashcardsApp {
                     (pill_w - TAG_PILL_PAD * 2.0).max(0.0),
                     search_y + 6.0,
                     tag,
-                    CRUST,
+                    self.palette.crust,
                     CARD_TAG_SIZE,
                     Fit::Start,
                     FontWeightHint::Bold,
@@ -1846,7 +1843,7 @@ impl FlashcardsApp {
                 y: list_top + 20.0,
                 text: String::from("No cards match your search."),
                 font_size: 14.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w),
                 overflow: TextOverflow::Ellipsis,
@@ -1860,7 +1857,7 @@ impl FlashcardsApp {
         table.header_weighted(
             cmds,
             list_top,
-            OVERLAY0,
+            self.palette.overlay0,
             CARD_HEADING_SIZE,
             FontWeightHint::Bold,
         );
@@ -1878,7 +1875,11 @@ impl FlashcardsApp {
             {
                 let y = rows_top + (vis_i as f32) * Self::CARD_ROW_H;
                 let is_selected = list_i == self.selected_card;
-                let bg = if is_selected { SURFACE1 } else { SURFACE0 };
+                let bg = if is_selected {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                };
 
                 cmds.push(RenderCommand::FillRect {
                     x: Self::PADDING,
@@ -1901,7 +1902,7 @@ impl FlashcardsApp {
                     Self::CARD_FRONT,
                     y + 8.0,
                     &card.front,
-                    TEXT_COLOR,
+                    self.palette.text,
                     CARD_FRONT_SIZE,
                     Fit::Start,
                 );
@@ -1913,7 +1914,7 @@ impl FlashcardsApp {
                     Self::CARD_TAGS,
                     y + 8.0,
                     if tags_str.is_empty() { "-" } else { &tags_str },
-                    MAUVE,
+                    self.palette.mauve,
                     CARD_TAG_SIZE,
                     Fit::Start,
                 );
@@ -1927,11 +1928,11 @@ impl FlashcardsApp {
                     format!("{}d", card.review.interval_days)
                 };
                 let status_color = if card.review.total_reviews == 0 {
-                    YELLOW
+                    self.palette.yellow
                 } else if card.review.repetitions >= 3 {
-                    GREEN
+                    self.palette.green
                 } else {
-                    SUBTEXT0
+                    self.palette.subtext0
                 };
                 table.cell_weighted(
                     cmds,
@@ -1956,7 +1957,7 @@ impl FlashcardsApp {
                     back_w,
                     y + 26.0,
                     &card.back,
-                    OVERLAY0,
+                    self.palette.overlay0,
                     CARD_BACK_SIZE,
                     Fit::Start,
                     FontWeightHint::Regular,
@@ -1976,7 +1977,7 @@ impl FlashcardsApp {
                     matching.len()
                 ),
                 font_size: 11.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(150.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1999,7 +2000,7 @@ impl FlashcardsApp {
             y: top,
             text: String::from(title),
             font_size: 18.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -2010,7 +2011,7 @@ impl FlashcardsApp {
             y: top + 26.0,
             text: String::from("[Enter] save  [Esc] cancel"),
             font_size: 11.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -2023,7 +2024,7 @@ impl FlashcardsApp {
             y: field_y,
             text: String::from("Front (Question):"),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -2033,7 +2034,7 @@ impl FlashcardsApp {
             y: field_y + 20.0,
             width: field_w,
             height: 36.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -2046,9 +2047,9 @@ impl FlashcardsApp {
             },
             font_size: 13.0,
             color: if self.editor_front.is_empty() {
-                OVERLAY0
+                self.palette.overlay0
             } else {
-                TEXT_COLOR
+                self.palette.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w - 16.0),
@@ -2062,7 +2063,7 @@ impl FlashcardsApp {
             y: back_y,
             text: String::from("Back (Answer):"),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -2072,7 +2073,7 @@ impl FlashcardsApp {
             y: back_y + 20.0,
             width: field_w,
             height: 36.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -2085,9 +2086,9 @@ impl FlashcardsApp {
             },
             font_size: 13.0,
             color: if self.editor_back.is_empty() {
-                OVERLAY0
+                self.palette.overlay0
             } else {
-                TEXT_COLOR
+                self.palette.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w - 16.0),
@@ -2101,7 +2102,7 @@ impl FlashcardsApp {
             y: tags_y,
             text: String::from("Tags (comma-separated):"),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -2111,7 +2112,7 @@ impl FlashcardsApp {
             y: tags_y + 20.0,
             width: field_w,
             height: 36.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -2124,9 +2125,9 @@ impl FlashcardsApp {
             },
             font_size: 13.0,
             color: if self.editor_tags.is_empty() {
-                OVERLAY0
+                self.palette.overlay0
             } else {
-                TEXT_COLOR
+                self.palette.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w - 16.0),
@@ -2158,7 +2159,7 @@ impl FlashcardsApp {
             y: top,
             width: progress_w,
             height: progress_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         if total > 0.0 {
@@ -2169,7 +2170,7 @@ impl FlashcardsApp {
                     y: top,
                     width: filled,
                     height: progress_h,
-                    color: BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -2186,7 +2187,7 @@ impl FlashcardsApp {
                 session.remaining()
             ),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w),
             overflow: TextOverflow::Ellipsis,
@@ -2216,7 +2217,7 @@ impl FlashcardsApp {
             y: card_y,
             width: content_w - 80.0,
             height: card_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(12.0),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -2224,7 +2225,11 @@ impl FlashcardsApp {
             y: card_y,
             width: content_w - 80.0,
             height: card_h,
-            color: if session.flipped { GREEN } else { BLUE },
+            color: if session.flipped {
+                self.palette.green
+            } else {
+                self.palette.blue
+            },
             line_width: 2.0,
             corner_radii: CornerRadii::all(12.0),
         });
@@ -2235,7 +2240,11 @@ impl FlashcardsApp {
         } else {
             "QUESTION"
         };
-        let side_color = if session.flipped { GREEN } else { BLUE };
+        let side_color = if session.flipped {
+            self.palette.green
+        } else {
+            self.palette.blue
+        };
         cmds.push(RenderCommand::Text {
             x: Self::PADDING + 60.0,
             y: card_y + 16.0,
@@ -2258,7 +2267,7 @@ impl FlashcardsApp {
             y: card_y + 60.0,
             text: display_text,
             font_size: 18.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w - 160.0),
             overflow: TextOverflow::Ellipsis,
@@ -2271,7 +2280,7 @@ impl FlashcardsApp {
                 y: card_y + card_h - 30.0,
                 text: card.tags.join(" | "),
                 font_size: 10.0,
-                color: MAUVE,
+                color: self.palette.mauve,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 160.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2294,7 +2303,7 @@ impl FlashcardsApp {
                     y: btn_y,
                     width: btn_w,
                     height: 40.0,
-                    color: rating.color(),
+                    color: rating.color(&self.palette),
                     corner_radii: CornerRadii::all(8.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -2302,7 +2311,7 @@ impl FlashcardsApp {
                     y: btn_y + 10.0,
                     text: format!("[{}] {}", i.saturating_add(1), rating.label()),
                     font_size: 14.0,
-                    color: CRUST,
+                    color: self.palette.crust,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(btn_w - 20.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2317,7 +2326,7 @@ impl FlashcardsApp {
                 y: btn_y,
                 width: prompt_w,
                 height: 40.0,
-                color: BLUE,
+                color: self.palette.blue,
                 corner_radii: CornerRadii::all(8.0),
             });
             cmds.push(RenderCommand::Text {
@@ -2325,7 +2334,7 @@ impl FlashcardsApp {
                 y: btn_y + 10.0,
                 text: String::from("[Space] Flip Card"),
                 font_size: 14.0,
-                color: CRUST,
+                color: self.palette.crust,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(prompt_w - 40.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2347,7 +2356,7 @@ impl FlashcardsApp {
             y: top,
             width: content_w - 120.0,
             height: 280.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(12.0),
         });
 
@@ -2356,7 +2365,7 @@ impl FlashcardsApp {
             y: top + 20.0,
             text: String::from("Session Complete!"),
             font_size: 20.0,
-            color: GREEN,
+            color: self.palette.green,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -2367,7 +2376,7 @@ impl FlashcardsApp {
             y: top + 60.0,
             text: format!("Cards reviewed: {}", session.reviewed),
             font_size: 14.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -2378,7 +2387,7 @@ impl FlashcardsApp {
             y: top + 84.0,
             text: format!("Accuracy: {}%", session.session_accuracy()),
             font_size: 14.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -2386,7 +2395,12 @@ impl FlashcardsApp {
 
         // Rating breakdown
         let labels = ["Again", "Hard", "Good", "Easy"];
-        let colors = [RED, PEACH, BLUE, GREEN];
+        let colors = [
+            self.palette.red,
+            self.palette.peach,
+            self.palette.blue,
+            self.palette.green,
+        ];
         for (i, (label, color)) in labels.iter().zip(colors.iter()).enumerate() {
             let y = top + 120.0 + (i as f32) * 24.0;
             cmds.push(RenderCommand::Text {
@@ -2409,7 +2423,7 @@ impl FlashcardsApp {
             y: top + 240.0,
             text: String::from("[Esc] Back to deck"),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -2430,7 +2444,7 @@ impl FlashcardsApp {
             y: top,
             text: format!("Statistics: {}", deck.name),
             font_size: 18.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
             overflow: TextOverflow::Ellipsis,
@@ -2441,7 +2455,7 @@ impl FlashcardsApp {
             y: top + 26.0,
             text: String::from("[Esc] back"),
             font_size: 11.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
@@ -2452,12 +2466,20 @@ impl FlashcardsApp {
 
         // Stat boxes
         let stats = [
-            ("Total Cards", format!("{}", deck.cards.len()), BLUE),
-            ("Total Reviews", format!("{}", deck.total_reviews()), TEAL),
+            (
+                "Total Cards",
+                format!("{}", deck.cards.len()),
+                self.palette.blue,
+            ),
+            (
+                "Total Reviews",
+                format!("{}", deck.total_reviews()),
+                self.palette.teal,
+            ),
             (
                 "Avg Accuracy",
                 format!("{}%", deck.average_accuracy()),
-                GREEN,
+                self.palette.green,
             ),
         ];
 
@@ -2468,7 +2490,7 @@ impl FlashcardsApp {
                 y: stats_y,
                 width: col_w,
                 height: 70.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(8.0),
             });
             cmds.push(RenderCommand::Text {
@@ -2476,7 +2498,7 @@ impl FlashcardsApp {
                 y: stats_y + 10.0,
                 text: String::from(*label),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_w - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2499,9 +2521,13 @@ impl FlashcardsApp {
             (
                 "Due Today",
                 format!("{}", deck.due_cards(self.current_day).len()),
-                YELLOW,
+                self.palette.yellow,
             ),
-            ("Mastered", format!("{}", deck.mastered_count()), GREEN),
+            (
+                "Mastered",
+                format!("{}", deck.mastered_count()),
+                self.palette.green,
+            ),
             (
                 "New",
                 format!(
@@ -2511,7 +2537,7 @@ impl FlashcardsApp {
                         .filter(|c| c.review.total_reviews == 0)
                         .count()
                 ),
-                PEACH,
+                self.palette.peach,
             ),
         ];
 
@@ -2522,7 +2548,7 @@ impl FlashcardsApp {
                 y: row2_y,
                 width: col_w,
                 height: 70.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(8.0),
             });
             cmds.push(RenderCommand::Text {
@@ -2530,7 +2556,7 @@ impl FlashcardsApp {
                 y: row2_y + 10.0,
                 text: String::from(*label),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_w - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2554,7 +2580,7 @@ impl FlashcardsApp {
             y: breakdown_y,
             text: String::from("Card Breakdown"),
             font_size: 14.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -2565,7 +2591,7 @@ impl FlashcardsApp {
             y1: breakdown_y + 20.0,
             x2: self.width - Self::PADDING,
             y2: breakdown_y + 20.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
 
@@ -2575,10 +2601,10 @@ impl FlashcardsApp {
         let bar_max_w = content_w - 200.0;
 
         let ease_ranges = [
-            ("Ease < 1.8 (difficult)", RED),
-            ("Ease 1.8-2.2 (moderate)", YELLOW),
-            ("Ease 2.2-2.5 (good)", BLUE),
-            ("Ease > 2.5 (easy)", GREEN),
+            ("Ease < 1.8 (difficult)", self.palette.red),
+            ("Ease 1.8-2.2 (moderate)", self.palette.yellow),
+            ("Ease 2.2-2.5 (good)", self.palette.blue),
+            ("Ease > 2.5 (easy)", self.palette.green),
         ];
 
         let counts: [usize; 4] = [
@@ -2608,7 +2634,7 @@ impl FlashcardsApp {
                 y: y + 3.0,
                 text: String::from(*label),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(180.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2631,7 +2657,7 @@ impl FlashcardsApp {
                 y: y + 3.0,
                 text: format!("{count}"),
                 font_size: 11.0,
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(40.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2665,6 +2691,10 @@ fn today() -> u32 {
 }
 
 impl App for FlashcardsApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Flashcards".to_owned()
     }
@@ -4317,6 +4347,7 @@ mod tests {
 
     #[test]
     fn the_tag_filter_pill_stays_inside_the_panel() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         // The pill was a flat 100px at a proportional anchor, so it ran off
         // the right edge whenever the content was narrower than 270px. A
         // `max_width` on the label inside it is not a bound on the pill.
@@ -4329,7 +4360,7 @@ mod tests {
                 else {
                     continue;
                 };
-                if color != MAUVE {
+                if color != pal.mauve {
                     continue;
                 }
                 assert!(w >= 0.0, "at width {width} the pill is {w} wide");
@@ -4604,5 +4635,64 @@ mod tests {
         app.search_query = String::from("ab");
         app.handle_search_backspace();
         assert_eq!(app.search_query, "ab");
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut FlashcardsApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = FlashcardsApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

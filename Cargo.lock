@@ -2051,6 +2051,7 @@ dependencies = [
 name = "calendar"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -5295,6 +5296,7 @@ dependencies = [
 name = "finance"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -5419,6 +5421,7 @@ dependencies = [
 name = "flashcards"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "tzrules",
@@ -14421,6 +14424,7 @@ dependencies = [
 name = "radio"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

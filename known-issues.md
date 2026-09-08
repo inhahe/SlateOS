@@ -124416,12 +124416,19 @@ which makes step 1 below larger than one dependency line.
   new defaulted `App::theme_changed` — before the first frame, and again on
   every change. `design-decisions.md` §822 records why it is a trait method
   and not an `Event`.
-- **Step 2: 19 done.** `calculator`, `diskcleanup`, `charmap`, `clipmanager`,
+- **Step 2: 23 done.** `calculator`, `diskcleanup`, `charmap`, `clipmanager`,
   `fileassoc`, `startupmanager`, `magnifier`, `systemrestore`, `videoplayer`,
   `qrcode`, `notes`, `rssreader`, `spreadsheet`, `paint`, `defrag`, `netscan`,
-  `photomanager`, `renamer` and `mediaconvert`. Each has a test on the
-  rectangles it emits, and each was mutation-checked by making
-  `theme_changed` ignore its argument.
+  `photomanager`, `renamer`, `mediaconvert`, `radio`, `flashcards`, `calendar`
+  and `finance`. Each has a test on the rectangles it emits, and each was
+  mutation-checked by making `theme_changed` ignore its argument.
+
+**A nested case the blanket call-site rewrite gets wrong.** `.color()` becomes
+`.color(&self.palette)` everywhere, which is right in the window's methods and
+wrong *inside another palette-taking method*: `CalendarEvent::effective_color`
+calls `self.category.color(…)`, where `self` is the event, so the argument has
+to be its own `pal`. The compiler catches it (E0609 on the app's own type), but
+expect one per application that has a colour method calling another.
 
 **The single-helper case is now scripted too.** Every application that needs
 one function threaded needs the *same* one: a `color()` method on a domain

@@ -13,6 +13,7 @@
 //! - Now playing visualization (simulated spectrum)
 //! - Station search
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::listview::ListViewport;
@@ -87,29 +88,10 @@ const STATION_ROW_HEIGHT: f32 = 50.0;
 const STATION_ROWS_TOP: f32 = 30.0;
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
+
 // Part of the complete Catppuccin Mocha palette, kept whole even though no
 // widget currently paints with this one: a named palette with a hole in it is
 // not the palette it is named after.
-#[allow(dead_code, reason = "the palette is kept complete")]
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const SKY: Color = Color::from_hex(0x89DCEB);
 
 // ── Genre ──────────────────────────────────────────────────────────────────
 
@@ -171,21 +153,21 @@ impl Genre {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Rock => RED,
-            Self::Pop => MAUVE,
-            Self::Jazz => YELLOW,
-            Self::Classical => LAVENDER,
-            Self::Electronic => BLUE,
-            Self::HipHop => PEACH,
-            Self::Country => GREEN,
-            Self::RnB => TEAL,
-            Self::Metal => SUBTEXT0,
-            Self::Blues => SKY,
+            Self::Rock => pal.red,
+            Self::Pop => pal.mauve,
+            Self::Jazz => pal.yellow,
+            Self::Classical => pal.lavender,
+            Self::Electronic => pal.blue,
+            Self::HipHop => pal.peach,
+            Self::Country => pal.green,
+            Self::RnB => pal.teal,
+            Self::Metal => pal.subtext0,
+            Self::Blues => pal.sky,
             Self::Ambient => Color::from_hex(0x74C7EC),
-            Self::News => SUBTEXT1,
-            Self::Talk => OVERLAY0,
+            Self::News => pal.subtext1,
+            Self::Talk => pal.overlay0,
             Self::Lofi => Color::from_hex(0xF2CDCD),
             Self::World => Color::from_hex(0xF5E0DC),
         }
@@ -583,6 +565,12 @@ struct RadioApp {
     /// it would lose most of every second and every clock in the window would
     /// crawl.
     tick_carry_ms: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 /// Seed used when the kernel's entropy source cannot be reached.
@@ -603,6 +591,7 @@ impl RadioApp {
             *bar = ((i as u8).wrapping_mul(7).wrapping_add(30)) % 100;
         }
         let mut app = Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             stations,
             favorites: Vec::new(),
             recent: Vec::new(),
@@ -1273,7 +1262,7 @@ impl RadioApp {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1315,7 +1304,7 @@ impl RadioApp {
             y,
             width: w,
             height: h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1325,7 +1314,7 @@ impl RadioApp {
             y: y + 10.0,
             text: "Internet Radio".into(),
             font_size: 14.0,
-            color: BLUE,
+            color: self.palette.blue,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -1346,7 +1335,7 @@ impl RadioApp {
                     y: ty,
                     width: w - 8.0,
                     height: 20.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -1355,7 +1344,11 @@ impl RadioApp {
                 y: ty + 4.0,
                 text: label.to_string(),
                 font_size: 10.0,
-                color: if active { TEXT_COLOR } else { SUBTEXT0 },
+                color: if active {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -1376,7 +1369,7 @@ impl RadioApp {
                 y: ty,
                 text: "Genres [Left/Right]".into(),
                 font_size: 10.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(w - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1391,7 +1384,7 @@ impl RadioApp {
                     y: ty,
                     width: w - 12.0,
                     height: 18.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(3.0),
                 });
             }
@@ -1400,7 +1393,11 @@ impl RadioApp {
                 y: ty + 3.0,
                 text: "All Genres".into(),
                 font_size: 10.0,
-                color: if all_active { TEXT_COLOR } else { SUBTEXT0 },
+                color: if all_active {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 28.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1438,7 +1435,7 @@ impl RadioApp {
                         y: gy,
                         width: w - 12.0,
                         height: 18.0,
-                        color: SURFACE0,
+                        color: self.palette.surface0,
                         corner_radii: CornerRadii::all(3.0),
                     });
                 }
@@ -1448,7 +1445,7 @@ impl RadioApp {
                     y: gy + 5.0,
                     width: 8.0,
                     height: 8.0,
-                    color: genre.color(),
+                    color: genre.color(&self.palette),
                     corner_radii: CornerRadii::all(4.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -1456,7 +1453,11 @@ impl RadioApp {
                     y: gy + 3.0,
                     text: genre.label().to_string(),
                     font_size: 10.0,
-                    color: if active { TEXT_COLOR } else { SUBTEXT0 },
+                    color: if active {
+                        self.palette.text
+                    } else {
+                        self.palette.subtext0
+                    },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 36.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1470,7 +1471,7 @@ impl RadioApp {
                     y: ty + (window.count as f32) * GENRE_ROW_HEIGHT + 3.0,
                     text: format!("{hidden} more"),
                     font_size: 9.0,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 36.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1484,7 +1485,7 @@ impl RadioApp {
             y: y + h - SEARCH_HINT_HEIGHT,
             text: "[/] Search".into(),
             font_size: 9.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -1496,7 +1497,7 @@ impl RadioApp {
             y,
             width: 1.0,
             height: h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
     }
@@ -1518,7 +1519,7 @@ impl RadioApp {
             y: y + 8.0,
             text: title,
             font_size: 13.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -1541,7 +1542,7 @@ impl RadioApp {
                 y: start_y + 10.0,
                 text: "No stations".into(),
                 font_size: 12.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 40.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1574,7 +1575,7 @@ impl RadioApp {
                         y: ry,
                         width: w - 8.0,
                         height: row_h - 4.0,
-                        color: SURFACE0,
+                        color: self.palette.surface0,
                         corner_radii: CornerRadii::all(6.0),
                     });
                 }
@@ -1586,7 +1587,7 @@ impl RadioApp {
                         y: ry + 8.0,
                         width: 4.0,
                         height: row_h - 20.0,
-                        color: GREEN,
+                        color: self.palette.green,
                         corner_radii: CornerRadii::all(2.0),
                     });
                 }
@@ -1598,11 +1599,11 @@ impl RadioApp {
                     text: station.name.clone(),
                     font_size: 13.0,
                     color: if is_playing {
-                        GREEN
+                        self.palette.green
                     } else if is_sel {
-                        TEXT_COLOR
+                        self.palette.text
                     } else {
-                        SUBTEXT1
+                        self.palette.subtext1
                     },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(w - 100.0),
@@ -1615,7 +1616,7 @@ impl RadioApp {
                     y: ry + 4.0,
                     width: 60.0,
                     height: 16.0,
-                    color: station.genre.color(),
+                    color: station.genre.color(&self.palette),
                     corner_radii: CornerRadii::all(8.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -1623,7 +1624,7 @@ impl RadioApp {
                     y: ry + 6.0,
                     text: station.genre.label().to_string(),
                     font_size: 8.0,
-                    color: CRUST,
+                    color: self.palette.crust,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(52.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1647,7 +1648,7 @@ impl RadioApp {
                         fav_mark
                     ),
                     font_size: 9.0,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 40.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1659,7 +1660,7 @@ impl RadioApp {
                     y: ry + 32.0,
                     text: station.description.clone(),
                     font_size: 9.0,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 40.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1678,7 +1679,7 @@ impl RadioApp {
                 y: start_y + (shown as f32) * row_h,
                 text: format!("{hidden} more"),
                 font_size: 9.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 40.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1692,7 +1693,7 @@ impl RadioApp {
             y,
             width: w,
             height: h,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1702,7 +1703,7 @@ impl RadioApp {
             y,
             width: w,
             height: 1.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1715,9 +1716,9 @@ impl RadioApp {
                     text: station.name.clone(),
                     font_size: 14.0,
                     color: if self.play_state == PlayState::Playing {
-                        GREEN
+                        self.palette.green
                     } else {
-                        TEXT_COLOR
+                        self.palette.text
                     },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(250.0),
@@ -1742,7 +1743,7 @@ impl RadioApp {
                         station.url
                     ),
                     font_size: 10.0,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(250.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1760,7 +1761,7 @@ impl RadioApp {
                             y: y + h - 10.0 - bar_h,
                             width: bar_w - 1.0,
                             height: bar_h,
-                            color: BLUE,
+                            color: self.palette.blue,
                             corner_radii: CornerRadii::ZERO,
                         });
                     }
@@ -1772,7 +1773,7 @@ impl RadioApp {
                 y: y + 20.0,
                 text: "No station playing — Select and press Enter".into(),
                 font_size: 12.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(400.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1791,7 +1792,11 @@ impl RadioApp {
             y: y + 8.0,
             text: vol_label,
             font_size: 10.0,
-            color: if self.muted { RED } else { SUBTEXT1 },
+            color: if self.muted {
+                self.palette.red
+            } else {
+                self.palette.subtext1
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
             overflow: TextOverflow::Ellipsis,
@@ -1803,7 +1808,7 @@ impl RadioApp {
             y: y + 22.0,
             width: 80.0,
             height: 4.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(2.0),
         });
         let vol_fill = if self.muted {
@@ -1816,7 +1821,7 @@ impl RadioApp {
             y: y + 22.0,
             width: vol_fill,
             height: 4.0,
-            color: GREEN,
+            color: self.palette.green,
             corner_radii: CornerRadii::all(2.0),
         });
 
@@ -1826,7 +1831,7 @@ impl RadioApp {
             y: y + 34.0,
             text: "[Space] Play/Stop [+/-] Vol [M] Mute".into(),
             font_size: 8.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(170.0),
             overflow: TextOverflow::Ellipsis,
@@ -1839,7 +1844,7 @@ impl RadioApp {
                 y: y + 48.0,
                 text: format!("Sleep: {}", Self::format_time(remaining)),
                 font_size: 9.0,
-                color: YELLOW,
+                color: self.palette.yellow,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1853,7 +1858,7 @@ impl RadioApp {
                 y: y + 8.0,
                 width: 8.0,
                 height: 8.0,
-                color: RED,
+                color: self.palette.red,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1861,7 +1866,7 @@ impl RadioApp {
                 y: y + 8.0,
                 text: format!("REC {}", Self::format_time(self.record_duration_secs)),
                 font_size: 9.0,
-                color: RED,
+                color: self.palette.red,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1874,7 +1879,7 @@ impl RadioApp {
             y: y + h - 16.0,
             text: self.status_message.clone(),
             font_size: 9.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -1892,7 +1897,7 @@ impl RadioApp {
             y: sy,
             width: sw,
             height: sh,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -1907,9 +1912,9 @@ impl RadioApp {
             text: display,
             font_size: 14.0,
             color: if self.search_query.is_empty() {
-                OVERLAY0
+                self.palette.overlay0
             } else {
-                TEXT_COLOR
+                self.palette.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(sw - 24.0),
@@ -1922,7 +1927,7 @@ impl RadioApp {
                 y: sy + 28.0,
                 text: format!("{} results — Enter to view", self.search_results.len()),
                 font_size: 10.0,
-                color: GREEN,
+                color: self.palette.green,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sw - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1932,6 +1937,10 @@ impl RadioApp {
 }
 
 impl App for RadioApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // What is playing, because that is what a radio is left open for.
         match (self.play_state, self.current_station) {
@@ -3329,6 +3338,65 @@ mod tests {
         assert_eq!(
             app.search_query, "",
             "Ctrl+A is a command nobody has bound, not the letter A"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut RadioApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = RadioApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

@@ -124425,8 +124425,30 @@ which makes step 1 below larger than one dependency line.
   `stickynotes`, `taskscheduler`, `contacts`, `habits`, `fontmanager` and
   `automator`, `sysmonitor`, `undelete`, `ircclient`, `dictionary`,
   `reminders`, `weather`, `alarmclock`, `diagram`, `partmanager` and
-  `credmanager` and `vpnmanager`. Each has a test on the rectangles it emits,
-  and each was mutation-checked by making `theme_changed` ignore its argument.
+  `credmanager`, `vpnmanager` and `dbviewer`. Each has a test on the rectangles
+  it emits, and each was mutation-checked by making `theme_changed` ignore its
+  argument.
+
+**The worst bug this conversion has produced: substitution inside string
+literals.** `dbviewer` names a colour constant `TEXT`. The word-boundary
+substitution therefore rewrote the *SQL type name* `"TEXT"` to
+`"self.palette.text"` in seven places, including inside longer statements like
+`"CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"`. The parser
+stopped recognising `TEXT` columns. It compiles, clippy is clean, and only one
+test — `test_parse_create_table`, which happens to cover `CREATE TABLE` —
+failed.
+
+Two things follow, both done:
+
+- **The converter now skips string literals** when substituting.
+- **The whole tree was audited** for a palette path inside any string literal,
+  not just the exact literal the first grep matched: `"…name TEXT NOT NULL)"`
+  contains the substring but is not equal to it, and a naive search missed two
+  of the seven. `dbviewer` was the only affected application, and it is clean.
+
+This is the argument for converting one application at a time and running its
+own suite: a batch pass would have buried a logic change in a diff of colour
+substitutions.
 
 **A `const` table of colours cannot hold a palette, and the fix is a role
 selector.** `vpnmanager`'s `TOOLBAR_BUTTONS` was

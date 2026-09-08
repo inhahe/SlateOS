@@ -124423,8 +124423,23 @@ which makes step 1 below larger than one dependency line.
   `finance`, `slides`, `worldclock`, `camera`, `compass`, `diskanalyzer`,
   `jsonviewer`, `logviewer`, `passwordgen`, `podcast`, `regextester`,
   `stickynotes`, `taskscheduler`, `contacts`, `habits`, `fontmanager` and
-  `automator`. Each has a test on the rectangles it emits, and each was
-  mutation-checked by making `theme_changed` ignore its argument.
+  `automator`, `sysmonitor`, `undelete` and `ircclient`. Each has a test on the
+  rectangles it emits, and each was mutation-checked by making `theme_changed`
+  ignore its argument.
+
+**Several types per application share one colour method.** `undelete` has
+three (`FileSignatureKind`, `FileCategory`, `RecoveryConfidence`),
+`sysmonitor` two, `ircclient` two. The threader now handles every occurrence
+rather than the first. Its first version had a subtle bug worth avoiding: it
+located each rewritten signature with `s.index(new)`, and since the types
+share an identical signature string, `index` returned the *first* every time,
+so the body rewrite landed on the same method repeatedly while the others were
+left half-converted. Use the match position.
+
+**Wrapper methods propagate the requirement.** `sysmonitor`'s `cpu_color`,
+`mem_color` and `disk_color` do nothing but call `color_for_value`, so giving
+that one a palette gives all three one. Expect a small cascade whenever the
+colour method has callers of its own inside the same type.
 
 **A fourth content case, and the tell held again.** `contacts` sets a new
 group's colour in `Group::new` — the swatch that group is shown with, chosen

@@ -34,6 +34,7 @@
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::fn_params_excessive_bools)]
 
+use appearance::Palette;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::history::SampleHistory;
@@ -50,24 +51,6 @@ use std::time::Duration;
 // Catppuccin Mocha palette
 // ============================================================================
 
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const SKY: Color = Color::from_hex(0x89DCEB);
 const PINK: Color = Color::from_hex(0xF5C2E7);
 
 // ============================================================================
@@ -195,13 +178,13 @@ impl ProcessStatus {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Running => GREEN,
-            Self::Sleeping => BLUE,
-            Self::Stopped => YELLOW,
-            Self::Zombie => RED,
-            Self::Idle => OVERLAY0,
+            Self::Running => pal.green,
+            Self::Sleeping => pal.blue,
+            Self::Stopped => pal.yellow,
+            Self::Zombie => pal.red,
+            Self::Idle => pal.overlay0,
         }
     }
 }
@@ -390,29 +373,29 @@ impl Default for AlertThresholds {
 
 impl AlertThresholds {
     /// Get the color for a usage value based on thresholds.
-    pub fn color_for_value(&self, value: f32, warn: f32, crit: f32) -> Color {
+    pub fn color_for_value(&self, pal: &Palette, value: f32, warn: f32, crit: f32) -> Color {
         if value >= crit {
-            RED
+            pal.red
         } else if value >= warn {
-            YELLOW
+            pal.yellow
         } else {
-            GREEN
+            pal.green
         }
     }
 
     /// Get CPU color for a given usage percentage.
-    pub fn cpu_color(&self, percent: f32) -> Color {
-        self.color_for_value(percent, self.cpu_warn_percent, self.cpu_crit_percent)
+    pub fn cpu_color(&self, percent: f32, pal: &Palette) -> Color {
+        self.color_for_value(pal, percent, self.cpu_warn_percent, self.cpu_crit_percent)
     }
 
     /// Get memory color for a given usage percentage.
-    pub fn mem_color(&self, percent: f32) -> Color {
-        self.color_for_value(percent, self.mem_warn_percent, self.mem_crit_percent)
+    pub fn mem_color(&self, percent: f32, pal: &Palette) -> Color {
+        self.color_for_value(pal, percent, self.mem_warn_percent, self.mem_crit_percent)
     }
 
     /// Get disk color for a given usage percentage.
-    pub fn disk_color(&self, percent: f32) -> Color {
-        self.color_for_value(percent, self.disk_warn_percent, self.disk_crit_percent)
+    pub fn disk_color(&self, percent: f32, pal: &Palette) -> Color {
+        self.color_for_value(pal, percent, self.disk_warn_percent, self.disk_crit_percent)
     }
 }
 
@@ -523,10 +506,10 @@ pub enum AlertSeverity {
 }
 
 impl AlertSeverity {
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Warning => YELLOW,
-            Self::Critical => RED,
+            Self::Warning => pal.yellow,
+            Self::Critical => pal.red,
         }
     }
 }
@@ -582,6 +565,12 @@ pub struct SysMonitorState {
 
     // -- Status --
     pub status_message: String,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl SysMonitorState {
@@ -609,6 +598,7 @@ impl SysMonitorState {
         };
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             window_width: 1024,
             window_height: 720,
             active_tab: Tab::Overview,
@@ -1336,7 +1326,7 @@ impl SysMonitorState {
         let h = self.window_height as f32;
 
         // Background
-        tree.fill_rect(0.0, 0.0, w, h, BASE);
+        tree.fill_rect(0.0, 0.0, w, h, self.palette.base);
 
         // Tab bar
         self.render_tab_bar(&mut tree);
@@ -1364,7 +1354,7 @@ impl SysMonitorState {
 
     fn render_tab_bar(&self, tree: &mut RenderTree) {
         let w = self.window_width as f32;
-        tree.fill_rect(0.0, 0.0, w, TAB_BAR_HEIGHT, MANTLE);
+        tree.fill_rect(0.0, 0.0, w, TAB_BAR_HEIGHT, self.palette.mantle);
 
         let mut tx = 0.0f32;
         for tab in &Tab::ALL {
@@ -1378,7 +1368,7 @@ impl SysMonitorState {
                     y: 0.0,
                     width: tab_w,
                     height: TAB_BAR_HEIGHT,
-                    color: BASE,
+                    color: self.palette.base,
                     corner_radii: CornerRadii {
                         top_left: 4.0,
                         top_right: 4.0,
@@ -1387,10 +1377,14 @@ impl SysMonitorState {
                     },
                 });
                 // Accent underline
-                tree.fill_rect(tx, TAB_BAR_HEIGHT - 2.0, tab_w, 2.0, BLUE);
+                tree.fill_rect(tx, TAB_BAR_HEIGHT - 2.0, tab_w, 2.0, self.palette.blue);
             }
 
-            let text_color = if is_active { TEXT } else { SUBTEXT0 };
+            let text_color = if is_active {
+                self.palette.text
+            } else {
+                self.palette.subtext0
+            };
             let font_weight = if is_active {
                 FontWeightHint::Bold
             } else {
@@ -1415,7 +1409,7 @@ impl SysMonitorState {
             x: w - 100.0,
             y: 9.0,
             text: ri_label,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1429,14 +1423,14 @@ impl SysMonitorState {
         let w = self.window_width as f32;
         let y = self.window_height as f32 - STATUS_BAR_HEIGHT;
 
-        tree.fill_rect(0.0, y, w, STATUS_BAR_HEIGHT, CRUST);
+        tree.fill_rect(0.0, y, w, STATUS_BAR_HEIGHT, self.palette.crust);
 
         // Status message
         tree.push(RenderCommand::Text {
             x: 8.0,
             y: y + 5.0,
             text: self.status_message.clone(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w * 0.6),
@@ -1451,14 +1445,14 @@ impl SysMonitorState {
                 y: y + 4.0,
                 width: 8.0,
                 height: 8.0,
-                color: alert.severity.color(),
+                color: alert.severity.color(&self.palette),
                 corner_radii: CornerRadii::all(4.0),
             });
             tree.push(RenderCommand::Text {
                 x: alert_x + 8.0,
                 y: y + 5.0,
                 text: alert.message.clone(),
-                color: alert.severity.color(),
+                color: alert.severity.color(&self.palette),
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(280.0),
@@ -1482,7 +1476,7 @@ impl SysMonitorState {
             CONTENT_PAD + 12.0,
             content_y + 8.0,
             &self.system_info.hostname,
-            TEXT,
+            self.palette.text,
             14.0,
         );
         let info_line = format!(
@@ -1496,7 +1490,7 @@ impl SysMonitorState {
             x: CONTENT_PAD + 12.0,
             y: content_y + 28.0,
             text: info_line,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w - 24.0),
@@ -1512,11 +1506,11 @@ impl SysMonitorState {
             };
             let batt_label = format!("{batt_icon}: {pct}%");
             let batt_color = if pct < 20 {
-                RED
+                self.palette.red
             } else if pct < 50 {
-                YELLOW
+                self.palette.yellow
             } else {
-                GREEN
+                self.palette.green
             };
             tree.push(RenderCommand::Text {
                 x: CONTENT_PAD + 12.0,
@@ -1538,9 +1532,16 @@ impl SysMonitorState {
 
         // CPU gauge card
         self.render_card(tree, CONTENT_PAD, cur_y, half_w, gauge_h);
-        render_bold_text(tree, CONTENT_PAD + 12.0, cur_y + 8.0, "CPU", TEXT, 13.0);
+        render_bold_text(
+            tree,
+            CONTENT_PAD + 12.0,
+            cur_y + 8.0,
+            "CPU",
+            self.palette.text,
+            13.0,
+        );
         let cpu_pct = self.system_info.cpu_overall;
-        let cpu_color = self.thresholds.cpu_color(cpu_pct);
+        let cpu_color = self.thresholds.cpu_color(cpu_pct, &self.palette);
         let cpu_label = format!("{cpu_pct:.1}%");
         tree.push(RenderCommand::Text {
             x: CONTENT_PAD + 50.0,
@@ -1580,7 +1581,7 @@ impl SysMonitorState {
             x: cpu_graph_x,
             y: cur_y + gauge_h - 14.0,
             text: load_label,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1590,14 +1591,21 @@ impl SysMonitorState {
         // Memory gauge card
         let mem_card_x = CONTENT_PAD + half_w + CARD_GAP;
         self.render_card(tree, mem_card_x, cur_y, half_w, gauge_h);
-        render_bold_text(tree, mem_card_x + 12.0, cur_y + 8.0, "Memory", TEXT, 13.0);
+        render_bold_text(
+            tree,
+            mem_card_x + 12.0,
+            cur_y + 8.0,
+            "Memory",
+            self.palette.text,
+            13.0,
+        );
 
         let mem_pct = if self.system_info.total_memory > 0 {
             self.system_info.used_memory as f32 / self.system_info.total_memory as f32 * 100.0
         } else {
             0.0
         };
-        let mem_color = self.thresholds.mem_color(mem_pct);
+        let mem_color = self.thresholds.mem_color(mem_pct, &self.palette);
         let mem_label = format!(
             "{} / {}  ({mem_pct:.1}%)",
             format_bytes(self.system_info.used_memory),
@@ -1640,7 +1648,7 @@ impl SysMonitorState {
             x: mem_graph_x,
             y: cur_y + gauge_h - 14.0,
             text: swap_label,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1654,11 +1662,18 @@ impl SysMonitorState {
 
         // Disk summary card
         self.render_card(tree, CONTENT_PAD, cur_y, half_w, disk_card_h);
-        render_bold_text(tree, CONTENT_PAD + 12.0, cur_y + 8.0, "Disks", TEXT, 13.0);
+        render_bold_text(
+            tree,
+            CONTENT_PAD + 12.0,
+            cur_y + 8.0,
+            "Disks",
+            self.palette.text,
+            13.0,
+        );
         let mut disk_y = cur_y + 26.0;
         for disk in self.disks.iter().take(3) {
             let usage_pct = disk.usage_fraction() * 100.0;
-            let disk_color = self.thresholds.disk_color(usage_pct);
+            let disk_color = self.thresholds.disk_color(usage_pct, &self.palette);
             let label = format!(
                 "{}: {usage_pct:.0}% ({} / {})",
                 disk.name,
@@ -1681,7 +1696,14 @@ impl SysMonitorState {
         // Network summary card
         let net_card_x = CONTENT_PAD + half_w + CARD_GAP;
         self.render_card(tree, net_card_x, cur_y, half_w, disk_card_h);
-        render_bold_text(tree, net_card_x + 12.0, cur_y + 8.0, "Network", TEXT, 13.0);
+        render_bold_text(
+            tree,
+            net_card_x + 12.0,
+            cur_y + 8.0,
+            "Network",
+            self.palette.text,
+            13.0,
+        );
         let mut net_y = cur_y + 26.0;
         for iface in self.interfaces.iter().take(3) {
             let label = format!(
@@ -1695,7 +1717,7 @@ impl SysMonitorState {
                 x: net_card_x + 16.0,
                 y: net_y,
                 text: label,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(half_w - 32.0),
@@ -1721,7 +1743,14 @@ impl SysMonitorState {
             let alert_h =
                 ALERT_ROW_HEIGHT.mul_add(rows as f32, ALERT_PANEL_HEADER + ALERT_PANEL_FOOTER);
             self.render_card(tree, CONTENT_PAD, cur_y, content_w, alert_h);
-            render_bold_text(tree, CONTENT_PAD + 12.0, cur_y + 8.0, "Alerts", RED, 13.0);
+            render_bold_text(
+                tree,
+                CONTENT_PAD + 12.0,
+                cur_y + 8.0,
+                "Alerts",
+                self.palette.red,
+                13.0,
+            );
             let mut alert_y = cur_y + ALERT_PANEL_HEADER;
             for alert in self.active_alerts.iter().take(shown) {
                 tree.push(RenderCommand::FillRect {
@@ -1729,14 +1758,14 @@ impl SysMonitorState {
                     y: alert_y + 3.0,
                     width: 6.0,
                     height: 6.0,
-                    color: alert.severity.color(),
+                    color: alert.severity.color(&self.palette),
                     corner_radii: CornerRadii::all(3.0),
                 });
                 tree.push(RenderCommand::Text {
                     x: CONTENT_PAD + 28.0,
                     y: alert_y,
                     text: alert.message.clone(),
-                    color: alert.severity.color(),
+                    color: alert.severity.color(&self.palette),
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_w - 48.0),
@@ -1750,7 +1779,7 @@ impl SysMonitorState {
                     x: CONTENT_PAD + 28.0,
                     y: alert_y,
                     text: format!("+{hidden} more"),
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_w - 48.0),
@@ -1773,7 +1802,11 @@ impl SysMonitorState {
         let filter_w = 220.0;
         let filter_x = w - filter_w - 8.0;
         let filter_h = HEADER_HEIGHT - 2.0;
-        let filter_border = if self.filter_focused { BLUE } else { SURFACE1 };
+        let filter_border = if self.filter_focused {
+            self.palette.blue
+        } else {
+            self.palette.surface1
+        };
         tree.push(RenderCommand::StrokeRect {
             x: filter_x,
             y: content_y + 1.0,
@@ -1788,7 +1821,7 @@ impl SysMonitorState {
             y: content_y + 2.0,
             width: filter_w - 2.0,
             height: filter_h - 2.0,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::all(2.0),
         });
 
@@ -1798,9 +1831,9 @@ impl SysMonitorState {
             &self.filter_text
         };
         let filter_text_color = if self.filter_text.is_empty() {
-            OVERLAY0
+            self.palette.overlay0
         } else {
-            TEXT
+            self.palette.text
         };
         tree.push(RenderCommand::Text {
             x: filter_x + 8.0,
@@ -1819,11 +1852,23 @@ impl SysMonitorState {
             // held inside the box because the text itself is clipped there.
             let typed = text::width(&self.filter_text, 11.0).min(filter_w - 16.0);
             let cursor_x = filter_x + 8.0 + typed;
-            tree.fill_rect(cursor_x, content_y + 5.0, 1.0, filter_h - 8.0, TEXT);
+            tree.fill_rect(
+                cursor_x,
+                content_y + 5.0,
+                1.0,
+                filter_h - 8.0,
+                self.palette.text,
+            );
         }
 
         // Column headers
-        tree.fill_rect(0.0, content_y, w - filter_w - 16.0, HEADER_HEIGHT, MANTLE);
+        tree.fill_rect(
+            0.0,
+            content_y,
+            w - filter_w - 16.0,
+            HEADER_HEIGHT,
+            self.palette.mantle,
+        );
         let mut col_x = 0.0f32;
         for col in &ProcessColumn::ALL {
             let cw = col.width();
@@ -1840,9 +1885,9 @@ impl SysMonitorState {
             };
 
             let label_color = if *col == self.sort_column {
-                BLUE
+                self.palette.blue
             } else {
-                SUBTEXT0
+                self.palette.subtext0
             };
             tree.push(RenderCommand::Text {
                 x: col_x + 6.0,
@@ -1860,7 +1905,7 @@ impl SysMonitorState {
                 content_y + 2.0,
                 1.0,
                 HEADER_HEIGHT - 4.0,
-                SURFACE0,
+                self.palette.surface0,
             );
             col_x += cw;
         }
@@ -1888,11 +1933,11 @@ impl SysMonitorState {
             let ry = rows_y + vis_i as f32 * ROW_HEIGHT;
 
             let bg = if self.selected_index == Some(row_idx) {
-                SURFACE1
+                self.palette.surface1
             } else if self.hovered_index == Some(row_idx) {
-                SURFACE0
+                self.palette.surface0
             } else if row_idx % 2 == 0 {
-                BASE
+                self.palette.base
             } else {
                 Color::from_hex(0x1A1A2E)
             };
@@ -1907,7 +1952,7 @@ impl SysMonitorState {
                             x: cx + 6.0,
                             y: ry + 4.0,
                             text: proc.pid.to_string(),
-                            color: OVERLAY0,
+                            color: self.palette.overlay0,
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
@@ -1919,7 +1964,7 @@ impl SysMonitorState {
                             x: cx + 6.0,
                             y: ry + 4.0,
                             text: proc.name.clone(),
-                            color: TEXT,
+                            color: self.palette.text,
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(cw - 12.0),
@@ -1931,7 +1976,7 @@ impl SysMonitorState {
                             x: cx + 6.0,
                             y: ry + 4.0,
                             text: proc.status.label().to_string(),
-                            color: proc.status.color(),
+                            color: proc.status.color(&self.palette),
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
@@ -1940,7 +1985,7 @@ impl SysMonitorState {
                     }
                     ProcessColumn::Cpu => {
                         let cpu_str = format!("{:.1}", proc.cpu_percent);
-                        let cpu_color = self.thresholds.cpu_color(proc.cpu_percent);
+                        let cpu_color = self.thresholds.cpu_color(proc.cpu_percent, &self.palette);
                         tree.push(RenderCommand::Text {
                             x: cx + 6.0,
                             y: ry + 4.0,
@@ -1957,7 +2002,7 @@ impl SysMonitorState {
                             x: cx + 6.0,
                             y: ry + 4.0,
                             text: format_bytes(proc.memory_bytes),
-                            color: TEXT,
+                            color: self.palette.text,
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
@@ -1969,7 +2014,7 @@ impl SysMonitorState {
                             x: cx + 6.0,
                             y: ry + 4.0,
                             text: proc.thread_count.to_string(),
-                            color: OVERLAY0,
+                            color: self.palette.overlay0,
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
@@ -1981,7 +2026,7 @@ impl SysMonitorState {
                             x: cx + 6.0,
                             y: ry + 4.0,
                             text: format_uptime_short(proc.uptime_secs),
-                            color: OVERLAY0,
+                            color: self.palette.overlay0,
                             font_size: 11.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
@@ -2011,11 +2056,13 @@ impl SysMonitorState {
             CONTENT_PAD + 12.0,
             content_y + 8.0,
             "CPU Usage",
-            TEXT,
+            self.palette.text,
             13.0,
         );
         let cpu_label = format!("{:.1}%", self.system_info.cpu_overall);
-        let cpu_color = self.thresholds.cpu_color(self.system_info.cpu_overall);
+        let cpu_color = self
+            .thresholds
+            .cpu_color(self.system_info.cpu_overall, &self.palette);
         tree.push(RenderCommand::Text {
             x: CONTENT_PAD + 100.0,
             y: content_y + 8.0,
@@ -2051,7 +2098,7 @@ impl SysMonitorState {
             CONTENT_PAD + 12.0,
             cur_y + 8.0,
             "Per-Core Details",
-            TEXT,
+            self.palette.text,
             13.0,
         );
 
@@ -2066,7 +2113,7 @@ impl SysMonitorState {
                 x: CONTENT_PAD + 16.0,
                 y: core_y + 2.0,
                 text: core_label,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2079,13 +2126,13 @@ impl SysMonitorState {
                 y: core_y,
                 width: bar_w,
                 height: 16.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(3.0),
             });
 
             // Usage bar fill
             let fill_w = bar_w * (core.usage_percent / 100.0);
-            let bar_color = self.thresholds.cpu_color(core.usage_percent);
+            let bar_color = self.thresholds.cpu_color(core.usage_percent, &self.palette);
             if fill_w > 0.5 {
                 tree.push(RenderCommand::FillRect {
                     x: bar_start_x,
@@ -2106,7 +2153,7 @@ impl SysMonitorState {
                 x: bar_start_x + bar_w + 12.0,
                 y: core_y + 2.0,
                 text: detail,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2138,11 +2185,11 @@ impl SysMonitorState {
             CONTENT_PAD + 12.0,
             content_y + 8.0,
             "Memory Usage",
-            TEXT,
+            self.palette.text,
             13.0,
         );
         let mem_label = format!("{mem_pct:.1}%");
-        let mem_color = self.thresholds.mem_color(mem_pct);
+        let mem_color = self.thresholds.mem_color(mem_pct, &self.palette);
         tree.push(RenderCommand::Text {
             x: CONTENT_PAD + 120.0,
             y: content_y + 8.0,
@@ -2178,7 +2225,7 @@ impl SysMonitorState {
             CONTENT_PAD + 12.0,
             cur_y + 8.0,
             "Breakdown",
-            TEXT,
+            self.palette.text,
             13.0,
         );
 
@@ -2194,15 +2241,15 @@ impl SysMonitorState {
             y: bar_y,
             width: bar_w,
             height: bar_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
 
         let segments: &[(&str, u64, Color)] = &[
-            ("Used", self.system_info.used_memory, BLUE),
-            ("Cached", self.system_info.cached_memory, TEAL),
-            ("Buffers", self.system_info.buffers, MAUVE),
-            ("Free", self.system_info.free_memory, SURFACE1),
+            ("Used", self.system_info.used_memory, self.palette.blue),
+            ("Cached", self.system_info.cached_memory, self.palette.teal),
+            ("Buffers", self.system_info.buffers, self.palette.mauve),
+            ("Free", self.system_info.free_memory, self.palette.surface1),
         ];
 
         let mut fill_x = bar_x;
@@ -2239,7 +2286,7 @@ impl SysMonitorState {
                 x: legend_x + 14.0,
                 y: legend_y,
                 text: entry,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2260,7 +2307,7 @@ impl SysMonitorState {
                 format_bytes(self.system_info.swap_used),
                 format_bytes(self.system_info.swap_total),
             ),
-            color: SUBTEXT1,
+            color: self.palette.subtext1,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2273,7 +2320,7 @@ impl SysMonitorState {
             y: swap_bar_y,
             width: bar_w,
             height: 12.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
         let swap_fill = bar_w * swap_frac;
@@ -2283,7 +2330,7 @@ impl SysMonitorState {
                 y: swap_bar_y,
                 width: swap_fill,
                 height: 12.0,
-                color: PEACH,
+                color: self.palette.peach,
                 corner_radii: CornerRadii::all(3.0),
             });
         }
@@ -2303,7 +2350,14 @@ impl SysMonitorState {
 
             // Disk name and mount point
             let title = format!("{} ({})", disk.name, disk.mount_point);
-            render_bold_text(tree, CONTENT_PAD + 12.0, cur_y + 8.0, &title, TEXT, 13.0);
+            render_bold_text(
+                tree,
+                CONTENT_PAD + 12.0,
+                cur_y + 8.0,
+                &title,
+                self.palette.text,
+                13.0,
+            );
 
             // Usage bar
             let bar_x = CONTENT_PAD + 16.0;
@@ -2311,14 +2365,14 @@ impl SysMonitorState {
             let bar_w = content_w - 200.0;
             let bar_h = 18.0;
             let usage_pct = disk.usage_fraction() * 100.0;
-            let disk_color = self.thresholds.disk_color(usage_pct);
+            let disk_color = self.thresholds.disk_color(usage_pct, &self.palette);
 
             tree.push(RenderCommand::FillRect {
                 x: bar_x,
                 y: bar_y,
                 width: bar_w,
                 height: bar_h,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             let fill_w = bar_w * disk.usage_fraction();
@@ -2362,7 +2416,7 @@ impl SysMonitorState {
                 x: bar_x,
                 y: io_y,
                 text: io_label,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 32.0),
@@ -2387,7 +2441,7 @@ impl SysMonitorState {
                 io_graph_w,
                 io_graph_h,
                 &disk.read_history,
-                GREEN,
+                self.palette.green,
                 max_io,
             );
             self.render_mini_graph(
@@ -2397,7 +2451,7 @@ impl SysMonitorState {
                 io_graph_w,
                 io_graph_h,
                 &disk.write_history,
-                PEACH,
+                self.palette.peach,
                 max_io,
             );
 
@@ -2407,14 +2461,14 @@ impl SysMonitorState {
                 y: io_graph_y + io_graph_h + 2.0,
                 width: 8.0,
                 height: 8.0,
-                color: GREEN,
+                color: self.palette.green,
                 corner_radii: CornerRadii::all(2.0),
             });
             tree.push(RenderCommand::Text {
                 x: bar_x + 12.0,
                 y: io_graph_y + io_graph_h,
                 text: "Read".to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2425,14 +2479,14 @@ impl SysMonitorState {
                 y: io_graph_y + io_graph_h + 2.0,
                 width: 8.0,
                 height: 8.0,
-                color: PEACH,
+                color: self.palette.peach,
                 corner_radii: CornerRadii::all(2.0),
             });
             tree.push(RenderCommand::Text {
                 x: bar_x + io_graph_w + 20.0,
                 y: io_graph_y + io_graph_h,
                 text: "Write".to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2447,7 +2501,7 @@ impl SysMonitorState {
                 x: CONTENT_PAD + 16.0,
                 y: content_y + 20.0,
                 text: "No disk information available.".to_string(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2470,7 +2524,14 @@ impl SysMonitorState {
 
             // Interface name and connection count
             let title = format!("{} ({} connections)", iface.name, iface.connection_count);
-            render_bold_text(tree, CONTENT_PAD + 12.0, cur_y + 8.0, &title, TEXT, 13.0);
+            render_bold_text(
+                tree,
+                CONTENT_PAD + 12.0,
+                cur_y + 8.0,
+                &title,
+                self.palette.text,
+                13.0,
+            );
 
             // Traffic stats
             let stats_y = cur_y + 28.0;
@@ -2485,7 +2546,7 @@ impl SysMonitorState {
                 x: CONTENT_PAD + 16.0,
                 y: stats_y,
                 text: stats,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 32.0),
@@ -2510,7 +2571,7 @@ impl SysMonitorState {
                 graph_w,
                 graph_h,
                 &iface.rx_history,
-                SKY,
+                self.palette.sky,
                 max_traffic,
             );
             self.render_mini_graph(
@@ -2530,14 +2591,14 @@ impl SysMonitorState {
                 y: graph_y + graph_h + 2.0,
                 width: 8.0,
                 height: 8.0,
-                color: SKY,
+                color: self.palette.sky,
                 corner_radii: CornerRadii::all(2.0),
             });
             tree.push(RenderCommand::Text {
                 x: CONTENT_PAD + 28.0,
                 y: graph_y + graph_h,
                 text: "RX".to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2555,7 +2616,7 @@ impl SysMonitorState {
                 x: CONTENT_PAD + 36.0 + graph_w,
                 y: graph_y + graph_h,
                 text: "TX".to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2570,7 +2631,7 @@ impl SysMonitorState {
                 x: CONTENT_PAD + 16.0,
                 y: content_y + 20.0,
                 text: "No network interface information available.".to_string(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2608,7 +2669,7 @@ impl SysMonitorState {
             y: menu.y,
             width: menu_w,
             height: menu_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         tree.push(RenderCommand::StrokeRect {
@@ -2616,7 +2677,7 @@ impl SysMonitorState {
             y: menu.y,
             width: menu_w,
             height: menu_h,
-            color: SURFACE2,
+            color: self.palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -2630,15 +2691,15 @@ impl SysMonitorState {
                     y: iy,
                     width: menu_w - 4.0,
                     height: item_h,
-                    color: SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(2.0),
                 });
             }
 
             let text_color = if *action == ContextAction::Kill {
-                RED
+                self.palette.red
             } else {
-                TEXT
+                self.palette.text
             };
             tree.push(RenderCommand::Text {
                 x: menu.x + 12.0,
@@ -2664,7 +2725,7 @@ impl SysMonitorState {
             y,
             width: w,
             height: h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::all(CARD_RADIUS),
         });
         tree.push(RenderCommand::StrokeRect {
@@ -2672,7 +2733,7 @@ impl SysMonitorState {
             y,
             width: w,
             height: h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CARD_RADIUS),
         });
@@ -2696,7 +2757,7 @@ impl SysMonitorState {
             y,
             width: w,
             height: h,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -2721,7 +2782,7 @@ impl SysMonitorState {
             y,
             width: w,
             height: h,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::all(4.0),
         });
         tree.push(RenderCommand::StrokeRect {
@@ -2729,7 +2790,7 @@ impl SysMonitorState {
             y,
             width: w,
             height: h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -2737,13 +2798,13 @@ impl SysMonitorState {
         // Grid lines at 25%, 50%, 75%
         for &pct in &[25.0f32, 50.0, 75.0] {
             let gy = y + h * (1.0 - pct / 100.0);
-            render_dashed_hline(tree, x + 1.0, gy, w - 2.0, SURFACE0);
+            render_dashed_hline(tree, x + 1.0, gy, w - 2.0, self.palette.surface0);
             let pct_label = format!("{:.0}%", pct / 100.0 * max_value);
             tree.push(RenderCommand::Text {
                 x: x + 4.0,
                 y: gy - 10.0,
                 text: pct_label,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3203,6 +3264,10 @@ fn format_uptime_short(secs: u64) -> String {
 // ============================================================================
 
 impl App for SysMonitorState {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "System Monitor".to_owned()
     }
@@ -3555,9 +3620,10 @@ mod tests {
 
     #[test]
     fn test_process_status_colors_differ() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         assert_ne!(
-            ProcessStatus::Running.color(),
-            ProcessStatus::Zombie.color()
+            ProcessStatus::Running.color(&pal),
+            ProcessStatus::Zombie.color(&pal)
         );
     }
 
@@ -3630,36 +3696,41 @@ mod tests {
 
     #[test]
     fn test_alert_thresholds_cpu_color_green() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let t = AlertThresholds::default();
-        assert_eq!(t.cpu_color(30.0), GREEN);
+        assert_eq!(t.cpu_color(30.0, &pal), pal.green);
     }
 
     #[test]
     fn test_alert_thresholds_cpu_color_yellow() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let t = AlertThresholds::default();
-        assert_eq!(t.cpu_color(75.0), YELLOW);
+        assert_eq!(t.cpu_color(75.0, &pal), pal.yellow);
     }
 
     #[test]
     fn test_alert_thresholds_cpu_color_red() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let t = AlertThresholds::default();
-        assert_eq!(t.cpu_color(95.0), RED);
+        assert_eq!(t.cpu_color(95.0, &pal), pal.red);
     }
 
     #[test]
     fn test_alert_thresholds_mem_color() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let t = AlertThresholds::default();
-        assert_eq!(t.mem_color(50.0), GREEN);
-        assert_eq!(t.mem_color(80.0), YELLOW);
-        assert_eq!(t.mem_color(95.0), RED);
+        assert_eq!(t.mem_color(50.0, &pal), pal.green);
+        assert_eq!(t.mem_color(80.0, &pal), pal.yellow);
+        assert_eq!(t.mem_color(95.0, &pal), pal.red);
     }
 
     #[test]
     fn test_alert_thresholds_disk_color() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let t = AlertThresholds::default();
-        assert_eq!(t.disk_color(50.0), GREEN);
-        assert_eq!(t.disk_color(85.0), YELLOW);
-        assert_eq!(t.disk_color(96.0), RED);
+        assert_eq!(t.disk_color(50.0, &pal), pal.green);
+        assert_eq!(t.disk_color(85.0, &pal), pal.yellow);
+        assert_eq!(t.disk_color(96.0, &pal), pal.red);
     }
 
     // -- DiskInfo tests --
@@ -3716,8 +3787,9 @@ mod tests {
 
     #[test]
     fn test_alert_severity_colors() {
-        assert_eq!(AlertSeverity::Warning.color(), YELLOW);
-        assert_eq!(AlertSeverity::Critical.color(), RED);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(AlertSeverity::Warning.color(&pal), pal.yellow);
+        assert_eq!(AlertSeverity::Critical.color(&pal), pal.red);
     }
 
     // -- SysMonitorState tests --
@@ -4028,6 +4100,7 @@ mod tests {
     /// sized for alerts it had decided not to draw.
     #[test]
     fn the_alert_card_matches_the_rows_it_holds() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         for (alerts, rows) in [(1_usize, 1_usize), (5, 5), (12, ALERT_MAX_ROWS)] {
             let tree = overview_with_alerts(alerts);
             let drawn = alert_panel_rows(&tree);
@@ -4052,7 +4125,7 @@ mod tests {
                 .find_map(|c| match c {
                     RenderCommand::FillRect {
                         y, height, color, ..
-                    } if (*y - card_top).abs() < 0.5 && *color == MANTLE => Some(*height),
+                    } if (*y - card_top).abs() < 0.5 && *color == pal.mantle => Some(*height),
                     _ => None,
                 })
                 .expect("the alert card");
@@ -4614,5 +4687,64 @@ mod tests {
         };
         s.handle_mouse(&mouse);
         assert!(s.scroll_offset <= s.visible_indices.len());
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut SysMonitorState) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = SysMonitorState::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

@@ -7945,6 +7945,7 @@ version = "0.1.0"
 name = "ircclient"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -17512,6 +17513,7 @@ dependencies = [
 name = "sysmonitor"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -18591,6 +18593,7 @@ dependencies = [
 name = "undelete"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

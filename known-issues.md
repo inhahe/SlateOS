@@ -124425,9 +124425,17 @@ which makes step 1 below larger than one dependency line.
   `stickynotes`, `taskscheduler`, `contacts`, `habits`, `fontmanager` and
   `automator`, `sysmonitor`, `undelete`, `ircclient`, `dictionary`,
   `reminders`, `weather`, `alarmclock`, `diagram`, `partmanager` and
-  `credmanager`, `vpnmanager` and `dbviewer`. Each has a test on the rectangles
-  it emits, and each was mutation-checked by making `theme_changed` ignore its
-  argument.
+  `credmanager`, `vpnmanager`, `dbviewer`, `whiteboard` and `mindmap`. Each has
+  a test on the rectangles it emits, and each was mutation-checked by making
+  `theme_changed` ignore its argument.
+
+**`whiteboard` and `mindmap` are the clearest content cases yet**, and both
+were deferred earlier for exactly the right reason. `whiteboard`'s constant is
+the default *ink*; `mindmap`'s `NODE_COLORS` is the eight colours a node cycles
+through. Both are saved with the document, so following the theme would mean a
+saved drawing or map changing colour when the user changed theme. Both keep
+fixed values, with the reasoning written where they are defined — and the rest
+of each application (56 and 40-odd chrome uses) converted normally.
 
 **The worst bug this conversion has produced: substitution inside string
 literals.** `dbviewer` names a colour constant `TEXT`. The word-boundary

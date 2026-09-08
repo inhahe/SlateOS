@@ -33,6 +33,7 @@
 #![allow(clippy::fn_params_excessive_bools)]
 #![allow(clippy::wildcard_imports)]
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -48,23 +49,23 @@ use std::time::Duration;
 // Catppuccin Mocha theme constants
 // ============================================================================
 
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-
 /// Preset node colors the user can cycle through.
-const NODE_COLORS: [Color; 8] = [BLUE, GREEN, RED, YELLOW, PEACH, TEAL, MAUVE, SURFACE0];
+/// The colours a node can be cycled through.
+///
+/// Content, not chrome: a node's colour is the user's choice, cycled with a
+/// key and saved with the map, so it must not follow the desktop theme -- a
+/// saved mind map would otherwise recolour itself when the theme changed.
+/// Fixed values for the same reason `paint`'s swatches are fixed.
+const NODE_COLORS: [Color; 8] = [
+    Color::from_hex(0x89B4FA),
+    Color::from_hex(0xA6E3A1),
+    Color::from_hex(0xF38BA8),
+    Color::from_hex(0xF9E2AF),
+    Color::from_hex(0xFAB387),
+    Color::from_hex(0x94E2D5),
+    Color::from_hex(0xCBA6F7),
+    Color::from_hex(0x313244),
+];
 
 // ============================================================================
 // Layout constants
@@ -369,7 +370,7 @@ impl MindMap {
     /// Create a new mind map with a single root node.
     pub fn new(name: String, id_gen: &mut IdGenerator) -> Self {
         let root_id = id_gen.next_id();
-        let root = MindMapNode::new(root_id, "Central Idea".to_string(), None, BLUE, 0);
+        let root = MindMapNode::new(root_id, "Central Idea".to_string(), None, NODE_COLORS[0], 0);
         let mut nodes = HashMap::new();
         nodes.insert(root_id, root);
         Self {
@@ -916,6 +917,12 @@ pub struct MindMapApp {
     pub edit_buffer: String,
     /// Whether we are in text editing mode.
     pub editing_node: Option<NodeId>,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for MindMapApp {
@@ -930,6 +937,7 @@ impl MindMapApp {
         let mut id_gen = IdGenerator::new();
         let map = MindMap::new("Mind Map 1".to_string(), &mut id_gen);
         let mut app = Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             win_width: 1280.0,
             win_height: 800.0,
             maps: vec![map],
@@ -1951,7 +1959,7 @@ impl MindMapApp {
             y: 0.0,
             width: self.win_width,
             height: self.win_height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1979,7 +1987,7 @@ impl MindMapApp {
             y: 0.0,
             width: self.win_width,
             height: TOOLBAR_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1989,7 +1997,7 @@ impl MindMapApp {
             y: 12.0,
             text: "Mind Map".to_string(),
             font_size: 15.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2013,7 +2021,7 @@ impl MindMapApp {
                 y: 6.0,
                 width: 70.0,
                 height: 28.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(PANEL_CORNER),
             });
             cmds.push(RenderCommand::Text {
@@ -2021,7 +2029,7 @@ impl MindMapApp {
                 y: 14.0,
                 text: label.to_string(),
                 font_size: 11.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(58.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2035,7 +2043,7 @@ impl MindMapApp {
             y: 14.0,
             text: zoom_pct,
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2051,15 +2059,23 @@ impl MindMapApp {
             y,
             width: self.win_width,
             height: TAB_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
         let mut tx = 10.0;
         for (i, map) in self.maps.iter().enumerate() {
             let is_active = i == self.active_map;
-            let tab_color = if is_active { BASE } else { SURFACE0 };
-            let text_color = if is_active { TEXT } else { OVERLAY0 };
+            let tab_color = if is_active {
+                self.palette.base
+            } else {
+                self.palette.surface0
+            };
+            let text_color = if is_active {
+                self.palette.text
+            } else {
+                self.palette.overlay0
+            };
             let tab_w = 120.0f32;
 
             cmds.push(RenderCommand::FillRect {
@@ -2095,7 +2111,7 @@ impl MindMapApp {
             y: y + 4.0,
             width: 24.0,
             height: 20.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(PANEL_CORNER),
         });
         cmds.push(RenderCommand::Text {
@@ -2103,7 +2119,7 @@ impl MindMapApp {
             y: y + 8.0,
             text: "+".to_string(),
             font_size: 13.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2118,7 +2134,7 @@ impl MindMapApp {
             y: self.canvas_y(),
             width: self.canvas_width(),
             height: self.canvas_height(),
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2140,7 +2156,12 @@ impl MindMapApp {
         let offset_x = self.pan_x % grid_step;
         let offset_y = self.pan_y % grid_step;
 
-        let dot_color = Color::rgba(OVERLAY0.r, OVERLAY0.g, OVERLAY0.b, 40);
+        let dot_color = Color::rgba(
+            self.palette.overlay0.r,
+            self.palette.overlay0.g,
+            self.palette.overlay0.b,
+            40,
+        );
         let dot_size = 2.0f32;
 
         let mut gx = offset_x;
@@ -2208,7 +2229,11 @@ impl MindMapApp {
             let mid_x = f32::midpoint(spx, scx);
 
             let is_search_match = self.search_results.contains(&node_id);
-            let line_color = if is_search_match { YELLOW } else { node.color };
+            let line_color = if is_search_match {
+                self.palette.yellow
+            } else {
+                node.color
+            };
             let alpha_color = Color::rgba(line_color.r, line_color.g, line_color.b, 140);
 
             // Segment 1: parent to control point 1
@@ -2278,14 +2303,22 @@ impl MindMapApp {
                 y: sy - 3.0,
                 width: sw + 6.0,
                 height: sh + 6.0,
-                color: if is_search_match { YELLOW } else { TEXT },
+                color: if is_search_match {
+                    self.palette.yellow
+                } else {
+                    self.palette.text
+                },
                 line_width: 2.0,
                 corner_radii: self.corner_radii_for_shape(node.shape, 11.0),
             });
         }
 
         // Node fill
-        let fill_color = if is_editing { SURFACE1 } else { node.color };
+        let fill_color = if is_editing {
+            self.palette.surface1
+        } else {
+            node.color
+        };
 
         let cr = self.corner_radii_for_shape(node.shape, NODE_CORNER_RADIUS);
         cmds.push(RenderCommand::FillRect {
@@ -2299,9 +2332,9 @@ impl MindMapApp {
 
         // Node border
         let border_color = if is_search_match {
-            YELLOW
+            self.palette.yellow
         } else if is_selected {
-            TEXT
+            self.palette.text
         } else {
             Color::rgba(node.color.r, node.color.g, node.color.b, 180)
         };
@@ -2361,7 +2394,7 @@ impl MindMapApp {
                 y: indicator_y,
                 width: COLLAPSE_SIZE,
                 height: COLLAPSE_SIZE,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(2.0),
             });
             cmds.push(RenderCommand::Text {
@@ -2369,7 +2402,7 @@ impl MindMapApp {
                 y: indicator_y + 1.0,
                 text: indicator_text.to_string(),
                 font_size: 10.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2399,7 +2432,7 @@ impl MindMapApp {
             y,
             width: SIDEBAR_WIDTH,
             height: h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2409,7 +2442,7 @@ impl MindMapApp {
             y1: y,
             x2: SIDEBAR_WIDTH,
             y2: y + h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2420,7 +2453,7 @@ impl MindMapApp {
             y: sy,
             text: "Node Properties".to_string(),
             font_size: 13.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2439,7 +2472,7 @@ impl MindMapApp {
                     // the `SIDEBAR_WIDTH - 20` two lines below it.
                     text: format!("Text: {}", node.text),
                     font_size: 11.0,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(SIDEBAR_WIDTH - 20.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2452,7 +2485,7 @@ impl MindMapApp {
                     y: sy,
                     text: format!("Shape: {}", node.shape.label()),
                     font_size: 11.0,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2465,7 +2498,7 @@ impl MindMapApp {
                     y: sy,
                     text: "Color:".to_string(),
                     font_size: 11.0,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2486,7 +2519,7 @@ impl MindMapApp {
                     y: sy,
                     text: format!("Children: {}", node.children.len()),
                     font_size: 11.0,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2500,7 +2533,7 @@ impl MindMapApp {
                     y: sy,
                     text: format!("Depth: {depth}"),
                     font_size: 11.0,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2518,7 +2551,7 @@ impl MindMapApp {
                     y: sy,
                     text: format!("State: {state_text}"),
                     font_size: 11.0,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2531,7 +2564,7 @@ impl MindMapApp {
                 y: sy,
                 text: "No node selected".to_string(),
                 font_size: 11.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2545,7 +2578,7 @@ impl MindMapApp {
             y1: sy,
             x2: x + SIDEBAR_WIDTH - 10.0,
             y2: sy,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
         sy += 10.0;
@@ -2555,7 +2588,7 @@ impl MindMapApp {
             y: sy,
             text: "Shortcuts".to_string(),
             font_size: 13.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2583,7 +2616,7 @@ impl MindMapApp {
                 y: sy,
                 text: key.to_string(),
                 font_size: 10.0,
-                color: BLUE,
+                color: self.palette.blue,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2593,7 +2626,7 @@ impl MindMapApp {
                 y: sy,
                 text: action.to_string(),
                 font_size: 10.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2616,7 +2649,7 @@ impl MindMapApp {
             y: by,
             width: bar_width,
             height: bar_height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -2626,7 +2659,7 @@ impl MindMapApp {
             y: by,
             width: bar_width,
             height: bar_height,
-            color: BLUE,
+            color: self.palette.blue,
             line_width: 1.0,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -2637,7 +2670,7 @@ impl MindMapApp {
             y: by + 10.0,
             text: "Search:".to_string(),
             font_size: 12.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2650,9 +2683,9 @@ impl MindMapApp {
             self.search_query.clone()
         };
         let query_color = if self.search_query.is_empty() {
-            OVERLAY0
+            self.palette.overlay0
         } else {
-            TEXT
+            self.palette.text
         };
 
         cmds.push(RenderCommand::Text {
@@ -2682,7 +2715,7 @@ impl MindMapApp {
                 y: by + 10.0,
                 text: count_text,
                 font_size: 10.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2700,7 +2733,7 @@ impl MindMapApp {
             y,
             width: self.win_width,
             height: STATUS_BAR_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2719,7 +2752,7 @@ impl MindMapApp {
             y: y + 5.0,
             text: status,
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.win_width - 20.0),
             overflow: TextOverflow::Ellipsis,
@@ -2757,7 +2790,7 @@ impl MindMapApp {
                 y: y + 5.0,
                 text: sel_info,
                 font_size: SEL_INFO_SIZE,
-                color: BLUE,
+                color: self.palette.blue,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SEL_INFO_WIDTH),
                 overflow: TextOverflow::Ellipsis,
@@ -2792,6 +2825,10 @@ fn node_text_color(bg: Color) -> Color {
 // ============================================================================
 
 impl App for MindMapApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         format!("Mind Map — {}", self.active_map_ref().name)
     }
@@ -3212,7 +3249,12 @@ mod tests {
         if let Some(root) = map.nodes.get_mut(&root_id) {
             root.text = "Root\n- forged sibling\n  - forged child".to_string();
         }
-        map.add_child(root_id, "Child\n- another forged".to_string(), BLUE, 0);
+        map.add_child(
+            root_id,
+            "Child\n- another forged".to_string(),
+            NODE_COLORS[0],
+            0,
+        );
         let text = map.export_text();
         // Two real nodes, so two lines -- counting lines rather than searching
         // for the payload, since a correctly folded label still contains it.
@@ -3293,7 +3335,8 @@ mod tests {
 
     #[test]
     fn test_node_new_root() {
-        let node = MindMapNode::new(1, "Root".to_string(), None, BLUE, 0);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let node = MindMapNode::new(1, "Root".to_string(), None, pal.blue, 0);
         assert_eq!(node.id, 1);
         assert!(node.parent.is_none());
         assert_eq!(node.shape, NodeShape::Ellipse);
@@ -3304,7 +3347,8 @@ mod tests {
 
     #[test]
     fn test_node_new_child() {
-        let node = MindMapNode::new(2, "Child".to_string(), Some(1), GREEN, 1);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let node = MindMapNode::new(2, "Child".to_string(), Some(1), pal.green, 1);
         assert_eq!(node.parent, Some(1));
         assert_eq!(node.shape, NodeShape::RoundedRect);
         assert_eq!(node.width, DEFAULT_NODE_W);
@@ -3312,7 +3356,8 @@ mod tests {
 
     #[test]
     fn test_node_contains() {
-        let mut node = MindMapNode::new(1, "Test".to_string(), None, BLUE, 0);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut node = MindMapNode::new(1, "Test".to_string(), None, pal.blue, 0);
         node.x = 100.0;
         node.y = 100.0;
         node.width = 140.0;
@@ -3325,7 +3370,8 @@ mod tests {
 
     #[test]
     fn test_node_center() {
-        let mut node = MindMapNode::new(1, "Test".to_string(), None, BLUE, 0);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut node = MindMapNode::new(1, "Test".to_string(), None, pal.blue, 0);
         node.x = 50.0;
         node.y = 75.0;
         let (cx, cy) = node.center();
@@ -3335,7 +3381,8 @@ mod tests {
 
     #[test]
     fn test_node_right_center() {
-        let mut node = MindMapNode::new(1, "Test".to_string(), None, BLUE, 0);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut node = MindMapNode::new(1, "Test".to_string(), None, pal.blue, 0);
         node.x = 100.0;
         node.y = 100.0;
         node.width = 140.0;
@@ -3346,7 +3393,8 @@ mod tests {
 
     #[test]
     fn test_node_left_center() {
-        let mut node = MindMapNode::new(1, "Test".to_string(), None, BLUE, 0);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut node = MindMapNode::new(1, "Test".to_string(), None, pal.blue, 0);
         node.x = 100.0;
         node.y = 100.0;
         node.width = 140.0;
@@ -3357,7 +3405,8 @@ mod tests {
 
     #[test]
     fn test_node_bounds() {
-        let mut node = MindMapNode::new(1, "Test".to_string(), None, BLUE, 0);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut node = MindMapNode::new(1, "Test".to_string(), None, pal.blue, 0);
         node.x = 200.0;
         node.y = 150.0;
         node.width = 100.0;
@@ -3382,10 +3431,11 @@ mod tests {
 
     #[test]
     fn test_mind_map_add_child() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        let child = map.add_child(root, "Child 1".to_string(), GREEN, 1);
+        let child = map.add_child(root, "Child 1".to_string(), pal.green, 1);
         assert!(child.is_some());
         assert_eq!(map.node_count(), 2);
         let cid = child.unwrap();
@@ -3395,19 +3445,21 @@ mod tests {
 
     #[test]
     fn test_mind_map_add_child_invalid_parent() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
-        let result = map.add_child(999, "Orphan".to_string(), GREEN, 1);
+        let result = map.add_child(999, "Orphan".to_string(), pal.green, 1);
         assert!(result.is_none());
     }
 
     #[test]
     fn test_mind_map_add_sibling() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        let c1 = map.add_child(root, "C1".to_string(), GREEN, 1).unwrap();
-        let c2 = map.add_sibling(c1, "C2".to_string(), GREEN, 1);
+        let c1 = map.add_child(root, "C1".to_string(), pal.green, 1).unwrap();
+        let c2 = map.add_sibling(c1, "C2".to_string(), pal.green, 1);
         assert!(c2.is_some());
         assert_eq!(map.node_count(), 3);
         let parent_children = &map.node(root).unwrap().children;
@@ -3418,20 +3470,22 @@ mod tests {
 
     #[test]
     fn test_mind_map_add_sibling_to_root_fails() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
-        let result = map.add_sibling(map.root_id, "Sibling".to_string(), GREEN, 1);
+        let result = map.add_sibling(map.root_id, "Sibling".to_string(), pal.green, 1);
         assert!(result.is_none());
     }
 
     #[test]
     fn test_mind_map_subtree_ids() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        let c1 = map.add_child(root, "C1".to_string(), GREEN, 1).unwrap();
-        let c2 = map.add_child(root, "C2".to_string(), GREEN, 1).unwrap();
-        let gc1 = map.add_child(c1, "GC1".to_string(), RED, 2).unwrap();
+        let c1 = map.add_child(root, "C1".to_string(), pal.green, 1).unwrap();
+        let c2 = map.add_child(root, "C2".to_string(), pal.green, 1).unwrap();
+        let gc1 = map.add_child(c1, "GC1".to_string(), pal.red, 2).unwrap();
         let ids = map.subtree_ids(root);
         assert_eq!(ids.len(), 4);
         assert!(ids.contains(&root));
@@ -3442,10 +3496,11 @@ mod tests {
 
     #[test]
     fn test_mind_map_subtree_ids_leaf() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        let c1 = map.add_child(root, "C1".to_string(), GREEN, 1).unwrap();
+        let c1 = map.add_child(root, "C1".to_string(), pal.green, 1).unwrap();
         let ids = map.subtree_ids(c1);
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], c1);
@@ -3453,11 +3508,12 @@ mod tests {
 
     #[test]
     fn test_mind_map_delete_subtree() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        let c1 = map.add_child(root, "C1".to_string(), GREEN, 1).unwrap();
-        let _gc1 = map.add_child(c1, "GC1".to_string(), RED, 2).unwrap();
+        let c1 = map.add_child(root, "C1".to_string(), pal.green, 1).unwrap();
+        let _gc1 = map.add_child(c1, "GC1".to_string(), pal.red, 2).unwrap();
         let result = map.delete_subtree(c1);
         assert!(result.is_some());
         let (removed, parent_id, _) = result.unwrap();
@@ -3477,11 +3533,12 @@ mod tests {
 
     #[test]
     fn test_mind_map_restore_subtree() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        let c1 = map.add_child(root, "C1".to_string(), GREEN, 1).unwrap();
-        let gc1 = map.add_child(c1, "GC1".to_string(), RED, 2).unwrap();
+        let c1 = map.add_child(root, "C1".to_string(), pal.green, 1).unwrap();
+        let gc1 = map.add_child(c1, "GC1".to_string(), pal.red, 2).unwrap();
 
         let (removed, parent_id, child_index) = map.delete_subtree(c1).unwrap();
         assert_eq!(map.node_count(), 1);
@@ -3513,10 +3570,11 @@ mod tests {
 
     #[test]
     fn test_mind_map_change_color() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        let result = map.change_color(root, RED, 2);
+        let result = map.change_color(root, pal.red, 2);
         assert!(result.is_some());
         assert_eq!(map.node(root).unwrap().color_index, 2);
     }
@@ -3556,22 +3614,24 @@ mod tests {
 
     #[test]
     fn test_mind_map_visible_nodes_no_collapse() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        let c1 = map.add_child(root, "C1".to_string(), GREEN, 1).unwrap();
-        let _gc1 = map.add_child(c1, "GC1".to_string(), RED, 2).unwrap();
+        let c1 = map.add_child(root, "C1".to_string(), pal.green, 1).unwrap();
+        let _gc1 = map.add_child(c1, "GC1".to_string(), pal.red, 2).unwrap();
         let visible = map.visible_node_ids();
         assert_eq!(visible.len(), 3);
     }
 
     #[test]
     fn test_mind_map_visible_nodes_collapsed() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        let c1 = map.add_child(root, "C1".to_string(), GREEN, 1).unwrap();
-        let _gc1 = map.add_child(c1, "GC1".to_string(), RED, 2).unwrap();
+        let c1 = map.add_child(root, "C1".to_string(), pal.green, 1).unwrap();
+        let _gc1 = map.add_child(c1, "GC1".to_string(), pal.red, 2).unwrap();
         map.toggle_collapse(c1);
         let visible = map.visible_node_ids();
         assert_eq!(visible.len(), 2); // root + c1 (gc1 hidden)
@@ -3579,21 +3639,23 @@ mod tests {
 
     #[test]
     fn test_mind_map_search_found() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        map.add_child(root, "Alpha".to_string(), GREEN, 1);
-        map.add_child(root, "Beta".to_string(), RED, 2);
+        map.add_child(root, "Alpha".to_string(), pal.green, 1);
+        map.add_child(root, "Beta".to_string(), pal.red, 2);
         let results = map.search("alpha");
         assert_eq!(results.len(), 1);
     }
 
     #[test]
     fn test_mind_map_search_case_insensitive() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        map.add_child(root, "MyNode".to_string(), GREEN, 1);
+        map.add_child(root, "MyNode".to_string(), pal.green, 1);
         let results = map.search("MYNODE");
         assert_eq!(results.len(), 1);
     }
@@ -3625,11 +3687,12 @@ mod tests {
 
     #[test]
     fn test_mind_map_export_text_with_children() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        map.add_child(root, "Child A".to_string(), GREEN, 1);
-        map.add_child(root, "Child B".to_string(), RED, 2);
+        map.add_child(root, "Child A".to_string(), pal.green, 1);
+        map.add_child(root, "Child B".to_string(), pal.red, 2);
         let text = map.export_text();
         assert!(text.contains("Central Idea\n"));
         assert!(text.contains("  - Child A\n"));
@@ -3645,30 +3708,33 @@ mod tests {
 
     #[test]
     fn test_mind_map_depth_child() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        let c1 = map.add_child(root, "C1".to_string(), GREEN, 1).unwrap();
+        let c1 = map.add_child(root, "C1".to_string(), pal.green, 1).unwrap();
         assert_eq!(map.depth(c1), 1);
     }
 
     #[test]
     fn test_mind_map_depth_grandchild() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        let c1 = map.add_child(root, "C1".to_string(), GREEN, 1).unwrap();
-        let gc1 = map.add_child(c1, "GC1".to_string(), RED, 2).unwrap();
+        let c1 = map.add_child(root, "C1".to_string(), pal.green, 1).unwrap();
+        let gc1 = map.add_child(c1, "GC1".to_string(), pal.red, 2).unwrap();
         assert_eq!(map.depth(gc1), 2);
     }
 
     #[test]
     fn test_mind_map_descendant_count() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        let c1 = map.add_child(root, "C1".to_string(), GREEN, 1).unwrap();
-        map.add_child(c1, "GC1".to_string(), RED, 2);
+        let c1 = map.add_child(root, "C1".to_string(), pal.green, 1).unwrap();
+        map.add_child(c1, "GC1".to_string(), pal.red, 2);
         assert_eq!(map.descendant_count(root), 2);
         assert_eq!(map.descendant_count(c1), 1);
     }
@@ -3687,11 +3753,12 @@ mod tests {
 
     #[test]
     fn test_auto_layout_children_positioned() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        let c1 = map.add_child(root, "C1".to_string(), GREEN, 1).unwrap();
-        let c2 = map.add_child(root, "C2".to_string(), RED, 2).unwrap();
+        let c1 = map.add_child(root, "C1".to_string(), pal.green, 1).unwrap();
+        let c2 = map.add_child(root, "C2".to_string(), pal.red, 2).unwrap();
         auto_layout(&mut map, 500.0, 400.0);
 
         // c1 (even index) goes right, c2 (odd index) goes left
@@ -3712,11 +3779,12 @@ mod tests {
 
     #[test]
     fn test_auto_layout_collapsed_subtree_not_laid_out() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        let c1 = map.add_child(root, "C1".to_string(), GREEN, 1).unwrap();
-        let gc1 = map.add_child(c1, "GC1".to_string(), RED, 2).unwrap();
+        let c1 = map.add_child(root, "C1".to_string(), pal.green, 1).unwrap();
+        let gc1 = map.add_child(c1, "GC1".to_string(), pal.red, 2).unwrap();
 
         // Collapse c1
         map.toggle_collapse(c1);
@@ -4436,11 +4504,12 @@ mod tests {
 
     #[test]
     fn test_measure_subtree_with_children() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut id_gen = IdGenerator::new();
         let mut map = MindMap::new("Test".to_string(), &mut id_gen);
         let root = map.root_id;
-        map.add_child(root, "C1".to_string(), GREEN, 1);
-        map.add_child(root, "C2".to_string(), RED, 2);
+        map.add_child(root, "C1".to_string(), pal.green, 1);
+        map.add_child(root, "C2".to_string(), pal.red, 2);
         let h = measure_subtree_height(&map, root);
         // Should be at least 2 children heights + gap
         assert!(h >= DEFAULT_NODE_H * 2.0 + RADIAL_V_GAP);
@@ -4494,5 +4563,64 @@ mod tests {
         app.end_drag();
 
         assert!(app.can_undo());
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut MindMapApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = MindMapApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

@@ -2079,6 +2079,7 @@ version = "0.1.0"
 name = "camera"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -2934,6 +2935,7 @@ dependencies = [
 name = "compass"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -4010,6 +4012,7 @@ dependencies = [
 name = "diskanalyzer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "scratchdir",
@@ -16160,6 +16163,7 @@ version = "0.1.0"
 name = "slides"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -19844,6 +19848,7 @@ dependencies = [
 name = "worldclock"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "tzrules",

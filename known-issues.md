@@ -124420,8 +124420,25 @@ which makes step 1 below larger than one dependency line.
   `fileassoc`, `startupmanager`, `magnifier`, `systemrestore`, `videoplayer`,
   `qrcode`, `notes`, `rssreader`, `spreadsheet`, `paint`, `defrag`, `netscan`,
   `photomanager`, `renamer`, `mediaconvert`, `radio`, `flashcards`, `calendar`
-  and `finance`. Each has a test on the rectangles it emits, and each was
-  mutation-checked by making `theme_changed` ignore its argument.
+  `finance`, `slides`, `worldclock`, `camera`, `compass` and `diskanalyzer`.
+  Each has a test on the rectangles it emits, and each was mutation-checked by
+  making `theme_changed` ignore its argument.
+
+**One application refused conversion, correctly: `whiteboard`.** Its
+`MOCHA_TEXT` is read in a `Default::default()` — the default *pen* colour — and
+a `Default` impl cannot take a palette. The colour is also content rather than
+chrome: it is the ink the user draws with, like `paint`'s swatches. Reverted
+rather than forced. The general rule this makes concrete: a constant used in a
+`Default` impl is usually content, and the hex-value match cannot tell the two
+apart when the chrome and the ink happen to be the same colour.
+
+**Two more shapes met here.** A *recursive* free helper
+(`diskanalyzer::squarify_layout`) needs the palette threaded through its own
+recursive call as well as its callers, and the public entry point above it
+(`compute_treemap`) too. And a helper reached only from a constructor
+(`slides::SlideTheme::mocha`, called by `SlidesApp::new`) cannot take the live
+palette at all, because none exists yet — it takes the defaults, and
+`theme_changed` replaces the result before the first frame.
 
 **A nested case the blanket call-site rewrite gets wrong.** `.color()` becomes
 `.color(&self.palette)` everywhere, which is right in the window's methods and

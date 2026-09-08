@@ -29,6 +29,7 @@
 
 mod scan;
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
 use guitk::frame::Rect;
@@ -47,21 +48,6 @@ use std::time::Duration;
 // ============================================================================
 // Catppuccin Mocha palette
 // ============================================================================
-
-const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
-const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
-const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
-const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COLOR_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COLOR_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const COLOR_MANTLE: Color = Color::from_hex(0x181825);
-const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
-const COLOR_RED: Color = Color::from_hex(0xF38BA8);
-const COLOR_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COLOR_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COLOR_PEACH: Color = Color::from_hex(0xFAB387);
-const COLOR_MAUVE: Color = Color::from_hex(0xCBA6F7);
-const COLOR_TEAL: Color = Color::from_hex(0x94E2D5);
 
 // ============================================================================
 // Layout constants
@@ -582,6 +568,7 @@ pub struct TreemapRect {
 /// of the children, choosing the layout dimension that yields the best
 /// (closest to 1:1) aspect ratios.
 pub fn compute_treemap(
+    pal: &Palette,
     node: &FileNode,
     x: f32,
     y: f32,
@@ -606,7 +593,9 @@ pub fn compute_treemap(
     let sizes: Vec<f64> = children.iter().map(|c| c.size_bytes as f64).collect();
     let total: f64 = sizes.iter().sum();
 
-    squarify_layout(&children, &sizes, total, x, y, width, height, &mut rects);
+    squarify_layout(
+        pal, &children, &sizes, total, x, y, width, height, &mut rects,
+    );
 
     rects
 }
@@ -614,6 +603,7 @@ pub fn compute_treemap(
 /// Squarified treemap recursive layout.
 #[allow(clippy::too_many_arguments)]
 fn squarify_layout(
+    pal: &Palette,
     children: &[&FileNode],
     sizes: &[f64],
     total_size: f64,
@@ -634,7 +624,7 @@ fn squarify_layout(
             height,
             node_index: rects.len(),
             depth: child.depth,
-            color: color_for_node(child),
+            color: color_for_node(child, pal),
             path: child.path.clone(),
             name: child.name.clone(),
             size_bytes: child.size_bytes,
@@ -706,7 +696,7 @@ fn squarify_layout(
             height: rh,
             node_index: rects.len(),
             depth: child.depth,
-            color: color_for_node(child),
+            color: color_for_node(child, pal),
             path: child.path.clone(),
             name: child.name.clone(),
             size_bytes: child.size_bytes,
@@ -730,6 +720,7 @@ fn squarify_layout(
 
         if nw > TREEMAP_MIN_RECT && nh > TREEMAP_MIN_RECT {
             squarify_layout(
+                pal,
                 remaining_children,
                 remaining_sizes,
                 remaining_total,
@@ -765,34 +756,34 @@ fn worst_aspect_in_row(sizes: &[f64], row_sum: f64, full_length: f64, row_cross:
 }
 
 /// Pick a color for a treemap rectangle based on file type/extension.
-fn color_for_node(node: &FileNode) -> Color {
+fn color_for_node(node: &FileNode, pal: &Palette) -> Color {
     if node.kind == FileKind::Directory {
-        return COLOR_SURFACE1;
+        return pal.surface1;
     }
     let ext = node.extension();
-    color_for_extension(&ext)
+    color_for_extension(&ext, pal)
 }
 
 /// Map a file extension to a Catppuccin Mocha color.
-fn color_for_extension(ext: &str) -> Color {
+fn color_for_extension(ext: &str, pal: &Palette) -> Color {
     match ext {
         // Video
-        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" => COLOR_BLUE,
+        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" => pal.blue,
         // Images
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "svg" | "webp" | "tiff" => COLOR_GREEN,
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "svg" | "webp" | "tiff" => pal.green,
         // Documents
-        "pdf" | "doc" | "docx" | "odt" | "txt" | "rtf" | "xls" | "xlsx" => COLOR_YELLOW,
+        "pdf" | "doc" | "docx" | "odt" | "txt" | "rtf" | "xls" | "xlsx" => pal.yellow,
         // Code
         "rs" | "py" | "js" | "ts" | "c" | "cpp" | "h" | "java" | "go" | "rb" | "toml" | "json"
-        | "yaml" | "xml" | "html" | "css" => COLOR_PEACH,
+        | "yaml" | "xml" | "html" | "css" => pal.peach,
         // Archives
-        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" => COLOR_RED,
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" => pal.red,
         // Audio
-        "mp3" | "flac" | "wav" | "ogg" | "aac" | "wma" => COLOR_MAUVE,
+        "mp3" | "flac" | "wav" | "ogg" | "aac" | "wma" => pal.mauve,
         // Executables / binaries
-        "exe" | "dll" | "so" | "dylib" | "bin" | "elf" => COLOR_TEAL,
+        "exe" | "dll" | "so" | "dylib" | "bin" | "elf" => pal.teal,
         // Fallback
-        _ => COLOR_SURFACE0,
+        _ => pal.surface0,
     }
 }
 
@@ -1230,6 +1221,12 @@ pub struct DiskAnalyzerUI {
     /// The list would then refuse to scroll at all on exactly the hardware that
     /// scrolls most smoothly.
     wheel: wheel::Accumulator,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for DiskAnalyzerUI {
@@ -1245,6 +1242,7 @@ impl DiskAnalyzerUI {
         let config = AnalyzerConfig::default();
         let path_input = config.scan_path.display().to_string();
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             view_mode: ViewMode::Treemap,
             config,
             dir_tree: None,
@@ -1432,7 +1430,7 @@ impl DiskAnalyzerUI {
             let node = self.current_node().unwrap_or(&tree.root);
             let area = content_rect(size);
             (
-                compute_treemap(node, area.x, area.y, area.w, area.h),
+                compute_treemap(&self.palette, node, area.x, area.y, area.w, area.h),
                 compute_extension_stats(node),
                 flatten_tree(node, node.size_bytes, &self.expanded_paths),
             )
@@ -1572,7 +1570,7 @@ impl DiskAnalyzerUI {
             y: 0.0,
             width: w,
             height: h,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1599,7 +1597,7 @@ impl DiskAnalyzerUI {
             y: 0.0,
             width,
             height: TOOLBAR_HEIGHT,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1618,7 +1616,7 @@ impl DiskAnalyzerUI {
             y: input.y,
             width: input.w,
             height: input.h,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         if self.path_focused {
@@ -1632,7 +1630,7 @@ impl DiskAnalyzerUI {
                 y: input.y,
                 width: input.w,
                 height: input.h,
-                color: COLOR_BLUE,
+                color: self.palette.blue,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
@@ -1641,7 +1639,7 @@ impl DiskAnalyzerUI {
             x: input.x + 8.0,
             y: 14.0,
             text: self.path_input.clone(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(input.w - 16.0),
@@ -1661,14 +1659,18 @@ impl DiskAnalyzerUI {
             y: scan.y,
             width: scan.w,
             height: scan.h,
-            color: if scanning { COLOR_PEACH } else { COLOR_BLUE },
+            color: if scanning {
+                self.palette.peach
+            } else {
+                self.palette.blue
+            },
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         frame.push(RenderCommand::Text {
             x: scan.x + 8.0,
             y: 14.0,
             text: if scanning { "Cancel" } else { "Scan" }.to_string(),
-            color: COLOR_BASE,
+            color: self.palette.base,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(scan.w - 16.0),
@@ -1687,9 +1689,9 @@ impl DiskAnalyzerUI {
                 width: btn.w,
                 height: btn.h,
                 color: if active {
-                    COLOR_SURFACE1
+                    self.palette.surface1
                 } else {
-                    COLOR_SURFACE0
+                    self.palette.surface0
                 },
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
@@ -1697,7 +1699,11 @@ impl DiskAnalyzerUI {
                 x: btn.x + 8.0,
                 y: 14.0,
                 text: (*label).to_string(),
-                color: if active { COLOR_TEXT } else { COLOR_SUBTEXT0 },
+                color: if active {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(btn.w - 16.0),
@@ -1717,7 +1723,7 @@ impl DiskAnalyzerUI {
             y,
             width,
             height: BREADCRUMB_HEIGHT,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1729,7 +1735,7 @@ impl DiskAnalyzerUI {
                     x: bx,
                     y: y + 8.0,
                     text: " / ".to_string(),
-                    color: COLOR_OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -1750,7 +1756,11 @@ impl DiskAnalyzerUI {
                 x: bx,
                 y: y + 8.0,
                 text: segment.clone(),
-                color: if i == last { COLOR_TEXT } else { COLOR_BLUE },
+                color: if i == last {
+                    self.palette.text
+                } else {
+                    self.palette.blue
+                },
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(BREADCRUMB_MAX_SEGMENT),
@@ -1788,7 +1798,7 @@ impl DiskAnalyzerUI {
                 y: rect.y,
                 width: rect.width,
                 height: rect.height,
-                color: COLOR_BASE,
+                color: self.palette.base,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS_SMALL),
             });
@@ -1799,7 +1809,7 @@ impl DiskAnalyzerUI {
                     x: rect.x + 4.0,
                     y: rect.y + 4.0,
                     text: rect.name.clone(),
-                    color: COLOR_TEXT,
+                    color: self.palette.text,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(rect.width - 8.0),
@@ -1812,7 +1822,7 @@ impl DiskAnalyzerUI {
                     x: rect.x + 4.0,
                     y: rect.y + 18.0,
                     text: format_size(rect.size_bytes),
-                    color: COLOR_SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(rect.width - 8.0),
@@ -1843,7 +1853,7 @@ impl DiskAnalyzerUI {
             x: (cx - 150.0).max(area.x),
             y: cy,
             text: message,
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Regular,
             max_width: Some(area.w),
@@ -1886,10 +1896,10 @@ impl DiskAnalyzerUI {
             y: area.y,
             width,
             height: TABLE_HEADER_HEIGHT,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
-        frame.draw_with(|cmds| table.header(cmds, area.y + 8.0, COLOR_TEXT, FONT_SIZE));
+        frame.draw_with(|cmds| table.header(cmds, area.y + 8.0, self.palette.text, FONT_SIZE));
         for (index, column) in SORTABLE_COLUMNS.iter().enumerate() {
             frame.hit(
                 Target::ColumnHeader(*column),
@@ -1911,7 +1921,7 @@ impl DiskAnalyzerUI {
                     SortDirection::Ascending => "^".to_string(),
                     SortDirection::Descending => "v".to_string(),
                 },
-                color: COLOR_BLUE,
+                color: self.palette.blue,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(8.0),
@@ -1955,7 +1965,7 @@ impl DiskAnalyzerUI {
                     y: ry,
                     width,
                     height: ROW_HEIGHT,
-                    color: COLOR_SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -1976,7 +1986,7 @@ impl DiskAnalyzerUI {
                     CHEVRON_WIDTH,
                     ry + 6.0,
                     chevron,
-                    COLOR_OVERLAY0,
+                    self.palette.overlay0,
                     FONT_SIZE,
                     Fit::Start,
                     FontWeightHint::Regular,
@@ -1998,9 +2008,9 @@ impl DiskAnalyzerUI {
                     ry + 6.0,
                     &row.name,
                     if row.kind == FileKind::Directory {
-                        COLOR_BLUE
+                        self.palette.blue
                     } else {
-                        COLOR_TEXT
+                        self.palette.text
                     },
                     FONT_SIZE,
                     Fit::End,
@@ -2014,7 +2024,7 @@ impl DiskAnalyzerUI {
                     SIZE_COL,
                     ry + 6.0,
                     &format_size(row.size_bytes),
-                    COLOR_SUBTEXT0,
+                    self.palette.subtext0,
                     FONT_SIZE,
                     Fit::Start,
                 );
@@ -2025,7 +2035,7 @@ impl DiskAnalyzerUI {
                     PERCENT_COL,
                     ry + 6.0,
                     &format_percent(row.percentage),
-                    COLOR_SUBTEXT0,
+                    self.palette.subtext0,
                     FONT_SIZE,
                     Fit::Start,
                 );
@@ -2036,7 +2046,7 @@ impl DiskAnalyzerUI {
                     KIND_COL,
                     ry + 6.0,
                     file_kind_label(row.kind),
-                    COLOR_SUBTEXT0,
+                    self.palette.subtext0,
                     FONT_SIZE,
                     Fit::Start,
                 );
@@ -2067,7 +2077,7 @@ impl DiskAnalyzerUI {
             x: PADDING,
             y: area.y,
             text: "File Types by Size".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w),
@@ -2104,7 +2114,7 @@ impl DiskAnalyzerUI {
                 x: PADDING,
                 y: by + 4.0,
                 text: label,
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0 - PADDING),
@@ -2116,7 +2126,7 @@ impl DiskAnalyzerUI {
                 y: by,
                 width: bar_w,
                 height: BAR_CHART_ROW_HEIGHT,
-                color: color_for_extension(&stat.extension),
+                color: color_for_extension(&stat.extension, &self.palette),
                 corner_radii: CornerRadii::all(CORNER_RADIUS_SMALL),
             });
 
@@ -2130,7 +2140,7 @@ impl DiskAnalyzerUI {
                     stat.count,
                     format_percent(stat.percentage),
                 ),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 // Measured against the room actually left to the right of the
@@ -2156,7 +2166,7 @@ impl DiskAnalyzerUI {
             y,
             width,
             height: STATUS_BAR_HEIGHT,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2165,11 +2175,11 @@ impl DiskAnalyzerUI {
             y: y + 6.0,
             text: self.status_text(),
             color: if self.scan_error.is_some() {
-                COLOR_RED
+                self.palette.red
             } else if !self.complete {
-                COLOR_YELLOW
+                self.palette.yellow
             } else {
-                COLOR_SUBTEXT0
+                self.palette.subtext0
             },
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
@@ -2247,7 +2257,7 @@ impl DiskAnalyzerUI {
             y: ty,
             width: tw,
             height: th,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         frame.push(RenderCommand::StrokeRect {
@@ -2255,7 +2265,7 @@ impl DiskAnalyzerUI {
             y: ty,
             width: tw,
             height: th,
-            color: COLOR_OVERLAY0,
+            color: self.palette.overlay0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -2266,7 +2276,7 @@ impl DiskAnalyzerUI {
                 x: tx + 8.0,
                 y: line_y,
                 text: line.to_string(),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(tw - 16.0),
@@ -2643,6 +2653,10 @@ fn lighten_color(color: Color, amount: u8) -> Color {
 // ============================================================================
 
 impl App for DiskAnalyzerUI {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Disk Usage Analyzer".to_string()
     }
@@ -3043,7 +3057,8 @@ mod tests {
         let mut root = sample_tree();
         calculate_sizes(&mut root);
         assign_depths(&mut root, 0);
-        let rects = compute_treemap(&root, 0.0, 0.0, 400.0, 300.0);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let rects = compute_treemap(&pal, &root, 0.0, 0.0, 400.0, 300.0);
         assert!(!rects.is_empty());
         // Should have one rect per child of root.
         assert_eq!(rects.len(), 3); // docs dir, src dir, logo.png
@@ -3051,10 +3066,11 @@ mod tests {
 
     #[test]
     fn test_treemap_covers_area() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut root = large_tree();
         calculate_sizes(&mut root);
         assign_depths(&mut root, 0);
-        let rects = compute_treemap(&root, 0.0, 0.0, 800.0, 600.0);
+        let rects = compute_treemap(&pal, &root, 0.0, 0.0, 800.0, 600.0);
 
         // All rects should be within bounds.
         for rect in &rects {
@@ -3076,17 +3092,19 @@ mod tests {
     #[test]
     fn test_treemap_empty() {
         let root = FileNode::new_dir("empty", "/empty");
-        let rects = compute_treemap(&root, 0.0, 0.0, 400.0, 300.0);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let rects = compute_treemap(&pal, &root, 0.0, 0.0, 400.0, 300.0);
         assert!(rects.is_empty());
     }
 
     #[test]
     fn test_treemap_single_child() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut root = FileNode::new_dir("r", "/r");
         root.add_child(FileNode::new_file("f.txt", "/r/f.txt", 100));
         calculate_sizes(&mut root);
         assign_depths(&mut root, 0);
-        let rects = compute_treemap(&root, 10.0, 20.0, 300.0, 200.0);
+        let rects = compute_treemap(&pal, &root, 10.0, 20.0, 300.0, 200.0);
         assert_eq!(rects.len(), 1);
         let r = &rects[0];
         assert!((r.x - 10.0).abs() < 0.01);
@@ -3097,20 +3115,22 @@ mod tests {
 
     #[test]
     fn test_treemap_tiny_rect_skipped() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let root = FileNode::new_dir("r", "/r");
-        let rects = compute_treemap(&root, 0.0, 0.0, 2.0, 2.0);
+        let rects = compute_treemap(&pal, &root, 0.0, 0.0, 2.0, 2.0);
         assert!(rects.is_empty());
     }
 
     #[test]
     fn test_treemap_proportional_sizes() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut root = FileNode::new_dir("r", "/r");
         root.add_child(FileNode::new_file("big.dat", "/r/big.dat", 900));
         root.add_child(FileNode::new_file("small.dat", "/r/small.dat", 100));
         calculate_sizes(&mut root);
         assign_depths(&mut root, 0);
 
-        let rects = compute_treemap(&root, 0.0, 0.0, 1000.0, 100.0);
+        let rects = compute_treemap(&pal, &root, 0.0, 0.0, 1000.0, 100.0);
         assert_eq!(rects.len(), 2);
 
         let big_area = rects[0].width * rects[0].height;
@@ -3127,6 +3147,7 @@ mod tests {
 
     #[test]
     fn test_hit_test_basic() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let rects = vec![
             TreemapRect {
                 x: 0.0,
@@ -3135,7 +3156,7 @@ mod tests {
                 height: 100.0,
                 node_index: 0,
                 depth: 1,
-                color: COLOR_BLUE,
+                color: pal.blue,
                 path: PathBuf::from("/a"),
                 name: "a".to_string(),
                 size_bytes: 100,
@@ -3148,7 +3169,7 @@ mod tests {
                 height: 100.0,
                 node_index: 1,
                 depth: 1,
-                color: COLOR_RED,
+                color: pal.red,
                 path: PathBuf::from("/b"),
                 name: "b".to_string(),
                 size_bytes: 200,
@@ -3167,6 +3188,7 @@ mod tests {
 
     #[test]
     fn test_hit_test_edge() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let rects = vec![TreemapRect {
             x: 10.0,
             y: 20.0,
@@ -3174,7 +3196,7 @@ mod tests {
             height: 30.0,
             node_index: 0,
             depth: 0,
-            color: COLOR_BLUE,
+            color: pal.blue,
             path: PathBuf::from("/x"),
             name: "x".to_string(),
             size_bytes: 50,
@@ -3637,31 +3659,36 @@ mod tests {
 
     #[test]
     fn test_color_for_extension_videos() {
-        assert_eq!(color_for_extension("mp4"), COLOR_BLUE);
-        assert_eq!(color_for_extension("mkv"), COLOR_BLUE);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(color_for_extension("mp4", &pal), pal.blue);
+        assert_eq!(color_for_extension("mkv", &pal), pal.blue);
     }
 
     #[test]
     fn test_color_for_extension_images() {
-        assert_eq!(color_for_extension("png"), COLOR_GREEN);
-        assert_eq!(color_for_extension("jpg"), COLOR_GREEN);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(color_for_extension("png", &pal), pal.green);
+        assert_eq!(color_for_extension("jpg", &pal), pal.green);
     }
 
     #[test]
     fn test_color_for_extension_code() {
-        assert_eq!(color_for_extension("rs"), COLOR_PEACH);
-        assert_eq!(color_for_extension("py"), COLOR_PEACH);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(color_for_extension("rs", &pal), pal.peach);
+        assert_eq!(color_for_extension("py", &pal), pal.peach);
     }
 
     #[test]
     fn test_color_for_extension_archives() {
-        assert_eq!(color_for_extension("zip"), COLOR_RED);
-        assert_eq!(color_for_extension("tar"), COLOR_RED);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(color_for_extension("zip", &pal), pal.red);
+        assert_eq!(color_for_extension("tar", &pal), pal.red);
     }
 
     #[test]
     fn test_color_for_extension_unknown() {
-        assert_eq!(color_for_extension("xyz"), COLOR_SURFACE0);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(color_for_extension("xyz", &pal), pal.surface0);
     }
 
     #[test]
@@ -4673,5 +4700,64 @@ mod tests {
         );
         probe::key(&mut ui, &alt_tab);
         assert_eq!(ui.view_mode, view);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut DiskAnalyzerUI) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = DiskAnalyzerUI::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

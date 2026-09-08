@@ -38,6 +38,7 @@
 #![allow(clippy::fn_params_excessive_bools)]
 #![allow(clippy::wildcard_imports)]
 
+use appearance::Palette;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -51,18 +52,6 @@ use std::collections::VecDeque;
 // ============================================================================
 // Catppuccin Mocha theme constants
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const SKY: Color = Color::from_hex(0x89DCEB);
 
 // ============================================================================
 // Layout constants
@@ -412,14 +401,14 @@ pub struct SlideTheme {
 
 impl SlideTheme {
     /// The default "Mocha" dark theme.
-    pub fn mocha() -> Self {
+    pub fn mocha(pal: &Palette) -> Self {
         Self {
             name: String::from("Mocha"),
-            background: CRUST,
-            title_color: TEXT,
-            subtitle_color: SUBTEXT1,
-            body_color: SUBTEXT0,
-            accent: BLUE,
+            background: pal.crust,
+            title_color: pal.text,
+            subtitle_color: pal.subtext1,
+            body_color: pal.subtext0,
+            accent: pal.blue,
             title_size: 44.0,
             subtitle_size: 28.0,
             body_size: 20.0,
@@ -815,17 +804,26 @@ pub struct SlidesApp {
     show_notes: bool,
     /// Title of the presentation.
     title: String,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl SlidesApp {
     /// Create a new presentation with one default title slide.
     pub fn new(width: f32, height: f32) -> Self {
-        let theme = SlideTheme::mocha();
+        let theme = SlideTheme::mocha(&Palette::from_settings(
+            &appearance::AppearanceSettings::default(),
+        ));
         let mut id_gen = IdGen::new(1);
         let slide_id = id_gen.next_id();
         let first = Slide::new(slide_id, SlideLayout::TitleSlide, &theme, &mut id_gen);
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             slides: vec![first],
             current_index: 0,
             theme,
@@ -1488,7 +1486,7 @@ impl SlidesApp {
             y: 0.0,
             width: self.window_width,
             height: self.window_height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1508,7 +1506,7 @@ impl SlidesApp {
             y: 0.0,
             width: self.window_width,
             height: TOOLBAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1518,7 +1516,7 @@ impl SlidesApp {
             y1: TOOLBAR_HEIGHT,
             x2: self.window_width,
             y2: TOOLBAR_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -1527,7 +1525,7 @@ impl SlidesApp {
             x: 12.0,
             y: 12.0,
             text: self.title.clone(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
@@ -1543,19 +1541,28 @@ impl SlidesApp {
             ("Export", 540.0),
         ];
         for &(label, bx) in buttons {
-            self.render_button(cmds, bx, 6.0, 70.0, 28.0, label, SURFACE0, TEXT);
+            self.render_button(
+                cmds,
+                bx,
+                6.0,
+                70.0,
+                28.0,
+                label,
+                self.palette.surface0,
+                self.palette.text,
+            );
         }
 
         // Undo/Redo indicators.
         let undo_col = if self.undo_mgr.can_undo() {
-            BLUE
+            self.palette.blue
         } else {
-            OVERLAY0
+            self.palette.overlay0
         };
         let redo_col = if self.undo_mgr.can_redo() {
-            BLUE
+            self.palette.blue
         } else {
-            OVERLAY0
+            self.palette.overlay0
         };
         cmds.push(RenderCommand::Text {
             x: 630.0,
@@ -1583,7 +1590,7 @@ impl SlidesApp {
             x: 740.0,
             y: 12.0,
             text: format!("Theme: {}", self.theme.name),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1631,7 +1638,7 @@ impl SlidesApp {
             y,
             width: self.window_width,
             height: STATUS_BAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Line {
@@ -1639,7 +1646,7 @@ impl SlidesApp {
             y1: y,
             x2: self.window_width,
             y2: y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -1653,7 +1660,7 @@ impl SlidesApp {
             x: 12.0,
             y: y + 5.0,
             text: slide_pos,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1666,7 +1673,7 @@ impl SlidesApp {
                 x: 200.0,
                 y: y + 5.0,
                 text: trans,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1678,7 +1685,7 @@ impl SlidesApp {
                 x: 400.0,
                 y: y + 5.0,
                 text: layout_info,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1695,7 +1702,7 @@ impl SlidesApp {
             x: self.window_width - 120.0,
             y: y + 5.0,
             text: view_label.to_string(),
-            color: TEAL,
+            color: self.palette.teal,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1729,7 +1736,7 @@ impl SlidesApp {
             y: top,
             width: SIDEBAR_WIDTH,
             height: panel_h,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1739,7 +1746,7 @@ impl SlidesApp {
             y1: top,
             x2: SIDEBAR_WIDTH,
             y2: bot,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -1765,7 +1772,7 @@ impl SlidesApp {
                     y: ty - 2.0,
                     width: thumb_w + 4.0,
                     height: thumb_h + 4.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(CORNER_R),
                 });
@@ -1789,7 +1796,7 @@ impl SlidesApp {
                     x: THUMBNAIL_PAD + 4.0,
                     y: ty + 8.0,
                     text: preview,
-                    color: TEXT,
+                    color: self.palette.text,
                     font_size: 8.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(thumb_w - 8.0),
@@ -1802,7 +1809,11 @@ impl SlidesApp {
                 x: THUMBNAIL_PAD,
                 y: ty + thumb_h + 2.0,
                 text: format!("Slide {}", i.saturating_add(1)),
-                color: if is_current { BLUE } else { OVERLAY0 },
+                color: if is_current {
+                    self.palette.blue
+                } else {
+                    self.palette.overlay0
+                },
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1836,7 +1847,7 @@ impl SlidesApp {
             y: top,
             width: avail_w,
             height: avail_h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1892,7 +1903,7 @@ impl SlidesApp {
                     y: cy + ey * scale - 1.0,
                     width: ew * scale + 2.0,
                     height: eh * scale + 2.0,
-                    color: SKY,
+                    color: self.palette.sky,
                     line_width: 1.5,
                     corner_radii: CornerRadii::ZERO,
                 });
@@ -1907,7 +1918,7 @@ impl SlidesApp {
                     self.current_index.saturating_add(1),
                     self.slides.len(),
                 ),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2090,7 +2101,7 @@ impl SlidesApp {
                     y: iy,
                     width: iw,
                     height: ih,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(CORNER_R),
                 });
@@ -2099,7 +2110,7 @@ impl SlidesApp {
                     x: ix + iw * 0.25,
                     y: iy + ih * 0.45,
                     text: placeholder_label.clone(),
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: 14.0 * scale,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(iw * 0.5),
@@ -2151,7 +2162,7 @@ impl SlidesApp {
             y: top,
             width: PROPERTIES_WIDTH,
             height: ph,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
         // Separator.
@@ -2160,7 +2171,7 @@ impl SlidesApp {
             y1: top,
             x2: px,
             y2: bot,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2173,7 +2184,7 @@ impl SlidesApp {
             x: lx,
             y,
             text: String::from("Properties"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2214,7 +2225,7 @@ impl SlidesApp {
                 y1: y,
                 x2: px + PROPERTIES_WIDTH - 12.0,
                 y2: y,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 width: 1.0,
             });
             y += 12.0;
@@ -2226,7 +2237,7 @@ impl SlidesApp {
                         x: lx,
                         y,
                         text: String::from("Element"),
-                        color: BLUE,
+                        color: self.palette.blue,
                         font_size: 13.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
@@ -2342,7 +2353,7 @@ impl SlidesApp {
                     x: lx,
                     y,
                     text: String::from("No element selected"),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(val_w),
@@ -2355,7 +2366,7 @@ impl SlidesApp {
                     x: lx,
                     y,
                     text: String::from("Insert Element:"),
-                    color: SUBTEXT1,
+                    color: self.palette.subtext1,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
@@ -2366,7 +2377,16 @@ impl SlidesApp {
                 let insert_items: &[&str] =
                     &["Text Box", "Rectangle", "Ellipse", "Line", "Arrow", "Image"];
                 for label in insert_items {
-                    self.render_button(cmds, lx, y, val_w - 4.0, 22.0, label, SURFACE0, TEXT);
+                    self.render_button(
+                        cmds,
+                        lx,
+                        y,
+                        val_w - 4.0,
+                        22.0,
+                        label,
+                        self.palette.surface0,
+                        self.palette.text,
+                    );
                     y += 26.0;
                 }
             }
@@ -2387,7 +2407,7 @@ impl SlidesApp {
             x,
             y,
             text: key.to_string(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(70.0),
@@ -2397,7 +2417,7 @@ impl SlidesApp {
             x: x + 75.0,
             y,
             text: value.to_string(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(120.0),
@@ -2417,7 +2437,7 @@ impl SlidesApp {
             y: notes_y,
             width: notes_w,
             height: NOTES_HEIGHT,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
         // Separator.
@@ -2426,7 +2446,7 @@ impl SlidesApp {
             y1: notes_y,
             x2: nx + notes_w,
             y2: notes_y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
         // Header.
@@ -2434,7 +2454,7 @@ impl SlidesApp {
             x: nx + 10.0,
             y: notes_y + 6.0,
             text: String::from("Speaker Notes"),
-            color: SUBTEXT1,
+            color: self.palette.subtext1,
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2452,9 +2472,9 @@ impl SlidesApp {
             y: notes_y + 24.0,
             text: display.to_string(),
             color: if notes_text.is_empty() {
-                OVERLAY0
+                self.palette.overlay0
             } else {
-                TEXT
+                self.palette.text
             },
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
@@ -2510,7 +2530,7 @@ impl SlidesApp {
                     y: ty - 2.0,
                     width: thumb_w + 4.0,
                     height: thumb_h + 4.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(CORNER_R),
                 });
@@ -2534,7 +2554,7 @@ impl SlidesApp {
                     x: tx + 8.0,
                     y: ty + 12.0,
                     text: preview,
-                    color: TEXT,
+                    color: self.palette.text,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(thumb_w - 16.0),
@@ -2548,7 +2568,7 @@ impl SlidesApp {
                     x: tx + 4.0,
                     y: ty + thumb_h - 14.0,
                     text: slide.transition.label().to_string(),
-                    color: TEAL,
+                    color: self.palette.teal,
                     font_size: 8.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -2561,7 +2581,11 @@ impl SlidesApp {
                 x: tx,
                 y: ty + thumb_h + 4.0,
                 text: format!("{}. {}", i.saturating_add(1), slide.layout.label()),
-                color: if is_current { BLUE } else { SUBTEXT0 },
+                color: if is_current {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(thumb_w),
@@ -2644,6 +2668,10 @@ fn push_html_escaped(out: &mut String, text: &str) {
 // ============================================================================
 
 impl App for SlidesApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         format!(
             "{} — slide {} of {}",
@@ -2943,6 +2971,7 @@ mod tests {
     /// fields individually would have been just as easy to write incompletely.
     #[test]
     fn no_text_field_can_inject_a_tag_into_the_export() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         const PAYLOAD: &str = "<script>alert(1)</script>";
 
         let mut app = SlidesApp::new(800.0, 600.0);
@@ -2957,7 +2986,7 @@ mod tests {
             height: 10.0,
             text: PAYLOAD.to_string(),
             font_size: 12.0,
-            color: TEXT,
+            color: pal.text,
             bold: false,
             centered: false,
         });
@@ -2977,7 +3006,7 @@ mod tests {
             height: 10.0,
             items: vec![PAYLOAD.to_string()],
             font_size: 12.0,
-            color: TEXT,
+            color: pal.text,
         });
 
         let html = app.export_html();
@@ -3081,6 +3110,7 @@ mod tests {
 
     #[test]
     fn test_textbox_bounds() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let e = SlideElement::TextBox {
             id: 1,
             x: 10.0,
@@ -3089,7 +3119,7 @@ mod tests {
             height: 50.0,
             text: String::from("Hi"),
             font_size: 14.0,
-            color: TEXT,
+            color: pal.text,
             bold: false,
             centered: false,
         };
@@ -3099,6 +3129,7 @@ mod tests {
 
     #[test]
     fn test_element_translate() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut e = SlideElement::Shape {
             id: 2,
             kind: ShapeKind::Rectangle,
@@ -3106,8 +3137,8 @@ mod tests {
             y: 50.0,
             width: 80.0,
             height: 60.0,
-            fill_color: BLUE,
-            stroke_color: BLUE,
+            fill_color: pal.blue,
+            stroke_color: pal.blue,
             stroke_width: 1.0,
         };
         e.translate(10.0, -5.0);
@@ -3132,6 +3163,7 @@ mod tests {
 
     #[test]
     fn test_element_set_size() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut e = SlideElement::BulletList {
             id: 4,
             x: 0.0,
@@ -3140,7 +3172,7 @@ mod tests {
             height: 200.0,
             items: vec![String::from("A")],
             font_size: 16.0,
-            color: TEXT,
+            color: pal.text,
         };
         e.set_size(300.0, 400.0);
         let (_, _, w, h) = e.bounds();
@@ -3152,7 +3184,8 @@ mod tests {
 
     #[test]
     fn test_theme_mocha() {
-        let t = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let t = SlideTheme::mocha(&pal);
         assert_eq!(t.name, "Mocha");
         assert!(t.title_size > t.subtitle_size);
         assert!(t.subtitle_size > t.body_size);
@@ -3174,7 +3207,8 @@ mod tests {
 
     #[test]
     fn test_slide_new_title_layout() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(100);
         let s = Slide::new(1, SlideLayout::TitleSlide, &theme, &mut id_gen);
         assert_eq!(s.layout, SlideLayout::TitleSlide);
@@ -3185,7 +3219,8 @@ mod tests {
 
     #[test]
     fn test_slide_blank_layout_has_no_elements() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(200);
         let s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
         assert!(s.elements.is_empty());
@@ -3193,7 +3228,8 @@ mod tests {
 
     #[test]
     fn test_slide_effective_bg_default() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(300);
         let s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
         assert_eq!(s.effective_bg(&theme), theme.background);
@@ -3201,7 +3237,8 @@ mod tests {
 
     #[test]
     fn test_slide_effective_bg_override() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(400);
         let mut s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
         let red = Color::from_hex(0xF38BA8);
@@ -3211,7 +3248,8 @@ mod tests {
 
     #[test]
     fn test_slide_element_by_id() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(500);
         let s = Slide::new(1, SlideLayout::TitleSlide, &theme, &mut id_gen);
         let first_id = s.elements[0].id();
@@ -3221,7 +3259,8 @@ mod tests {
 
     #[test]
     fn test_slide_remove_element() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(600);
         let mut s = Slide::new(1, SlideLayout::TitleSlide, &theme, &mut id_gen);
         let count_before = s.elements.len();
@@ -3236,7 +3275,8 @@ mod tests {
 
     #[test]
     fn test_undo_redo_basic() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(700);
         let s1 = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
         let s2 = Slide::new(2, SlideLayout::TitleSlide, &theme, &mut id_gen);
@@ -3266,7 +3306,8 @@ mod tests {
 
     #[test]
     fn test_undo_max_depth() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(800);
         let s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
         let mut mgr = UndoManager::new(3);
@@ -3280,7 +3321,8 @@ mod tests {
 
     #[test]
     fn test_save_clears_redo() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(900);
         let s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
         let mut mgr = UndoManager::new(10);
@@ -3588,7 +3630,8 @@ mod tests {
     /// 30 characters.
     #[test]
     fn a_long_title_is_not_pre_truncated() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(8100);
         let mut s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
         s.title = "Q3 Revenue by Region and Segment, with Year-on-Year Comparison".to_string();
@@ -3599,7 +3642,8 @@ mod tests {
     /// its length. Nothing is cut here now, so a non-Latin title survives whole.
     #[test]
     fn a_non_latin_title_is_not_shortened() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(8200);
         let mut s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
         s.title = "四半期ごとの売上と地域別の内訳について".to_string();
@@ -3611,7 +3655,8 @@ mod tests {
     /// thumbnail label.
     #[test]
     fn a_multi_line_body_previews_only_its_first_line() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(8300);
         let mut s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
         s.elements.push(SlideElement::TextBox {
@@ -3622,7 +3667,7 @@ mod tests {
             height: 50.0,
             text: String::from("Opening remarks\nand then the rest"),
             font_size: 14.0,
-            color: TEXT,
+            color: pal.text,
             bold: false,
             centered: false,
         });
@@ -3644,7 +3689,8 @@ mod tests {
 
     #[test]
     fn test_slide_preview_text_from_elements() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(5000);
         let mut s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
         assert!(slide_preview_text(&s).is_empty());
@@ -3656,7 +3702,7 @@ mod tests {
             height: 30.0,
             text: String::from("Preview text"),
             font_size: 14.0,
-            color: TEXT,
+            color: pal.text,
             bold: false,
             centered: false,
         });
@@ -3665,7 +3711,8 @@ mod tests {
 
     #[test]
     fn test_slide_preview_from_bullets() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(6000);
         let mut s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
         s.elements.push(SlideElement::BulletList {
@@ -3676,7 +3723,7 @@ mod tests {
             height: 100.0,
             items: vec![String::from("Bullet one")],
             font_size: 14.0,
-            color: TEXT,
+            color: pal.text,
         });
         assert_eq!(slide_preview_text(&s), "Bullet one");
     }
@@ -3685,7 +3732,8 @@ mod tests {
 
     #[test]
     fn test_title_slide_elements() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(7000);
         let s = Slide::new(1, SlideLayout::TitleSlide, &theme, &mut id_gen);
         // Title + Subtitle + decorative line = 3 elements.
@@ -3694,7 +3742,8 @@ mod tests {
 
     #[test]
     fn test_title_content_elements() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(7100);
         let s = Slide::new(1, SlideLayout::TitleContent, &theme, &mut id_gen);
         // Title + bullet list = 2.
@@ -3703,7 +3752,8 @@ mod tests {
 
     #[test]
     fn test_section_header_elements() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(7200);
         let s = Slide::new(1, SlideLayout::SectionHeader, &theme, &mut id_gen);
         // Title + bottom bar = 2.
@@ -3712,7 +3762,8 @@ mod tests {
 
     #[test]
     fn test_two_column_elements() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(7300);
         let s = Slide::new(1, SlideLayout::TwoColumn, &theme, &mut id_gen);
         // Title + left bullets + right bullets = 3.
@@ -3721,10 +3772,70 @@ mod tests {
 
     #[test]
     fn test_image_caption_elements() {
-        let theme = SlideTheme::mocha();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = SlideTheme::mocha(&pal);
         let mut id_gen = IdGen::new(7400);
         let s = Slide::new(1, SlideLayout::ImageCaption, &theme, &mut id_gen);
         // Image placeholder + caption = 2.
         assert_eq!(s.elements.len(), 2);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut SlidesApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = SlidesApp::new(1000.0, 700.0);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

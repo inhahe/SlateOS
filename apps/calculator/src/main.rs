@@ -15,6 +15,7 @@
 //! a key's picture, its clickable area and its meaning are one fact instead of
 //! three that could drift apart.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -947,21 +948,16 @@ fn format_result(value: f64) -> String {
 }
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colours
 // ============================================================================
-
-const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
-const COLOR_MANTLE: Color = Color::from_hex(0x181825);
-const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
-const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
-const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COLOR_SUBTEXT: Color = Color::from_hex(0xA6ADC8);
-const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
-const COLOR_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COLOR_RED: Color = Color::from_hex(0xF38BA8);
-const COLOR_PEACH: Color = Color::from_hex(0xFAB387);
-const COLOR_MAUVE: Color = Color::from_hex(0xCBA6F7);
-const COLOR_TEAL: Color = Color::from_hex(0x94E2D5);
+//
+// There are none here. They come from `appearance::Palette`, handed over by
+// `App::theme_changed` (`design-decisions.md` §822), so this window follows
+// the light/dark switch, the accent colour and the high-contrast schemes.
+//
+// It used to hold eleven Catppuccin Mocha constants, which is why picking a
+// light theme left the calculator dark. See `known-issues.md`
+// `TD-C-129-OF-135-APPLICATIONS-IGNORE-THE-THEME-ENTIRELY`.
 
 // ============================================================================
 // Layout constants
@@ -1040,20 +1036,18 @@ fn key_rows(mode: CalcMode) -> Vec<&'static [&'static str]> {
 ///
 /// Keyed on the label because the label *is* the key's identity here -- the
 /// same string [`Target::Key`] carries and [`handle_button`] dispatches on.
-fn key_colors(label: &str) -> (Color, Color) {
+fn key_colors(label: &str, pal: &Palette) -> (Color, Color) {
     match label {
-        "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "." => {
-            (COLOR_SURFACE0, COLOR_TEXT)
-        }
-        "=" => (COLOR_BLUE, COLOR_BASE),
-        "C" | "CE" => (COLOR_SURFACE1, COLOR_RED),
-        "MC" | "MR" | "M+" | "M-" | "MS" => (COLOR_SURFACE1, COLOR_GREEN),
-        "pi" | "e" => (COLOR_SURFACE1, COLOR_MAUVE),
+        "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "." => (pal.surface0, pal.text),
+        "=" => (pal.blue, pal.base),
+        "C" | "CE" => (pal.surface1, pal.red),
+        "MC" | "MR" | "M+" | "M-" | "MS" => (pal.surface1, pal.green),
+        "pi" | "e" => (pal.surface1, pal.mauve),
         "+" | "-" | "*" | "/" | "mod" | "x^y" | "%" | "(" | ")" | "\u{232B}" | "\u{00B1}" => {
-            (COLOR_SURFACE1, COLOR_PEACH)
+            (pal.surface1, pal.peach)
         }
         // Everything else on a key row is a function: sin, log, n! and friends.
-        _ => (COLOR_SURFACE1, COLOR_TEAL),
+        _ => (pal.surface1, pal.teal),
     }
 }
 
@@ -1223,6 +1217,12 @@ pub struct CalculatorUi {
     history_scroll: usize,
     /// Banks fractions of a wheel notch so a trackpad's small deltas add up.
     wheel: wheel::Accumulator,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls [`App::theme_changed`] before the first frame, so nothing is ever
+    /// drawn with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for CalculatorUi {
@@ -1237,6 +1237,7 @@ impl CalculatorUi {
     pub fn new() -> Self {
         Self {
             calc: Calculator::new(),
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
             history_scroll: 0,
@@ -1266,7 +1267,7 @@ impl CalculatorUi {
             y: 0.0,
             width: layout.window.w,
             height: layout.window.h,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -1292,11 +1293,17 @@ impl CalculatorUi {
     }
 
     /// Draw one key: its background, its centred label, and its hit box.
-    fn render_key(frame: &mut Frame, cell: Rect, label: &'static str, font_size: f32) {
+    fn render_key(
+        frame: &mut Frame,
+        pal: &Palette,
+        cell: Rect,
+        label: &'static str,
+        font_size: f32,
+    ) {
         if cell.w <= 0.0 || cell.h <= 0.0 {
             return;
         }
-        let (bg, fg) = key_colors(label);
+        let (bg, fg) = key_colors(label, pal);
         frame.push(RenderCommand::FillRect {
             x: cell.x,
             y: cell.y,
@@ -1340,7 +1347,12 @@ impl CalculatorUi {
 
         for (index, label) in [mode_label, angle_label].into_iter().enumerate() {
             let (x, w) = cell_at(band.x, band.w, 4, index);
-            Self::render_status_button(frame, Rect::new(x, band.y, w, band.h), label);
+            Self::render_status_button(
+                frame,
+                &self.palette,
+                Rect::new(x, band.y, w, band.h),
+                label,
+            );
         }
 
         // The memory cell is a readout, not a button: it names what is stored
@@ -1352,7 +1364,7 @@ impl CalculatorUi {
                 x: mem_x,
                 y: band.y + (band.h - FONT_SIZE_STATUS) / 2.0,
                 text: format!("M {}", format_result(self.calc.memory)),
-                color: COLOR_GREEN,
+                color: self.palette.green,
                 font_size: FONT_SIZE_STATUS,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(mem_w),
@@ -1361,10 +1373,15 @@ impl CalculatorUi {
         }
 
         let (hist_x, hist_w) = cell_at(band.x, band.w, 4, 3);
-        Self::render_status_button(frame, Rect::new(hist_x, band.y, hist_w, band.h), "Hist");
+        Self::render_status_button(
+            frame,
+            &self.palette,
+            Rect::new(hist_x, band.y, hist_w, band.h),
+            "Hist",
+        );
     }
 
-    fn render_status_button(frame: &mut Frame, cell: Rect, label: &'static str) {
+    fn render_status_button(frame: &mut Frame, pal: &Palette, cell: Rect, label: &'static str) {
         if cell.w <= 0.0 || cell.h <= 0.0 {
             return;
         }
@@ -1373,7 +1390,7 @@ impl CalculatorUi {
             y: cell.y,
             width: cell.w,
             height: cell.h,
-            color: COLOR_SURFACE0,
+            color: pal.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         let (centre_x, _) = cell.centre();
@@ -1382,7 +1399,7 @@ impl CalculatorUi {
                 .max(cell.x),
             y: cell.y + (cell.h - FONT_SIZE_STATUS) / 2.0,
             text: String::from(label),
-            color: COLOR_BLUE,
+            color: pal.blue,
             font_size: FONT_SIZE_STATUS,
             font_weight: FontWeightHint::Regular,
             max_width: Some(cell.w),
@@ -1401,7 +1418,7 @@ impl CalculatorUi {
             y: band.y,
             width: band.w,
             height: band.h,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         frame.push(RenderCommand::StrokeRect {
@@ -1409,7 +1426,7 @@ impl CalculatorUi {
             y: band.y,
             width: band.w,
             height: band.h,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -1425,7 +1442,7 @@ impl CalculatorUi {
                 x: band.x + PADDING,
                 y: band.y + PADDING,
                 text: format!("({}", self.calc.paren_depth),
-                color: COLOR_PEACH,
+                color: self.palette.peach,
                 font_size: FONT_SIZE_EXPR,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(inner_w),
@@ -1443,7 +1460,7 @@ impl CalculatorUi {
             .max(band.x + PADDING),
             y: band.y + PADDING,
             text: self.calc.expression.clone(),
-            color: COLOR_SUBTEXT,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_EXPR,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner_w),
@@ -1454,9 +1471,9 @@ impl CalculatorUi {
         // number, and reading it in the same colour as one is how a user comes
         // to believe the calculator answered.
         let result_color = if self.calc.display.starts_with("Error:") {
-            COLOR_RED
+            self.palette.red
         } else {
-            COLOR_TEXT
+            self.palette.text
         };
         frame.push(RenderCommand::Text {
             x: text::right_x(
@@ -1482,6 +1499,7 @@ impl CalculatorUi {
                 let (x, w) = cell_at(band.x, band.w, labels.len(), index);
                 Self::render_key(
                     frame,
+                    &self.palette,
                     Rect::new(x, band.y, w, band.h),
                     label,
                     key_font_size(label),
@@ -1514,14 +1532,14 @@ impl CalculatorUi {
             y: panel.y,
             width: panel.w,
             height: panel.h,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         frame.push(RenderCommand::Text {
             x: panel.x + PADDING,
             y: panel.y + 2.0,
             text: String::from("History"),
-            color: COLOR_SUBTEXT,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_STATUS,
             font_weight: FontWeightHint::Bold,
             max_width: Some(panel.w),
@@ -1540,7 +1558,7 @@ impl CalculatorUi {
                 x: list.x + PADDING,
                 y: list.y + 2.0,
                 text: String::from("No history yet"),
-                color: COLOR_SURFACE1,
+                color: self.palette.surface1,
                 font_size: FONT_SIZE_HISTORY_EXPR,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(list.w),
@@ -1572,7 +1590,7 @@ impl CalculatorUi {
                 x: row.x + PADDING,
                 y: row.y + 1.0,
                 text: entry.expression.clone(),
-                color: COLOR_SUBTEXT,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_HISTORY_EXPR,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((row.w - PADDING * 2.0).max(0.0)),
@@ -1582,7 +1600,7 @@ impl CalculatorUi {
                 x: row.x + PADDING,
                 y: row.y + 13.0,
                 text: format!("= {}", entry.result),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE_HISTORY_RESULT,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some((row.w - PADDING * 2.0).max(0.0)),
@@ -1814,6 +1832,10 @@ fn handle_event(ui: &mut CalculatorUi, event: &Event) -> EventResult {
 impl App for CalculatorUi {
     fn title(&self) -> String {
         String::from("Calculator")
+    }
+
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
     }
 
     fn initial_size(&self) -> (u32, u32) {
@@ -2900,5 +2922,70 @@ mod tests {
         calc.expression = String::from("200");
         calc.input_percent();
         assert_eq!(calc.display, "2");
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours, not in eleven constants.
+    ///
+    /// Asserted on the rectangles the calculator emits rather than on its
+    /// `palette` field, which would only prove the field was assigned. The
+    /// claim that matters to a user is that the picture changes.
+    #[test]
+    fn the_calculator_draws_in_the_theme_it_is_given() {
+        fn fills(ui: &mut CalculatorUi) -> Vec<Color> {
+            ui.render(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The palette a user gets for a given theme choice.
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        let mut ui = CalculatorUi::new();
+
+        ui.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut ui);
+        assert!(!dark.is_empty(), "the calculator drew no filled rectangles");
+
+        ui.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut ui);
+
+        assert_eq!(
+            dark.len(),
+            light.len(),
+            "the theme changed the layout, not just the colours"
+        );
+        assert_ne!(
+            dark, light,
+            "the calculator drew identically on the dark and light themes, so \
+             it is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        ui.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut ui),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

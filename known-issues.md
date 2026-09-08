@@ -124370,9 +124370,48 @@ which makes step 1 below larger than one dependency line.
    the same page draws different colours under two themes, which is the claim
    that matters.
 
-**Do not start at step 2.** Converting an application before the route exists
-means making it load `appearance.yaml` on its own, which is 129 copies of a
-parse and 129 places for the reload edge to be got wrong.
+**Progress, 2026-09-08.**
+
+- **Step 1 is done.** `gui/window` depends on `appearance`, resolves one
+  `Palette` per process from `appearance.yaml`, and hands it over through a
+  new defaulted `App::theme_changed` — before the first frame, and again on
+  every change. `design-decisions.md` §822 records why it is a trait method
+  and not an `Event`.
+- **Step 2 has started: 2 of 129.** `calculator` (11 constants) and
+  `diskcleanup` (9). Both have a test on the rectangles they emit, and both
+  tests were mutation-checked by making `theme_changed` ignore its argument.
+
+**The pattern, so the rest are mechanical.** Per application: add
+`appearance` to `Cargo.toml`; add a `palette: Palette` field seeded from
+`AppearanceSettings::default()` so it is never absent; implement
+`theme_changed` to store it; replace each `COLOR_*`/`MOCHA_*` constant with
+the `Palette` field of the same role; delete the constant block. Then a test
+that renders under two themes and asserts the same number of commands with
+different colours.
+
+**Two things that recur and are worth knowing in advance:**
+
+- **Associated functions with no `self`.** Most colour uses are in `&self`
+  methods and become `self.palette.<role>`, but every application has a few
+  free or associated helpers (`key_colors`, `render_key`,
+  `render_status_button` in `calculator`) that need a `pal: &Palette`
+  parameter threading through their call sites. The compiler finds them all;
+  they are the only part that is not a substitution.
+- **`clippy::field_reassign_with_default`.** The obvious way to write the test
+  — `let mut s = AppearanceSettings::default(); s.theme_mode = …;` — is a
+  clippy error in this workspace. Build the settings in one struct-update
+  expression instead.
+
+**Roles that are not in the shorter constant blocks.** `Palette` carries
+`blue`, `yellow`, `mauve`, `teal`, `peach`, `lavender`, `green` and `red` as
+well as the neutrals, so an application naming a hue by name converts
+one-to-one. Nothing so far has needed a colour the palette does not have.
+
+**Do not start at step 2 for an application before step 1 existed** — that is
+now moot, but the reason stands for any similar sweep: converting before the
+route exists means making each application load `appearance.yaml` on its own,
+which is 129 copies of a parse and 129 places for the reload edge to be got
+wrong.
 
 **Related and already done:** `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-
 COPY-OF-THE-PALETTE` did exactly this for the shell's 49 modules, and

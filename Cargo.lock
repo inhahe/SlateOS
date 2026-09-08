@@ -2035,6 +2035,7 @@ dependencies = [
 name = "calculator"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -4014,6 +4015,7 @@ dependencies = [
 name = "diskcleanup"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

@@ -124424,9 +124424,15 @@ which makes step 1 below larger than one dependency line.
   `jsonviewer`, `logviewer`, `passwordgen`, `podcast`, `regextester`,
   `stickynotes`, `taskscheduler`, `contacts`, `habits`, `fontmanager` and
   `automator`, `sysmonitor`, `undelete`, `ircclient`, `dictionary`,
-  `reminders`, `weather`, `alarmclock`, `diagram` and `partmanager`. Each has a
-  test on the rectangles it emits, and each was mutation-checked by making
-  `theme_changed` ignore its argument.
+  `reminders`, `weather`, `alarmclock`, `diagram`, `partmanager` and
+  `credmanager`. Each has a test on the rectangles it emits, and each was
+  mutation-checked by making `theme_changed` ignore its argument.
+
+**The shape-2 fixer must handle both spellings of the palette.** The constant
+substitution produces `self.palette.<role>`; the `.color()` call-site rewrites
+produce `&self.palette` passed on to another function. A fixer that rewrote
+only the first left 22 errors in `credmanager` that read as a new problem and
+were the same one. It now rewrites both.
 
 **Run the shape-2 fixer on every application, not just the ones the survey
 flags.** The survey lists functions needing a *parameter*; it does not list

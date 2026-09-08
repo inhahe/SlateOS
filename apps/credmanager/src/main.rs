@@ -45,6 +45,7 @@
 // Narrowing it per-item is
 // `known-issues.md` → `C-CREDMANAGER-ALLOWS-DEAD-CODE-CRATE-WIDE`.
 
+use appearance::Palette;
 use std::collections::{HashMap, HashSet};
 use std::process::ExitCode;
 
@@ -67,20 +68,6 @@ use pwkdf::{KdfError, KdfParams, PasswordVerifier};
 // =============================================================================
 // Catppuccin Mocha palette
 // =============================================================================
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // =============================================================================
 // Constants
@@ -297,13 +284,13 @@ impl EntryType {
         }
     }
 
-    fn badge_color(self) -> Color {
+    fn badge_color(self, pal: &Palette) -> Color {
         match self {
-            Self::Login => BLUE,
-            Self::SecureNote => YELLOW,
-            Self::CreditCard => PEACH,
-            Self::Identity => GREEN,
-            Self::SshKey => LAVENDER,
+            Self::Login => pal.blue,
+            Self::SecureNote => pal.yellow,
+            Self::CreditCard => pal.peach,
+            Self::Identity => pal.green,
+            Self::SshKey => pal.lavender,
         }
     }
 
@@ -2175,13 +2162,13 @@ impl PasswordStrength {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::VeryWeak => RED,
-            Self::Weak => PEACH,
-            Self::Fair => YELLOW,
-            Self::Strong => GREEN,
-            Self::VeryStrong => LAVENDER,
+            Self::VeryWeak => pal.red,
+            Self::Weak => pal.peach,
+            Self::Fair => pal.yellow,
+            Self::Strong => pal.green,
+            Self::VeryStrong => pal.lavender,
         }
     }
 
@@ -2315,11 +2302,11 @@ impl AuditIssueKind {
         }
     }
 
-    fn severity_color(self) -> Color {
+    fn severity_color(self, pal: &Palette) -> Color {
         match self {
-            Self::WeakPassword | Self::Compromised | Self::CommonPattern => RED,
-            Self::ReusedPassword | Self::OldPassword => YELLOW,
-            Self::NoTotp => SUBTEXT0,
+            Self::WeakPassword | Self::Compromised | Self::CommonPattern => pal.red,
+            Self::ReusedPassword | Self::OldPassword => pal.yellow,
+            Self::NoTotp => pal.subtext0,
         }
     }
 }
@@ -2648,13 +2635,13 @@ impl SidebarSelection {
     }
 
     /// The colour the row's label takes while it is the selected one.
-    fn accent(&self) -> Color {
+    fn accent(&self, pal: &Palette) -> Color {
         match self {
-            Self::AllItems | Self::Folder(_) => BLUE,
-            Self::Favorites => YELLOW,
-            Self::Audit => RED,
-            Self::TypeFilter(etype) => etype.badge_color(),
-            Self::Tag(_) => LAVENDER,
+            Self::AllItems | Self::Folder(_) => pal.blue,
+            Self::Favorites => pal.yellow,
+            Self::Audit => pal.red,
+            Self::TypeFilter(etype) => etype.badge_color(pal),
+            Self::Tag(_) => pal.lavender,
         }
     }
 
@@ -2932,6 +2919,12 @@ struct AppState {
     new_entry: Option<NewEntryForm>,
     /// What the last copy put on the clipboard, for the status line.
     last_copied: Option<String>,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl AppState {
@@ -2947,6 +2940,7 @@ impl AppState {
     /// ([`Vault::create`]).
     fn new(vault: Vault) -> Self {
         let mut state = Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             vault,
             sidebar_selection: SidebarSelection::AllItems,
             selected_entry_id: None,
@@ -3211,13 +3205,13 @@ fn draw_text(
 }
 
 /// Render a horizontal separator line.
-fn draw_separator(frame: &mut Frame, x: f32, y: f32, width: f32) {
+fn draw_separator(frame: &mut Frame, pal: &Palette, x: f32, y: f32, width: f32) {
     frame.push(RenderCommand::Line {
         x1: x,
         y1: y,
         x2: x + width,
         y2: y,
-        color: SURFACE1,
+        color: pal.surface1,
         width: 1.0,
     });
 }
@@ -3311,6 +3305,7 @@ fn button_width(label: &str, pad: f32) -> f32 {
 /// Render a progress/strength bar.
 fn draw_strength_bar(
     frame: &mut Frame,
+    pal: &Palette,
     x: f32,
     y: f32,
     width: f32,
@@ -3318,7 +3313,7 @@ fn draw_strength_bar(
     fraction: f32,
     color: Color,
 ) {
-    draw_rect(frame, x, y, width, height, SURFACE0, 3.0);
+    draw_rect(frame, x, y, width, height, pal.surface0, 3.0);
     let fill_width = (width * fraction.clamp(0.0, 1.0)).max(0.0);
     if fill_width > 0.0 {
         draw_rect(frame, x, y, fill_width, height, color, 3.0);
@@ -3387,7 +3382,15 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
     let width = layout.window.w;
 
     // Toolbar background
-    draw_rect(frame, 0.0, 0.0, width, TOOLBAR_HEIGHT, MANTLE, 0.0);
+    draw_rect(
+        frame,
+        0.0,
+        0.0,
+        width,
+        TOOLBAR_HEIGHT,
+        state.palette.mantle,
+        0.0,
+    );
 
     // Clipped to the strip the layout gave it, so that in a window shorter
     // than its own chrome the buttons are trimmed out of existence rather than
@@ -3399,7 +3402,15 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
     // Add button
     let add = take_toolbar(&mut x, 60.0);
     draw_button(
-        frame, add.x, add.y, add.w, add.h, "+ Add", BLUE, BASE, false,
+        frame,
+        add.x,
+        add.y,
+        add.w,
+        add.h,
+        "+ Add",
+        state.palette.blue,
+        state.palette.base,
+        false,
     );
     frame.hit(Target::Add, add);
 
@@ -3412,7 +3423,7 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
         search.y,
         search.w,
         search.h,
-        SURFACE0,
+        state.palette.surface0,
         CORNER_RADIUS,
     );
     let search_text = if state.search_query.is_empty() {
@@ -3421,9 +3432,9 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
         &state.search_query
     };
     let search_color = if state.search_query.is_empty() {
-        OVERLAY0
+        state.palette.overlay0
     } else {
-        TEXT_COLOR
+        state.palette.text
     };
     draw_text(
         frame,
@@ -3446,8 +3457,8 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
         sort.w,
         sort.h,
         state.sort_order.label(),
-        SURFACE1,
-        TEXT_COLOR,
+        state.palette.surface1,
+        state.palette.text,
         false,
     );
     frame.hit(Target::Sort, sort);
@@ -3461,8 +3472,8 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
         generator.w,
         generator.h,
         "Generator",
-        SURFACE1,
-        LAVENDER,
+        state.palette.surface1,
+        state.palette.lavender,
         false,
     );
     frame.hit(Target::Generator, generator);
@@ -3475,19 +3486,34 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
         "Unlock"
     };
     let lock_color = if state.vault.is_unlocked() {
-        GREEN
+        state.palette.green
     } else {
-        RED
+        state.palette.red
     };
     draw_button(
-        frame, lock.x, lock.y, lock.w, lock.h, lock_text, SURFACE1, lock_color, false,
+        frame,
+        lock.x,
+        lock.y,
+        lock.w,
+        lock.h,
+        lock_text,
+        state.palette.surface1,
+        lock_color,
+        false,
     );
     frame.hit(Target::LockVault, lock);
 
     // Settings button
     let settings = take_toolbar(&mut x, 80.0);
     draw_button(
-        frame, settings.x, settings.y, settings.w, settings.h, "Settings", SURFACE1, SUBTEXT0,
+        frame,
+        settings.x,
+        settings.y,
+        settings.w,
+        settings.h,
+        "Settings",
+        state.palette.surface1,
+        state.palette.subtext0,
         false,
     );
     frame.hit(Target::Settings, settings);
@@ -3495,7 +3521,7 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
     frame.unclip();
 
     // Bottom border
-    draw_separator(frame, 0.0, TOOLBAR_HEIGHT - 1.0, width);
+    draw_separator(frame, &state.palette, 0.0, TOOLBAR_HEIGHT - 1.0, width);
 }
 
 // =============================================================================
@@ -3511,7 +3537,15 @@ fn render_sidebar(frame: &mut Frame, state: &AppState, layout: &Layout) {
     let pane = layout.sidebar;
 
     // Sidebar background
-    draw_rect(frame, pane.x, pane.y, pane.w, pane.h, MANTLE, 0.0);
+    draw_rect(
+        frame,
+        pane.x,
+        pane.y,
+        pane.w,
+        pane.h,
+        state.palette.mantle,
+        0.0,
+    );
 
     // Clipped to the pane, so that rows past the bottom edge -- a vault with
     // enough tags will produce them -- record no hit box at all. Bounding the
@@ -3527,7 +3561,7 @@ fn render_sidebar(frame: &mut Frame, state: &AppState, layout: &Layout) {
         text_x,
         y,
         &state.vault.name,
-        TEXT_COLOR,
+        state.palette.text,
         HEADING_FONT_SIZE,
         FontWeightHint::Bold,
         Some(SIDEBAR_WIDTH - 24.0),
@@ -3540,7 +3574,7 @@ fn render_sidebar(frame: &mut Frame, state: &AppState, layout: &Layout) {
         text_x,
         y,
         &entry_count_text,
-        SUBTEXT0,
+        state.palette.subtext0,
         SMALL_FONT_SIZE,
         FontWeightHint::Regular,
         None,
@@ -3561,14 +3595,14 @@ fn render_sidebar(frame: &mut Frame, state: &AppState, layout: &Layout) {
             if group.is_some() {
                 y += 6.0;
             }
-            draw_separator(frame, 8.0, y, SIDEBAR_WIDTH - 16.0);
+            draw_separator(frame, &state.palette, 8.0, y, SIDEBAR_WIDTH - 16.0);
             y += 12.0;
             draw_text(
                 frame,
                 text_x,
                 y,
                 item_group.heading(),
-                OVERLAY0,
+                state.palette.overlay0,
                 SMALL_FONT_SIZE,
                 FontWeightHint::Bold,
                 None,
@@ -3580,14 +3614,26 @@ fn render_sidebar(frame: &mut Frame, state: &AppState, layout: &Layout) {
         let row = Rect::new(4.0, y, SIDEBAR_WIDTH - 8.0, SIDEBAR_ROW_HEIGHT);
         let selected = state.sidebar_selection == *item;
         if selected {
-            draw_rect(frame, row.x, row.y, row.w, row.h, SURFACE0, 4.0);
+            draw_rect(
+                frame,
+                row.x,
+                row.y,
+                row.w,
+                row.h,
+                state.palette.surface0,
+                4.0,
+            );
         }
         draw_text(
             frame,
             text_x + 4.0,
             y + 8.0,
             &item.label(&state.vault),
-            if selected { item.accent() } else { TEXT_COLOR },
+            if selected {
+                item.accent(&state.palette)
+            } else {
+                state.palette.text
+            },
             DEFAULT_FONT_SIZE,
             FontWeightHint::Regular,
             None,
@@ -3605,7 +3651,7 @@ fn render_sidebar(frame: &mut Frame, state: &AppState, layout: &Layout) {
         y1: pane.y,
         x2: SIDEBAR_WIDTH,
         y2: pane.bottom(),
-        color: SURFACE1,
+        color: state.palette.surface1,
         width: 1.0,
     });
 }
@@ -3619,7 +3665,15 @@ fn render_entry_list(frame: &mut Frame, state: &AppState, layout: &Layout) {
     let x_start = pane.x;
 
     // List background
-    draw_rect(frame, pane.x, pane.y, pane.w, pane.h, BASE, 0.0);
+    draw_rect(
+        frame,
+        pane.x,
+        pane.y,
+        pane.w,
+        pane.h,
+        state.palette.base,
+        0.0,
+    );
 
     // List header
     let count_text = format!("{} entries", state.filtered_ids.len());
@@ -3628,7 +3682,7 @@ fn render_entry_list(frame: &mut Frame, state: &AppState, layout: &Layout) {
         x_start + 12.0,
         pane.y + 10.0,
         &count_text,
-        SUBTEXT0,
+        state.palette.subtext0,
         SMALL_FONT_SIZE,
         FontWeightHint::Regular,
         None,
@@ -3672,7 +3726,7 @@ fn render_entry_list(frame: &mut Frame, state: &AppState, layout: &Layout) {
                     row_y,
                     ENTRY_LIST_WIDTH - 8.0,
                     ROW_HEIGHT - 2.0,
-                    SURFACE0,
+                    state.palette.surface0,
                     4.0,
                 );
             }
@@ -3680,7 +3734,7 @@ fn render_entry_list(frame: &mut Frame, state: &AppState, layout: &Layout) {
             let text_x = x_start + 16.0;
 
             // Type icon badge
-            let badge_color = entry.entry_type().badge_color();
+            let badge_color = entry.entry_type().badge_color(&state.palette);
             draw_rect(
                 frame,
                 text_x,
@@ -3695,14 +3749,18 @@ fn render_entry_list(frame: &mut Frame, state: &AppState, layout: &Layout) {
                 text_x + 4.0,
                 row_y + 10.0,
                 entry.entry_type().icon_char(),
-                BASE,
+                state.palette.base,
                 SMALL_FONT_SIZE,
                 FontWeightHint::Bold,
                 None,
             );
 
             // Entry name
-            let name_color = if is_selected { BLUE } else { TEXT_COLOR };
+            let name_color = if is_selected {
+                state.palette.blue
+            } else {
+                state.palette.text
+            };
             draw_text(
                 frame,
                 text_x + 28.0,
@@ -3722,7 +3780,7 @@ fn render_entry_list(frame: &mut Frame, state: &AppState, layout: &Layout) {
                     text_x + 28.0,
                     row_y + 28.0,
                     sub,
-                    SUBTEXT0,
+                    state.palette.subtext0,
                     SMALL_FONT_SIZE,
                     FontWeightHint::Regular,
                     Some(ENTRY_LIST_WIDTH - 80.0),
@@ -3736,7 +3794,7 @@ fn render_entry_list(frame: &mut Frame, state: &AppState, layout: &Layout) {
                     x_start + ENTRY_LIST_WIDTH - 30.0,
                     row_y + 8.0,
                     "*",
-                    YELLOW,
+                    state.palette.yellow,
                     DEFAULT_FONT_SIZE,
                     FontWeightHint::Bold,
                     None,
@@ -3750,7 +3808,7 @@ fn render_entry_list(frame: &mut Frame, state: &AppState, layout: &Layout) {
                     x_start + ENTRY_LIST_WIDTH - 48.0,
                     row_y + 8.0,
                     "!",
-                    RED,
+                    state.palette.red,
                     DEFAULT_FONT_SIZE,
                     FontWeightHint::Bold,
                     None,
@@ -3760,6 +3818,7 @@ fn render_entry_list(frame: &mut Frame, state: &AppState, layout: &Layout) {
             // Bottom separator
             draw_separator(
                 frame,
+                &state.palette,
                 x_start + 12.0,
                 row_y + ROW_HEIGHT - 2.0,
                 ENTRY_LIST_WIDTH - 24.0,
@@ -3777,7 +3836,7 @@ fn render_entry_list(frame: &mut Frame, state: &AppState, layout: &Layout) {
         y1: pane.y,
         x2: list_right,
         y2: pane.bottom(),
-        color: SURFACE1,
+        color: state.palette.surface1,
         width: 1.0,
     });
 }
@@ -3805,7 +3864,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
         y_start,
         panel_width,
         panel_height,
-        BASE,
+        state.palette.base,
         0.0,
     );
 
@@ -3828,7 +3887,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 empty_x,
                 y_start + panel_height / 2.0,
                 empty,
-                OVERLAY0,
+                state.palette.overlay0,
                 HEADING_FONT_SIZE,
                 FontWeightHint::Light,
                 None,
@@ -3849,14 +3908,14 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
     let mut y = y_start + pad - state.detail_scroll;
 
     // Entry type badge + name
-    let badge_color = entry.entry_type().badge_color();
+    let badge_color = entry.entry_type().badge_color(&state.palette);
     let type_badge_w = draw_badge(
         frame,
         x_start + pad,
         y,
         entry.entry_type().label(),
         badge_color,
-        BASE,
+        state.palette.base,
     );
 
     if entry.starred {
@@ -3865,7 +3924,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
             x_start + pad + type_badge_w + 12.0,
             y + 2.0,
             "* Starred",
-            YELLOW,
+            state.palette.yellow,
             SMALL_FONT_SIZE,
             FontWeightHint::Regular,
             None,
@@ -3878,7 +3937,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
         x_start + pad,
         y,
         entry.display_name(),
-        TEXT_COLOR,
+        state.palette.text,
         HEADING_FONT_SIZE,
         FontWeightHint::Bold,
         Some(panel_width - pad * 2.0),
@@ -3892,7 +3951,12 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
             y,
             panel_width - pad * 2.0,
             28.0,
-            Color::rgba(RED.r, RED.g, RED.b, 40),
+            Color::rgba(
+                state.palette.red.r,
+                state.palette.red.g,
+                state.palette.red.b,
+                40,
+            ),
             4.0,
         );
         draw_text(
@@ -3900,7 +3964,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
             x_start + pad + 8.0,
             y + 6.0,
             "! This password may be compromised",
-            RED,
+            state.palette.red,
             DEFAULT_FONT_SIZE,
             FontWeightHint::Bold,
             None,
@@ -3908,7 +3972,13 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
         y += 36.0;
     }
 
-    draw_separator(frame, x_start + pad, y, panel_width - pad * 2.0);
+    draw_separator(
+        frame,
+        &state.palette,
+        x_start + pad,
+        y,
+        panel_width - pad * 2.0,
+    );
     y += 16.0;
 
     // Render field rows based on entry type
@@ -3922,6 +3992,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
             // Site
             y = render_detail_field(
                 frame,
+                &state.palette,
                 y,
                 field_label_x,
                 field_value_x,
@@ -3937,6 +4008,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
             // Username
             y = render_detail_field(
                 frame,
+                &state.palette,
                 y,
                 field_label_x,
                 field_value_x,
@@ -3957,6 +4029,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
             };
             y = render_detail_field(
                 frame,
+                &state.palette,
                 y,
                 field_label_x,
                 field_value_x,
@@ -3973,12 +4046,13 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
             y += 8.0;
             draw_strength_bar(
                 frame,
+                &state.palette,
                 field_value_x,
                 y,
                 160.0,
                 6.0,
                 strength.fraction(),
-                strength.color(),
+                strength.color(&state.palette),
             );
             let strength_text = format!("{} ({:.0} bits)", strength.label(), entropy);
             draw_text(
@@ -3986,7 +4060,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 field_value_x + 170.0,
                 y - 2.0,
                 &strength_text,
-                strength.color(),
+                strength.color(&state.palette),
                 SMALL_FONT_SIZE,
                 FontWeightHint::Regular,
                 None,
@@ -4002,8 +4076,8 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 60.0,
                 24.0,
                 toggle_text,
-                SURFACE1,
-                TEXT_COLOR,
+                state.palette.surface1,
+                state.palette.text,
                 false,
             );
             y += row_spacing;
@@ -4012,6 +4086,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
             if !login.url.is_empty() {
                 y = render_detail_field(
                     frame,
+                    &state.palette,
                     y,
                     field_label_x,
                     field_value_x,
@@ -4029,6 +4104,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
             if let Some(ref totp) = login.totp_secret {
                 y = render_detail_field(
                     frame,
+                    &state.palette,
                     y,
                     field_label_x,
                     field_value_x,
@@ -4046,7 +4122,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                     field_label_x,
                     y,
                     "TOTP",
-                    SUBTEXT0,
+                    state.palette.subtext0,
                     DEFAULT_FONT_SIZE,
                     FontWeightHint::Regular,
                     None,
@@ -4056,7 +4132,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                     field_value_x,
                     y,
                     "Not configured",
-                    OVERLAY0,
+                    state.palette.overlay0,
                     DEFAULT_FONT_SIZE,
                     FontWeightHint::Light,
                     None,
@@ -4066,14 +4142,20 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
 
             // Notes
             if !login.notes.is_empty() {
-                draw_separator(frame, field_label_x, y, panel_width - pad * 2.0);
+                draw_separator(
+                    frame,
+                    &state.palette,
+                    field_label_x,
+                    y,
+                    panel_width - pad * 2.0,
+                );
                 y += 12.0;
                 draw_text(
                     frame,
                     field_label_x,
                     y,
                     "Notes",
-                    SUBTEXT0,
+                    state.palette.subtext0,
                     DEFAULT_FONT_SIZE,
                     FontWeightHint::Bold,
                     None,
@@ -4084,7 +4166,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                     field_label_x,
                     y,
                     &login.notes,
-                    TEXT_COLOR,
+                    state.palette.text,
                     DEFAULT_FONT_SIZE,
                     FontWeightHint::Regular,
                     Some(panel_width - pad * 2.0),
@@ -4098,7 +4180,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 field_label_x,
                 y,
                 "Title",
-                SUBTEXT0,
+                state.palette.subtext0,
                 DEFAULT_FONT_SIZE,
                 FontWeightHint::Regular,
                 None,
@@ -4108,14 +4190,20 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 field_value_x,
                 y,
                 &note.title,
-                TEXT_COLOR,
+                state.palette.text,
                 DEFAULT_FONT_SIZE,
                 FontWeightHint::Regular,
                 Some(panel_width - pad * 2.0 - 120.0),
             );
             y += row_spacing;
 
-            draw_separator(frame, field_label_x, y, panel_width - pad * 2.0);
+            draw_separator(
+                frame,
+                &state.palette,
+                field_label_x,
+                y,
+                panel_width - pad * 2.0,
+            );
             y += 12.0;
 
             draw_text(
@@ -4123,7 +4211,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 field_label_x,
                 y,
                 &note.content,
-                TEXT_COLOR,
+                state.palette.text,
                 DEFAULT_FONT_SIZE,
                 FontWeightHint::Regular,
                 Some(panel_width - pad * 2.0),
@@ -4133,6 +4221,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
         EntryData::CreditCard(card) => {
             y = render_detail_field(
                 frame,
+                &state.palette,
                 y,
                 field_label_x,
                 field_value_x,
@@ -4147,6 +4236,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
 
             y = render_detail_field(
                 frame,
+                &state.palette,
                 y,
                 field_label_x,
                 field_value_x,
@@ -4161,6 +4251,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
 
             y = render_detail_field(
                 frame,
+                &state.palette,
                 y,
                 field_label_x,
                 field_value_x,
@@ -4175,6 +4266,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
 
             y = render_detail_field(
                 frame,
+                &state.palette,
                 y,
                 field_label_x,
                 field_value_x,
@@ -4188,14 +4280,20 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
             y += row_spacing;
 
             if !card.notes.is_empty() {
-                draw_separator(frame, field_label_x, y, panel_width - pad * 2.0);
+                draw_separator(
+                    frame,
+                    &state.palette,
+                    field_label_x,
+                    y,
+                    panel_width - pad * 2.0,
+                );
                 y += 12.0;
                 draw_text(
                     frame,
                     field_label_x,
                     y,
                     "Notes",
-                    SUBTEXT0,
+                    state.palette.subtext0,
                     DEFAULT_FONT_SIZE,
                     FontWeightHint::Bold,
                     None,
@@ -4206,7 +4304,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                     field_label_x,
                     y,
                     &card.notes,
-                    TEXT_COLOR,
+                    state.palette.text,
                     DEFAULT_FONT_SIZE,
                     FontWeightHint::Regular,
                     Some(panel_width - pad * 2.0),
@@ -4217,6 +4315,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
         EntryData::Identity(ident) => {
             y = render_detail_field(
                 frame,
+                &state.palette,
                 y,
                 field_label_x,
                 field_value_x,
@@ -4231,6 +4330,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
 
             y = render_detail_field(
                 frame,
+                &state.palette,
                 y,
                 field_label_x,
                 field_value_x,
@@ -4246,6 +4346,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
             if !ident.phone.is_empty() {
                 y = render_detail_field(
                     frame,
+                    &state.palette,
                     y,
                     field_label_x,
                     field_value_x,
@@ -4262,6 +4363,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
             if !ident.address.is_empty() {
                 y = render_detail_field(
                     frame,
+                    &state.palette,
                     y,
                     field_label_x,
                     field_value_x,
@@ -4278,6 +4380,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
         EntryData::SshKey(key) => {
             y = render_detail_field(
                 frame,
+                &state.palette,
                 y,
                 field_label_x,
                 field_value_x,
@@ -4292,6 +4395,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
 
             y = render_detail_field(
                 frame,
+                &state.palette,
                 y,
                 field_label_x,
                 field_value_x,
@@ -4309,7 +4413,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 field_label_x,
                 y,
                 "Public Key",
-                SUBTEXT0,
+                state.palette.subtext0,
                 DEFAULT_FONT_SIZE,
                 FontWeightHint::Regular,
                 None,
@@ -4322,7 +4426,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 y,
                 panel_width - pad * 2.0,
                 60.0,
-                SURFACE0,
+                state.palette.surface0,
                 4.0,
             );
             draw_text(
@@ -4330,7 +4434,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 field_label_x + 8.0,
                 y + 8.0,
                 &key.public_key,
-                TEXT_COLOR,
+                state.palette.text,
                 SMALL_FONT_SIZE,
                 FontWeightHint::Regular,
                 Some(panel_width - pad * 2.0 - 16.0),
@@ -4342,14 +4446,20 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
     // Tags section
     if !entry.tags.is_empty() {
         y += 8.0;
-        draw_separator(frame, field_label_x, y, panel_width - pad * 2.0);
+        draw_separator(
+            frame,
+            &state.palette,
+            field_label_x,
+            y,
+            panel_width - pad * 2.0,
+        );
         y += 12.0;
         draw_text(
             frame,
             field_label_x,
             y,
             "Tags",
-            SUBTEXT0,
+            state.palette.subtext0,
             DEFAULT_FONT_SIZE,
             FontWeightHint::Bold,
             None,
@@ -4363,7 +4473,14 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 tag_x = field_label_x;
                 y += 26.0;
             }
-            draw_badge(frame, tag_x, y, tag, SURFACE1, LAVENDER);
+            draw_badge(
+                frame,
+                tag_x,
+                y,
+                tag,
+                state.palette.surface1,
+                state.palette.lavender,
+            );
             tag_x += tag_w + 6.0;
         }
         y += 28.0;
@@ -4371,7 +4488,13 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
 
     // Metadata
     y += 8.0;
-    draw_separator(frame, field_label_x, y, panel_width - pad * 2.0);
+    draw_separator(
+        frame,
+        &state.palette,
+        field_label_x,
+        y,
+        panel_width - pad * 2.0,
+    );
     y += 12.0;
 
     let created_text = format!(
@@ -4383,7 +4506,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
         field_label_x,
         y,
         &created_text,
-        OVERLAY0,
+        state.palette.overlay0,
         SMALL_FONT_SIZE,
         FontWeightHint::Regular,
         None,
@@ -4399,7 +4522,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
         field_label_x,
         y,
         &modified_text,
-        OVERLAY0,
+        state.palette.overlay0,
         SMALL_FONT_SIZE,
         FontWeightHint::Regular,
         None,
@@ -4409,9 +4532,9 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
         y += 18.0;
         let age_days = entry.password_age_days(state.now);
         let age_color = if age_days > PASSWORD_OLD_DAYS {
-            YELLOW
+            state.palette.yellow
         } else {
-            OVERLAY0
+            state.palette.overlay0
         };
         let age_text = format!("Password age: {} days", age_days);
         draw_text(
@@ -4441,6 +4564,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
 #[allow(clippy::too_many_arguments)]
 fn render_detail_field(
     frame: &mut Frame,
+    pal: &Palette,
     y: f32,
     label_x: f32,
     value_x: f32,
@@ -4456,13 +4580,13 @@ fn render_detail_field(
         label_x,
         y,
         label,
-        SUBTEXT0,
+        pal.subtext0,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Regular,
         None,
     );
 
-    let value_color = if is_password { PEACH } else { TEXT_COLOR };
+    let value_color = if is_password { pal.peach } else { pal.text };
     draw_text(
         frame,
         value_x,
@@ -4484,8 +4608,8 @@ fn render_detail_field(
         44.0,
         24.0,
         "Copy",
-        SURFACE1,
-        SUBTEXT0,
+        pal.surface1,
+        pal.subtext0,
         false,
     );
     frame.hit(copy, Rect::new(copy_x, y - 4.0, 44.0, 24.0));
@@ -4515,7 +4639,7 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         y_start,
         panel_width,
         panel_height,
-        BASE,
+        state.palette.base,
         0.0,
     );
 
@@ -4532,7 +4656,7 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         x_start + pad,
         y,
         "New Entry",
-        TEXT_COLOR,
+        state.palette.text,
         HEADING_FONT_SIZE,
         FontWeightHint::Bold,
         None,
@@ -4555,7 +4679,11 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
             rect.y,
             rect.w,
             rect.h,
-            if chosen { kind.badge_color() } else { SURFACE0 },
+            if chosen {
+                kind.badge_color(&state.palette)
+            } else {
+                state.palette.surface0
+            },
             CORNER_RADIUS,
         );
         draw_text(
@@ -4563,7 +4691,11 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
             chooser_x + 10.0,
             y + 6.0,
             label,
-            if chosen { BASE } else { SUBTEXT0 },
+            if chosen {
+                state.palette.base
+            } else {
+                state.palette.subtext0
+            },
             SMALL_FONT_SIZE,
             if chosen {
                 FontWeightHint::Bold
@@ -4584,7 +4716,7 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
             x_start + pad,
             y,
             label,
-            SUBTEXT0,
+            state.palette.subtext0,
             SMALL_FONT_SIZE,
             FontWeightHint::Regular,
             Some(inner),
@@ -4599,7 +4731,11 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
             rect.y,
             rect.w,
             rect.h,
-            if focused { SURFACE1 } else { SURFACE0 },
+            if focused {
+                state.palette.surface1
+            } else {
+                state.palette.surface0
+            },
             CORNER_RADIUS,
         );
 
@@ -4611,7 +4747,11 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         } else {
             raw.to_string()
         };
-        let text_color = if raw.is_empty() { OVERLAY0 } else { TEXT_COLOR };
+        let text_color = if raw.is_empty() {
+            state.palette.overlay0
+        } else {
+            state.palette.text
+        };
         draw_text(
             frame,
             rect.x + 10.0,
@@ -4642,7 +4782,11 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         save.y,
         save.w,
         save.h,
-        if can_save { GREEN } else { SURFACE0 },
+        if can_save {
+            state.palette.green
+        } else {
+            state.palette.surface0
+        },
         CORNER_RADIUS,
     );
     draw_text(
@@ -4650,7 +4794,11 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         save.x + 28.0,
         save.y + 8.0,
         "Save",
-        if can_save { BASE } else { OVERLAY0 },
+        if can_save {
+            state.palette.base
+        } else {
+            state.palette.overlay0
+        },
         DEFAULT_FONT_SIZE,
         FontWeightHint::Bold,
         Some(save.w),
@@ -4664,7 +4812,7 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         cancel.y,
         cancel.w,
         cancel.h,
-        SURFACE0,
+        state.palette.surface0,
         CORNER_RADIUS,
     );
     draw_text(
@@ -4672,7 +4820,7 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         cancel.x + 22.0,
         cancel.y + 8.0,
         "Cancel",
-        SUBTEXT0,
+        state.palette.subtext0,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Regular,
         Some(cancel.w),
@@ -4686,7 +4834,7 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
             x_start + pad,
             y,
             "A name is needed before this can be saved.",
-            OVERLAY0,
+            state.palette.overlay0,
             SMALL_FONT_SIZE,
             FontWeightHint::Regular,
             Some(inner),
@@ -4706,7 +4854,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         y_start,
         panel_width,
         panel_height,
-        BASE,
+        state.palette.base,
         0.0,
     );
 
@@ -4718,7 +4866,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         x_start + pad,
         y,
         "Password Generator",
-        TEXT_COLOR,
+        state.palette.text,
         HEADING_FONT_SIZE,
         FontWeightHint::Bold,
         None,
@@ -4732,7 +4880,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         y,
         panel_width - pad * 2.0,
         48.0,
-        SURFACE0,
+        state.palette.surface0,
         CORNER_RADIUS,
     );
     // A refusal takes the password's own place, in red. Left in the prompt
@@ -4740,9 +4888,12 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
     // exactly the wrong thing to tell someone whose generator cannot generate.
     let (display_pw, pw_color) = match (&state.generator_error, state.generated_password.is_empty())
     {
-        (Some(message), _) => (message.as_str(), RED),
-        (None, true) => ("Click Generate to create a password", OVERLAY0),
-        (None, false) => (state.generated_password.as_str(), GREEN),
+        (Some(message), _) => (message.as_str(), state.palette.red),
+        (None, true) => (
+            "Click Generate to create a password",
+            state.palette.overlay0,
+        ),
+        (None, false) => (state.generated_password.as_str(), state.palette.green),
     };
     draw_text(
         frame,
@@ -4761,12 +4912,13 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         let (strength, entropy) = evaluate_password_strength(&state.generated_password);
         draw_strength_bar(
             frame,
+            &state.palette,
             x_start + pad,
             y,
             panel_width - pad * 2.0,
             8.0,
             strength.fraction(),
-            strength.color(),
+            strength.color(&state.palette),
         );
         y += 16.0;
         let label = format!("{} - {:.0} bits entropy", strength.label(), entropy);
@@ -4775,7 +4927,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
             x_start + pad,
             y,
             &label,
-            strength.color(),
+            strength.color(&state.palette),
             SMALL_FONT_SIZE,
             FontWeightHint::Regular,
             None,
@@ -4791,8 +4943,8 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         100.0,
         32.0,
         "Generate",
-        BLUE,
-        BASE,
+        state.palette.blue,
+        state.palette.base,
         false,
     );
     draw_button(
@@ -4802,13 +4954,19 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         80.0,
         32.0,
         "Copy",
-        SURFACE1,
-        TEXT_COLOR,
+        state.palette.surface1,
+        state.palette.text,
         false,
     );
     y += 48.0;
 
-    draw_separator(frame, x_start + pad, y, panel_width - pad * 2.0);
+    draw_separator(
+        frame,
+        &state.palette,
+        x_start + pad,
+        y,
+        panel_width - pad * 2.0,
+    );
     y += 16.0;
 
     // Mode selection
@@ -4817,7 +4975,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         x_start + pad,
         y,
         "Mode",
-        TEXT_COLOR,
+        state.palette.text,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Bold,
         None,
@@ -4832,8 +4990,16 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
     let mut mode_x = x_start + pad;
     for (mode, label) in &modes {
         let is_active = state.password_generator.mode == *mode;
-        let bg = if is_active { BLUE } else { SURFACE1 };
-        let fg = if is_active { BASE } else { TEXT_COLOR };
+        let bg = if is_active {
+            state.palette.blue
+        } else {
+            state.palette.surface1
+        };
+        let fg = if is_active {
+            state.palette.base
+        } else {
+            state.palette.text
+        };
         let btn_w = button_width(label, 10.0);
         draw_button(frame, mode_x, y, btn_w, 28.0, label, bg, fg, false);
         mode_x += btn_w + 8.0;
@@ -4846,7 +5012,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         x_start + pad,
         y,
         "Length",
-        TEXT_COLOR,
+        state.palette.text,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Regular,
         None,
@@ -4857,7 +5023,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         x_start + pad + 100.0,
         y,
         &len_text,
-        BLUE,
+        state.palette.blue,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Bold,
         None,
@@ -4868,11 +5034,27 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
     let slider_x = x_start + pad;
     let slider_w = panel_width - pad * 2.0;
     let slider_y = y + 12.0;
-    draw_rect(frame, slider_x, slider_y, slider_w, 4.0, SURFACE1, 2.0);
+    draw_rect(
+        frame,
+        slider_x,
+        slider_y,
+        slider_w,
+        4.0,
+        state.palette.surface1,
+        2.0,
+    );
 
     let frac = (state.password_generator.length as f32 - 8.0) / 120.0;
     let knob_x = slider_x + slider_w * frac.clamp(0.0, 1.0);
-    draw_rect(frame, knob_x - 6.0, slider_y - 4.0, 12.0, 12.0, BLUE, 6.0);
+    draw_rect(
+        frame,
+        knob_x - 6.0,
+        slider_y - 4.0,
+        12.0,
+        12.0,
+        state.palette.blue,
+        6.0,
+    );
     y += 32.0;
 
     // Character set toggles (for random mode)
@@ -4882,7 +5064,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
             x_start + pad,
             y,
             "Character Sets",
-            TEXT_COLOR,
+            state.palette.text,
             DEFAULT_FONT_SIZE,
             FontWeightHint::Bold,
             None,
@@ -4897,7 +5079,11 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         ];
 
         for (label, enabled) in &options {
-            let check_color = if *enabled { GREEN } else { SURFACE2 };
+            let check_color = if *enabled {
+                state.palette.green
+            } else {
+                state.palette.surface2
+            };
             let check_char = if *enabled { "[x]" } else { "[ ]" };
             draw_text(
                 frame,
@@ -4914,7 +5100,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
                 x_start + pad + 32.0,
                 y,
                 label,
-                TEXT_COLOR,
+                state.palette.text,
                 DEFAULT_FONT_SIZE,
                 FontWeightHint::Regular,
                 None,
@@ -4930,7 +5116,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
             x_start + pad,
             y,
             "Word Count",
-            TEXT_COLOR,
+            state.palette.text,
             DEFAULT_FONT_SIZE,
             FontWeightHint::Regular,
             None,
@@ -4941,7 +5127,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
             x_start + pad + 120.0,
             y,
             &wc_text,
-            BLUE,
+            state.palette.blue,
             DEFAULT_FONT_SIZE,
             FontWeightHint::Bold,
             None,
@@ -4953,7 +5139,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
             x_start + pad,
             y,
             "Separator",
-            TEXT_COLOR,
+            state.palette.text,
             DEFAULT_FONT_SIZE,
             FontWeightHint::Regular,
             None,
@@ -4963,7 +5149,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
             x_start + pad + 120.0,
             y,
             &state.password_generator.passphrase.separator,
-            BLUE,
+            state.palette.blue,
             DEFAULT_FONT_SIZE,
             FontWeightHint::Bold,
             None,
@@ -4973,7 +5159,13 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
 
     // Entropy info
     y += 8.0;
-    draw_separator(frame, x_start + pad, y, panel_width - pad * 2.0);
+    draw_separator(
+        frame,
+        &state.palette,
+        x_start + pad,
+        y,
+        panel_width - pad * 2.0,
+    );
     y += 12.0;
 
     let entropy = state.password_generator.entropy_bits();
@@ -4983,7 +5175,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         x_start + pad,
         y,
         &entropy_text,
-        SUBTEXT0,
+        state.palette.subtext0,
         SMALL_FONT_SIZE,
         FontWeightHint::Regular,
         None,
@@ -5007,7 +5199,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         x_start + pad,
         y,
         &pool_text,
-        SUBTEXT0,
+        state.palette.subtext0,
         SMALL_FONT_SIZE,
         FontWeightHint::Regular,
         None,
@@ -5032,7 +5224,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         y_start,
         panel_width,
         panel_height,
-        BASE,
+        state.palette.base,
         0.0,
     );
 
@@ -5044,7 +5236,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         x_start + pad,
         y,
         "Settings",
-        TEXT_COLOR,
+        state.palette.text,
         HEADING_FONT_SIZE,
         FontWeightHint::Bold,
         None,
@@ -5057,7 +5249,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         x_start + pad,
         y,
         "SECURITY",
-        OVERLAY0,
+        state.palette.overlay0,
         SMALL_FONT_SIZE,
         FontWeightHint::Bold,
         None,
@@ -5069,7 +5261,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         x_start + pad,
         y,
         "Auto-lock timeout",
-        TEXT_COLOR,
+        state.palette.text,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Regular,
         None,
@@ -5080,7 +5272,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         x_start + pad + 200.0,
         y,
         &timeout_text,
-        BLUE,
+        state.palette.blue,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Bold,
         None,
@@ -5090,10 +5282,26 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
     // Timeout slider
     let slider_x = x_start + pad;
     let slider_w = panel_width - pad * 2.0;
-    draw_rect(frame, slider_x, y, slider_w, 4.0, SURFACE1, 2.0);
+    draw_rect(
+        frame,
+        slider_x,
+        y,
+        slider_w,
+        4.0,
+        state.palette.surface1,
+        2.0,
+    );
     let frac = (state.settings_auto_lock as f32 - 1.0) / 59.0;
     let knob_x = slider_x + slider_w * frac.clamp(0.0, 1.0);
-    draw_rect(frame, knob_x - 6.0, y - 4.0, 12.0, 12.0, BLUE, 6.0);
+    draw_rect(
+        frame,
+        knob_x - 6.0,
+        y - 4.0,
+        12.0,
+        12.0,
+        state.palette.blue,
+        6.0,
+    );
     y += 24.0;
 
     draw_text(
@@ -5101,7 +5309,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         x_start + pad,
         y,
         "Clipboard auto-clear",
-        TEXT_COLOR,
+        state.palette.text,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Regular,
         None,
@@ -5112,14 +5320,20 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         x_start + pad + 200.0,
         y,
         &clear_text,
-        BLUE,
+        state.palette.blue,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Bold,
         None,
     );
     y += 36.0;
 
-    draw_separator(frame, x_start + pad, y, panel_width - pad * 2.0);
+    draw_separator(
+        frame,
+        &state.palette,
+        x_start + pad,
+        y,
+        panel_width - pad * 2.0,
+    );
     y += 16.0;
 
     // Vault info section
@@ -5128,7 +5342,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         x_start + pad,
         y,
         "VAULT INFO",
-        OVERLAY0,
+        state.palette.overlay0,
         SMALL_FONT_SIZE,
         FontWeightHint::Bold,
         None,
@@ -5152,7 +5366,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
             x_start + pad,
             y,
             label,
-            SUBTEXT0,
+            state.palette.subtext0,
             DEFAULT_FONT_SIZE,
             FontWeightHint::Regular,
             None,
@@ -5162,7 +5376,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
             x_start + pad + 160.0,
             y,
             value,
-            TEXT_COLOR,
+            state.palette.text,
             DEFAULT_FONT_SIZE,
             FontWeightHint::Regular,
             None,
@@ -5176,7 +5390,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         x_start + pad,
         y,
         "Total entries",
-        SUBTEXT0,
+        state.palette.subtext0,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Regular,
         None,
@@ -5186,7 +5400,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         x_start + pad + 160.0,
         y,
         &count_text,
-        TEXT_COLOR,
+        state.palette.text,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Regular,
         None,
@@ -5199,7 +5413,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         x_start + pad,
         y,
         "Folders",
-        SUBTEXT0,
+        state.palette.subtext0,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Regular,
         None,
@@ -5209,14 +5423,20 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         x_start + pad + 160.0,
         y,
         &folder_count_text,
-        TEXT_COLOR,
+        state.palette.text,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Regular,
         None,
     );
     y += 36.0;
 
-    draw_separator(frame, x_start + pad, y, panel_width - pad * 2.0);
+    draw_separator(
+        frame,
+        &state.palette,
+        x_start + pad,
+        y,
+        panel_width - pad * 2.0,
+    );
     y += 16.0;
 
     // Export section
@@ -5225,7 +5445,7 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         x_start + pad,
         y,
         "DATA",
-        OVERLAY0,
+        state.palette.overlay0,
         SMALL_FONT_SIZE,
         FontWeightHint::Bold,
         None,
@@ -5239,8 +5459,8 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         120.0,
         32.0,
         "Export CSV",
-        SURFACE1,
-        TEXT_COLOR,
+        state.palette.surface1,
+        state.palette.text,
         false,
     );
     draw_button(
@@ -5250,8 +5470,8 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         120.0,
         32.0,
         "Backup",
-        SURFACE1,
-        TEXT_COLOR,
+        state.palette.surface1,
+        state.palette.text,
         false,
     );
 
@@ -5274,7 +5494,7 @@ fn render_audit_panel(frame: &mut Frame, state: &AppState, width: f32, height: f
         y_start,
         panel_width,
         panel_height,
-        BASE,
+        state.palette.base,
         0.0,
     );
 
@@ -5286,7 +5506,7 @@ fn render_audit_panel(frame: &mut Frame, state: &AppState, width: f32, height: f
         x_start + pad,
         y,
         "Password Audit",
-        TEXT_COLOR,
+        state.palette.text,
         HEADING_FONT_SIZE,
         FontWeightHint::Bold,
         None,
@@ -5299,7 +5519,7 @@ fn render_audit_panel(frame: &mut Frame, state: &AppState, width: f32, height: f
             x_start + pad,
             y,
             "No issues found. All passwords look good!",
-            GREEN,
+            state.palette.green,
             DEFAULT_FONT_SIZE,
             FontWeightHint::Regular,
             None,
@@ -5313,14 +5533,20 @@ fn render_audit_panel(frame: &mut Frame, state: &AppState, width: f32, height: f
         x_start + pad,
         y,
         &summary,
-        YELLOW,
+        state.palette.yellow,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Bold,
         None,
     );
     y += 28.0;
 
-    draw_separator(frame, x_start + pad, y, panel_width - pad * 2.0);
+    draw_separator(
+        frame,
+        &state.palette,
+        x_start + pad,
+        y,
+        panel_width - pad * 2.0,
+    );
     y += 12.0;
 
     frame.push(RenderCommand::PushClip {
@@ -5335,7 +5561,7 @@ fn render_audit_panel(frame: &mut Frame, state: &AppState, width: f32, height: f
             break;
         }
 
-        let issue_color = issue.issue.severity_color();
+        let issue_color = issue.issue.severity_color(&state.palette);
 
         draw_rect(
             frame,
@@ -5343,7 +5569,7 @@ fn render_audit_panel(frame: &mut Frame, state: &AppState, width: f32, height: f
             y,
             panel_width - pad * 2.0,
             36.0,
-            SURFACE0,
+            state.palette.surface0,
             4.0,
         );
 
@@ -5354,7 +5580,7 @@ fn render_audit_panel(frame: &mut Frame, state: &AppState, width: f32, height: f
             y + 8.0,
             issue.issue.label(),
             issue_color,
-            BASE,
+            state.palette.base,
         );
 
         // Entry name, laid out from the width the badge actually drew.
@@ -5363,7 +5589,7 @@ fn render_audit_panel(frame: &mut Frame, state: &AppState, width: f32, height: f
             x_start + pad + 8.0 + severity_w + 16.0,
             y + 10.0,
             &issue.entry_name,
-            TEXT_COLOR,
+            state.palette.text,
             DEFAULT_FONT_SIZE,
             FontWeightHint::Regular,
             Some(panel_width - pad * 2.0 - severity_w - 32.0),
@@ -5381,7 +5607,7 @@ fn render_audit_panel(frame: &mut Frame, state: &AppState, width: f32, height: f
 
 fn render_lock_screen(frame: &mut Frame, state: &AppState, width: f32, height: f32) {
     // Full-screen overlay
-    draw_rect(frame, 0.0, 0.0, width, height, MANTLE, 0.0);
+    draw_rect(frame, 0.0, 0.0, width, height, state.palette.mantle, 0.0);
 
     let center_x = width / 2.0;
     let center_y = height / 2.0;
@@ -5404,7 +5630,15 @@ fn render_lock_screen(frame: &mut Frame, state: &AppState, width: f32, height: f
         color: Color::rgba(0, 0, 0, 100),
         corner_radii: CornerRadii::all(12.0),
     });
-    draw_rect(frame, px, py, panel_w, panel_h, SURFACE0, 12.0);
+    draw_rect(
+        frame,
+        px,
+        py,
+        panel_w,
+        panel_h,
+        state.palette.surface0,
+        12.0,
+    );
 
     // Lock icon
     draw_text(
@@ -5412,7 +5646,7 @@ fn render_lock_screen(frame: &mut Frame, state: &AppState, width: f32, height: f
         text::center_x("[=]", center_x, 24.0, FontWeightHint::Bold),
         py + 30.0,
         "[=]",
-        BLUE,
+        state.palette.blue,
         24.0,
         FontWeightHint::Bold,
         None,
@@ -5431,7 +5665,7 @@ fn render_lock_screen(frame: &mut Frame, state: &AppState, width: f32, height: f
         name_x,
         py + 70.0,
         &state.vault.name,
-        TEXT_COLOR,
+        state.palette.text,
         HEADING_FONT_SIZE,
         FontWeightHint::Bold,
         None,
@@ -5450,7 +5684,7 @@ fn render_lock_screen(frame: &mut Frame, state: &AppState, width: f32, height: f
         instruction_x,
         py + 100.0,
         instruction,
-        SUBTEXT0,
+        state.palette.subtext0,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Regular,
         None,
@@ -5462,14 +5696,18 @@ fn render_lock_screen(frame: &mut Frame, state: &AppState, width: f32, height: f
     let input_w = panel_w - 60.0;
     let input_h = 40.0;
 
-    let border_color = if state.unlock_failed { RED } else { SURFACE2 };
+    let border_color = if state.unlock_failed {
+        state.palette.red
+    } else {
+        state.palette.surface2
+    };
     draw_rect(
         frame,
         input_x,
         input_y,
         input_w,
         input_h,
-        BASE,
+        state.palette.base,
         CORNER_RADIUS,
     );
     draw_stroke_rect(
@@ -5491,9 +5729,9 @@ fn render_lock_screen(frame: &mut Frame, state: &AppState, width: f32, height: f
         &masked
     };
     let display_color = if masked.is_empty() {
-        OVERLAY0
+        state.palette.overlay0
     } else {
-        TEXT_COLOR
+        state.palette.text
     };
     draw_text(
         frame,
@@ -5519,7 +5757,7 @@ fn render_lock_screen(frame: &mut Frame, state: &AppState, width: f32, height: f
             error_x,
             input_y + input_h + 8.0,
             error,
-            RED,
+            state.palette.red,
             SMALL_FONT_SIZE,
             FontWeightHint::Regular,
             None,
@@ -5529,7 +5767,15 @@ fn render_lock_screen(frame: &mut Frame, state: &AppState, width: f32, height: f
     // Unlock button
     let unlock = Rect::new(center_x - 50.0, py + 200.0, 100.0, 36.0);
     draw_button(
-        frame, unlock.x, unlock.y, unlock.w, unlock.h, "Unlock", BLUE, BASE, false,
+        frame,
+        unlock.x,
+        unlock.y,
+        unlock.w,
+        unlock.h,
+        "Unlock",
+        state.palette.blue,
+        state.palette.base,
+        false,
     );
     // Until this was recorded the button was decoration: the only way past the
     // lock screen was the Enter key, and `handle_mouse` returned immediately
@@ -5563,7 +5809,7 @@ impl AppState {
         }
 
         // Background
-        draw_rect(&mut frame, 0.0, 0.0, w, h, BASE, 0.0);
+        draw_rect(&mut frame, 0.0, 0.0, w, h, self.palette.base, 0.0);
 
         render_toolbar(&mut frame, self, &layout);
         render_sidebar(&mut frame, self, &layout);
@@ -6095,6 +6341,10 @@ fn attempt_unlock(state: &mut AppState) {
 // =============================================================================
 
 impl App for AppState {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Credential Manager".to_string()
     }
@@ -6258,7 +6508,11 @@ mod tests {
 
     #[test]
     fn test_entry_type_badge_colors_distinct() {
-        let colors: Vec<Color> = EntryType::all().iter().map(|t| t.badge_color()).collect();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let colors: Vec<Color> = EntryType::all()
+            .iter()
+            .map(|t| t.badge_color(&pal))
+            .collect();
         for i in 0..colors.len() {
             for j in i + 1..colors.len() {
                 assert_ne!(colors[i], colors[j]);
@@ -8067,9 +8321,10 @@ mod tests {
     /// tag early and left a gap on the right.
     #[test]
     fn a_badge_is_measured_the_same_way_wherever_it_is_measured() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut frame = Frame::new(1280.0, 800.0);
         for label in ["Login", "Identity", "Compromised"] {
-            let drawn = draw_badge(&mut frame, 0.0, 0.0, label, BLUE, BASE);
+            let drawn = draw_badge(&mut frame, 0.0, 0.0, label, pal.blue, pal.base);
             assert!(
                 (drawn - badge_width(label)).abs() < f32::EPSILON,
                 "{label:?}: drawn {drawn} but laid out {}",
@@ -9031,6 +9286,65 @@ mod tests {
         assert_eq!(
             press(&mut state, Target::CopyField(0)),
             EventResult::Ignored
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut AppState) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = unlocked_app();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

@@ -20,6 +20,7 @@
 //! left the navigation code using a `grid_columns: 16` that no window of any
 //! size actually had.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -33,20 +34,6 @@ use std::num::NonZeroUsize;
 use std::process::ExitCode;
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ── Unicode General Categories ─────────────────────────────────────────────
 
@@ -794,6 +781,12 @@ struct CharMapApp {
     /// separately, so half a notch spent on one does not spill into the other.
     block_wheel: wheel::Accumulator,
     grid_wheel: wheel::Accumulator,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl CharMapApp {
@@ -801,6 +794,7 @@ impl CharMapApp {
         let blocks = unicode_blocks();
         let mut app = Self {
             blocks,
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             selected_block: 0,
             block_scroll: 0,
             grid_chars: Vec::new(),
@@ -1351,7 +1345,7 @@ impl CharMapApp {
         let layout = Layout::new(width, height);
         let mut frame = Frame::new(width, height);
 
-        fill(&mut frame, layout.window, BASE, 0.0);
+        fill(&mut frame, layout.window, self.palette.base, 0.0);
 
         if let Some(sidebar) = layout.sidebar.as_ref() {
             self.render_sidebar(&mut frame, sidebar, layout.block_rows);
@@ -1366,7 +1360,7 @@ impl CharMapApp {
     }
 
     fn render_sidebar(&self, frame: &mut Frame, sidebar: &Sidebar, rows: usize) {
-        fill(frame, sidebar.panel, MANTLE, 0.0);
+        fill(frame, sidebar.panel, self.palette.mantle, 0.0);
         frame.clip(sidebar.panel);
 
         label(
@@ -1375,14 +1369,14 @@ impl CharMapApp {
             sidebar.panel.y + 6.0,
             "Unicode Blocks",
             13.0,
-            BLUE,
+            self.palette.blue,
             FontWeightHint::Bold,
             sidebar.panel.w - 16.0,
         );
 
         // The filter is a button, not a caption with a keystroke written beside
         // it. `[F2]` in a label is only discoverable by reading it.
-        fill(frame, sidebar.filter, SURFACE0, 4.0);
+        fill(frame, sidebar.filter, self.palette.surface0, 4.0);
         frame.hit(Target::Filter, sidebar.filter);
         label(
             frame,
@@ -1390,7 +1384,7 @@ impl CharMapApp {
             sidebar.filter.y + 3.0,
             &format!("Filter: {} [F2]", self.category_filter.label()),
             10.0,
-            SUBTEXT0,
+            self.palette.subtext0,
             FontWeightHint::Regular,
             sidebar.filter.w - 12.0,
         );
@@ -1418,7 +1412,7 @@ impl CharMapApp {
                 fill(
                     frame,
                     Rect::new(row.x + 2.0, row.y, row.w - 4.0, row.h),
-                    SURFACE0,
+                    self.palette.surface0,
                     4.0,
                 );
             }
@@ -1428,7 +1422,11 @@ impl CharMapApp {
                 row.y + 3.0,
                 block.name,
                 11.0,
-                if selected { TEXT_COLOR } else { SUBTEXT1 },
+                if selected {
+                    self.palette.text
+                } else {
+                    self.palette.subtext1
+                },
                 FontWeightHint::Regular,
                 row.w - 20.0,
             );
@@ -1438,7 +1436,7 @@ impl CharMapApp {
                 row.y + 13.0,
                 &format!("{:04X}–{:04X} ({})", block.start, block.end, block.len()),
                 8.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
                 row.w - 20.0,
             );
@@ -1456,7 +1454,7 @@ impl CharMapApp {
                     sidebar.list.w,
                     2.0,
                 ),
-                SURFACE2,
+                self.palette.surface2,
                 0.0,
             );
         }
@@ -1468,14 +1466,14 @@ impl CharMapApp {
                 1.0,
                 sidebar.panel.h,
             ),
-            SURFACE0,
+            self.palette.surface0,
             0.0,
         );
         frame.unclip();
     }
 
     fn render_header(&self, frame: &mut Frame, layout: &Layout) {
-        fill(frame, layout.header, CRUST, 0.0);
+        fill(frame, layout.header, self.palette.crust, 0.0);
         frame.clip(layout.header);
 
         let title = if self.search_active {
@@ -1497,7 +1495,7 @@ impl CharMapApp {
             layout.header.y + 8.0,
             &title,
             12.0,
-            TEXT_COLOR,
+            self.palette.text,
             FontWeightHint::Bold,
             (layout.search.x - layout.header.x - 16.0).max(0.0),
         );
@@ -1505,7 +1503,11 @@ impl CharMapApp {
         fill(
             frame,
             layout.search,
-            if self.search_active { BLUE } else { SURFACE0 },
+            if self.search_active {
+                self.palette.blue
+            } else {
+                self.palette.surface0
+            },
             4.0,
         );
         frame.hit(Target::SearchBox, layout.search);
@@ -1519,7 +1521,11 @@ impl CharMapApp {
                 "Search [Ctrl+F]"
             },
             10.0,
-            if self.search_active { CRUST } else { SUBTEXT0 },
+            if self.search_active {
+                self.palette.crust
+            } else {
+                self.palette.subtext0
+            },
             FontWeightHint::Regular,
             layout.search.w - 12.0,
         );
@@ -1543,7 +1549,7 @@ impl CharMapApp {
                     "No characters in this block pass the filter"
                 },
                 11.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
                 layout.grid.w - 16.0,
             );
@@ -1569,11 +1575,11 @@ impl CharMapApp {
                 let is_sel = idx == selected;
                 let is_fav = self.favorites.contains(&cp);
                 let bg = if is_sel {
-                    BLUE
+                    self.palette.blue
                 } else if is_fav {
-                    SURFACE1
+                    self.palette.surface1
                 } else {
-                    SURFACE0
+                    self.palette.surface0
                 };
                 fill(frame, cell, bg, 4.0);
                 if is_fav {
@@ -1583,7 +1589,7 @@ impl CharMapApp {
                         cell.y + 1.0,
                         "*",
                         8.0,
-                        YELLOW,
+                        self.palette.yellow,
                         FontWeightHint::Bold,
                         8.0,
                     );
@@ -1594,7 +1600,11 @@ impl CharMapApp {
                     cell.y + 6.0,
                     &cell_glyph(cp),
                     16.0,
-                    if is_sel { CRUST } else { TEXT_COLOR },
+                    if is_sel {
+                        self.palette.crust
+                    } else {
+                        self.palette.text
+                    },
                     FontWeightHint::Regular,
                     cell.w - 8.0,
                 );
@@ -1604,7 +1614,11 @@ impl CharMapApp {
                     cell.bottom() - 10.0,
                     &format!("{cp:04X}"),
                     7.0,
-                    if is_sel { MANTLE } else { OVERLAY0 },
+                    if is_sel {
+                        self.palette.mantle
+                    } else {
+                        self.palette.overlay0
+                    },
                     FontWeightHint::Regular,
                     cell.w - 4.0,
                 );
@@ -1617,7 +1631,7 @@ impl CharMapApp {
         fill(
             frame,
             Rect::new(detail.panel.x, detail.panel.y, 1.0, detail.panel.h),
-            SURFACE0,
+            self.palette.surface0,
             0.0,
         );
         fill(
@@ -1628,7 +1642,7 @@ impl CharMapApp {
                 (detail.panel.w - 1.0).max(0.0),
                 detail.panel.h,
             ),
-            MANTLE,
+            self.palette.mantle,
             0.0,
         );
         frame.clip(detail.panel);
@@ -1639,7 +1653,7 @@ impl CharMapApp {
             detail.panel.y + 8.0,
             "Character Detail",
             13.0,
-            BLUE,
+            self.palette.blue,
             FontWeightHint::Bold,
             detail.panel.w - 20.0,
         );
@@ -1651,7 +1665,7 @@ impl CharMapApp {
                 detail.preview.y,
                 "No character selected",
                 11.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
                 detail.panel.w - 20.0,
             );
@@ -1659,18 +1673,18 @@ impl CharMapApp {
             return;
         };
 
-        fill(frame, detail.preview, SURFACE0, 8.0);
+        fill(frame, detail.preview, self.palette.surface0, 8.0);
         label(
             frame,
             detail.preview.x + 10.0,
             detail.preview.y + 10.0,
             &info.display_char(),
             self.preview_size.font_size(),
-            TEXT_COLOR,
+            self.palette.text,
             FontWeightHint::Regular,
             detail.preview.w - 20.0,
         );
-        fill(frame, detail.size_button, SURFACE1, 3.0);
+        fill(frame, detail.size_button, self.palette.surface1, 3.0);
         frame.hit(Target::PreviewSize, detail.size_button);
         label(
             frame,
@@ -1678,7 +1692,7 @@ impl CharMapApp {
             detail.size_button.y + 2.0,
             &format!("[F3] {}", self.preview_size.label()),
             8.0,
-            SUBTEXT0,
+            self.palette.subtext0,
             FontWeightHint::Regular,
             detail.size_button.w - 8.0,
         );
@@ -1709,7 +1723,7 @@ impl CharMapApp {
                 y,
                 &format!("{name}:"),
                 10.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Bold,
                 70.0,
             );
@@ -1719,7 +1733,7 @@ impl CharMapApp {
                 y,
                 value,
                 10.0,
-                TEXT_COLOR,
+                self.palette.text,
                 FontWeightHint::Regular,
                 (detail.fields.w - 70.0).max(0.0),
             );
@@ -1729,7 +1743,11 @@ impl CharMapApp {
         fill(
             frame,
             detail.star,
-            if is_fav { SURFACE1 } else { SURFACE0 },
+            if is_fav {
+                self.palette.surface1
+            } else {
+                self.palette.surface0
+            },
             3.0,
         );
         frame.hit(Target::Star, detail.star);
@@ -1743,12 +1761,16 @@ impl CharMapApp {
                 "Add to favourites [Space]"
             },
             10.0,
-            if is_fav { YELLOW } else { OVERLAY0 },
+            if is_fav {
+                self.palette.yellow
+            } else {
+                self.palette.overlay0
+            },
             FontWeightHint::Regular,
             detail.star.w - 12.0,
         );
 
-        fill(frame, detail.copy, SURFACE0, 3.0);
+        fill(frame, detail.copy, self.palette.surface0, 3.0);
         frame.hit(Target::Copy, detail.copy);
         label(
             frame,
@@ -1756,7 +1778,7 @@ impl CharMapApp {
             detail.copy.y + 3.0,
             "Copy to clipboard [Enter]",
             10.0,
-            GREEN,
+            self.palette.green,
             FontWeightHint::Regular,
             detail.copy.w - 12.0,
         );
@@ -1766,9 +1788,9 @@ impl CharMapApp {
             detail,
             detail.recent,
             &format!("Recently Used ({})", self.recent.len()),
-            TEAL,
+            self.palette.teal,
             &self.recent,
-            SURFACE0,
+            self.palette.surface0,
             Target::RecentTile,
         );
         self.render_tiles(
@@ -1776,9 +1798,9 @@ impl CharMapApp {
             detail,
             detail.favorites,
             &format!("Favourites ({})", self.favorites.len()),
-            YELLOW,
+            self.palette.yellow,
             &self.favorites,
-            SURFACE1,
+            self.palette.surface1,
             Target::FavoriteTile,
         );
 
@@ -1852,7 +1874,7 @@ impl CharMapApp {
                 tile.y + 3.0,
                 &ch.to_string(),
                 12.0,
-                TEXT_COLOR,
+                self.palette.text,
                 FontWeightHint::Regular,
                 tile.w - 6.0,
             );
@@ -1861,7 +1883,7 @@ impl CharMapApp {
     }
 
     fn render_status(&self, frame: &mut Frame, status: Rect) {
-        fill(frame, status, CRUST, 0.0);
+        fill(frame, status, self.palette.crust, 0.0);
         frame.clip(status);
         label(
             frame,
@@ -1869,7 +1891,7 @@ impl CharMapApp {
             status.y + 8.0,
             &self.status_message,
             11.0,
-            SUBTEXT1,
+            self.palette.subtext1,
             FontWeightHint::Regular,
             status.w * 0.6,
         );
@@ -1888,7 +1910,7 @@ impl CharMapApp {
             status.y + 8.0,
             &right,
             10.0,
-            OVERLAY0,
+            self.palette.overlay0,
             FontWeightHint::Regular,
             250.0,
         );
@@ -2252,6 +2274,10 @@ fn handle_event(app: &mut CharMapApp, event: &Event) -> EventResult {
 }
 
 impl App for CharMapApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Character Map")
     }
@@ -3399,5 +3425,63 @@ mod tests {
 
         let info2 = char_info(0x00E9);
         assert_eq!(info2.utf8_hex(), "C3 A9");
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours, not in fourteen constants.
+    ///
+    /// Asserted on the rectangles emitted rather than on the `palette` field,
+    /// which would only prove it was assigned. What matters to a user is that
+    /// the picture changes.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut CharMapApp) -> Vec<Color> {
+            app.render(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = CharMapApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on both themes, so it is still \
+             painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

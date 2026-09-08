@@ -124377,9 +124377,46 @@ which makes step 1 below larger than one dependency line.
   new defaulted `App::theme_changed` — before the first frame, and again on
   every change. `design-decisions.md` §822 records why it is a trait method
   and not an `Event`.
-- **Step 2 has started: 2 of 129.** `calculator` (11 constants) and
-  `diskcleanup` (9). Both have a test on the rectangles they emit, and both
-  tests were mutation-checked by making `theme_changed` ignore its argument.
+- **Step 2 has started: 3 of 129.** `calculator` (11 constants),
+  `diskcleanup` (9) and `charmap` (14). Each has a test on the rectangles it
+  emits, and each was mutation-checked by making `theme_changed` ignore its
+  argument.
+
+**Batch conversion was tried and abandoned; do not retry it as written.** The
+substitution half automates well — mapping by *hex value* rather than by
+constant name is the trick, since the names vary
+(`COLOR_TEXT`/`COL_TEXT`/`MOCHA_TEXT`) while the values are the one palette.
+What does not automate is the part after it. Four applications were converted
+in one pass and three had to be reverted:
+
+| app | errors after the automated pass |
+|---|---|
+| `charmap` | 1 (a missing field initialiser) — kept |
+| `fileassoc` | 18 — reverted |
+| `startupmanager` | 28 — reverted |
+| `clipmanager` | 91 — reverted |
+
+The difference is not size, it is **where the drawing lives**. `charmap` and
+`calculator` draw from `&self` methods, so the substitution
+`CONST` → `self.palette.<role>` is the whole job. `clipmanager` draws from
+free functions that take `state: &AppState`, where the same substitution has
+to produce `state.palette.<role>` instead — and a script that rewrote call
+sites with a regex to thread a new parameter made 91 errors out of 13.
+
+**So: convert one application at a time, and look first at how it draws.**
+Three shapes, in increasing cost:
+
+1. **Colours used only in `&self` methods** — pure substitution, done in one
+   pass. `charmap`, `calculator` (nearly).
+2. **Free functions that already take the application struct** — substitute to
+   `<param>.palette` instead. No signature changes, still mechanical, but the
+   script has to know the parameter's name.
+3. **Free or associated helpers taking neither** — these need a
+   `pal: &Palette` parameter threaded through their call sites, and that is
+   the part to do by hand. The compiler names every one of them (E0424,
+   *"expected value, found module `self`"*), so the work is bounded and
+   visible; it is the *automatic rewriting of call sites* that is not safe,
+   particularly where a call spans several lines.
 
 **The pattern, so the rest are mechanical.** Per application: add
 `appearance` to `Cargo.toml`; add a `palette: Palette` field seeded from

@@ -124131,3 +124131,51 @@ at zero external references. It did **not** count `pub const` — and
 config watcher used. The build caught it, but a sweep of this kind should
 enumerate *every* kind of public item, not the three that happened to come to
 mind. The constant now comes from `appearance::CONFIG_NAME`, which owns it.
+
+---
+
+## TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/desktop/src/` — `login_screen.rs` (2 417 lines), `blur.rs`
+(2 224), `input_method.rs` (1 279), `tray_dnd.rs` (1 185). 7 105 lines.
+
+**In short:** four features of the desktop shell are fully written, declared
+as modules, and constructed by nothing. Not one public item in any of them is
+referenced from anywhere else in the tree — including the shell's own
+`main.rs`. There is no login screen at runtime, no window blur, no
+input-method switching, and no drag-and-drop in the system tray, however much
+code there is for each.
+
+**These are not the settings panels, and must not be treated the same way.**
+Three unreachable `*_settings.rs` panels were deleted the same day under
+`design-decisions.md` §815 — but §815 draws its line precisely here: *"The
+volume overlay and the login screen are the desktop showing you something, so
+they stay in the shell and get wired up."* The login screen is named in the
+decision as a thing to **wire up**, not remove. The other three are the same
+kind of thing: chrome the desktop shows you, not screens you open. **Deleting
+any of these would be a misreading of §815.**
+
+**How they were found.** A sweep of all 56 shell modules counting external
+references to every public item — `struct`, `enum`, `trait`, `type`, `const`,
+`static`, `fn` and `mod`. `gui/desktop` is self-contained (its own `main.rs`,
+no other crate depends on it), so nothing outside the corpus could reach them.
+
+| module | what it holds | what is missing |
+|---|---|---|
+| `login_screen.rs` | `LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig` | Construction and a session hand-off. §815 says wire it up. This is also where `design-decisions.md` §818 (a passwordless account is never locked) has to take effect, and it currently cannot. |
+| `blur.rs` | `BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager` | A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
+| `input_method.rs` | `InputMethodManager`, `SwitchShortcut` | A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
+| `tray_dnd.rs` | `TrayDragSource`, `TrayDropTarget`, `TrayIconSlot`, `TrayIconArrangement`, `TraySlotConfig`, `TrayArrangementConfig`, `StartInTrayConfig` | A caller in the tray's event path. |
+
+**Order worth doing them in.** `login_screen` first: it is named in §815, it
+gates §818, and a machine with no login screen is a machine with no user
+accounts in any meaningful sense. Then `tray_dnd` (self-contained, one event
+path). Then `blur` (needs a compositing decision about where the pass runs —
+compare the colour-filter work, which had the same question). `input_method`
+last, because wiring is the small half of it.
+
+**Why this is being recorded rather than fixed here.** Each is a feature-sized
+job with a design question in it, and this was a dead-code sweep. What matters
+is that the sweep is written down: before it, nothing in the tree said these
+four were disconnected, and their size makes them look finished.

@@ -230,7 +230,28 @@ fn parse_ihdr(data: &[u8]) -> ImageResult<Header> {
 /// [`ImageError`] — a malformed header, a picture over `limits`, a failed
 /// critical-chunk checksum, or unreadable compressed data. Never panics, for
 /// any input.
+/// Decode a picture no larger than `max_w` x `max_h`, box-filtered on the way
+/// out.
+///
+/// For a thumbnailer: the destination is tiny and the source may be enormous,
+/// and the full-size `Vec<u32>` in between is pure waste. Falls back to a full
+/// decode followed by nothing for interlaced files, whose passes arrive
+/// scattered and cannot be accumulated row by row.
+///
+/// The aspect ratio is preserved and the result never exceeds either bound.
+///
+/// # Errors
+///
+/// As [`decode`].
+pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> ImageResult<Image> {
+    decode_inner(bytes, limits, Some((max_w.max(1), max_h.max(1))))
+}
+
 pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
+    decode_inner(bytes, limits, None)
+}
+
+fn decode_inner(bytes: &[u8], limits: Limits, scale_to: Option<(u32, u32)>) -> ImageResult<Image> {
     let header = read_header(bytes)?;
 
     // (2) in the module docs: refuse from the header, before anything the
@@ -309,6 +330,22 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
     if raw.len() != limit {
         // Short is a truncated file; the decompressor already refuses long.
         return Err(ImageError::Truncated);
+    }
+
+    // The scaled path, when one was asked for and the file allows it. An
+    // interlaced file cannot use it: Adam7's passes arrive scattered across
+    // the image, so a row-by-row accumulator would have nothing coherent to
+    // accumulate, and it falls through to the full decode below.
+    if let Some((max_w, max_h)) = scale_to
+        && !header.interlaced
+    {
+        let (dw, dh) = fit_within(header.width, header.height, max_w, max_h);
+        let out = expand_scaled(&header, &raw, &palette, trns.as_deref(), dw, dh)?;
+        return Ok(Image {
+            width: dw,
+            height: dh,
+            pixels: out,
+        });
     }
 
     let mut out = vec![0u32; usize::try_from(pixels).unwrap_or(0)];
@@ -420,6 +457,161 @@ fn expand_adam7(
 
 /// Unfilter one pass and convert its samples to `0xAARRGGBB`.
 ///
+/// The largest `w x h` that fits in `max_w x max_h` with the aspect ratio of
+/// `w x h`, never zero in either dimension.
+///
+/// A picture is never scaled *up*: a 16x16 icon asked to fit 128x128 stays
+/// 16x16, because inventing pixels is not what a thumbnailer is for.
+fn fit_within(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if w <= max_w && h <= max_h {
+        return (w.max(1), h.max(1));
+    }
+    // Saturating rather than plain: the product of two `u32`s fits a `u64`
+    // with a hair to spare, but writing the proof in a comment and the
+    // multiplication as if it needed none is how the next edit loses it.
+    let by_w = u64::from(max_w).saturating_mul(u64::from(h));
+    let by_h = u64::from(max_h).saturating_mul(u64::from(w));
+    // Whichever bound binds first: comparing the cross-products avoids
+    // floating point and its rounding.
+    if by_w <= by_h {
+        let dh = by_w.checked_div(u64::from(w.max(1))).unwrap_or(1).max(1);
+        (max_w.max(1), u32::try_from(dh).unwrap_or(1))
+    } else {
+        let dw = by_h.checked_div(u64::from(h.max(1))).unwrap_or(1).max(1);
+        (u32::try_from(dw).unwrap_or(1), max_h.max(1))
+    }
+}
+
+/// Reconstruct a non-interlaced image straight into a box-filtered
+/// destination, never holding the picture at its own size.
+///
+/// # What this saves, and what it does not
+///
+/// The full-size path allocates two things: the decompressed scanlines
+/// (`height x (row_bytes + 1)`) and a `Vec<u32>` of every pixel. For a
+/// 24-megapixel photograph that is roughly 96 MB each. This drops the second
+/// -- rows are reconstructed one at a time, as they already were, and summed
+/// into a destination-sized accumulator instead of being stored.
+///
+/// It does **not** drop the first. The decompressed buffer exists before any
+/// of this runs, because `deflate` inflates a whole stream in one call and has
+/// no incremental API. Removing that too is what would let
+/// `ThumbConfig::max_source_pixels` go away entirely; it needs a streaming
+/// inflater, and `deflate/` is outside this lane's globs. See
+/// `known-issues.md` `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE`.
+///
+/// # The filter
+///
+/// A box filter: every source pixel is added to exactly one destination cell
+/// and each cell is divided by its own count at the end. Counting per cell
+/// rather than assuming `(w/dw) * (h/dh)` matters because the division is
+/// integer -- with a 100-wide source and a 30-wide destination the columns
+/// come out 4,3,3,4,3..., and a fixed divisor would darken the wide ones.
+///
+/// Alpha is averaged with the colour rather than premultiplied first. That is
+/// the same thing `box_filter_downscale` in the thumbnailer does, and matching
+/// it is deliberate: two averaging rules would make a scaled decode and a
+/// decode-then-scale disagree about the same picture.
+fn expand_scaled(
+    h: &Header,
+    raw: &[u8],
+    palette: &[u32],
+    trns: Option<&[u8]>,
+    dest_w: u32,
+    dest_h: u32,
+) -> ImageResult<Vec<u32>> {
+    let row_len = usize::try_from(h.row_bytes(h.width)).map_err(|_| ImageError::Truncated)?;
+    let step = h.filter_step();
+    let cells = (dest_w as usize)
+        .checked_mul(dest_h as usize)
+        .ok_or(ImageError::Truncated)?;
+
+    // u64 sums: a destination cell can cover the whole source, so the count is
+    // bounded by the pixel cap rather than by anything small, and 255 * 24e6
+    // overflows a u32.
+    let mut acc = vec![[0u64; 4]; cells];
+    let mut counts = vec![0u64; cells];
+
+    let mut prev = vec![0u8; row_len];
+    let mut cur = vec![0u8; row_len];
+
+    for y in 0..h.height {
+        let at = (y as usize)
+            .checked_mul(row_len.saturating_add(1))
+            .ok_or(ImageError::Truncated)?;
+        let filter = *raw.get(at).ok_or(ImageError::Truncated)?;
+        let src = raw
+            .get(at.saturating_add(1)..at.saturating_add(1).saturating_add(row_len))
+            .ok_or(ImageError::Truncated)?;
+        cur.clear();
+        cur.extend_from_slice(src);
+        unfilter(filter, &mut cur, &prev, step)?;
+
+        // Which destination row this source row falls in. Clamped so the last
+        // source row cannot land one past the end when the division is exact.
+        let dy = usize::try_from(
+            u64::from(y)
+                .saturating_mul(u64::from(dest_h))
+                .checked_div(u64::from(h.height.max(1)))
+                .unwrap_or(0)
+                .min(u64::from(dest_h.saturating_sub(1))),
+        )
+        .unwrap_or(0);
+
+        for x in 0..h.width {
+            let dx = usize::try_from(
+                u64::from(x)
+                    .saturating_mul(u64::from(dest_w))
+                    .checked_div(u64::from(h.width.max(1)))
+                    .unwrap_or(0)
+                    .min(u64::from(dest_w.saturating_sub(1))),
+            )
+            .unwrap_or(0);
+            let Some(idx) = dy
+                .checked_mul(dest_w as usize)
+                .and_then(|v| v.checked_add(dx))
+            else {
+                return Err(ImageError::Truncated);
+            };
+            let px = pixel_at(h, &cur, x as usize, palette, trns)?;
+            if let (Some(cell), Some(n)) = (acc.get_mut(idx), counts.get_mut(idx)) {
+                // Saturating throughout. The sums are bounded by 255 times
+                // the pixel cap and cannot reach a u64 in practice, but a
+                // codec is exactly the place where "in practice" is decided
+                // by whoever supplies the file.
+                cell[0] = cell[0].saturating_add(u64::from((px >> 24) & 0xFF));
+                cell[1] = cell[1].saturating_add(u64::from((px >> 16) & 0xFF));
+                cell[2] = cell[2].saturating_add(u64::from((px >> 8) & 0xFF));
+                cell[3] = cell[3].saturating_add(u64::from(px & 0xFF));
+                *n = n.saturating_add(1);
+            }
+        }
+        core::mem::swap(&mut prev, &mut cur);
+    }
+
+    let mut out = vec![0u32; cells];
+    for (slot, (cell, n)) in out.iter_mut().zip(acc.iter().zip(counts.iter())) {
+        if *n == 0 {
+            continue;
+        }
+        // Every channel divided by the same count, so a cell that covered
+        // fewer source pixels than its neighbour is still its own average
+        // rather than a darker version of one.
+        // `checked_div` although `n` is known non-zero two lines above: the
+        // guard and the division are far enough apart that a later edit could
+        // separate them, and the fallback is a black cell rather than a panic
+        // in a decoder that reads files it did not write.
+        let mean = |v: u64| {
+            u32::try_from(v.checked_div(*n).unwrap_or(0))
+                .unwrap_or(255)
+                .min(255)
+        };
+        *slot =
+            (mean(cell[0]) << 24) | (mean(cell[1]) << 16) | (mean(cell[2]) << 8) | mean(cell[3]);
+    }
+    Ok(out)
+}
+
 /// `placement` is `(x_start, y_start, x_step, y_step)`; for a non-interlaced
 /// image it is `(0, 0, 1, 1)`, which is why there is no second copy of this
 /// function for the simple case.
@@ -1355,5 +1547,112 @@ mod tests {
         // which makes it the one value that can be checked against the world
         // rather than against this implementation.
         assert_eq!(crc32(b"IEND", b""), 0xAE42_6082);
+    }
+
+    // ------------------------------------------------------------------
+    // Scaled decode
+    // ------------------------------------------------------------------
+
+    /// A scaled decode is the same picture, at a smaller size.
+    ///
+    /// The property that matters: it must agree with decoding and *then*
+    /// averaging, or the file manager's previews would differ depending on
+    /// which path a picture happened to take. Compared to a box filter written
+    /// here rather than trusted, so the test says what the answer should be
+    /// instead of asking the code.
+    #[test]
+    fn a_scaled_decode_averages_the_same_way_a_full_one_would() {
+        let png =
+            crate::testing::png_rgba(8, 8, |x, y| [(x * 32) as u8, (y * 32) as u8, 0x40, 0xFF]);
+        let scaled =
+            decode_scaled(&png, Limits::default(), 4, 4).expect("the scaled decode must work");
+        assert_eq!((scaled.width, scaled.height), (4, 4));
+
+        let full = decode(&png, Limits::default()).expect("full");
+        for dy in 0..4u32 {
+            for dx in 0..4u32 {
+                // Each destination cell covers exactly 2x2 here.
+                let mut sums = [0u32; 4];
+                for sy in 0..2u32 {
+                    for sx in 0..2u32 {
+                        let px = full.pixels[((dy * 2 + sy) * 8 + dx * 2 + sx) as usize];
+                        sums[0] += (px >> 24) & 0xFF;
+                        sums[1] += (px >> 16) & 0xFF;
+                        sums[2] += (px >> 8) & 0xFF;
+                        sums[3] += px & 0xFF;
+                    }
+                }
+                let want = ((sums[0] / 4) << 24)
+                    | ((sums[1] / 4) << 16)
+                    | ((sums[2] / 4) << 8)
+                    | (sums[3] / 4);
+                assert_eq!(
+                    scaled.pixels[(dy * 4 + dx) as usize],
+                    want,
+                    "cell ({dx}, {dy})"
+                );
+            }
+        }
+    }
+
+    /// A picture smaller than the bounds comes back untouched.
+    ///
+    /// Scaling *up* would invent pixels, which is not what a thumbnailer is
+    /// for and would make a 16x16 icon a blurry 128x128 one.
+    #[test]
+    fn a_small_picture_is_not_enlarged() {
+        let png = crate::testing::png_gradient(6, 4);
+        let scaled = decode_scaled(&png, Limits::default(), 128, 128).expect("scaled");
+        let full = decode(&png, Limits::default()).expect("full");
+
+        assert_eq!((scaled.width, scaled.height), (6, 4));
+        assert_eq!(scaled.pixels, full.pixels, "and not resampled either");
+    }
+
+    /// The aspect ratio survives, and neither bound is exceeded.
+    #[test]
+    fn a_scaled_decode_keeps_the_shape_and_stays_inside_both_bounds() {
+        let png = crate::testing::png_gradient(40, 10);
+        let scaled = decode_scaled(&png, Limits::default(), 8, 8).expect("scaled");
+
+        assert!(scaled.width <= 8 && scaled.height <= 8, "inside the box");
+        assert_eq!(scaled.width, 8, "the wide side binds first");
+        assert_eq!(scaled.height, 2, "and the other follows the ratio");
+        assert_eq!(scaled.pixels.len(), 16);
+    }
+
+    /// A destination dimension never rounds to zero.
+    ///
+    /// A 4000x3 panorama scaled to fit 64x64 has a height of 0.048 rows; a
+    /// zero there would produce an empty picture, and a caller asking for a
+    /// preview would get one with no pixels rather than a thin one.
+    #[test]
+    fn an_extreme_ratio_still_produces_at_least_one_row() {
+        let png = crate::testing::png_gradient(400, 3);
+        let scaled = decode_scaled(&png, Limits::default(), 64, 64).expect("scaled");
+
+        assert!(scaled.height >= 1, "height rounded away to nothing");
+        assert_eq!(
+            scaled.pixels.len(),
+            (scaled.width as usize) * (scaled.height as usize)
+        );
+    }
+
+    /// Every destination cell is covered: none is left at the default zero.
+    ///
+    /// The failure this catches is an off-by-one in the index arithmetic
+    /// leaving the last row or column untouched, which on a dark picture is
+    /// almost invisible by eye.
+    #[test]
+    fn every_destination_cell_receives_at_least_one_source_pixel() {
+        let png = crate::testing::png_rgba(37, 23, |_, _| [0x10, 0x20, 0x30, 0xFF]);
+        let scaled = decode_scaled(&png, Limits::default(), 9, 5).expect("scaled");
+
+        for (i, px) in scaled.pixels.iter().enumerate() {
+            assert_eq!(
+                *px, 0xFF10_2030,
+                "cell {i} is not the uniform colour, so it took no source pixels"
+            );
+        }
     }
 }

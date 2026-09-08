@@ -89233,7 +89233,41 @@ is the generic file glyph. Neither reports an error.
 
 ---
 
-## `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE` (lane C, 2026-08-26)
+## `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE` (lane C, 2026-08-26) -- **halved 2026-09-07; still open for the other half**
+
+**Update 2026-09-07: the peak is halved, and the remaining half is not
+reachable from this lane.** `imagecodec::decode_scaled` box-filters during
+scanline reconstruction, exactly as this entry proposed, and the thumbnailer
+uses it. The full-size `Vec<u32>` between decode and downscale is gone -- for a
+24-megapixel photograph, 96 MB of the roughly 190 MB.
+
+**What still costs 96 MB, and why it stays.** The *decompressed scanlines*.
+`zlib_inflate_limited` inflates the whole stream in one call before any
+reconstruction happens, because `deflate` exposes only `inflate` and
+`inflate_limited` over a complete buffer -- there is no incremental API to feed
+rows from. Adding one is what would let `ThumbConfig::max_source_pixels` go
+away entirely, and `deflate/` is not in lane C's globs. That is the piece to
+ask for, not to work around.
+
+**Interlaced files keep the old path**, as the entry predicted: Adam7's passes
+arrive scattered across the image, so a row-by-row accumulator has nothing
+coherent to accumulate. `decode_scaled` falls back rather than refusing, so a
+caller never has to know which case a file is.
+
+**The test that carries the design** asserts a scaled decode gives the same
+answer as decoding and *then* averaging, computed independently in the test
+rather than read back from the code. Two averaging rules would make the same
+photograph look different depending on which path it took. Four more cover the
+edges: a picture smaller than the box is not enlarged, the aspect ratio
+survives, a 400x3 panorama still yields at least one row rather than rounding
+to an empty picture, and every destination cell receives at least one source
+pixel -- an off-by-one leaving the last row untouched is almost invisible by
+eye on a dark image.
+
+Original entry follows.
+
+---
+
 
 **In short:** to draw a 128×128 preview of a photograph, the file manager
 decodes the photograph at full size first and then shrinks it. A 24-megapixel
@@ -90847,7 +90881,38 @@ are recorded as `design-decisions.md` §608.
 
 ---
 
-## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) — **open**, tech debt
+## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) -- **now one of seventeen**
+
+**Update 2026-09-07: sixteen of the seventeen work.** Eleven of the twelve
+this entry describes were built in one session, in the order the entry's own
+increment list proposed. What remains is `target_monitor`, which waits on
+multi-monitor support and is the one the entry always put last.
+
+The title is left as it was written. It is wrong now and that is the point:
+renaming it would lose the thing worth remembering, which is that a settings
+page can accept, save and *display* twelve settings that do nothing, and that
+the only way a user finds out is by writing one and watching nothing happen.
+
+**What the twelve needed, in the end.** Four new privileged requests
+(`ShellSetOpacity`, `ShellMove`/`ShellResize`, `ShellSetStackTier`,
+`ShellSetSizeLimits`, `ShellSetWindowPolicy`), one new verb
+(`ShellControlAction::Fullscreen`), and `CONTROL_VERSION` 4 → 10. Every one
+follows the same shape: a separate wire tag, `require_shell()` rather than
+`link.resolve()`, and -- where an equivalent self-only operation already
+existed -- the *same* `CompositorRequest`, because only the right to ask
+differs.
+
+**Two of the entry's own reasons turned out to be wrong**, and both cost
+investigation before the work could start:
+
+- "the compositor has no per-window constraint store at all" -- it had one,
+  enforced by every resize, by maximise, and at creation. Only the setter was
+  missing.
+- "a per-window layer override" for `always_on_top` -- a layer is the
+  client's, chosen at creation, so an `AboveNormal` layer would let any
+  program put itself above the taskbar. It needed a *tier within* a layer.
+
+## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) -- original entry follows — **open**, tech debt
 
 **In short:** The Settings panel has a "Window rules" page where you can say
 things like *"the editor should always open maximised on desktop 2"* or *"chat

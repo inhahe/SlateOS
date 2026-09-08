@@ -280,6 +280,28 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
     Err(ImageError::UnknownFormat)
 }
 
+/// Decode a picture already scaled to fit `max_w` x `max_h`.
+///
+/// For callers that want a preview rather than the picture: a thumbnailer
+/// asking for 128x128 of a 24-megapixel photograph should not be handed 190 MB
+/// on the way. The aspect ratio is kept and a picture already smaller than the
+/// bounds is returned at its own size -- inventing pixels is not what this is
+/// for.
+///
+/// Falls back to a full decode for formats or files that cannot be scaled
+/// during reconstruction, so a caller may always use it and never has to ask
+/// which case it is in.
+///
+/// # Errors
+///
+/// As [`decode`].
+pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> ImageResult<Image> {
+    if png::is_png(bytes) {
+        return png::decode_scaled(bytes, limits, max_w, max_h);
+    }
+    Err(ImageError::UnknownFormat)
+}
+
 /// Read a picture's dimensions without decoding its pixels.
 ///
 /// The file manager's detail columns and the preview engine want the size of

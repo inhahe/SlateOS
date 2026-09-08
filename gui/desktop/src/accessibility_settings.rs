@@ -160,71 +160,21 @@ impl Default for VisualSettings {
 // Input assistance
 // ============================================================================
 
-/// Sticky keys mode — hold modifier keys without holding them physically.
-#[derive(Clone, Debug)]
-pub struct StickyKeysConfig {
-    pub enabled: bool,
-    pub lock_on_double_press: bool,
-    pub release_on_two_keys: bool,
-    pub play_sound: bool,
-    pub show_indicator: bool,
-}
-
-impl Default for StickyKeysConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            lock_on_double_press: true,
-            release_on_two_keys: true,
-            play_sound: true,
-            show_indicator: true,
-        }
-    }
-}
-
-/// Filter keys mode — ignore brief or repeated keystrokes.
-#[derive(Clone, Debug)]
-pub struct FilterKeysConfig {
-    pub enabled: bool,
-    pub acceptance_delay_ms: u32,
-    pub repeat_delay_ms: u32,
-    pub bounce_delay_ms: u32,
-    pub play_sound: bool,
-    pub show_indicator: bool,
-}
-
-impl Default for FilterKeysConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            acceptance_delay_ms: 300,
-            repeat_delay_ms: 500,
-            bounce_delay_ms: 200,
-            play_sound: true,
-            show_indicator: true,
-        }
-    }
-}
-
-/// Mouse keys mode — control pointer via keyboard numpad.
-#[derive(Clone, Debug)]
-pub struct MouseKeysConfig {
-    pub enabled: bool,
-    pub speed: u8,
-    pub acceleration: bool,
-    pub use_numpad: bool,
-}
-
-impl Default for MouseKeysConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            speed: 5,
-            acceleration: true,
-            use_numpad: true,
-        }
-    }
-}
+// Sticky, filter and mouse keys are defined in `inputsettings`, not here.
+//
+// This panel used to carry its own `StickyKeysConfig`/`FilterKeysConfig`/
+// `MouseKeysConfig`, which agreed with neither the state machines in
+// `crate::a11y` nor the flat fields on `a11y::AccessibilityConfig` -- three
+// models of one setting, none of them connected to the keyboard, so every
+// toggle on this screen did nothing at all. See `known-issues.md`
+// `TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING`.
+//
+// The names that changed in the move, so the old ones are not searched for in
+// vain: `acceptance_delay_ms` is `slow_keys_ms` (the feature's name, as every
+// document a user might read spells it), `bounce_delay_ms` is
+// `bounce_keys_ms`, and `repeat_delay_ms` is gone -- it duplicated
+// `KeyboardConfig`'s, which already owns key repeat.
+pub use inputsettings::{FilterKeysConfig, MouseKeysConfig, StickyKeysConfig};
 
 /// Input assistance settings aggregate.
 #[derive(Clone, Debug)]
@@ -798,7 +748,7 @@ impl AccessibilitySettingsUI {
             cy,
             width,
             "Acceptance",
-            &format!("{}ms", self.settings.input.filter_keys.acceptance_delay_ms),
+            &format!("{}ms", self.settings.input.filter_keys.slow_keys_ms),
         );
         cy += 28.0;
         self.render_label_value(
@@ -808,7 +758,7 @@ impl AccessibilitySettingsUI {
             cy,
             width,
             "Bounce",
-            &format!("{}ms", self.settings.input.filter_keys.bounce_delay_ms),
+            &format!("{}ms", self.settings.input.filter_keys.bounce_keys_ms),
         );
         cy += 36.0;
 
@@ -841,7 +791,7 @@ impl AccessibilitySettingsUI {
             cy,
             width,
             "Speed",
-            &self.settings.input.mouse_keys.speed.to_string(),
+            &format!("{} px", self.settings.input.mouse_keys.speed.round() as i32),
         );
         cy += 36.0;
 
@@ -1354,26 +1304,10 @@ mod tests {
         assert!(!v.reduce_motion);
     }
 
-    #[test]
-    fn test_sticky_keys_defaults() {
-        let s = StickyKeysConfig::default();
-        assert!(!s.enabled);
-        assert!(s.lock_on_double_press);
-    }
-
-    #[test]
-    fn test_filter_keys_defaults() {
-        let f = FilterKeysConfig::default();
-        assert!(!f.enabled);
-        assert_eq!(f.acceptance_delay_ms, 300);
-    }
-
-    #[test]
-    fn test_mouse_keys_defaults() {
-        let m = MouseKeysConfig::default();
-        assert!(!m.enabled);
-        assert_eq!(m.speed, 5);
-    }
+    // The sticky/filter/mouse-key default tests are gone with the structs they
+    // tested. Those types are now `inputsettings`', which tests its own
+    // defaults; re-asserting them here would pin one crate's constants from
+    // another and fail the day the owner changed them for a good reason.
 
     #[test]
     fn test_audio_defaults() {

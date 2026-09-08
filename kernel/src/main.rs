@@ -5315,6 +5315,18 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::audit::self_test(),
             );
+            // Filesystem benchmark self-test.
+            selftest::dispatch_debug(
+                "FS bench",
+                selftest::Severity::Diagnostic,
+                fs::bench::self_test(),
+            );
+            // Power-management self-test.
+            selftest::dispatch_debug(
+                "Power",
+                selftest::Severity::Diagnostic,
+                fs::power::self_test(),
+            );
             // Mount namespace self-test.
             selftest::dispatch_debug(
                 "Mount namespace",

@@ -33434,7 +33434,7 @@ above still stands -- in particular, check whether the freeze point *moves*
 between runs, which is what distinguishes this from a deterministic deadlock in
 whichever self-test the log happens to stop at.
 
-## TD-LOCKDEP-CLASS-TABLE-IS-PUBLISHED-TWICE-AND-ONLY-ONE-PATH-IS-ORDERED (lane A, 2026-08-17) - **open**
+## TD-LOCKDEP-CLASS-TABLE-IS-PUBLISHED-TWICE-AND-ONLY-ONE-PATH-IS-ORDERED (lane A, 2026-08-17) - **FIXED** (`e3ae7bae1`)
 
 **In short:** the lock-order checker keeps a table of the locks it has seen. A
 CPU adding a row to that table reserves the row first and fills it in second.
@@ -50890,7 +50890,7 @@ the file grew by exactly 47 bytes and contains no `0x00`, which is the whole
 of the change. `grep -c fmt_f posix/src/printf.rs` now answers `74` where it
 previously answered `Binary file posix/src/printf.rs matches`.
 
-## OPEN-A-SELF-STOP-ANNOUNCEMENT-WINDOW-IS-PREEMPTIBLE (found by lane B, 2026-08-20) — filed to lane A
+## OPEN-A-SELF-STOP-ANNOUNCEMENT-WINDOW-IS-PREEMPTIBLE (found by lane B, 2026-08-20) — **FIXED** (`dba5e9087`)
 
 **Owner: lane A** (`kernel/**`). Filed as
 `requests/b-a-self-stop-announcement-window-is-preemptible-and-strands-the-child.md`;

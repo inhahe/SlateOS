@@ -558,6 +558,19 @@ pub struct Process {
     /// the field is cheap (one heap allocation per process) and keeps
     /// fork's structural invariant simple: every child inherits.
     pub cwd: Vec<u8>,
+    /// Filesystem root override — the `chroot(2)` jail directory.
+    ///
+    /// `None` means the real filesystem root `/`; `Some(path)` means
+    /// absolute path lookups resolve against `path` instead.  The path
+    /// must be a canonical absolute directory at the time of the call
+    /// (validated by `SYS_PROCESS_CHROOT`), though nothing prevents the
+    /// directory from being removed later — a dangling chroot produces
+    /// `ENOENT` at resolution time, matching POSIX behaviour.
+    ///
+    /// Inherited across `fork` and `exec` (cloned verbatim).  Set by
+    /// `SYS_PROCESS_CHROOT` (native) and the Linux shim (if enabled).
+    /// Read by path-resolution code.
+    pub root_dir: Option<Vec<u8>>,
     /// Resolved absolute path of the executable image, stored as bytes.
     ///
     /// Backs `/proc/<pid>/exe` (a magic symlink in Linux).  Captured at
@@ -1336,6 +1349,9 @@ impl Process {
             // Every process starts at the filesystem root.  `chdir`
             // changes this; `fork_create` clones the parent's value.
             cwd: alloc::vec![b'/'],
+            // No chroot jail — paths resolve against the real root.
+            // `SYS_PROCESS_CHROOT` sets this; `fork_create` clones it.
+            root_dir: None,
             // Empty until the ELF loader records the exec'd binary's path.
             exe_path: Vec::new(),
             // Compiled-in Linux rlimit defaults; modified per-process
@@ -1594,6 +1610,7 @@ pub fn fork_create(
         linux_fd_table,
         linux_saved_auxv,
         cwd,
+        root_dir,
         rlimits,
         linux_as_bytes,
         brk_start,
@@ -1664,6 +1681,7 @@ pub fn fork_create(
             // it execve's (which rebuilds it).
             parent.linux_saved_auxv.clone(),
             parent.cwd.clone(),
+            parent.root_dir.clone(),
             parent.rlimits,
             parent.linux_as_bytes,
             // The child's address space mirrors the parent's, including its
@@ -1800,6 +1818,10 @@ pub fn fork_create(
         // of fork.  Subsequent chdirs in either process do not affect
         // the other (each owns its own Vec).
         cwd,
+        // POSIX: the child inherits the parent's chroot jail at the
+        // moment of fork.  Each process's subsequent chroot is
+        // independent.
+        root_dir,
         // POSIX: rlimits inherit verbatim across fork.  setrlimit in
         // either process is independent thereafter.
         rlimits,
@@ -2490,6 +2512,47 @@ pub fn set_cwd(pid: ProcessId, new_cwd: Vec<u8>) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
     proc.cwd = new_cwd;
+    Ok(())
+}
+
+/// Return the calling process's chroot directory, or `None` if there is
+/// no chroot (the process sees the real root).  The outer `Option` is
+/// "process does not exist"; the inner `Option<Vec<u8>>` is the
+/// `root_dir` field itself.
+#[must_use]
+pub fn get_root_dir(pid: ProcessId) -> Option<Option<Vec<u8>>> {
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid).map(|p| p.root_dir.clone())
+}
+
+/// Set or clear the process's chroot directory.
+///
+/// `Some(path)` installs a chroot jail; `None` restores the real root.
+/// The path must be a canonical absolute directory path (starts with `/`,
+/// no interior NULs, length ≤ `CWD_MAX_LEN`).  The syscall layer is
+/// responsible for verifying that the path actually names a directory in
+/// the VFS; this accessor only does the shallow byte-level sanity check.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if `pid` is not in the table.
+/// - [`KernelError::InvalidArgument`] if `new_root` is `Some` and the
+///   path violates the shallow invariants.
+pub fn set_root_dir(pid: ProcessId, new_root: Option<Vec<u8>>) -> KernelResult<()> {
+    if let Some(ref root) = new_root {
+        if root.is_empty() || root[0] != b'/' {
+            return Err(KernelError::InvalidArgument);
+        }
+        if root.len() > CWD_MAX_LEN {
+            return Err(KernelError::InvalidArgument);
+        }
+        if root.contains(&0) {
+            return Err(KernelError::InvalidArgument);
+        }
+    }
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    proc.root_dir = new_root;
     Ok(())
 }
 

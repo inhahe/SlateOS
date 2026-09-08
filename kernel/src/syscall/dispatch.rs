@@ -98,6 +98,7 @@ use super::number::{
     SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE,
     SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_RECV,
     SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE, SYS_YIELD,
+    SYS_PROCESS_SETGROUPS, SYS_PROCESS_CHROOT,
 };
 use crate::drm::syscall as drm_handlers;
 
@@ -376,6 +377,11 @@ const fn build_v1_table() -> SyscallTable {
     // objects by native handle, so a caller already holding a pipe and a
     // timerfd waits on both without first building a port.
     handlers[SYS_WAIT_MULTIPLE as usize] = Some(handlers::sys_wait_multiple);
+
+    // Supplementary groups + chroot (1067–1068). Native entry points onto
+    // the same PCB state the Linux shim uses, so both ABIs share one truth.
+    handlers[SYS_PROCESS_SETGROUPS as usize] = Some(handlers::sys_process_setgroups);
+    handlers[SYS_PROCESS_CHROOT as usize] = Some(handlers::sys_process_chroot);
 
     // io_ring (260–269).
     handlers[SYS_IO_RING_SETUP as usize] = Some(handlers::sys_io_ring_setup);
@@ -981,6 +987,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_wait_info_layout()?;
     test_dispatch_rusage_info_layout()?;
     test_dispatch_set_credentials_gate()?;
+    test_dispatch_setgroups()?;
 
     serial_println!("[syscall] Dispatch self-test PASSED");
     Ok(())
@@ -1012,6 +1019,7 @@ pub fn self_test_fs() -> KernelResult<()> {
 
     test_dispatch_fs_roundtrip()?;
     test_dispatch_openat2_native()?;
+    test_dispatch_chroot()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())
@@ -4274,5 +4282,139 @@ fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
     serial_println!(
         "[syscall]   Dispatch FS roundtrip: OK (write/read/stat/delete/mkdir/listdir/rmdir)"
     );
+    Ok(())
+}
+
+/// Test `SYS_PROCESS_SETGROUPS` (1067): drop-all, set, and re-read via PCB.
+fn test_dispatch_setgroups() -> KernelResult<()> {
+    use crate::proc::{pcb, thread};
+    use crate::sched;
+
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        // Kernel-mode task with no owning process — skip this test
+        // rather than fail on a path the handler itself handles.
+        serial_println!("[syscall]   Dispatch setgroups: SKIP (no owning process)");
+        return Ok(());
+    };
+
+    // 1. Drop all supplementary groups: count=0, ptr=0.
+    let args_drop = SyscallArgs {
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let r = dispatch(SYS_PROCESS_SETGROUPS, &args_drop);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall]   FAIL: setgroups(0) returned {}",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Confirm the group list is now empty.
+    let creds = pcb::get_credentials(pid).ok_or(KernelError::NoSuchProcess)?;
+    if !creds.groups.is_empty() {
+        serial_println!(
+            "[syscall]   FAIL: groups should be empty after drop, got {}",
+            creds.groups.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 2. Install two supplementary groups [100, 200].
+    let groups: [u32; 2] = [100, 200];
+    let args_set = SyscallArgs {
+        arg0: 2,
+        arg1: groups.as_ptr() as u64,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let r = dispatch(SYS_PROCESS_SETGROUPS, &args_set);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall]   FAIL: setgroups(2, [100,200]) returned {}",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Confirm the groups were written.
+    let creds = pcb::get_credentials(pid).ok_or(KernelError::NoSuchProcess)?;
+    if creds.groups.len() != 2 || creds.groups[0] != 100 || creds.groups[1] != 200 {
+        serial_println!(
+            "[syscall]   FAIL: expected groups [100,200], got {:?}",
+            creds.groups
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 3. Drop again to leave the process clean.
+    let _ = dispatch(SYS_PROCESS_SETGROUPS, &args_drop);
+
+    serial_println!("[syscall]   Dispatch setgroups: OK (drop, set, verify, clean)");
+    Ok(())
+}
+
+/// Test `SYS_PROCESS_CHROOT` (1068): set a chroot to `/`, verify it sticks.
+///
+/// This runs post-mount so `/` is a valid directory.  We don't test a
+/// deeper path because this test runs in kernel context where `read_user_cstr`
+/// works on kernel addresses, and `/` is the simplest target that the VFS
+/// can always stat.
+fn test_dispatch_chroot() -> KernelResult<()> {
+    use crate::proc::{pcb, thread};
+    use crate::sched;
+
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        serial_println!("[syscall]   Dispatch chroot: SKIP (no owning process)");
+        return Ok(());
+    };
+
+    // Chroot to "/".
+    let path: &[u8] = b"/\0";
+    let args = SyscallArgs {
+        arg0: path.as_ptr() as u64,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let r = dispatch(SYS_PROCESS_CHROOT, &args);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall]   FAIL: chroot('/') returned {}",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify the root_dir was set.
+    let root = pcb::get_root_dir(pid).ok_or(KernelError::NoSuchProcess)?;
+    match root {
+        Some(ref dir) if dir == b"/" => {}
+        _ => {
+            serial_println!(
+                "[syscall]   FAIL: expected root_dir=Some('/'), got {:?}",
+                root
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Clean up: restore the real root.  Setting root_dir back to None
+    // is not exposed via the syscall (there's no "unchroot"), so we use
+    // the pcb accessor directly.
+    pcb::set_root_dir(pid, None)?;
+
+    serial_println!("[syscall]   Dispatch chroot: OK (set '/', verify, clean)");
     Ok(())
 }

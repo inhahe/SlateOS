@@ -15505,3 +15505,153 @@ pub fn sys_wait_multiple(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(ready as i64)
 }
+
+// ---------------------------------------------------------------------------
+// Supplementary groups + chroot (1067–1068)
+// ---------------------------------------------------------------------------
+
+/// `SYS_PROCESS_SETGROUPS` (1067) — set the calling process's supplementary
+/// group list.
+///
+/// Native counterpart of the Linux `setgroups(2)`.  The capability gate uses
+/// our native system: the caller must hold `(Process, SET_CREDENTIALS)` to
+/// make any change, matching `SYS_PROCESS_SET_CREDENTIALS`.  `count == 0`
+/// drops all supplementary groups.
+///
+/// # Arguments
+///
+/// - `arg0` — `count: u64` — number of GIDs (0 = drop all).
+/// - `arg1` — `list_ptr: u64` — user-space `&[u32; count]` (ignored when
+///   `count == 0`).
+///
+/// # Errors
+///
+/// `NoSuchProcess`, `PermissionDenied`, `InvalidArgument`, `BadAddress`.
+pub fn sys_process_setgroups(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::Rights;
+    use crate::proc::thread;
+
+    /// Linux's NGROUPS_MAX (since 2.6.4).  We follow the same cap.
+    const NGROUPS_MAX: u64 = 65536;
+
+    let count = args.arg0;
+    let list_ptr = args.arg1;
+
+    // Identify the caller.
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+
+    // Capability gate: any mutation requires (Process, SET_CREDENTIALS).
+    if !pcb::has_capability_type(pid, ResourceType::Process, Rights::SET_CREDENTIALS) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+
+    // Validate count.
+    if count > NGROUPS_MAX {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Read the group list from userspace.
+    let new_groups: alloc::vec::Vec<u32> = if count == 0 {
+        alloc::vec::Vec::new()
+    } else {
+        if list_ptr == 0 {
+            return SyscallResult::err(KernelError::PageFault);
+        }
+        match crate::mm::user::read_user_items::<u32>(list_ptr, count as usize, NGROUPS_MAX as usize) {
+            Ok(v) => v,
+            Err(e) => return SyscallResult::err(e),
+        }
+    };
+
+    // Apply: read-modify-write the credentials atomically.
+    let Some(mut creds) = pcb::get_credentials(pid) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    creds.groups = new_groups;
+    match pcb::set_credentials(pid, creds) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_CHROOT` (1068) — change the calling process's filesystem
+/// root directory.
+///
+/// The capability gate is `(Process, SET_CREDENTIALS)` — the same right that
+/// governs uid/gid mutations.  The Linux-ABI handler terminally refuses
+/// (`EPERM`) because no Linux caller holds `CAP_SYS_CHROOT`; this native
+/// handler actually installs the root when the caller has the right.
+///
+/// # Arguments
+///
+/// - `arg0` — `path_ptr: u64` — user-space pointer to a NUL-terminated
+///   absolute path naming an existing directory.
+///
+/// # Errors
+///
+/// `NoSuchProcess`, `PermissionDenied`, `NotFound`, `InvalidArgument`,
+/// `BadAddress`.
+pub fn sys_process_chroot(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::Rights;
+    use crate::proc::thread;
+
+    let path_ptr = args.arg0;
+
+    // Identify the caller.
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+
+    // Capability gate.
+    if !pcb::has_capability_type(pid, ResourceType::Process, Rights::SET_CREDENTIALS) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+
+    // Read the path from userspace.
+    if path_ptr == 0 {
+        return SyscallResult::err(KernelError::PageFault);
+    }
+    let path_bytes = match read_user_cbytes(path_ptr, PATH_MAX) {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Validate: must be absolute.
+    if path_bytes.is_empty() || path_bytes[0] != b'/' {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Normalize away `.`/`..`/double-slash components.  The path is already
+    // absolute, so the cwd is irrelevant.
+    let norm = crate::fs::vfs::normalize_path(crate::fs::path::Path::new(&path_bytes));
+    let canon = norm.as_bytes().to_vec();
+
+    // Verify the path names an existing directory via the VFS.
+    let path_str = match core::str::from_utf8(&canon) {
+        Ok(s) => s,
+        Err(_) => {
+            // The VFS API takes &str; a non-UTF-8 path cannot be looked up.
+            // This is a known limitation (D-VFS-PATHS-ARE-STR-NOT-BYTES).
+            return SyscallResult::err(KernelError::InvalidArgument);
+        }
+    };
+    match crate::fs::Vfs::stat(path_str) {
+        Ok(entry) => {
+            if entry.entry_type != crate::fs::EntryType::Directory {
+                return SyscallResult::err(KernelError::InvalidArgument);
+            }
+        }
+        Err(KernelError::NotFound) => return SyscallResult::err(KernelError::NotFound),
+        Err(e) => return SyscallResult::err(e),
+    }
+
+    // Install the chroot.
+    match pcb::set_root_dir(pid, Some(canon)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}

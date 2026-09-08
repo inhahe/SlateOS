@@ -307,7 +307,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         crate::cpu::sti();
     }
     selftest::check_eq!(
-        stale_after, 1,
+        stale_after,
+        1,
         "stale count should be 1 after one stale check"
     );
     serial_println!("[watchdog]   Stale detection: OK");

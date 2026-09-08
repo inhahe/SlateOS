@@ -501,9 +501,7 @@ fn all_suites() -> Vec<TestSuite> {
     suites.push(TestSuite {
         name: "hypervisor",
         description: "Hypervisor/VM detection via CPUID",
-        run: || {
-            crate::hypervisor::self_test().is_ok()
-        },
+        run: || crate::hypervisor::self_test().is_ok(),
         category: "kernel",
         severity: Severity::Diagnostic,
     });

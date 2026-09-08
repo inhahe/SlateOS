@@ -17538,6 +17538,7 @@ version = "0.1.0"
 name = "systemrestore"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

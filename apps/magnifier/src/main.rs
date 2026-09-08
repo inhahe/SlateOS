@@ -93,6 +93,7 @@
 //! filters, the sampling grid, the colour readout — is the real thing and is
 //! tested as such.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -105,19 +106,6 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 const WINDOW_WIDTH: f32 = 820.0;
 const WINDOW_HEIGHT: f32 = 620.0;
@@ -985,6 +973,12 @@ pub struct Magnifier {
     /// The size the window was last drawn at — what the next click is read
     /// against.
     size_drawn: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Magnifier {
@@ -999,6 +993,7 @@ impl Magnifier {
         let screen = (screen_w.max(1.0), screen_h.max(1.0));
         let middle = (screen.0 / 2.0, screen.1 / 2.0);
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             preset: DEFAULT_PRESET,
             mode: MagnifyMode::FullScreen,
             tracking: TrackingMode::FollowMouse,
@@ -1685,7 +1680,7 @@ impl Magnifier {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height, self.chrome);
         let mut f = Frame::new(width, height);
-        fill(&mut f, l.window, BASE, 0.0);
+        fill(&mut f, l.window, self.palette.base, 0.0);
         self.draw_viewport(&mut f, &l);
         self.draw_header(&mut f, &l);
         self.draw_info(&mut f, &l);
@@ -1703,7 +1698,7 @@ impl Magnifier {
         if v.w <= 0.0 || v.h <= 0.0 {
             return;
         }
-        fill(f, v, CRUST, 0.0);
+        fill(f, v, self.palette.crust, 0.0);
         if self.paused {
             self.draw_paused(f, l);
             return;
@@ -1799,7 +1794,7 @@ impl Magnifier {
         } else {
             mag.y
         };
-        line(f, mag.x, y, mag.right(), y, BLUE, 2.0);
+        line(f, mag.x, y, mag.right(), y, self.palette.blue, 2.0);
     }
 
     fn draw_lens(&self, f: &mut Frame, l: &Layout) {
@@ -1808,9 +1803,9 @@ impl Magnifier {
             return;
         }
         let radius = self.lens_shape.radius(lens.w, lens.h);
-        fill(f, lens, MANTLE, radius);
+        fill(f, lens, self.palette.mantle, radius);
         self.draw_pane(f, lens, self.zoom());
-        stroke(f, lens, BLUE, 2.0, radius);
+        stroke(f, lens, self.palette.blue, 2.0, radius);
         // After the life-size pane's box, so a click inside the lens is a click
         // on the magnified view and reads at the magnified scale.
         f.hit(Target::Magnified, lens);
@@ -1821,8 +1816,8 @@ impl Magnifier {
         let (cx, cy) = window_point(pane, src, self.centre.0, self.centre.1);
         let arm = (pane.w.min(pane.h) * 0.06).clamp(6.0, 24.0);
         f.clip(pane);
-        line(f, cx - arm, cy, cx + arm, cy, RED, 2.0);
-        line(f, cx, cy - arm, cx, cy + arm, RED, 2.0);
+        line(f, cx - arm, cy, cx + arm, cy, self.palette.red, 2.0);
+        line(f, cx, cy - arm, cx, cy + arm, self.palette.red, 2.0);
         f.unclip();
     }
 
@@ -1838,10 +1833,10 @@ impl Magnifier {
         // x coordinates: the old drawing took `min_x`, `max_x` and `min_y` and
         // never looked at `end_y`, so every measurement was drawn flat however
         // it had been taken.
-        line(f, x1, y1, x2, y2, YELLOW, 2.0);
+        line(f, x1, y1, x2, y2, self.palette.yellow, 2.0);
         let tick = 5.0;
-        line(f, x1, y1 - tick, x1, y1 + tick, YELLOW, 2.0);
-        line(f, x2, y2 - tick, x2, y2 + tick, YELLOW, 2.0);
+        line(f, x1, y1 - tick, x1, y1 + tick, self.palette.yellow, 2.0);
+        line(f, x2, y2 - tick, x2, y2 + tick, self.palette.yellow, 2.0);
         let text_str = format!("{:.0} px", self.ruler.screen_length());
         let size = (pane.h * 0.05).clamp(8.0, 13.0);
         let w = text::measure(&text_str, size, FontWeightHint::Bold);
@@ -1872,7 +1867,7 @@ impl Magnifier {
                 box_.y,
                 &text_str,
                 size,
-                YELLOW,
+                self.palette.yellow,
                 FontWeightHint::Bold,
                 box_.right() - box_.x,
             );
@@ -1910,7 +1905,7 @@ impl Magnifier {
             Rect::new(v.x, top, v.w, line_h),
             "Magnifier paused",
             size,
-            OVERLAY0,
+            self.palette.overlay0,
             FontWeightHint::Bold,
         );
         centred_in(
@@ -1918,7 +1913,7 @@ impl Magnifier {
             Rect::new(v.x, top + line_h, v.w, small_h),
             "Esc, or the Pause button, to resume",
             small,
-            OVERLAY0,
+            self.palette.overlay0,
             FontWeightHint::Regular,
         );
     }
@@ -1971,7 +1966,7 @@ impl Magnifier {
                 y,
                 "Magnifier",
                 size,
-                LAVENDER,
+                self.palette.lavender,
                 FontWeightHint::Bold,
                 split - left,
             );
@@ -1984,7 +1979,11 @@ impl Magnifier {
                 y,
                 &right_text,
                 small,
-                if self.paused { OVERLAY0 } else { GREEN },
+                if self.paused {
+                    self.palette.overlay0
+                } else {
+                    self.palette.green
+                },
                 FontWeightHint::Bold,
                 right - x,
             );
@@ -2015,7 +2014,7 @@ impl Magnifier {
         );
         if let Some((r, g, b)) = self.picked {
             fill(f, swatch_rect, Color::rgb(r, g, b), swatch * 0.2);
-            stroke(f, swatch_rect, SURFACE1, 1.0, swatch * 0.2);
+            stroke(f, swatch_rect, self.palette.surface1, 1.0, swatch * 0.2);
         }
 
         // The status shares the reading's row rather than stacking under it,
@@ -2077,7 +2076,7 @@ impl Magnifier {
             top,
             &self.info_line(),
             size,
-            SUBTEXT0,
+            self.palette.subtext0,
             FontWeightHint::Regular,
             status_x - gap - left,
         );
@@ -2087,7 +2086,7 @@ impl Magnifier {
             top + (line_h - status_h) / 2.0,
             &self.status,
             status_size,
-            TEXT_COLOR,
+            self.palette.text,
             FontWeightHint::Regular,
             run_right - status_x,
         );
@@ -2153,8 +2152,16 @@ impl Magnifier {
                 l,
                 r,
                 &self.control_label(*target),
-                if lit { SURFACE1 } else { SURFACE0 },
-                if lit { YELLOW } else { TEXT_COLOR },
+                if lit {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
+                if lit {
+                    self.palette.yellow
+                } else {
+                    self.palette.text
+                },
             );
             // The hit box goes on in the same pass that drew the button, from
             // the same rectangle, so no arithmetic can put one of them
@@ -2170,8 +2177,8 @@ impl Magnifier {
         // button underneath, which would otherwise fire through the sheet.
         fill(f, l.window, Color::rgba(0, 0, 0, 170), 0.0);
         let h = l.help;
-        fill(f, h, SURFACE0, 12.0);
-        stroke(f, h, SURFACE1, 1.0, 12.0);
+        fill(f, h, self.palette.surface0, 12.0);
+        stroke(f, h, self.palette.surface1, 1.0, 12.0);
         // Every run below is cut to the sheet with `Rect::intersect`, and none
         // of them were before. The reason nothing complained is that this pass
         // scrims the *window*, so it legitimately owns the window and a
@@ -2225,7 +2232,7 @@ impl Magnifier {
                 y,
                 HELP_TITLE,
                 title,
-                BLUE,
+                self.palette.blue,
                 FontWeightHint::Bold,
                 box_.right() - box_.x,
             );
@@ -2260,7 +2267,7 @@ impl Magnifier {
                 y,
                 keys,
                 size,
-                YELLOW,
+                self.palette.yellow,
                 FontWeightHint::Bold,
                 split - left,
             );
@@ -2270,7 +2277,7 @@ impl Magnifier {
                 y,
                 what,
                 size,
-                TEXT_COLOR,
+                self.palette.text,
                 FontWeightHint::Regular,
                 right - split,
             );
@@ -2287,7 +2294,7 @@ impl Magnifier {
                 y,
                 "Any click, or Esc, closes this",
                 small,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
                 box_.right() - box_.x,
             );
@@ -2439,6 +2446,10 @@ pub fn handle_event(app: &mut Magnifier, event: &Event) -> EventResult {
 }
 
 impl App for Magnifier {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Magnifier".to_string()
     }
@@ -5212,6 +5223,7 @@ mod tests {
     /// contorting the sweep, and leave the sweep asserting what it is good at.
     #[test]
     fn push_text_refuses_a_box_with_no_room_in_it() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let cases: [(&str, f32, &str, f32); 5] = [
             ("no width at all", 12.0, "Zoom 4x", 0.0),
             ("a width below zero", 12.0, "Zoom 4x", -3.0),
@@ -5227,7 +5239,7 @@ mod tests {
                 10.0,
                 text_str,
                 size,
-                TEXT_COLOR,
+                pal.text,
                 FontWeightHint::Regular,
                 limit,
             );
@@ -5248,7 +5260,7 @@ mod tests {
             10.0,
             "Zoom 4x",
             12.0,
-            TEXT_COLOR,
+            pal.text,
             FontWeightHint::Regular,
             80.0,
         );
@@ -5695,4 +5707,63 @@ mod tests {
     }
 
     // __TESTS_TAIL__
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut Magnifier) -> Vec<Color> {
+            app.render(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = Magnifier::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
+    }
 }

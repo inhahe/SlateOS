@@ -124377,10 +124377,26 @@ which makes step 1 below larger than one dependency line.
   new defaulted `App::theme_changed` — before the first frame, and again on
   every change. `design-decisions.md` §822 records why it is a trait method
   and not an `Event`.
-- **Step 2 has started: 6 of 129.** `calculator` (11 constants),
-  `diskcleanup` (9), `charmap` (14), `clipmanager` (14), `fileassoc` (13) and
-  `startupmanager` (13). Each has a test on the rectangles it emits, and each
-  was mutation-checked by making `theme_changed` ignore its argument.
+- **Step 2 has started: 8 of 129.** `calculator` (11 constants),
+  `diskcleanup` (9), `charmap` (14), `clipmanager` (14), `fileassoc` (13),
+  `startupmanager` (13), `magnifier` (13) and `systemrestore` (15). Each has a
+  test on the rectangles it emits, and each was mutation-checked by making
+  `theme_changed` ignore its argument.
+
+**Survey before converting.** A script that groups every constant use by its
+enclosing `impl` block answers, in one pass and before any edit, the only
+question that decides the cost. The difference is large enough to choose work
+by: `magnifier` was 26 uses with nothing to hand-thread, `systemrestore` 152
+uses with one method, while `netmanager` (13 methods), `vpnmanager` (9) and
+`credmanager` (7) are several times the work for the same number of
+constants. Survey first, then take the cheap ones in batches.
+
+**Known remaining costs, from that survey:** `netmanager` 13 hand-threaded
+functions, `vpnmanager` 9, `credmanager` 7, `contacts` 3. Every one of them is
+a `color()`-style method on a *domain* enum — `ConnectionState`,
+`SecurityLevel`, `VpnProtocol`, `LogLevel`, `PasswordStrength` — which is the
+shape worth expecting: applications give their own types a colour method, and
+those types are never the window.
 
 **Batch conversion was tried and abandoned; do not retry it as written.** The
 substitution half automates well — mapping by *hex value* rather than by
@@ -124439,11 +124455,17 @@ non-window impls up front instead of discovering them one build at a time.
 
 **Three smaller things that recur:**
 
-- **Stranded attributes.** Deleting `const COLOR_X: Color = …;` lines leaves
-  behind any `#[allow(dead_code)]` that annotated them, which is
-  `clippy::empty_line_after_outer_attr` — an *error* in this workspace, and
-  one the test suite does not catch because `cargo test` passes while
-  `cargo clippy` fails. Sweep for orphaned attributes after the deletion.
+- **Stranded attributes, and the sweep for them is the dangerous part.**
+  Deleting `const COLOR_X: Color = …;` lines leaves behind any attribute that
+  annotated them, which is `clippy::empty_line_after_outer_attr` — an *error*
+  in this workspace, and one `cargo test` does not catch, so a crate can test
+  green with a broken build. But a general "attribute followed by nothing"
+  regex is worse than the problem: mine matched an attribute followed by a
+  *comment* and deleted `#[cfg(test)]` from `magnifier`'s test module, which
+  compiled the whole module into the binary and produced 36 warnings. Two
+  rules that hold: an attribute followed by a comment is **not** stranded, and
+  after any such sweep check `git diff | grep '^-#\['` and read every
+  attribute it claims to have removed.
 - **Method references stop composing.** `map_or(default, ClipType::badge_color)`
   cannot survive `badge_color` gaining a parameter; it has to become a
   closure.

@@ -20,6 +20,7 @@
 //! SystemRestoreUI     -- guitk-based GUI with tree view, timeline, details panel
 //! ```
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -38,27 +39,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // Catppuccin Mocha palette
 // ============================================================================
 
-const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
-const COLOR_MANTLE: Color = Color::from_hex(0x181825);
-const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
-const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
 // Part of the complete Catppuccin Mocha palette, kept whole even though no
 // widget currently paints with this one: a named palette with a hole in it is
 // not the palette it is named after, and the next widget to want one would
 // otherwise re-derive the hex by hand.
-#[allow(dead_code, reason = "the palette is kept complete")]
-const COLOR_SURFACE2: Color = Color::from_hex(0x585B70);
-const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COLOR_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COLOR_SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
-const COLOR_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COLOR_RED: Color = Color::from_hex(0xF38BA8);
-const COLOR_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COLOR_PEACH: Color = Color::from_hex(0xFAB387);
-const COLOR_LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const COLOR_OVERLAY0: Color = Color::from_hex(0x6C7086);
-
 // ============================================================================
 // Layout constants
 // ============================================================================
@@ -184,13 +168,13 @@ impl SnapshotType {
     }
 
     /// Icon indicator color for each type.
-    pub fn indicator_color(self) -> Color {
+    pub fn indicator_color(self, pal: &Palette) -> Color {
         match self {
-            Self::Manual => COLOR_BLUE,
-            Self::Automatic => COLOR_GREEN,
-            Self::PreUpdate => COLOR_YELLOW,
-            Self::PreInstall => COLOR_PEACH,
-            Self::Scheduled => COLOR_LAVENDER,
+            Self::Manual => pal.blue,
+            Self::Automatic => pal.green,
+            Self::PreUpdate => pal.yellow,
+            Self::PreInstall => pal.peach,
+            Self::Scheduled => pal.lavender,
         }
     }
 }
@@ -2035,6 +2019,12 @@ pub struct SystemRestoreUI {
     pub window_width: f32,
     /// How tall the window is, in pixels.
     pub window_height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl SystemRestoreUI {
@@ -2120,6 +2110,7 @@ impl SystemRestoreUI {
         };
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             manager,
             view_mode: ViewMode::Tree,
             selected_id: Some(root_id),
@@ -2184,7 +2175,7 @@ impl SystemRestoreUI {
             y: 0.0,
             width: self.window_width,
             height: self.window_height,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3006,7 +2997,7 @@ impl SystemRestoreUI {
             y: 0.0,
             width: self.window_width,
             height: HEADER_HEIGHT,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3015,7 +3006,7 @@ impl SystemRestoreUI {
             x: PADDING,
             y: HEADER_HEIGHT / 2.0 - FONT_SIZE_TITLE / 2.0,
             text: "System Restore".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
@@ -3029,14 +3020,14 @@ impl SystemRestoreUI {
             y: HEADER_HEIGHT / 2.0 - 10.0,
             width: 100.0,
             height: 20.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(10.0),
         });
         rt.push(RenderCommand::Text {
             x: 255.0,
             y: HEADER_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
             text: count_text,
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
@@ -3050,7 +3041,7 @@ impl SystemRestoreUI {
             y: HEADER_HEIGHT / 2.0 - 14.0,
             width: 240.0,
             height: 28.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         let search_display = if self.search_query.is_empty() {
@@ -3059,9 +3050,9 @@ impl SystemRestoreUI {
             self.search_query.clone()
         };
         let search_color = if self.search_query.is_empty() {
-            COLOR_OVERLAY0
+            self.palette.overlay0
         } else {
-            COLOR_TEXT
+            self.palette.text
         };
         rt.push(RenderCommand::Text {
             x: search_x + 8.0,
@@ -3080,7 +3071,7 @@ impl SystemRestoreUI {
             y1: HEADER_HEIGHT,
             x2: self.window_width,
             y2: HEADER_HEIGHT,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -3095,7 +3086,7 @@ impl SystemRestoreUI {
             y: toolbar_y,
             width: self.window_width,
             height: TOOLBAR_HEIGHT,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3105,14 +3096,14 @@ impl SystemRestoreUI {
             let is_active = *mode == self.view_mode;
             let tab_width = 80.0;
             let tab_color = if is_active {
-                COLOR_SURFACE0
+                self.palette.surface0
             } else {
-                COLOR_MANTLE
+                self.palette.mantle
             };
             let text_color = if is_active {
-                COLOR_BLUE
+                self.palette.blue
             } else {
-                COLOR_SUBTEXT0
+                self.palette.subtext0
             };
 
             rt.push(RenderCommand::FillRect {
@@ -3151,10 +3142,10 @@ impl SystemRestoreUI {
 
         // Action buttons.
         let actions = [
-            ("Create", COLOR_GREEN),
-            ("Restore", COLOR_BLUE),
-            ("Delete", COLOR_RED),
-            ("Export", COLOR_PEACH),
+            ("Create", self.palette.green),
+            ("Restore", self.palette.blue),
+            ("Delete", self.palette.red),
+            ("Export", self.palette.peach),
         ];
         let mut btn_x = self.window_width - (actions.len() as f32 * (BUTTON_WIDTH + 8.0)) - PADDING;
         for (label, color) in &actions {
@@ -3175,7 +3166,7 @@ impl SystemRestoreUI {
                 ),
                 y: toolbar_y + TOOLBAR_HEIGHT / 2.0 - FONT_SIZE / 2.0,
                 text: label.to_string(),
-                color: COLOR_BASE,
+                color: self.palette.base,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(BUTTON_WIDTH - 8.0),
@@ -3190,7 +3181,7 @@ impl SystemRestoreUI {
             y1: toolbar_y + TOOLBAR_HEIGHT,
             x2: self.window_width,
             y2: toolbar_y + TOOLBAR_HEIGHT,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -3243,7 +3234,7 @@ impl SystemRestoreUI {
                         y: row_y,
                         width: self.window_width - 2.0 * PADDING,
                         height: TREE_ROW_HEIGHT,
-                        color: COLOR_SURFACE0,
+                        color: self.palette.surface0,
                         corner_radii: CornerRadii::all(4.0),
                     });
                 }
@@ -3257,7 +3248,7 @@ impl SystemRestoreUI {
                         y1: row_y,
                         x2: line_x,
                         y2: row_y + TREE_ROW_HEIGHT / 2.0,
-                        color: COLOR_OVERLAY0,
+                        color: self.palette.overlay0,
                         width: 1.0,
                     });
                     // Horizontal line to node.
@@ -3266,7 +3257,7 @@ impl SystemRestoreUI {
                         y1: row_y + TREE_ROW_HEIGHT / 2.0,
                         x2: PADDING + indent,
                         y2: row_y + TREE_ROW_HEIGHT / 2.0,
-                        color: COLOR_OVERLAY0,
+                        color: self.palette.overlay0,
                         width: 1.0,
                     });
                 }
@@ -3279,7 +3270,7 @@ impl SystemRestoreUI {
                     y: dot_y,
                     width: 8.0,
                     height: 8.0,
-                    color: snap.snapshot_type.indicator_color(),
+                    color: snap.snapshot_type.indicator_color(&self.palette),
                     corner_radii: CornerRadii::all(4.0),
                 });
 
@@ -3290,9 +3281,9 @@ impl SystemRestoreUI {
                     y: row_y + 4.0,
                     text: snap.name.clone(),
                     color: if is_selected {
-                        COLOR_TEXT
+                        self.palette.text
                     } else {
-                        COLOR_SUBTEXT1
+                        self.palette.subtext1
                     },
                     font_size: FONT_SIZE,
                     font_weight: if is_selected {
@@ -3315,7 +3306,7 @@ impl SystemRestoreUI {
                     x: name_x,
                     y: row_y + 20.0,
                     text: meta_text,
-                    color: COLOR_SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(400.0),
@@ -3329,7 +3320,7 @@ impl SystemRestoreUI {
                         x: lock_x,
                         y: row_y + TREE_ROW_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
                         text: "Locked".to_string(),
-                        color: COLOR_YELLOW,
+                        color: self.palette.yellow,
                         font_size: FONT_SIZE_SMALL,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(50.0),
@@ -3345,7 +3336,7 @@ impl SystemRestoreUI {
                         x: branch_x,
                         y: row_y + TREE_ROW_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
                         text: format!("{} children", kids.len()),
-                        color: COLOR_OVERLAY0,
+                        color: self.palette.overlay0,
                         font_size: FONT_SIZE_SMALL,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(80.0),
@@ -3378,7 +3369,7 @@ impl SystemRestoreUI {
                 y1: y + PADDING,
                 x2: timeline_x,
                 y2: y + PADDING + total_h,
-                color: COLOR_SURFACE1,
+                color: self.palette.surface1,
                 width: 2.0,
             });
         }
@@ -3394,7 +3385,7 @@ impl SystemRestoreUI {
                         y: entry_y,
                         width: self.window_width - timeline_x - 40.0,
                         height: TIMELINE_ENTRY_HEIGHT - 4.0,
-                        color: COLOR_SURFACE0,
+                        color: self.palette.surface0,
                         corner_radii: CornerRadii::all(4.0),
                     });
                 }
@@ -3405,7 +3396,7 @@ impl SystemRestoreUI {
                     y: entry_y + TIMELINE_ENTRY_HEIGHT / 2.0 - TIMELINE_DOT_RADIUS,
                     width: TIMELINE_DOT_RADIUS * 2.0,
                     height: TIMELINE_DOT_RADIUS * 2.0,
-                    color: snap.snapshot_type.indicator_color(),
+                    color: snap.snapshot_type.indicator_color(&self.palette),
                     corner_radii: CornerRadii::all(TIMELINE_DOT_RADIUS),
                 });
 
@@ -3416,9 +3407,9 @@ impl SystemRestoreUI {
                     y: entry_y + 4.0,
                     text: snap.name.clone(),
                     color: if is_selected {
-                        COLOR_TEXT
+                        self.palette.text
                     } else {
-                        COLOR_SUBTEXT1
+                        self.palette.subtext1
                     },
                     font_size: FONT_SIZE,
                     font_weight: if is_selected {
@@ -3441,7 +3432,7 @@ impl SystemRestoreUI {
                     x: text_x,
                     y: entry_y + 22.0,
                     text: meta_text,
-                    color: COLOR_SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(500.0),
@@ -3454,7 +3445,7 @@ impl SystemRestoreUI {
                     x: 4.0,
                     y: entry_y + TIMELINE_ENTRY_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
                     text: ts_text,
-                    color: COLOR_OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(80.0),
@@ -3475,7 +3466,7 @@ impl SystemRestoreUI {
             x: panel_x,
             y: y + PADDING,
             text: "Compare Snapshots".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(panel_width),
@@ -3495,7 +3486,7 @@ impl SystemRestoreUI {
                     x: panel_x,
                     y: y + PADDING + 24.0,
                     text: summary,
-                    color: COLOR_SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(panel_width),
@@ -3510,11 +3501,11 @@ impl SystemRestoreUI {
                         break;
                     }
                     let color = if entry.is_addition() {
-                        COLOR_GREEN
+                        self.palette.green
                     } else if entry.is_removal() {
-                        COLOR_RED
+                        self.palette.red
                     } else {
-                        COLOR_YELLOW
+                        self.palette.yellow
                     };
                     rt.push(RenderCommand::Text {
                         x: panel_x + 8.0,
@@ -3534,7 +3525,7 @@ impl SystemRestoreUI {
                 x: panel_x,
                 y: y + PADDING + 24.0,
                 text: "Select two snapshots to compare".to_string(),
-                color: COLOR_OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width),
@@ -3553,7 +3544,7 @@ impl SystemRestoreUI {
             x: panel_x,
             y: y + PADDING,
             text: "Snapshot Schedule".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(panel_width),
@@ -3567,9 +3558,9 @@ impl SystemRestoreUI {
             "Disabled"
         };
         let status_color = if schedule.enabled {
-            COLOR_GREEN
+            self.palette.green
         } else {
-            COLOR_RED
+            self.palette.red
         };
         rt.push(RenderCommand::FillRect {
             x: panel_x,
@@ -3583,7 +3574,7 @@ impl SystemRestoreUI {
             x: panel_x + 12.0,
             y: y + PADDING + 35.0,
             text: status_text.to_string(),
-            color: COLOR_BASE,
+            color: self.palette.base,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(60.0),
@@ -3606,7 +3597,7 @@ impl SystemRestoreUI {
                 x: label_x,
                 y: info_y,
                 text: label.to_string(),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(160.0),
@@ -3616,7 +3607,7 @@ impl SystemRestoreUI {
                 x: value_x,
                 y: info_y,
                 text: value.to_string(),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_width - 200.0),
@@ -3642,7 +3633,7 @@ impl SystemRestoreUI {
                 x: label_x,
                 y: info_y,
                 text: "Next snapshot:".to_string(),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(160.0),
@@ -3652,7 +3643,7 @@ impl SystemRestoreUI {
                 x: value_x,
                 y: info_y,
                 text: due_text,
-                color: COLOR_LAVENDER,
+                color: self.palette.lavender,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
@@ -3671,7 +3662,7 @@ impl SystemRestoreUI {
             x: panel_x,
             y: y + PADDING,
             text: "Storage Management".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(panel_width),
@@ -3687,7 +3678,7 @@ impl SystemRestoreUI {
             y: bar_y,
             width: bar_width,
             height: 24.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -3702,7 +3693,7 @@ impl SystemRestoreUI {
                 y: bar_y,
                 width: bar_width * manual_frac,
                 height: 24.0,
-                color: COLOR_BLUE,
+                color: self.palette.blue,
                 corner_radii: CornerRadii::all(4.0),
             });
         }
@@ -3712,7 +3703,7 @@ impl SystemRestoreUI {
                 y: bar_y,
                 width: bar_width * auto_frac,
                 height: 24.0,
-                color: COLOR_GREEN,
+                color: self.palette.green,
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -3724,14 +3715,14 @@ impl SystemRestoreUI {
             y: legend_y,
             width: 12.0,
             height: 12.0,
-            color: COLOR_BLUE,
+            color: self.palette.blue,
             corner_radii: CornerRadii::all(2.0),
         });
         rt.push(RenderCommand::Text {
             x: panel_x + 28.0,
             y: legend_y,
             text: format!("Manual ({})", format_bytes(stats.manual_bytes)),
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
@@ -3743,14 +3734,14 @@ impl SystemRestoreUI {
             y: legend_y,
             width: 12.0,
             height: 12.0,
-            color: COLOR_GREEN,
+            color: self.palette.green,
             corner_radii: CornerRadii::all(2.0),
         });
         rt.push(RenderCommand::Text {
             x: panel_x + 248.0,
             y: legend_y,
             text: format!("Auto ({})", format_bytes(stats.auto_bytes)),
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
@@ -3775,7 +3766,7 @@ impl SystemRestoreUI {
                 x: label_x,
                 y: info_y,
                 text: label.to_string(),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(200.0),
@@ -3785,7 +3776,7 @@ impl SystemRestoreUI {
                 x: value_x,
                 y: info_y,
                 text: value.clone(),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
@@ -3802,7 +3793,7 @@ impl SystemRestoreUI {
                 x: label_x,
                 y: info_y,
                 text: "Suggestions:".to_string(),
-                color: COLOR_YELLOW,
+                color: self.palette.yellow,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(panel_width),
@@ -3814,7 +3805,7 @@ impl SystemRestoreUI {
                     x: label_x + 12.0,
                     y: info_y,
                     text: suggestion.clone(),
-                    color: COLOR_SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(panel_width - 24.0),
@@ -3835,7 +3826,7 @@ impl SystemRestoreUI {
             y1: panel_y,
             x2: self.window_width,
             y2: panel_y,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -3845,7 +3836,7 @@ impl SystemRestoreUI {
             y: panel_y,
             width: self.window_width,
             height: DETAILS_PANEL_HEIGHT,
-            color: COLOR_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3871,7 +3862,7 @@ impl SystemRestoreUI {
             x: col1_x,
             y,
             text: snap.name.clone(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.window_width / 2.0 - PADDING),
@@ -3884,14 +3875,14 @@ impl SystemRestoreUI {
             y,
             width: 80.0,
             height: 20.0,
-            color: snap.snapshot_type.indicator_color(),
+            color: snap.snapshot_type.indicator_color(&self.palette),
             corner_radii: CornerRadii::all(4.0),
         });
         rt.push(RenderCommand::Text {
             x: col2_x + 8.0,
             y: y + 3.0,
             text: snap.snapshot_type.label().to_string(),
-            color: COLOR_BASE,
+            color: self.palette.base,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(70.0),
@@ -3905,7 +3896,7 @@ impl SystemRestoreUI {
         // DETAILS_PANEL_HEIGHT box with the ancestry chain anchored to its
         // bottom, so the wrap is capped (see DESCRIPTION_MAX_LINES) and the
         // cursor advances by the height actually drawn.
-        let description_used = text::Paragraph::new(&snap.description, COLOR_SUBTEXT0)
+        let description_used = text::Paragraph::new(&snap.description, self.palette.subtext0)
             .at(col1_x, y, self.window_width - 2.0 * PADDING)
             .font(FONT_SIZE, FontWeightHint::Regular)
             .max_lines(DESCRIPTION_MAX_LINES)
@@ -3933,7 +3924,7 @@ impl SystemRestoreUI {
                 x: label_x,
                 y,
                 text: label.to_string(),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(60.0),
@@ -3943,7 +3934,7 @@ impl SystemRestoreUI {
                 x: label_x + 65.0,
                 y,
                 text: value.clone(),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
@@ -3959,7 +3950,7 @@ impl SystemRestoreUI {
             x: col1_x,
             y,
             text: "Included:".to_string(),
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(80.0),
@@ -3970,7 +3961,7 @@ impl SystemRestoreUI {
             x: col1_x + 70.0,
             y,
             text: comp_names.join(", "),
-            color: COLOR_SUBTEXT1,
+            color: self.palette.subtext1,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.window_width - col1_x - 90.0),
@@ -3990,14 +3981,14 @@ impl SystemRestoreUI {
                     y,
                     width: tag_width,
                     height: 18.0,
-                    color: COLOR_SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(9.0),
                 });
                 rt.push(RenderCommand::Text {
                     x: tag_x + 8.0,
                     y: y + 2.0,
                     text: tag.clone(),
-                    color: COLOR_LAVENDER,
+                    color: self.palette.lavender,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(tag_width - 16.0),
@@ -4016,7 +4007,7 @@ impl SystemRestoreUI {
                 x: cx,
                 y: chain_y,
                 text: "Path:".to_string(),
-                color: COLOR_OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(40.0),
@@ -4060,7 +4051,7 @@ impl SystemRestoreUI {
                     x: cx,
                     y: chain_y,
                     text: CHAIN_ELLIPSIS.to_string(),
-                    color: COLOR_OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(marker_w),
@@ -4071,7 +4062,7 @@ impl SystemRestoreUI {
                     x: cx,
                     y: chain_y,
                     text: " > ".to_string(),
-                    color: COLOR_OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(CHAIN_SEPARATOR_WIDTH),
@@ -4086,7 +4077,7 @@ impl SystemRestoreUI {
                         x: cx,
                         y: chain_y,
                         text: " > ".to_string(),
-                        color: COLOR_OVERLAY0,
+                        color: self.palette.overlay0,
                         font_size: FONT_SIZE_SMALL,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(CHAIN_SEPARATOR_WIDTH),
@@ -4095,9 +4086,9 @@ impl SystemRestoreUI {
                     cx += CHAIN_SEPARATOR_WIDTH;
                 }
                 let name_color = if *ancestor_id == snap.id {
-                    COLOR_BLUE
+                    self.palette.blue
                 } else {
-                    COLOR_SUBTEXT0
+                    self.palette.subtext0
                 };
                 rt.push(RenderCommand::Text {
                     x: cx,
@@ -4125,7 +4116,7 @@ impl SystemRestoreUI {
             ),
             y: panel_y + DETAILS_PANEL_HEIGHT / 2.0 - FONT_SIZE / 2.0,
             text: "Select a snapshot to view details".to_string(),
-            color: COLOR_OVERLAY0,
+            color: self.palette.overlay0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(250.0),
@@ -4142,7 +4133,7 @@ impl SystemRestoreUI {
             y: bar_y,
             width: self.window_width,
             height: STATUS_BAR_HEIGHT,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4156,7 +4147,7 @@ impl SystemRestoreUI {
             x: PADDING,
             y: bar_y + STATUS_BAR_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
             text: filter_text,
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
@@ -4179,7 +4170,7 @@ impl SystemRestoreUI {
             ),
             y: bar_y + STATUS_BAR_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
             text: storage_text,
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
@@ -4200,9 +4191,9 @@ impl SystemRestoreUI {
             y: bar_y + STATUS_BAR_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
             text: schedule_text,
             color: if self.manager.schedule.enabled {
-                COLOR_GREEN
+                self.palette.green
             } else {
-                COLOR_OVERLAY0
+                self.palette.overlay0
             },
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
@@ -4260,7 +4251,7 @@ impl SystemRestoreUI {
             y: dy,
             width: dialog_w,
             height: dialog_h,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -4270,7 +4261,7 @@ impl SystemRestoreUI {
             y: dy,
             width: dialog_w,
             height: dialog_h,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -4280,7 +4271,7 @@ impl SystemRestoreUI {
             x: dx + PADDING,
             y: dy + PADDING,
             text: "Create New Snapshot".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_w - 2.0 * PADDING),
@@ -4293,7 +4284,7 @@ impl SystemRestoreUI {
             x: dx + PADDING,
             y: field_y,
             text: "Name:".to_string(),
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(60.0),
@@ -4304,7 +4295,7 @@ impl SystemRestoreUI {
             y: field_y + 18.0,
             width: dialog_w - 2.0 * PADDING,
             height: 28.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         let name_display = if self.form_name.is_empty() {
@@ -4313,9 +4304,9 @@ impl SystemRestoreUI {
             &self.form_name
         };
         let name_color = if self.form_name.is_empty() {
-            COLOR_OVERLAY0
+            self.palette.overlay0
         } else {
-            COLOR_TEXT
+            self.palette.text
         };
         rt.push(RenderCommand::Text {
             x: dx + PADDING + 8.0,
@@ -4334,7 +4325,7 @@ impl SystemRestoreUI {
             x: dx + PADDING,
             y: field_y,
             text: "Description:".to_string(),
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(100.0),
@@ -4345,7 +4336,7 @@ impl SystemRestoreUI {
             y: field_y + 18.0,
             width: dialog_w - 2.0 * PADDING,
             height: 28.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -4355,7 +4346,7 @@ impl SystemRestoreUI {
             x: dx + PADDING,
             y: field_y,
             text: "Components:".to_string(),
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(100.0),
@@ -4379,7 +4370,11 @@ impl SystemRestoreUI {
                 y: cy,
                 width: CHECKBOX_SIZE,
                 height: CHECKBOX_SIZE,
-                color: if checked { COLOR_BLUE } else { COLOR_SURFACE0 },
+                color: if checked {
+                    self.palette.blue
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii::all(3.0),
             });
             if checked {
@@ -4387,7 +4382,7 @@ impl SystemRestoreUI {
                     x: cx + 3.0,
                     y: cy + 1.0,
                     text: "v".to_string(),
-                    color: COLOR_BASE,
+                    color: self.palette.base,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(CHECKBOX_SIZE),
@@ -4398,7 +4393,7 @@ impl SystemRestoreUI {
                 x: cx + CHECKBOX_SIZE + 4.0,
                 y: cy + 1.0,
                 text: comp.label().to_string(),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_width - CHECKBOX_SIZE - 8.0),
@@ -4413,7 +4408,7 @@ impl SystemRestoreUI {
             x: dx + PADDING,
             y: est_y,
             text: format!("Estimated size: {}", est_size),
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - 2.0 * PADDING),
@@ -4428,14 +4423,14 @@ impl SystemRestoreUI {
             y: btn_y,
             width: BUTTON_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 200.0,
             y: btn_y + 8.0,
             text: "Cancel".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(BUTTON_WIDTH - 16.0),
@@ -4447,14 +4442,14 @@ impl SystemRestoreUI {
             y: btn_y,
             width: BUTTON_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_GREEN,
+            color: self.palette.green,
             corner_radii: CornerRadii::all(4.0),
         });
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 92.0,
             y: btn_y + 8.0,
             text: "Create".to_string(),
-            color: COLOR_BASE,
+            color: self.palette.base,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(BUTTON_WIDTH - 16.0),
@@ -4475,7 +4470,7 @@ impl SystemRestoreUI {
             y: dy,
             width: dialog_w,
             height: dialog_h,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         rt.push(RenderCommand::StrokeRect {
@@ -4483,7 +4478,7 @@ impl SystemRestoreUI {
             y: dy,
             width: dialog_w,
             height: dialog_h,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -4493,7 +4488,7 @@ impl SystemRestoreUI {
             x: dx + PADDING,
             y: dy + PADDING,
             text: "Confirm Restore".to_string(),
-            color: COLOR_YELLOW,
+            color: self.palette.yellow,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_w - 2.0 * PADDING),
@@ -4506,7 +4501,7 @@ impl SystemRestoreUI {
                 x: dx + PADDING,
                 y: dy + 44.0,
                 text: format!("Restore to \"{}\"?", snap.name),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_w - 2.0 * PADDING),
@@ -4517,7 +4512,7 @@ impl SystemRestoreUI {
                 x: dx + PADDING,
                 y: dy + 70.0,
                 text: "Warning: This will revert system state to this snapshot.".to_string(),
-                color: COLOR_RED,
+                color: self.palette.red,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_w - 2.0 * PADDING),
@@ -4528,7 +4523,7 @@ impl SystemRestoreUI {
                 x: dx + PADDING,
                 y: dy + 94.0,
                 text: format!("Components affected: {}", snap.component_count()),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_w - 2.0 * PADDING),
@@ -4539,7 +4534,7 @@ impl SystemRestoreUI {
                 x: dx + PADDING,
                 y: dy + 114.0,
                 text: format!("Size: {}", snap.size_display()),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_w - 2.0 * PADDING),
@@ -4552,14 +4547,14 @@ impl SystemRestoreUI {
                 y: dy + 140.0,
                 width: dialog_w - 2.0 * PADDING,
                 height: 28.0,
-                color: COLOR_SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             rt.push(RenderCommand::Text {
                 x: dx + PADDING + 8.0,
                 y: dy + 146.0,
                 text: "Tip: A snapshot of current state will be created automatically.".to_string(),
-                color: COLOR_LAVENDER,
+                color: self.palette.lavender,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_w - 2.0 * PADDING - 16.0),
@@ -4574,14 +4569,14 @@ impl SystemRestoreUI {
             y: btn_y,
             width: BUTTON_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 200.0,
             y: btn_y + 8.0,
             text: "Cancel".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(BUTTON_WIDTH - 16.0),
@@ -4592,14 +4587,14 @@ impl SystemRestoreUI {
             y: btn_y,
             width: BUTTON_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_YELLOW,
+            color: self.palette.yellow,
             corner_radii: CornerRadii::all(4.0),
         });
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 92.0,
             y: btn_y + 8.0,
             text: "Restore".to_string(),
-            color: COLOR_BASE,
+            color: self.palette.base,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(BUTTON_WIDTH - 16.0),
@@ -4619,7 +4614,7 @@ impl SystemRestoreUI {
             y: dy,
             width: dialog_w,
             height: dialog_h,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         rt.push(RenderCommand::StrokeRect {
@@ -4627,7 +4622,7 @@ impl SystemRestoreUI {
             y: dy,
             width: dialog_w,
             height: dialog_h,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -4636,7 +4631,7 @@ impl SystemRestoreUI {
             x: dx + PADDING,
             y: dy + PADDING,
             text: "Delete Snapshot?".to_string(),
-            color: COLOR_RED,
+            color: self.palette.red,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_w - 2.0 * PADDING),
@@ -4648,7 +4643,7 @@ impl SystemRestoreUI {
                 x: dx + PADDING,
                 y: dy + 44.0,
                 text: format!("Delete \"{}\"? This cannot be undone.", snap.name),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_w - 2.0 * PADDING),
@@ -4658,7 +4653,7 @@ impl SystemRestoreUI {
                 x: dx + PADDING,
                 y: dy + 70.0,
                 text: format!("This will free {}.", snap.size_display()),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dialog_w - 2.0 * PADDING),
@@ -4672,14 +4667,14 @@ impl SystemRestoreUI {
             y: btn_y,
             width: BUTTON_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 200.0,
             y: btn_y + 8.0,
             text: "Cancel".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(BUTTON_WIDTH - 16.0),
@@ -4690,14 +4685,14 @@ impl SystemRestoreUI {
             y: btn_y,
             width: BUTTON_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_RED,
+            color: self.palette.red,
             corner_radii: CornerRadii::all(4.0),
         });
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 92.0,
             y: btn_y + 8.0,
             text: "Delete".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(BUTTON_WIDTH - 16.0),
@@ -4717,7 +4712,7 @@ impl SystemRestoreUI {
             y: dy,
             width: dialog_w,
             height: dialog_h,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         rt.push(RenderCommand::StrokeRect {
@@ -4725,7 +4720,7 @@ impl SystemRestoreUI {
             y: dy,
             width: dialog_w,
             height: dialog_h,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -4734,7 +4729,7 @@ impl SystemRestoreUI {
             x: dx + PADDING,
             y: dy + PADDING,
             text: "Export Snapshots".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_w - 2.0 * PADDING),
@@ -4744,7 +4739,7 @@ impl SystemRestoreUI {
             x: dx + PADDING,
             y: dy + 44.0,
             text: format!("Export {} snapshot(s) to file.", self.manager.tree.count()),
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - 2.0 * PADDING),
@@ -4757,14 +4752,14 @@ impl SystemRestoreUI {
             y: dy + 80.0,
             width: dialog_w - 2.0 * PADDING,
             height: 28.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         rt.push(RenderCommand::Text {
             x: dx + PADDING + 8.0,
             y: dy + 86.0,
             text: "/system/backups/snapshots.txt".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - 2.0 * PADDING - 16.0),
@@ -4777,14 +4772,14 @@ impl SystemRestoreUI {
             y: btn_y,
             width: BUTTON_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 200.0,
             y: btn_y + 8.0,
             text: "Cancel".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(BUTTON_WIDTH - 16.0),
@@ -4795,14 +4790,14 @@ impl SystemRestoreUI {
             y: btn_y,
             width: BUTTON_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_PEACH,
+            color: self.palette.peach,
             corner_radii: CornerRadii::all(4.0),
         });
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 92.0,
             y: btn_y + 8.0,
             text: "Export".to_string(),
-            color: COLOR_BASE,
+            color: self.palette.base,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(BUTTON_WIDTH - 16.0),
@@ -4822,7 +4817,7 @@ impl SystemRestoreUI {
             y: dy,
             width: dialog_w,
             height: dialog_h,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         rt.push(RenderCommand::StrokeRect {
@@ -4830,7 +4825,7 @@ impl SystemRestoreUI {
             y: dy,
             width: dialog_w,
             height: dialog_h,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -4839,7 +4834,7 @@ impl SystemRestoreUI {
             x: dx + PADDING,
             y: dy + PADDING,
             text: "Import Snapshots".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_w - 2.0 * PADDING),
@@ -4849,7 +4844,7 @@ impl SystemRestoreUI {
             x: dx + PADDING,
             y: dy + 44.0,
             text: "Import snapshot metadata from file.".to_string(),
-            color: COLOR_SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - 2.0 * PADDING),
@@ -4862,14 +4857,14 @@ impl SystemRestoreUI {
             y: dy + 80.0,
             width: dialog_w - 2.0 * PADDING,
             height: 28.0,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         rt.push(RenderCommand::Text {
             x: dx + PADDING + 8.0,
             y: dy + 86.0,
             text: "Select file...".to_string(),
-            color: COLOR_OVERLAY0,
+            color: self.palette.overlay0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - 2.0 * PADDING - 16.0),
@@ -4882,14 +4877,14 @@ impl SystemRestoreUI {
             y: btn_y,
             width: BUTTON_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 200.0,
             y: btn_y + 8.0,
             text: "Cancel".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(BUTTON_WIDTH - 16.0),
@@ -4900,14 +4895,14 @@ impl SystemRestoreUI {
             y: btn_y,
             width: BUTTON_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_BLUE,
+            color: self.palette.blue,
             corner_radii: CornerRadii::all(4.0),
         });
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 92.0,
             y: btn_y + 8.0,
             text: "Import".to_string(),
-            color: COLOR_BASE,
+            color: self.palette.base,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(BUTTON_WIDTH - 16.0),
@@ -4939,7 +4934,7 @@ impl SystemRestoreUI {
                 y: oy,
                 width: overlay_w,
                 height: overlay_h,
-                color: COLOR_BASE,
+                color: self.palette.base,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
             rt.push(RenderCommand::StrokeRect {
@@ -4947,7 +4942,7 @@ impl SystemRestoreUI {
                 y: oy,
                 width: overlay_w,
                 height: overlay_h,
-                color: COLOR_SURFACE1,
+                color: self.palette.surface1,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
@@ -4957,7 +4952,7 @@ impl SystemRestoreUI {
                 x: ox + PADDING,
                 y: oy + PADDING,
                 text: progress.current_step.clone(),
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(overlay_w - 2.0 * PADDING),
@@ -4971,7 +4966,7 @@ impl SystemRestoreUI {
                 y: bar_y,
                 width: overlay_w - 2.0 * PADDING,
                 height: PROGRESS_BAR_HEIGHT,
-                color: COLOR_SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -4979,9 +4974,9 @@ impl SystemRestoreUI {
             let fill_width = (overlay_w - 2.0 * PADDING) * progress.fraction();
             if fill_width > 0.0 {
                 let bar_color = if progress.error.is_some() {
-                    COLOR_RED
+                    self.palette.red
                 } else {
-                    COLOR_BLUE
+                    self.palette.blue
                 };
                 rt.push(RenderCommand::FillRect {
                     x: ox + PADDING,
@@ -5004,7 +4999,7 @@ impl SystemRestoreUI {
                 ),
                 y: bar_y + 3.0,
                 text: percent,
-                color: COLOR_TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(40.0),
@@ -5021,7 +5016,7 @@ impl SystemRestoreUI {
                     progress.total_steps,
                     format_bytes(progress.bytes_processed),
                 ),
-                color: COLOR_SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(overlay_w - 2.0 * PADDING),
@@ -5034,7 +5029,7 @@ impl SystemRestoreUI {
                     x: ox + PADDING,
                     y: oy + overlay_h - 24.0,
                     text: err.clone(),
-                    color: COLOR_RED,
+                    color: self.palette.red,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(overlay_w - 2.0 * PADDING),
@@ -5210,6 +5205,10 @@ fn system_now_secs() -> Option<u64> {
 }
 
 impl App for SystemRestoreUI {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // Which snapshot is selected, because that is what every action in the
         // toolbar acts on and the one thing a user switching windows needs to
@@ -6022,12 +6021,13 @@ mod tests {
 
     #[test]
     fn test_snapshot_type_indicator_colors_unique() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let types = SnapshotType::all();
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(
-                    types[i].indicator_color(),
-                    types[j].indicator_color(),
+                    types[i].indicator_color(&pal),
+                    types[j].indicator_color(&pal),
                     "Types {:?} and {:?} should have different colors",
                     types[i],
                     types[j],
@@ -7858,5 +7858,64 @@ mod tests {
             tree.set_parent(a, Some(999)),
             Err(SnapshotError::ParentNotFound(999))
         ));
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut SystemRestoreUI) -> Vec<Color> {
+            app.render(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = SystemRestoreUI::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

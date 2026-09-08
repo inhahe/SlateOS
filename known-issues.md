@@ -3242,7 +3242,7 @@ caller, filtered by `may_signal`", keeping the same best-effort fanout and
 model landing — this should be done in the same change, since that is the only
 thing blocking it.
 
-### TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP. `cargo fmt -p posix` rewrites 244 files you did not touch — 2026-08-12 — 🔶 HALF FIXED 2026-08-15 / 2026-08-17 (all of Lane B clean: `posix`, `oils`, `coreutils`, `ere`; `kernel` still drifted — Lane A)
+### TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP. `cargo fmt -p posix` rewrites 244 files you did not touch — 2026-08-12 — ✅ FIXED (all of Lane B clean 2026-08-15/2026-08-17; `kernel` now clean too — `cargo fmt -p kernel -- --check` exits 0 as of 2026-09-08)
 
 > **UPDATE 2026-08-15 — the operator answered Q42 with option A, and Lane B's
 > half is done.** `design-decisions.md` **§310**: one-shot repo-wide reformat,

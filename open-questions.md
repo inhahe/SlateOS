@@ -280,18 +280,82 @@ that means two different things depending on its age, which is the kind of thing
 that is impossible to explain and impossible to remove later. Listed for
 completeness; I do not recommend it.
 
-### My recommendation
+### Your two questions, answered — 2026-09-07
 
-**A.** The two search tools had to be unified because they are one feature with
-two implementations — a disagreement with no upside. Backup is not that: its
-dialect is the right one for its job and matches what every developer already
-knows from `.gitignore`, where `[` is likewise not special in the common case.
-The gain from B is small (a shorter way to write a few exclude patterns) and the
-cost lands on data that already exists and that nobody will re-read to check.
+You asked (A) what is normal, and (B) how likely a user is to really benefit.
 
-If you prefer B, the change itself is small — `apps/backup` would call
-`globmatch`'s class parser for the segment-matching step — and the real work is
-deciding whether to warn about existing patterns containing a `[`.
+**(A) What is normal: character classes are standard in *both* families.** This
+is the answer I got wrong the first time round, and it reverses my
+recommendation, so it is worth being blunt about.
+
+| tool | family | `[a-z]` means |
+|---|---|---|
+| `.gitignore` | the exclude-list family | a character class |
+| `rsync --exclude` | same | a character class |
+| `tar --exclude` | same | a character class |
+| POSIX `fnmatch`, every shell glob | the search family | a character class |
+| **our `apps/backup`** | exclude-list | **five literal characters** |
+
+My original recommendation said backup's dialect "matches what every developer
+already knows from `.gitignore`, where `[` is likewise not special in the
+common case". **That is simply false.** Git matches with `fnmatch(3)` and
+`FNM_PATHNAME`, and `[a-z]` is a class there exactly as it is in a shell. I
+asserted it without checking, and the whole case for option A rested on it.
+
+So "no character classes" is normal for **neither** family. It is not a
+deliberate dialect we chose for good reasons; it is a feature the backup
+matcher never grew. The first three rows of the difference table *are* a real
+dialect and are right as they stand — `*` stopping at `/`, `**` spanning
+directories, matching on raw bytes. The fourth row is not a dialect; it is a
+gap.
+
+**This also inverts the direction you were leaning.** Removing classes from
+search and indexing to match backup would make SlateOS the only system a user
+has ever met in which `[a-z]` in a pattern means five literal characters —
+including different from its own shell. It would mean deleting a working,
+carefully-tested feature (`apps/globmatch` handles the awkward POSIX corners:
+`[]]` as the one-element class containing `]`, a trailing `-` as a literal)
+in order to match the one tool that is the outlier.
+
+**(B) Would a user really benefit: rarely — but that is the wrong axis.**
+Direct benefit is small and I will not overstate it. Real exclude lists are
+overwhelmingly `*.tmp`, `node_modules/`, `build/`, `.cache/`. A pattern with a
+bracket in it is uncommon.
+
+The asymmetry is in what happens when one *does* appear, because **both
+behaviours are silent**:
+
+- A user pastes a `.gitignore` into the backup exclude list — far and away the
+  most likely way a `[` arrives, since that is where such lists come from.
+- `[Tt]humbs.db` then excludes a file literally named `[Tt]humbs.db`, which
+  does not exist, so it excludes **nothing**.
+- The backup silently contains files the user believed they had excluded. No
+  error, no warning, and nothing they would ever think to check.
+
+So the question is not "how often is a class useful" but "what does it cost
+when the two languages differ" — and that cost is a wrong backup that looks
+right.
+
+**Your remark that decides it.** You said you have no rules using `[]`. Option
+B's only real cost was the one in its own Cost line: *"a silent change of
+meaning in data users already wrote"*. If that data does not exist, B costs
+nothing and the objection is gone. (One clarification in case it changes your
+answer: this question is about **SlateOS's own `apps/backup`**, not your
+backup program on `D:` — so the installed base is whatever exclude lists exist
+inside this OS, which is currently none.)
+
+### My recommendation, revised: **B**
+
+Teach `apps/backup` character classes, by calling `apps/globmatch`'s existing
+class parser for the segment-matching step. It is one matcher changed rather
+than two, it moves toward both traditions instead of away from both, it turns
+a silent-wrong-answer case into a correct one, and the migration cost that was
+the sole argument against it does not apply.
+
+If you would rather not add the feature, the fallback is **not** option A but
+"make backup **reject** a pattern containing an unescaped `[`" — that keeps
+the languages apart while making the disagreement loud instead of silent,
+which is the only genuinely bad property of the current state.
 
 ### If this is never answered
 

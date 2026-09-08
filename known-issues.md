@@ -124425,9 +124425,33 @@ which makes step 1 below larger than one dependency line.
   `stickynotes`, `taskscheduler`, `contacts`, `habits`, `fontmanager` and
   `automator`, `sysmonitor`, `undelete`, `ircclient`, `dictionary`,
   `reminders`, `weather`, `alarmclock`, `diagram`, `partmanager` and
-  `credmanager`, `vpnmanager`, `dbviewer`, `whiteboard`, `mindmap`, `tmux`, `remotedesktop`, `markdowneditor` and `netmanager`.
+  `credmanager`, `vpnmanager`, `dbviewer`, `whiteboard`, `mindmap`, `tmux`,
+  `remotedesktop`, `markdowneditor`, `netmanager` and `snippets`.
   Each has a test on the rectangles it emits, and each was mutation-checked by
   making `theme_changed` ignore its argument.
+
+**Done: this is now every non-game application in the tree.** The 140
+applications with a `main.rs` divide into 58 converted, 42 games (which the
+operator asked be deprioritised), and 40 that name no palette roles at all and
+so have nothing to convert. The buckets are disjoint and sum to 140 --
+`survey_all.py` used to overlap them and report "0 already converted", because
+a converted application has no constants left and so fell into the
+"nothing to convert" bucket, which was also how its hardcoded games list
+silently hid nineteen games among the work still to do.
+
+**The sharpest form of the content-vs-chrome rule, learned from `snippets`.**
+The earlier tell -- "the constant is read where no window is in scope" -- does
+not fire here: `snippets` sets a folder's colour inside `&mut self` methods.
+The reliable question is *when* the colour is resolved:
+
+  * resolved **at draw time**, every frame -> chrome, follows the theme;
+  * **written into a stored field** -> content, stays fixed.
+
+A stored colour cannot follow the theme even in principle, because nothing
+rewrites it when the theme changes -- the same reason `tmux`'s parsed ANSI
+cells stay fixed. `snippets` has both kinds in one file: `Folder.color` is
+stored (five sites, left fixed), while `Language::color` and `TokenKind::color`
+are syntax highlighting computed per frame (twenty-two sites, themed).
 
 **Check the package name before believing a build.** `apps/tmux`'s crate is
 `tmux-app`, so `cargo build -p tmux` silently built something else and reported

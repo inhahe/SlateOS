@@ -918,7 +918,7 @@ that let them through is untouched.
 
 The cost grows with the number of app crates, which is growing.
 
-## A-Q4 — [A]+[C] Desktop icon layout exists in two places: `fs::deskicons` (kernel) and `gui/desktop/src/icons.rs` (shell). Which is the authority? — Status: OPEN
+## A-Q8 — [A]+[C] Desktop icon layout exists in two places: `fs::deskicons` (kernel) and `gui/desktop/src/icons.rs` (shell). Which is the authority? — Status: OPEN
 
 **In short:** A user's desktop icons have positions on screen. Two independent
 modules model that layout: `kernel/src/fs/deskicons.rs` (Lane A, marked done in

@@ -57,23 +57,24 @@ use super::number::{
     SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI,
     SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE, SYS_GETRANDOM, SYS_ICMP_PING, SYS_ICMP_PING_WAIT,
     SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE,
-    SYS_IRQ_WAIT, SYS_LOADAVG, SYS_LOG_READ, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP,
-    SYS_MPROTECT, SYS_MUNMAP, SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE,
-    SYS_NET_FW_FLUSH, SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE,
-    SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL,
-    SYS_NET_ROUTE_LIST, SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE,
-    SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL,
-    SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ,
-    SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE,
-    SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE,
-    SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS,
-    SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE,
-    SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID,
-    SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS,
-    SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID,
-    SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2,
-    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE,
-    SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ,
+    SYS_IRQ_WAIT, SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_LOADAVG, SYS_LOG_READ, SYS_MM_GET_PROFILE,
+    SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MPROTECT, SYS_MUNMAP, SYS_NET_FW_ADD_RULE,
+    SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH, SYS_NET_FW_SET_POLICY,
+    SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE, SYS_NET_RAW_OPEN, SYS_NET_RAW_RX,
+    SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST, SYS_NET_STAT,
+    SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE, SYS_NS_QUERY,
+    SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL, SYS_PIPE_CLOSE, SYS_PIPE_CREATE,
+    SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES,
+    SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE,
+    SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT,
+    SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS,
+    SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID,
+    SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID, SYS_PROCESS_IS_READY,
+    SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_EXEC_FDS,
+    SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID, SYS_PROCESS_SETGROUPS,
+    SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT,
+    SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP,
+    SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ,
     SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
     SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE,
     SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ, SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE,
@@ -382,6 +383,8 @@ const fn build_v1_table() -> SyscallTable {
     // the same PCB state the Linux shim uses, so both ABIs share one truth.
     handlers[SYS_PROCESS_SETGROUPS as usize] = Some(handlers::sys_process_setgroups);
     handlers[SYS_PROCESS_CHROOT as usize] = Some(handlers::sys_process_chroot);
+    handlers[SYS_ITIMER_SET as usize] = Some(handlers::sys_itimer_set);
+    handlers[SYS_ITIMER_GET as usize] = Some(handlers::sys_itimer_get);
 
     // io_ring (260–269).
     handlers[SYS_IO_RING_SETUP as usize] = Some(handlers::sys_io_ring_setup);
@@ -1026,6 +1029,7 @@ pub fn self_test_fs() -> KernelResult<()> {
     test_dispatch_fs_roundtrip()?;
     test_dispatch_openat2_native()?;
     test_dispatch_chroot()?;
+    test_dispatch_itimer()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())
@@ -4418,5 +4422,139 @@ fn test_dispatch_chroot() -> KernelResult<()> {
     pcb::set_root_dir(pid, None)?;
 
     serial_println!("[syscall]   Dispatch chroot: OK (set '/', verify, clean)");
+    Ok(())
+}
+
+/// Test `SYS_ITIMER_SET`/`SYS_ITIMER_GET` (1069/1070): arm the real interval
+/// timer, observe that it is *actually armed*, then disarm it.
+///
+/// **The load-bearing assertion is the `GET` after the `SET`.** The defect this
+/// pair exists to remove is a call that validates its arguments, reports
+/// success and arms nothing — and a test that only checked `SET`'s return code
+/// would pass against exactly that. So this reads the timer back and requires a
+/// positive remaining time: evidence that something was armed, not merely that
+/// the call was accepted.
+///
+/// Two things it deliberately does not do:
+///
+/// * **It does not clear the timer first to get a known state.** Establishing
+///   one that way destroys whatever was there, silently. Nothing arms a timer
+///   on this process today, which is not a reason to write it that way — it is
+///   the reason the bug would be hard to find when something does. It looks
+///   first and declines instead, the way [`test_dispatch_chroot`] declines when
+///   there is no owning process.
+/// * **It does not return early between arming and disarming.** `SIGALRM` with
+///   no handler installed terminates the process by default
+///   ([`crate::proc::itimer`]'s module doc), so an early `return Err(...)` would
+///   leave an hour-long timer armed on whatever process the boot self-tests run
+///   as. A boot does not last an hour, which is exactly what would make that
+///   leak survive review. Every reading is taken, the timer is disarmed
+///   unconditionally, and only then are the results judged.
+fn test_dispatch_itimer() -> KernelResult<()> {
+    use crate::proc::thread;
+    use crate::sched;
+
+    let task_id = sched::current_task_id();
+    if thread::owner_process(task_id).is_none() {
+        serial_println!("[syscall]   Dispatch itimer: SKIP (no owning process)");
+        return Ok(());
+    }
+
+    /// Far enough out that it cannot expire mid-test, so a zero reading below
+    /// means "never armed" and never "already fired".
+    const ONE_HOUR_NS: u64 = 3_600 * 1_000_000_000;
+
+    let call = |nr: u64, which: u64, value_ns: u64, interval_ns: u64| {
+        dispatch(
+            nr,
+            &SyscallArgs {
+                arg0: which,
+                arg1: value_ns,
+                arg2: interval_ns,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        )
+    };
+
+    // Look before touching: refuse to clobber a timer this test does not own.
+    let existing = call(SYS_ITIMER_GET, 0, 0, 0);
+    if existing.value != 0 || existing.value2 != 0 {
+        serial_println!(
+            "[syscall]   Dispatch itimer: SKIP (a timer is already armed on this \
+             process: {} ns remaining, interval {}) — refusing to clobber state \
+             this test does not own",
+            existing.value,
+            existing.value2
+        );
+        return Ok(());
+    }
+
+    // Take every reading first, disarm unconditionally, judge afterwards.
+    let armed = call(SYS_ITIMER_SET, 0, ONE_HOUR_NS, 0);
+    let read = call(SYS_ITIMER_GET, 0, 0, 0);
+    let disarmed = call(SYS_ITIMER_SET, 0, 0, 0);
+    let after = call(SYS_ITIMER_GET, 0, 0, 0);
+    let virt = call(SYS_ITIMER_SET, 1, ONE_HOUR_NS, 0);
+
+    let hour = i64::try_from(ONE_HOUR_NS).unwrap_or(i64::MAX);
+
+    if armed.value != 0 || armed.value2 != 0 {
+        serial_println!(
+            "[syscall]   FAIL: itimer set on a disarmed timer reported a previous \
+             value of ({}, {}), expected (0, 0)",
+            armed.value,
+            armed.value2
+        );
+        return Err(KernelError::InternalError);
+    }
+    if read.value <= 0 || read.value > hour {
+        serial_println!(
+            "[syscall]   FAIL: itimer get returned {} ns remaining; expected a \
+             positive value no greater than the hour just armed. Zero here means \
+             the call reported success and armed nothing.",
+            read.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    if read.value2 != 0 {
+        serial_println!(
+            "[syscall]   FAIL: itimer get reported interval {}, expected 0 for a \
+             one-shot timer",
+            read.value2
+        );
+        return Err(KernelError::InternalError);
+    }
+    if disarmed.value <= 0 {
+        serial_println!(
+            "[syscall]   FAIL: disarming reported previous value {}, expected the \
+             remaining time",
+            disarmed.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    if after.value != 0 || after.value2 != 0 {
+        serial_println!(
+            "[syscall]   FAIL: after disarm, itimer get returned ({}, {}), \
+             expected (0, 0)",
+            after.value,
+            after.value2
+        );
+        return Err(KernelError::InternalError);
+    }
+    if virt.value >= 0 {
+        serial_println!(
+            "[syscall]   FAIL: ITIMER_VIRTUAL returned {}, expected an error — \
+             accepting it would arm a wall-clock timer for a CPU-time request",
+            virt.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[syscall]   itimer (1069/1070: arm, read back armed, disarm reports the \
+         remainder, ITIMER_VIRTUAL refused): OK"
+    );
     Ok(())
 }

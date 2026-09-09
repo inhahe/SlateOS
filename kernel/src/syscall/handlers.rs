@@ -15746,3 +15746,64 @@ pub fn sys_process_chroot(args: &SyscallArgs) -> SyscallResult {
         Err(e) => SyscallResult::err(e),
     }
 }
+
+/// The only interval timer this kernel keeps. Matches Linux's `ITIMER_REAL`.
+const ITIMER_REAL: u64 = 0;
+
+/// Saturating `u64` nanoseconds → the `i64` a syscall returns in a register.
+///
+/// `i64::MAX` nanoseconds is roughly 292 years, so the clamp is unreachable in
+/// practice; it exists so the conversion has no failure path rather than to
+/// handle a real case. Reporting "very far away" is the right answer if it ever
+/// does happen — a wrapping cast would report a *negative* time, which a caller
+/// reads as an error code.
+fn itimer_ns_to_reg(ns: u64) -> i64 {
+    i64::try_from(ns).unwrap_or(i64::MAX)
+}
+
+/// `SYS_ITIMER_SET` (1069) — arm, re-arm or disarm the calling process's real
+/// interval timer, reporting what it held before.
+///
+/// See [`crate::syscall::number::SYS_ITIMER_SET`] for the contract, and
+/// `design-decisions.md` §925 for why both previous values come back in
+/// registers rather than through a caller-supplied buffer.
+pub fn sys_itimer_set(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::thread;
+
+    if args.arg0 != ITIMER_REAL {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+
+    let (prev_value_ns, prev_interval_ns) =
+        crate::proc::itimer::set_real(pid, args.arg1, args.arg2);
+
+    SyscallResult::ok2(
+        itimer_ns_to_reg(prev_value_ns),
+        itimer_ns_to_reg(prev_interval_ns),
+    )
+}
+
+/// `SYS_ITIMER_GET` (1070) — report the calling process's real interval timer
+/// as `(remaining_ns, interval_ns)`, without disturbing it.
+///
+/// See [`crate::syscall::number::SYS_ITIMER_GET`].
+pub fn sys_itimer_get(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::thread;
+
+    if args.arg0 != ITIMER_REAL {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+
+    let (value_ns, interval_ns) = crate::proc::itimer::get_real(pid);
+    SyscallResult::ok2(itimer_ns_to_reg(value_ns), itimer_ns_to_reg(interval_ns))
+}

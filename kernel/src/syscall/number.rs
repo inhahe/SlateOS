@@ -5215,6 +5215,72 @@ pub const SYS_PROCESS_SETGROUPS: u64 = 1067;
 /// Chosen number 1068, next free slot after 1067.
 pub const SYS_PROCESS_CHROOT: u64 = 1068;
 
+/// `SYS_ITIMER_SET` — arm, re-arm or disarm the calling process's real
+/// interval timer, and report what it held before.
+///
+/// `(which, value_ns, interval_ns) -> ok2(prev_value_ns, prev_interval_ns)`
+///
+/// The timer counts wall-clock time and raises `SIGALRM` in the calling process
+/// when it expires. A non-zero `interval_ns` re-arms it to that period after
+/// each expiry; zero makes it one-shot. `value_ns == 0` disarms it regardless
+/// of `interval_ns`, matching `setitimer(2)`.
+///
+/// **Nanoseconds, not `struct itimerval`.** The native ABI does not carry
+/// Linux's four-field `{tv_sec, tv_usec}` pair: [`crate::proc::itimer`] stores
+/// nanoseconds, and duplicating that layout here would create a second
+/// definition to keep in step with the one `syscall::linux` already owns. libc
+/// converts, where it converts everything else.
+///
+/// **Both previous values come back in registers**, so this call takes no user
+/// pointer and therefore has no fault path at all. That is deliberate, and is
+/// the one place the native ABI is *better* than the Linux one rather than
+/// merely different: Linux's `do_setitimer` arms the new timer *before* copying
+/// the old value out, so a bad `old_value` pointer yields `EFAULT` **with the
+/// timer already armed** — a call that reports failure having changed the
+/// world. With nothing to copy out, that window does not exist here.
+///
+/// `alarm(seconds)` is expressible as
+/// `SYS_ITIMER_SET(ITIMER_REAL, seconds * 1e9, 0)`, its return value being
+/// `prev_value_ns` rounded up to whole seconds. POSIX defines `alarm` in
+/// exactly those terms and [`crate::proc::itimer`]'s module doc says the same —
+/// `alarm` and `setitimer(ITIMER_REAL)` are one timer, so `alarm(0)` correctly
+/// reports and clears one armed through this call.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
+///   `ITIMER_VIRTUAL` (1) and `ITIMER_PROF` (2) count CPU time consumed by the
+///   process, which this kernel does not account for per-process. Refusing is
+///   honest; accepting would reproduce, one layer down, the exact "reports
+///   success and arms nothing" defect this call exists to remove.
+/// - [`KernelError::NoSuchProcess`] — the caller has no owning process.
+///
+/// No capability is required: the timer belongs to the calling process and
+/// affects nothing else, which is also why `syscall::linux`'s `setitimer` arm
+/// checks none.
+///
+/// See `design-decisions.md` §925 and
+/// `requests/b-a-expose-the-interval-timer-natively-so-alarm-can-fire.md`.
+///
+/// Chosen number 1069, next free slot after 1068.
+pub const SYS_ITIMER_SET: u64 = 1069;
+
+/// `SYS_ITIMER_GET` — report the calling process's real interval timer.
+///
+/// `(which) -> ok2(value_ns, interval_ns)`
+///
+/// `value_ns` is the time remaining until the next `SIGALRM`, not the value the
+/// timer was armed with, and is zero when the timer is disarmed. Reading does
+/// not disturb the timer.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
+/// - [`KernelError::NoSuchProcess`] — the caller has no owning process.
+///
+/// Chosen number 1070, next free slot after 1069.
+pub const SYS_ITIMER_GET: u64 = 1070;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

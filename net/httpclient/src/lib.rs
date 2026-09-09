@@ -3,9 +3,23 @@
 //! A native HTTP/1.1 client library for `Slate OS`. Provides URL parsing, request building,
 //! response parsing, cookie handling, and HTTP protocol serialization/deserialization.
 //!
-//! This library is used by the package manager and other applications for network fetching.
 //! It implements the HTTP/1.1 protocol with support for chunked transfer encoding,
 //! redirects, cookies, and common authentication schemes.
+//!
+//! # What this crate does *not* do: send anything
+//!
+//! There is no transport here -- no `connect`, no `send`, no `TcpStream`. This
+//! is the protocol, not the client: it turns a request into bytes and bytes
+//! back into a response, and something else has to carry them.
+//!
+//! This paragraph used to read "is used by the package manager and other
+//! applications for network fetching". That was not true and had probably
+//! never been true: no crate in the tree depends on this one, and `pkg/`
+//! contains no socket code either. It is corrected rather than deleted because
+//! the sentence cost lane C ten minutes on 2026-09-08 -- reading it, believing
+//! the fetching problem was solved, and planning on top of that -- and the
+//! next reader deserves to be told the opposite plainly. See `known-issues.md`
+//! `TD-C-THE-HTTP-CLIENT-CANNOT-MAKE-A-REQUEST`.
 //!
 //! # Example
 //!

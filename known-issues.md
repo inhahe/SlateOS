@@ -125512,8 +125512,24 @@ either way.
      service". Wired today it would parse containers, show transport controls,
      and display no frames. That is the same trap: a feature that appears to
      exist and does nothing. Its trigger is a decoder service, not a caller.
-3. **Route `apps/colorpicker` through `guitk::colorpicker`,** or delete the
-   toolkit's copy. One of the two, not both.
+3. ~~**Route `apps/colorpicker` through `guitk::colorpicker`**~~ — **done
+   2026-09-08**, and it turned out not to be tidying. The app's own
+   `from_hsv` computed its sector as `(h / 60.0).floor() as u32`, and `as u32`
+   *saturates* in Rust: every negative hue became sector 0, so **every hue
+   below zero rendered as the same red**. Hue −60 gave `(255, 0, 0)` where it
+   should give magenta. The shared version takes the hue modulo 360 and clamps
+   s and v first, so routing through it fixed the bug as a side effect of
+   removing the duplicate.
+
+   Latent rather than live: the app's own `to_hsv` always returns a hue in
+   [0, 360), so nothing in the current UI reaches the bad path. It was
+   reachable by any caller constructing an `Hsv` directly — which is what the
+   new regression test does, and it fails against the old implementation.
+
+   **This is the argument for the whole entry, in one case.** The duplicate was
+   not two copies of a correct thing; it was a correct one and a subtly broken
+   one, and the `#![allow(dead_code)]` on the correct one is why nobody
+   compared them.
 
 **Related.** `TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING` is
 the same mechanism with 5,628 more lines, found the same way and logged

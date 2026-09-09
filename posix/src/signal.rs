@@ -174,8 +174,99 @@ process_global! {
     /// `sigprocmask(SIG_BLOCK, ..., &old)` and later restore with
     /// `sigprocmask(SIG_SETMASK, &old, NULL)` — the old mask must
     /// round-trip correctly.
+    ///
+    /// (The paragraph above used to end "but since we have no signal
+    /// delivery, pending is always empty, so `sigpending` still returns
+    /// empty". That was contradicted by [`sigpending`] itself, twelve
+    /// hundred lines below, which asks the kernel via `SYS_SIGNAL_PENDING`.)
     fn blocked_mask_ptr() -> SigsetT = SigsetT::EMPTY;
+
+    /// How many signal handlers this process has actually run.
+    ///
+    /// Bumped by `dispatch_self_signal` immediately before a registered
+    /// handler is invoked, and read by [`wait_for_delivery`], which is what
+    /// `pause(2)` and [`sigsuspend`] wait on.
+    ///
+    /// It has to exist because **a delivered signal otherwise leaves no
+    /// trace a waiter could observe.** Delivery is asynchronous — the kernel
+    /// redirects the thread to `__signal_trampoline`, the handler runs, and
+    /// execution resumes — so afterwards nothing distinguishes "a signal was
+    /// caught" from "nothing happened". `SYS_SIGNAL_PENDING` does not help:
+    /// it reports signals *blocked and queued*, which is the opposite set.
+    ///
+    /// Wrapping is harmless. Both waiters compare for inequality against a
+    /// sample taken before they slept, so only a *change* matters; aliasing
+    /// would need 2^64 handlers to run inside one sleep interval.
+    ///
+    /// **Atomic, and not because of threads.** The other globals in this
+    /// block are plain values on the macro's stated assumption that the
+    /// target is single-threaded. This one is a read-modify-write performed
+    /// *in signal-delivery context*, and a second delivery landing inside it
+    /// would lose an update -- which is not a corrupt count but a missed
+    /// wake: `pause` would stay parked for a signal it was already sent.
+    /// `fetch_add` is what makes the increment survive being interrupted by
+    /// the very thing it is counting.
+    fn deliveries_ptr() -> core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
 }
+
+/// Read the delivery counter.
+///
+/// On the host this has no caller outside the tests: `wait_for_delivery` is a
+/// stub there, because there is no kernel to deliver anything, so the only
+/// reader of the counter is compiled out. The `allow` is scoped to that build
+/// rather than blanket, so a genuinely dead reader on the target -- which
+/// would mean nothing waits on signals at all -- still warns.
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+fn deliveries() -> u64 {
+    // SAFETY: `deliveries_ptr()` is owned solely by this process (this thread
+    // on host builds) and always points at an initialised `AtomicU64`.
+    unsafe { (*deliveries_ptr()).load(core::sync::atomic::Ordering::Relaxed) }
+}
+
+/// Record that a registered handler is about to run.
+///
+/// Bumped *before* the call rather than after, so that a handler which never
+/// returns normally — one that `longjmp`s out, as `setjmp`-based error
+/// recovery does — still counts as a delivery.
+fn note_delivery() {
+    // SAFETY: as `deliveries()`.
+    unsafe {
+        (*deliveries_ptr()).fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Block until this process runs a signal handler.
+///
+/// Polls, because there is nothing else to poll with: the kernel has no
+/// wait-for-signal primitive. The sleep is what makes this a wait rather than
+/// a spin, and 2 ms bounds the latency a caller sees while costing 500
+/// syscalls a second in the rare process that is parked here at all.
+///
+/// A `SYS_SIGNAL_WAIT` would remove the poll and is worth asking for if this
+/// ever shows up in a profile — not before, since a process in `pause` is by
+/// definition doing nothing else.
+///
+/// Note what it does **not** wake for: a signal whose disposition is `SIG_IGN`,
+/// or whose default action is ignore, runs no handler and bumps no counter, so
+/// it correctly leaves `pause` waiting. That is POSIX's rule, and it falls out
+/// of counting handler *invocations* rather than deliveries.
+#[cfg(target_os = "none")]
+pub(crate) fn wait_for_delivery() {
+    let start = deliveries();
+    while deliveries() == start {
+        let _ = crate::syscall::syscall1(crate::syscall::SYS_SLEEP, 2_000_000_u64);
+    }
+}
+
+/// Host build: return at once.
+///
+/// There is no kernel here to deliver anything, so the loop above would wait
+/// for something that cannot happen — it would hang `cargo test` rather than
+/// fail it. The host keeps the old immediate return, which is wrong in the
+/// same way it always was and is at least bounded.
+#[cfg(not(target_os = "none"))]
+pub(crate) fn wait_for_delivery() {}
 
 /// Install a signal handler.
 ///
@@ -784,6 +875,8 @@ fn dispatch_self_signal(sig: i32) -> i32 {
             // as a valid fn(i32).  We trust they provided a valid pointer.
             let func: extern "C" fn(i32) =
                 unsafe { core::mem::transmute::<usize, extern "C" fn(i32)>(handler) };
+            // Before the call, not after: see `note_delivery`.
+            note_delivery();
             func(sig);
 
             // Restore the mask the handler ran under.  This may unblock a
@@ -1309,8 +1402,21 @@ pub extern "C" fn pthread_sigmask(how: i32, set: *const SigsetT, oldset: *mut Si
 
 /// Wait for a signal.
 ///
-/// Stub: sets errno to EINTR and returns -1 (POSIX specifies
-/// sigsuspend always returns -1 with errno=EINTR).
+/// Replaces the process's blocked mask with `*mask`, waits until a handler
+/// runs, restores the previous mask, and returns -1 with `EINTR`.
+///
+/// Until 2026-09-09 this set `EINTR` and returned **immediately**, having
+/// waited for nothing. POSIX does say `sigsuspend` always returns -1 with
+/// `EINTR` — but it returns *after a signal has been delivered*, and the
+/// waiting is the whole function. Returning the right value without doing the
+/// work reported an event that had not occurred, and a caller using it to wait
+/// for a child proceeded as though one had.
+///
+/// The kernel had already built the other half and said so:
+/// `kernel/src/proc/thread.rs` posts `SIGCHLD` to a *native* parent precisely
+/// so one "parked in `sigsuspend()`/`pause()`" wakes, remarking that "without
+/// this the parent livelocks in sigsuspend". Nothing was ever parked there,
+/// because this function never waited.
 ///
 /// Errors (Linux-matching priority):
 /// * `EFAULT` — `mask` is NULL.  Linux's `sys_rt_sigsuspend` copies
@@ -1323,6 +1429,16 @@ pub extern "C" fn sigsuspend(mask: *const SigsetT) -> i32 {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
+    // SAFETY: non-null (checked just above); read unaligned to tolerate a
+    // caller buffer that is not naturally aligned, as `setitimer` does.
+    let requested = unsafe { core::ptr::read_unaligned(mask) };
+    let previous = current_blocked_low();
+    apply_blocked_low(requested.bits[0]);
+    wait_for_delivery();
+    // Restored even though every path returns -1: the mask is process state,
+    // and a caller looping on `sigsuspend` must not accumulate the mask it
+    // passed in.
+    apply_blocked_low(previous);
     errno::set_errno(errno::EINTR);
     -1
 }
@@ -5141,6 +5257,91 @@ mod tests {
             "handler should receive the signal number"
         );
         signal(SIGUSR1, old);
+    }
+
+    // -----------------------------------------------------------------
+    // The delivery counter, which `pause` and `sigsuspend` wait on.
+    //
+    // These are host tests of a mechanism whose *wait* is bare-metal only
+    // (`wait_for_delivery` is a no-op off-target, or `cargo test` would park
+    // forever waiting for a kernel that is not there). What the host can
+    // still check is the half that decides whether the wait ever ends: that
+    // the counter moves exactly when a handler runs. If it did not move, a
+    // process in `pause` on the target would never wake, and no host test
+    // would have said so.
+    // -----------------------------------------------------------------
+
+    /// The counter moves when a handler actually runs.
+    #[test]
+    fn test_delivery_counter_increments_when_a_handler_runs() {
+        extern "C" fn handler(_sig: i32) {}
+
+        let old = signal(SIGUSR1, handler as *const () as SighandlerT);
+        let before = deliveries();
+        assert_eq!(raise(SIGUSR1), 0);
+        assert_eq!(
+            deliveries(),
+            before.wrapping_add(1),
+            "a handler ran, so the delivery counter must have moved"
+        );
+        signal(SIGUSR1, old);
+    }
+
+    /// ...and does not move for a signal that runs no handler.
+    ///
+    /// This is the one that keeps `pause` correct rather than merely awake.
+    /// POSIX says an ignored signal does not end a `pause`, and that falls
+    /// out of counting handler *invocations* rather than deliveries. Count
+    /// deliveries instead and `pause` would return on a signal the process
+    /// asked to ignore.
+    #[test]
+    fn test_delivery_counter_ignores_a_signal_with_no_handler() {
+        let old = signal(SIGUSR1, SIG_IGN);
+        let before = deliveries();
+        assert_eq!(raise(SIGUSR1), 0);
+        assert_eq!(
+            deliveries(),
+            before,
+            "SIG_IGN runs no handler, so it must not count as a delivery"
+        );
+        signal(SIGUSR1, old);
+    }
+
+    /// `sigsuspend` restores the mask it replaced.
+    ///
+    /// It returns -1/`EINTR` on every path, so the restore has no successful
+    /// exit to hide behind: a caller that loops on `sigsuspend` would
+    /// otherwise accumulate the mask it passed in, and each iteration would
+    /// wait for a strictly smaller set of signals than the last.
+    #[test]
+    fn test_sigsuspend_restores_the_previous_blocked_mask() {
+        let mut saved = SigsetT::EMPTY;
+        let mut want = SigsetT::EMPTY;
+        want.bits[0] = 1u64 << (SIGUSR2 - 1);
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, &raw const want, &raw mut saved),
+            0
+        );
+
+        let mut during = SigsetT::EMPTY;
+        during.bits[0] = 1u64 << (SIGUSR1 - 1);
+        assert_eq!(sigsuspend(&raw const during), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINTR);
+
+        let mut after = SigsetT::EMPTY;
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, core::ptr::null(), &raw mut after),
+            0
+        );
+        assert_eq!(
+            after.bits[0], want.bits[0],
+            "sigsuspend must leave the blocked mask as it found it"
+        );
+
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, &raw const saved, core::ptr::null_mut()),
+            0
+        );
     }
 
     /// raise() with SIG_IGN for various terminating signals.

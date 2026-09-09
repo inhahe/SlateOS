@@ -1313,7 +1313,24 @@ pub extern "C" fn getdtablesize() -> i32 {
 
 /// Set an alarm timer.
 ///
-/// Stub: returns 0 (no alarm support — signals not implemented).
+/// Stub: returns 0, having armed nothing, so no `SIGALRM` ever arrives.
+///
+/// **The reason given here until 2026-09-09 was "signals not implemented",
+/// and that has stopped being true.** `signal.rs` registers
+/// `__signal_trampoline` at startup and the kernel delivers pending signals
+/// through it. The gap is now narrower and elsewhere: the kernel's
+/// `proc/itimer.rs` really does back `alarm`/`setitimer(ITIMER_REAL)` with a
+/// real `SIGALRM`, but only through the Linux-ABI table
+/// (`kernel/src/syscall/linux.rs`), and `posix/src/syscall.rs` has no native
+/// number to reach it with. `SYS_TIMER_CREATE` (12) is native but reports
+/// expiry to a completion port rather than as a signal, so it cannot serve
+/// this on its own.
+///
+/// Asked of lane A in
+/// `requests/b-a-expose-the-interval-timer-natively-so-alarm-can-fire.md`.
+/// See `known-issues.md` -> `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING`, which
+/// records why this is not simply flipped to an error the way `setgroups`
+/// was: that one had no callers anywhere, and this one does.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn alarm(_seconds: u32) -> u32 {
     0
@@ -1321,7 +1338,8 @@ pub extern "C" fn alarm(_seconds: u32) -> u32 {
 
 /// Set an alarm timer with microsecond granularity (deprecated BSD function).
 ///
-/// Stub: returns 0 (no alarm support — signals not implemented).
+/// Stub: returns 0, having armed nothing. Same position as [`alarm`], whose
+/// doc carries the reason and the correction.
 /// `usecs` is the initial alarm delay in microseconds.
 /// `interval` is the repeat interval in microseconds (0 = one-shot).
 ///
@@ -1334,10 +1352,22 @@ pub extern "C" fn ualarm(_usecs: u32, _interval: u32) -> u32 {
 
 /// Suspend until a signal is delivered.
 ///
-/// Stub: sleeps for 1 second then returns -1/EINTR (no signals).
+/// Waits until this process runs a signal handler, then returns -1 with
+/// `EINTR` — which is the only way `pause` ever returns.
+///
+/// Until 2026-09-09 it slept for one second and returned `EINTR` regardless,
+/// which **reported an event that had not happened**: `EINTR` from `pause`
+/// means "a signal was caught", and there it meant "a second elapsed". A
+/// caller looping `while (!flag) pause();` merely spun at 1 Hz, but one that
+/// treats the return as proof of a signal acted on a signal that never came.
+///
+/// The wait is [`crate::signal::wait_for_delivery`], which polls a counter
+/// bumped whenever a handler runs. See it for why a delivered signal
+/// otherwise leaves no trace, and for what `pause` deliberately does *not*
+/// wake for: an ignored signal runs no handler and must not end the wait.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pause() -> i32 {
-    let _ = syscall1(SYS_SLEEP, 1_000_000_000_u64);
+    crate::signal::wait_for_delivery();
     errno::set_errno(errno::EINTR);
     -1
 }

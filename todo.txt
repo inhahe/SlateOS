@@ -56106,3 +56106,49 @@ The habit to keep: `cargo clippy -p <crate> --target x86_64-pc-windows-gnu
 sentence "clippy is clean" makes, which is this project's recurring failure
 shape -- a command that answered a narrower question than the one being asked,
 reported at the width of the question.
+
+## Next: a gate that checks every C-ABI struct against musl automatically (lane B, 2026-09-09)
+
+**Why.** `Sigaction` carried the kernel's field order under a comment claiming
+it was glibc's, for months, because both layouts are 152 bytes and the one
+field they agree on -- `sa_handler` at offset 0 -- is the one every test
+touched (design-decisions.md §1010). A size test existed and passed. Offsets
+were never checked.
+
+Today's response was manual: measure `sigaction`, `stack_t` and `termios`
+against musl with `zig cc --target=x86_64-linux-musl` and `_Static_assert`,
+then pin the numbers in Rust tests. That covers three structs and nothing else,
+and the next one to drift will drift silently.
+
+**The gate, and it can be genuinely single-source.** A `#[test]` on the host
+*emits* a C file of `_Static_assert`s derived from `offset_of!` and
+`size_of::<T>()`; `scripts/check-libc-abi.py` then compiles that file with
+`zig cc --target=x86_64-linux-musl -fsyntax-only`. Rust is the source of the
+numbers and musl is the oracle, so there is no table to keep in step -- which
+is the property that makes it worth building rather than a second list to rot.
+
+Sketch:
+
+    // in posix, #[cfg(test)]
+    abi_check! { Sigaction as "struct sigaction" in "signal.h" {
+        sa_handler, sa_mask, sa_flags, sa_restorer
+    } }
+
+emitting, per field:
+
+    _Static_assert(offsetof(struct sigaction, sa_flags) == 136, "...");
+
+**Candidates to cover**, in rough order of how much would break: `Sigaction`,
+`StackT`, `Termios`, `Winsize`, `SigsetT`, `Stat`, `Dirent`, `Timespec`,
+`Timeval`, `Rusage`, `Rlimit`, `Iovec`, `Sockaddr*`, `Pollfd`, `Utsname`.
+
+**Wire it into `scripts/hooks/pre-push`** beside `check-libc-shape.py`, which
+is its closest sibling: that one asserts libc.a's archive *shape* and this
+asserts its *type* shape. Same failure class -- a property that was true by
+accident, then relied on.
+
+**One caveat to design around:** a few of our types deliberately differ from
+musl because they are the *kernel* wire format (`KERNEL_NCCS = 19` in
+`ioctl.rs` is the honest example). The macro needs an explicit "kernel format,
+not libc" opt-out, and the opt-out should name the translation function that
+converts between them -- otherwise the gate teaches people to add exemptions.

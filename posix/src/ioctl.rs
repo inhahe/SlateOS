@@ -1898,12 +1898,38 @@ mod tests {
         assert_eq!(core::mem::size_of::<Winsize>(), 8);
     }
 
+    /// Size **and offsets**, against musl.
+    ///
+    /// The size alone is not enough, and that is not a hypothetical: on
+    /// 2026-09-09 `Sigaction` was found to be the *kernel's* field order under
+    /// a comment claiming it was glibc's, and it survived for months because
+    /// both layouts are 152 bytes. Two structures can agree on every byte of
+    /// size and disagree on every field. See design-decisions.md 1010.
+    ///
+    /// The numbers below were measured, not derived: asserted at compile time
+    /// against musl's own headers with
+    /// `zig cc --target=x86_64-linux-musl`, which is the toolchain every C
+    /// port in this tree is built with.
+    ///
+    /// ```c
+    /// _Static_assert(sizeof(struct termios) == 60, "size 60");
+    /// _Static_assert(offsetof(struct termios, c_line) == 16, "line");
+    /// _Static_assert(offsetof(struct termios, c_cc) == 17, "cc@17");
+    /// _Static_assert(sizeof(((struct termios*)0)->c_cc) == 32, "NCCS 32");
+    /// ```
     #[test]
     fn test_termios_size() {
-        // Termios layout: c_iflag(4) + c_oflag(4) + c_cflag(4) + c_lflag(4) +
-        // c_line(1) + c_cc(32) + padding(3) + c_ispeed(4) + c_ospeed(4) = 60.
-        let size = core::mem::size_of::<Termios>();
-        assert_eq!(size, 60, "Termios size mismatch");
+        assert_eq!(core::mem::size_of::<Termios>(), 60, "Termios size mismatch");
+        assert_eq!(core::mem::offset_of!(Termios, c_iflag), 0);
+        assert_eq!(core::mem::offset_of!(Termios, c_oflag), 4);
+        assert_eq!(core::mem::offset_of!(Termios, c_cflag), 8);
+        assert_eq!(core::mem::offset_of!(Termios, c_lflag), 12);
+        assert_eq!(core::mem::offset_of!(Termios, c_line), 16);
+        assert_eq!(core::mem::offset_of!(Termios, c_cc), 17);
+        assert_eq!(NCCS, 32);
+        // Three bytes of padding after c_cc, then the two speeds.
+        assert_eq!(core::mem::offset_of!(Termios, c_ispeed), 52);
+        assert_eq!(core::mem::offset_of!(Termios, c_ospeed), 56);
     }
 
     // -- Kernel termios marshalling --

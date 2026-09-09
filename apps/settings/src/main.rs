@@ -172,6 +172,7 @@ impl SettingsCategory {
                 SettingsPage::Ethernet,
                 SettingsPage::VPN,
                 SettingsPage::Proxy,
+                SettingsPage::DynamicDns,
             ],
             Self::Personalization => &[
                 SettingsPage::Themes,
@@ -216,6 +217,7 @@ pub enum SettingsPage {
     Ethernet,
     VPN,
     Proxy,
+    DynamicDns,
     // Personalization
     Themes,
     Colors,
@@ -255,6 +257,7 @@ impl SettingsPage {
             Self::Ethernet => "Ethernet",
             Self::VPN => "VPN",
             Self::Proxy => "Proxy",
+            Self::DynamicDns => "Dynamic DNS",
             Self::Themes => "Themes",
             Self::Colors => "Colors",
             Self::Wallpaper => "Wallpaper",
@@ -2766,6 +2769,7 @@ impl SettingsState {
             SettingsPage::Colors => self.build_colors_page(sink),
             SettingsPage::NetworkStatus => self.build_network_page(sink),
             SettingsPage::Proxy => self.build_proxy_page(sink),
+            SettingsPage::DynamicDns => Self::build_dyndns_page(sink, &self.palette()),
             SettingsPage::UserAccounts | SettingsPage::LoginOptions => {
                 self.build_accounts_page(sink);
             }
@@ -3920,6 +3924,96 @@ impl SettingsState {
                 tree.text(x + 12.0, y + 28.0, &path, pal.subtext0, 11.0);
                 tree.text(control_x, y + 8.0, &size, pal.subtext0, 12.0);
                 tree.text(control_x, y + 26.0, &files, pal.subtext0, 11.0);
+            });
+            s.advance(56.0);
+        }
+    }
+
+    /// The Dynamic DNS page: the entries the kernel actually has.
+    ///
+    /// The kernel implements dynamic DNS (`kernel/src/fs/dyndns.rs`) and
+    /// publishes its state at `/proc/dyndns`; this reads that. `remote.rs`
+    /// contains a second, unreachable implementation of the same page over an
+    /// in-memory model -- see `known-issues.md`
+    /// `TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING` -- which
+    /// this deliberately does not use, for the reason the snapshots page gives:
+    /// invented system state is worse than none, because the user acts on it.
+    ///
+    /// Read-only. Adding and removing entries needs a syscall the kernel does
+    /// not expose to userspace yet; `known-issues.md` carries that as
+    /// `TD-C-DYNDNS-PAGE-IS-READ-ONLY`.
+    fn build_dyndns_page<S: PageSink>(s: &mut S, pal: &Palette) {
+        let (summary, rows) = dyndns::system_dyndns();
+
+        s.section("Router");
+        if summary.router_detected {
+            let title = if summary.router_model.is_empty() {
+                summary.router_ip.clone()
+            } else {
+                format!("{} ({})", summary.router_ip, summary.router_model)
+            };
+            // The external address is the whole point of the page: an entry is
+            // "working" exactly when what it published matches this.
+            let external = if summary.external_ip.is_empty() {
+                "External address unknown".to_string()
+            } else {
+                format!("External address {}", summary.external_ip)
+            };
+            let forwarding = match (summary.upnp, summary.natpmp) {
+                (true, true) => "Port forwarding: UPnP and NAT-PMP",
+                (true, false) => "Port forwarding: UPnP",
+                (false, true) => "Port forwarding: NAT-PMP",
+                (false, false) => "Port forwarding: not offered by this router",
+            };
+            let forwards = match summary.forwards {
+                0 => "No ports forwarded".to_string(),
+                1 => "1 port forwarded".to_string(),
+                n => format!("{n} ports forwarded"),
+            };
+            s.draw(move |tree, x, y| {
+                fill_rounded(tree, x, y, 580.0, 66.0, pal.surface0, 6.0);
+                text_bold(tree, x + 12.0, y + 8.0, &title, pal.text, 13.0);
+                tree.text(x + 12.0, y + 28.0, &external, pal.subtext0, 11.0);
+                tree.text(x + 12.0, y + 46.0, forwarding, pal.subtext0, 11.0);
+                tree.text(x + 400.0, y + 28.0, &forwards, pal.subtext0, 11.0);
+            });
+            s.advance(74.0);
+        } else {
+            s.note("No router was detected on this network.", 32.0);
+        }
+
+        s.section("Dynamic DNS");
+        if rows.is_empty() {
+            s.note("No dynamic-DNS entries are configured.", 32.0);
+            return;
+        }
+
+        for row in rows {
+            let control_x = s.control_x();
+            let title = row.name.clone();
+            let detail = dyndns::describe(&row);
+            let status = row.status.clone();
+            // Whether the published address is the one the router reports. A
+            // "Success" that published a stale address is the failure this page
+            // exists to make visible, and the status alone does not show it.
+            let stale = row.last_ip != "-"
+                && !summary.external_ip.is_empty()
+                && row.last_ip != summary.external_ip;
+            s.draw(move |tree, x, y| {
+                fill_rounded(tree, x, y, 580.0, 48.0, pal.surface0, 6.0);
+                text_bold(tree, x + 12.0, y + 8.0, &title, pal.text, 13.0);
+                tree.text(x + 12.0, y + 28.0, &detail, pal.subtext0, 11.0);
+                // Resolved here, at draw time, so it follows the theme.
+                let colour = match status.as_str() {
+                    "Success" | "NoChange" => pal.green,
+                    "Failed" => pal.red,
+                    "Updating" => pal.yellow,
+                    _ => pal.subtext0,
+                };
+                tree.text(control_x, y + 8.0, &status, colour, 12.0);
+                if stale {
+                    tree.text(control_x, y + 26.0, "address out of date", pal.peach, 11.0);
+                }
             });
             s.advance(56.0);
         }
@@ -8721,6 +8815,65 @@ mod against_the_real_compositor {
         }
         let snap = desktop.until("the window to be reclaimed", |s| s.windows == 0);
         assert_eq!(snap.clients, 0, "the connection was dropped too");
+    }
+
+    /// The Dynamic DNS page draws what the kernel reports, and says so plainly
+    /// when there is nothing to report.
+    ///
+    /// The same test as the snapshots one, for the same reason. `remote.rs`
+    /// holds an unreachable version of this page whose default state invents
+    /// a `home.example.com` entry against Dynu with a `Success` status and a
+    /// last-known address; a user reading that would believe a hostname was
+    /// being kept up to date when nothing is.
+    #[test]
+    fn the_dyndns_page_invents_no_entries() {
+        use guitk::render::{RenderCommand, RenderTree};
+
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::DynamicDns;
+        let mut tree = RenderTree::new();
+        state.render_current_page(&mut tree, 0.0, 0.0);
+        let texts: Vec<String> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // No `/proc/dyndns` on the machine this test runs on, so both halves of
+        // the page must be the empty ones.
+        assert!(
+            texts.iter().any(|t| t.contains("No dynamic-DNS entries")),
+            "the page did not report an empty entry list: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("No router was detected")),
+            "the page did not report the absent router: {texts:?}"
+        );
+        for invented in ["home.example.com", "Dynu", "Success", "203.0.113"] {
+            assert!(
+                !texts.iter().any(|t| t.contains(invented)),
+                "the page invented {invented:?}: {texts:?}"
+            );
+        }
+    }
+
+    /// The page is reachable, which is the whole point of it existing.
+    ///
+    /// `remote.rs`'s version is not: `render_remote_access_page` is public, and
+    /// nothing calls it. A page builder that no navigation entry dispatches to
+    /// is dead code that looks like a feature.
+    #[test]
+    fn the_dyndns_page_is_reachable_from_the_network_category() {
+        assert!(
+            crate::SettingsCategory::Network
+                .pages()
+                .contains(&SettingsPage::DynamicDns),
+            "the page exists but no navigation entry leads to it"
+        );
+        assert_eq!(SettingsPage::DynamicDns.label(), "Dynamic DNS");
     }
 
     /// The snapshots page draws what the kernel reports, and says so plainly

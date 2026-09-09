@@ -57,6 +57,11 @@
 //! See `requests/a-cb-deferred-ops-format-agreed-with-notes.md` for the full
 //! design rationale.
 
+// The enqueue / next_entry_id / replay API and its supporting constants are
+// written and tested but not yet wired into the VFS mount/unmount path.
+// Suppress dead-code warnings until integration lands.
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -787,7 +792,7 @@ enum ReplayResult {
     Deferred(&'static str),
 }
 
-fn replay_one(mount_path: &Path, entry: &DeferredEntry) -> ReplayResult {
+fn replay_one(_mount_path: &Path, entry: &DeferredEntry) -> ReplayResult {
     // Step 1: verify the target inode still exists.
     let target_stat = match Vfs::stat(&entry.target_path) {
         Ok(s) => s,
@@ -931,7 +936,7 @@ pub fn replay_on_mount(mount_path: &Path) {
 /// Exercise the deferred-ops module.  Run at boot after the root filesystem
 /// is mounted.
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[deferred-ops] Running self-test...");
@@ -1081,4 +1086,5 @@ pub fn self_test() {
     );
 
     serial_println!("[deferred-ops] Self-test PASSED");
+    Ok(())
 }

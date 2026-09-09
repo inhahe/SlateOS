@@ -244,7 +244,8 @@ pub fn enable() {
 /// 1. Heartbeat increments correctly.
 /// 2. Check doesn't false-positive when heartbeats are advancing.
 /// 3. Check detects a simulated stale heartbeat.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use crate::selftest;
     serial_println!("[watchdog] Running self-test...");
 
     // Test 1: Heartbeat increments.
@@ -263,7 +264,7 @@ pub fn self_test() {
         let a = HEARTBEATS.get(cpu).map_or(0, |h| h.load(Ordering::Relaxed));
         (b, a)
     });
-    assert_eq!(after, before + 1, "heartbeat should increment");
+    selftest::check_eq!(after, before + 1, "heartbeat should increment");
     serial_println!("[watchdog]   Heartbeat increment: OK");
 
     // Test 2: Check doesn't false-positive.
@@ -278,7 +279,7 @@ pub fn self_test() {
     let stale = STALE_COUNT
         .get(cpu)
         .map_or(u64::MAX, |sc| sc.load(Ordering::Relaxed));
-    assert_eq!(stale, 0, "no false positive when heartbeat advances");
+    selftest::check_eq!(stale, 0, "no false positive when heartbeat advances");
     serial_println!("[watchdog]   No false positive: OK");
 
     // Test 3: Simulated stale detection.
@@ -305,8 +306,9 @@ pub fn self_test() {
     unsafe {
         crate::cpu::sti();
     }
-    assert_eq!(
-        stale_after, 1,
+    selftest::check_eq!(
+        stale_after,
+        1,
         "stale count should be 1 after one stale check"
     );
     serial_println!("[watchdog]   Stale detection: OK");
@@ -327,4 +329,5 @@ pub fn self_test() {
     }
 
     serial_println!("[watchdog] Self-test PASSED");
+    Ok(())
 }

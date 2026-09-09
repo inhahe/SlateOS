@@ -409,7 +409,7 @@ impl SchedulerBackend {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the scheduler backend enum.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[sched::backend] Running self-test...");
@@ -579,4 +579,5 @@ pub fn self_test() {
     }
 
     serial_println!("[sched::backend] Self-test PASSED (11 tests)");
+    Ok(())
 }

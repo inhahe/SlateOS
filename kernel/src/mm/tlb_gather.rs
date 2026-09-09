@@ -329,7 +329,7 @@ impl Drop for TlbGather {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the TLB gather system.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[tlb_gather] Running self-test...");
 
     // Test 1: Empty gather does nothing.
@@ -437,4 +437,5 @@ pub fn self_test() {
     );
 
     serial_println!("[tlb_gather] Self-test PASSED");
+    Ok(())
 }

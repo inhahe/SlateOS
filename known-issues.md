@@ -2289,7 +2289,7 @@ primitive than the three that just landed. Promote it to `requests/` the first
 time a port actually depends on the filter — glibc's `posix_spawn` and
 `pthread_cancel` paths are the likeliest candidates.
 
-### TD-POSIX-NATIVE-GETRUSAGE-REPORTS-SYSTEM-WIDE-CPU. `getrusage()` on our own ABI returns the machine's total CPU time as if it were the caller's — LOGGED 2026-08-16 by lane B, filed to lane A
+### TD-POSIX-NATIVE-GETRUSAGE-REPORTS-SYSTEM-WIDE-CPU. `getrusage()` on our own ABI returns the machine's total CPU time as if it were the caller's — LOGGED 2026-08-16 by lane B, filed to lane A — ✅ FIXED 2026-08-16 by lane A (`SYS_PROCESS_GET_RUSAGE = 1064`, commit `c9bc34347`)
 
 **In short:** a program can ask the OS "how much CPU have I used?". On our own
 ABI it gets an answer, the answer looks entirely plausible, and it is **the
@@ -3242,7 +3242,7 @@ caller, filtered by `may_signal`", keeping the same best-effort fanout and
 model landing — this should be done in the same change, since that is the only
 thing blocking it.
 
-### TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP. `cargo fmt -p posix` rewrites 244 files you did not touch — 2026-08-12 — 🔶 HALF FIXED 2026-08-15 / 2026-08-17 (all of Lane B clean: `posix`, `oils`, `coreutils`, `ere`; `kernel` still drifted — Lane A)
+### TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP. `cargo fmt -p posix` rewrites 244 files you did not touch — 2026-08-12 — ✅ FIXED (all of Lane B clean 2026-08-15/2026-08-17; `kernel` now clean too — `cargo fmt -p kernel -- --check` exits 0 as of 2026-09-08)
 
 > **UPDATE 2026-08-15 — the operator answered Q42 with option A, and Lane B's
 > half is done.** `design-decisions.md` **§310**: one-shot repo-wide reformat,
@@ -16363,7 +16363,7 @@ round trip deliberately does not model expansion (`strip_quotes` does not
 expand and a real shell does), and says so in place, so that gap is not
 silently absorbed into a property that would then read as covering it.
 
-### A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD, so `$HOME/<TAB>` searches for a directory literally named `$HOME` — 2026-09-04 (lane A) — OPEN
+### A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD, so `$HOME/<TAB>` searches for a directory literally named `$HOME` — 2026-09-04 (lane A) — ✅ FIXED 2026-09-05 by lane A (`eb62e6501`, `completion_view` now calls `expand_vars_speculative_str` before `remove_quotes`)
 
 **In short:** in the kernel shell, press Tab after typing a path that contains
 a variable — `cat $HOME/no<TAB>`, `ls $PWD/<TAB>` — and nothing is offered.
@@ -25539,7 +25539,7 @@ delete.
 directory before it completes, and observe that a partial checkout looks
 identical to a failed one.
 
-### BUG-LIVENESS-SYSTEM-HANG-FALSE-POSITIVE. The total-hang detector fired on a healthy boot and, by disarming, blinded the wall-clock backstop for the remaining ~600 s — 2026-08-15 — OPEN (lane A owns the fix)
+### BUG-LIVENESS-SYSTEM-HANG-FALSE-POSITIVE. The total-hang detector fired on a healthy boot and, by disarming, blinded the wall-clock backstop for the remaining ~600 s — 2026-08-15 — ✅ FIXED (lane A; the total-hang branch no longer disarms, bounded to 3 reports via `LIVENESS_MAX_HANG_REPORTS`; `check_liveness_failures` in boot-test.sh asserts the contract)
 
 **In short.** The boot watchdog announced `SYSTEM HANG`. The machine had not
 hung: the boot continued for another ten minutes and reached `BOOT_OK`. The
@@ -33434,7 +33434,7 @@ above still stands -- in particular, check whether the freeze point *moves*
 between runs, which is what distinguishes this from a deterministic deadlock in
 whichever self-test the log happens to stop at.
 
-## TD-LOCKDEP-CLASS-TABLE-IS-PUBLISHED-TWICE-AND-ONLY-ONE-PATH-IS-ORDERED (lane A, 2026-08-17) - **open**
+## TD-LOCKDEP-CLASS-TABLE-IS-PUBLISHED-TWICE-AND-ONLY-ONE-PATH-IS-ORDERED (lane A, 2026-08-17) - **FIXED** (`e3ae7bae1`)
 
 **In short:** the lock-order checker keeps a table of the locks it has seen. A
 CPU adding a row to that table reserves the row first and fills it in second.
@@ -50890,7 +50890,7 @@ the file grew by exactly 47 bytes and contains no `0x00`, which is the whole
 of the change. `grep -c fmt_f posix/src/printf.rs` now answers `74` where it
 previously answered `Binary file posix/src/printf.rs matches`.
 
-## OPEN-A-SELF-STOP-ANNOUNCEMENT-WINDOW-IS-PREEMPTIBLE (found by lane B, 2026-08-20) — filed to lane A
+## OPEN-A-SELF-STOP-ANNOUNCEMENT-WINDOW-IS-PREEMPTIBLE (found by lane B, 2026-08-20) — **FIXED** (`dba5e9087`)
 
 **Owner: lane A** (`kernel/**`). Filed as
 `requests/b-a-self-stop-announcement-window-is-preemptible-and-strands-the-child.md`;
@@ -114379,7 +114379,7 @@ a structure the loader has to read to know which platform it is for.
 
 ---
 
-## A-EDITING-BOOT-TEST-SH-MID-RUN-KILLS-THE-RUN-WITH-A-LIE — OPEN 2026-09-02
+## A-EDITING-BOOT-TEST-SH-MID-RUN-KILLS-THE-RUN-WITH-A-LIE — FIXED 2026-09-08
 
 **Lane:** A. **Severity:** costs a 20–45 minute run, and — the part that
 matters — blames a line that is innocent, so the first response to it is to
@@ -114460,6 +114460,14 @@ written down rather than left as "obvious":
 
 **Where it is:** `scripts/boot-test.sh` (the whole file is the subject; the
 re-exec belongs immediately after the `set -u`/`SCRIPT_DIR` preamble).
+
+**Fixed 2026-09-08.** The re-exec is in place at lines 302–325 of
+`boot-test.sh`. It copies itself to a temp file via `mktemp`, sets
+`BOOT_TEST_REEXEC=1` and `BOOT_TEST_ORIG_DIR` (so `SCRIPT_DIR` still points
+at the checkout, not the temp directory), and execs the snapshot. The parent
+shell installs a `trap … EXIT INT TERM` that removes the snapshot on every
+exit path. Both details the entry called out — preserving `SCRIPT_DIR` and
+cleaning up the copy — are handled.
 
 ---
 
@@ -115895,7 +115903,7 @@ The verdicts are carried forward into kshell's self-test rungs, so the evidence
 does survive — but only the evidence gathered on the day the rule was written.
 A later edit to `shellquote.rs` that changes behaviour is caught by nothing.
 
-## A-TEST-CANARY-LOADS-LIVE-CASES-FAIL-ON-A-BUSY-HOST — OPEN 2026-09-03 (found by lane B, owned by lane A)
+## A-TEST-CANARY-LOADS-LIVE-CASES-FAIL-ON-A-BUSY-HOST — **FIXED** 2026-09-07 (`0868abf03`) (found by lane B, owned by lane A)
 
 **In short:** `scripts/test-canary-load.py` starts real spinner processes and
 then checks that each one got most of a CPU. On an idle machine that is true;

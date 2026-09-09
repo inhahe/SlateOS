@@ -236,7 +236,7 @@ pub fn meter_count() -> usize {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the watermark system.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[watermark] Running self-test...");
 
     // Test 1: Register a meter.
@@ -301,4 +301,5 @@ pub fn self_test() {
     uncharge(h2, 42);
 
     serial_println!("[watermark] Self-test PASSED");
+    Ok(())
 }

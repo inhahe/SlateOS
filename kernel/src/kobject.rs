@@ -280,7 +280,7 @@ pub fn reset() {
 // ---------------------------------------------------------------------------
 
 /// Self-test for kernel object tracking.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[kobject] Running self-test...");
 
     // Test 1: Reset state.
@@ -356,4 +356,5 @@ pub fn self_test() {
     reset();
 
     serial_println!("[kobject] Self-test PASSED");
+    Ok(())
 }

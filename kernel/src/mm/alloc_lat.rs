@@ -403,7 +403,7 @@ fn rdtsc() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Self-test for allocation latency histogramming.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[alloc_lat] Running self-test...");
 
     // Test 1: Reset clears everything.
@@ -514,4 +514,5 @@ pub fn self_test() {
     reset();
 
     serial_println!("[alloc_lat] Self-test PASSED");
+    Ok(())
 }

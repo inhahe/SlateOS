@@ -321,7 +321,7 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("memlayout::self_test() — running tests...");
     use crate::limine::{MemmapEntry, memmap_type};
 
@@ -429,4 +429,5 @@ pub fn self_test() {
         }
     }
     crate::serial_println!("memlayout::self_test() — all 8 tests passed");
+    Ok(())
 }

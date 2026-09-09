@@ -293,7 +293,7 @@ fn find_slot(label: u8) -> usize {
 // ---------------------------------------------------------------------------
 
 /// Self-test for allocation checkpoints.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[alloc_checkpoint] Running self-test...");
 
     // Test 1: Clear state.
@@ -368,4 +368,5 @@ pub fn self_test() {
     clear();
 
     serial_println!("[alloc_checkpoint] Self-test PASSED");
+    Ok(())
 }

@@ -626,7 +626,7 @@ fn log_topology() {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the NUMA subsystem.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[numa] Running self-test...");
 
     // Test 1: Node count is at least 1.
@@ -672,4 +672,5 @@ pub fn self_test() {
     serial_println!("[numa]   Topology info consistent: OK");
 
     serial_println!("[numa] Self-test PASSED");
+    Ok(())
 }

@@ -361,7 +361,7 @@ impl<T> Drop for KRwLockWriteGuard<'_, T> {
 ///
 /// Tests uncontended read/write, concurrent readers, try_* methods,
 /// and writer preference semantics.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[krwlock] Running self-test...");
@@ -472,4 +472,5 @@ pub fn self_test() {
     serial_println!("[krwlock]   State transitions: OK");
 
     serial_println!("[krwlock] Self-test PASSED");
+    Ok(())
 }

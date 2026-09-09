@@ -451,7 +451,7 @@ fn halt_loop() -> ! {
 ///
 /// Tests API availability and capability reporting only — does NOT
 /// actually trigger shutdown or reboot!
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[power] Running self-test...");
 
     let caps = capabilities();
@@ -473,4 +473,5 @@ pub fn self_test() {
     serial_println!("[power]   At least one reboot method available: OK");
 
     serial_println!("[power] Self-test PASSED");
+    Ok(())
 }

@@ -244,7 +244,7 @@ pub fn total_accounted() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Self-test for memory type accounting.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
     serial_println!("[memtype] Running self-test...");
 
@@ -294,4 +294,5 @@ pub fn self_test() {
     serial_println!("[memtype]   all_type_names: OK");
 
     serial_println!("[memtype] Self-test PASSED");
+    Ok(())
 }

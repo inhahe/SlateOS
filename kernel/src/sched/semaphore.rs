@@ -194,7 +194,7 @@ impl Semaphore {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the counting semaphore.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[semaphore] Running self-test...");
 
     // --- 1. Basic acquire/release ---
@@ -269,4 +269,5 @@ pub fn self_test() {
     serial_println!("[semaphore]   wait_timeout_ns (zero timeout): OK");
 
     serial_println!("[semaphore] Self-test PASSED");
+    Ok(())
 }

@@ -974,7 +974,7 @@ pub fn apply_system_profile(profile_id: u8) -> bool {
 }
 
 /// Run self-test.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[sysctl] Running self-test...");
 
     // Read default values.
@@ -1112,4 +1112,5 @@ pub fn self_test() {
     assert_eq!(info.unwrap().value, 5);
 
     serial_println!("[sysctl] Self-test PASSED");
+    Ok(())
 }

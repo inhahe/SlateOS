@@ -318,7 +318,7 @@ pub fn stats() -> (usize, u64, u64, usize, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("usagetime::self_test() — running tests...");
     // Start from a clean, freshly-defaulted state so the assertions below are
     // exact and the tracked apps / limits / categories this test creates do not
@@ -384,4 +384,5 @@ pub fn self_test() {
     *STATE.lock() = None;
     init_defaults();
     crate::serial_println!("usagetime::self_test() — all 8 tests passed");
+    Ok(())
 }

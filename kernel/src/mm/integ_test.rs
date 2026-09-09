@@ -47,7 +47,7 @@ const TEST_BASE: u64 = 0xFFFF_C900_0000_0000;
 // ---------------------------------------------------------------------------
 
 /// Run all memory subsystem integration tests.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[mm_integ] Running integration tests...");
 
     test_alloc_map_access_unmap();
@@ -58,6 +58,7 @@ pub fn self_test() {
     test_rmap_round_trip();
 
     serial_println!("[mm_integ] All integration tests PASSED");
+    Ok(())
 }
 
 /// Test 1: Allocate → map → read/write → unmap → free.

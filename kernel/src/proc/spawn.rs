@@ -9009,6 +9009,9 @@ pub fn self_test_cctty() -> KernelResult<()> {
 /// The fixture contains no `alarm`/`setitimer` calls (those are known-broken:
 /// `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING`).  Every read is non-blocking
 /// with a bounded spin, so it can fail but cannot hang.
+// Wired into main.rs but currently commented-out while Lane B routes
+// PtySlave reads through 872/873.
+#[allow(dead_code)]
 pub fn self_test_ctest_pty() -> KernelResult<()> {
     let Some(ctest_elf) = pathz_test_elf("ctest-pty", "ctest-pty")? else {
         return Ok(());

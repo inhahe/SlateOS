@@ -266,7 +266,7 @@ impl<T> Drop for KMutexGuard<'_, T> {
 /// Tests single-threaded acquire/release and try_lock semantics.
 /// Multi-task contention testing requires spawning tasks (done
 /// separately in integration tests).
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[kmutex] Running self-test...");
@@ -350,4 +350,5 @@ pub fn self_test() {
     serial_println!("[kmutex]   lock_timeout_ns (after release): OK");
 
     serial_println!("[kmutex] Self-test PASSED");
+    Ok(())
 }

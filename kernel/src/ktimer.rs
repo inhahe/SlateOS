@@ -448,7 +448,7 @@ pub fn process_expirations() {
 /// 2. Periodic timers fire repeatedly.
 /// 3. Cancellation works.
 /// 4. Statistics are accurate.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use core::sync::atomic::AtomicU64;
 
     serial_println!("[ktimer] Running self-test...");
@@ -588,4 +588,5 @@ pub fn self_test() {
     );
 
     serial_println!("[ktimer] Self-test PASSED");
+    Ok(())
 }

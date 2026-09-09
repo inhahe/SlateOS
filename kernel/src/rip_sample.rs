@@ -522,7 +522,7 @@ pub fn hottest_rip() -> Option<(u64, u32)> {
 // ---------------------------------------------------------------------------
 
 /// Self-test for RIP sampling.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[rip_sample] Running self-test...");
 
     // Test 1: Reset state.
@@ -643,4 +643,5 @@ pub fn self_test() {
     reset();
 
     serial_println!("[rip_sample] Self-test PASSED");
+    Ok(())
 }

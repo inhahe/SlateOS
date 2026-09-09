@@ -960,54 +960,56 @@ static DOUBLE_QUOTE_GLYPH: [u8; 16] = [
 /// Verifies UTF-8 decoding, character width detection, glyph generation
 /// for box drawing and block elements, and the replacement character
 /// fallback.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use crate::selftest;
+
     // 1. UTF-8 sequence length detection.
-    assert_eq!(utf8_seq_len(b'A'), 1);
-    assert_eq!(utf8_seq_len(0xC3), 2); // lead byte of 2-byte seq (ü etc.)
-    assert_eq!(utf8_seq_len(0xE2), 3); // lead byte of 3-byte seq (box drawing)
-    assert_eq!(utf8_seq_len(0xF0), 4); // lead byte of 4-byte seq (emoji)
-    assert_eq!(utf8_seq_len(0x80), 0); // continuation byte → invalid
-    assert_eq!(utf8_seq_len(0xC0), 0); // overlong lead → invalid
+    selftest::check_eq!(utf8_seq_len(b'A'), 1);
+    selftest::check_eq!(utf8_seq_len(0xC3), 2, "lead byte of 2-byte seq");
+    selftest::check_eq!(utf8_seq_len(0xE2), 3, "lead byte of 3-byte seq");
+    selftest::check_eq!(utf8_seq_len(0xF0), 4, "lead byte of 4-byte seq");
+    selftest::check_eq!(utf8_seq_len(0x80), 0, "continuation byte → invalid");
+    selftest::check_eq!(utf8_seq_len(0xC0), 0, "overlong lead → invalid");
     crate::serial_println!("[unicode]   UTF-8 sequence length: OK");
 
     // 2. UTF-8 decoding.
     // 'A' = U+0041
     let mut buf = [0u8; 4];
     buf[0] = b'A';
-    assert_eq!(decode_utf8(buf, 1), 0x41);
+    selftest::check_eq!(decode_utf8(buf, 1), 0x41);
 
     // 'ü' = U+00FC = 0xC3 0xBC
     buf = [0xC3, 0xBC, 0, 0];
-    assert_eq!(decode_utf8(buf, 2), 0xFC);
+    selftest::check_eq!(decode_utf8(buf, 2), 0xFC);
 
     // '─' = U+2500 = 0xE2 0x94 0x80
     buf = [0xE2, 0x94, 0x80, 0];
-    assert_eq!(decode_utf8(buf, 3), 0x2500);
+    selftest::check_eq!(decode_utf8(buf, 3), 0x2500);
 
     // '😀' = U+1F600 = 0xF0 0x9F 0x98 0x80
     buf = [0xF0, 0x9F, 0x98, 0x80];
-    assert_eq!(decode_utf8(buf, 4), 0x1F600);
+    selftest::check_eq!(decode_utf8(buf, 4), 0x1F600);
 
     // Overlong encoding (U+0041 encoded as 2 bytes) → replacement.
     buf = [0xC1, 0x81, 0, 0];
-    assert_eq!(decode_utf8(buf, 2), 0xFFFD);
+    selftest::check_eq!(decode_utf8(buf, 2), 0xFFFD);
     crate::serial_println!("[unicode]   UTF-8 decoding: OK");
 
     // 3. Character width.
-    assert_eq!(char_width(u32::from(b'A')), 1);
-    assert_eq!(char_width(0x2500), 1); // box drawing
-    assert_eq!(char_width(0x4E00), 2); // CJK ideograph
-    assert_eq!(char_width(0xAC00), 2); // Hangul syllable
+    selftest::check_eq!(char_width(u32::from(b'A')), 1);
+    selftest::check_eq!(char_width(0x2500), 1, "box drawing");
+    selftest::check_eq!(char_width(0x4E00), 2, "CJK ideograph");
+    selftest::check_eq!(char_width(0xAC00), 2, "Hangul syllable");
     crate::serial_println!("[unicode]   Character width: OK");
 
     // 4. Box drawing glyph generation.
     // U+2500 ─ : horizontal line at CY, full width.
     let g = box_drawing_glyph(0); // ─
-    assert!(g[CY] != 0, "─ must have pixels at center row");
+    selftest::check!(g[CY] != 0, "─ must have pixels at center row");
     // All rows except CY should be empty for a simple light horizontal.
     for (i, row) in g.iter().enumerate() {
         if i != CY {
-            assert_eq!(*row, 0, "─ row {i} should be empty");
+            selftest::check_eq!(*row, 0, "─ row {} should be empty", i);
         }
     }
 
@@ -1015,60 +1017,61 @@ pub fn self_test() {
     let g = box_drawing_glyph(2); // │
     let vert_bit = 1u8 << (7 - CX);
     for row in &g {
-        assert!((*row & vert_bit) != 0, "│ must have center column set");
+        selftest::check!((*row & vert_bit) != 0, "│ must have center column set");
     }
 
     // U+250C ┌ : right + down from center.
     let g = box_drawing_glyph(0x0C); // ┌
     // Center row should have right segment.
-    assert!(g[CY] != 0, "┌ center row should have pixels");
+    selftest::check!(g[CY] != 0, "┌ center row should have pixels");
     // Below center should have vertical segment.
-    assert!(
+    selftest::check!(
         (g[CY + 1] & vert_bit) != 0,
         "┌ should have vert below center"
     );
     // Above center should be empty.
-    assert_eq!(g[0], 0, "┌ top row should be empty");
+    selftest::check_eq!(g[0], 0, "┌ top row should be empty");
     crate::serial_println!("[unicode]   Box drawing generation: OK");
 
     // 5. Block element glyph generation.
     // U+2588 █ : full block — all bytes 0xFF.
     let g = block_element_glyph(0x08); // █
     for row in &g {
-        assert_eq!(*row, 0xFF, "█ should be fully filled");
+        selftest::check_eq!(*row, 0xFF, "█ should be fully filled");
     }
 
     // U+2580 ▀ : upper half — top 8 rows filled, bottom 8 empty.
     let g = block_element_glyph(0x00); // ▀
     for row in g.iter().take(8) {
-        assert_eq!(*row, 0xFF, "▀ upper rows should be filled");
+        selftest::check_eq!(*row, 0xFF, "▀ upper rows should be filled");
     }
     for row in g.iter().skip(8) {
-        assert_eq!(*row, 0x00, "▀ lower rows should be empty");
+        selftest::check_eq!(*row, 0x00, "▀ lower rows should be empty");
     }
 
     // U+258C ▌ : left half — each row 0xF0.
     let g = block_element_glyph(0x0C); // ▌
     for row in &g {
-        assert_eq!(*row, 0xF0, "▌ should be 0xF0");
+        selftest::check_eq!(*row, 0xF0, "▌ should be 0xF0");
     }
     crate::serial_println!("[unicode]   Block element generation: OK");
 
     // 6. Glyph lookup dispatch.
     let (g, w) = glyph_for_codepoint(u32::from(b'A'));
-    assert!(!w, "ASCII should not be wide");
-    assert_ne!(g, [0u8; 16], "ASCII 'A' should not be blank");
+    selftest::check!(!w, "ASCII should not be wide");
+    selftest::check_ne!(g, [0u8; 16], "ASCII 'A' should not be blank");
 
     let (g, w) = glyph_for_codepoint(0x2500); // ─
-    assert!(!w, "box drawing should not be wide");
-    assert!(g[CY] != 0, "─ should have center row");
+    selftest::check!(!w, "box drawing should not be wide");
+    selftest::check!(g[CY] != 0, "─ should have center row");
 
     let (_, w) = glyph_for_codepoint(0x4E00); // 一 (CJK)
-    assert!(w, "CJK should be wide");
+    selftest::check!(w, "CJK should be wide");
 
     let (g, _) = glyph_for_codepoint(0xFFFD); // replacement
-    assert_eq!(g, REPLACEMENT_GLYPH);
+    selftest::check_eq!(g, REPLACEMENT_GLYPH);
     crate::serial_println!("[unicode]   Glyph lookup dispatch: OK");
 
     crate::serial_println!("[unicode] Self-test PASSED");
+    Ok(())
 }

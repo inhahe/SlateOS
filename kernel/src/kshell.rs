@@ -56826,7 +56826,7 @@ fn cmd_focusassist(args: &str) {
             );
         }
         "test" => {
-            focusassist::self_test();
+            let _ = focusassist::self_test();
             shell_println!("Self-tests passed.");
         }
         _ => {
@@ -57130,7 +57130,7 @@ fn cmd_storageclean(args: &str) {
             );
         }
         "test" => {
-            storageclean::self_test();
+            let _ = storageclean::self_test();
             shell_println!("Self-tests passed.");
         }
         _ => {
@@ -57367,7 +57367,7 @@ fn cmd_sysdiag(args: &str) {
             shell_println!("Operations:          {}", ops);
         }
         "test" => {
-            sysdiag::self_test();
+            let _ = sysdiag::self_test();
             shell_println!("[sysdiag] All self-tests passed.");
         }
         "init" => {
@@ -57725,7 +57725,7 @@ fn cmd_nightlight(args: &str) {
             shell_println!("Operations:   {}", ops);
         }
         "test" => {
-            nightlight::self_test();
+            let _ = nightlight::self_test();
             shell_println!("[nightlight] All self-tests passed.");
         }
         "init" => {
@@ -58234,7 +58234,7 @@ fn cmd_tasksched(args: &str) {
         "test" => {
             #[inline(never)]
             fn case() {
-                tasksched::self_test();
+                let _ = tasksched::self_test();
                 shell_println!("[tasksched] All self-tests passed.");
             }
             case();
@@ -58538,7 +58538,7 @@ fn cmd_envvars(args: &str) {
             shell_println!("Operations:     {}", ops);
         }
         "test" => {
-            envvars::self_test();
+            let _ = envvars::self_test();
             shell_println!("[envvars] All self-tests passed.");
         }
         "init" => {
@@ -58844,7 +58844,7 @@ fn cmd_bluetooth(args: &str) {
             shell_println!("Operations:      {}", ops);
         }
         "test" => {
-            bluetooth::self_test();
+            let _ = bluetooth::self_test();
             shell_println!("[bluetooth] All self-tests passed.");
         }
         "init" => {
@@ -59130,7 +59130,7 @@ fn cmd_printmgr(args: &str) {
             shell_println!("Operations:    {}", ops);
         }
         "test" => {
-            printmgr::self_test();
+            let _ = printmgr::self_test();
             shell_println!("[printmgr] All self-tests passed.");
         }
         "init" => {
@@ -59449,7 +59449,7 @@ fn cmd_screenrec(args: &str) {
             shell_println!("Operations:  {}", ops);
         }
         "test" => {
-            screenrec::self_test();
+            let _ = screenrec::self_test();
             shell_println!("[screenrec] All self-tests passed.");
         }
         "init" => {
@@ -59855,7 +59855,7 @@ fn cmd_datausage(args: &str) {
             shell_println!("  Operations     : {}", ops);
         }
         "test" => {
-            datausage::self_test();
+            let _ = datausage::self_test();
             shell_println!("datausage: self-tests completed (see serial).");
         }
         "init" => {
@@ -60058,7 +60058,7 @@ fn cmd_mousesettings(args: &str) {
             );
         }
         "test" => {
-            mousesettings::self_test();
+            let _ = mousesettings::self_test();
             shell_println!("mousesettings: self-tests completed (see serial).");
         }
         "init" => {
@@ -60245,7 +60245,7 @@ fn cmd_touchpad(args: &str) {
             );
         }
         "test" => {
-            touchpad::self_test();
+            let _ = touchpad::self_test();
             shell_println!("touchpad: self-tests completed (see serial).");
         }
         "init" => {
@@ -60444,7 +60444,7 @@ fn cmd_powerprofile(args: &str) {
             );
         }
         "test" => {
-            powerprofile::self_test();
+            let _ = powerprofile::self_test();
             shell_println!("powerprofile: self-tests completed (see serial).");
         }
         "init" => {
@@ -60642,7 +60642,7 @@ fn cmd_defaultapps(args: &str) {
             );
         }
         "test" => {
-            defaultapps::self_test();
+            let _ = defaultapps::self_test();
             shell_println!("defaultapps: self-tests completed (see serial).");
         }
         "init" => {
@@ -60963,7 +60963,7 @@ fn cmd_monitors(args: &str) {
             );
         }
         "test" => {
-            monitors::self_test();
+            let _ = monitors::self_test();
             shell_println!("monitors: self-tests completed (see serial).");
         }
         "init" => {
@@ -61255,7 +61255,7 @@ fn cmd_fwsettings(args: &str) {
             );
         }
         "test" => {
-            fwsettings::self_test();
+            let _ = fwsettings::self_test();
             shell_println!("fwsettings: self-tests completed (see serial).");
         }
         "init" => {
@@ -61498,7 +61498,7 @@ fn cmd_updatemgr(args: &str) {
             );
         }
         "test" => {
-            updatemgr::self_test();
+            let _ = updatemgr::self_test();
             shell_println!("updatemgr: self-tests completed (see serial).");
         }
         "init" => {
@@ -61735,7 +61735,7 @@ fn cmd_notifprefs(args: &str) {
             );
         }
         "test" => {
-            notifprefs::self_test();
+            let _ = notifprefs::self_test();
             shell_println!("notifprefs: self-tests completed (see serial).");
         }
         "init" => {
@@ -61972,7 +61972,7 @@ fn cmd_fileshare(args: &str) {
             );
         }
         "test" => {
-            fileshare::self_test();
+            let _ = fileshare::self_test();
             shell_println!("fileshare: self-tests completed (see serial).");
         }
         "init" => {
@@ -62486,7 +62486,7 @@ fn cmd_parental(args: &str) {
             );
         }
         "test" => {
-            parental::self_test();
+            let _ = parental::self_test();
             shell_println!("Parental self-test complete.");
         }
         "init" => {
@@ -62858,7 +62858,7 @@ fn cmd_audiodevice(args: &str) {
             );
         }
         "test" => {
-            audiodevice::self_test();
+            let _ = audiodevice::self_test();
             shell_println!("Audio device self-test complete.");
         }
         "init" => {
@@ -63100,7 +63100,7 @@ fn cmd_sessionmgr(args: &str) {
             );
         }
         "test" => {
-            sessionmgr::self_test();
+            let _ = sessionmgr::self_test();
             shell_println!("Session manager self-test complete.");
         }
         "init" => {
@@ -63310,7 +63310,7 @@ fn cmd_crashreport(args: &str) {
             );
         }
         "test" => {
-            crashreport::self_test();
+            let _ = crashreport::self_test();
             shell_println!("Crash report self-test complete.");
         }
         "init" => {
@@ -63551,7 +63551,7 @@ fn cmd_netproxy(args: &str) {
             );
         }
         "test" => {
-            netproxy::self_test();
+            let _ = netproxy::self_test();
             shell_println!("Proxy self-test complete.");
         }
         "init" => {
@@ -63797,7 +63797,7 @@ fn cmd_fileversion(args: &str) {
             );
         }
         "test" => {
-            fileversion::self_test();
+            let _ = fileversion::self_test();
             shell_println!("File versioning self-test complete.");
         }
         "init" => {
@@ -64051,7 +64051,7 @@ fn cmd_devicemgr(args: &str) {
             );
         }
         "test" => {
-            devicemgr::self_test();
+            let _ = devicemgr::self_test();
             shell_println!("Device manager self-test complete.");
         }
         "init" => {
@@ -64275,7 +64275,7 @@ fn cmd_location(args: &str) {
             );
         }
         "test" => {
-            location::self_test();
+            let _ = location::self_test();
             shell_println!("Location self-test complete.");
         }
         "init" => {
@@ -64538,7 +64538,7 @@ fn cmd_diskencrypt(args: &str) {
             );
         }
         "test" => {
-            diskencrypt::self_test();
+            let _ = diskencrypt::self_test();
             shell_println!("Disk encryption self-test complete.");
         }
         "init" => {
@@ -64747,7 +64747,7 @@ fn cmd_pkgmgr(args: &str) {
             );
         }
         "test" => {
-            pkgmgr::self_test();
+            let _ = pkgmgr::self_test();
             shell_println!("Package manager self-test complete.");
         }
         "init" => {
@@ -64923,7 +64923,7 @@ fn cmd_remotedesktop(args: &str) {
             );
         }
         "test" => {
-            remotedesktop::self_test();
+            let _ = remotedesktop::self_test();
             shell_println!("Remote desktop self-test complete.");
         }
         "init" => {
@@ -65096,7 +65096,7 @@ fn cmd_restorepoint(args: &str) {
             );
         }
         "test" => {
-            restorepoint::self_test();
+            let _ = restorepoint::self_test();
             shell_println!("Restore point self-test complete.");
         }
         "init" => {
@@ -65331,7 +65331,7 @@ fn cmd_battery(args: &str) {
             );
         }
         "test" => {
-            battery::self_test();
+            let _ = battery::self_test();
             shell_println!("Battery self-test complete.");
         }
         "init" => {
@@ -65524,7 +65524,7 @@ fn cmd_dictation(args: &str) {
             );
         }
         "test" => {
-            dictation::self_test();
+            let _ = dictation::self_test();
             shell_println!("Dictation self-test complete.");
         }
         "init" => {
@@ -65722,7 +65722,7 @@ fn cmd_screenreader(args: &str) {
             );
         }
         "test" => {
-            screenreader::self_test();
+            let _ = screenreader::self_test();
             shell_println!("Screen reader self-test complete.");
         }
         "init" => {
@@ -65907,7 +65907,7 @@ fn cmd_langpack(args: &str) {
             );
         }
         "test" => {
-            langpack::self_test();
+            let _ = langpack::self_test();
             shell_println!("Language pack self-test complete.");
         }
         "init" => {
@@ -66055,7 +66055,7 @@ fn cmd_spellcheck(args: &str) {
             );
         }
         "test" => {
-            spellcheck::self_test();
+            let _ = spellcheck::self_test();
             shell_println!("Spell check self-test complete.");
         }
         "init" => {
@@ -66192,7 +66192,7 @@ fn cmd_screentime(args: &str) {
             );
         }
         "test" => {
-            screentime::self_test();
+            let _ = screentime::self_test();
             shell_println!("Screen time self-test complete.");
         }
         "init" => {
@@ -66328,7 +66328,7 @@ fn cmd_disksmart(args: &str) {
             );
         }
         "test" => {
-            disksmart::self_test();
+            let _ = disksmart::self_test();
             shell_println!("Disk S.M.A.R.T. self-test complete.");
         }
         "init" => {
@@ -66491,7 +66491,7 @@ fn cmd_magnifier(args: &str) {
             );
         }
         "test" => {
-            magnifier::self_test();
+            let _ = magnifier::self_test();
             shell_println!("Magnifier self-test complete.");
         }
         "init" => {
@@ -66640,7 +66640,7 @@ fn cmd_cloudsync(args: &str) {
             );
         }
         "test" => {
-            cloudsync::self_test();
+            let _ = cloudsync::self_test();
             shell_println!("Cloud sync self-test complete.");
         }
         "init" => {
@@ -66741,7 +66741,7 @@ fn cmd_gestures(args: &str) {
             );
         }
         "test" => {
-            gestures::self_test();
+            let _ = gestures::self_test();
             shell_println!("Gestures self-test complete.");
         }
         "init" => {
@@ -66885,7 +66885,7 @@ fn cmd_soundevents(args: &str) {
             );
         }
         "test" => {
-            soundevents::self_test();
+            let _ = soundevents::self_test();
             shell_println!("Sound events self-test complete.");
         }
         "init" => {
@@ -67042,7 +67042,7 @@ fn cmd_usbmgr(args: &str) {
             );
         }
         "test" => {
-            usbmgr::self_test();
+            let _ = usbmgr::self_test();
             shell_println!("USB manager self-test complete.");
         }
         "init" => {
@@ -67222,7 +67222,7 @@ fn cmd_cliphistory(args: &str) {
             );
         }
         "test" => {
-            cliphistory::self_test();
+            let _ = cliphistory::self_test();
             shell_println!("Clipboard history self-test complete.");
         }
         "init" => {
@@ -67366,7 +67366,7 @@ fn cmd_displaycolor(args: &str) {
             );
         }
         "test" => {
-            displaycolor::self_test();
+            let _ = displaycolor::self_test();
             shell_println!("Display color self-test complete.");
         }
         "init" => {
@@ -67521,7 +67521,7 @@ fn cmd_syslog(args: &str) {
             );
         }
         "test" => {
-            syslog::self_test();
+            let _ = syslog::self_test();
             shell_println!("System log self-test complete.");
         }
         "init" => {
@@ -69363,7 +69363,7 @@ fn cmd_udriver(args: &str) {
             }
         }
         "test" => {
-            udriver::self_test();
+            let _ = udriver::self_test();
             shell_println!("Userspace driver framework self-test: PASSED");
         }
         "help" => {
@@ -69506,7 +69506,7 @@ fn cmd_devhotplug(args: &str) {
             shell_println!("Hotplug system initialized with built-in driver database");
         }
         "test" => {
-            devhotplug::self_test();
+            let _ = devhotplug::self_test();
             shell_println!("Device hotplug self-test: PASSED");
         }
         "help" => {
@@ -69582,7 +69582,7 @@ fn cmd_devpower(args: &str) {
             shell_println!("System resume: {} devices resumed", count);
         }
         "test" => {
-            devpower::self_test();
+            let _ = devpower::self_test();
             shell_println!("Device power management self-test: PASSED");
         }
         "help" => {
@@ -69731,7 +69731,7 @@ fn cmd_vmguest(args: &str) {
             }
         }
         "test" => {
-            vmguest::self_test();
+            let _ = vmguest::self_test();
             shell_println!("VM guest integration self-test: PASSED");
         }
         "help" => {
@@ -69860,7 +69860,7 @@ fn cmd_pciids(args: &str) {
             shell_println!("  Device entries:   {}", d);
         }
         "test" => {
-            pciids::self_test();
+            let _ = pciids::self_test();
             shell_println!("PCI ID database self-test: PASSED");
         }
         "help" => {
@@ -70034,7 +70034,7 @@ fn cmd_upnp(args: &str) {
             }
         }
         "test" => {
-            upnp::self_test();
+            let _ = upnp::self_test();
             shell_println!("UPnP/NAT-PMP self-test: PASSED");
         }
         "help" => {
@@ -75578,7 +75578,7 @@ fn cmd_inputa11y(args: &str) {
             );
         }
         "test" => {
-            inputa11y::self_test();
+            let _ = inputa11y::self_test();
             shell_println!("Input a11y self-test complete.");
         }
         "init" => {
@@ -75779,7 +75779,7 @@ fn cmd_driverupdate(args: &str) {
             );
         }
         "test" => {
-            driverupdate::self_test();
+            let _ = driverupdate::self_test();
             shell_println!("Driver update self-test complete.");
         }
         "init" => {
@@ -75936,7 +75936,7 @@ fn cmd_netshare(args: &str) {
             shell_println!("Total mounts: {}, Errors: {}, Ops: {}", mounts, errors, ops);
         }
         "test" => {
-            netshare::self_test();
+            let _ = netshare::self_test();
             shell_println!("Net share self-test complete.");
         }
         "init" => {
@@ -76096,7 +76096,7 @@ fn cmd_startuprepair(args: &str) {
             shell_println!("Failed boots: {}, Ops: {}", failed, ops);
         }
         "test" => {
-            startuprepair::self_test();
+            let _ = startuprepair::self_test();
             shell_println!("Startup repair self-test complete.");
         }
         "init" => {
@@ -76312,7 +76312,7 @@ fn cmd_remoteassist(args: &str) {
             shell_println!("Files transferred: {}, Ops: {}", files, ops);
         }
         "test" => {
-            remoteassist::self_test();
+            let _ = remoteassist::self_test();
             shell_println!("Remote assist self-test complete.");
         }
         "init" => {
@@ -76538,7 +76538,7 @@ fn cmd_taskmon(args: &str) {
             shell_println!("Ops: {}", ops);
         }
         "test" => {
-            taskmon::self_test();
+            let _ = taskmon::self_test();
             shell_println!("Task monitor self-test complete.");
         }
         "init" => {
@@ -76775,7 +76775,7 @@ fn cmd_printqueue(args: &str) {
             shell_println!("Active jobs: {}, Ops: {}", active, ops);
         }
         "test" => {
-            printqueue::self_test();
+            let _ = printqueue::self_test();
             shell_println!("Print queue self-test complete.");
         }
         "init" => {
@@ -77193,7 +77193,7 @@ fn cmd_hwmonitor(args: &str) {
             shell_println!("Readings: {}, Alerts: {}, Ops: {}", readings, alerts, ops);
         }
         "test" => {
-            hwmonitor::self_test();
+            let _ = hwmonitor::self_test();
             shell_println!("Hardware monitor self-test complete.");
         }
         "init" => {
@@ -77381,7 +77381,7 @@ fn cmd_appsandbox(args: &str) {
             shell_println!("Checks: {}, Denied: {}, Ops: {}", checks, denied, ops);
         }
         "test" => {
-            appsandbox::self_test();
+            let _ = appsandbox::self_test();
             shell_println!("App sandbox self-test complete.");
         }
         "init" => {
@@ -77578,7 +77578,7 @@ fn cmd_gamepadinput(args: &str) {
             );
         }
         "test" => {
-            gamepadinput::self_test();
+            let _ = gamepadinput::self_test();
             shell_println!("Gamepad input self-test complete.");
         }
         "init" => {
@@ -77756,7 +77756,7 @@ fn cmd_sysrestore(args: &str) {
             shell_println!("Rotated: {}, Ops: {}", rotated, ops);
         }
         "test" => {
-            sysrestore::self_test();
+            let _ = sysrestore::self_test();
             shell_println!("System restore self-test complete.");
         }
         "init" => {
@@ -77973,7 +77973,7 @@ fn cmd_audiomux(args: &str) {
             );
         }
         "test" => {
-            audiomux::self_test();
+            let _ = audiomux::self_test();
             shell_println!("Audio mux self-test complete.");
         }
         "init" => {
@@ -78145,7 +78145,7 @@ fn cmd_netthrottle(args: &str) {
             );
         }
         "test" => {
-            netthrottle::self_test();
+            let _ = netthrottle::self_test();
             shell_println!("Net throttle self-test complete.");
         }
         "init" => {
@@ -78271,7 +78271,7 @@ fn cmd_dumpanalyzer(args: &str) {
             );
         }
         "test" => {
-            dumpanalyzer::self_test();
+            let _ = dumpanalyzer::self_test();
             shell_println!("Dump analyzer self-test complete.");
         }
         "init" => {
@@ -78395,7 +78395,7 @@ fn cmd_memdiag(args: &str) {
             );
         }
         "selftest" => {
-            memdiag::self_test();
+            let _ = memdiag::self_test();
             shell_println!("Memory diagnostics self-test complete.");
         }
         "init" => {
@@ -78612,7 +78612,7 @@ fn cmd_parentaltime(args: &str) {
             shell_println!("Ops: {}", ops);
         }
         "test" => {
-            parentaltime::self_test();
+            let _ = parentaltime::self_test();
             shell_println!("Parental time self-test complete.");
         }
         "init" => {
@@ -78828,7 +78828,7 @@ fn cmd_mediakeys(args: &str) {
             shell_println!("Active ID: {}, Ops: {}", active_id, ops);
         }
         "test" => {
-            mediakeys::self_test();
+            let _ = mediakeys::self_test();
             shell_println!("Media keys self-test complete.");
         }
         "init" => {
@@ -79102,7 +79102,7 @@ fn cmd_webcam(args: &str) {
             shell_println!("Denied: {}, Ops: {}", denied, ops);
         }
         "test" => {
-            webcam::self_test();
+            let _ = webcam::self_test();
             shell_println!("Webcam self-test complete.");
         }
         "init" => {
@@ -79344,7 +79344,7 @@ fn cmd_speechio(args: &str) {
             shell_println!("TTS: {}, Ops: {}", if tts_on { "On" } else { "Off" }, ops);
         }
         "test" => {
-            speechio::self_test();
+            let _ = speechio::self_test();
             shell_println!("Speech I/O self-test complete.");
         }
         "init" => {
@@ -79617,7 +79617,7 @@ fn cmd_mobilelink(args: &str) {
             shell_println!("Messages: {}, Transfers: {}, Ops: {}", msgs, transfers, ops);
         }
         "test" => {
-            mobilelink::self_test();
+            let _ = mobilelink::self_test();
             shell_println!("Mobile link self-test complete.");
         }
         "init" => {
@@ -79767,7 +79767,7 @@ fn cmd_screenlock(args: &str) {
             shell_println!("Ops: {}", ops);
         }
         "test" => {
-            screenlock::self_test();
+            let _ = screenlock::self_test();
             shell_println!("Screen lock self-test complete.");
         }
         "init" => {
@@ -80016,7 +80016,7 @@ fn cmd_appstore(args: &str) {
             shell_println!("Updates: {}, Ops: {}", updates, ops);
         }
         "test" => {
-            appstore::self_test();
+            let _ = appstore::self_test();
             shell_println!("App store self-test complete.");
         }
         "init" => {
@@ -80331,7 +80331,7 @@ fn cmd_wintiling(args: &str) {
             shell_println!("Ops: {}", ops);
         }
         "test" => {
-            wintiling::self_test();
+            let _ = wintiling::self_test();
             shell_println!("Window tiling self-test complete.");
         }
         "init" => {
@@ -80596,7 +80596,7 @@ fn cmd_peninput(args: &str) {
             shell_println!("Ops: {}", ops);
         }
         "test" => {
-            peninput::self_test();
+            let _ = peninput::self_test();
             shell_println!("Pen input self-test complete.");
         }
         "init" => {
@@ -80812,7 +80812,7 @@ fn cmd_brightness(args: &str) {
             );
         }
         "test" => {
-            brightness::self_test();
+            let _ = brightness::self_test();
             shell_println!("Brightness self-test complete.");
         }
         "init" => {
@@ -80963,7 +80963,7 @@ fn cmd_quicksettings(args: &str) {
             );
         }
         "test" => {
-            quicksettings::self_test();
+            let _ = quicksettings::self_test();
             shell_println!("Quick settings self-test complete.");
         }
         "init" => {
@@ -81104,7 +81104,7 @@ fn cmd_volumeosd(args: &str) {
             );
         }
         "test" => {
-            volumeosd::self_test();
+            let _ = volumeosd::self_test();
             shell_println!("Volume OSD self-test complete.");
         }
         "init" => {
@@ -81246,7 +81246,7 @@ fn cmd_netdiag(args: &str) {
             shell_println!("Ops: {}", ops);
         }
         "test" => {
-            netdiag::self_test();
+            let _ = netdiag::self_test();
             shell_println!("Network diagnostics self-test complete.");
         }
         "init" => {
@@ -81404,7 +81404,9 @@ fn cmd_sharesheet(args: &str) {
                 ops
             );
         }
-        "test" => sharesheet::self_test(),
+        "test" => {
+            let _ = sharesheet::self_test();
+        }
         _ => {
             shell_println!("Usage: sharesheet <command>");
             shell_println!("  list                List all targets");
@@ -81597,7 +81599,9 @@ fn cmd_oobe(args: &str) {
                 ops
             );
         }
-        "test" => oobe::self_test(),
+        "test" => {
+            let _ = oobe::self_test();
+        }
         _ => {
             shell_println!("Usage: oobe <command>");
             shell_println!("  status              Current state");
@@ -81809,7 +81813,9 @@ fn cmd_hdrdisplay(args: &str) {
                 ops
             );
         }
-        "test" => hdrdisplay::self_test(),
+        "test" => {
+            let _ = hdrdisplay::self_test();
+        }
         _ => {
             shell_println!("Usage: hdrdisplay <command>");
             shell_println!("  list                   List displays");
@@ -82022,7 +82028,9 @@ fn cmd_surroundsound(args: &str) {
                 ops
             );
         }
-        "test" => surroundsound::self_test(),
+        "test" => {
+            let _ = surroundsound::self_test();
+        }
         _ => {
             shell_println!("Usage: surroundsound <command>");
             shell_println!("  list                   List configs");
@@ -82219,7 +82227,9 @@ fn cmd_audioeq(args: &str) {
                 ops
             );
         }
-        "test" => audioeq::self_test(),
+        "test" => {
+            let _ = audioeq::self_test();
+        }
         _ => {
             shell_println!("Usage: audioeq <command>");
             shell_println!("  list                List configs");
@@ -82381,7 +82391,9 @@ fn cmd_screensaver(args: &str) {
                 ops
             );
         }
-        "test" => screensaver::self_test(),
+        "test" => {
+            let _ = screensaver::self_test();
+        }
         _ => {
             shell_println!("Usage: screensaver <command>");
             shell_println!("  list                List savers");
@@ -82656,7 +82668,9 @@ fn cmd_colortemp(args: &str) {
                 ops
             );
         }
-        "test" => colortemp::self_test(),
+        "test" => {
+            let _ = colortemp::self_test();
+        }
         _ => {
             shell_println!("Usage: colortemp <command>");
             shell_println!("  list                   List profiles");
@@ -82807,7 +82821,9 @@ fn cmd_gamemode(args: &str) {
                 ops
             );
         }
-        "test" => gamemode::self_test(),
+        "test" => {
+            let _ = gamemode::self_test();
+        }
         _ => {
             shell_println!("Usage: gamemode <command>");
             shell_println!("  status              Current state");
@@ -82955,7 +82971,9 @@ fn cmd_dpiscaling(args: &str) {
                 ops
             );
         }
-        "test" => dpiscaling::self_test(),
+        "test" => {
+            let _ = dpiscaling::self_test();
+        }
         _ => {
             shell_println!("Usage: dpiscaling <command>");
             shell_println!("  list                   List displays");
@@ -83138,7 +83156,9 @@ fn cmd_netprofile(args: &str) {
                 ops
             );
         }
-        "test" => netprofile::self_test(),
+        "test" => {
+            let _ = netprofile::self_test();
+        }
         _ => {
             shell_println!("Usage: netprofile <command>");
             shell_println!("  list                   List profiles");
@@ -83277,7 +83297,9 @@ fn cmd_apppermissions(args: &str) {
                 ops
             );
         }
-        "test" => apppermissions::self_test(),
+        "test" => {
+            let _ = apppermissions::self_test();
+        }
         _ => {
             shell_println!("Usage: apppermissions <command>");
             shell_println!("  check <app> <perm>  Check permission");
@@ -83438,7 +83460,9 @@ fn cmd_kbshortcuts(args: &str) {
                 ops
             );
         }
-        "test" => kbshortcuts::self_test(),
+        "test" => {
+            let _ = kbshortcuts::self_test();
+        }
         _ => {
             shell_println!("Usage: kbshortcuts <command>");
             shell_println!("  list                  List shortcuts");
@@ -83604,7 +83628,9 @@ fn cmd_displayarrange(args: &str) {
                 ops
             );
         }
-        "test" => displayarrange::self_test(),
+        "test" => {
+            let _ = displayarrange::self_test();
+        }
         _ => {
             shell_println!("Usage: displayarrange <command>");
             shell_println!("  list                  List displays");
@@ -83694,7 +83720,9 @@ fn cmd_sysanimations(args: &str) {
                 ops
             );
         }
-        "test" => sysanimations::self_test(),
+        "test" => {
+            let _ = sysanimations::self_test();
+        }
         _ => {
             shell_println!("Usage: sysanimations <command>");
             shell_println!("  list                List animations");
@@ -83817,7 +83845,9 @@ fn cmd_filevault(args: &str) {
                 ops
             );
         }
-        "test" => filevault::self_test(),
+        "test" => {
+            let _ = filevault::self_test();
+        }
         _ => {
             shell_println!("Usage: filevault <command>");
             shell_println!("  list                     List vaults");
@@ -83951,7 +83981,9 @@ fn cmd_mousegestures(args: &str) {
                 ops
             );
         }
-        "test" => mousegestures::self_test(),
+        "test" => {
+            let _ = mousegestures::self_test();
+        }
         _ => {
             shell_println!("Usage: mousegestures <command>");
             shell_println!("  list                   List bindings");
@@ -84137,7 +84169,9 @@ fn cmd_fontsettings(args: &str) {
             shell_println!("  Total changes: {}", changes);
             shell_println!("  Operations:    {}", ops);
         }
-        "test" => fontsettings::self_test(),
+        "test" => {
+            let _ = fontsettings::self_test();
+        }
         _ => {
             shell_println!("Usage: fontsettings <subcommand>");
             shell_println!("  show                  Current config");
@@ -84315,7 +84349,9 @@ fn cmd_notifbadge(args: &str) {
             shell_println!("  Total updates: {}", updates);
             shell_println!("  Operations:    {}", ops);
         }
-        "test" => notifbadge::self_test(),
+        "test" => {
+            let _ = notifbadge::self_test();
+        }
         _ => {
             shell_println!("Usage: notifbadge <subcommand>");
             shell_println!("  show                  List visible badges");
@@ -84530,7 +84566,9 @@ fn cmd_lockwallpaper(args: &str) {
             shell_println!("  Total changes:   {}", changes);
             shell_println!("  Operations:      {}", ops);
         }
-        "test" => lockwallpaper::self_test(),
+        "test" => {
+            let _ = lockwallpaper::self_test();
+        }
         _ => {
             shell_println!("Usage: lockwallpaper <subcommand>");
             shell_println!("  show                  Current config");
@@ -84709,7 +84747,9 @@ fn cmd_systemsounds(args: &str) {
             shell_println!("  Total plays:  {}", plays);
             shell_println!("  Operations:   {}", ops);
         }
-        "test" => systemsounds::self_test(),
+        "test" => {
+            let _ = systemsounds::self_test();
+        }
         _ => {
             shell_println!("Usage: systemsounds <subcommand>");
             shell_println!("  show                  Current assignments");
@@ -84880,7 +84920,9 @@ fn cmd_hotcorners(args: &str) {
             shell_println!("  Total triggers:  {}", triggers);
             shell_println!("  Operations:      {}", ops);
         }
-        "test" => hotcorners::self_test(),
+        "test" => {
+            let _ = hotcorners::self_test();
+        }
         _ => {
             shell_println!("Usage: hotcorners <subcommand>");
             shell_println!("  show                  Current config");
@@ -85066,7 +85108,9 @@ fn cmd_dynlock(args: &str) {
             shell_println!("  Total unlocks: {}", unlocks);
             shell_println!("  Operations:    {}", ops);
         }
-        "test" => dynlock::self_test(),
+        "test" => {
+            let _ = dynlock::self_test();
+        }
         _ => {
             shell_println!("Usage: dynlock <subcommand>");
             shell_println!("  show                  Current status");
@@ -85226,7 +85270,9 @@ fn cmd_snaplayout(args: &str) {
             shell_println!("  Total snaps: {}", snaps);
             shell_println!("  Operations:  {}", ops);
         }
-        "test" => snaplayout::self_test(),
+        "test" => {
+            let _ = snaplayout::self_test();
+        }
         _ => {
             shell_println!("Usage: snaplayout <subcommand>");
             shell_println!("  show / list           List layouts");
@@ -85420,7 +85466,9 @@ fn cmd_haptfeedback(args: &str) {
             shell_println!("  Total fires:   {}", fires);
             shell_println!("  Operations:    {}", ops);
         }
-        "test" => haptfeedback::self_test(),
+        "test" => {
+            let _ = haptfeedback::self_test();
+        }
         _ => {
             shell_println!("Usage: haptfeedback <subcommand>");
             shell_println!("  show                  Devices & mappings");
@@ -85651,7 +85699,9 @@ fn cmd_eyeprotect(args: &str) {
             shell_println!("  Skips:     {}", skips);
             shell_println!("  Operations: {}", ops);
         }
-        "test" => eyeprotect::self_test(),
+        "test" => {
+            let _ = eyeprotect::self_test();
+        }
         _ => {
             shell_println!("Usage: eyeprotect <subcommand>");
             shell_println!("  show                  Current status");
@@ -85856,7 +85906,9 @@ fn cmd_pinnedapps(args: &str) {
             shell_println!("  Total launches:  {}", launches);
             shell_println!("  Operations:      {}", ops);
         }
-        "test" => pinnedapps::self_test(),
+        "test" => {
+            let _ = pinnedapps::self_test();
+        }
         _ => {
             shell_println!("Usage: pinnedapps <subcommand>");
             shell_println!("  show                  List all pinned apps");
@@ -86044,7 +86096,9 @@ fn cmd_inputmethod(args: &str) {
             shell_println!("  Switches:   {}", switches);
             shell_println!("  Operations: {}", ops);
         }
-        "test" => inputmethod::self_test(),
+        "test" => {
+            let _ = inputmethod::self_test();
+        }
         _ => {
             shell_println!("Usage: inputmethod <subcommand>");
             shell_println!("  show                  Engines & composition");
@@ -86267,7 +86321,9 @@ fn cmd_storagesense(args: &str) {
             shell_println!("  Total freed:  {}", storagesense::format_bytes(freed));
             shell_println!("  Operations:   {}", ops);
         }
-        "test" => storagesense::self_test(),
+        "test" => {
+            let _ = storagesense::self_test();
+        }
         _ => {
             shell_println!("Usage: storagesense <subcommand>");
             shell_println!("  show                  Policies & estimates");
@@ -86389,7 +86445,9 @@ fn cmd_autofix(args: &str) {
             shell_println!("  Ignored:  {}", ignored);
             shell_println!("  Ops:      {}", ops);
         }
-        "test" => autofix::self_test(),
+        "test" => {
+            let _ = autofix::self_test();
+        }
         _ => {
             shell_println!("Usage: autofix <subcommand>");
             shell_println!("  show / list           List issues");
@@ -86567,7 +86625,9 @@ fn cmd_recentsearch(args: &str) {
             shell_println!("  Suggestions used: {}", suggestions);
             shell_println!("  Operations:       {}", ops);
         }
-        "test" => recentsearch::self_test(),
+        "test" => {
+            let _ = recentsearch::self_test();
+        }
         _ => {
             shell_println!("Usage: recentsearch <subcommand>");
             shell_println!("  show                  Recent history");
@@ -86703,7 +86763,9 @@ fn cmd_sysmaint(args: &str) {
             shell_println!("  Failures:  {}", failures);
             shell_println!("  Ops:       {}", ops);
         }
-        "test" => sysmaint::self_test(),
+        "test" => {
+            let _ = sysmaint::self_test();
+        }
         _ => {
             shell_println!("Usage: sysmaint <subcommand>");
             shell_println!("  show / list           All tasks");
@@ -86908,7 +86970,9 @@ fn cmd_multiclip(args: &str) {
             shell_println!("  Pastes:   {}", pastes);
             shell_println!("  Ops:      {}", ops);
         }
-        "test" => multiclip::self_test(),
+        "test" => {
+            let _ = multiclip::self_test();
+        }
         _ => {
             shell_println!("Usage: multiclip <subcommand>");
             shell_println!("  show / list           Clipboard history");
@@ -87060,7 +87124,9 @@ fn cmd_focussession(args: &str) {
                 ops
             );
         }
-        "test" => focussession::self_test(),
+        "test" => {
+            let _ = focussession::self_test();
+        }
         "init" => {
             focussession::init_defaults();
             shell_println!("Focus session subsystem initialised.");
@@ -87298,7 +87364,9 @@ fn cmd_quicknote(args: &str) {
                 ops
             );
         }
-        "test" => quicknote::self_test(),
+        "test" => {
+            let _ = quicknote::self_test();
+        }
         "init" => {
             quicknote::init_defaults();
             shell_println!("Quick notes subsystem initialised.");
@@ -87440,7 +87508,9 @@ fn cmd_uicolorscheme(args: &str) {
             let (schemes, changes, ops) = colorscheme::stats();
             shell_println!("Schemes: {}, Changes: {}, Ops: {}", schemes, changes, ops);
         }
-        "test" => colorscheme::self_test(),
+        "test" => {
+            let _ = colorscheme::self_test();
+        }
         "init" => {
             colorscheme::init_defaults();
             shell_println!("Color scheme subsystem initialised.");
@@ -87648,7 +87718,9 @@ fn cmd_appcompat(args: &str) {
                 ops
             );
         }
-        "test" => appcompat::self_test(),
+        "test" => {
+            let _ = appcompat::self_test();
+        }
         "init" => {
             appcompat::init_defaults();
             shell_println!("App compatibility subsystem initialised.");
@@ -87872,7 +87944,9 @@ fn cmd_windowrules(args: &str) {
                 ops
             );
         }
-        "test" => windowrules::self_test(),
+        "test" => {
+            let _ = windowrules::self_test();
+        }
         "init" => {
             windowrules::init_defaults();
             shell_println!("Window rules subsystem initialised.");
@@ -88106,7 +88180,9 @@ fn cmd_spatialaudio(args: &str) {
                 ops
             );
         }
-        "test" => spatialaudio::self_test(),
+        "test" => {
+            let _ = spatialaudio::self_test();
+        }
         "init" => {
             spatialaudio::init_defaults();
             shell_println!("Spatial audio subsystem initialised.");
@@ -88328,7 +88404,9 @@ fn cmd_filetransfer(args: &str) {
                 ops
             );
         }
-        "test" => filetransfer::self_test(),
+        "test" => {
+            let _ = filetransfer::self_test();
+        }
         "init" => {
             filetransfer::init_defaults();
             shell_println!("File transfer subsystem initialised.");
@@ -88506,7 +88584,9 @@ fn cmd_startupopt(args: &str) {
                 ops
             );
         }
-        "test" => startupopt::self_test(),
+        "test" => {
+            let _ = startupopt::self_test();
+        }
         "init" => {
             startupopt::init_defaults();
             shell_println!("Startup optimization subsystem initialised.");
@@ -88686,7 +88766,9 @@ fn cmd_usagetime(args: &str) {
                 ops
             );
         }
-        "test" => usagetime::self_test(),
+        "test" => {
+            let _ = usagetime::self_test();
+        }
         "init" => {
             usagetime::init_defaults();
             shell_println!("Usage time subsystem initialised.");
@@ -88886,7 +88968,9 @@ fn cmd_voicecontrol(args: &str) {
                 ops
             );
         }
-        "test" => voicecontrol::self_test(),
+        "test" => {
+            let _ = voicecontrol::self_test();
+        }
         "init" => {
             voicecontrol::init_defaults();
             shell_println!("Voice control subsystem initialised.");
@@ -89074,7 +89158,9 @@ fn cmd_devpair(args: &str) {
                 ops
             );
         }
-        "test" => devpair::self_test(),
+        "test" => {
+            let _ = devpair::self_test();
+        }
         "init" => {
             devpair::init_defaults();
             shell_println!("Device pairing subsystem initialised.");
@@ -89308,7 +89394,9 @@ fn cmd_notifgroup(args: &str) {
                 ops
             );
         }
-        "test" => notifgroup::self_test(),
+        "test" => {
+            let _ = notifgroup::self_test();
+        }
         "init" => {
             notifgroup::init_defaults();
             shell_println!("Notification grouping subsystem initialised.");
@@ -89480,7 +89568,9 @@ fn cmd_playmedia(args: &str) {
                 ops
             );
         }
-        "test" => playmedia::self_test(),
+        "test" => {
+            let _ = playmedia::self_test();
+        }
         "init" => {
             playmedia::init_defaults();
             shell_println!("Media playback subsystem initialised.");
@@ -89718,7 +89808,9 @@ fn cmd_kbmacro(args: &str) {
                 ops
             );
         }
-        "test" => kbmacro::self_test(),
+        "test" => {
+            let _ = kbmacro::self_test();
+        }
         "init" => {
             kbmacro::init_defaults();
             shell_println!("Keyboard macro subsystem initialised.");
@@ -89917,7 +90009,9 @@ fn cmd_sysresource(args: &str) {
                 ops
             );
         }
-        "test" => sysresource::self_test(),
+        "test" => {
+            let _ = sysresource::self_test();
+        }
         "init" => {
             sysresource::init_defaults();
             shell_println!("System resource monitoring initialised.");
@@ -90070,7 +90164,9 @@ fn cmd_faceunlock(args: &str) {
                 ops
             );
         }
-        "test" => faceunlock::self_test(),
+        "test" => {
+            let _ = faceunlock::self_test();
+        }
         "init" => {
             faceunlock::init_defaults();
             shell_println!("Face unlock subsystem initialised.");
@@ -90316,7 +90412,7 @@ fn cmd_usbpolicy(args: &str) {
             shell_println!("  Allowed: {} | Denied: {} | Ops: {}", allowed, denied, ops);
         }
         "test" => {
-            usbpolicy::self_test();
+            let _ = usbpolicy::self_test();
             shell_println!("usbpolicy self-test complete");
         }
         "init" => {
@@ -90525,7 +90621,7 @@ fn cmd_applaunch(args: &str) {
             );
         }
         "test" => {
-            applaunch::self_test();
+            let _ = applaunch::self_test();
             shell_println!("applaunch self-test complete");
         }
         "init" => {
@@ -90643,7 +90739,7 @@ fn cmd_sysprofiler(args: &str) {
             );
         }
         "test" => {
-            sysprofiler::self_test();
+            let _ = sysprofiler::self_test();
             shell_println!("sysprofiler self-test complete");
         }
         "init" => {
@@ -90884,7 +90980,7 @@ fn cmd_clipsync(args: &str) {
             );
         }
         "test" => {
-            clipsync::self_test();
+            let _ = clipsync::self_test();
             shell_println!("clipsync self-test complete");
         }
         "init" => {
@@ -91100,7 +91196,7 @@ fn cmd_netusage(args: &str) {
             shell_println!("  Cap warnings: {} | Ops: {}", warnings, ops);
         }
         "test" => {
-            netusage::self_test();
+            let _ = netusage::self_test();
             shell_println!("netusage self-test complete");
         }
         "init" => {
@@ -91319,7 +91415,7 @@ fn cmd_touchscreen(args: &str) {
             );
         }
         "test" => {
-            touchscreen::self_test();
+            let _ = touchscreen::self_test();
             shell_println!("touchscreen self-test complete");
         }
         "init" => {
@@ -91660,7 +91756,7 @@ fn cmd_diskquota(args: &str) {
             );
         }
         "test" => {
-            diskquota::self_test();
+            let _ = diskquota::self_test();
             shell_println!("diskquota self-test complete");
         }
         "init" => {
@@ -91868,7 +91964,7 @@ fn cmd_appdefaults(args: &str) {
             );
         }
         "test" => {
-            appdefaults::self_test();
+            let _ = appdefaults::self_test();
             shell_println!("appdefaults self-test complete");
         }
         "init" => {
@@ -92070,7 +92166,7 @@ fn cmd_policyengine(args: &str) {
             );
         }
         "test" => {
-            policyengine::self_test();
+            let _ = policyengine::self_test();
             shell_println!("policyengine self-test complete");
         }
         "init" => {
@@ -92335,7 +92431,7 @@ fn cmd_fontpreview(args: &str) {
             );
         }
         "test" => {
-            fontpreview::self_test();
+            let _ = fontpreview::self_test();
             shell_println!("fontpreview self-test complete");
         }
         "init" => {
@@ -92530,7 +92626,7 @@ fn cmd_wifiscan(args: &str) {
             );
         }
         "test" => {
-            wifiscan::self_test();
+            let _ = wifiscan::self_test();
             shell_println!("wifiscan self-test complete");
         }
         "init" => {
@@ -92804,7 +92900,7 @@ fn cmd_splitview(args: &str) {
             );
         }
         "test" => {
-            splitview::self_test();
+            let _ = splitview::self_test();
             shell_println!("splitview self-test complete");
         }
         "init" => {
@@ -93048,7 +93144,7 @@ fn cmd_iotdevice(args: &str) {
             );
         }
         "test" => {
-            iotdevice::self_test();
+            let _ = iotdevice::self_test();
             shell_println!("iotdevice self-test complete");
         }
         "init" => {
@@ -93285,7 +93381,7 @@ fn cmd_prochistory(args: &str) {
             );
         }
         "test" => {
-            prochistory::self_test();
+            let _ = prochistory::self_test();
             shell_println!("prochistory self-test complete");
         }
         "init" => {
@@ -93471,7 +93567,7 @@ fn cmd_notiffilter(args: &str) {
             );
         }
         "test" => {
-            notiffilter::self_test();
+            let _ = notiffilter::self_test();
             shell_println!("notiffilter self-test complete");
         }
         "init" => {
@@ -93636,7 +93732,7 @@ fn cmd_colorblind(args: &str) {
             );
         }
         "test" => {
-            colorblind::self_test();
+            let _ = colorblind::self_test();
             shell_println!("colorblind self-test complete");
         }
         "init" => {
@@ -93793,7 +93889,9 @@ fn cmd_clipaction(args: &str) {
             clipaction::init_defaults();
             shell_println!("Clipboard actions initialized");
         }
-        "test" => clipaction::self_test(),
+        "test" => {
+            let _ = clipaction::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: clipaction <detect|actions|exec|add|remove|list|stats|init|test>"
@@ -93996,7 +94094,9 @@ fn cmd_energysaver(args: &str) {
             energysaver::init_defaults();
             shell_println!("Energy saver initialized");
         }
-        "test" => energysaver::self_test(),
+        "test" => {
+            let _ = energysaver::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: energysaver <mode|profile|brightness|cpulimit|throttle|unthrottle|throttled|estimate|autoswitch|stats|init|test>"
@@ -94153,7 +94253,9 @@ fn cmd_filerules(args: &str) {
             filerules::init_defaults();
             shell_println!("File rules initialized");
         }
-        "test" => filerules::self_test(),
+        "test" => {
+            let _ = filerules::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: filerules <list|add|remove|enable|disable|eval|stats|init|test>"
@@ -94337,7 +94439,9 @@ fn cmd_secureboot(args: &str) {
             secureboot::init_defaults();
             shell_println!("Secure boot initialized");
         }
-        "test" => secureboot::self_test(),
+        "test" => {
+            let _ = secureboot::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: secureboot <status|set|enroll|remove|verify|keys|records|stats|init|test>"
@@ -94546,7 +94650,9 @@ fn cmd_eventlog(args: &str) {
             eventlog::init_defaults();
             shell_println!("Event log initialized");
         }
-        "test" => eventlog::self_test(),
+        "test" => {
+            let _ = eventlog::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: eventlog <log|recent|errors|source|category|clear|counts|stats|init|test>"
@@ -94733,7 +94839,9 @@ fn cmd_systemimage(args: &str) {
             systemimage::init_defaults();
             shell_println!("System image initialized");
         }
-        "test" => systemimage::self_test(),
+        "test" => {
+            let _ = systemimage::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: systemimage <list|create|delete|restore|verify|info|stats|init|test>"
@@ -94971,7 +95079,9 @@ fn cmd_raidmgr(args: &str) {
             raidmgr::init_defaults();
             shell_println!("RAID manager initialized");
         }
-        "test" => raidmgr::self_test(),
+        "test" => {
+            let _ = raidmgr::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: raidmgr <list|create|delete|add|remove|fail|rebuild|info|stats|init|test>"
@@ -95230,7 +95340,9 @@ fn cmd_networkbridge(args: &str) {
             networkbridge::init_defaults();
             shell_println!("Network bridge initialized");
         }
-        "test" => networkbridge::self_test(),
+        "test" => {
+            let _ = networkbridge::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: networkbridge <list|create|delete|add|remove|up|down|ip|mtu|info|stats|init|test>"
@@ -95382,7 +95494,9 @@ fn cmd_secureerase(args: &str) {
             secureerase::init_defaults();
             shell_println!("Secure erase initialized");
         }
-        "test" => secureerase::self_test(),
+        "test" => {
+            let _ = secureerase::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: secureerase <start|complete|cancel|status|list|stats|init|test>"
@@ -95531,7 +95645,9 @@ fn cmd_dnssettings(args: &str) {
             dnssettings::init_defaults();
             shell_println!("DNS settings initialized");
         }
-        "test" => dnssettings::self_test(),
+        "test" => {
+            let _ = dnssettings::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: dnssettings <servers|add|remove|resolve|flush|search|stats|init|test>"
@@ -95741,7 +95857,9 @@ fn cmd_backupsched(args: &str) {
             backupsched::init_defaults();
             shell_println!("Backup scheduler initialized");
         }
-        "test" => backupsched::self_test(),
+        "test" => {
+            let _ = backupsched::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: backupsched <list|create|delete|enable|disable|run|history|stats|init|test>"
@@ -95978,7 +96096,9 @@ fn cmd_displaycal(args: &str) {
             displaycal::init_defaults();
             shell_println!("Display calibration initialized");
         }
-        "test" => displaycal::self_test(),
+        "test" => {
+            let _ = displaycal::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: displaycal <list|add|remove|profile|gamma|whitepoint|calibrate|info|stats|init|test>"
@@ -96174,7 +96294,9 @@ fn cmd_vpnprofile(args: &str) {
             vpnprofile::init_defaults();
             shell_println!("VPN profiles initialized");
         }
-        "test" => vpnprofile::self_test(),
+        "test" => {
+            let _ = vpnprofile::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: vpnprofile <list|create|delete|connect|disconnect|killswitch|info|stats|init|test>"
@@ -96325,7 +96447,9 @@ fn cmd_diskhealth(args: &str) {
             diskhealth::init_defaults();
             shell_println!("Disk health initialized");
         }
-        "test" => diskhealth::self_test(),
+        "test" => {
+            let _ = diskhealth::self_test();
+        }
         _ => {
             shell_println!("Usage: diskhealth <list|check|add|remove|info|stats|init|test>");
             shell_println!("Aliases: dhealth");
@@ -96454,7 +96578,9 @@ fn cmd_recoverypart(args: &str) {
             recoverypart::init_defaults();
             shell_println!("Recovery partition initialized");
         }
-        "test" => recoverypart::self_test(),
+        "test" => {
+            let _ = recoverypart::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: recoverypart <status|add|remove|verify|repair|boot|stats|init|test>"
@@ -96683,7 +96809,9 @@ fn cmd_userprofile(args: &str) {
             userprofile::init_defaults();
             shell_println!("User profiles initialized");
         }
-        "test" => userprofile::self_test(),
+        "test" => {
+            let _ = userprofile::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: userprofile <list|create|delete|switch|lock|unlock|rename|whoami|info|home|shell|avatar|stats|init|test>"
@@ -96796,7 +96924,9 @@ fn cmd_diskclean(args: &str) {
             diskclean::init_defaults();
             shell_println!("Disk cleanup initialized");
         }
-        "test" => diskclean::self_test(),
+        "test" => {
+            let _ = diskclean::self_test();
+        }
         _ => {
             shell_println!("Usage: diskclean <scan|clean|estimate|items|stats|init|test>");
             shell_println!("Aliases: dclean");
@@ -98114,7 +98244,7 @@ fn cmd_lavg(args: &str) {
             shell_println!("  Operations:      {}", ops);
         }
         "test" => {
-            loadavg::self_test();
+            let _ = loadavg::self_test();
             shell_println!("loadavg self-test passed.");
         }
         _ => {
@@ -98230,7 +98360,7 @@ fn cmd_kernlog(args: &str) {
             shell_println!("  Operations:       {}", ops);
         }
         "test" => {
-            kernlog::self_test();
+            let _ = kernlog::self_test();
             shell_println!("kernlog self-test passed.");
         }
         _ => {
@@ -98382,7 +98512,7 @@ fn cmd_coredump(args: &str) {
             shell_println!("  Operations:    {}", ops);
         }
         "test" => {
-            coredump::self_test();
+            let _ = coredump::self_test();
             shell_println!("coredump self-test passed.");
         }
         _ => {
@@ -98506,7 +98636,7 @@ fn cmd_fwupdate(args: &str) {
             shell_println!("  Operations:  {}", ops);
         }
         "test" => {
-            fwupdate::self_test();
+            let _ = fwupdate::self_test();
             shell_println!("fwupdate self-test passed.");
         }
         _ => {
@@ -98628,7 +98758,7 @@ fn cmd_timesync(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            timesync::self_test();
+            let _ = timesync::self_test();
             shell_println!("timesync self-test passed.");
         }
         _ => {
@@ -98764,7 +98894,7 @@ fn cmd_kmod(args: &str) {
             shell_println!("  Operations:     {}", ops);
         }
         "test" => {
-            kmod::self_test();
+            let _ = kmod::self_test();
             shell_println!("kmod self-test passed.");
         }
         _ => {
@@ -98881,7 +99011,7 @@ fn cmd_entropy(args: &str) {
             shell_println!("  Operations:    {}", ops);
         }
         "test" => {
-            entropy::self_test();
+            let _ = entropy::self_test();
             shell_println!("entropy self-test passed.");
         }
         _ => {
@@ -99012,7 +99142,7 @@ fn cmd_iosched(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            iosched::self_test();
+            let _ = iosched::self_test();
             shell_println!("iosched self-test passed.");
         }
         _ => {
@@ -99128,7 +99258,7 @@ fn cmd_netmon(args: &str) {
             shell_println!("  Operations:  {}", ops);
         }
         "test" => {
-            netmon::self_test();
+            let _ = netmon::self_test();
             shell_println!("netmon self-test passed.");
         }
         _ => {
@@ -99335,7 +99465,7 @@ fn cmd_groupmgr(args: &str) {
             shell_println!("  Operations:  {}", ops);
         }
         "test" => {
-            groupmgr::self_test();
+            let _ = groupmgr::self_test();
             shell_println!("groupmgr self-test passed.");
         }
         _ => {
@@ -99491,7 +99621,7 @@ fn cmd_sysrq(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            sysrq::self_test();
+            let _ = sysrq::self_test();
             shell_println!("sysrq self-test passed.");
         }
         _ => {
@@ -99624,7 +99754,7 @@ fn cmd_telemetry(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            telemetry::self_test();
+            let _ = telemetry::self_test();
             shell_println!("telemetry self-test passed.");
         }
         _ => {
@@ -99719,7 +99849,7 @@ fn cmd_fscache(args: &str) {
             shell_println!("  Operations:  {}", ops);
         }
         "test" => {
-            fscache::self_test();
+            let _ = fscache::self_test();
             shell_println!("fscache self-test passed.");
         }
         _ => {
@@ -99833,7 +99963,7 @@ fn cmd_nameservice(args: &str) {
             }
         }
         "test" => {
-            nameservice::self_test();
+            let _ = nameservice::self_test();
             shell_println!("nameservice self-test passed.");
         }
         _ => {
@@ -100001,7 +100131,7 @@ fn cmd_oomkiller(args: &str) {
             shell_println!("  Operations:   {}", ops);
         }
         "test" => {
-            oomkiller::self_test();
+            let _ = oomkiller::self_test();
             shell_println!("oomkiller self-test passed.");
         }
         _ => {
@@ -100117,7 +100247,7 @@ fn cmd_blktrace(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            blktrace::self_test();
+            let _ = blktrace::self_test();
             shell_println!("blktrace self-test passed.");
         }
         _ => {
@@ -100252,7 +100382,7 @@ fn cmd_cgroupfs(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            cgroupfs::self_test();
+            let _ = cgroupfs::self_test();
             shell_println!("cgroupfs self-test passed.");
         }
         _ => {
@@ -100386,7 +100516,7 @@ fn cmd_secpolicy(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            secpolicy::self_test();
+            let _ = secpolicy::self_test();
             shell_println!("secpolicy self-test passed.");
         }
         _ => {
@@ -100526,7 +100656,7 @@ fn cmd_procstat(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            procstat::self_test();
+            let _ = procstat::self_test();
             shell_println!("procstat self-test passed.");
         }
         _ => {
@@ -100629,7 +100759,7 @@ fn cmd_kernparam(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            kernparam::self_test();
+            let _ = kernparam::self_test();
             shell_println!("kernparam self-test passed.");
         }
         _ => {
@@ -100789,7 +100919,7 @@ fn cmd_tracemon(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            tracemon::self_test();
+            let _ = tracemon::self_test();
             shell_println!("tracemon self-test passed.");
         }
         _ => {
@@ -100926,7 +101056,7 @@ fn cmd_authbroker(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            authbroker::self_test();
+            let _ = authbroker::self_test();
             shell_println!("authbroker self-test passed.");
         }
         _ => {
@@ -101117,7 +101247,7 @@ fn cmd_prociso(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            prociso::self_test();
+            let _ = prociso::self_test();
             shell_println!("prociso self-test passed.");
         }
         _ => {
@@ -101254,7 +101384,7 @@ fn cmd_dmevent(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            dmevent::self_test();
+            let _ = dmevent::self_test();
             shell_println!("dmevent self-test passed.");
         }
         _ => {
@@ -101366,7 +101496,7 @@ fn cmd_pftrack(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            pftrack::self_test();
+            let _ = pftrack::self_test();
             shell_println!("pftrack self-test passed.");
         }
         _ => {
@@ -101514,7 +101644,7 @@ fn cmd_ipclog(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            ipclog::self_test();
+            let _ = ipclog::self_test();
             shell_println!("ipclog self-test passed.");
         }
         _ => {
@@ -101587,7 +101717,7 @@ fn cmd_numastat(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            numastat::self_test();
+            let _ = numastat::self_test();
             shell_println!("numastat self-test passed.");
         }
         _ => {
@@ -101759,7 +101889,7 @@ fn cmd_shmem(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            shmem::self_test();
+            let _ = shmem::self_test();
             shell_println!("shmem self-test passed.");
         }
         _ => {
@@ -101830,7 +101960,7 @@ fn cmd_wqstat(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            wqstat::self_test();
+            let _ = wqstat::self_test();
             shell_println!("wqstat self-test passed.");
         }
         _ => {
@@ -101917,7 +102047,7 @@ fn cmd_slabstat(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            slabstat::self_test();
+            let _ = slabstat::self_test();
             shell_println!("slabstat self-test passed.");
         }
         _ => {
@@ -101997,7 +102127,7 @@ fn cmd_timerq(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            timerq::self_test();
+            let _ = timerq::self_test();
             shell_println!("timerq self-test passed.");
         }
         _ => {
@@ -102158,7 +102288,7 @@ fn cmd_fdtable(args: &str) {
             shell_println!("  Operations: {}", ops);
         }
         "test" => {
-            fdtable::self_test();
+            let _ = fdtable::self_test();
             shell_println!("fdtable self-test passed.");
         }
         _ => {
@@ -102265,7 +102395,7 @@ fn cmd_rcustat(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         "test" => {
-            rcustat::self_test();
+            let _ = rcustat::self_test();
         }
         _ => {
             shell_println!(
@@ -102418,7 +102548,7 @@ fn cmd_kconsole(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         "test" => {
-            kconsole::self_test();
+            let _ = kconsole::self_test();
         }
         _ => {
             shell_println!(
@@ -102645,7 +102775,7 @@ fn cmd_signalq(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         "test" => {
-            signalq::self_test();
+            let _ = signalq::self_test();
         }
         _ => {
             shell_println!(
@@ -102801,7 +102931,7 @@ fn cmd_memcg(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         "test" => {
-            memcg::self_test();
+            let _ = memcg::self_test();
         }
         _ => {
             shell_println!(
@@ -102873,7 +103003,7 @@ fn cmd_tlbstat(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         "test" => {
-            tlbstat::self_test();
+            let _ = tlbstat::self_test();
         }
         _ => {
             shell_println!("Usage: tlbstat [cpus|shootdowns [n]|hitrate|stats|test]");
@@ -102938,7 +103068,7 @@ fn cmd_pagestat(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         "test" => {
-            pagestat::self_test();
+            let _ = pagestat::self_test();
         }
         _ => {
             shell_println!("Usage: pagestat [zones|orders|hugepages|stats|test]");
@@ -103026,7 +103156,7 @@ fn cmd_dmastat(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         "test" => {
-            dmastat::self_test();
+            let _ = dmastat::self_test();
         }
         _ => {
             shell_println!("Usage: dmastat [devices|faults [n]|register <id> <name>|stats|test]");
@@ -103096,7 +103226,7 @@ fn cmd_compstat(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         "test" => {
-            compstat::self_test();
+            let _ = compstat::self_test();
         }
         _ => {
             shell_println!("Usage: compstat [zones|events [n]|rate|stats|test]");
@@ -103170,7 +103300,7 @@ fn cmd_irqstat(args: &str) {
             }
         }
         "test" => {
-            irqstat::self_test();
+            let _ = irqstat::self_test();
         }
         _ => {
             shell_println!("Usage: irqstat [lines|cpus|stats|test]");
@@ -103276,7 +103406,7 @@ fn cmd_epollstat(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         "test" => {
-            epollstat::self_test();
+            let _ = epollstat::self_test();
         }
         _ => {
             shell_println!(
@@ -103379,7 +103509,7 @@ fn cmd_vmmap(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         "test" => {
-            vmmap::self_test();
+            let _ = vmmap::self_test();
         }
         _ => {
             shell_println!(
@@ -103454,7 +103584,7 @@ fn cmd_softirq(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         "test" => {
-            softirq::self_test();
+            let _ = softirq::self_test();
         }
         _ => {
             shell_println!("Usage: softirq [types|cpus|raise <type>|stats|test]");
@@ -103565,7 +103695,7 @@ fn cmd_netfilter(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         "test" => {
-            netfilter::self_test();
+            let _ = netfilter::self_test();
         }
         _ => {
             shell_println!(
@@ -103647,7 +103777,7 @@ fn cmd_schedclass(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         "test" => {
-            schedclass::self_test();
+            let _ = schedclass::self_test();
         }
         _ => {
             shell_println!("Usage: schedclass [classes|tasks|show <pid>|stats|test]");
@@ -103703,7 +103833,7 @@ fn cmd_cpuidle(args: &str) {
             }
         }
         "test" => {
-            cpuidle::self_test();
+            let _ = cpuidle::self_test();
         }
         _ => {
             shell_println!("Usage: cpuidle [cpus|residency|stats|test]");
@@ -103764,7 +103894,7 @@ fn cmd_futexstat(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         "test" => {
-            futexstat::self_test();
+            let _ = futexstat::self_test();
         }
         _ => {
             shell_println!("Usage: futexstat [hotspots [n]|procs|stats|test]");
@@ -103870,7 +104000,9 @@ fn cmd_writeback(args: &str) {
             shell_println!("Dirty threshold: {}%", threshold);
             shell_println!("Operations: {}", ops);
         }
-        "test" => writeback::self_test(),
+        "test" => {
+            let _ = writeback::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: writeback [devices|flushers|dirty <dev> <n>|flush <dev>|threshold [pct]|stats|test]"
@@ -103963,7 +104095,9 @@ fn cmd_iolatency(args: &str) {
             shell_println!("Threshold: {}ns", threshold);
             shell_println!("Operations: {}", ops);
         }
-        "test" => iolatency::self_test(),
+        "test" => {
+            let _ = iolatency::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: iolatency [devices|histogram <dev>|slow [n]|threshold [ns]|stats|test]"
@@ -104071,7 +104205,9 @@ fn cmd_taskstats(args: &str) {
             shell_println!("Total delays: {}ns", delays);
             shell_println!("Operations: {}", ops);
         }
-        "test" => taskstats::self_test(),
+        "test" => {
+            let _ = taskstats::self_test();
+        }
         _ => {
             shell_println!("Usage: taskstats [list|top [n]|get <pid>|stats|test]");
             set_exit(1);
@@ -104196,7 +104332,9 @@ fn cmd_kprobes(args: &str) {
             shell_println!("Total overhead: {}ns", overhead);
             shell_println!("Operations: {}", ops);
         }
-        "test" => kprobes::self_test(),
+        "test" => {
+            let _ = kprobes::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: kprobes [list|register <name> <addr>|unregister <id>|enable <id>|disable <id>|type <t>|stats|test]"
@@ -104293,7 +104431,9 @@ fn cmd_netsock(args: &str) {
             shell_println!("Retransmits: {}", retrans);
             shell_println!("Operations: {}", ops);
         }
-        "test" => netsock::self_test(),
+        "test" => {
+            let _ = netsock::self_test();
+        }
         _ => {
             shell_println!("Usage: netsock [list|tcp|udp|pid <pid>|stats|test]");
             set_exit(1);
@@ -104350,7 +104490,9 @@ fn cmd_blkqueue(args: &str) {
             shell_println!("Total plugs: {}", plugs);
             shell_println!("Operations: {}", ops);
         }
-        "test" => blkqueue::self_test(),
+        "test" => {
+            let _ = blkqueue::self_test();
+        }
         _ => {
             shell_println!("Usage: blkqueue [list|device <name>|stats|test]");
             set_exit(1);
@@ -104401,7 +104543,9 @@ fn cmd_powerstat(args: &str) {
             shell_println!("Total wakes: {}", wakes);
             shell_println!("Operations: {}", ops);
         }
-        "test" => powerstat::self_test(),
+        "test" => {
+            let _ = powerstat::self_test();
+        }
         _ => {
             shell_println!("Usage: powerstat [domains|wakes [n]|stats|test]");
             set_exit(1);
@@ -104450,7 +104594,9 @@ fn cmd_inodestat(args: &str) {
             shell_println!("Dcache lookups: {}", lookups);
             shell_println!("Operations: {}", ops);
         }
-        "test" => inodestat::self_test(),
+        "test" => {
+            let _ = inodestat::self_test();
+        }
         _ => {
             shell_println!("Usage: inodestat [fs|dcache|stats|test]");
             set_exit(1);
@@ -104506,7 +104652,9 @@ fn cmd_migstat(args: &str) {
             shell_println!("NUMA crosses: {}", numa);
             shell_println!("Operations: {}", ops);
         }
-        "test" => migstat::self_test(),
+        "test" => {
+            let _ = migstat::self_test();
+        }
         _ => {
             shell_println!("Usage: migstat [cpus|hot [n]|reasons|stats|test]");
             set_exit(1);
@@ -104552,7 +104700,9 @@ fn cmd_pagecache(args: &str) {
             shell_println!("Hit rate: {}.{}%", rate / 100, rate % 100);
             shell_println!("Operations: {}", ops);
         }
-        "test" => pagecache::self_test(),
+        "test" => {
+            let _ = pagecache::self_test();
+        }
         _ => {
             shell_println!("Usage: pagecache [devices|rate|stats|test]");
             set_exit(1);
@@ -104625,7 +104775,9 @@ fn cmd_netdev(args: &str) {
             shell_println!("Total drops: {}", drops);
             shell_println!("Operations: {}", ops);
         }
-        "test" => netdev::self_test(),
+        "test" => {
+            let _ = netdev::self_test();
+        }
         _ => {
             shell_println!("Usage: netdev [list|get <iface>|stats|test]");
             set_exit(1);
@@ -104668,7 +104820,9 @@ fn cmd_cpustat(args: &str) {
             shell_println!("Interrupts: {}", irqs);
             shell_println!("Operations: {}", ops);
         }
-        "test" => cpustat::self_test(),
+        "test" => {
+            let _ = cpustat::self_test();
+        }
         _ => {
             shell_println!("Usage: cpustat [percpu|util|stats|test]");
             set_exit(1);
@@ -104729,7 +104883,9 @@ fn cmd_filelock(args: &str) {
             shell_println!("Total deadlocks: {}", deadlocks);
             shell_println!("Operations: {}", ops);
         }
-        "test" => filelock::self_test(),
+        "test" => {
+            let _ = filelock::self_test();
+        }
         _ => {
             shell_println!("Usage: filelock [list|pid <pid>|stats|test]");
             set_exit(1);
@@ -104789,7 +104945,9 @@ fn cmd_pidstat(args: &str) {
             shell_println!("Total reuses: {}", reuses);
             shell_println!("Operations: {}", ops);
         }
-        "test" => pidstat::self_test(),
+        "test" => {
+            let _ = pidstat::self_test();
+        }
         _ => {
             shell_println!("Usage: pidstat [list|info <ns_id>|stats|test]");
             set_exit(1);
@@ -104827,7 +104985,9 @@ fn cmd_binfmt(args: &str) {
             shell_println!("Total errors: {}", errors);
             shell_println!("Operations: {}", ops);
         }
-        "test" => binfmt::self_test(),
+        "test" => {
+            let _ = binfmt::self_test();
+        }
         _ => {
             shell_println!("Usage: binfmt [formats|errors|stats|test]");
             set_exit(1);
@@ -104887,7 +105047,9 @@ fn cmd_pipestat(args: &str) {
             shell_println!("Total blocks: {}", blocks);
             shell_println!("Operations: {}", ops);
         }
-        "test" => pipestat::self_test(),
+        "test" => {
+            let _ = pipestat::self_test();
+        }
         _ => {
             shell_println!("Usage: pipestat [list|pid <pid>|stats|test]");
             set_exit(1);
@@ -104924,7 +105086,9 @@ fn cmd_sockbuf(args: &str) {
             shell_println!("Total bytes: {}", bytes);
             shell_println!("Operations: {}", ops);
         }
-        "test" => sockbuf::self_test(),
+        "test" => {
+            let _ = sockbuf::self_test();
+        }
         _ => {
             shell_println!("Usage: sockbuf [pools|stats|test]");
             set_exit(1);
@@ -104981,7 +105145,9 @@ fn cmd_schedlat(args: &str) {
             shell_println!("Global max latency: {}ns", max_ns);
             shell_println!("Operations: {}", ops);
         }
-        "test" => schedlat::self_test(),
+        "test" => {
+            let _ = schedlat::self_test();
+        }
         _ => {
             shell_println!("Usage: schedlat [percpu|histogram|stats|test]");
             set_exit(1);
@@ -105012,7 +105178,9 @@ fn cmd_mempress(args: &str) {
             shell_println!("OOM proximity: {}%", oom);
             shell_println!("Operations: {}", ops);
         }
-        "test" => mempress::self_test(),
+        "test" => {
+            let _ = mempress::self_test();
+        }
         _ => {
             shell_println!("Usage: mempress [current|stats|test]");
             set_exit(1);
@@ -105058,7 +105226,9 @@ fn cmd_cpucache(args: &str) {
             shell_println!("Hit rate: {}.{}%", rate / 100, rate % 100);
             shell_println!("Operations: {}", ops);
         }
-        "test" => cpucache::self_test(),
+        "test" => {
+            let _ = cpucache::self_test();
+        }
         _ => {
             shell_println!("Usage: cpucache [topology|rates|stats|test]");
             set_exit(1);
@@ -105202,7 +105372,9 @@ fn cmd_aiostat(args: &str) {
                 ops
             );
         }
-        "test" => aiostat::self_test(),
+        "test" => {
+            let _ = aiostat::self_test();
+        }
         _ => {
             shell_println!("Usage: aiostat <init|create|destroy|submit|complete|rings|stats|test>");
             shell_println!("  create <pid> [sq_size] [cq_size]  — create ring");
@@ -105329,7 +105501,9 @@ fn cmd_kthread(args: &str) {
                 ops
             );
         }
-        "test" => kthread::self_test(),
+        "test" => {
+            let _ = kthread::self_test();
+        }
         _ => {
             shell_println!("Usage: kthread <init|register|unregister|state|list|cpu|stats|test>");
             shell_println!("  register <name> [cpu]         — create kernel thread");
@@ -105491,7 +105665,9 @@ fn cmd_mmapstat(args: &str) {
                 ops
             );
         }
-        "test" => mmapstat::self_test(),
+        "test" => {
+            let _ = mmapstat::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: mmapstat <init|register|map|unmap|protect|types|procs|stats|test>"
@@ -105631,7 +105807,9 @@ fn cmd_rqstat(args: &str) {
                 ops
             );
         }
-        "test" => rqstat::self_test(),
+        "test" => {
+            let _ = rqstat::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: rqstat <init|register|enqueue|dequeue|balance|wait|cpus|stats|test>"
@@ -105749,7 +105927,9 @@ fn cmd_thpstat(args: &str) {
                 ck
             );
         }
-        "test" => thpstat::self_test(),
+        "test" => {
+            let _ = thpstat::self_test();
+        }
         _ => {
             shell_println!("Usage: thpstat <init|promote|demote|split|compact|sizes|stats|test>");
             shell_println!("  promote [pmd|pud]              — record promotion");
@@ -105918,7 +106098,9 @@ fn cmd_cgiostat(args: &str) {
                 ops
             );
         }
-        "test" => cgiostat::self_test(),
+        "test" => {
+            let _ = cgiostat::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: cgiostat <init|create|remove|read|write|throttle|list|stats|test>"
@@ -106051,7 +106233,9 @@ fn cmd_bpfstat(args: &str) {
                 ops
             );
         }
-        "test" => bpfstat::self_test(),
+        "test" => {
+            let _ = bpfstat::self_test();
+        }
         _ => {
             shell_println!("Usage: bpfstat <init|load|unload|run|progs|maps|stats|test>");
             shell_println!(
@@ -106157,7 +106341,9 @@ fn cmd_pgtable(args: &str) {
             let (fs, fr, ff, fg) = pgtable::flush_stats();
             shell_println!("TLB: single={} range={} full={} global={}", fs, fr, ff, fg);
         }
-        "test" => pgtable::self_test(),
+        "test" => {
+            let _ = pgtable::self_test();
+        }
         _ => {
             shell_println!("Usage: pgtable <init|alloc|free|walk|flush|levels|stats|test>");
             shell_println!("  alloc <pml4|pdpt|pd|pt>        — allocate page table page");
@@ -106354,7 +106540,9 @@ fn cmd_zramstat(args: &str) {
                 ops
             );
         }
-        "test" => zramstat::self_test(),
+        "test" => {
+            let _ = zramstat::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: zramstat <init|create|remove|write|read|discard|devices|stats|test>"
@@ -106461,7 +106649,9 @@ fn cmd_ksmstat(args: &str) {
                 ops
             );
         }
-        "test" => ksmstat::self_test(),
+        "test" => {
+            let _ = ksmstat::self_test();
+        }
         _ => {
             shell_println!("Usage: ksmstat <init|register|merge|unmerge|scan|procs|stats|test>");
             shell_println!("  register <pid> <name>          — register process");
@@ -106557,7 +106747,9 @@ fn cmd_clocksrc(args: &str) {
                 ops
             );
         }
-        "test" => clocksrc::self_test(),
+        "test" => {
+            let _ = clocksrc::self_test();
+        }
         _ => {
             shell_println!("Usage: clocksrc <init|register|current|list|stats|test>");
             shell_println!("  register <name> [freq] [rating] — add clock source");
@@ -106665,7 +106857,9 @@ fn cmd_pmcstat(args: &str) {
                 ops
             );
         }
-        "test" => pmcstat::self_test(),
+        "test" => {
+            let _ = pmcstat::self_test();
+        }
         other => {
             shell_println!("Usage: pmcstat <init|sample|ipc|cmr|cpus|stats|test>");
             shell_println!("  sample <cpu> <event> [value]    — record counter sample");
@@ -106844,7 +107038,9 @@ fn cmd_cputhr(args: &str) {
                 ops
             );
         }
-        "test" => cputhr::self_test(),
+        "test" => {
+            let _ = cputhr::self_test();
+        }
         _ => {
             shell_println!("Usage: cputhr <init|throttle|clear|cap|temp|cpus|stats|test>");
             shell_println!("  throttle <cpu> [ms]            — record throttle event");
@@ -107110,7 +107306,9 @@ fn cmd_ipcns(args: &str) {
                 ops
             );
         }
-        "test" => ipcns::self_test(),
+        "test" => {
+            let _ = ipcns::self_test();
+        }
         _ => {
             shell_println!("Usage: ipcns <init|create|destroy|shm|sem|msg|list|stats|test>");
             shell_println!("  create <name>                  — create IPC namespace");
@@ -107227,7 +107425,9 @@ fn cmd_netqueue(args: &str) {
                 ops
             );
         }
-        "test" => netqueue::self_test(),
+        "test" => {
+            let _ = netqueue::self_test();
+        }
         _ => {
             shell_println!("Usage: netqueue <init|register|rx|tx|queues|stats|test>");
             shell_println!("  register <iface> <qid> [rx|tx] — register queue");
@@ -107325,7 +107525,9 @@ fn cmd_secmod(args: &str) {
                 ops
             );
         }
-        "test" => secmod::self_test(),
+        "test" => {
+            let _ = secmod::self_test();
+        }
         _ => {
             shell_println!("Usage: secmod <init|register|check|deny|modules|stats|test>");
             shell_println!("  check <module> [hook]          — record allow");
@@ -107418,7 +107620,9 @@ fn cmd_vmballoon(args: &str) {
                 ops
             );
         }
-        "test" => vmballoon::self_test(),
+        "test" => {
+            let _ = vmballoon::self_test();
+        }
         _ => {
             shell_println!("Usage: vmballoon <init|inflate|deflate|target|status|stats|test>");
             shell_println!("  inflate [pages]                — inflate balloon");
@@ -107547,7 +107751,9 @@ fn cmd_devfreq(args: &str) {
             let (devs, trans, ops) = devfreq::stats();
             shell_println!("Devices: {}  Transitions: {}  Ops: {}", devs, trans, ops);
         }
-        "test" => devfreq::self_test(),
+        "test" => {
+            let _ = devfreq::self_test();
+        }
         _ => {
             shell_println!("Usage: devfreq <init|register|transition|governor|list|stats|test>");
             shell_println!("  register <name> [min_khz] [max_khz] — register device");
@@ -107640,7 +107846,9 @@ fn cmd_hwrng(args: &str) {
                 ops
             );
         }
-        "test" => hwrng::self_test(),
+        "test" => {
+            let _ = hwrng::self_test();
+        }
         _ => {
             shell_println!("Usage: hwrng <init|generate|request|pool|sources|stats|test>");
             shell_println!(
@@ -107722,7 +107930,9 @@ fn cmd_acpistat(args: &str) {
                 ops
             );
         }
-        "test" => acpistat::self_test(),
+        "test" => {
+            let _ = acpistat::self_test();
+        }
         _ => {
             shell_println!("Usage: acpistat <init|event|gpe|events|gpes|stats|test>");
             shell_println!("  event <power|sleep|lid_open|lid_close|ac_on|battery|thermal>");
@@ -107868,7 +108078,9 @@ fn cmd_userfault(args: &str) {
                 ops
             );
         }
-        "test" => userfault::self_test(),
+        "test" => {
+            let _ = userfault::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: userfault <init|register|unregister|fault|resolve|list|stats|test>"
@@ -107971,7 +108183,9 @@ fn cmd_ioport(args: &str) {
                 ops
             );
         }
-        "test" => ioport::self_test(),
+        "test" => {
+            let _ = ioport::self_test();
+        }
         _ => {
             shell_println!("Usage: ioport <init|register|in|out|list|stats|test>");
             shell_println!("  register <name> <base_hex> <len> — register port region");
@@ -108077,7 +108291,9 @@ fn cmd_msivec(args: &str) {
                 ops
             );
         }
-        "test" => msivec::self_test(),
+        "test" => {
+            let _ = msivec::self_test();
+        }
         _ => {
             shell_println!("Usage: msivec <init|alloc|free|interrupt|target|list|stats|test>");
             shell_println!("  alloc <dev> <msi|msix> <count> [cpu] — allocate vectors");
@@ -108195,7 +108411,9 @@ fn cmd_cpuset(args: &str) {
                 ops
             );
         }
-        "test" => cpuset::self_test(),
+        "test" => {
+            let _ = cpuset::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: cpuset <init|create|destroy|assign|remove|affinity|list|stats|test>"
@@ -108316,7 +108534,9 @@ fn cmd_ftrace(args: &str) {
                 ops
             );
         }
-        "test" => ftrace::self_test(),
+        "test" => {
+            let _ = ftrace::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: ftrace <init|add|remove|enable|disable|hit|on|off|list|stats|test>"
@@ -108446,7 +108666,9 @@ fn cmd_kstack(args: &str) {
                 ops
             );
         }
-        "test" => kstack::self_test(),
+        "test" => {
+            let _ = kstack::self_test();
+        }
         _ => {
             shell_println!("Usage: kstack <init|register|usage|overflow|guard|list|stats|test>");
             shell_println!("  register <cpu> <size>   — register a CPU stack, size in bytes");
@@ -108565,7 +108787,9 @@ fn cmd_fnotify(args: &str) {
                 ops
             );
         }
-        "test" => fnotify::self_test(),
+        "test" => {
+            let _ = fnotify::self_test();
+        }
         _ => {
             shell_println!("Usage: fnotify <init|watch|unwatch|event|drain|list|stats|test>");
             shell_println!("  watch <inotify|fanotify|dnotify>   — add watch");
@@ -108687,7 +108911,9 @@ fn cmd_netlat(args: &str) {
                 ops
             );
         }
-        "test" => netlat::self_test(),
+        "test" => {
+            let _ = netlat::self_test();
+        }
         _ => {
             shell_println!("Usage: netlat <init|register|rtt|proc|list|stats|test>");
             shell_println!("  register <iface>             — register interface");
@@ -108817,7 +109043,9 @@ fn cmd_diskstat(args: &str) {
                 ops
             );
         }
-        "test" => diskstat::self_test(),
+        "test" => {
+            let _ = diskstat::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: diskstat <init|register|read|write|discard|flush|list|stats|test>"
@@ -108944,7 +109172,9 @@ fn cmd_taskio(args: &str) {
                 ops
             );
         }
-        "test" => taskio::self_test(),
+        "test" => {
+            let _ = taskio::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: taskio <init|register|unregister|read|write|cancel|list|stats|test>"
@@ -109061,7 +109291,9 @@ fn cmd_ttystat(args: &str) {
                 ops
             );
         }
-        "test" => ttystat::self_test(),
+        "test" => {
+            let _ = ttystat::self_test();
+        }
         _ => {
             shell_println!("Usage: ttystat <init|register|read|write|signal|list|stats|test>");
             shell_println!("  register <name> <console|serial|pty|vt> [bufsize]");
@@ -109235,7 +109467,9 @@ fn cmd_swapact(args: &str) {
                 ops
             );
         }
-        "test" => swapact::self_test(),
+        "test" => {
+            let _ = swapact::self_test();
+        }
         _ => {
             shell_println!("Usage: swapact <init|register|in|out|list|stats|test>");
             shell_println!("  register <name> <partition|file|zram> <pages> [priority]");
@@ -109307,7 +109541,9 @@ fn cmd_schedwait(args: &str) {
                 ops
             );
         }
-        "test" => schedwait::self_test(),
+        "test" => {
+            let _ = schedwait::self_test();
+        }
         _ => {
             shell_println!("Usage: schedwait <init|wait|reasons|histogram|stats|test>");
             shell_println!("  wait <runqueue|iowait|lock|sleep|ipc|pgfault> <ns>");
@@ -109415,7 +109651,9 @@ fn cmd_ratestat(args: &str) {
                 ops
             );
         }
-        "test" => ratestat::self_test(),
+        "test" => {
+            let _ = ratestat::self_test();
+        }
         _ => {
             shell_println!("Usage: ratestat <init|register|allow|deny|refill|list|stats|test>");
             shell_println!("  register <name> <rate/s> <burst>  — register limiter");
@@ -109522,7 +109760,9 @@ fn cmd_iomem(args: &str) {
                 ops
             );
         }
-        "test" => iomem::self_test(),
+        "test" => {
+            let _ = iomem::self_test();
+        }
         _ => {
             shell_println!("Usage: iomem <init|register|unregister|read|write|list|stats|test>");
             shell_println!("  register <name> <base_hex> <size_hex>  — register region");
@@ -109660,7 +109900,9 @@ fn cmd_vmzone(args: &str) {
                 ops
             );
         }
-        "test" => vmzone::self_test(),
+        "test" => {
+            let _ = vmzone::self_test();
+        }
         _ => {
             shell_println!("Usage: vmzone <init|register|alloc|free|reclaim|list|stats|test>");
             shell_println!("  register <name> <dma|dma32|normal|highmem|movable> <pages>");
@@ -109741,7 +109983,9 @@ fn cmd_buddyinfo(args: &str) {
                 ops
             );
         }
-        "test" => budstat::self_test(),
+        "test" => {
+            let _ = budstat::self_test();
+        }
         _ => {
             shell_println!("Usage: buddyinfo <init|register|update|split|list|stats|test>");
             shell_println!("  update <zone> <order> <count>  — set free count");
@@ -109968,7 +110212,9 @@ fn cmd_cgmem(args: &str) {
                 ops
             );
         }
-        "test" => cgmem::self_test(),
+        "test" => {
+            let _ = cgmem::self_test();
+        }
         _ => {
             shell_println!(
                 "Usage: cgmem <init|create|remove|charge|uncharge|swap|list|stats|test>"
@@ -110077,7 +110323,9 @@ fn cmd_vmfrag(args: &str) {
                 ops
             );
         }
-        "test" => vmfrag::self_test(),
+        "test" => {
+            let _ = vmfrag::self_test();
+        }
         _ => {
             shell_println!("Usage: vmfrag <init|register|update|compact|list|stats|test>");
             shell_println!("  update <zone> <order> <index_x10>  — set frag index");
@@ -110189,7 +110437,9 @@ fn cmd_pidfd(args: &str) {
                 ops
             );
         }
-        "test" => pidfd::self_test(),
+        "test" => {
+            let _ = pidfd::self_test();
+        }
         _ => {
             shell_println!("Usage: pidfd <init|create|poll|signal|wait|close|list|stats|test>");
             shell_println!("  create <pid>   — record pidfd creation");
@@ -118023,7 +118273,7 @@ fn cmd_cgroup(args: &str) {
             }
         }
         "test" => {
-            cgroup::self_test();
+            let _ = cgroup::self_test();
         }
         _ => {
             shell_println!("Usage: cgroup [list|create|delete|cpu|mem|io|stats|test]");
@@ -118169,7 +118419,7 @@ fn cmd_pidns(args: &str) {
             }
         }
         "test" => {
-            pidns::self_test();
+            let _ = pidns::self_test();
         }
         _ => {
             shell_println!("Usage: pidns [list|create|delete|stats|test]");
@@ -118402,7 +118652,7 @@ fn cmd_userns(args: &str) {
             );
         }
         "test" => {
-            userns::self_test();
+            let _ = userns::self_test();
         }
         _ => {
             shell_println!("Usage: userns [list|create|delete|uidmap|gidmap|stats|test]");
@@ -118739,7 +118989,7 @@ fn cmd_netns(args: &str) {
             }
         }
         "test" => {
-            netns::self_test();
+            let _ = netns::self_test();
         }
         _ => {
             shell_println!("Usage: netns [list|create|delete|ifconfig|route|stats|up|down|test]");
@@ -120988,7 +121238,7 @@ fn cmd_container(args: &str) {
         "test" => {
             #[inline(never)]
             fn case() {
-                container::self_test();
+                let _ = container::self_test();
             }
             case();
         }
@@ -121477,7 +121727,7 @@ fn parse_cpus_to_percent(s: &str) -> Option<u64> {
 /// `parse_mem_size_to_frames` / `parse_cpus_to_percent` helpers added for
 /// `oci run --memory`/`--cpus`, covering the happy paths and the rejection
 /// cases. Called from `main.rs` alongside the other subsystem self-tests.
-pub fn cli_resource_parser_self_test() {
+pub fn cli_resource_parser_self_test() -> crate::error::KernelResult<()> {
     let frame = crate::mm::frame::FRAME_SIZE as u64; // 16384
 
     // Memory: bare bytes round up to whole frames.
@@ -121517,6 +121767,7 @@ pub fn cli_resource_parser_self_test() {
     assert_eq!(parse_cpus_to_percent("abc"), None);
 
     crate::serial_println!("[kshell] CLI resource-limit parser self-test PASSED");
+    Ok(())
 }
 
 /// `docker` (alias `dk`) — Docker-CLI-compatible front-end.
@@ -123978,7 +124229,7 @@ fn cmd_scfilter(args: &str) {
             shell_println!("  Denied attempts:  {}", denied);
         }
         "test" => {
-            scfilter::self_test();
+            let _ = scfilter::self_test();
         }
         _ => {
             shell_println!("Usage: scfilter [list|install|remove|deny|allow|check|info|test]");

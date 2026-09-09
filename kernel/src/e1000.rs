@@ -977,14 +977,14 @@ pub fn init(hhdm_offset: u64) {
 // ---------------------------------------------------------------------------
 
 /// Self-test for e1000 driver.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[e1000] Running self-test...");
 
     let has_device = DEVICE.lock().is_some();
     if !has_device {
         serial_println!("[e1000]   No device — skipping hardware tests");
         serial_println!("[e1000] Self-test PASSED (no hardware)");
-        return;
+        return Ok(());
     }
 
     // Test 1: MAC address is valid.
@@ -1041,10 +1041,11 @@ pub fn self_test() {
     // The statistics counters then separate "the descriptor was processed"
     // from "the frame was actually transmitted", which are not the same claim.
     if !tx_datapath_test(mac) {
-        return;
+        return Ok(());
     }
 
     serial_println!("[e1000] Self-test PASSED");
+    Ok(())
 }
 
 /// Transmit one synthetic frame and verify the hardware reported it back.

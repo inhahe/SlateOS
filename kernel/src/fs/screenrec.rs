@@ -718,7 +718,7 @@ pub fn format_duration(seconds: u32) -> String {
 // ---------------------------------------------------------------------------
 
 /// Run self-tests for the screen recording module.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[screenrec] Running self-tests...");
@@ -892,4 +892,5 @@ pub fn self_test() {
     init_defaults();
 
     serial_println!("[screenrec] All self-tests passed.");
+    Ok(())
 }

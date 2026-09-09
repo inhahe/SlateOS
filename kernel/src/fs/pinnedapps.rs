@@ -397,7 +397,7 @@ pub fn stats() -> (usize, usize, usize, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("pinnedapps::self_test() — running tests...");
 
     // Reset at both ends. `init_defaults()` early-returns once the state
@@ -539,4 +539,5 @@ pub fn self_test() {
     init_defaults();
 
     crate::serial_println!("pinnedapps::self_test() — all 9 tests passed");
+    Ok(())
 }

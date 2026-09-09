@@ -211,7 +211,7 @@ impl CondVar {
 /// Tests the API surface and basic semantics.  Full multi-task tests
 /// (producer-consumer, broadcast wake) require spawning tasks and are
 /// timing-dependent — covered separately.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[condvar] Running self-test...");
@@ -284,4 +284,5 @@ pub fn self_test() {
     serial_println!("[condvar]   wait_timeout_ns (zero): OK");
 
     serial_println!("[condvar] Self-test PASSED");
+    Ok(())
 }

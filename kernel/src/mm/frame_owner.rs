@@ -657,7 +657,7 @@ pub fn top_owners() -> [(Owner, u32); Owner::COUNT] {
     clippy::arithmetic_side_effects,
     clippy::expect_used
 )]
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::mm::frame;
 
     serial_println!("[frame_owner] Running self-test...");
@@ -850,4 +850,5 @@ pub fn self_test() {
 
     skips.report("[frame_owner]");
     serial_println!("[frame_owner] Self-test PASSED{}", skips.suffix());
+    Ok(())
 }

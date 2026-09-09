@@ -445,7 +445,7 @@ pub fn stats() -> (&'static str, &'static str, u64, u64, usize, u64) {
 ///
 /// The pristine value is `None` rather than a table: this module initialises
 /// lazily, and `None` is exactly what a fresh boot holds.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     // `OPS` is a lock-free mirror of `state.ops`, which lives *inside* the
     // table. `with_pristine` restores the table and so restores `state.ops`,
     // but it cannot know about the mirror -- leave it and the two disagree
@@ -454,6 +454,7 @@ pub fn self_test() {
     let saved_ops = OPS.load(Ordering::Relaxed);
     crate::fs::selftest::with_pristine(&STATE, None, self_test_inner);
     OPS.store(saved_ops, Ordering::Relaxed);
+    Ok(())
 }
 
 fn self_test_inner() {

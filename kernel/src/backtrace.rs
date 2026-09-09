@@ -299,7 +299,8 @@ pub fn dump_stack_scan(rsp: u64, words: usize) {
 /// 2. The first frame's return address is in kernel text.
 /// 3. walk_from(0) returns zero frames (null pointer stops walk).
 #[inline(never)]
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use crate::selftest;
     serial_println!("[backtrace] Running self-test...");
 
     // Test 1: capture() from here should get at least one frame.
@@ -308,13 +309,13 @@ pub fn self_test() {
         serial_println!("[backtrace]   WARNING: capture() returned 0 frames");
         serial_println!("[backtrace]   (frame pointers may be absent in release build)");
         serial_println!("[backtrace] Self-test SKIPPED (no frame pointers)");
-        return;
+        return Ok(());
     }
     serial_println!("[backtrace]   capture(): {} frame(s)", bt.count);
 
     // Test 2: first frame return address is in kernel text.
     let first = bt.frames[0].return_addr;
-    assert!(
+    selftest::check!(
         is_kernel_text_addr(first),
         "first return address {:#x} not in kernel text",
         first
@@ -326,8 +327,9 @@ pub fn self_test() {
 
     // Test 3: walk_from(0) should return nothing.
     let empty = walk_from(0);
-    assert_eq!(empty.count, 0, "walk_from(0) should return 0 frames");
+    selftest::check_eq!(empty.count, 0, "walk_from(0) should return 0 frames");
     serial_println!("[backtrace]   walk_from(0): 0 frames (OK)");
 
     serial_println!("[backtrace] Self-test PASSED");
+    Ok(())
 }

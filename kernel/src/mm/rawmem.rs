@@ -167,7 +167,7 @@ pub unsafe fn fill_u8(p: *mut u8, v: u8, len: usize) {
 /// all stand on, so they run *before* those subsystems' own self-tests: if a
 /// hand-written `asm!` store had the wrong operand size or direction, every
 /// downstream "OK" would be meaningless.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[rawmem] Running self-test...");
@@ -223,4 +223,5 @@ pub fn self_test() {
     serial_println!("[rawmem]   zero-length fill is a no-op: OK");
 
     serial_println!("[rawmem] Self-test PASSED");
+    Ok(())
 }

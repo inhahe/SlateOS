@@ -232,7 +232,7 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("sockbuf::self_test() — running tests...");
     // Start from a clean, empty state so the assertions below are exact and
     // no fixtures leak into the live buffer-pool table afterwards.
@@ -324,4 +324,5 @@ pub fn self_test() {
     *STATE.lock() = None;
     init_defaults();
     crate::serial_println!("sockbuf::self_test() — all 8 tests passed");
+    Ok(())
 }

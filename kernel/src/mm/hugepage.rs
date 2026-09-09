@@ -362,7 +362,7 @@ pub fn stats() -> HugePageStats {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the huge page subsystem.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[hugepage] Running self-test...");
 
     let pml4 = page_table::active_pml4_phys();
@@ -379,7 +379,7 @@ pub fn self_test() {
             serial_println!(
                 "[hugepage] Self-test SKIPPED (no 2 MiB contiguous block free on this machine)"
             );
-            return;
+            return Ok(());
         }
         Err(e) => {
             serial_println!(
@@ -479,4 +479,5 @@ pub fn self_test() {
     );
 
     serial_println!("[hugepage] Self-test PASSED");
+    Ok(())
 }

@@ -271,7 +271,7 @@ pub fn reset() {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the memory scrubber.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[scrub] Running self-test...");
 
     // Test 1: Init sets up range correctly.
@@ -337,4 +337,5 @@ pub fn self_test() {
     disable();
 
     serial_println!("[scrub] Self-test PASSED");
+    Ok(())
 }

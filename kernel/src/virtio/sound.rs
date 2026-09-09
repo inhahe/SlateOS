@@ -1176,7 +1176,7 @@ fn generate_sine_440(buf: &mut [u8], sample_offset: u32) {
 ///
 /// If no virtio-sound device is present (common without `-device virtio-sound-pci`),
 /// the test gracefully reports "no device" and passes.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[virtio-snd] Running self-test...");
 
     if !is_available() {
@@ -1187,7 +1187,7 @@ pub fn self_test() {
             "[virtio-snd]   Not available — either no device is attached, or init failed above"
         );
         serial_println!("[virtio-snd] Self-test PASSED (no device)");
-        return;
+        return Ok(());
     }
 
     let (available, outputs, inputs, playing) = status_info();
@@ -1210,4 +1210,5 @@ pub fn self_test() {
     }
 
     serial_println!("[virtio-snd] Self-test PASSED");
+    Ok(())
 }

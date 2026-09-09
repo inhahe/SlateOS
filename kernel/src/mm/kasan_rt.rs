@@ -366,7 +366,7 @@ pub unsafe extern "C" fn __asan_unregister_globals(_globals: *mut u8, _n: usize)
 /// prints nonsense. Calling the entry points directly with a known-poisoned
 /// heap address checks the plumbing end to end without needing the instrumented
 /// toolchain.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[kasan-rt] Running self-test...");
     let mut skips = crate::fs::selftest::Skips::new();
     // Set inside the closure below; a `&mut Skips` capture would work too, but
@@ -444,4 +444,5 @@ pub fn self_test() {
 
     skips.report("[kasan-rt]");
     serial_println!("[kasan-rt] Self-test PASSED{}", skips.suffix());
+    Ok(())
 }

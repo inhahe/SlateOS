@@ -482,7 +482,7 @@ pub fn stats() -> (usize, usize, usize, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("diskencrypt::self_test() — running tests...");
 
     // Start from the seeded defaults, not from whatever a previous run left.
@@ -598,4 +598,5 @@ pub fn self_test() {
     init_defaults();
 
     crate::serial_println!("diskencrypt::self_test() — all 12 tests passed");
+    Ok(())
 }

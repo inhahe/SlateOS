@@ -354,7 +354,7 @@ pub fn reset() {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the migration tracker.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[sched_migrate] Running self-test...");
 
     // Save current state.
@@ -418,4 +418,5 @@ pub fn self_test() {
     }
 
     serial_println!("[sched_migrate] Self-test PASSED");
+    Ok(())
 }

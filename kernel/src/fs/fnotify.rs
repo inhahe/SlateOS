@@ -312,7 +312,7 @@ pub fn stats() -> (u64, u64, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("fnotify::self_test() — running tests...");
     // Start from a clean, freshly-defaulted state so the assertions below are
     // exact and the watch/event fixtures this test creates do not leak into the
@@ -383,4 +383,5 @@ pub fn self_test() {
     *STATE.lock() = None;
     init_defaults();
     crate::serial_println!("fnotify::self_test() — all 8 tests passed");
+    Ok(())
 }

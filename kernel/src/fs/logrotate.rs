@@ -351,7 +351,7 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("logrotate::self_test() — running tests...");
     // Start from a clean state with the default policy so the assertions below
     // are exact, and clear at the end so the simulated rotations performed by
@@ -432,4 +432,5 @@ pub fn self_test() {
     *STATE.lock() = None;
     init_defaults();
     crate::serial_println!("logrotate::self_test() — all 8 tests passed");
+    Ok(())
 }

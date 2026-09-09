@@ -1129,8 +1129,9 @@ pub fn procfs_content() -> String {
 ///
 /// Each pristine value is the `static`'s own initialiser, which is the one
 /// spelling of "what a fresh boot holds" that cannot drift away from it.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner);
+    Ok(())
 }
 
 fn self_test_inner() {

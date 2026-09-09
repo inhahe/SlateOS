@@ -378,7 +378,7 @@ fn play_via_pcspk(event: NotifySound) {
 // ---------------------------------------------------------------------------
 
 /// Self-test: verify notification sound generation.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[notify] Running self-test...");
 
     // Test 1: Generate PCM for each event type.
@@ -426,4 +426,5 @@ pub fn self_test() {
     }
 
     serial_println!("[notify] Self-test PASSED");
+    Ok(())
 }

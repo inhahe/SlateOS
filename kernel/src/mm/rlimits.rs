@@ -412,7 +412,7 @@ pub fn tracked_count() -> usize {
 
 /// Self-test for resource limits.
 #[allow(clippy::expect_used)] // Tests panic on unexpected state by design.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[rlimits] Running self-test...");
 
     // --- 1. Default limits are unlimited ---
@@ -504,4 +504,5 @@ pub fn self_test() {
     serial_println!("[rlimits]   is_unlimited check: OK");
 
     serial_println!("[rlimits] Self-test PASSED");
+    Ok(())
 }

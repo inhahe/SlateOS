@@ -421,7 +421,7 @@ pub fn stats() -> (usize, u64, u64, u32, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("screentime::self_test() — running tests...");
     // Start from a clean, freshly-defaulted state so the assertions below are
     // exact and the tracked apps / daily-history / limit fixtures this test
@@ -505,4 +505,5 @@ pub fn self_test() {
     *STATE.lock() = None;
     init_defaults();
     crate::serial_println!("screentime::self_test() — all 11 tests passed");
+    Ok(())
 }

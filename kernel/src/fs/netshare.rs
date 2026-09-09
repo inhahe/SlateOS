@@ -323,7 +323,7 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("netshare::self_test() — running tests...");
     init_defaults();
 
@@ -502,4 +502,5 @@ pub fn self_test() {
     );
 
     crate::serial_println!("netshare::self_test() — all 12 tests passed");
+    Ok(())
 }

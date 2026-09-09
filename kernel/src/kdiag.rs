@@ -424,7 +424,7 @@ pub fn section(name: &str) -> Option<DiagSection> {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the diagnostic report generator.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[kdiag] Running self-test...");
 
     // Test 1: Full report generates all sections.
@@ -469,4 +469,5 @@ pub fn self_test() {
     serial_println!("[kdiag]   Boot health: OK");
 
     serial_println!("[kdiag] Self-test PASSED");
+    Ok(())
 }

@@ -336,13 +336,13 @@ pub fn measure<F: FnOnce()>(event: Event, f: F) -> Option<u64> {
 /// 3. Counter reset zeros the value.
 ///
 /// If PMU is unavailable, logs the skip and passes.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[pmc] Running self-test...");
 
     if !is_available() {
         serial_println!("[pmc]   PMU not available (skipping hardware tests)");
         serial_println!("[pmc] Self-test PASSED (no PMU)");
-        return;
+        return Ok(());
     }
 
     let features = cpu::features().unwrap();
@@ -388,4 +388,5 @@ pub fn self_test() {
     serial_println!("[pmc]   Bounds checking: OK");
 
     serial_println!("[pmc] Self-test PASSED");
+    Ok(())
 }

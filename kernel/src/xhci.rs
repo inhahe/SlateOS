@@ -2467,7 +2467,7 @@ pub fn hid_report_to_scancode(report: &HidKeyboardReport) -> Option<u8> {
 /// Verifies that PCI detection works and the controller can be
 /// initialized.  If no xHCI hardware is present, the test passes
 /// (non-fatal).
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("[xhci] Self-test...");
 
     // Test 1: PCI detection API.
@@ -2544,4 +2544,5 @@ pub fn self_test() {
     assert_eq!(core::mem::size_of::<HidMouseReport>(), 4);
 
     crate::serial_println!("[xhci] Self-test PASSED");
+    Ok(())
 }

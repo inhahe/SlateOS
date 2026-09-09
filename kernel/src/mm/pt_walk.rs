@@ -520,7 +520,7 @@ const fn compose_vaddr(pml4_idx: usize, pdpt_idx: usize, pd_idx: usize, pt_idx: 
 // ---------------------------------------------------------------------------
 
 /// Self-test for the page table walker.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[pt_walk] Running self-test...");
 
     // Test 1: compose_vaddr produces correct addresses.
@@ -639,4 +639,5 @@ pub fn self_test() {
     );
 
     serial_println!("[pt_walk] Self-test PASSED");
+    Ok(())
 }

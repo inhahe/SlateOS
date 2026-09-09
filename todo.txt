@@ -55868,3 +55868,56 @@ checked and how, so the next reader can see the evidence rather than repeat
 the investigation. That is a mitigation and not a fix -- it only helps entries
 somebody has already re-checked.
 
+
+
+## Q47 needs one measurement before it can be answered (lane A, 2026-09-09)
+
+`open-questions.md` lists Q47 (shared vs separate cargo `target/` across the
+four worktrees) as "operator input received, needs re-evaluation on E: before
+deciding". It has no `design-decisions.md` entry, and it should not get one
+until the measurement below is taken -- writing it up from reasoning alone is
+the mistake s923 documents.
+
+**Why it is not answerable from the armchair.** I talked myself into and back
+out of a wrong argument today, so it is worth writing down. The intuitive case
+against sharing is cache thrash: four worktrees on four branches, each build
+invalidating the others. That is **wrong**, and `scripts/prune-build-cache.py`'s
+own header says why -- when a unit's inputs change cargo mints a new
+`-<hash>` artifact and writes it *beside* the old one rather than replacing it.
+Divergent branches therefore coexist in one `target/`; they do not evict each
+other. So sharing really would save the space taken by dependency units that
+are byte-identical across branches, which is most of the third-party tree.
+
+The real cost of sharing is different: cargo takes an **exclusive lock** on a
+target directory for the duration of a build, so a shared one serialises the
+lanes by construction.
+
+That makes the operator's own hypothesis the entire crux, exactly as they
+stated it:
+
+> "I don't know if that's really an issue because I think two builds going at a
+> time would each take twice as long anyway due to CPU and filesystem I/O
+> saturation?"
+
+If that is true, serialisation is free and sharing is a pure space win. If it
+is false, sharing trades wall-clock for disk. Nobody has measured it.
+
+**The measurement.** Wall-clock of the same clean build, (a) alone, and (b) with
+a second lane's identical build running concurrently in its own target dir. If
+2 x concurrent is within ~10% of 2 x serial, the operator is right. Use two
+worktrees that are not mid-task, run it when no boot test is live (it competes
+for the same CPU and disk), and record it in `bench/` so it is re-runnable --
+`bench/file-read-latency.py` is the pattern.
+
+**Context that is already established, so it need not be re-derived:**
+
+- Space is already bounded automatically: `prune-build-cache.py` is wired into
+  `boot-test.sh` (`prune_build_cache_if_low`) and fires when free space drops
+  below **100 GB**, taking only units cargo has not invoked in 14 days. E: had
+  208.8 GB free on 2026-09-09, which is why nothing is being pruned now.
+- The operator recalled that an earlier evaluation found "relatively little
+  could be spared". The pruner's own recorded measurements disagree: lane A's
+  `incremental/` was 31.6 GB of a 48.4 GB tree (65%), and lane B held 19,769
+  units untouched for over a week. Worth reconciling before quoting either.
+- Separate target dirs are the status quo, so "do nothing" is a real option and
+  costs only disk.

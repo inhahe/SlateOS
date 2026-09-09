@@ -125220,11 +125220,23 @@ with a space in it, and a name longer than its column. Both are covered by
 tests here, so if lane A escapes the name the tests keep passing and the parser
 does not need to change.
 
-**Still outstanding:** the 2,256-line in-memory model in `snapshots.rs` is
-still there, still unreachable, and is now clearly redundant rather than merely
-unused — the kernel does this. It should shrink to the display types the page
-needs. Left for a separate change because deleting two thousand lines and
-rewriting a page in one commit makes both harder to review.
+**And the model is gone, same day.** `snapshots.rs` is **2,256 → 313 lines**:
+the reader, `format_size`, and their tests. Removing the
+`#![allow(dead_code)]` *first* is what made the deletion safe — the compiler
+named all **41** unreachable items, so the cut was made from its list rather
+than by eye.
+
+**30 passing tests were deleted with it**, and that is the right outcome rather
+than a cost to regret: they tested `SnapshotManager`, `BlockHash`,
+`SnapshotIncludes` and the rest — a userspace reimplementation of a kernel
+subsystem that should not exist. A test suite over code that should be deleted
+is an argument for keeping it, which is exactly the trap. The eight tests that
+matter — the ones over the format the kernel actually emits — all remain.
+
+That leaves `remote.rs` (1,619) and `associations.rs` (1,753) from this entry.
+Neither has the snapshots pair's saving grace of a finished kernel subsystem to
+defer to, so each is a genuine "wire it or delete it" and needs deciding on its
+own merits.
 
 **Found by** the palette conversion. Every audit until then read only
 `main.rs`, so these three files were never looked at; they were found by

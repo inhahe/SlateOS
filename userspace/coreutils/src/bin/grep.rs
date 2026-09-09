@@ -30,13 +30,27 @@
 //! | `--include=G` / `--exclude=G` | search only / never the files whose name matches glob `G` |
 //! | `--exclude-from=F` | read `--exclude` globs from file `F`, one per line |
 //! | `--exclude-dir=G` | do not descend into a directory whose name matches `G` |
-//! | `--exclude-path=A/B` | do not descend into a directory whose *path* ends `A/B` (ours) |
 //! | `-Z` | write a NUL after a file name instead of the `:` or newline |
 //! | `-z` | the input is NUL-separated too, and so is the output |
 //! | `-a` | accepted and ignored: this grep never suppresses binary output |
 //! | `--` | end of options; what follows is a pattern or a file |
 //!
 //! Exit status: 0 if a line was selected, 1 if none was, 2 on an error.
+//!
+//! ## Beyond GNU
+//!
+//! Five options GNU does not have, ported from the operator's own grep. Each
+//! is opt-in and each is spelled so that no GNU abbreviation that works today
+//! stops working -- see `design-decisions.md` 1008 for the rule and for what
+//! each one diverges from.
+//!
+//! | option | what it does |
+//! |---|---|
+//! | `--every-pattern` | a file prints nothing unless **every** pattern occurs in it |
+//! | `--near=N` | every pattern within `N` lines of another, and only lines inside a satisfying window are selected |
+//! | `--escape-control` | render control bytes as `\xNN` instead of sending them to the terminal |
+//! | `--keep-color-escapes` | under `--escape-control`, let a complete colour sequence through |
+//! | `--exclude-path=A/B` | do not descend into a directory whose *path* ends `A/B` |
 //!
 //! ## Patterns are patterns
 //!
@@ -536,6 +550,10 @@ struct Options {
     /// `--escape-control`: render control bytes as `\xNN` instead of sending
     /// them to the terminal. See [`escaped`].
     escape_control: bool,
+    /// `--keep-color-escapes`: under `--escape-control`, a complete SGR
+    /// sequence survives instead of being escaped. Meaningless on its own, and
+    /// refused on its own rather than ignored. See [`sgr_len`].
+    keep_color_escapes: bool,
     /// `--near NUM`: every pattern must occur within NUM lines of another,
     /// and only matching lines inside a satisfying window are selected. The
     /// sliding-window form of [`Options::every_pattern`]; see
@@ -924,6 +942,7 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("every-pattern", Takes::Nothing),
     ("near", Takes::Required),
     ("escape-control", Takes::Nothing),
+    ("keep-color-escapes", Takes::Nothing),
     ("invert-match", Takes::Nothing),
     ("silent", Takes::Nothing),
     ("text", Takes::Nothing),
@@ -1002,6 +1021,8 @@ Miscellaneous:
       --every-pattern        a file must contain every pattern, not any of them
       --near=NUM             every pattern within NUM lines of another
       --escape-control       show control bytes as \\xNN instead of sending them
+      --keep-color-escapes   with --escape-control, let a complete colour
+                             sequence through unescaped
   -v, --invert-match        select non-matching lines
   -V, --version             display version information and exit
       --help                display this help text and exit
@@ -1131,6 +1152,7 @@ enum Flag {
     EveryPattern,
     Near,
     EscapeControl,
+    KeepColorEscapes,
     BinaryFiles,
     Color,
     Exclude,
@@ -1179,6 +1201,7 @@ fn long_flag(name: &str) -> Flag {
         "every-pattern" => Flag::EveryPattern,
         "near" => Flag::Near,
         "escape-control" => Flag::EscapeControl,
+        "keep-color-escapes" => Flag::KeepColorEscapes,
         "include" => Flag::Include,
         "ignore-case" => Flag::Short(b'i'),
         "no-ignore-case" => Flag::NoIgnoreCase,
@@ -1472,6 +1495,7 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
             Flag::EveryPattern => opts.every_pattern = true,
             Flag::Near => opts.near = near_arg(&quote::os_bytes(&required(value)))?,
             Flag::EscapeControl => opts.escape_control = true,
+            Flag::KeepColorEscapes => opts.keep_color_escapes = true,
             Flag::LineBuffered => opts.line_buffered = true,
             // Upstream's `default: usage (EXIT_TROUBLE)`. Unreachable as things
             // stand — `SHORT_OPTIONS` lists exactly the letters matched above,
@@ -1516,6 +1540,18 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
             _ => first,
         };
         patterns.extend(split_arg_patterns(&stripped));
+    }
+
+    // `--keep-color-escapes` exempts something from an escaping that is off by
+    // default, so on its own it can only be a no-op -- and a silent no-op on a
+    // plausible command is the defect `--exclude-path` was added to remove. It
+    // is refused rather than ignored, and deliberately does *not* imply
+    // `--escape-control`: a flag whose name promises to keep something should
+    // not quietly start rewriting everything else.
+    if opts.keep_color_escapes && !opts.escape_control {
+        return Err(
+            GREP.usage("--keep-color-escapes has no meaning without --escape-control".to_string())
+        );
     }
 
     // Recursion with no operand walks the working directory, as GNU does;
@@ -3080,24 +3116,102 @@ fn line_flush(out: &mut impl Write, opts: &Options) -> io::Result<()> {
 /// others would be worse than none, because it invites the belief that output
 /// is now safe to look at.
 ///
+/// # The one exemption
+///
+/// `--keep-color-escapes` lets a *complete* SGR sequence through unescaped, so
+/// that `ls --color | grep --escape-control --keep-color-escapes pat` keeps its
+/// colours. [`sgr_len`] is the whitelist and documents what it deliberately
+/// does not cover. The exemption applies to the whole body for the same reason
+/// the escaping does: colour in the unmatched half of a line is as much a
+/// colour as colour inside the match, so covering only the match would leave
+/// half the output looking like a bug.
+///
+/// The exemption is refused without `--escape-control` rather than ignored --
+/// on its own it could only ever be a no-op.
+///
 /// Flagged to the operator rather than done quietly — see `design-decisions.md`
 /// §1008.
 fn escaped<'a>(body: &'a [u8], opts: &Options) -> Cow<'a, [u8]> {
-    if !opts.escape_control || !body.iter().any(|b| *b < 0x20 && *b != b'\n' && *b != b'\r') {
+    if !opts.escape_control {
         return Cow::Borrowed(body);
     }
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = Vec::with_capacity(body.len());
-    for &b in body {
-        if b < 0x20 && b != b'\n' && b != b'\r' {
-            out.extend_from_slice(b"\\x");
-            out.push(HEX[usize::from(b >> 4)]);
-            out.push(HEX[usize::from(b & 0x0f)]);
-        } else {
-            out.push(b);
+    // Built at the first byte that actually changes, and never before: the
+    // cost of the option on ordinary text is one scan and no allocation.
+    let mut out: Option<Vec<u8>> = None;
+    let mut i = 0usize;
+    while i < body.len() {
+        if opts.keep_color_escapes
+            && let Some(n) = sgr_len(body, i)
+        {
+            let end = i.saturating_add(n);
+            if let Some(o) = out.as_mut() {
+                o.extend_from_slice(body.get(i..end).unwrap_or_default());
+            }
+            i = end;
+            continue;
         }
+        let b = *body.get(i).unwrap_or(&0);
+        if b < 0x20 && b != b'\n' && b != b'\r' {
+            let o = out.get_or_insert_with(|| {
+                let mut v = Vec::with_capacity(body.len().saturating_add(16));
+                v.extend_from_slice(body.get(..i).unwrap_or_default());
+                v
+            });
+            o.extend_from_slice(b"\\x");
+            o.push(HEX[usize::from(b >> 4)]);
+            o.push(HEX[usize::from(b & 0x0f)]);
+        } else if let Some(o) = out.as_mut() {
+            o.push(b);
+        }
+        i = i.saturating_add(1);
     }
-    Cow::Owned(out)
+    out.map_or(Cow::Borrowed(body), Cow::Owned)
+}
+
+/// The length of the complete SGR sequence beginning at `body[i]`, if one
+/// begins there: `ESC [`, then parameter bytes, then `m`.
+///
+/// # A whitelist, and why it has to be one
+///
+/// This is what `--keep-color-escapes` lets past [`escaped`], so it decides
+/// what a hostile file can still do to the reader's terminal. It is written as
+/// "recognise exactly this and nothing else" rather than "escape the dangerous
+/// ones", because the second form has to be right about every sequence that
+/// exists and the first only has to be right about one.
+///
+/// What that excludes is the point: `ESC [ 2 J` (erase display), `ESC [ H`
+/// (cursor home), `ESC ] 0 ; … BEL` (set the window title), `ESC ] 8 ; ; url`
+/// (a hyperlink whose text need not be its target), `ESC c` (full reset), and
+/// every device-report sequence that makes the terminal *send* something back.
+/// None of them end in `m`, so none of them are matched here.
+///
+/// An **incomplete** sequence is not matched either. `ESC [ 3 1` at the end of
+/// a line has no final byte, so it is escaped like any other stray `ESC`,
+/// rather than being passed on to swallow whatever the terminal reads next.
+///
+/// # What still gets through, honestly
+///
+/// SGR is colour *and* the rest of the graphic-rendition set, so `ESC [ 8 m`
+/// (conceal) survives and can make matched text invisible. That is the cost of
+/// asking for colours to survive, and it is a legibility problem rather than a
+/// terminal-control one -- the line this option draws is that the output
+/// cannot move the cursor, clear the screen, retitle the window or provoke a
+/// reply. Anyone who needs the stronger guarantee should leave this option off,
+/// which is the default.
+fn sgr_len(body: &[u8], i: usize) -> Option<usize> {
+    if body.get(i) != Some(&0x1b) || body.get(i.saturating_add(1)) != Some(&b'[') {
+        return None;
+    }
+    let mut j = i.saturating_add(2);
+    while matches!(body.get(j), Some(b'0'..=b'9' | b';')) {
+        j = j.saturating_add(1);
+    }
+    if body.get(j) == Some(&b'm') {
+        Some(j.saturating_add(1).saturating_sub(i))
+    } else {
+        None
+    }
 }
 
 fn write_body(
@@ -4357,6 +4471,109 @@ mod tests {
             ..Options::default()
         };
         assert!(matches!(escaped(b"ordinary text", &o), Cow::Borrowed(_)));
+    }
+
+    fn esc_keep(bytes: &[u8]) -> Vec<u8> {
+        let o = Options {
+            escape_control: true,
+            keep_color_escapes: true,
+            ..Options::default()
+        };
+        escaped(bytes, &o).into_owned()
+    }
+
+    /// The whitelist, stated as what it recognises.
+    #[test]
+    fn sgr_len_measures_a_complete_colour_sequence() {
+        assert_eq!(sgr_len(b"\x1b[31mx", 0), Some(5));
+        assert_eq!(sgr_len(b"\x1b[0m", 0), Some(4));
+        // No parameters at all is still SGR -- `ESC[m` means `ESC[0m`.
+        assert_eq!(sgr_len(b"\x1b[m", 0), Some(3));
+        assert_eq!(sgr_len(b"\x1b[1;38;5;208mx", 0), Some(13));
+        // …and it measures from `i`, not from the start.
+        assert_eq!(sgr_len(b"ab\x1b[31m", 2), Some(5));
+    }
+
+    /// Everything the whitelist deliberately does not cover. Each of these is
+    /// a sequence a hostile file could carry, and each is what the option is
+    /// *for* -- if any were matched here, the guarantee would be gone.
+    #[test]
+    fn sgr_len_refuses_everything_that_is_not_a_colour() {
+        assert_eq!(sgr_len(b"\x1b[2J", 0), None); // erase display
+        assert_eq!(sgr_len(b"\x1b[H", 0), None); // cursor home
+        assert_eq!(sgr_len(b"\x1b[6n", 0), None); // device status report
+        assert_eq!(sgr_len(b"\x1b]0;title\x07", 0), None); // set window title
+        assert_eq!(sgr_len(b"\x1bc", 0), None); // full reset
+        assert_eq!(sgr_len(b"[31m", 0), None); // no ESC at all
+        // An unfinished one: no final byte, so it is not a sequence yet and is
+        // escaped like any other stray ESC rather than passed on to swallow
+        // whatever the terminal reads next.
+        assert_eq!(sgr_len(b"\x1b[31", 0), None);
+        assert_eq!(sgr_len(b"\x1b[31x", 0), None);
+    }
+
+    /// The colour survives and the dangerous sequence beside it does not, in
+    /// the same line. Measured against the real binary with `od -c` before
+    /// being written down here.
+    #[test]
+    fn keep_color_escapes_passes_colour_and_stops_the_rest() {
+        let out = esc_keep(b"a\x1b[31mhit\x1b[0m b\x1b[2J c\x07");
+        assert_eq!(out, b"a\x1b[31mhit\x1b[0m b\\x1b[2J c\\x07".to_vec());
+    }
+
+    /// A window title is an OSC, not an SGR, and this is the sequence that
+    /// makes the difference worth a whitelist: it ends in BEL, carries
+    /// arbitrary text, and on some terminals can be read back.
+    #[test]
+    fn keep_color_escapes_stops_a_window_title() {
+        assert_eq!(
+            esc_keep(b"t\x1b]0;pwned\x07 x"),
+            b"t\\x1b]0;pwned\\x07 x".to_vec()
+        );
+    }
+
+    /// The exemption covers the whole body, as the escaping does: colour in
+    /// the unmatched half of a line is as much a colour as colour inside the
+    /// match, and covering only the match would leave half the output looking
+    /// like a bug.
+    #[test]
+    fn keep_color_escapes_covers_text_outside_the_match() {
+        let out = esc_keep(b"\x1b[32mbefore\x1b[0m hit \x1b[32mafter\x1b[0m");
+        assert!(!out.windows(4).any(|w| w == b"\\x1b"));
+    }
+
+    /// Nothing to change means nothing allocated, even when the body is full
+    /// of escape sequences.
+    #[test]
+    fn keep_color_escapes_borrows_when_every_sequence_is_a_colour() {
+        let o = Options {
+            escape_control: true,
+            keep_color_escapes: true,
+            ..Options::default()
+        };
+        assert!(matches!(
+            escaped(b"\x1b[31mred\x1b[0m", &o),
+            Cow::Borrowed(_)
+        ));
+        // …and one bad byte among good sequences is enough to make a copy.
+        assert!(matches!(
+            escaped(b"\x1b[31mred\x1b[0m\x07", &o),
+            Cow::Owned(_)
+        ));
+    }
+
+    /// Without `--escape-control` there is nothing to be exempt from, so the
+    /// flag could only ever be a no-op. It is refused instead, and it does not
+    /// imply `--escape-control`: a flag whose name promises to *keep*
+    /// something should not quietly start rewriting everything else.
+    #[test]
+    fn keep_color_escapes_is_refused_on_its_own() {
+        assert_eq!(
+            parse_err(&["--keep-color-escapes", "foo"]),
+            "--keep-color-escapes has no meaning without --escape-control"
+        );
+        let both = parse_ok(&["--escape-control", "--keep-color-escapes", "foo"]).opts;
+        assert!(both.escape_control && both.keep_color_escapes);
     }
 
     fn near_set(text: &str, patterns: &[&str], near: usize, opts: &Options) -> Vec<usize> {

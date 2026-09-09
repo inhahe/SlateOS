@@ -69911,6 +69911,73 @@ whole reason for existing is that `--exclude-dir=a/b` silently matches nothing
 must not be able to silently match nothing itself.
 
 
+### `--allow-match-colors` is the third proposed name that breaks a GNU abbreviation
+
+It is spelled `--keep-color-escapes`. `--allow-match-colors` cannot be used for
+the same reason `--all-patterns` could not: GNU grep has exactly one long
+option beginning with `a`, so `grep --a 3 file` resolves to `--after-context`
+today and a second `a` option would stop it resolving.
+
+That is now three for three -- `--all-patterns`, `--proximity` and
+`--allow-match-colors` -- and only the first was caught by a gate. The rule
+in this entry is worth stating as a *procedure* rather than a principle:
+enumerate GNU's long options by first letter once, and read the answer off the
+table before choosing a name.
+
+```text
+a h m o p q s t u v   one option each  -- a new name here BREAKS an abbreviation
+b c d e f i l n r w   two or more      -- safe if the name diverges early
+g j k x y z …         none at all      -- entirely free
+```
+
+`--keep-color-escapes` is in the third row, which is the strongest position
+available: GNU grep has no long option beginning with `k` at all, so every
+prefix of it, down to `--k`, is one GNU rejects today and we accept now.
+
+### What `--keep-color-escapes` lets through is a whitelist, not a blacklist
+
+The operator's `--allow-match-colors` "passes through ANSI colour sequences
+already present in matched text while still filtering every other escape". Ours
+recognises exactly one shape -- `ESC [`, parameter bytes, `m` -- and escapes
+everything else. Written that way round because a blacklist has to be right
+about every sequence that exists and a whitelist only has to be right about
+one.
+
+Measured on the built binary with `od -c`, all in one line of input:
+
+| input | with `--escape-control --keep-color-escapes` |
+|---|---|
+| `ESC [ 3 1 m` … `ESC [ 0 m` | passes through raw |
+| `ESC [ 2 J` (erase display) | `\x1b[2J` |
+| `ESC ] 0 ; pwned BEL` (set window title) | `\x1b]0;pwned\x07` |
+| `ESC [ 3 1` (unfinished) | `\x1b[31` |
+| `BEL` | `\x07` |
+
+The unfinished case is the one worth naming: a sequence with no final byte is
+*not* passed on, because a terminal that receives it will swallow whatever
+arrives next -- including the rest of the grep output -- looking for one.
+
+**Stated honestly, because a safety option that overstates itself is worse than
+none:** SGR is the whole graphic-rendition set, not only colour, so `ESC [ 8 m`
+(conceal) survives and can make text invisible. The line this option draws is
+that output cannot move the cursor, clear the screen, retitle the window or
+provoke a reply from the terminal. It is not a promise that the text is
+legible, and anyone needing the stronger guarantee leaves the option off, which
+is the default.
+
+**It is refused without `--escape-control`, not ignored.** On its own it exempts
+something from an escaping that is not happening, so it could only ever be a
+no-op -- the same defect `--exclude-path` was added to remove, and it would be
+absurd to reintroduce it two commits later. It deliberately does not *imply*
+`--escape-control` either: a flag whose name promises to keep something should
+not quietly start rewriting everything else.
+
+**Whole body, not the match**, for the same reason `--escape-control` is whole
+body: colour in the unmatched half of a line is as much a colour as colour
+inside the match, so covering only the match would leave half the output
+looking like a bug.
+
+
 **Against the choice, honestly:** it is the operator's OS, and their muscle
 memory is a real cost that falls on them rather than on a hypothetical GNU
 user. The mitigation is only a mitigation — aliasing the short forms back

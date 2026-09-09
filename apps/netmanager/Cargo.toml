@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Network Manager — interfaces, IP, DNS, WiFi, VPN and diagnostics"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 # The window and its event loop. Without this every control in the program was
 # unreachable: `fn main` was literally `fn main() {}`, so a hit-test, a

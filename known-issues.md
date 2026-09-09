@@ -125142,9 +125142,56 @@ and now covers 5,628 lines.
 exists and is drawn by `SettingsState::build_snapshots_page` in `main.rs` —
 a *different* implementation from `snapshots::render_snapshots_page`. So there
 are two snapshot pages, and any change made to the one the user cannot see is
-work thrown away. Whichever is kept, the other must go; they cannot both be
-maintained, and the file-scope palette this entry was discovered through was
-being maintained in both.
+work thrown away.
+
+**Investigated 2026-09-08, and the answer is "neither, as they stand".** The
+first guess — keep the reachable one, delete the other — is wrong in both
+directions:
+
+* The **reachable** page renders a hardcoded array:
+  `("Gen 42", "2026-05-17 09:00", "Current")`, `("Gen 41", …)`. It is a
+  mockup. 238 lines.
+* The **unreachable** one is backed by a genuine model — `SnapshotId`,
+  `BlockHash::compute`, `SnapshotIncludes`, `SnapshotManager`, a
+  copy-on-write block store, snapshot trees. 2,256 lines. But
+  `SnapshotManager::new()` builds it **in memory** and nothing in the file
+  reads a byte from disk, so it too displays only what the process itself
+  put there.
+
+**And the real thing exists, done, in the kernel.** `roadmap.md` line 2434:
+`fs::snapshot` — "CAS-backed point-in-time directory tree snapshots with
+create/restore/delete/diff/list; branching (parent→child tree), selective
+include/exclude filters, metadata preservation" — marked `[x]`, with a
+`fssnapshot` kshell command and **`/proc/snapshots`**. So `snapshots.rs` is a
+2,256-line userspace reimplementation of a kernel subsystem that was already
+finished, and the page the user sees is a picture of neither.
+
+**The format is settled, so the fix is not open-ended.** `gen_snapshots()` in
+`kernel/src/fs/procfs.rs` emits a fixed-column table:
+
+```
+Filesystem snapshots: <n>
+
+  ID  NAME                  PATH                               FILES         BYTES  PARENT
+```
+
+with `PARENT` as an id or `-`, and the path **octal-escaped**
+(`mangle_mount_field`) precisely so a root path containing a newline cannot
+forge a row.
+
+That escaping is what makes splitting on newlines *safe* — one line is one
+snapshot, guaranteed, because no raw newline can reach the output. (An earlier
+draft of this paragraph said the reverse: that a reader "must not assume one
+line is one snapshot". That was backwards, and worth correcting in place rather
+than quietly, because a reader who believed it would write a more complicated
+parser to defend against something the kernel already prevents. What the reader
+*does* owe is the un-escaping, on the path field, after splitting.)
+
+**So the work is:** read `/proc/snapshots`, render *that*, delete the mockup,
+and delete or drastically reduce `snapshots.rs` to whatever the page still
+needs that the kernel does not provide. Do not "choose between the two pages" —
+that framing, which the first version of this entry used, assumes one of them
+shows real snapshots and neither does.
 
 **Found by** the palette conversion. Every audit until then read only
 `main.rs`, so these three files were never looked at; they were found by
@@ -125543,8 +125590,37 @@ either way.
      service". Wired today it would parse containers, show transport controls,
      and display no frames. That is the same trap: a feature that appears to
      exist and does nothing. Its trigger is a decoder service, not a caller.
-3. **Route `apps/colorpicker` through `guitk::colorpicker`,** or delete the
-   toolkit's copy. One of the two, not both.
+3. ~~**Route `apps/colorpicker` through `guitk::colorpicker`**~~ — **done
+   2026-09-08**, and it turned out not to be tidying. The app's own
+   `from_hsv` computed its sector as `(h / 60.0).floor() as u32`, and `as u32`
+   *saturates* in Rust: every negative hue became sector 0, so **every hue
+   below zero rendered as the same red**. Hue −60 gave `(255, 0, 0)` where it
+   should give magenta. The shared version takes the hue modulo 360 and clamps
+   s and v first, so routing through it fixed the bug as a side effect of
+   removing the duplicate.
+
+   Latent rather than live: the app's own `to_hsv` always returns a hue in
+   [0, 360), so nothing in the current UI reaches the bad path. It was
+   reachable by any caller constructing an `Hsv` directly — which is what the
+   new regression test does, and it fails against the old implementation.
+
+   **This is the argument for the whole entry, in one case.** The duplicate was
+   not two copies of a correct thing; it was a correct one and a subtly broken
+   one, and the `#![allow(dead_code)]` on the correct one is why nobody
+   compared them.
+
+   **The generalisation was swept, and came back clean** — recorded so nobody
+   repeats it. `clippy::cast_sign_loss` is `allow` workspace-wide with a
+   documented reason (~2000 hits, casts usually deliberate, "leave to manual
+   review"), so this was the manual review for the one shape that actually
+   bites: a float that can be negative, cast to an unsigned type, where Rust's
+   `as` *saturates to zero* rather than wrapping or trapping. Every
+   `.floor() as u{8,16,32,size}` in `gui/**`, `apps/**`, `net*/**` and `pkg/**`
+   was checked — fifteen sites. Fourteen are guarded, most by an explicit
+   `.max(0.0)` and `guitk::grid`'s hit test by an early `if content_x < 0.0 {
+   return None }`. The fifteenth was `apps/colorpicker`, above. `gui/compositor`
+   already carries written warnings about the same hazard at two sites
+   (`lib.rs:377`, `:13576`), so that crate had learned it independently.
 
 **Related.** `TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING` is
 the same mechanism with 5,628 more lines, found the same way and logged

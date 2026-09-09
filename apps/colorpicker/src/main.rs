@@ -14,6 +14,7 @@
 
 use appearance::Palette;
 use guitk::color::Color;
+use guitk::colorpicker::{self, Hsv};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
 use guitk::frame::Rect;
 use guitk::probe::Probe;
@@ -208,16 +209,14 @@ pub struct Hsl {
 // HSV type
 // ============================================================================
 
-/// Hue/Saturation/Value representation.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Hsv {
-    /// Hue in degrees [0, 360).
-    pub h: f32,
-    /// Saturation [0, 1].
-    pub s: f32,
-    /// Value [0, 1].
-    pub v: f32,
-}
+// `Hsv` is `guitk::colorpicker::Hsv`, imported above.
+//
+// It used to be declared here -- the same three fields, the same units,
+// documented the same way -- alongside its own RGB conversions, while the
+// toolkit's identical pair sat behind a `#![allow(dead_code)]` that nobody
+// could see past. That is the cost the attribute was hiding: not the unused
+// lines but the second implementation written because the first was invisible.
+// See `known-issues.md` TD-C-TWENTY-FOUR-THOUSAND-LINES-BEHIND-ALLOW-DEAD-CODE.
 
 // ============================================================================
 // CMYK type
@@ -440,66 +439,17 @@ impl PickedColor {
     // -- RGB <-> HSV -------------------------------------------------------
 
     /// Convert to HSV.
+    ///
+    /// Through `guitk::colorpicker`, which clamps its inputs and takes the hue
+    /// modulo 360 where this file's own version did neither.
     pub fn to_hsv(self) -> Hsv {
-        let r = self.r as f32 / 255.0;
-        let g = self.g as f32 / 255.0;
-        let b = self.b as f32 / 255.0;
-
-        let max = r.max(g).max(b);
-        let min = r.min(g).min(b);
-        let delta = max - min;
-
-        let v = max;
-        let s = if max < f32::EPSILON { 0.0 } else { delta / max };
-
-        if delta < f32::EPSILON {
-            return Hsv { h: 0.0, s: 0.0, v };
-        }
-
-        let h = if (max - r).abs() < f32::EPSILON {
-            let mut hue = (g - b) / delta;
-            if hue < 0.0 {
-                hue += 6.0;
-            }
-            hue * 60.0
-        } else if (max - g).abs() < f32::EPSILON {
-            ((b - r) / delta + 2.0) * 60.0
-        } else {
-            ((r - g) / delta + 4.0) * 60.0
-        };
-
-        Hsv { h, s, v }
+        colorpicker::rgb_to_hsv(self.r, self.g, self.b)
     }
 
     /// Create from HSV values (h in [0,360), s and v in [0,1]).
     pub fn from_hsv(hsv: Hsv) -> Self {
-        let Hsv { h, s, v } = hsv;
-        if s < f32::EPSILON {
-            let val = (v * 255.0).round() as u8;
-            return Self::from_rgb(val, val, val);
-        }
-
-        let h_sector = h / 60.0;
-        let i = h_sector.floor() as u32;
-        let f = h_sector - i as f32;
-        let p = v * (1.0 - s);
-        let q = v * (1.0 - s * f);
-        let t = v * (1.0 - s * (1.0 - f));
-
-        let (r, g, b) = match i % 6 {
-            0 => (v, t, p),
-            1 => (q, v, p),
-            2 => (p, v, t),
-            3 => (p, q, v),
-            4 => (t, p, v),
-            _ => (v, p, q),
-        };
-
-        Self::from_rgb(
-            (r * 255.0).round() as u8,
-            (g * 255.0).round() as u8,
-            (b * 255.0).round() as u8,
-        )
+        let (r, g, b) = colorpicker::hsv_to_rgb(hsv);
+        Self::from_rgb(r, g, b)
     }
 
     // -- RGB -> CMYK -------------------------------------------------------
@@ -3848,6 +3798,59 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    /// A hue outside [0, 360) and a saturation outside [0, 1] produce a real
+    /// colour rather than nonsense.
+    ///
+    /// This is what routing through `guitk::colorpicker` bought. The version
+    /// this file used to carry indexed a six-way `match i % 6` on
+    /// `(h / 60.0).floor() as u32` -- for a negative hue, `as u32` saturates to
+    /// zero and every hue below 0 came out as the same red. The shared version
+    /// takes the hue modulo 360 and clamps s and v first.
+    #[test]
+    fn an_out_of_range_hue_wraps_instead_of_collapsing() {
+        // 400 degrees is 40 degrees, and -60 is 300.
+        assert_eq!(
+            PickedColor::from_hsv(Hsv {
+                h: 400.0,
+                s: 1.0,
+                v: 1.0
+            }),
+            PickedColor::from_hsv(Hsv {
+                h: 40.0,
+                s: 1.0,
+                v: 1.0
+            }),
+        );
+        assert_eq!(
+            PickedColor::from_hsv(Hsv {
+                h: -60.0,
+                s: 1.0,
+                v: 1.0
+            }),
+            PickedColor::from_hsv(Hsv {
+                h: 300.0,
+                s: 1.0,
+                v: 1.0
+            }),
+        );
+
+        // And out-of-range saturation clamps rather than overflowing the
+        // channel arithmetic.
+        let over = PickedColor::from_hsv(Hsv {
+            h: 0.0,
+            s: 4.0,
+            v: 1.0,
+        });
+        assert_eq!(
+            over,
+            PickedColor::from_hsv(Hsv {
+                h: 0.0,
+                s: 1.0,
+                v: 1.0
+            })
         );
     }
 }

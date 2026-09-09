@@ -463,6 +463,36 @@ Nothing caught it because nothing builds `apps/`:
 A `cargo check --workspace --target x86_64-pc-windows-gnu` would have caught it.
 Nobody has a reason to run one.
 
+### A second instance, 2026-09-09 — and this one was not cross-lane
+
+The case above is a lane boundary problem: lane B could not see lane C's caller.
+This one has no lane in it at all.
+
+`design-decisions.md` §826 changed four colour constants in `gui/appearance`.
+Lane C ran `cargo test -p settings`, which passed, and merged. The change also
+broke `a11y::tests::no_high_contrast_colour_is_a_palette_role` in `gui/desktop` —
+pure black had become the light theme's text colour, and that test asserts no
+high-contrast colour is also a palette role. It sat red on `main` until it was
+found by accident a day later, while doing something else.
+
+So the gap is not only "a lane cannot see another lane's callers". It is
+**anyone editing a crate that four others depend on and testing only the crate
+they edited**, which is the ordinary way to work and is what the per-crate
+instruction in `CLAUDE.md` asks for. A palette is exactly the shape of thing
+that has many dependents and no obvious blast radius.
+
+**One practical finding that changes the cost estimate below.**
+`cargo check --workspace --target x86_64-pc-windows-gnu` **exits 0** on the
+current tree and takes minutes on a cold cache, seconds warm. The `build`
+spelling does *not* — it fails trying to link the kernel for the host target,
+which is its own trap (`known-issues.md`
+`TD-C-CARGO-BUILD-WORKSPACE-ON-THE-HOST-TARGET-FAILS-ON-THE-KERNEL`). If the
+answer here is yes, the gate should be spelled `check`, not `build`.
+
+Whether the gate should also run `cargo test --workspace` is a separate and much
+more expensive question: `check` would **not** have caught this second instance,
+because a broken test compiles fine. It would have caught the first.
+
 ### Why this is yours and not mine
 
 Any answer gates all three lanes' merges, and the cost lands on whoever is

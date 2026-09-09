@@ -125442,11 +125442,19 @@ do: `CLAUDE.md` says to run the workspace build/test before merging, and every
 the host is Windows. Put together they ask for the kernel to be linked for the
 host, with `kernel/linker.ld`, against mingw's CRT.
 
+**`cargo check` is unaffected — measured, not assumed.**
+`cargo check --workspace --target x86_64-pc-windows-gnu` exits **0** on the same
+tree. `check` type-checks without linking, and the kernel's failure is entirely
+at the link step, so the whole workspace checks cleanly. That matters because it
+is `cargo check --workspace` that C-Q11 proposes as the pre-merge gate: the gate
+being considered works today, and only the `build` spelling of it does not.
+
 **What to run instead**, when the point is "did I break anything outside my own
 crate":
 
 ```
-cargo build --workspace --exclude kernel --target x86_64-pc-windows-gnu
+cargo check --workspace --target x86_64-pc-windows-gnu            # works
+cargo build --workspace --exclude kernel --target …               # if you need artifacts
 ```
 
 **Why this is worth writing down rather than just knowing.** The failure names

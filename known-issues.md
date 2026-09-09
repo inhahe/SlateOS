@@ -124963,8 +124963,10 @@ pre-migration figure still stated as current.
 
 The nineteen minutes to reach clippy is real, but only 440 s of it is gates.
 The rest is the 34 `scripts/test-*.py` tooling suites, which do not go through
-`run_checker` and so appear nowhere in the timing log — roughly 700 s, and now
-the dominant pre-build cost. **Anyone shortening this phase should start with
+`run_checker` and so appear nowhere in the timing log. Bracketed from the
+runner's own heartbeat markers on the 2026-09-09 run: **540–660 s**, against
+410 s for every gate combined. The suites, not the gates, are now the
+dominant pre-build cost. **Anyone shortening this phase should start with
 the tooling suites, not the gates.**
 
 **A warning this is the third instance of today.** The `D:`→`E:` migration

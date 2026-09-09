@@ -150,13 +150,6 @@ ALLOWLIST = {
         "watchdog boot and latches the one-shot NMI dump, spoiling a real "
         "catch. Wire a temporary call in for a one-off validation."
     ),
-    "proc::spawn::self_test_ctest_pty": (
-        "Disabled: the fixture hangs the boot because pty slave reads go "
-        "through SYS_TTY_READ which falls back to the console keyboard "
-        "(known limitation TD-B-PTY-SLAVE-READ-IS-CTTY-ONLY). Re-enable "
-        "in main.rs once a handle-taking SYS_TTY_READ exists. See "
-        "known-issues.md A-CTEST-PTY-HANGS-BOOT."
-    ),
 }
 
 # The file every boot runs. A self-test reachable from here is real coverage.

@@ -2487,34 +2487,44 @@ extern "C" fn kernel_main() -> ! {
         case();
     }
 
-    // DISABLED: ctest-pty hangs the boot.
-    //
-    // ROOT CAUSE (2026-09-08): PtySlave reads in posix/src/file.rs dispatch
-    // through SYS_TTY_READ(buf, count), which hardcodes current_tty() — the
-    // console.  The console's default termios is canonical (ICANON, VMIN=1),
-    // so canonical_read() blocks forever waiting for keyboard input that
-    // never arrives.  The pty slave's own termios (set to raw by the fixture)
-    // is never consulted because the read goes to the wrong device.
-    //
-    // KERNEL FIX: SYS_PTY_SLAVE_READ (872) and SYS_PTY_SLAVE_TRY_READ (873)
-    // now exist.  They use resolve_tty_arg to read from the correct pty.
-    //
-    // REMAINING: posix/src/file.rs (lane B) must route HandleKind::PtySlave
-    // reads through the new syscalls instead of SYS_TTY_READ.  Filed as
-    // request a-b-pty-slave-read-syscalls-exist-route-posix-reads.md.
-    //
-    // The "scheduler doesn't preempt" concern from the original filing was a
-    // false alarm: schedule_inner correctly returns without switching when the
-    // spinning task is the only runnable one (picked_id == current_id).
-    //
-    // Re-enable once lane B routes PtySlave reads through 872/873.
-    //
-    // if let Err(e) = proc::spawn::self_test_ctest_pty() {
-    //     serial_println!(
-    //         "WARNING: pty ^C signal delivery (ring 3) self-test failed: {:?}",
-    //         e
-    //     );
-    // }
+    {
+        #[inline(never)]
+        fn case() {
+            // A byte becomes a signal and crosses a process boundary. The fixture
+            // opens a pty pair on our own libc, forks with forkpty, and the parent
+            // writes 0x03 to the master; the child's SIGINT handler has to fire.
+            // Nothing else at any level covers that path — ctest-ctty says outright
+            // that ^C "is untested here only because the fixture has no way to
+            // synthesise a keystroke", and a pty master is exactly that way.
+            //
+            // Disabled 2026-09-08 because it hung the boot; re-enabled 2026-09-09
+            // once the cause was gone on both sides. The cause: PtySlave reads
+            // dispatched SYS_TTY_READ, which hardcodes current_tty() — the console —
+            // whose default termios is canonical, so canonical_read blocked forever
+            // on keyboard input that never arrives, and the slave's own raw termios
+            // was never consulted because the read went to the wrong device. Lane A
+            // added SYS_PTY_SLAVE_READ (872) and SYS_PTY_SLAVE_TRY_READ (873), which
+            // resolve the handle; lane B now routes the slave arm through them
+            // (posix/src/file.rs), and the fixture bounds every read twice — with
+            // O_NONBLOCK and a poll(POLLIN, 0) gate before each one. The kernel side
+            // is bounded too, at 8000 yields, so a regression here reports a failure
+            // rather than hanging the boot for the other two lanes.
+            //
+            // Diagnostic, like the job-control and controlling-terminal rungs above.
+            // This is its first execution at any level, so a failure is a genuine
+            // result — possibly in the pty layer rather than here — and must not
+            // block all three lanes while it is being understood. The exit code is
+            // reported with a legend: 78 means the line discipline never turned the
+            // byte into a signal, which is the single thing this fixture exists to
+            // detect.
+            selftest::dispatch_debug(
+                "pty ^C signal delivery (ring 3)",
+                selftest::Severity::Diagnostic,
+                proc::spawn::self_test_ctest_pty(),
+            );
+        }
+        case();
+    }
 
     {
         #[inline(never)]

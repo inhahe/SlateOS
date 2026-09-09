@@ -4454,9 +4454,60 @@ fn test_dispatch_itimer() -> KernelResult<()> {
     use crate::proc::thread;
     use crate::sched;
 
+    // Both numbers are checked for registration and argument validation FIRST,
+    // because those need no process. The boot self-tests run with no owning
+    // process, so a test that needed one would skip in its entirety and report
+    // nothing -- which is what the first version of this did, passing a whole
+    // boot while proving neither syscall existed.
+    //
+    // `which != ITIMER_REAL` is rejected before the pid lookup, so this reaches
+    // the handler either way. It separates three outcomes a caller must be able
+    // to tell apart: `NoSuchSyscall` means the number is not registered at all,
+    // `InvalidArgument` means a registered handler ran and refused the
+    // argument, and success would mean the handler accepted a CPU-time request
+    // for a wall-clock timer.
+    let bad_which = SyscallResult::err(KernelError::InvalidArgument).value;
+    let no_such = SyscallResult::err(KernelError::NoSuchSyscall).value;
+    for (nr, name) in [
+        (SYS_ITIMER_SET, "SYS_ITIMER_SET"),
+        (SYS_ITIMER_GET, "SYS_ITIMER_GET"),
+    ] {
+        let r = dispatch(
+            nr,
+            &SyscallArgs {
+                arg0: 1, // ITIMER_VIRTUAL
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        );
+        if r.value == no_such {
+            serial_println!(
+                "[syscall]   FAIL: {} ({}) is not registered -- dispatch returned                  NoSuchSyscall, so the number was never wired to a handler",
+                name,
+                nr
+            );
+            return Err(KernelError::InternalError);
+        }
+        if r.value != bad_which {
+            serial_println!(
+                "[syscall]   FAIL: {} ({}) returned {} for ITIMER_VIRTUAL, expected                  InvalidArgument ({}). Accepting it would arm a wall-clock timer                  for a CPU-time request",
+                name,
+                nr,
+                r.value,
+                bad_which
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
     let task_id = sched::current_task_id();
     if thread::owner_process(task_id).is_none() {
-        serial_println!("[syscall]   Dispatch itimer: SKIP (no owning process)");
+        serial_println!(
+            "[syscall]   itimer (1069/1070 registered, ITIMER_VIRTUAL refused by              both): OK -- arming SKIPPED (no owning process to own a timer)"
+        );
         return Ok(());
     }
 

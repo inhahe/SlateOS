@@ -124286,7 +124286,7 @@ no other crate depends on it), so nothing outside the corpus could reach them.
 | module | what it holds | what is missing |
 |---|---|---|
 | `login_screen.rs` | ~~`LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig`~~ | **Done, 2026-09-08.** `ShellSession` constructs one when the account database names anybody (`design-decisions.md` §824), draws it on a fifth full-screen surface created last within `Layer::Overlay` so nothing the shell owns is over it, routes every key and click to it while it is up, and answers with `authlib`. What it still lacks is the *session hand-off* — a successful login unmaps the screen and reveals the desktop, but nothing starts a session as that user, because there is nowhere to send that (the shell has no channel to the process server; same gap as `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`). Autologin is read and not acted on; see `todo.txt`. Originally: Construction and a session hand-off. §815 says wire it up. *(Correction, 2026-09-08: an earlier version of this row said §818 has to take effect here. It does not — §818 is about the **lock** screen, `apps/lockscreen`, which is a separate program. See `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.)* |
-| `blur.rs` | `BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager` | A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
+| `blur.rs` | ~~`BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager`~~ | **Moved to `gui/compositor`, 2026-09-08 — it could not be wired here.** It works on a *framebuffer* (`BlurManager::update_all(&mut [u32], w, h)`) and the shell has no framebuffer: it submits render trees and never sees a pixel of what is behind its surfaces. `blur.rs` was the only file in the whole `gui/desktop` crate to mention `[u32]`. The pixels behind a window are the compositor's, so the pass now lives where it can run; what remains is a protocol way for a surface to ask for it, and a call in the compositor's paint path. Originally: A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
 | `input_method.rs` | `InputMethodManager`, `SwitchShortcut` | A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
 | `tray_dnd.rs` | `TrayDragSource`, `TrayDropTarget`, `TrayIconSlot`, `TrayIconArrangement`, `TraySlotConfig`, `TrayArrangementConfig`, `StartInTrayConfig` | A caller in the tray's event path. |
 
@@ -125087,6 +125087,18 @@ treat "before the first item of kind X" as a position — attributes and doc
 comments bind forward to the item beneath them, so the real insertion point is
 before *the attribute run*, not before the item. `wire_app.py` now walks back
 over any `#[...]`, `///` or `//!` lines above its anchor.
+
+**It applies to deletion too, and the same day proved it.** Removing
+`pub mod palette_check;` from `gui/desktop/src/lib.rs` — when that module moved
+to `appearance` — left its `#[cfg(test)]` and doc comment attached to the next
+declaration down, `pub mod power;`. Forward binding makes a *deletion* exactly
+as dangerous as an insertion: whatever the attribute governed is gone, so it
+silently governs its new neighbour. This one would have compiled the power
+module out of every release build. The compiler caught it only because `power`
+is used elsewhere; had the stranded attribute been an `#[allow]`, nothing would
+have said a word — which is the nine-out-of-ten case above. **Deleting an item
+means deleting its attribute run with it**, which is the same rule
+`convert_app.py` learned for constants and their doc comments.
 
 **Found by:** a clippy warning in `filediff` that had no business being there,
 followed by grepping every application for an attribute directly above

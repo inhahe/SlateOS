@@ -64,6 +64,16 @@ use guitk::style::CornerRadii;
 use osfont::raster::GlyphMask;
 use osfont::system::{Family, FontCache, Weight};
 
+/// Backdrop blur: the pass that makes a translucent surface show a blurred
+/// version of what is behind it.
+///
+/// Lived in `gui/desktop` until 2026-09-08 and could not run there. It works on
+/// a framebuffer -- `BlurManager::update_all(&mut [u32], w, h)` -- and the
+/// shell has no framebuffer: it submits render trees and never sees a pixel of
+/// what is behind its surfaces. It was the only file in that whole crate to
+/// mention `[u32]`. The pixels behind a window are the compositor's, so the
+/// pass belongs here.
+pub mod blur;
 mod buffer;
 pub use buffer::{BufferFormat, ImageAsset, SharedBuffer};
 // Sticky, filter and mouse keys. The state machines live here rather than

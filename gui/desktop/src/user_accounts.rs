@@ -1447,7 +1447,7 @@ mod tests {
     )]
 
     use super::*;
-    use crate::palette_check;
+    use appearance::palette_check;
 
     /// The palette the ordinary render tests draw with.
     fn test_palette() -> Palette {

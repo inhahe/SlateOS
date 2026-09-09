@@ -1473,7 +1473,7 @@ mod tests {
         for light in [false, true] {
             let p = accented(light);
             for (tab, cmds) in every_tab(&p) {
-                crate::palette_check::assert_drawn_from(
+                appearance::palette_check::assert_drawn_from(
                     &p,
                     &cmds,
                     &[readable_on(p.accent), readable_on(p.yellow)],

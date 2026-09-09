@@ -2098,7 +2098,7 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
-    use crate::palette_check;
+    use appearance::palette_check;
 
     fn make_notif(app: &str, title: &str, ts: u64) -> Notification {
         Notification {

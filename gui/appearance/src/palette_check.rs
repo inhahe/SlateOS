@@ -34,7 +34,7 @@
 //! Text chosen for a coloured fill is a function of that fill's brightness
 //! rather than a role, so it is not a palette member and has to be allowed
 //! somehow. This module used to allow it *unconditionally*: the two values
-//! [`readable_on`](appearance::readable_on) can return, `0x11111B` and
+//! [`readable_on`](crate::readable_on) can return, `0x11111B` and
 //! `0xEFF1F5`, passed the sweep in any module and in either mode.
 //!
 //! That was a hole big enough to drive the whole conversion through, because
@@ -68,14 +68,14 @@
 //!
 //! # Why `derived` is a parameter and not a blanket allowance
 //!
-//! [`emphasized`](appearance::emphasized) and `Color::lerp` produce colours
+//! [`emphasized`](crate::emphasized) and `Color::lerp` produce colours
 //! that are genuinely in no palette. Allowing "anything near a role" to cover
 //! them would gut the check. Instead each module names its own derivations at
 //! the call site, so a colour that is not a role has to be *claimed* by
 //! someone — which turns the exception into documentation of what the module
 //! computes.
 
-use appearance::Palette;
+use crate::Palette;
 use guitk::color::Color;
 use guitk::render::RenderCommand;
 
@@ -349,7 +349,7 @@ pub fn text_on_background(cmds: &[RenderCommand], root: Color) -> Vec<TextOn> {
                 }
                 let Some((ink, ratio)) = inks
                     .into_iter()
-                    .map(|ink| (ink, appearance::contrast_ratio(ink, behind)))
+                    .map(|ink| (ink, crate::contrast_ratio(ink, behind)))
                     .min_by(|a, b| a.1.total_cmp(&b.1))
                 else {
                     continue;
@@ -683,7 +683,7 @@ mod tests {
             "the faint span is the one that decides whether the run is legible"
         );
         assert!(
-            found[0].ratio < appearance::contrast_ratio(p.text, p.surface0),
+            found[0].ratio < crate::contrast_ratio(p.text, p.surface0),
             "reporting the fallback ink would have flattered this run"
         );
     }
@@ -705,7 +705,7 @@ mod tests {
             assert_eq!(found.len(), 1);
             let f = &found[0];
             assert!(
-                (f.ratio - appearance::contrast_ratio(f.ink, f.behind)).abs() < 1e-6,
+                (f.ratio - crate::contrast_ratio(f.ink, f.behind)).abs() < 1e-6,
                 "ratio {} does not match contrast_ratio({:?}, {:?})",
                 f.ratio,
                 f.ink,

@@ -1958,7 +1958,7 @@ mod tests {
     //    background (two, the first a shadow), and a site that changes sides
     //    fails whichever of the two helpers names it.
 
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
     use appearance::readable_on;
 
     /// An accent that is in neither palette, so a site reaching for the accent

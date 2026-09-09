@@ -1067,7 +1067,7 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
     use guitk::event::{Key, KeyEvent, Modifiers};
 
     /// A palette whose accent belongs to no palette.

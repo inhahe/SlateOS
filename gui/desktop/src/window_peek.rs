@@ -957,8 +957,8 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
-    use crate::palette_check::assert_drawn_from;
     use appearance::AccentColor;
+    use appearance::palette_check::assert_drawn_from;
 
     fn make_snapshot(id: u64, title: &str, w: f32, h: f32) -> WindowSnapshot {
         WindowSnapshot::new(id, "test-app", title, w, h)

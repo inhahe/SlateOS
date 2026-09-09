@@ -1656,7 +1656,7 @@ mod tests {
 
     use super::*;
     use crate::draw_check::assert_nothing_is_drawn_and_never_seen;
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
 
     /// The palette the older tests were written against: dark mode, stock
     /// accent, which is what the deleted constants spelled out by hand.

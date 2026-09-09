@@ -8,6 +8,7 @@
 
 use appearance::Palette;
 use guitk::color::Color;
+use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -305,6 +306,103 @@ fn push_on_background(commands: &mut Vec<RenderCommand>, p: &Palette, text: Rend
 }
 
 // ============================================================================
+// Geometry and input
+// ============================================================================
+
+/// The height of the bar along the bottom, and the row pitch of the power menu
+/// that rises from it.
+const BAR_HEIGHT: f32 = 40.0;
+
+/// The vertical distance between one user row and the next.
+///
+/// Larger than a row is tall (64) — the gap is deliberate, and the difference
+/// is why a click between two rows selects neither.
+const USER_ROW_PITCH: f32 = 80.0;
+
+/// The power menu's entries, in the order they are drawn.
+///
+/// Two tables and not one because they are read in different places and by
+/// different things: the renderer wants glyph and label, the hit test wants the
+/// action. Their *order* is the shared fact, and keeping them adjacent with a
+/// length assertion below is what enforces it -- an earlier version had the
+/// labels inline in `render_power_menu` and no actions at all, which is how a
+/// menu with four visible rows had nothing behind any of them.
+const POWER_MENU_LABELS: [(&str, &str); 4] = [
+    ("\u{23FB}", "Shut Down"),
+    ("\u{1F504}", "Restart"),
+    ("\u{1F4A4}", "Sleep"),
+    ("\u{1F4BE}", "Hibernate"),
+];
+
+/// What each row of [`POWER_MENU_LABELS`] does, in the same order.
+pub const POWER_MENU_ACTIONS: [LoginPowerAction; POWER_MENU_LABELS.len()] = [
+    LoginPowerAction::Shutdown,
+    LoginPowerAction::Reboot,
+    LoginPowerAction::Sleep,
+    LoginPowerAction::Hibernate,
+];
+
+/// A rectangle a click can land in.
+///
+/// The whole reason this section exists: every one of these was arithmetic
+/// inlined in a `render_*` method, so nothing outside could say where anything
+/// was, and the screen could be drawn but not used. Each rectangle now has one
+/// definition that both the renderer and the hit test read, which is what keeps
+/// a click landing on the thing the user can see.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hit {
+    /// Left edge.
+    pub x: f32,
+    /// Top edge.
+    pub y: f32,
+    /// Width.
+    pub w: f32,
+    /// Height.
+    pub h: f32,
+}
+
+impl Hit {
+    /// Whether `(px, py)` is inside this rectangle.
+    ///
+    /// Half-open on both axes, so two rectangles that share an edge cannot
+    /// both claim the same pixel.
+    #[must_use]
+    pub fn contains(self, px: f32, py: f32) -> bool {
+        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
+    }
+}
+
+/// What the shell should do about an event the login screen has just seen.
+///
+/// The screen decides what a keystroke *means*; it cannot decide whether a
+/// password is right, and it must not — checking one needs the account
+/// database and the shared failure tally, neither of which belongs to a
+/// renderer. So the verdict comes back out here and the shell answers with
+/// [`LoginScreen::auth_success`] or [`LoginScreen::auth_failure`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoginAction {
+    /// The event was not for this screen, and nothing changed.
+    Ignored,
+    /// Something changed and the screen needs redrawing. Nothing else to do.
+    Redraw,
+    /// Check this password for this user.
+    ///
+    /// The password is a `String` because that is what a keyboard produces:
+    /// it is assembled from [`LoginScreen::type_char`], one `char` per
+    /// keystroke. A password arriving over IPC would have to be `Vec<u8>` —
+    /// see `apps/lockscreen`'s `PasswordAuthority`, whose note on this applies
+    /// there and not here.
+    Authenticate {
+        /// The account being logged into.
+        username: String,
+        /// What was typed.
+        password: String,
+    },
+    /// The user chose an entry from the power menu.
+    Power(LoginPowerAction),
+}
+
+// ============================================================================
 // Login screen state
 // ============================================================================
 
@@ -538,6 +636,254 @@ impl LoginScreen {
         self.users.iter().find(|u| u.autologin)
     }
 
+    // ------------------------------------------------------------------
+    // Geometry — one definition per rectangle, read by both the renderer
+    // and the hit test
+    // ------------------------------------------------------------------
+
+    /// Where the `index`th user row is drawn.
+    ///
+    /// Defined even for an index past the end, because the renderer walks
+    /// `0..users.len()` and the hit test walks the same range: making this
+    /// fallible would put an `unwrap` in both.
+    #[must_use]
+    pub fn user_row_rect(&self, index: usize) -> Hit {
+        let row_w = 280.0;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a user count large enough to lose f32 precision is 16.7M accounts on one machine, and the layout is unusable long before that"
+        )]
+        let count = self.users.len() as f32;
+        #[expect(clippy::cast_precision_loss, reason = "as above, for the row index")]
+        let i = index as f32;
+        Hit {
+            x: self.screen_width / 2.0 - row_w / 2.0,
+            y: self.screen_height / 2.0 - count * 40.0 + i * USER_ROW_PITCH,
+            w: row_w,
+            h: 64.0,
+        }
+    }
+
+    /// The power button in the bottom bar, whether or not it is shown.
+    #[must_use]
+    pub fn power_button_rect(&self) -> Hit {
+        Hit {
+            x: self.screen_width - 48.0,
+            y: self.screen_height - BAR_HEIGHT,
+            w: 32.0,
+            h: BAR_HEIGHT,
+        }
+    }
+
+    /// The accessibility button in the bottom bar, whether or not it is shown.
+    #[must_use]
+    pub fn a11y_button_rect(&self) -> Hit {
+        Hit {
+            x: self.screen_width - 88.0,
+            y: self.screen_height - BAR_HEIGHT,
+            w: 32.0,
+            h: BAR_HEIGHT,
+        }
+    }
+
+    /// The power menu's outer rectangle. Only meaningful while
+    /// [`power_menu_open`](Self::power_menu_open).
+    #[must_use]
+    pub fn power_menu_rect(&self) -> Hit {
+        let (w, h) = (160.0, 140.0);
+        Hit {
+            x: self.screen_width - w - 16.0,
+            y: self.screen_height - BAR_HEIGHT - h - 8.0,
+            w,
+            h,
+        }
+    }
+
+    /// The `index`th row of the power menu, in the order
+    /// [`POWER_MENU_ACTIONS`] lists them.
+    #[must_use]
+    pub fn power_menu_row_rect(&self, index: usize) -> Hit {
+        let menu = self.power_menu_rect();
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "four rows; the cast cannot lose anything"
+        )]
+        let i = index as f32;
+        Hit {
+            x: menu.x,
+            y: menu.y + 8.0 + i * 32.0,
+            w: menu.w,
+            h: 32.0,
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Input
+    // ------------------------------------------------------------------
+
+    /// Handle a keystroke.
+    ///
+    /// Returns [`LoginAction::Ignored`] for anything this screen does not act
+    /// on, so a caller can tell "handled" from "not mine" — which matters
+    /// because the login screen holds the keyboard for the whole machine and
+    /// must not silently swallow a chord it does nothing with.
+    ///
+    /// A release is always ignored: every action here is on the press, and
+    /// acting on both would type each character twice.
+    pub fn handle_key(&mut self, event: &KeyEvent) -> LoginAction {
+        if !event.pressed {
+            return LoginAction::Ignored;
+        }
+        // A menu is modal over the phase beneath it. Checked first so that
+        // Escape closes the menu rather than walking back a phase, and so that
+        // the arrow keys below cannot move a selection hidden behind it.
+        if self.power_menu_open || self.a11y_menu_open {
+            return if event.key == Key::Escape {
+                self.power_menu_open = false;
+                self.a11y_menu_open = false;
+                LoginAction::Redraw
+            } else {
+                LoginAction::Ignored
+            };
+        }
+        match self.phase {
+            LoginPhase::UserSelect => self.key_user_select(event),
+            LoginPhase::PasswordEntry | LoginPhase::Locked => self.key_password_entry(event),
+            // A failed attempt is cleared by any key at all, which is what a
+            // user reaching for the keyboard to retype expects. The keystroke
+            // is consumed rather than also typed: the field was just cleared,
+            // and a character arriving in the same event would look like the
+            // clear had not happened.
+            LoginPhase::Failed => {
+                self.retry();
+                LoginAction::Redraw
+            }
+            // Nothing to type into: the machine is busy answering the last
+            // attempt, or already letting the user in.
+            LoginPhase::Authenticating | LoginPhase::LoggingIn => LoginAction::Ignored,
+        }
+    }
+
+    fn key_user_select(&mut self, event: &KeyEvent) -> LoginAction {
+        match event.key {
+            Key::Up => {
+                self.selected_user = self.selected_user.saturating_sub(1);
+                LoginAction::Redraw
+            }
+            Key::Down => {
+                let last = self.users.len().saturating_sub(1);
+                self.selected_user = self.selected_user.saturating_add(1).min(last);
+                LoginAction::Redraw
+            }
+            Key::Enter | Key::Space => {
+                self.select_user(self.selected_user);
+                LoginAction::Redraw
+            }
+            _ => LoginAction::Ignored,
+        }
+    }
+
+    fn key_password_entry(&mut self, event: &KeyEvent) -> LoginAction {
+        match event.key {
+            Key::Enter => match self.submit_password() {
+                Some(username) => LoginAction::Authenticate {
+                    username,
+                    password: self.password_input.clone(),
+                },
+                // Locked out, or no user to log in as. `submit_password`
+                // leaves the phase alone in both cases, so there is nothing to
+                // redraw either.
+                None => LoginAction::Ignored,
+            },
+            Key::Backspace => {
+                self.backspace();
+                LoginAction::Redraw
+            }
+            // Only from password entry, and only back to the user list — never
+            // out of the login screen. There is nothing behind it.
+            Key::Escape => {
+                if self.users.len() > 1 {
+                    self.back_to_user_select();
+                } else {
+                    // One account: "back" would be to a list with a single row
+                    // and no other choice on it. Clearing the field is what the
+                    // key is actually for here.
+                    self.clear_password();
+                }
+                LoginAction::Redraw
+            }
+            _ => {
+                // Text, not a key name: a keyboard layout decides which
+                // character a key produces, and this screen must not
+                // second-guess it — a password typed on a Dvorak or AZERTY
+                // layout is the characters the layout produced.
+                //
+                // Control characters are dropped. `text` carries them for keys
+                // like Tab and Escape on some layouts, and a password field
+                // that accepts an invisible character accepts one the user
+                // cannot retype.
+                let mut typed = false;
+                for c in event.text.chars().filter(|c| !c.is_control()) {
+                    self.type_char(c);
+                    typed = true;
+                }
+                if typed {
+                    LoginAction::Redraw
+                } else {
+                    LoginAction::Ignored
+                }
+            }
+        }
+    }
+
+    /// Handle a mouse event.
+    ///
+    /// Only a left press acts; movement and release do nothing, because
+    /// nothing here is dragged and a hover state would be a second thing to
+    /// keep in step with the renderer for no gain.
+    pub fn handle_mouse(&mut self, event: &MouseEvent) -> LoginAction {
+        if event.kind != MouseEventKind::Press(MouseButton::Left) {
+            return LoginAction::Ignored;
+        }
+        let (x, y) = (event.x, event.y);
+
+        if self.power_menu_open {
+            for (i, action) in POWER_MENU_ACTIONS.iter().enumerate() {
+                if self.power_menu_row_rect(i).contains(x, y) {
+                    self.power_menu_open = false;
+                    return LoginAction::Power(*action);
+                }
+            }
+            // A click anywhere else shuts the menu, including on the button
+            // that opened it — which is why this runs before the button test
+            // below rather than after it, so one click does not close and
+            // reopen it.
+            self.power_menu_open = false;
+            return LoginAction::Redraw;
+        }
+        if self.a11y_menu_open {
+            self.a11y_menu_open = false;
+            return LoginAction::Redraw;
+        }
+        if self.config.show_power && self.power_button_rect().contains(x, y) {
+            self.toggle_power_menu();
+            return LoginAction::Redraw;
+        }
+        if self.config.show_accessibility && self.a11y_button_rect().contains(x, y) {
+            self.toggle_a11y_menu();
+            return LoginAction::Redraw;
+        }
+        if self.phase == LoginPhase::UserSelect {
+            for i in 0..self.users.len() {
+                if self.user_row_rect(i).contains(x, y) {
+                    self.select_user(i);
+                    return LoginAction::Redraw;
+                }
+            }
+        }
+        LoginAction::Ignored
+    }
+
     /// Tick animation (shake effect).
     pub fn tick_animation(&mut self, dt: f32) {
         if self.shake_timer > 0.0 {
@@ -677,22 +1023,18 @@ impl LoginScreen {
     }
 
     fn render_user_select(&self, p: &Palette, commands: &mut Vec<RenderCommand>) {
-        let cx = self.screen_width / 2.0;
-        let start_y = self.screen_height / 2.0 - (self.users.len() as f32 * 40.0);
-
         for (i, user) in self.users.iter().enumerate() {
-            let uy = start_y + i as f32 * 80.0;
+            let row = self.user_row_rect(i);
+            let (row_x, uy, row_w) = (row.x, row.y, row.w);
             let selected = i == self.selected_user;
 
             // User row. A panel this module draws itself, so everything mounted
             // on it below uses ordinary roles rather than the wallpaper pair.
-            let row_w = 280.0;
-            let row_x = cx - row_w / 2.0;
             commands.push(RenderCommand::FillRect {
                 x: row_x,
                 y: uy,
                 width: row_w,
-                height: 64.0,
+                height: row.h,
                 color: if selected {
                     p.surface0
                 } else {
@@ -1069,15 +1411,8 @@ impl LoginScreen {
             corner_radii: CornerRadii::all(8.0),
         });
 
-        let options = [
-            ("\u{23FB}", "Shut Down"),
-            ("\u{1F504}", "Restart"),
-            ("\u{1F4A4}", "Sleep"),
-            ("\u{1F4BE}", "Hibernate"),
-        ];
-
-        for (i, (icon, label)) in options.iter().enumerate() {
-            let iy = my + 8.0 + i as f32 * 32.0;
+        for (i, (icon, label)) in POWER_MENU_LABELS.iter().enumerate() {
+            let iy = self.power_menu_row_rect(i).y;
             commands.push(RenderCommand::Text {
                 x: mx + 12.0,
                 y: iy + 6.0,
@@ -1126,6 +1461,7 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+    use guitk::event::Modifiers;
 
     fn make_users() -> Vec<LoginUser> {
         vec![
@@ -2412,5 +2748,272 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Geometry and input
+    //
+    // Everything below exists because the screen could be *drawn* and not
+    // *used*: it had no hit test and no key handler, so however much of it
+    // rendered, no keystroke and no click could reach any of it.
+    // ------------------------------------------------------------------
+
+    fn press(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::default(),
+            text: String::new(),
+        }
+    }
+
+    fn typed(text: &str) -> KeyEvent {
+        KeyEvent {
+            // The key name is irrelevant to a password: what lands in the
+            // field is `text`, which is what the layout produced.
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers::default(),
+            text: text.to_string(),
+        }
+    }
+
+    fn click_at(x: f32, y: f32) -> MouseEvent {
+        MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }
+    }
+
+    /// The claim the whole geometry section exists to make: the rectangle the
+    /// hit test uses is the rectangle the renderer drew. Checked against the
+    /// commands rather than against a second copy of the arithmetic, which
+    /// would agree with the first copy and prove nothing.
+    #[test]
+    fn every_user_row_is_hit_where_it_was_drawn() {
+        let screen = make_screen();
+        let p = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let cmds = screen.render(&p);
+        for i in 0..screen.users.len() {
+            let want = screen.user_row_rect(i);
+            let drawn = cmds.iter().any(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => {
+                    (*x - want.x).abs() < f32::EPSILON
+                        && (*y - want.y).abs() < f32::EPSILON
+                        && (*width - want.w).abs() < f32::EPSILON
+                        && (*height - want.h).abs() < f32::EPSILON
+                }
+                _ => false,
+            });
+            assert!(drawn, "row {i} is drawn somewhere other than its hit rect");
+        }
+    }
+
+    #[test]
+    fn clicking_a_user_row_selects_that_user_and_asks_for_a_password() {
+        let mut screen = make_screen();
+        let row = screen.user_row_rect(1);
+        let action = screen.handle_mouse(&click_at(row.x + 4.0, row.y + 4.0));
+        assert_eq!(action, LoginAction::Redraw);
+        assert_eq!(screen.selected_user, 1);
+        assert_eq!(screen.phase, LoginPhase::PasswordEntry);
+    }
+
+    /// The gap between rows is 16px of nothing, and a click landing in it must
+    /// select neither neighbour. Pitch (80) is larger than height (64) for
+    /// exactly this reason, so a hit test written from the pitch would swallow
+    /// the gap and silently select the row above.
+    #[test]
+    fn a_click_in_the_gap_between_two_rows_selects_neither() {
+        let mut screen = make_screen();
+        let first = screen.user_row_rect(0);
+        let action = screen.handle_mouse(&click_at(first.x + 4.0, first.y + first.h + 4.0));
+        assert_eq!(action, LoginAction::Ignored);
+        assert_eq!(screen.phase, LoginPhase::UserSelect);
+    }
+
+    #[test]
+    fn the_arrow_keys_walk_the_user_list_and_stop_at_both_ends() {
+        let mut screen = make_screen();
+        assert_eq!(screen.selected_user, 0);
+        screen.handle_key(&press(Key::Up));
+        assert_eq!(screen.selected_user, 0, "up from the first row stays put");
+        screen.handle_key(&press(Key::Down));
+        assert_eq!(screen.selected_user, 1);
+        screen.handle_key(&press(Key::Down));
+        assert_eq!(screen.selected_user, 1, "down from the last row stays put");
+    }
+
+    #[test]
+    fn enter_on_the_user_list_moves_to_password_entry() {
+        let mut screen = make_screen();
+        assert_eq!(screen.handle_key(&press(Key::Enter)), LoginAction::Redraw);
+        assert_eq!(screen.phase, LoginPhase::PasswordEntry);
+    }
+
+    /// The point of the whole exercise: a typed password comes back out as
+    /// something the shell can check, naming the user it belongs to.
+    #[test]
+    fn typing_a_password_and_pressing_enter_asks_the_shell_to_authenticate() {
+        let mut screen = make_screen();
+        screen.select_user(1);
+        for c in ["h", "u", "n", "t", "e", "r"] {
+            assert_eq!(screen.handle_key(&typed(c)), LoginAction::Redraw);
+        }
+        assert_eq!(
+            screen.handle_key(&press(Key::Enter)),
+            LoginAction::Authenticate {
+                username: "bob".to_string(),
+                password: "hunter".to_string(),
+            }
+        );
+        assert_eq!(screen.phase, LoginPhase::Authenticating);
+    }
+
+    /// A keystroke's *text*, not its key name: a layout decides which
+    /// character a key produces, and a password typed on AZERTY is the
+    /// characters AZERTY produced.
+    #[test]
+    fn a_password_is_the_characters_the_layout_produced() {
+        let mut screen = make_screen();
+        screen.select_user(0);
+        screen.handle_key(&typed("é"));
+        screen.handle_key(&typed("ß"));
+        assert_eq!(screen.password(), "éß");
+    }
+
+    /// `text` carries control characters for some keys on some layouts, and a
+    /// password field that accepts an invisible character accepts one the user
+    /// cannot retype.
+    #[test]
+    fn control_characters_never_reach_the_password() {
+        let mut screen = make_screen();
+        screen.select_user(0);
+        assert_eq!(screen.handle_key(&typed("\t")), LoginAction::Ignored);
+        assert_eq!(screen.handle_key(&typed("\u{7}")), LoginAction::Ignored);
+        assert_eq!(screen.password(), "");
+    }
+
+    /// Acting on the release as well as the press would type every character
+    /// twice, which the mask would show and the user would be unable to
+    /// explain.
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut screen = make_screen();
+        screen.select_user(0);
+        let mut release = typed("a");
+        release.pressed = false;
+        assert_eq!(screen.handle_key(&release), LoginAction::Ignored);
+        assert_eq!(screen.password(), "");
+    }
+
+    #[test]
+    fn backspace_erases_and_escape_goes_back_to_the_user_list() {
+        let mut screen = make_screen();
+        screen.select_user(0);
+        screen.handle_key(&typed("ab"));
+        screen.handle_key(&press(Key::Backspace));
+        assert_eq!(screen.password(), "a");
+        assert_eq!(screen.handle_key(&press(Key::Escape)), LoginAction::Redraw);
+        assert_eq!(screen.phase, LoginPhase::UserSelect);
+    }
+
+    /// With one account there is no list to go back *to*, so Escape is the
+    /// clear-the-field key instead. Going back would show a single row with no
+    /// other choice on it and no way forward except the row already selected.
+    #[test]
+    fn with_a_single_account_escape_clears_the_field_instead_of_going_back() {
+        let mut screen =
+            LoginScreen::new(1920.0, 1080.0, vec![LoginUser::new(1000, "alice", "Alice")]);
+        screen.select_user(0);
+        screen.handle_key(&typed("secret"));
+        screen.handle_key(&press(Key::Escape));
+        assert_eq!(screen.phase, LoginPhase::PasswordEntry);
+        assert_eq!(screen.password(), "");
+    }
+
+    /// A failed attempt is cleared by any key, and that key is *consumed*: a
+    /// character arriving in the same event as the clear would look like the
+    /// clear had not happened.
+    #[test]
+    fn any_key_clears_a_failure_without_typing_itself() {
+        let mut screen = make_screen();
+        screen.select_user(0);
+        screen.handle_key(&typed("wrong"));
+        screen.handle_key(&press(Key::Enter));
+        screen.auth_failure("Incorrect password");
+        assert_eq!(screen.phase, LoginPhase::Failed);
+        assert_eq!(screen.handle_key(&typed("x")), LoginAction::Redraw);
+        assert_eq!(screen.phase, LoginPhase::PasswordEntry);
+        assert_eq!(screen.password(), "", "the clearing key must not be typed");
+    }
+
+    /// While the machine is checking the last guess there is nothing to type
+    /// into, and a keystroke that appeared to be accepted would be a keystroke
+    /// the user believes is in the field.
+    #[test]
+    fn nothing_types_while_authenticating_or_logging_in() {
+        let mut screen = make_screen();
+        screen.select_user(0);
+        screen.handle_key(&press(Key::Enter));
+        assert_eq!(screen.phase, LoginPhase::Authenticating);
+        assert_eq!(screen.handle_key(&typed("a")), LoginAction::Ignored);
+        screen.auth_success();
+        assert_eq!(screen.handle_key(&typed("a")), LoginAction::Ignored);
+    }
+
+    #[test]
+    fn the_power_button_opens_the_menu_and_a_row_names_its_action() {
+        let mut screen = make_screen();
+        let button = screen.power_button_rect();
+        screen.handle_mouse(&click_at(button.x + 2.0, button.y + 2.0));
+        assert!(screen.power_menu_open);
+        let row = screen.power_menu_row_rect(1);
+        assert_eq!(
+            screen.handle_mouse(&click_at(row.x + 2.0, row.y + 2.0)),
+            LoginAction::Power(LoginPowerAction::Reboot)
+        );
+        assert!(!screen.power_menu_open, "picking a row shuts the menu");
+    }
+
+    /// The menu closes on a click that misses it — including a click on the
+    /// button that opened it, which is why the open-menu case is tested before
+    /// the button case rather than after. Handled the other way round, one
+    /// click would close and reopen it and the menu would never shut.
+    #[test]
+    fn clicking_the_power_button_again_shuts_the_menu() {
+        let mut screen = make_screen();
+        let button = screen.power_button_rect();
+        screen.handle_mouse(&click_at(button.x + 2.0, button.y + 2.0));
+        assert!(screen.power_menu_open);
+        screen.handle_mouse(&click_at(button.x + 2.0, button.y + 2.0));
+        assert!(!screen.power_menu_open);
+    }
+
+    /// A menu is modal over the phase beneath it: the arrows must not move a
+    /// selection the user cannot see.
+    #[test]
+    fn an_open_menu_swallows_the_arrow_keys_and_escape_shuts_it() {
+        let mut screen = make_screen();
+        screen.toggle_power_menu();
+        assert_eq!(screen.handle_key(&press(Key::Down)), LoginAction::Ignored);
+        assert_eq!(screen.selected_user, 0);
+        assert_eq!(screen.handle_key(&press(Key::Escape)), LoginAction::Redraw);
+        assert!(!screen.power_menu_open);
+    }
+
+    /// The two tables are read in different places -- glyph and label by the
+    /// renderer, action by the hit test -- so their *order* is the shared fact
+    /// and a length mismatch is the way it would first go wrong.
+    #[test]
+    fn the_power_menu_has_one_action_per_row() {
+        assert_eq!(POWER_MENU_LABELS.len(), POWER_MENU_ACTIONS.len());
     }
 }

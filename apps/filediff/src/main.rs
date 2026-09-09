@@ -27,6 +27,7 @@
     clippy::struct_excessive_bools
 )]
 
+use appearance::Palette;
 #[allow(unused_imports)]
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -65,24 +66,6 @@ use diffcore::{
 /// Catppuccin Mocha theme colors used throughout the diff tool.
 pub mod colors {
     use guitk::color::Color;
-
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const CRUST: Color = Color::from_hex(0x11111B);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const SURFACE2: Color = Color::from_hex(0x585B70);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const TEAL: Color = Color::from_hex(0x94E2D5);
 
     // Diff-specific background colors (semi-transparent effect via muted shades)
     pub const ADD_BG: Color = Color::rgba(166, 227, 161, 30);
@@ -857,6 +840,12 @@ pub struct FileDiffApp {
 
     /// Whether the toolbar dropdown for view mode is open.
     pub view_mode_dropdown_open: bool,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for FileDiffApp {
@@ -870,6 +859,7 @@ impl FileDiffApp {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width: 1200.0,
             height: 800.0,
             left_path: String::new(),
@@ -1361,7 +1351,7 @@ impl FileDiffApp {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: colors::BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1414,7 +1404,7 @@ impl FileDiffApp {
             y: 0.0,
             width: self.width,
             height: TOOLBAR_HEIGHT,
-            color: colors::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1432,7 +1422,7 @@ impl FileDiffApp {
             y1: 8.0,
             x2: btn_x,
             y2: TOOLBAR_HEIGHT - 8.0,
-            color: colors::SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
         btn_x += 14.0;
@@ -1447,7 +1437,7 @@ impl FileDiffApp {
             y1: 8.0,
             x2: btn_x,
             y2: TOOLBAR_HEIGHT - 8.0,
-            color: colors::SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
         btn_x += 14.0;
@@ -1464,7 +1454,7 @@ impl FileDiffApp {
             y1: TOOLBAR_HEIGHT,
             x2: self.width,
             y2: TOOLBAR_HEIGHT,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -1493,9 +1483,9 @@ impl FileDiffApp {
                 width: btn_w,
                 height: btn_h,
                 color: if is_active {
-                    colors::SURFACE1
+                    self.palette.surface1
                 } else {
-                    colors::SURFACE0
+                    self.palette.surface0
                 },
                 corner_radii: CornerRadii::all(4.0),
             });
@@ -1505,9 +1495,9 @@ impl FileDiffApp {
                 y: btn_y + 7.0,
                 text: (*label).to_string(),
                 color: if is_active {
-                    colors::BLUE
+                    self.palette.blue
                 } else {
-                    colors::TEXT
+                    self.palette.text
                 },
                 font_size: UI_FONT_SIZE,
                 font_weight: if is_active {
@@ -1538,7 +1528,7 @@ impl FileDiffApp {
                 y: btn_y,
                 width: btn_w,
                 height: btn_h,
-                color: colors::SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -1546,7 +1536,7 @@ impl FileDiffApp {
                 x: *btn_x + 8.0,
                 y: btn_y + 7.0,
                 text: full_label,
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1579,9 +1569,9 @@ impl FileDiffApp {
                 width: btn_w,
                 height: btn_h,
                 color: if *active {
-                    colors::SURFACE1
+                    self.palette.surface1
                 } else {
-                    colors::SURFACE0
+                    self.palette.surface0
                 },
                 corner_radii: CornerRadii::all(4.0),
             });
@@ -1591,9 +1581,9 @@ impl FileDiffApp {
                 y: btn_y + 7.0,
                 text: (*label).to_string(),
                 color: if *active {
-                    colors::TEAL
+                    self.palette.teal
                 } else {
-                    colors::SUBTEXT0
+                    self.palette.subtext0
                 },
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -1621,9 +1611,9 @@ impl FileDiffApp {
             width: sync_w,
             height: btn_h,
             color: if self.sync_scroll {
-                colors::SURFACE1
+                self.palette.surface1
             } else {
-                colors::SURFACE0
+                self.palette.surface0
             },
             corner_radii: CornerRadii::all(4.0),
         });
@@ -1633,9 +1623,9 @@ impl FileDiffApp {
             y: btn_y + 7.0,
             text: sync_label.to_string(),
             color: if self.sync_scroll {
-                colors::GREEN
+                self.palette.green
             } else {
-                colors::OVERLAY0
+                self.palette.overlay0
             },
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
@@ -1649,10 +1639,18 @@ impl FileDiffApp {
         let panel_width = (self.width - SEPARATOR_WIDTH) / 2.0;
 
         // Left panel header
-        render_panel_header(tree, 0.0, content_y, panel_width, &self.left_path);
+        render_panel_header(
+            tree,
+            &self.palette,
+            0.0,
+            content_y,
+            panel_width,
+            &self.left_path,
+        );
         // Right panel header
         render_panel_header(
             tree,
+            &self.palette,
             panel_width + SEPARATOR_WIDTH,
             content_y,
             panel_width,
@@ -1668,7 +1666,7 @@ impl FileDiffApp {
             y: content_y,
             width: SEPARATOR_WIDTH,
             height: content_height,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1701,6 +1699,7 @@ impl FileDiffApp {
             // Left side
             render_diff_line(
                 tree,
+                &self.palette,
                 &DiffLineParams {
                     x: 0.0,
                     y,
@@ -1718,6 +1717,7 @@ impl FileDiffApp {
             // Right side
             render_diff_line(
                 tree,
+                &self.palette,
                 &DiffLineParams {
                     x: panel_width + SEPARATOR_WIDTH,
                     y,
@@ -1806,9 +1806,9 @@ impl FileDiffApp {
         search: SearchOverlay<'_>,
     ) {
         let (bg_color, prefix, text_color) = match edit.op {
-            DiffOp::Equal => (colors::BASE, " ", colors::TEXT),
-            DiffOp::Insert => (colors::ADD_BG, "+", colors::GREEN),
-            DiffOp::Delete => (colors::DEL_BG, "-", colors::RED),
+            DiffOp::Equal => (self.palette.base, " ", self.palette.text),
+            DiffOp::Insert => (colors::ADD_BG, "+", self.palette.green),
+            DiffOp::Delete => (colors::DEL_BG, "-", self.palette.red),
         };
 
         // Background
@@ -1828,7 +1828,7 @@ impl FileDiffApp {
                 x: PANEL_PADDING,
                 y: y + 3.0,
                 text: ln_text,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: CONTENT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(GUTTER_WIDTH - 4.0),
@@ -1843,7 +1843,7 @@ impl FileDiffApp {
                 x: GUTTER_WIDTH + PANEL_PADDING,
                 y: y + 3.0,
                 text: rn_text,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: CONTENT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(GUTTER_WIDTH - 4.0),
@@ -1932,7 +1932,7 @@ impl FileDiffApp {
         search: SearchOverlay<'_>,
     ) {
         let bg_color = match row.op {
-            DiffOp::Equal => colors::BASE,
+            DiffOp::Equal => self.palette.base,
             DiffOp::Insert => colors::ADD_BG,
             DiffOp::Delete => colors::DEL_BG,
         };
@@ -1954,7 +1954,7 @@ impl FileDiffApp {
                 x: PANEL_PADDING,
                 y: y + 3.0,
                 text: ln_text,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: CONTENT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(GUTTER_WIDTH - 4.0),
@@ -1964,9 +1964,9 @@ impl FileDiffApp {
 
         // Prefix
         let (prefix, prefix_color) = match row.op {
-            DiffOp::Equal => (" ", colors::TEXT),
-            DiffOp::Insert => ("+", colors::GREEN),
-            DiffOp::Delete => ("-", colors::RED),
+            DiffOp::Equal => (" ", self.palette.text),
+            DiffOp::Insert => ("+", self.palette.green),
+            DiffOp::Delete => ("-", self.palette.red),
         };
         tree.push(RenderCommand::Text {
             x: GUTTER_WIDTH + PANEL_PADDING,
@@ -2035,7 +2035,7 @@ impl FileDiffApp {
                 let highlight_color = match row.op {
                     DiffOp::Insert => colors::ADD_LINE_BG,
                     DiffOp::Delete => colors::DEL_LINE_BG,
-                    DiffOp::Equal => colors::BASE,
+                    DiffOp::Equal => self.palette.base,
                 };
                 tree.push(RenderCommand::FillRect {
                     x: text_x + char_offset,
@@ -2053,12 +2053,12 @@ impl FileDiffApp {
                 text: span_text.to_string(),
                 color: if span.changed {
                     match row.op {
-                        DiffOp::Insert => colors::GREEN,
-                        DiffOp::Delete => colors::RED,
-                        DiffOp::Equal => colors::TEXT,
+                        DiffOp::Insert => self.palette.green,
+                        DiffOp::Delete => self.palette.red,
+                        DiffOp::Equal => self.palette.text,
                     }
                 } else {
-                    colors::TEXT
+                    self.palette.text
                 },
                 font_size: CONTENT_FONT_SIZE,
                 font_weight: weight,
@@ -2079,7 +2079,7 @@ impl FileDiffApp {
             x: center_x - 120.0,
             y: center_y - 30.0,
             text: "File Diff/Compare Tool".to_string(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: 20.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2090,7 +2090,7 @@ impl FileDiffApp {
             x: center_x - 140.0,
             y: center_y + 10.0,
             text: "Open two files to compare them".to_string(),
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2110,7 +2110,7 @@ impl FileDiffApp {
             y,
             width: self.width,
             height: LINE_HEIGHT,
-            color: colors::CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2125,7 +2125,7 @@ impl FileDiffApp {
             x: PANEL_PADDING + 4.0,
             y: y + 3.0,
             text: summary,
-            color: colors::SUBTEXT1,
+            color: self.palette.subtext1,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - 16.0),
@@ -2139,7 +2139,7 @@ impl FileDiffApp {
         {
             let ey = list_y + vi as f32 * LINE_HEIGHT;
             if let Some(entry) = result.entries.get(entry_idx) {
-                render_dir_entry(tree, ey, entry);
+                render_dir_entry(tree, &self.palette, ey, entry);
             }
         }
     }
@@ -2157,7 +2157,7 @@ impl FileDiffApp {
             y: bar_y,
             width: bar_w,
             height: bar_h,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -2167,7 +2167,7 @@ impl FileDiffApp {
             y: bar_y,
             width: bar_w,
             height: bar_h,
-            color: colors::BLUE,
+            color: self.palette.blue,
             line_width: 1.0,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -2177,7 +2177,7 @@ impl FileDiffApp {
             x: bar_x + 8.0,
             y: bar_y + 10.0,
             text: "Find:".to_string(),
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2190,7 +2190,7 @@ impl FileDiffApp {
                 x: bar_x + 48.0,
                 y: bar_y + 10.0,
                 text: self.search.query.clone(),
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_size: CONTENT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bar_w - 140.0),
@@ -2212,7 +2212,7 @@ impl FileDiffApp {
             x: bar_x + bar_w - 80.0,
             y: bar_y + 10.0,
             text: match_info,
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2229,7 +2229,7 @@ impl FileDiffApp {
             y,
             width: self.width,
             height: STATUS_BAR_HEIGHT,
-            color: colors::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2239,7 +2239,7 @@ impl FileDiffApp {
             y1: y,
             x2: self.width,
             y2: y,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2251,7 +2251,7 @@ impl FileDiffApp {
             x: text_x,
             y: text_y,
             text: format!("{}", self.view_mode),
-            color: colors::BLUE,
+            color: self.palette.blue,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2280,7 +2280,7 @@ impl FileDiffApp {
             x: *text_x,
             y: text_y,
             text: change_info,
-            color: colors::PEACH,
+            color: self.palette.peach,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2297,7 +2297,7 @@ impl FileDiffApp {
             x: *text_x,
             y: text_y,
             text: stats_text,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2311,7 +2311,7 @@ impl FileDiffApp {
             x: *text_x,
             y: text_y,
             text: totals_text,
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2334,9 +2334,9 @@ impl FileDiffApp {
                     y: text_y,
                     text: merge_text,
                     color: if decided == total_hunks {
-                        colors::GREEN
+                        self.palette.green
                     } else {
-                        colors::YELLOW
+                        self.palette.yellow
                     },
                     font_size: UI_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
@@ -2373,7 +2373,7 @@ impl FileDiffApp {
             y,
             width: track_w,
             height,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -2392,7 +2392,7 @@ impl FileDiffApp {
             y: thumb_y,
             width: track_w,
             height: thumb_h,
-            color: colors::SURFACE2,
+            color: self.palette.surface2,
             corner_radii: CornerRadii::all(3.0),
         });
     }
@@ -2403,13 +2403,20 @@ impl FileDiffApp {
 // ============================================================================
 
 /// Render a panel header with file path.
-fn render_panel_header(tree: &mut RenderTree, x: f32, y: f32, width: f32, path: &str) {
+fn render_panel_header(
+    tree: &mut RenderTree,
+    pal: &Palette,
+    x: f32,
+    y: f32,
+    width: f32,
+    path: &str,
+) {
     tree.push(RenderCommand::FillRect {
         x,
         y,
         width,
         height: LINE_HEIGHT,
-        color: colors::CRUST,
+        color: pal.crust,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -2418,7 +2425,7 @@ fn render_panel_header(tree: &mut RenderTree, x: f32, y: f32, width: f32, path: 
         x: x + PANEL_PADDING + 4.0,
         y: y + 3.0,
         text: display_path.to_string(),
-        color: colors::SUBTEXT1,
+        color: pal.subtext1,
         font_size: UI_FONT_SIZE,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 12.0),
@@ -2498,11 +2505,11 @@ fn render_search_highlights(
 }
 
 /// Render a single diff line (used in side-by-side mode).
-fn render_diff_line(tree: &mut RenderTree, params: &DiffLineParams<'_>) {
+fn render_diff_line(tree: &mut RenderTree, pal: &Palette, params: &DiffLineParams<'_>) {
     let bg_color = match params.op {
         Some(DiffOp::Insert) => colors::ADD_BG,
         Some(DiffOp::Delete) => colors::DEL_BG,
-        Some(DiffOp::Equal) | None => colors::BASE,
+        Some(DiffOp::Equal) | None => pal.base,
     };
 
     // Background
@@ -2521,7 +2528,7 @@ fn render_diff_line(tree: &mut RenderTree, params: &DiffLineParams<'_>) {
         y1: params.y,
         x2: params.x + GUTTER_WIDTH,
         y2: params.y + LINE_HEIGHT,
-        color: colors::SURFACE0,
+        color: pal.surface0,
         width: 1.0,
     });
 
@@ -2537,7 +2544,7 @@ fn render_diff_line(tree: &mut RenderTree, params: &DiffLineParams<'_>) {
             ),
             y: params.y + 3.0,
             text: ln_text,
-            color: colors::OVERLAY0,
+            color: pal.overlay0,
             font_size: CONTENT_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(GUTTER_WIDTH - 4.0),
@@ -2548,9 +2555,9 @@ fn render_diff_line(tree: &mut RenderTree, params: &DiffLineParams<'_>) {
     // Text
     if let Some(text) = params.text {
         let text_color = match params.op {
-            Some(DiffOp::Insert) => colors::GREEN,
-            Some(DiffOp::Delete) => colors::RED,
-            _ => colors::TEXT,
+            Some(DiffOp::Insert) => pal.green,
+            Some(DiffOp::Delete) => pal.red,
+            _ => pal.text,
         };
 
         // Before the text, so the boxes are behind it.
@@ -2576,12 +2583,12 @@ fn render_diff_line(tree: &mut RenderTree, params: &DiffLineParams<'_>) {
 }
 
 /// Render a single directory comparison entry.
-fn render_dir_entry(tree: &mut RenderTree, ey: f32, entry: &DirCompareEntry) {
+fn render_dir_entry(tree: &mut RenderTree, pal: &Palette, ey: f32, entry: &DirCompareEntry) {
     let (status_color, status_text) = match entry.status {
-        FileCompareStatus::Same => (colors::GREEN, "Same"),
-        FileCompareStatus::Different => (colors::YELLOW, "Diff"),
-        FileCompareStatus::OnlyLeft => (colors::RED, "Left"),
-        FileCompareStatus::OnlyRight => (colors::BLUE, "Right"),
+        FileCompareStatus::Same => (pal.green, "Same"),
+        FileCompareStatus::Different => (pal.yellow, "Diff"),
+        FileCompareStatus::OnlyLeft => (pal.red, "Left"),
+        FileCompareStatus::OnlyRight => (pal.blue, "Right"),
     };
 
     // Status indicator
@@ -2611,7 +2618,7 @@ fn render_dir_entry(tree: &mut RenderTree, ey: f32, entry: &DirCompareEntry) {
         x: 70.0,
         y: ey + 3.0,
         text: entry.path.clone(),
-        color: colors::TEXT,
+        color: pal.text,
         font_size: CONTENT_FONT_SIZE,
         font_weight: FontWeightHint::Regular,
         max_width: Some(1200.0),
@@ -2624,6 +2631,10 @@ fn render_dir_entry(tree: &mut RenderTree, ey: f32, entry: &DirCompareEntry) {
 // ============================================================================
 
 impl App for FileDiffApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "File Diff".to_owned()
     }
@@ -4477,5 +4488,79 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         }
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut FileDiffApp) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 1200.0, 800.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = FileDiffApp::new();
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        oswindow::app::App::theme_changed(
+            &mut app,
+            &theme(
+                appearance::ThemeMode::Dark,
+                Some(appearance::HighContrastScheme::WhiteOnBlack),
+            ),
+        );
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

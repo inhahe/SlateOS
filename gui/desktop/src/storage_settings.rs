@@ -1006,7 +1006,7 @@ mod tests {
     )]
 
     use super::*;
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
 
     fn test_palette() -> Palette {
         Palette::for_mode(false)

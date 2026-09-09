@@ -15,8 +15,6 @@
 //! - **`TimeoutPolicy`** — time-bounds extension loading to prevent UI stalls.
 //! - **`build_context_menu`** — assembles base items + extension items into a final menu.
 
-#![allow(dead_code)]
-
 use crate::menu::MenuItem;
 
 use core::sync::atomic::{AtomicU64, Ordering};

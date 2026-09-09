@@ -35,8 +35,8 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::needless_pass_by_value)]
 
-#[allow(unused_imports)]
 use appearance::Palette;
+#[allow(unused_imports)]
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::RenderTree;

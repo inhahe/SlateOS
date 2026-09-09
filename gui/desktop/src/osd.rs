@@ -1241,7 +1241,7 @@ mod tests {
     )]
 
     use super::*;
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
 
     /// The dark palette, which is what every constant deleted from this module
     /// used to be: the tests below that predate the conversion asserted against

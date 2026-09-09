@@ -328,6 +328,18 @@ impl Watcher {
 // have dragged it into the shipped compositor.
 #[cfg(feature = "testing")]
 #[allow(clippy::expect_used)]
+// `missing_const_for_thread_local` fires on `TURN_DEPTH` although its
+// initializer *is* `const { Cell::new(0) }` -- written exactly the way the lint
+// asks for, on clippy 1.95, and it asks anyway. The suppression sits on the
+// module because the lint reports from inside the `thread_local!` expansion,
+// where an attribute on the invocation does not reach it. (The lint was renamed
+// from `thread_local_initializer_can_be_made_const`; naming the old one earned a
+// "has been renamed" warning and suppressed nothing, which is how the rename was
+// noticed.) Delete this when a later clippy stops firing.
+#[allow(
+    clippy::missing_const_for_thread_local,
+    reason = "already a const block; clippy 1.95 fires regardless"
+)]
 pub mod testing {
     //! Test support: run against a private, throwaway configuration directory.
     //!
@@ -341,15 +353,72 @@ pub mod testing {
     //! `set_var`/restore dance is three chances to leave `$HOME` pointing at a
     //! deleted directory for the rest of the run.
 
+    use core::cell::Cell;
     use scratchdir::ScratchDir;
     use std::env;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+    use std::sync::{Mutex, MutexGuard};
 
     /// The environment is process-global, so callers take turns rather than
     /// racing each other over `XDG_CONFIG_HOME`.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // How many turns this thread is already holding.
+    //
+    // `ENV_LOCK` is a plain `Mutex` and so is not reentrant, and the
+    // nesting is not hypothetical: the four theme tests in `oswindow` call
+    // `with_scratch_config` and build a `TestDesktop` *inside* it. A second
+    // `lock()` on the same thread is a deadlock, not an error -- the suite
+    // simply stops, with no failing test to point at, which is how this was
+    // found. `cargo test` runs a binary's tests as threads of one process,
+    // so a thread-local depth is the right grain: the outermost caller holds
+    // the lock and everything nested inside is already covered by it.
+    thread_local! {
+        static TURN_DEPTH: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// A turn at the process-global configuration environment, held until
+    /// dropped. See [`config_turn`].
+    ///
+    /// Carries the guard only for the outermost holder on a thread; a nested one
+    /// carries `None` and merely keeps the depth raised.
+    pub struct ConfigTurn {
+        _guard: Option<MutexGuard<'static, ()>>,
+    }
+
+    impl Drop for ConfigTurn {
+        fn drop(&mut self) {
+            TURN_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        }
+    }
+
+    /// Hold the same turn [`with_scratch_config`] takes, without installing a
+    /// scratch config.
+    ///
+    /// For a test that *reads* the config directory rather than replacing it.
+    /// The lock alone used to make its own callers take turns, which is not the
+    /// invariant that was needed: a reader that never called it -- 23 of the 27
+    /// tests in `oswindow`'s `app.rs`, every one of which reaches
+    /// `appearance::config::Watcher` through `drive()` -- would resolve
+    /// `XDG_CONFIG_HOME` in the middle of somebody else's scratch directory and
+    /// find a theme file it did not write. See `known-issues.md`
+    /// `TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS`.
+    ///
+    /// A poisoned lock is taken anyway, for [`with_scratch_config`]'s reason:
+    /// the environment is restored on the panicking path, so there is nothing
+    /// to recover and no reason to fail a second test.
+    #[must_use]
+    pub fn config_turn() -> ConfigTurn {
+        let depth = TURN_DEPTH.with(|d| {
+            let n = d.get();
+            d.set(n.saturating_add(1));
+            n
+        });
+        ConfigTurn {
+            _guard: (depth == 0).then(|| ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())),
+        }
+    }
 
     /// Restores `XDG_CONFIG_HOME` and `HOME` to what the process had, on every
     /// exit path.
@@ -396,7 +465,7 @@ pub mod testing {
         // environment was restored by `EnvRestore` on the way out of that
         // panic, so there is nothing to recover and no reason to fail this
         // test too.
-        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = config_turn();
 
         // Named from the process id and a per-process counter rather than from
         // the clock. The clock tag this replaces was not unique: `cargo test`

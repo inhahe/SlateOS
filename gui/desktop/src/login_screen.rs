@@ -306,6 +306,70 @@ fn push_on_background(commands: &mut Vec<RenderCommand>, p: &Palette, text: Rend
 }
 
 // ============================================================================
+// The accounts this machine offers
+// ============================================================================
+
+/// The users this machine will offer to log in, from the system account
+/// database.
+///
+/// The filter — which accounts a screen offers, and whether each needs a
+/// password — is [`loginusers`], shared with `apps/lockscreen` rather than
+/// written out at both. Two answers to "which names is the person standing at
+/// this machine offered" would drift silently, and the person cannot tell a
+/// hidden account from a deleted one. What is left here is this screen's own
+/// half: turning an account into the row this screen draws.
+///
+/// The most recently used account is marked, which is what
+/// [`LoginScreen::new`] selects first.
+#[must_use]
+pub fn system_users() -> Vec<LoginUser> {
+    users_from(&loginusers::offered_from_system())
+}
+
+/// The same, from the database at a given path — for tests, and for a chroot.
+#[must_use]
+pub fn users_from_db(users_yaml: &std::path::Path) -> Vec<LoginUser> {
+    users_from(&loginusers::offered(users_yaml))
+}
+
+fn users_from(accounts: &[loginusers::Account]) -> Vec<LoginUser> {
+    let recent = loginusers::most_recent(accounts);
+    accounts
+        .iter()
+        .enumerate()
+        .map(|(i, account)| {
+            // A record with no uid is still a person -- see `loginusers` for
+            // why it is kept -- and `LoginUser` has nowhere to put "unknown".
+            // Zero is the honest stand-in only because nothing here *uses* the
+            // uid: it is carried for a caller that starts a session, and that
+            // caller must resolve the name rather than trust this field. See
+            // `known-issues.md` TD-C-LOGINUSER-INVENTS-A-UID-IT-DOES-NOT-KNOW.
+            let mut user = LoginUser::new(
+                account.uid.unwrap_or(0),
+                &account.username,
+                &account.display_name,
+            );
+            if let Some(avatar) = &account.avatar {
+                user = user.with_avatar(avatar);
+            }
+            if account.is_admin {
+                user = user.with_admin();
+            }
+            if account.auto_login {
+                user = user.with_autologin();
+            }
+            if !account.has_password {
+                user = user.with_no_password();
+            }
+            if recent == Some(i) {
+                user = user.with_last_login();
+            }
+            user
+        })
+        .collect()
+}
+
+// ============================================================================
 // Geometry and input
 // ============================================================================
 
@@ -451,11 +515,22 @@ impl LoginScreen {
     pub fn new(screen_width: f32, screen_height: f32, users: Vec<LoginUser>) -> Self {
         // Default select last-login user or first.
         let selected = users.iter().position(|u| u.last_login).unwrap_or(0);
+        // With one account there is no choice to make, so the list is a screen
+        // the user must dismiss before they can type — a row they have to
+        // click to reach the field they were already looking at. The same
+        // reasoning that makes Escape *clear the field* rather than go back
+        // when there is one account (see `key_password_entry`): a list of one
+        // is not a list.
+        let phase = if users.len() == 1 {
+            LoginPhase::PasswordEntry
+        } else {
+            LoginPhase::UserSelect
+        };
 
         Self {
             users,
             selected_user: selected,
-            phase: LoginPhase::UserSelect,
+            phase,
             password_input: String::new(),
             show_password: false,
             error_message: None,
@@ -1883,7 +1958,7 @@ mod tests {
     //    background (two, the first a shadow), and a site that changes sides
     //    fails whichever of the two helpers names it.
 
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
     use appearance::readable_on;
 
     /// An accent that is in neither palette, so a site reaching for the accent
@@ -3015,5 +3090,87 @@ mod tests {
     #[test]
     fn the_power_menu_has_one_action_per_row() {
         assert_eq!(POWER_MENU_LABELS.len(), POWER_MENU_ACTIONS.len());
+    }
+
+    // ------------------------------------------------------------------
+    // The accounts this machine offers
+    // ------------------------------------------------------------------
+
+    fn db_with(body: &str) -> (scratchdir::ScratchDir, std::path::PathBuf) {
+        let dir = scratchdir::ScratchDir::new("login-screen");
+        let path = dir.path("users.yaml");
+        std::fs::write(&path, body).unwrap();
+        (dir, path)
+    }
+
+    /// The screen offers the accounts the shared filter offers — no more, and
+    /// with the same verdict on whether each needs a password.
+    #[test]
+    fn the_rows_are_the_accounts_the_shared_filter_offers() {
+        let (_dir, path) = db_with(
+            "users:\n\
+             - username: daemon\n   uid: 1\n   password_hash: x\n\
+             - username: alice\n   uid: 1000\n   password_hash: x\n   display_name: Alice A\n\
+             - username: guest\n   uid: 1001\n",
+        );
+        let users = users_from_db(&path);
+        let names: Vec<&str> = users.iter().map(|u| u.username.as_str()).collect();
+        assert_eq!(names, vec!["alice", "guest"], "daemon is not a person");
+        assert_eq!(users[0].display_name, "Alice A");
+        assert!(users[0].has_password);
+        assert!(!users[1].has_password, "guest has no hash");
+    }
+
+    /// The row the screen opens on is the one the person most likely wants,
+    /// and it is chosen by the same rule the lock screen uses.
+    #[test]
+    fn the_most_recently_used_account_is_marked_and_selected() {
+        let (_dir, path) = db_with(
+            "users:\n\
+             - username: alice\n   uid: 1000\n   last_login_timestamp: 100\n\
+             - username: bob\n   uid: 1001\n   last_login_timestamp: 900\n",
+        );
+        let users = users_from_db(&path);
+        assert!(!users[0].last_login);
+        assert!(users[1].last_login);
+        let screen = LoginScreen::new(1920.0, 1080.0, users);
+        assert_eq!(screen.current_user().unwrap().username, "bob");
+    }
+
+    #[test]
+    fn an_administrator_is_labelled_as_one() {
+        let (_dir, path) = db_with(
+            "users:\n\
+             - username: alice\n   uid: 1000\n   is_admin: true\n\
+             - username: bob\n   uid: 1001\n",
+        );
+        let users = users_from_db(&path);
+        assert_eq!(users[0].account_type, "Administrator");
+        assert_eq!(users[1].account_type, "Standard");
+    }
+
+    /// A machine whose account database cannot be read has no account list at
+    /// all — `/etc/passwd` is generated from it. An empty screen that offers
+    /// nobody is the right answer; inventing a row would offer a name that
+    /// cannot answer.
+    #[test]
+    fn an_unreadable_database_offers_no_rows() {
+        assert!(users_from_db(std::path::Path::new("/nonexistent/users.yaml")).is_empty());
+    }
+
+    /// A list of one is not a list: with a single account the screen opens on
+    /// the password field, because the row the user would have to click is the
+    /// only row and they were already looking at the field behind it.
+    #[test]
+    fn a_single_account_opens_straight_at_the_password_field() {
+        let screen = LoginScreen::new(1920.0, 1080.0, vec![LoginUser::new(1000, "alice", "Alice")]);
+        assert_eq!(screen.phase, LoginPhase::PasswordEntry);
+        assert_eq!(screen.current_user().unwrap().username, "alice");
+    }
+
+    /// Two accounts still ask which one, since now there is a choice.
+    #[test]
+    fn two_accounts_open_on_the_user_list() {
+        assert_eq!(make_screen().phase, LoginPhase::UserSelect);
     }
 }

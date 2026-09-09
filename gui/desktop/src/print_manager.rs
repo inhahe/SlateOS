@@ -944,7 +944,7 @@ mod tests {
     // Colour: every site resolves from the live palette
     // ================================================================
 
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
 
     fn rgb(c: Color) -> (u8, u8, u8) {
         (c.r, c.g, c.b)

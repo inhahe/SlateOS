@@ -1555,7 +1555,7 @@ mod tests {
     )]
 
     use super::*;
-    use crate::palette_check;
+    use appearance::palette_check;
 
     // --- MatchCriteria tests ---
 

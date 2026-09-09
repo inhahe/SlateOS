@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Text view widgets for displaying text content (read-only or selectable).
 //!
 //! Two widget types:
@@ -851,6 +850,27 @@ impl SimpleTextView {
     /// test that says so — so that if a kerning face ever arrives, this decision
     /// fails loudly here rather than showing up as a caret that drifts a
     /// fraction of a pixel per character on one face and not another.
+    /// x of column `col` on `line`, relative to the text area's left edge.
+    ///
+    /// A column past the end of the line clamps to the end, which is what a
+    /// selection running through a short line means.
+    ///
+    /// `#[cfg(test)]`: its only caller today is the test that asserts that
+    /// clamping. It was briefly deleted as dead code on 2026-09-08 -- the lib
+    /// build's "never used" warning does not account for test-only callers --
+    /// and the test failing is what said so. Kept rather than deleted with its
+    /// test, because the clamping rule is the non-obvious part of column
+    /// geometry and selection rendering will need it.
+    #[cfg(test)]
+    fn col_x(&self, line: usize, col: usize) -> f32 {
+        let offsets = self.column_offsets(line);
+        offsets
+            .get(col)
+            .or_else(|| offsets.last())
+            .copied()
+            .unwrap_or(0.0)
+    }
+
     fn column_offsets(&self, line: usize) -> Vec<f32> {
         let mut offsets = vec![0.0_f32];
         let Some(spans) = self.lines.get(line) else {
@@ -866,19 +886,6 @@ impl SimpleTextView {
             }
         }
         offsets
-    }
-
-    /// x of column `col` on `line`, relative to the text area's left edge.
-    ///
-    /// A column past the end of the line clamps to the end, which is what a
-    /// selection running through a short line means.
-    fn col_x(&self, line: usize, col: usize) -> f32 {
-        let offsets = self.column_offsets(line);
-        offsets
-            .get(col)
-            .or_else(|| offsets.last())
-            .copied()
-            .unwrap_or(0.0)
     }
 
     /// Convert pixel coordinates to a text position.

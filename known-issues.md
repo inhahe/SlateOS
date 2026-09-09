@@ -123434,6 +123434,61 @@ been audited, and this entry deliberately does not recommend a direction until
 it has been, because "nobody has audited it" is a statement about the auditing
 and not about the hazard. Doing the audit is the next step, not the decision.
 
+### The audit, done 2026-09-09 — and it comes out the other way
+
+**In the tree: no callers.** Across every file type, the only match outside
+`posix/` and `kernel/` is a doc comment in `apps/alarmclock` about dismissing
+an alarm clock, which is not this.
+
+**Outside the tree: a real one.** The built interpreter,
+`build/spike/python-slateos.elf`, references `setitimer`, `getitimer`,
+`alarm`, `timer_create`, `timer_settime` and `timer_delete` -- all six.
+CPython is this tree's largest libc consumer and it already *runs* on SlateOS.
+So the population is not empty, and `ENOSYS` is not the free move it was for
+`setgroups`. (Method, stated because it is weaker than a symbol table: a byte
+search of the linked binary for each name. It shows the symbols are present,
+not that every one is called on a live path. `nm` is not available here.)
+
+**Which way that cuts is less obvious than it looks.** Silent success is not
+obviously the safer option for a *timeout*: `signal.alarm(5)` succeeding and
+never firing converts a bounded wait into an unbounded one, which is the hang
+class that cost this lane two hours the same week. A loud failure at least
+lets a caller choose a fallback. But that is an argument for *fixing* it, not
+for breaking a running interpreter, and it is a user-visible policy change in
+a language runtime rather than a tidy-up.
+
+**So the direction is neither: implement it.** The kernel already has
+`proc/itimer.rs`, which backs `alarm` and `setitimer(ITIMER_REAL)` with a real
+`SIGALRM` and is wired into `kernel/src/syscall/linux.rs` -- but has no native
+syscall number, exactly as `setgroups` and `chroot` did. Asked of lane A in
+`requests/b-a-expose-the-interval-timer-natively-so-alarm-can-fire.md`. When
+that number exists this stops being a stub without any of the above needing to
+be decided.
+
+**Two siblings, same premise -- both FIXED 2026-09-09, same day.**
+`pause()` slept a second and returned `EINTR`, and `sigsuspend()` returned
+`EINTR` immediately: both reported "a signal was delivered" when none was.
+Neither needed the kernel. `signal.rs` now keeps a delivery counter, bumped
+whenever a registered handler runs, and both wait on it -- because a delivered
+signal otherwise leaves *no trace a waiter can observe* (delivery is
+asynchronous, and `SYS_SIGNAL_PENDING` reports signals blocked and queued,
+which is the opposite set).
+
+Lane A had already built the other half and said so:
+`kernel/src/proc/thread.rs` posts `SIGCHLD` to a native parent specifically so
+one "parked in `sigsuspend()`/`pause()`" wakes, remarking that "without this
+the parent livelocks in sigsuspend". Nothing had ever been parked there,
+because the libc side never waited -- so a carefully built kernel path had no
+consumer.
+
+Two details worth keeping. The counter counts handler **invocations**, not
+deliveries, which is what makes an ignored signal correctly *not* end a
+`pause` -- POSIX's rule, arrived at by construction rather than by a special
+case. And it is atomic, not for threading (the `process_global!` macro assumes
+a single-threaded target) but because the increment runs *in signal-delivery
+context*: a second delivery landing inside a read-modify-write would lose an
+update, and a lost update is a missed wake, not a wrong number.
+
 **The two honest options, for when it is:** arm a real kernel timer (the kernel
 already has the delivery path -- `kernel/src/proc/signal.rs` mentions
 `ITIMER_REAL`), or fail loudly so callers can choose a fallback. Succeeding
@@ -124241,14 +124296,17 @@ no other crate depends on it), so nothing outside the corpus could reach them.
 
 | module | what it holds | what is missing |
 |---|---|---|
-| `login_screen.rs` | `LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig` | Construction and a session hand-off. §815 says wire it up. *(Correction, 2026-09-08: an earlier version of this row said §818 has to take effect here. It does not — §818 is about the **lock** screen, `apps/lockscreen`, which is a separate program. See `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.)* |
-| `blur.rs` | `BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager` | A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
-| `input_method.rs` | `InputMethodManager`, `SwitchShortcut` | A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
+| `login_screen.rs` | ~~`LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig`~~ | **Done, 2026-09-08.** `ShellSession` constructs one when the account database names anybody (`design-decisions.md` §824), draws it on a fifth full-screen surface created last within `Layer::Overlay` so nothing the shell owns is over it, routes every key and click to it while it is up, and answers with `authlib`. What it still lacks is the *session hand-off* — a successful login unmaps the screen and reveals the desktop, but nothing starts a session as that user, because there is nowhere to send that (the shell has no channel to the process server; same gap as `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`). Autologin is read and not acted on; see `todo.txt`. Originally: Construction and a session hand-off. §815 says wire it up. *(Correction, 2026-09-08: an earlier version of this row said §818 has to take effect here. It does not — §818 is about the **lock** screen, `apps/lockscreen`, which is a separate program. See `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.)* |
+| `blur.rs` | ~~`BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager`~~ | **Done, 2026-09-08: moved to `gui/compositor` and wired.** A surface asks with `WindowSpec::blur_behind` (a *role*, so the compositor resolves the parameters from its own palette), and `Compositor::blur_behind_window` runs the pass over the region immediately before that window is drawn — the one moment the framebuffer holds everything behind it and nothing in front. Software targets only; see `TD-C-BLUR-IS-SOFTWARE-ONLY`. Originally it could not be wired in the shell at all: It works on a *framebuffer* (`BlurManager::update_all(&mut [u32], w, h)`) and the shell has no framebuffer: it submits render trees and never sees a pixel of what is behind its surfaces. `blur.rs` was the only file in the whole `gui/desktop` crate to mention `[u32]`. The pixels behind a window are the compositor's, so the pass now lives where it can run; what remains is a protocol way for a surface to ask for it, and a call in the compositor's paint path. Originally: A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
+| `input_method.rs` | ~~`InputMethodManager`, `SwitchShortcut`~~ | **Wired 2026-09-08, as the *switcher* it is.** `DesktopShell` owns an `InputMethodManager`; `HotkeyAction::SwitchInputLayout` (Super+Space) advances it and writes `input.yaml`, which the compositor already watches — so the keys actually move, and the choice survives a restart. Two of the three offered shortcuts remain unbound and cannot be bound yet: see `TD-C-TWO-OF-THREE-LAYOUT-SHORTCUTS-NEED-RELEASE-SEMANTICS`. **This is still not an IME** and the note below stands in full. Originally: A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
 | `tray_dnd.rs` | `TrayDragSource`, `TrayDropTarget`, `TrayIconSlot`, `TrayIconArrangement`, `TraySlotConfig`, `TrayArrangementConfig`, `StartInTrayConfig` | A caller in the tray's event path. |
 
 **Order worth doing them in.** `login_screen` first: it is named in §815, it
 gates §818, and a machine with no login screen is a machine with no user
-accounts in any meaningful sense. Then `tray_dnd` (self-contained, one event
+accounts in any meaningful sense. **(As of 2026-09-08 three of the four are
+done — `login_screen`, `blur` and `input_method`. Only `tray_dnd` is left, and
+it is blocked on C-Q12: there are two system trays and the drag-and-drop sits
+with the half that has no icons.)** Then `tray_dnd` (self-contained, one event
 path). Then `blur` (needs a compositing decision about where the pass runs —
 compare the colour-filter work, which had the same question). `input_method`
 last, because wiring is the small half of it.
@@ -124469,14 +124527,81 @@ which makes step 1 below larger than one dependency line.
   Each has a test on the rectangles it emits, and each was mutation-checked by
   making `theme_changed` ignore its argument.
 
-**Done: this is now every non-game application in the tree.** The 140
-applications with a `main.rs` divide into 58 converted, 42 games (which the
-operator asked be deprioritised), and 40 that name no palette roles at all and
-so have nothing to convert. The buckets are disjoint and sum to 140 --
-`survey_all.py` used to overlap them and report "0 already converted", because
-a converted application has no constants left and so fell into the
-"nothing to convert" bucket, which was also how its hardcoded games list
-silently hid nineteen games among the work still to do.
+**"Done: every non-game application" was claimed on 2026-09-08 and was wrong
+by sixteen applications.** Corrected the same day. The claim rested on the
+survey, and the survey rested on a regex anchored `^const` -- which sees a
+colour declared at file scope and does *not* see one declared `pub const`
+inside a `mod mocha { … }` block, referred to as `mocha::BASE`. Sixteen
+applications declare theirs that way: `emojipicker`, `unitconverter`,
+`torrent`, `systray`, `filediff`, `diskimager`, `kanban`, `screenrecorder`,
+`filesearch`, `email`, `launcher`, `hexeditor`, `soundrecorder`,
+`colorpicker`, `archivemanager` and `lockscreen`.
+
+**The failure mode is the one that matters here: it did not report them as
+outstanding, it reported them as *finished*.** An application with no
+file-scope constants looks identical to a converted one — both have zero — so
+all sixteen landed in the "names no palette roles at all" bucket and the
+totals still summed to 140. A survey that under-reports work looks exactly
+like a survey that has found none, which is why the arithmetic adding up was
+no evidence at all.
+
+The converter now recovers the enclosing module for each constant and
+substitutes the *qualified* name, since a bare `BASE` matches nothing at the
+use site.
+
+**And then a *fourth* shape turned up, by not trusting the survey a third
+time.** With all sixteen done, the survey again said zero left. Rather than
+report that, the tree was searched for the twenty Mocha hex values *in any
+form* — and five more applications appeared: `editor` (42 sites),
+`typingtutor` (18), `metronome` (13), `ebook` (13) and `settings` (2). They
+declare no colour constants at all; they write `Color::from_hex(0x1E1E2E)`
+**inline at the use site**. A survey that looks for `const NAME: Color = …` is
+blind to those in both directions — it cannot report them as outstanding *or*
+as done, so they simply never appeared in any count.
+
+**The lesson, stated plainly because it has now cost three corrections:** the
+survey counts *declarations*, and the thing that actually matters is *uses*.
+Every time the declaration shape has varied — file scope, module scope,
+underscore-prefixed, and now no declaration at all — the count has been wrong
+in the direction that makes the work look finished. The check that has never
+been fooled is grepping for the twenty hex values themselves and subtracting
+the sites deliberately kept fixed. That is the check to run before saying
+"done", and the survey is only a work queue.
+
+**And a sixth: submodules.** Every audit and every converter run named
+`apps/{app}/src/main.rs`. An application with more than one source file could
+therefore hold a second palette in a file nobody ever looked at, and
+`apps/settings` held three -- 38 constants across `snapshots.rs`, `remote.rs`
+and `associations.rs`, each headed with the comment *"Theme colors (same
+Catppuccin Mocha palette as main settings)"*, saying plainly what it was. The
+declaration shape there is the **original** file-scope one, so nothing about
+it was hard to find. It was simply never looked at.
+
+**The audit that finally holds** is over every `.rs` under `apps/*/src`, not
+`main.rs`, counting the twenty hex values and subtracting the sites
+deliberately kept fixed:
+
+```
+for d in apps/*/src; do
+  a=$(basename $(dirname $d))
+  n=$(cat $d/*.rs 2>/dev/null | grep -ciE "0x(1E1E2E|181825|…)")
+  [ "$n" -gt 0 ] && printf "%-16s %3d" "$a" "$n"
+done
+```
+
+Final counts: **79 applications converted**, 42 games, and the only
+non-game hex values left in `apps/` are ones deliberately kept:
+`tmux` 52 (ANSI cells), `whiteboard` 22 (ink), `mindmap` 12, `stickynotes` 9,
+`kanban` 7 (labels), `hexeditor` 7 (bookmarks), `snippets` 5 (folders),
+`soundrecorder` 4 (markers), `screenrecorder` 3 (annotations), `settings` 2
+(the theme-preview mockup), `editor` 2 (merge-conflict tints).
+
+The earlier fix to `survey_all.py` still stands: it used to overlap its buckets
+and report "0 already converted", because a converted application has no
+constants left and so fell into the "nothing to convert" bucket, which was also
+how its hardcoded games list silently hid nineteen games among the work still
+to do. Three bugs in one survey, each of which made the remaining work look
+smaller than it was.
 
 **The sharpest form of the content-vs-chrome rule, learned from `snippets`.**
 The earlier tell -- "the constant is read where no window is in scope" -- does
@@ -124899,6 +125024,639 @@ one.
 
 Related, same day, same shape: `A-A-A-BOOT-TEST-ONLY-GATE-DOES-NOT-EXIST-FOR-A-LANE-THAT-NEVER-BOOTS`.
 
+---
+
+---
+
+## TD-C-LOGINUSER-INVENTS-A-UID-IT-DOES-NOT-KNOW
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/desktop/src/login_screen.rs` — `users_from`, the
+`account.uid.unwrap_or(0)`. `LoginUser::uid` is `u32`.
+
+**In short:** an account whose entry in the user database does not say what its
+numeric id is gets shown on the login screen as **id 0**, which is the id of
+the machine's administrator. Nothing today reads that number, so nothing goes
+wrong yet; the danger is the day something does.
+
+**Why the account is offered at all.** `loginusers::offered` deliberately keeps
+a record with no readable uid, because a hand-edited `users.yaml` that omits
+the field describes a person far more often than it describes a service
+account, and dropping the machine's only account is a worse failure than
+listing one extra. So the case is real and will not be filtered away.
+
+**Why zero is the wrong stand-in.** Zero is not a neutral placeholder here —
+it is *root*. `loginusers::Account` keeps the honest `Option<u32>` for exactly
+this reason ("the file does not say" and "the file says 0" are different
+facts), and this conversion throws that distinction away at the last step. It
+is safe **only** because `LoginUser::uid` currently has no reader: the screen
+draws the name, and authentication is by name. The moment anything starts a
+session, sets ownership, or checks a privilege from this field, an account with
+a malformed database entry becomes an account that claims to be root.
+
+**The proper fix** is for `LoginUser::uid` to be `Option<u32>` too, so the
+unknown survives to whoever starts the session and that caller resolves the
+name against the database itself — which it must do regardless, since the
+screen's copy can be stale by the time a password is accepted. Deferred only
+because the session hand-off does not exist yet (see
+`TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED`), and the right
+shape for the field is easier to see with one real caller than with none.
+
+**Trigger to do it:** the first reader of `LoginUser::uid`. Do not add one
+without changing the type first.
+
+---
+
+## TD-C-AN-INSERTED-IMPORT-SILENTLY-REATTACHED-AN-ATTRIBUTE-IN-TEN-APPS
+
+**Date:** 2026-09-08. **Lane:** C. **Fixed the same day.**
+**Where:** `wire_app.py`, the conversion kit's import step; ten applications
+under `apps/`.
+
+**In short:** the tool that adds one line to a file put it in the wrong place —
+between a `#[allow(...)]` marker and the line that marker was written to cover.
+The marker then silently applied to the *new* line instead. Nothing broke and
+nothing looked wrong; in nine of the ten applications there was no visible
+symptom at all.
+
+**What happened.** `wire_app.py` inserts `use appearance::Palette;` before the
+file's first `use`. Ten applications have an `#[allow(unused_imports)]`
+immediately above that first `use`, so the insertion landed *between* the
+attribute and its item. Rust attaches an outer attribute to whatever follows
+it, so the allow silently moved onto the Palette import — which is used, so it
+suppresses nothing — and the import it had been covering became unguarded.
+
+**Why it is worth an entry rather than a one-line fix.** In `filediff` the
+unguarded import produced a fresh warning (`Modifiers`, `MouseButton`) and that
+is how it was noticed. In the other nine, the covered import happened to be in
+use, so removing its guard changed nothing visible. The failure mode is
+therefore *silent by default*: a suppression that has quietly moved to a
+different item produces no diagnostic, and the next person to touch the file
+gets a warning with no idea why it appeared. Nine of ten instances would never
+have been found by building.
+
+**The general lesson.** A tool that inserts a line into Rust source cannot
+treat "before the first item of kind X" as a position — attributes and doc
+comments bind forward to the item beneath them, so the real insertion point is
+before *the attribute run*, not before the item. `wire_app.py` now walks back
+over any `#[...]`, `///` or `//!` lines above its anchor.
+
+**It applies to deletion too, and the same day proved it.** Removing
+`pub mod palette_check;` from `gui/desktop/src/lib.rs` — when that module moved
+to `appearance` — left its `#[cfg(test)]` and doc comment attached to the next
+declaration down, `pub mod power;`. Forward binding makes a *deletion* exactly
+as dangerous as an insertion: whatever the attribute governed is gone, so it
+silently governs its new neighbour. This one would have compiled the power
+module out of every release build. The compiler caught it only because `power`
+is used elsewhere; had the stranded attribute been an `#[allow]`, nothing would
+have said a word — which is the nine-out-of-ten case above. **Deleting an item
+means deleting its attribute run with it**, which is the same rule
+`convert_app.py` learned for constants and their doc comments.
+
+**Found by:** a clippy warning in `filediff` that had no business being there,
+followed by grepping every application for an attribute directly above
+`use appearance::Palette;`. All ten fixed; all ten build clippy-clean and pass
+their suites.
+
+---
+
+## TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `apps/settings/src/snapshots.rs` (2,256 lines),
+`remote.rs` (1,619), `associations.rs` (1,753). 5,628 lines.
+
+**In short:** the Settings app has three whole pages written — system
+snapshots, remote desktop, and which program opens which file type — that the
+user cannot reach. They are complete, they compile, and nothing anywhere opens
+them. A fourth thing makes it worse than a plain gap: the snapshots page exists
+*twice*, once here and once in `main.rs`, and it is the copy in `main.rs` that
+the user actually sees.
+
+**The evidence.** `main.rs` declares all three with `mod`, and then refers to
+them **zero** times: `grep -c 'snapshots::' main.rs` → 0, and the same for the
+other two. Their entry points — `render_snapshots_page`,
+`render_remote_page`, `render_associations_page` — have no callers at all.
+There is no `SettingsPage::Remote` and no `SettingsPage::Associations` variant,
+so those two pages have nowhere in the navigation to be opened *from*.
+
+**Why nothing warned.** Each file opens with a module-level
+`#![allow(dead_code)]` — `snapshots.rs:15`, `remote.rs:7`,
+`associations.rs:7`. That is the exact mechanism
+`TD-C-ALLOW-DEAD-CODE-IS-HIDING-WHOLE-UNWIRED-MODULES` describes, and this is
+the largest instance found so far: without it, `cargo build` would have said
+these modules were unreachable every time anyone built the Settings app.
+The attribute was presumably added for a handful of genuinely-unused helpers
+and now covers 5,628 lines.
+
+**The duplicate is the part to decide first.** `SettingsPage::Snapshots`
+exists and is drawn by `SettingsState::build_snapshots_page` in `main.rs` —
+a *different* implementation from `snapshots::render_snapshots_page`. So there
+are two snapshot pages, and any change made to the one the user cannot see is
+work thrown away. Whichever is kept, the other must go; they cannot both be
+maintained, and the file-scope palette this entry was discovered through was
+being maintained in both.
+
+**Found by** the palette conversion. Every audit until then read only
+`main.rs`, so these three files were never looked at; they were found by
+grepping every `.rs` under `apps/*/src` for the twenty Catppuccin hex values,
+and each turned out to carry its own copy of the palette under the comment
+*"Theme colors (same Catppuccin Mocha palette as main settings)"*. They have
+since been converted to read the palette, so this is dead code that is at
+least no longer *divergent* dead code.
+
+**What to do, in order.**
+
+1. Decide which snapshots page is the real one, delete the other.
+2. Decide whether Remote Desktop and File Associations are pages the Settings
+   app should have. If yes, add the `SettingsPage` variants and wire them; if
+   no, delete the modules. `apps/remotedesktop` already exists as a separate
+   application, which is an argument that `remote.rs` duplicates *that* too and
+   should go.
+3. Remove the three `#![allow(dead_code)]` attributes, so that the next module
+   to become unreachable says so.
+
+---
+
+## TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/settingsfile/src/…` — `testing::with_scratch_config`;
+`gui/window/src/app.rs` — the 27 tests that call `drive()`.
+
+**In short:** four tests in the window library point the "where is the config
+file" setting at a temporary directory of their own, so they can write a theme
+file and watch it being noticed. That setting is one value shared by the whole
+test *process*, and the other twenty-three tests read it without knowing. When
+the timing lines up, one of those twenty-three sees a theme file that a
+different test put there, redraws because of it, and fails an assertion about
+how many times it drew.
+
+**How it shows.** `cargo test -p oswindow --lib` fails
+`app::tests::a_file_written_while_answering_idle_is_still_announced` with
+`left: 2, right: 1` — "announcing is not redrawing: only the unprompted first
+frame". Run **alone**, `cargo test -p oswindow a_file_written_while` passes.
+That difference is the whole diagnosis: a test that passes by itself and fails
+in company is sharing something.
+
+**What is shared.** `with_scratch_config` takes an `ENV_LOCK` mutex and then
+sets a process-global **environment variable** naming the config directory. The
+lock makes its own callers take turns, which is what it was written for. It
+does nothing about a *reader* that never calls it: `drive()` constructs a
+`ThemeWatch`, which constructs an `appearance::config::Watcher`, which resolves
+the config directory from that same env var. Twenty-three tests reach that path
+and none of them hold the lock.
+
+So the invariant the lock provides is "two scratch configs are never installed
+at once", and the invariant actually needed is "nobody reads the config
+directory while a scratch one is installed". The second is strictly stronger.
+
+**Why it is worth more than a retry.** The failing assertion is about a real
+rule — *announcing a settings change to an application must not redraw it* —
+and the test is the only thing holding that rule. A flaky test on a real rule
+gets muted, and then the rule is unprotected. It is also latent for every test
+added to this file in future: 23 of 27 are one scheduling accident from the
+same failure.
+
+**Not caused by, but found during,** the blur work: `cargo test -p oswindow`
+had not been run directly in a while, and the failure reproduces with the blur
+change stashed.
+
+**The fix.** Make the reader take the lock too, rather than wrapping
+twenty-three tests by hand: the shared `desktop()` test helper that every
+`drive()` test already uses should hold the config lock for the life of the
+test. That serialises all 27 against the 4, which is affordable — the whole
+suite runs in hundredths of a second — and it cannot be forgotten by the next
+test added, which wrapping by hand can.
+
+An env var is process-wide by definition, so making the override thread-local
+is not available; serialising the readers is the only option that does not
+change what `Watcher` reads from.
+
+**Fixed 2026-09-08, and the first attempt deadlocked** — worth recording,
+because the failure mode is worse than the bug. `TestDesktop::new` was made to
+take `ENV_LOCK` directly, which is correct for the twenty-three readers and
+fatal for the four writers: they call `with_scratch_config` and build a
+`TestDesktop` **inside** it, and `std::sync::Mutex` is not reentrant. A second
+`lock()` on the same thread is not an error, it is a stop — the suite hangs
+with no failing test and no message, which is harder to diagnose than the
+flake it replaced.
+
+The turn is now reentrant by a thread-local depth: the outermost holder on a
+thread takes the mutex and everything nested inside it merely raises the count.
+`cargo test` runs a binary's tests as threads of one process, so per-thread is
+exactly the right grain. `TestDesktop` holds a `ConfigTurn` for its own
+lifetime, so a test takes the turn whether or not its author knew there was
+one.
+
+**A second, benign oddity found on the way:** `settingsfile` has *two*
+`ENV_LOCK` statics — one in `mod testing` (line 352) and one in its own
+`#[cfg(test)] mod tests` (line 515) — guarding the same process-global
+environment with different mutexes, so they do not exclude each other. It is
+harmless today because the two are never live in one build: the crate's own
+unit tests run with the `testing` feature off, and a dependent's run with it
+on. Left as it is rather than merged, since merging them would mean exposing
+the lock from a module that is compiled out of exactly the build that needs the
+other one. Noted so that a future `[features] default = ["testing"]` is
+understood to make them overlap.
+
+---
+
+## TD-C-BLUR-IS-SOFTWARE-ONLY
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/compositor/src/lib.rs` — `Compositor::blur_behind_window`.
+
+**In short:** the translucent-blurred look the taskbar and menus now ask for
+works when the compositor is drawing with the CPU, and quietly does nothing
+when it is drawing with the graphics card. Nothing breaks — the surface is just
+drawn plain — but on a machine with working graphics acceleration the feature
+is invisible, which is the opposite of where you would expect it to work.
+
+**Why.** A backdrop blur has to *read pixels back*: it exists to show a softened
+version of what is already behind a surface. The software target has a
+`Vec<u32>` to read and rewrite. A hardware backend has no mutable pixel
+access, and deliberately so — a GPU blur is a shader sampling a texture, not a
+CPU pass over an array — so `RenderBackend::as_software_mut()` returns `None`
+and the pass returns early.
+
+**Why it was built this way anyway.** The alternative was to leave 2,223 lines
+of written, tested blur code unreachable for longer, which is what it had been
+since before the three-lane split (see
+`TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED`). `BlurKind` is
+advisory in the way `WindowSpec::transparent` is: a compositor that cannot
+honour it draws the surface flat and does not tell the client. A plainer
+taskbar is not a broken desktop, which is exactly why this is a limitation and
+not a bug — unlike `layer`, which is refused rather than demoted, because a
+panel behind the windows *is* a broken desktop.
+
+**The proper fix** is a shader path in the hardware backend: render the region
+behind the surface to an offscreen texture, blur it there (two-pass separable
+Gaussian, which is what `BlurRenderer` already does on the CPU), and sample it
+when compositing the surface. The parameters are already resolved
+compositor-side from `BlurKind`, so nothing about the protocol changes; the
+work is entirely in the backend.
+
+**Do not "fix" this by making `RenderTarget` expose mutable pixels.** That
+would put a method on the trait that every implementor but one has to refuse,
+and it would make the software fallback the definition of the feature. The
+per-backend split is the honest shape.
+
+## B-THE-C-PLUS-PLUS-LINK-LINE-NEEDS-TWO-DECISIONS-AND-ONE-MISSING-FAMILY (lane B, 2026-09-09)
+
+**In short:** we can now compile C++ for SlateOS — that was established today
+and annotated on `design-decisions.md` §73. Actually *linking* a C++ program
+against our own C library turns out to need two small things nobody has
+decided, and one function family we do not have. None is hard; all three are
+invisible until someone tries the link, which is why they are written down
+here rather than discovered again.
+
+**What was measured.** A C++ TU using `<string>`, `<vector>`, `<memory>` and a
+`throw`/`catch`, compiled with our own codegen flags (`-mcmodel=large
+-fno-pic -fno-pie -fno-builtin -O2`) and linked with `rust-lld` against
+`toolchain/sysroot/lib/libc.a` plus zig's prebuilt `libc++.a`,
+`libc++abi.a` and `libunwind.a`.
+
+### 1. Our libc already ships a C++ ABI, and it collides
+
+Linking zig's `libc++abi.a` produced **duplicate** symbol errors, not missing
+ones: `__cxa_allocate_exception`, `__cxa_begin_catch`, `__cxa_deleted_virtual`
+and friends are defined in *both* archives. `posix` has carried a C++ ABI shim
+for some time. Dropping zig's `libc++abi.a` left exactly one further duplicate,
+`_Unwind_Resume`, so our libc supplies part of the unwinder too.
+
+That is a good position to be in and it is still a decision: **whose C++ ABI
+wins.** Ours, and zig's `libc++.a` links against it; or zig's, and posix's shim
+is excluded from the link. The two cannot both be in the line. This is not
+something a porter should have to work out under time pressure with a wall of
+duplicate-symbol errors in front of them, which is the shape it takes today.
+
+### 2. With zig's `libc++abi` dropped, the exception *types* go missing
+
+`typeinfo for std::out_of_range`, `std::out_of_range::~out_of_range()`,
+`std::bad_array_new_length` and `__cxa_free_exception` are then undefined —
+they live in `libc++abi`, which is exactly the archive that collided. So
+option "use ours" is not free: our shim covers the ABI *entry points* but not
+the standard exception classes. Whoever decides (1) has to cover these.
+
+### 3. `swprintf`, `vswprintf` and `wcstold` — real libc gaps
+
+These are ours, not a packaging question.
+
+* **`wcstold`** — **FIXED 2026-09-09**, the same day it was found. It was the
+  only absent member of a family we already had: `wcstod` and `wcstof` have
+  been here all along. Built on `strtold`'s proven pattern — an `f64` core
+  named `__wcstold_f64` plus an `%st(0)` assembly thunk, because Rust cannot
+  express a `long double` return.
+* **`swprintf` / `vswprintf`** — **FIXED 2026-09-09.** Not a second engine:
+  the format is narrowed, the existing `format_core` runs exactly as it does
+  for `snprintf`, and the result is widened. No translation of conversion
+  specifiers is needed, because C gives `%s` a `char *` and `%ls` a
+  `wchar_t *` in *both* families. The intermediate needs no buffer of its own
+  — the narrow text is formatted into the caller's own buffer and expanded in
+  place, back to front, which is safe rather than lucky: character `i` starts
+  at byte `s_i` with `i <= s_i <= 4i`, and its destination slot is exactly
+  `[4i, 4i+4)`, so the write never reaches below the byte it was decoded
+  from. Truncation follows `swprintf`'s rule (negative) and not
+  `snprintf`'s (the would-be length), which is why the two share an engine
+  and not a return path.
+
+**Why this matters more than its size.** §73 defers YSH until a C++/slateos
+toolchain exists, and that prerequisite has now fired. The entry moves YSH
+from blocked-on-toolchain to blocked-on-effort — and this is the effort. It is
+a short list, and it is much better to have it as a list than as a surprise.
+
+**How to reproduce**, since the measurement is cheap and will need redoing
+when any of the three moves: compile any C++ TU with the slateos flags, link
+it with `rust-lld -static --no-dynamic-linker` against
+`toolchain/sysroot/lib/libc.a` and zig's `libc++.a`, and read the undefined
+and duplicate lists. Zig's archives are built on demand into its global cache
+by any `zig c++ -static` build.
+
+---
+
+---
+
+## TD-C-TWO-OF-THREE-LAYOUT-SHORTCUTS-NEED-RELEASE-SEMANTICS
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/desktop/src/input_method.rs` — `SwitchShortcut`;
+`gui/desktop/src/hotkeys.rs` — `HotkeyAction::SwitchInputLayout`.
+
+**In short:** the keyboard-layout switcher offers three shortcuts to choose
+from — Alt+Shift, Ctrl+Shift, and Super+Space. Only Super+Space is wired up.
+The other two are the kind of shortcut where you hold two modifier keys and
+*let go* without pressing anything else, and the desktop currently has no way
+to notice that; it can only notice "this key went down while those modifiers
+were held". Wiring them as if they were ordinary shortcuts would not merely
+fail — it would break Alt+Shift+Tab, which is how you switch windows backwards.
+
+**The mechanism, precisely.** A shell asks the compositor to route a chord with
+`grab_key(window, key, modifiers)`, and that fires on the **press** of `key`.
+`Key` does have `LeftShift` and `LeftAlt`, so `(LeftShift, alt)` is
+*expressible* — but it means "Shift went down while Alt was held", which is the
+first half of Alt+Shift+Tab. Every reverse Alt-Tab would switch the keyboard
+layout, and the Tab that followed would arrive with the shell holding the grab.
+
+What Alt+Shift means on every desktop that offers it is: the modifier pair was
+released with **no other key pressed in between**. That is a different
+predicate, over a key-*down*/key-*up* sequence, and neither the grab protocol
+nor `HotkeyRegistry` can currently state it.
+
+**What was done instead.** `SwitchInputLayout` is bound to Super+Space, which
+is an ordinary chord and works. `SwitchShortcut::AltShift` and `::CtrlShift`
+remain in the model, unbound. A user who selects one of them today gets no
+layout switching — which is why this is logged rather than left to be
+discovered.
+
+**The proper fix**, in the order the pieces have to arrive:
+
+1. The compositor learns to recognise a modifier-only chord: on the release of
+   a modifier, fire if the matching set was held and no non-modifier key went
+   down while it was.
+2. The protocol gains a way to ask for one — a `grab_modifier_chord` beside
+   `grab_key`, rather than overloading `grab_key` with a key that is itself a
+   modifier, so that the two predicates cannot be confused at the call site.
+3. `HotkeyRegistry` gains a binding kind for it, and `SwitchShortcut`'s other
+   two variants bind through that.
+
+**Until then, do not bind them.** A layout switch on the press of Shift-with-Alt
+is worse than no layout switch: it is a working shortcut (Alt+Shift+Tab) taken
+away in exchange for one that fires at the wrong time.
+
+---
+
+## TD-C-TWENTY-FOUR-THOUSAND-LINES-BEHIND-ALLOW-DEAD-CODE
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/toolkit/src/` — `textview.rs` (4,018 lines), `svg.rs` (3,392),
+`menubar.rs` (3,341), `colorpicker.rs` (2,595), `filetypes.rs` (2,203),
+`disabled.rs` (1,739), `context_ext.rs` (1,604). Plus
+`apps/imageviewer/src/video.rs` (2,435) and
+`apps/procexplorer/src/features.rs` (2,539).
+
+**In short:** roughly twenty-four thousand lines of this lane's code are
+reached by nothing. Seven of them are widgets in the shared toolkit — a text
+view, an SVG renderer, a menu bar, a colour picker, a file-type table, a
+disabled-state helper, a context-menu extension — that no application uses.
+Two are features inside applications (video playback in the image viewer,
+and a features module in the process explorer) that their own `main.rs` never
+calls. Every one of these files opens with `#![allow(dead_code)]`, so the
+compiler has never once mentioned it.
+
+**The measurement**, so it can be repeated rather than believed:
+
+```
+for f in $(grep -rl "^#!\[allow(dead_code)\]" --include=*.rs gui/ apps/); do
+  # ... count `<module>::` references in sibling files, and for a library
+  # crate, count crates outside it that name `guitk::<module>`
+done
+```
+
+For the toolkit the sibling count is not the test — its modules are `pub` and
+exist to be used from outside — so the number that matters is **crates outside
+`gui/toolkit` that mention `guitk::<module>`**. For the seven above that number
+is **zero**. For comparison, the same measurement gives `grid` 5, `scaling` 3
+and `pathbar` 1, which is what a used module looks like.
+
+**A toolkit widget nobody has used yet is not automatically waste** — that is
+the honest counter-argument, and it is why this is a debt entry and not a
+deletion. A toolkit is built ahead of its callers. The reason it is *debt* is
+the next paragraph.
+
+**One verified case of an application reimplementing what the toolkit already
+had.** `guitk::colorpicker` defines `Hsv { h: f32, s: f32, v: f32 }` with
+`hsv_to_rgb`, `rgb_to_hsv` and `color_to_hex_string`. `apps/colorpicker`
+defines its own `Hsv { h: f32, s: f32, v: f32 }` — the same three fields, the
+same units, documented the same way — and its own conversions. Neither knows
+about the other. That is the cost the `allow` is hiding: not the unused lines,
+but the second implementation written because nobody could see the first.
+
+**Deliberately not claimed:** that the other six are duplicated too. It was
+checked for `filetypes` against `apps/explorer`'s file-type handling and the
+two are *not* the same thing, so the pattern is not assumed. `textview`,
+`svg`, `menubar`, `disabled` and `context_ext` have not been checked
+either way.
+
+**What to do, in order.**
+
+1. ~~**Take the `#![allow(dead_code)]` off `gui/toolkit`'s modules**~~ —
+   **done 2026-09-08.** It was as quiet as predicted: seven attributes removed,
+   **three** warnings, all of them genuinely-unused *private* items. A `pub`
+   item in a library is not dead code to rustc, so the attribute had been
+   earning nothing on those files while suppressing the three things it should
+   have been reporting. Those three are worth listing, because two of them were
+   not what they looked like:
+
+   * `disabled::DISABLED_OPACITY` — the module documents 50% as the standard
+     dimming for a disabled control, `render_disabled` takes the opacity as a
+     *parameter*, and the constant was private. So every caller would have
+     written `0.5` itself, which is how a standard stops being one. Now `pub`.
+   * `colorpicker::DialogLayout::height` — a stored copy of a value that *is*
+     used (`button_y` is measured back from it) but only during construction.
+     The field was removed. **The first attempt at this comment claimed the
+     layout ignored its height entirely and that the buttons could fall off a
+     short dialog; the compiler disproved that three lines later.** Worth
+     recording as a caution: an unused *field* is not evidence that the
+     *value* is unused.
+   * `textview::col_x` — deleted as dead, and it was not: its only caller is a
+     `#[cfg(test)]` test that asserts its clamping rule, which a *lib* build's
+     "never used" warning does not account for. Restored, and marked
+     `#[cfg(test)]` so both builds are quiet. **The general lesson: "never
+     used" from `cargo build` means "no non-test caller", which is a different
+     claim.**
+2. **Decide the two application modules.** `imageviewer/video.rs` and
+   `procexplorer/features.rs` are unreachable inside their own binaries, where
+   `pub` buys nothing.
+
+   **Checked 2026-09-08, and "wire it" is wrong for both** — which is worth
+   recording, because it was written above as if the only question were
+   plumbing.
+
+   * `procexplorer/features.rs` holds six *finished* widgets — window picker,
+     blocking analyser, affinity mask, priority selector, environment viewer,
+     memory map — each with its own `render() -> Vec<RenderCommand>`. Wiring
+     them into the Details tab really is a few lines. But
+     `ProcessExplorer::refresh()` is a **placeholder that calls nothing**: its
+     own comment says "in production, call kernel syscalls here", and the data
+     comes from `load_demo_data()`. So the whole application displays invented
+     processes, and wiring `features.rs` would connect one pile of demo data to
+     another — a *more elaborate* display of things that are not true, which is
+     worse than a plain one. The unwired module is a symptom; the missing data
+     source is the disease. See
+     `TD-C-THE-GUI-PROCESS-EXPLORER-HAS-NO-DATA-SOURCE-AND-ONE-EXISTS`.
+   * `imageviewer/video.rs` says plainly in its own module doc that "actual
+     codec decoding is deferred to a future hardware-accelerated decoder
+     service". Wired today it would parse containers, show transport controls,
+     and display no frames. That is the same trap: a feature that appears to
+     exist and does nothing. Its trigger is a decoder service, not a caller.
+3. ~~**Route `apps/colorpicker` through `guitk::colorpicker`**~~ — **done
+   2026-09-08**, and it turned out not to be tidying. The app's own
+   `from_hsv` computed its sector as `(h / 60.0).floor() as u32`, and `as u32`
+   *saturates* in Rust: every negative hue became sector 0, so **every hue
+   below zero rendered as the same red**. Hue −60 gave `(255, 0, 0)` where it
+   should give magenta. The shared version takes the hue modulo 360 and clamps
+   s and v first, so routing through it fixed the bug as a side effect of
+   removing the duplicate.
+
+   Latent rather than live: the app's own `to_hsv` always returns a hue in
+   [0, 360), so nothing in the current UI reaches the bad path. It was
+   reachable by any caller constructing an `Hsv` directly — which is what the
+   new regression test does, and it fails against the old implementation.
+
+   **This is the argument for the whole entry, in one case.** The duplicate was
+   not two copies of a correct thing; it was a correct one and a subtly broken
+   one, and the `#![allow(dead_code)]` on the correct one is why nobody
+   compared them.
+
+   **The generalisation was swept, and came back clean** — recorded so nobody
+   repeats it. `clippy::cast_sign_loss` is `allow` workspace-wide with a
+   documented reason (~2000 hits, casts usually deliberate, "leave to manual
+   review"), so this was the manual review for the one shape that actually
+   bites: a float that can be negative, cast to an unsigned type, where Rust's
+   `as` *saturates to zero* rather than wrapping or trapping. Every
+   `.floor() as u{8,16,32,size}` in `gui/**`, `apps/**`, `net*/**` and `pkg/**`
+   was checked — fifteen sites. Fourteen are guarded, most by an explicit
+   `.max(0.0)` and `guitk::grid`'s hit test by an early `if content_x < 0.0 {
+   return None }`. The fifteenth was `apps/colorpicker`, above. `gui/compositor`
+   already carries written warnings about the same hazard at two sites
+   (`lib.rs:377`, `:13576`), so that crate had learned it independently.
+
+**Related.** `TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING` is
+the same mechanism with 5,628 more lines, found the same way and logged
+separately because it also has a *duplicate wired page*, which is a worse
+problem than being unreachable. Together they are about 30,000 lines.
+
+---
+
+## TD-C-THE-GUI-PROCESS-EXPLORER-HAS-NO-DATA-SOURCE-AND-ONE-EXISTS
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `apps/procexplorer/src/main.rs` — `ProcessExplorer::refresh`.
+
+**In short:** the graphical process explorer does not show you the processes
+running on the machine. It shows a fixed list of made-up ones. Everything else
+about it works — sorting, filtering, the tabs, the graphs — but the step that
+would ask the system what is actually running was never written, and the
+placeholder that stands in its place says so in a comment nobody sees.
+
+**The evidence, in its own words:**
+
+```rust
+pub fn refresh(&mut self) {
+    // Placeholder: in production, call kernel syscalls here:
+    //   - sys_process_list() -> Vec<ProcessInfo>
+    //   ...
+    // For now, the data vectors are populated externally or via
+    // `load_demo_data()` for development/testing.
+```
+
+**And the data source exists.** `userspace/htop` reads `/proc/<pid>/` for the
+same facts — per-process stats, `/proc/stat`, `/proc/meminfo` — and has done
+for some time. So this is not blocked on the kernel; the GUI explorer simply
+never learned to read what the terminal one already reads.
+
+**Why this outranks wiring `features.rs`.** That module (2,539 lines, six
+finished widgets) is unreachable, and connecting it looks like the obvious next
+job. It is not: pointed at `load_demo_data()`, an affinity editor and a memory
+map would render invented numbers with the same confidence as real ones. **A
+richer display of false data is worse than a plain one**, because it invites
+the user to act on it — the affinity and priority widgets exist precisely to
+*change* things.
+
+**The proper fix, and the part that needs a decision.** Read `/proc`. The
+question is *whose* reader:
+
+| | |
+|---|---|
+| Copy htop's into `apps/procexplorer` | A third copy of `/proc` parsing in the tree, free to drift from htop's — and the two would then disagree about what a process's state letter means. |
+| Extract htop's readers into a shared crate | The right shape, but `userspace/**` is **lane B's**, so this needs a `requests/` note rather than an edit. |
+| A `sysinfo`-style crate in lane C | Avoids the lane boundary and creates the second copy anyway. |
+
+Extracting is the one to ask for. Filed as a request when this is picked up;
+recorded here so the finding is not lost in the meantime.
+
+**Do not wire `features.rs` first.** It would make the wrong data more
+convincing.
+
+## B-THE-TWO-MULTIBYTE-COUNTING-CALLS-DOCUMENTED-A-BEHAVIOUR-NEITHER-HAD (lane B, 2026-09-09) — FIXED same day
+
+**In short:** the two functions that convert between ordinary and wide strings
+both offer a "just tell me how big the answer would be" mode, used by passing
+a null destination. Both documented it. Neither did it: asked to measure, they
+answered zero, for every input.
+
+**Where.** `posix/src/wchar.rs`, `mbstowcs` and `wcstombs`.
+
+**What was wrong.** `mbstowcs`'s loop was `while dst_count < n`, and
+`wcstombs`'s capacity check `if dst_off + enc_len > n` ran unconditionally.
+Both bound the *writing*, which is right, and both also bound the *counting*,
+which is not: C says `n` is ignored when `dst` is null. So the idiomatic
+measurement — `f(NULL, src, 0)` — exited immediately and returned 0. Passing a
+large `n` with a null `dst` worked, which is why the doc comments could look
+true to anyone who tried it that way.
+
+**How it was found, which is the part worth keeping.** Not by a test and not
+by review: by writing `vswprintf`, whose first act is to measure the format
+string. Its symptom was not an error but an **empty output** — a formatted
+string with nothing in it and a return of 0, which is a perfectly plausible
+answer for a caller to receive. Three of its seven tests failed and the
+smallest one, `swprintf(buf, 4, L"abc")`, returned 0 instead of 3, which is
+what made it findable at all.
+
+**Both doc comments were already correct.** They said "if `dst` is null,
+counts the total bytes needed" and "if `dst` is null, just counts characters"
+— written when the functions were, and never true. This is the same shape as
+the week's other findings, with one difference worth noting: the usual case is
+a comment that *became* stale when the code moved beneath it. This one never
+matched at all, and nothing in the tree called these functions the documented
+way, so there was nothing to notice it until something did.
+
+**Fixed** by making both checks conditional on `dst` being non-null, with
+regression tests covering the counting form, the mirror-image asymmetry
+(`mbstowcs` counts characters and so counts *short* on multibyte input;
+`wcstombs` counts bytes and counts *long*), and a guard that the bounded
+writing form still respects `n`.
 
 ---
 

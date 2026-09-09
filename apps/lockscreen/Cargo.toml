@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Lock Screen — secure graphical lock screen with clock, password entry, and multi-user support"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 # The password hash, and the constant-time comparison it is checked with. This
 # file used to carry its own copy of both.
@@ -31,6 +33,12 @@ authlib = { path = "../../userspace/authlib" }
 # the names offered cannot drift from the names that can answer. See
 # `system_users`.
 userdb = { path = "../../userspace/userdb" }
+# *Which* of those accounts a screen offers, and whether each needs a password.
+# The policy is shared with the desktop shell's login screen rather than
+# written out at both: two answers to "which names is the person at this
+# machine offered" would drift silently, and the person cannot tell a hidden
+# account from a deleted one.
+loginusers = { path = "../../gui/loginusers" }
 
 # Test-only. The fixtures here write a `users.yaml` or a shadow line and read
 # it back over the code that decides who gets in, so two tests naming one file

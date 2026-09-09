@@ -81,7 +81,6 @@ pub mod about;
 pub mod animations;
 pub mod backup_settings;
 pub mod bluetooth;
-pub mod blur;
 pub mod calendar;
 pub mod clipboard_viewer;
 pub mod context_ext;
@@ -111,10 +110,6 @@ pub mod osd;
 pub mod overview;
 /// The sweep that proves a module was converted off its own colour constants.
 ///
-/// Test-only: it exists to check the other modules' render output, and a
-/// release build has nothing to check.
-#[cfg(test)]
-pub mod palette_check;
 pub mod power;
 pub mod power_settings;
 pub mod print_manager;
@@ -970,6 +965,15 @@ pub struct DesktopShell {
     /// that the two front ends cannot offer different applications.
     pub apps: Vec<AppEntry>,
     /// Whether Alt+Tab switcher is active.
+    /// The installed keyboard layouts and which one is active.
+    ///
+    /// The shell owns *which* layout is chosen; the compositor owns applying it
+    /// to keystrokes. The two meet at `input.yaml`: switching writes the
+    /// setting, and the compositor's existing settings watcher picks it up --
+    /// the same route the Settings app already uses, so a layout chosen with
+    /// the keyboard and one chosen in a panel cannot disagree, and the choice
+    /// survives a restart the way a user expects.
+    pub input_methods: input_method::InputMethodManager,
     pub alt_tab_active: bool,
     /// Alt+Tab selection index.
     pub alt_tab_index: usize,
@@ -1438,6 +1442,10 @@ impl DesktopShell {
             shortcut_capture: None,
             shortcut_message: None,
             apps: launcher::builtin_app_database(),
+            // The layouts this machine has, from `keylayout`'s built-in set.
+            // Which one is *active* is corrected from `input.yaml` by
+            // `load_input_settings`; this is only the list.
+            input_methods: input_method::InputMethodManager::with_builtins(),
             alt_tab_active: false,
             alt_tab_index: 0,
             overview: overview::OverviewState::new(),
@@ -3393,8 +3401,42 @@ impl DesktopShell {
     /// a program, and is handed back for the same reason in
     /// [`launches`](HotkeyOutcome::launches): the shell has no connection to the
     /// process server either.
+    /// Write the newly-chosen keyboard layout to `input.yaml`.
+    ///
+    /// This is what makes the switch reach the *keys*. The shell decides which
+    /// layout is active; the compositor decides what a scancode means, and it
+    /// reads that from the settings file it already watches. Going through the
+    /// file rather than inventing a protocol message has three things to
+    /// recommend it: the mechanism exists and is tested, a layout chosen with
+    /// the keyboard and one chosen in the Settings panel cannot disagree
+    /// because they are the same value in the same place, and the choice
+    /// survives a restart, which is what a user expects of a layout.
+    ///
+    /// A failure is swallowed deliberately, and is the one place in this file
+    /// where that is right: the layout has already changed in the shell's own
+    /// model and the indicator will show it, so a read-only configuration
+    /// directory costs the user persistence, not the feature. Refusing the
+    /// keystroke because a file could not be written would be worse.
+    fn persist_input_layout(&mut self) {
+        let Some(id) = self.input_methods.active_layout_id() else {
+            return;
+        };
+        let mut file = inputsettings::InputFile::load();
+        if file.settings.keyboard.layout == id {
+            return;
+        }
+        file.settings.keyboard.layout = id.to_string();
+        // See the note above on why this is not propagated.
+        let _ = file.save();
+    }
+
     fn run_desktop_action(&mut self, action: &HotkeyAction) -> HotkeyOutcome {
         match action {
+            HotkeyAction::SwitchInputLayout => {
+                self.input_methods.next_layout();
+                self.persist_input_layout();
+                HotkeyOutcome::consumed()
+            }
             HotkeyAction::CycleWindows => {
                 if self.alt_tab_active {
                     self.next_alt_tab();
@@ -4022,6 +4064,20 @@ impl DesktopShell {
             self.font_size(TextRole::Caption),
         );
 
+        // The keyboard layout, immediately right of it. Without this, Super+Space
+        // changes what every key on the keyboard produces and nothing on screen
+        // says so -- which is worse than not having the shortcut.
+        let layout_w = self.layout_indicator_width();
+        if layout_w > 0.0 {
+            tree.text(
+                tray_x + padding + self.desktop_indicator_width() + self.scale(TRAY_PADDING),
+                tray_text_y,
+                self.input_methods.tray_label(),
+                self.theme.taskbar_fg,
+                self.font_size(TextRole::Caption),
+            );
+        }
+
         tree
     }
 
@@ -4365,6 +4421,24 @@ impl DesktopShell {
         )
     }
 
+    /// How wide the keyboard-layout indicator is, or zero when there is only
+    /// one layout installed.
+    ///
+    /// Zero rather than a fixed reserve: a machine with one layout has nothing
+    /// to switch between, and an indicator that always read "US" would be a
+    /// permanent label for a control that does nothing. The tray's width is
+    /// derived from its contents (see `tray_width`), so returning zero removes
+    /// the space as well as the text.
+    fn layout_indicator_width(&self) -> f32 {
+        if self.input_methods.layouts.len() < 2 {
+            return 0.0;
+        }
+        text::width(
+            self.input_methods.tray_label(),
+            self.font_size(TextRole::Caption),
+        ) + self.scale(TRAY_PADDING)
+    }
+
     /// What the virtual-desktop indicator reads.
     fn desktop_indicator_string(&self) -> String {
         format!("Desktop {}", self.current_desktop_number())
@@ -4380,8 +4454,10 @@ impl DesktopShell {
     /// since nothing about a clipped clock says which end was cut.
     fn tray_width(&self) -> f32 {
         let padding = self.scale(TRAY_PADDING);
-        let content =
-            self.clock_width() + self.scale(TRAY_BELL_WIDTH) + self.desktop_indicator_width();
+        let content = self.clock_width()
+            + self.scale(TRAY_BELL_WIDTH)
+            + self.desktop_indicator_width()
+            + self.layout_indicator_width();
         // Padding at the right edge, between each pair of items, and at the
         // left of the tray.
         (content + padding * 4.0).max(self.scale(TRAY_MIN_WIDTH))
@@ -10267,5 +10343,142 @@ mod run_box_wiring_tests {
         let mut shell = card_shell();
         drop(shell.handle_hotkey(&tap(Key::Escape)));
         assert!(!shell.shortcut_card_open);
+    }
+
+    /// Super+Space moves to the next installed layout.
+    ///
+    /// Asserted on the *active layout id*, not on the chord being consumed: a
+    /// hotkey that is swallowed and does nothing is exactly the failure this
+    /// feature had for months, when `input_method.rs` was 1,278 lines that
+    /// nothing constructed.
+    #[test]
+    fn super_space_switches_to_the_next_keyboard_layout() {
+        let mut shell = shell();
+        let first = shell
+            .input_methods
+            .active_layout_id()
+            .expect("a machine with no layouts cannot type at all")
+            .to_string();
+
+        // Built inline rather than through a `press` helper: this module has
+        // one that takes a *mouse* position, and the key-event one lives in a
+        // different test module.
+        let outcome = shell.handle_hotkey(&KeyEvent {
+            key: Key::Space,
+            pressed: true,
+            modifiers: Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        });
+        assert!(outcome.consumed, "Super+Space was not claimed by the shell");
+
+        let second = shell
+            .input_methods
+            .active_layout_id()
+            .expect("switching lost the layout list");
+        assert_ne!(
+            first, second,
+            "Super+Space was consumed but the active layout did not move"
+        );
+    }
+
+    /// The chord is *grabbed*, which is the half a consumed-and-ignored test
+    /// cannot see: a shortcut the compositor never routes to the shell is one
+    /// the shell never gets to consume.
+    #[test]
+    fn the_layout_chord_is_one_the_shell_actually_asks_for() {
+        let wanted = (
+            Key::Space,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        );
+        assert!(
+            shell().global_chords().contains(&wanted),
+            "Super+Space is bound but not grabbed, so it never reaches the shell"
+        );
+    }
+
+    /// The switch reaches `input.yaml`, which is what makes it reach the keys.
+    ///
+    /// The compositor decides what a scancode means and reads that from this
+    /// file. A test that only checked the shell's own field would pass on a
+    /// build where the user pressed the chord, saw the indicator change, and
+    /// went on typing in the old layout.
+    #[test]
+    fn switching_layout_writes_the_setting_the_compositor_reads() {
+        inputsettings::config::testing::with_scratch_config("shell-layout", |_root| {
+            let mut shell = shell();
+            let before = inputsettings::InputFile::load().settings.keyboard.layout;
+
+            let outcome = shell.handle_hotkey(&KeyEvent {
+                key: Key::Space,
+                pressed: true,
+                modifiers: Modifiers {
+                    super_key: true,
+                    ..Modifiers::NONE
+                },
+                text: String::new(),
+            });
+            assert!(outcome.consumed, "the chord was not claimed at all");
+
+            let after = inputsettings::InputFile::load().settings.keyboard.layout;
+            assert_ne!(
+                before, after,
+                "the chord changed the shell's model but not the file the                  compositor reads, so the keys would not have moved"
+            );
+            assert_eq!(
+                after,
+                shell
+                    .input_methods
+                    .active_layout_id()
+                    .expect("the shell still has a layout"),
+                "the file and the indicator disagree about which layout is active"
+            );
+        });
+    }
+
+    /// The taskbar says which layout is active, and says something different
+    /// after a switch.
+    ///
+    /// Without this the shortcut changes what every key on the keyboard
+    /// produces and nothing on screen reports it -- which is worse than not
+    /// having the shortcut, because the user has no way to find out what
+    /// happened or how to undo it.
+    #[test]
+    fn the_taskbar_reports_which_keyboard_layout_is_active() {
+        fn tray_strings(shell: &DesktopShell) -> Vec<String> {
+            shell
+                .render_taskbar()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut shell = shell();
+        assert!(
+            shell.input_methods.layouts.len() > 1,
+            "a machine with one layout draws no indicator, so this proves nothing"
+        );
+        let before = shell.input_methods.tray_label().to_string();
+        assert!(
+            tray_strings(&shell).contains(&before),
+            "the active layout is not named anywhere in the taskbar"
+        );
+
+        shell.input_methods.next_layout();
+        let after = shell.input_methods.tray_label().to_string();
+        assert_ne!(before, after, "the switcher did not move");
+        assert!(
+            tray_strings(&shell).contains(&after),
+            "the taskbar still names the old layout after a switch"
+        );
     }
 }

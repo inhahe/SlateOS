@@ -3,6 +3,7 @@
 //! A typing practice application with multiple lesson types, WPM tracking,
 //! accuracy statistics, and progressive difficulty levels.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
@@ -45,25 +46,6 @@ enum Target {
 // Constants
 // ---------------------------------------------------------------------------
 
-const COL_BASE: u32 = 0x1E1E2E;
-const COL_MANTLE: u32 = 0x181825;
-const COL_CRUST: u32 = 0x11111B;
-const COL_SURFACE0: u32 = 0x313244;
-const COL_SURFACE1: u32 = 0x45475A;
-const COL_SURFACE2: u32 = 0x585B70;
-const COL_TEXT: u32 = 0xCDD6F4;
-const COL_SUBTEXT0: u32 = 0xA6ADC8;
-const COL_SUBTEXT1: u32 = 0xBAC2DE;
-const COL_BLUE: u32 = 0x89B4FA;
-const COL_GREEN: u32 = 0xA6E3A1;
-const COL_RED: u32 = 0xF38BA8;
-const COL_YELLOW: u32 = 0xF9E2AF;
-const COL_PEACH: u32 = 0xFAB387;
-const COL_LAVENDER: u32 = 0xB4BEFE;
-const COL_OVERLAY0: u32 = 0x6C7086;
-const COL_TEAL: u32 = 0x94E2D5;
-const COL_MAUVE: u32 = 0xCBA6F7;
-
 // ---------------------------------------------------------------------------
 // Lesson content
 // ---------------------------------------------------------------------------
@@ -94,16 +76,16 @@ impl LessonCategory {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::HomeRow => Color::from_hex(COL_GREEN),
-            Self::TopRow => Color::from_hex(COL_BLUE),
-            Self::BottomRow => Color::from_hex(COL_PEACH),
-            Self::Numbers => Color::from_hex(COL_YELLOW),
-            Self::Punctuation => Color::from_hex(COL_MAUVE),
-            Self::CommonWords => Color::from_hex(COL_TEAL),
-            Self::Sentences => Color::from_hex(COL_LAVENDER),
-            Self::Paragraphs => Color::from_hex(COL_RED),
+            Self::HomeRow => pal.green,
+            Self::TopRow => pal.blue,
+            Self::BottomRow => pal.peach,
+            Self::Numbers => pal.yellow,
+            Self::Punctuation => pal.mauve,
+            Self::CommonWords => pal.teal,
+            Self::Sentences => pal.lavender,
+            Self::Paragraphs => pal.red,
         }
     }
 
@@ -579,11 +561,18 @@ struct TypingTutorApp {
     /// is read against.
     width: f32,
     height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl TypingTutorApp {
     fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             lessons: default_lessons(),
             selected_lesson: 0,
             view: AppView::LessonSelect,
@@ -997,7 +986,7 @@ impl TypingTutorApp {
     fn frame(&self, width: f32, height: f32) -> Frame<Target> {
         let l = Layout::solve(width, height);
         let mut f = Frame::new(width, height);
-        fill(&mut f, l.window, hex(COL_BASE), CornerRadii::ZERO);
+        fill(&mut f, l.window, self.palette.base, CornerRadii::ZERO);
         match self.view {
             AppView::LessonSelect => self.draw_lesson_select(&mut f, &l),
             AppView::Typing => self.draw_typing(&mut f, &l),
@@ -1011,19 +1000,19 @@ impl TypingTutorApp {
         // Right to left, so that what is measured from the right edge is taken
         // out of the row before the title is asked what it can have.
         let mut bar = inset_x(l.header, l.pad);
-        chip(f, l, &mut bar, "Stats", Target::Stats);
+        chip(f, &self.palette, l, &mut bar, "Stats", Target::Stats);
         let filter_text = match self.category_filter {
             None => String::from("All Categories"),
             Some(cat) => format!("Category: {}", cat.name()),
         };
-        chip(f, l, &mut bar, &filter_text, Target::Filter);
+        chip(f, &self.palette, l, &mut bar, &filter_text, Target::Filter);
         label_left(
             f,
             &Label {
                 text: "Typing Tutor",
                 size: l.big,
                 weight: FontWeightHint::Bold,
-                color: hex(COL_BLUE),
+                color: self.palette.blue,
             },
             bar,
         );
@@ -1034,7 +1023,7 @@ impl TypingTutorApp {
                 text: "Up/Down: Select  |  Enter: Start  |  C: Category  |  S: Stats",
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: hex(COL_OVERLAY0),
+                color: self.palette.overlay0,
             },
             inset_x(l.subhead, l.pad),
         );
@@ -1054,13 +1043,17 @@ impl TypingTutorApp {
             let r = l.row_rect(i);
             let selected = lesson_idx == self.selected_lesson;
             // An unselected row is drawn a shade off the background rather than
-            // in it. The program this replaces filled it with `COL_BASE` --
+            // in it. The program this replaces filled it with `self.palette.base` --
             // the background -- so the whole list was a single flat field and
             // the only visible row boundary was the one the cursor was on.
             fill(
                 f,
                 r,
-                hex(if selected { COL_SURFACE0 } else { COL_MANTLE }),
+                if selected {
+                    self.palette.surface0
+                } else {
+                    self.palette.mantle
+                },
                 CornerRadii::all(l.pad * 0.4),
             );
             let stripe = Rect::new(
@@ -1069,7 +1062,12 @@ impl TypingTutorApp {
                 (l.pad * 0.3).max(2.0),
                 (r.h - l.pad * 0.6).max(0.0),
             );
-            fill(f, stripe, lesson.category.color(), CornerRadii::all(1.0));
+            fill(
+                f,
+                stripe,
+                lesson.category.color(&self.palette),
+                CornerRadii::all(1.0),
+            );
 
             let text_x = stripe.right() + l.pad * 0.6;
             let text_w = (r.right() - l.pad * 0.5 - text_x).max(0.0);
@@ -1083,7 +1081,11 @@ impl TypingTutorApp {
                     } else {
                         FontWeightHint::Regular
                     },
-                    color: hex(if selected { COL_TEXT } else { COL_SUBTEXT1 }),
+                    color: if selected {
+                        self.palette.text
+                    } else {
+                        self.palette.subtext1
+                    },
                 },
                 text_x,
                 r.y + l.pad * 0.3,
@@ -1106,7 +1108,7 @@ impl TypingTutorApp {
                     text: &sub,
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: hex(COL_OVERLAY0),
+                    color: self.palette.overlay0,
                 },
                 text_x,
                 r.y + l.pad * 0.3 + l.font + l.pad * 0.2,
@@ -1133,7 +1135,7 @@ impl TypingTutorApp {
                     text: &more,
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: hex(COL_YELLOW),
+                    color: self.palette.yellow,
                 },
                 r,
             );
@@ -1145,7 +1147,7 @@ impl TypingTutorApp {
                 text: &count,
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: hex(COL_OVERLAY0),
+                color: self.palette.overlay0,
             },
             ftr,
         );
@@ -1160,14 +1162,14 @@ impl TypingTutorApp {
         };
 
         let mut bar = inset_x(l.header, l.pad);
-        chip(f, l, &mut bar, "Esc", Target::Back);
+        chip(f, &self.palette, l, &mut bar, "Esc", Target::Back);
         label_left(
             f,
             &Label {
                 text: &lesson.title,
                 size: l.big,
                 weight: FontWeightHint::Bold,
-                color: hex(COL_BLUE),
+                color: self.palette.blue,
             },
             bar,
         );
@@ -1190,7 +1192,7 @@ impl TypingTutorApp {
                 text: &stats,
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: hex(COL_SUBTEXT0),
+                color: self.palette.subtext0,
             },
             inset_x(l.subhead, l.pad),
         );
@@ -1198,17 +1200,22 @@ impl TypingTutorApp {
         let mut area = l.body;
         let bar_h = (l.pad * 0.5).max(3.0);
         let track = take_top(&mut area, bar_h, l.pad * 0.6);
-        fill(f, track, hex(COL_SURFACE0), CornerRadii::all(bar_h / 2.0));
+        fill(
+            f,
+            track,
+            self.palette.surface0,
+            CornerRadii::all(bar_h / 2.0),
+        );
         let progress = (session.progress_percent() / 100.0).clamp(0.0, 1.0) as f32;
         fill(
             f,
             Rect::new(track.x, track.y, track.w * progress, track.h),
-            hex(COL_GREEN),
+            self.palette.green,
             CornerRadii::all(bar_h / 2.0),
         );
 
-        fill(f, area, hex(COL_MANTLE), CornerRadii::all(l.pad * 0.5));
-        draw_lesson_text(f, l, session, shrink(area, l.pad));
+        fill(f, area, self.palette.mantle, CornerRadii::all(l.pad * 0.5));
+        draw_lesson_text(f, &self.palette, l, session, shrink(area, l.pad));
 
         // The next keystroke, named. It used to be drawn at a fixed y = 320,
         // which is inside the typing panel on a short window and in the middle
@@ -1225,7 +1232,7 @@ impl TypingTutorApp {
                     text: &hint,
                     size: l.font,
                     weight: FontWeightHint::Bold,
-                    color: hex(COL_YELLOW),
+                    color: self.palette.yellow,
                 },
                 inset_x(l.footer, l.pad),
             );
@@ -1238,15 +1245,15 @@ impl TypingTutorApp {
         };
 
         let mut bar = inset_x(l.header, l.pad);
-        chip(f, l, &mut bar, "Retry", Target::Retry);
-        chip(f, l, &mut bar, "Lessons", Target::Back);
+        chip(f, &self.palette, l, &mut bar, "Retry", Target::Retry);
+        chip(f, &self.palette, l, &mut bar, "Lessons", Target::Back);
         label_left(
             f,
             &Label {
                 text: "Lesson Complete!",
                 size: l.big,
                 weight: FontWeightHint::Bold,
-                color: hex(COL_GREEN),
+                color: self.palette.green,
             },
             bar,
         );
@@ -1261,7 +1268,7 @@ impl TypingTutorApp {
                 text: title,
                 size: l.font,
                 weight: FontWeightHint::Regular,
-                color: hex(COL_TEXT),
+                color: self.palette.text,
             },
             inset_x(l.subhead, l.pad),
         );
@@ -1269,19 +1276,35 @@ impl TypingTutorApp {
         let wpm = session.wpm(self.current_time_ms);
         let secs = session.elapsed_ms(self.current_time_ms) / 1000;
         let cards = [
-            ("WPM", format!("{wpm:.0}"), COL_BLUE),
-            ("Accuracy", format!("{:.1}%", session.accuracy()), COL_GREEN),
-            ("Time", format!("{}:{:02}", secs / 60, secs % 60), COL_PEACH),
+            ("WPM", format!("{wpm:.0}"), self.palette.blue),
+            (
+                "Accuracy",
+                format!("{:.1}%", session.accuracy()),
+                self.palette.green,
+            ),
+            (
+                "Time",
+                format!("{}:{:02}", secs / 60, secs % 60),
+                self.palette.peach,
+            ),
             (
                 "Keystrokes",
                 session.total_keystrokes.to_string(),
-                COL_YELLOW,
+                self.palette.yellow,
             ),
-            ("Correct", session.correct_keystrokes.to_string(), COL_TEAL),
-            ("Errors", session.incorrect_keystrokes.to_string(), COL_RED),
+            (
+                "Correct",
+                session.correct_keystrokes.to_string(),
+                self.palette.teal,
+            ),
+            (
+                "Errors",
+                session.incorrect_keystrokes.to_string(),
+                self.palette.red,
+            ),
         ];
         f.clip(l.body);
-        let bottom = draw_cards(f, l, &cards);
+        let bottom = draw_cards(f, &self.palette, l, &cards);
         let rating = format!("Rating: {}", wpm_rating(wpm));
         push_text(
             f,
@@ -1289,7 +1312,7 @@ impl TypingTutorApp {
                 text: &rating,
                 size: l.font,
                 weight: FontWeightHint::Bold,
-                color: hex(COL_MAUVE),
+                color: self.palette.mauve,
             },
             l.body.x,
             bottom + l.pad,
@@ -1312,7 +1335,7 @@ impl TypingTutorApp {
                 text: &settled,
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: hex(COL_SUBTEXT0),
+                color: self.palette.subtext0,
             },
             l.body.x,
             bottom + l.pad + l.font * 1.4,
@@ -1326,7 +1349,7 @@ impl TypingTutorApp {
                 text: "Enter: Lesson List  |  R: Retry",
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: hex(COL_OVERLAY0),
+                color: self.palette.overlay0,
             },
             inset_x(l.footer, l.pad),
         );
@@ -1334,14 +1357,14 @@ impl TypingTutorApp {
 
     fn draw_statistics(&self, f: &mut Frame<Target>, l: &Layout) {
         let mut bar = inset_x(l.header, l.pad);
-        chip(f, l, &mut bar, "Lessons", Target::Back);
+        chip(f, &self.palette, l, &mut bar, "Lessons", Target::Back);
         label_left(
             f,
             &Label {
                 text: "Statistics",
                 size: l.big,
                 weight: FontWeightHint::Bold,
-                color: hex(COL_LAVENDER),
+                color: self.palette.lavender,
             },
             bar,
         );
@@ -1353,28 +1376,36 @@ impl TypingTutorApp {
                     text: "No lessons completed yet. Start typing!",
                     size: l.font,
                     weight: FontWeightHint::Regular,
-                    color: hex(COL_SUBTEXT0),
+                    color: self.palette.subtext0,
                 },
                 inset_x(l.subhead, l.pad),
             );
         } else {
             let cards = [
-                ("Lessons", self.results.len().to_string(), COL_BLUE),
-                ("Avg WPM", format!("{:.0}", self.average_wpm()), COL_GREEN),
-                ("Best WPM", format!("{:.0}", self.best_wpm()), COL_YELLOW),
+                ("Lessons", self.results.len().to_string(), self.palette.blue),
+                (
+                    "Avg WPM",
+                    format!("{:.0}", self.average_wpm()),
+                    self.palette.green,
+                ),
+                (
+                    "Best WPM",
+                    format!("{:.0}", self.best_wpm()),
+                    self.palette.yellow,
+                ),
                 (
                     "Avg Accuracy",
                     format!("{:.1}%", self.average_accuracy()),
-                    COL_TEAL,
+                    self.palette.teal,
                 ),
                 (
                     "Total Chars",
                     self.total_chars_typed().to_string(),
-                    COL_PEACH,
+                    self.palette.peach,
                 ),
             ];
             f.clip(l.body);
-            let bottom = draw_cards(f, l, &cards);
+            let bottom = draw_cards(f, &self.palette, l, &cards);
             let table = Rect::new(
                 l.body.x,
                 bottom + l.pad,
@@ -1391,7 +1422,7 @@ impl TypingTutorApp {
                 text: "Esc/Enter: Back to lessons",
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: hex(COL_OVERLAY0),
+                color: self.palette.overlay0,
             },
             inset_x(l.footer, l.pad),
         );
@@ -1417,7 +1448,7 @@ impl TypingTutorApp {
                 text: "Recent Results",
                 size: l.font,
                 weight: FontWeightHint::Bold,
-                color: hex(COL_TEXT),
+                color: self.palette.text,
             },
             area.x,
             area.y,
@@ -1441,7 +1472,7 @@ impl TypingTutorApp {
         fill(
             f,
             Rect::new(area.x, area.y + row_h, area.w, row_h),
-            hex(COL_CRUST),
+            self.palette.crust,
             CornerRadii::all(l.pad * 0.3),
         );
         for (i, head) in headers.iter().enumerate() {
@@ -1451,7 +1482,7 @@ impl TypingTutorApp {
                     text: head,
                     size: l.tiny,
                     weight: FontWeightHint::Bold,
-                    color: hex(COL_SUBTEXT0),
+                    color: self.palette.subtext0,
                 },
                 col_x(i),
                 area.y + row_h,
@@ -1468,10 +1499,16 @@ impl TypingTutorApp {
                 // list it came from used. `SessionResult::category` was stored
                 // on every finished lesson and read by nothing at all, so the
                 // history could not say what kind of practice any row was.
-                (result.lesson_title.clone(), result.category.color()),
-                (format!("{:.0}", result.wpm), hex(COL_GREEN)),
-                (format!("{:.1}%", result.accuracy), hex(COL_TEAL)),
-                (format!("{}:{:02}", secs / 60, secs % 60), hex(COL_PEACH)),
+                (
+                    result.lesson_title.clone(),
+                    result.category.color(&self.palette),
+                ),
+                (format!("{:.0}", result.wpm), self.palette.green),
+                (format!("{:.1}%", result.accuracy), self.palette.teal),
+                (
+                    format!("{}:{:02}", secs / 60, secs % 60),
+                    self.palette.peach,
+                ),
             ];
             for (i, (body, color)) in cells.iter().enumerate() {
                 push_text(
@@ -1494,11 +1531,6 @@ impl TypingTutorApp {
 // ---------------------------------------------------------------------------
 // Drawing helpers
 // ---------------------------------------------------------------------------
-
-/// The palette is a wall of `u32` literals, and every use of one needs this.
-fn hex(c: u32) -> Color {
-    Color::from_hex(c)
-}
 
 fn fill(f: &mut Frame<Target>, r: Rect, color: Color, corner_radii: CornerRadii) {
     if r.is_empty() {
@@ -1609,7 +1641,7 @@ fn shrink(r: Rect, d: f32) -> Rect {
 /// the row has no room the chip is dropped entirely -- no paint and no hit box,
 /// so a test asking for its rectangle is told `None` rather than being handed
 /// an empty one it could mistake for a control.
-fn chip(f: &mut Frame<Target>, l: &Layout, bar: &mut Rect, body: &str, t: Target) {
+fn chip(f: &mut Frame<Target>, pal: &Palette, l: &Layout, bar: &mut Rect, body: &str, t: Target) {
     let w = text::measure(body, l.small, FontWeightHint::Bold) + l.pad * 2.0;
     let r = take_right(bar, w, l.pad);
     if r.is_empty() {
@@ -1617,14 +1649,14 @@ fn chip(f: &mut Frame<Target>, l: &Layout, bar: &mut Rect, body: &str, t: Target
     }
     let inner_h = text::line_height(l.small, FontWeightHint::Bold) + l.pad;
     let box_r = inset_y(r, ((r.h - inner_h) / 2.0).max(0.0));
-    fill(f, box_r, hex(COL_SURFACE0), CornerRadii::all(l.pad * 0.4));
+    fill(f, box_r, pal.surface0, CornerRadii::all(l.pad * 0.4));
     label_centred(
         f,
         &Label {
             text: body,
             size: l.small,
             weight: FontWeightHint::Bold,
-            color: hex(COL_TEXT),
+            color: pal.text,
         },
         box_r,
     );
@@ -1638,7 +1670,12 @@ fn chip(f: &mut Frame<Target>, l: &Layout, bar: &mut Rect, body: &str, t: Target
 /// rather than at a constant chosen by eye -- which is what `table_y = 240.0`
 /// was, and it overlapped the cards on any window where they wrapped to a
 /// third row.
-fn draw_cards(f: &mut Frame<Target>, l: &Layout, cards: &[(&str, String, u32)]) -> f32 {
+fn draw_cards(
+    f: &mut Frame<Target>,
+    pal: &Palette,
+    l: &Layout,
+    cards: &[(&str, String, Color)],
+) -> f32 {
     let mut bottom = l.body.y;
     for (i, (name, value, col)) in cards.iter().enumerate() {
         let r = l.card_rect(i);
@@ -1646,7 +1683,7 @@ fn draw_cards(f: &mut Frame<Target>, l: &Layout, cards: &[(&str, String, u32)]) 
             // Out of body. Wrapping on rather than drawing over the footer.
             break;
         }
-        fill(f, r, hex(COL_SURFACE0), CornerRadii::all(l.pad * 0.4));
+        fill(f, r, pal.surface0, CornerRadii::all(l.pad * 0.4));
         let inner = shrink(r, l.pad * 0.5);
         push_text(
             f,
@@ -1654,7 +1691,7 @@ fn draw_cards(f: &mut Frame<Target>, l: &Layout, cards: &[(&str, String, u32)]) 
                 text: name,
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: hex(COL_SUBTEXT0),
+                color: pal.subtext0,
             },
             inner.x,
             inner.y,
@@ -1666,7 +1703,7 @@ fn draw_cards(f: &mut Frame<Target>, l: &Layout, cards: &[(&str, String, u32)]) 
                 text: value,
                 size: l.font * 1.4,
                 weight: FontWeightHint::Bold,
-                color: hex(*col),
+                color: *col,
             },
             inner.x,
             inner.y + l.small + l.pad * 0.3,
@@ -1706,7 +1743,13 @@ fn wpm_rating(wpm: f64) -> &'static str {
 /// neighbour, and the cursor's highlight box, also 13.2 px, sat over the wrong
 /// part of the glyph it marked. Every advance is measured in the family it is
 /// drawn in now.
-fn draw_lesson_text(f: &mut Frame<Target>, l: &Layout, session: &TypingSession, area: Rect) {
+fn draw_lesson_text(
+    f: &mut Frame<Target>,
+    pal: &Palette,
+    l: &Layout,
+    session: &TypingSession,
+    area: Rect,
+) {
     if area.is_empty() || session.text.is_empty() {
         return;
     }
@@ -1761,15 +1804,15 @@ fn draw_lesson_text(f: &mut Frame<Target>, l: &Layout, session: &TypingSession, 
             fill(
                 f,
                 Rect::new(px - 1.0, py - 1.0, advance + 2.0, line_h),
-                hex(COL_SURFACE1),
+                pal.surface1,
                 CornerRadii::all(2.0),
             );
-            hex(COL_TEXT)
+            pal.text
         } else {
             match session.statuses.get(i) {
-                Some(CharStatus::Correct) => hex(COL_GREEN),
-                Some(CharStatus::Incorrect) => hex(COL_RED),
-                _ => hex(COL_SURFACE2),
+                Some(CharStatus::Correct) => pal.green,
+                Some(CharStatus::Incorrect) => pal.red,
+                _ => pal.surface2,
             }
         };
         f.push(RenderCommand::Text {
@@ -1788,6 +1831,10 @@ fn draw_lesson_text(f: &mut Frame<Target>, l: &Layout, session: &TypingSession, 
 }
 
 impl App for TypingTutorApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Typing Tutor".to_string()
     }
@@ -1901,8 +1948,9 @@ mod tests {
 
     #[test]
     fn lesson_category_colors() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         for cat in LessonCategory::all() {
-            let _ = cat.color(); // No panic
+            let _ = cat.color(&pal); // No panic
         }
     }
 
@@ -3192,7 +3240,7 @@ mod tests {
             let frame = app.frame(size.0, size.1);
             let highlight = frame.commands().iter().any(|c| {
                 matches!(c, RenderCommand::FillRect { color, .. }
-                    if *color == hex(COL_SURFACE1))
+                    if *color == app.palette.surface1)
             });
             assert!(
                 highlight,
@@ -3313,11 +3361,11 @@ mod tests {
                 _ => {}
             }
         }
-        assert_eq!(colours.first().copied(), Some(hex(COL_GREEN)));
-        assert_eq!(colours.get(1).copied(), Some(hex(COL_RED)));
+        assert_eq!(colours.first().copied(), Some(app.palette.green));
+        assert_eq!(colours.get(1).copied(), Some(app.palette.red));
         assert_eq!(
             colours.get(3).copied(),
-            Some(hex(COL_SURFACE2)),
+            Some(app.palette.surface2),
             "an untouched character is not drawn as pending"
         );
     }
@@ -3476,6 +3524,7 @@ mod tests {
     /// only thing that says what kind of practice it was.
     #[test]
     fn a_history_row_carries_its_category_colour() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut app = TypingTutorApp::new();
         app.results.push(SessionResult {
             lesson_title: String::from("Numbers drill"),
@@ -3497,7 +3546,7 @@ mod tests {
             .expect("the row is drawn");
         assert_eq!(
             drawn,
-            LessonCategory::Numbers.color(),
+            LessonCategory::Numbers.color(&pal),
             "the row is not in its category's colour"
         );
     }
@@ -3662,11 +3711,12 @@ mod tests {
 
     /// An unselected row is told apart from the background it sits on.
     ///
-    /// The program this replaces filled it with `COL_BASE` -- the background --
+    /// The program this replaces filled it with `self.palette.base` -- the background --
     /// so the list was one flat field and the only visible boundary in it was
     /// the one the cursor was on.
     #[test]
     fn an_unselected_row_is_told_apart_from_the_background() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let app = TypingTutorApp::new();
         assert_ne!(app.selected_lesson, 1, "row one is meant to be unselected");
         let r = probe::rect_of(&app, Target::Lesson(1)).expect("a second row");
@@ -3674,7 +3724,7 @@ mod tests {
             matches!(c, RenderCommand::FillRect { x, y, color, .. }
                 if (*x - r.x).abs() < 0.01
                     && (*y - r.y).abs() < 0.01
-                    && *color != hex(COL_BASE))
+                    && *color != pal.base)
         });
         assert!(
             painted,
@@ -3836,5 +3886,79 @@ mod tests {
         app.selected_lesson = max;
         app.handle_key(&make_key(Key::Down, None));
         assert_eq!(app.selected_lesson, max);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut TypingTutorApp) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 900.0, 650.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = TypingTutorApp::new();
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        oswindow::app::App::theme_changed(
+            &mut app,
+            &theme(
+                appearance::ThemeMode::Dark,
+                Some(appearance::HighContrastScheme::WhiteOnBlack),
+            ),
+        );
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

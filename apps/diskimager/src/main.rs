@@ -32,6 +32,7 @@
 //! comment saying what will call it; a crate-wide allow silences the one
 //! diagnostic that catches a feature with no way in.
 
+use appearance::Palette;
 #[allow(unused_imports)]
 use guitk::color::Color;
 use guitk::dialog::{DialogAction, FileDialog, list_directory};
@@ -62,32 +63,6 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
-
-// ============================================================================
-// Catppuccin Mocha color palette
-// ============================================================================
-
-pub mod colors {
-    use guitk::color::Color;
-
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const CRUST: Color = Color::from_hex(0x11111B);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const SURFACE2: Color = Color::from_hex(0x585B70);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-    pub const TEAL: Color = Color::from_hex(0x94E2D5);
-    pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-}
 
 // ============================================================================
 // Configuration constants
@@ -1722,6 +1697,12 @@ pub struct DiskImagerApp {
 
     // Tick counter for animations
     pub tick_count: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for DiskImagerApp {
@@ -1741,6 +1722,7 @@ impl DiskImagerApp {
             Err(e) => (Vec::new(), e, true),
         };
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             active_tab: MainTab::Write,
             window_width: 960.0,
             window_height: 680.0,
@@ -2747,7 +2729,7 @@ impl DiskImagerApp {
             0.0,
             self.window_width,
             self.window_height,
-            colors::BASE,
+            self.palette.base,
         );
 
         // Toolbar
@@ -2805,7 +2787,7 @@ impl DiskImagerApp {
             0.0,
             self.window_width,
             TOOLBAR_HEIGHT,
-            colors::MANTLE,
+            self.palette.mantle,
             CornerRadii::ZERO,
         );
 
@@ -2814,7 +2796,7 @@ impl DiskImagerApp {
             x: PANEL_PADDING,
             y: (TOOLBAR_HEIGHT - HEADER_FONT_SIZE) / 2.0,
             text: "Disk Imager".to_string(),
-            color: colors::BLUE,
+            color: self.palette.blue,
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2828,14 +2810,14 @@ impl DiskImagerApp {
             lay.refresh_y,
             lay.refresh_w,
             BUTTON_HEIGHT,
-            colors::SURFACE0,
+            self.palette.surface0,
             CornerRadii::all(4.0),
         );
         rt.push(RenderCommand::Text {
             x: lay.refresh_x + 12.0,
             y: lay.refresh_y + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
             text: "Refresh Drives".to_string(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2845,7 +2827,13 @@ impl DiskImagerApp {
 
     fn render_tab_bar(&self, rt: &mut RenderTree, y: f32) {
         // Tab bar background
-        rt.fill_rect(0.0, y, self.window_width, ROW_HEIGHT + 8.0, colors::CRUST);
+        rt.fill_rect(
+            0.0,
+            y,
+            self.window_width,
+            ROW_HEIGHT + 8.0,
+            self.palette.crust,
+        );
 
         let tab_width = 120.0_f32;
         for (idx, tab) in MainTab::ALL.iter().enumerate() {
@@ -2853,14 +2841,14 @@ impl DiskImagerApp {
             let is_active = self.active_tab == *tab;
 
             let bg = if is_active {
-                colors::BASE
+                self.palette.base
             } else {
-                colors::CRUST
+                self.palette.crust
             };
             let fg = if is_active {
-                colors::BLUE
+                self.palette.blue
             } else {
-                colors::SUBTEXT0
+                self.palette.subtext0
             };
 
             rt.fill_rounded_rect(
@@ -2899,7 +2887,7 @@ impl DiskImagerApp {
                     y + ROW_HEIGHT + 2.0,
                     tab_width - 4.0,
                     2.0,
-                    colors::BLUE,
+                    self.palette.blue,
                 );
             }
         }
@@ -2907,7 +2895,7 @@ impl DiskImagerApp {
 
     fn render_drive_list(&self, rt: &mut RenderTree, x: f32, y: f32, width: f32, height: f32) {
         // Background
-        rt.fill_rect(x, y, width, height, colors::MANTLE);
+        rt.fill_rect(x, y, width, height, self.palette.mantle);
 
         // Border right
         rt.push(RenderCommand::Line {
@@ -2915,7 +2903,7 @@ impl DiskImagerApp {
             y1: y,
             x2: x + width - 1.0,
             y2: y + height,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2924,7 +2912,7 @@ impl DiskImagerApp {
             x: x + PANEL_PADDING,
             y: y + PANEL_PADDING,
             text: "Drives".to_string(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
@@ -2959,7 +2947,7 @@ impl DiskImagerApp {
                     x: x + PANEL_PADDING,
                     y: entry_y_start + 8.0 + (i as f32) * (SMALL_FONT_SIZE + 4.0),
                     text: (*line).to_string(),
-                    color: colors::SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: SMALL_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - PANEL_PADDING * 2.0),
@@ -2988,9 +2976,9 @@ impl DiskImagerApp {
 
             // Background
             let bg = if is_selected {
-                colors::SURFACE0
+                self.palette.surface0
             } else {
-                colors::MANTLE
+                self.palette.mantle
             };
             rt.fill_rounded_rect(
                 x + 4.0,
@@ -3003,15 +2991,15 @@ impl DiskImagerApp {
 
             // Selection indicator
             if is_selected {
-                rt.fill_rect(x + 4.0, ey, 3.0, entry_height - 4.0, colors::BLUE);
+                rt.fill_rect(x + 4.0, ey, 3.0, entry_height - 4.0, self.palette.blue);
             }
 
             // Drive icon and name
             let icon_color = match drive.drive_type {
-                DriveType::Usb => colors::GREEN,
-                DriveType::SdCard => colors::PEACH,
-                DriveType::Ssd => colors::BLUE,
-                _ => colors::SUBTEXT0,
+                DriveType::Usb => self.palette.green,
+                DriveType::SdCard => self.palette.peach,
+                DriveType::Ssd => self.palette.blue,
+                _ => self.palette.subtext0,
             };
 
             rt.push(RenderCommand::Text {
@@ -3029,7 +3017,7 @@ impl DiskImagerApp {
                 x: x + PANEL_PADDING + 40.0,
                 y: ey + 6.0,
                 text: drive.name.clone(),
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 60.0),
@@ -3041,7 +3029,7 @@ impl DiskImagerApp {
                 x: x + PANEL_PADDING + 40.0,
                 y: ey + 24.0,
                 text: drive.model.clone(),
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 60.0),
@@ -3052,7 +3040,7 @@ impl DiskImagerApp {
                 x: x + PANEL_PADDING + 40.0,
                 y: ey + 40.0,
                 text: drive.summary(),
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 60.0),
@@ -3065,7 +3053,7 @@ impl DiskImagerApp {
                     x: x + width - 60.0,
                     y: ey + 6.0,
                     text: "SYSTEM".to_string(),
-                    color: colors::RED,
+                    color: self.palette.red,
                     font_size: SMALL_FONT_SIZE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
@@ -3077,7 +3065,7 @@ impl DiskImagerApp {
                     x: x + width - 60.0,
                     y: ey + 20.0,
                     text: "LOCKED".to_string(),
-                    color: colors::YELLOW,
+                    color: self.palette.yellow,
                     font_size: SMALL_FONT_SIZE,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
@@ -3130,7 +3118,7 @@ impl DiskImagerApp {
             x: px,
             y: lay.image_label_y,
             text: "Image File".to_string(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
@@ -3146,7 +3134,7 @@ impl DiskImagerApp {
                 lay.image_body_y,
                 width - PANEL_PADDING * 2.0,
                 60.0,
-                colors::SURFACE0,
+                self.palette.surface0,
                 CornerRadii::all(CORNER_RADIUS),
             );
             rt.push(RenderCommand::Text {
@@ -3157,7 +3145,7 @@ impl DiskImagerApp {
                 // program did not offer.
                 text: "No image loaded. Press Ctrl+O to open an .iso, .img, or .bin file."
                     .to_string(),
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 4.0),
@@ -3170,7 +3158,7 @@ impl DiskImagerApp {
             x: px,
             y: lay.drive_label_y,
             text: "Target Drive".to_string(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
@@ -3185,14 +3173,14 @@ impl DiskImagerApp {
                 lay.drive_body_y,
                 width - PANEL_PADDING * 2.0,
                 40.0,
-                colors::SURFACE0,
+                self.palette.surface0,
                 CornerRadii::all(CORNER_RADIUS),
             );
             rt.push(RenderCommand::Text {
                 x: px + PANEL_PADDING,
                 y: lay.drive_body_y + 12.0,
                 text: "Select a target drive from the left panel".to_string(),
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 4.0),
@@ -3205,7 +3193,7 @@ impl DiskImagerApp {
             x: px,
             y: lay.options_label_y,
             text: "Options".to_string(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3214,9 +3202,9 @@ impl DiskImagerApp {
 
         // Verify after write checkbox
         let check_color = if self.write_options.verify_after_write {
-            colors::GREEN
+            self.palette.green
         } else {
-            colors::SURFACE1
+            self.palette.surface1
         };
         rt.fill_rounded_rect(
             px,
@@ -3231,7 +3219,7 @@ impl DiskImagerApp {
                 x: px + 3.0,
                 y: lay.verify_row_y + 1.0,
                 text: "v".to_string(),
-                color: colors::CRUST,
+                color: self.palette.crust,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -3242,7 +3230,7 @@ impl DiskImagerApp {
             x: px + 26.0,
             y: lay.verify_row_y + 2.0,
             text: "Verify after write (byte-by-byte comparison)".to_string(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PANEL_PADDING * 2.0 - 30.0),
@@ -3254,7 +3242,7 @@ impl DiskImagerApp {
             x: px,
             y: lay.block_size_y,
             text: format!("Block size: {} bytes", self.write_options.block_size),
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -3265,9 +3253,9 @@ impl DiskImagerApp {
         // because both read it from `lay`.
         let can_write = self.can_write();
         let btn_color = if can_write {
-            colors::BLUE
+            self.palette.blue
         } else {
-            colors::SURFACE1
+            self.palette.surface1
         };
         rt.fill_rounded_rect(
             lay.button_x,
@@ -3282,9 +3270,9 @@ impl DiskImagerApp {
             y: lay.button_y + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
             text: "Write Image".to_string(),
             color: if can_write {
-                colors::CRUST
+                self.palette.crust
             } else {
-                colors::OVERLAY0
+                self.palette.overlay0
             },
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
@@ -3300,7 +3288,7 @@ impl DiskImagerApp {
                 x: px,
                 y: cy,
                 text: "Recent Images".to_string(),
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -3330,7 +3318,7 @@ impl DiskImagerApp {
                         "{}{suffix}",
                         truncate_path(&recent.path, room - suffix_w, SMALL_FONT_SIZE),
                     ),
-                    color: colors::SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: SMALL_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(room),
@@ -3349,7 +3337,7 @@ impl DiskImagerApp {
             x: px,
             y: cy,
             text: "Create Disk Image".to_string(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
@@ -3361,7 +3349,7 @@ impl DiskImagerApp {
             x: px,
             y: cy,
             text: "Create a raw disk image from the selected drive.".to_string(),
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PANEL_PADDING * 2.0),
@@ -3374,7 +3362,7 @@ impl DiskImagerApp {
             x: px,
             y: cy,
             text: "Source Drive".to_string(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3391,14 +3379,14 @@ impl DiskImagerApp {
                 cy,
                 width - PANEL_PADDING * 2.0,
                 40.0,
-                colors::SURFACE0,
+                self.palette.surface0,
                 CornerRadii::all(CORNER_RADIUS),
             );
             rt.push(RenderCommand::Text {
                 x: px + PANEL_PADDING,
                 y: cy + 12.0,
                 text: "Select a source drive from the left panel".to_string(),
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 4.0),
@@ -3413,7 +3401,7 @@ impl DiskImagerApp {
             x: px,
             y: cy,
             text: "Options".to_string(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3423,9 +3411,9 @@ impl DiskImagerApp {
 
         // Compress checkbox
         let compress_color = if self.create_options.compress {
-            colors::GREEN
+            self.palette.green
         } else {
-            colors::SURFACE1
+            self.palette.surface1
         };
         rt.fill_rounded_rect(px, cy, 18.0, 18.0, compress_color, CornerRadii::all(3.0));
         if self.create_options.compress {
@@ -3433,7 +3421,7 @@ impl DiskImagerApp {
                 x: px + 3.0,
                 y: cy + 1.0,
                 text: "v".to_string(),
-                color: colors::CRUST,
+                color: self.palette.crust,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -3444,7 +3432,7 @@ impl DiskImagerApp {
             x: px + 26.0,
             y: cy + 2.0,
             text: "Compress output (gzip)".to_string(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -3457,7 +3445,7 @@ impl DiskImagerApp {
             x: px,
             y: cy,
             text: format!("Block size: {} bytes", self.create_options.block_size),
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -3474,7 +3462,7 @@ impl DiskImagerApp {
                 self.create_options.format.name(),
                 self.create_options.format.extensions()
             ),
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PANEL_PADDING * 2.0),
@@ -3485,9 +3473,9 @@ impl DiskImagerApp {
         // Create button
         let can_create = self.selected_drive_index.is_some() && !self.operation.is_active();
         let btn_color = if can_create {
-            colors::GREEN
+            self.palette.green
         } else {
-            colors::SURFACE1
+            self.palette.surface1
         };
         let btn_w = 160.0_f32;
         rt.fill_rounded_rect(
@@ -3503,9 +3491,9 @@ impl DiskImagerApp {
             y: cy + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
             text: "Create Image".to_string(),
             color: if can_create {
-                colors::CRUST
+                self.palette.crust
             } else {
-                colors::OVERLAY0
+                self.palette.overlay0
             },
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
@@ -3531,7 +3519,7 @@ impl DiskImagerApp {
             x: px,
             y: cy,
             text: "ISO 9660 Browser".to_string(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
@@ -3551,7 +3539,7 @@ impl DiskImagerApp {
                 x: px,
                 y: cy,
                 text: "File Tree".to_string(),
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -3572,7 +3560,7 @@ impl DiskImagerApp {
                     dirs,
                     format_bytes(total),
                 ),
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 2.0),
@@ -3612,7 +3600,13 @@ impl DiskImagerApp {
                 let is_selected = self.selected_iso_entry == Some(idx);
 
                 if is_selected {
-                    rt.fill_rect(px, ey, width - PANEL_PADDING * 2.0, row_h, colors::SURFACE0);
+                    rt.fill_rect(
+                        px,
+                        ey,
+                        width - PANEL_PADDING * 2.0,
+                        row_h,
+                        self.palette.surface0,
+                    );
                 }
 
                 // Expand/collapse indicator
@@ -3622,7 +3616,7 @@ impl DiskImagerApp {
                         x: px + indent,
                         y: ey + 2.0,
                         text: arrow.to_string(),
-                        color: colors::OVERLAY0,
+                        color: self.palette.overlay0,
                         font_size: SMALL_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -3633,9 +3627,9 @@ impl DiskImagerApp {
                 // Icon
                 let icon_text = if entry.is_directory { "[D]" } else { "[F]" };
                 let icon_color = if entry.is_directory {
-                    colors::PEACH
+                    self.palette.peach
                 } else {
-                    colors::LAVENDER
+                    self.palette.lavender
                 };
                 rt.push(RenderCommand::Text {
                     x: px + indent + 14.0,
@@ -3653,7 +3647,7 @@ impl DiskImagerApp {
                     x: px + indent + 40.0,
                     y: ey + 2.0,
                     text: entry.name.clone(),
-                    color: colors::TEXT,
+                    color: self.palette.text,
                     font_size: SMALL_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - PANEL_PADDING * 2.0 - indent - 120.0),
@@ -3673,7 +3667,7 @@ impl DiskImagerApp {
                         x: size_x,
                         y: ey + 2.0,
                         text: size_text,
-                        color: colors::OVERLAY0,
+                        color: self.palette.overlay0,
                         font_size: SMALL_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -3689,14 +3683,14 @@ impl DiskImagerApp {
                 cy,
                 width - PANEL_PADDING * 2.0,
                 60.0,
-                colors::SURFACE0,
+                self.palette.surface0,
                 CornerRadii::all(CORNER_RADIUS),
             );
             rt.push(RenderCommand::Text {
                 x: px + PANEL_PADDING,
                 y: cy + 20.0,
                 text: "Load an ISO image to browse its contents.".to_string(),
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 4.0),
@@ -3713,7 +3707,7 @@ impl DiskImagerApp {
             x: px,
             y: cy,
             text: "Checksum Verification".to_string(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
@@ -3731,14 +3725,14 @@ impl DiskImagerApp {
                 cy,
                 width - PANEL_PADDING * 2.0,
                 40.0,
-                colors::SURFACE0,
+                self.palette.surface0,
                 CornerRadii::all(CORNER_RADIUS),
             );
             rt.push(RenderCommand::Text {
                 x: px + PANEL_PADDING,
                 y: cy + 12.0,
                 text: "Load an image file to compute checksums".to_string(),
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 4.0),
@@ -3752,7 +3746,7 @@ impl DiskImagerApp {
             x: px,
             y: cy,
             text: "Hash Algorithm".to_string(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3771,14 +3765,14 @@ impl DiskImagerApp {
             let bx = px + (idx as f32) * (alg_btn_w + btn_gap);
             let is_selected = self.hash_algorithm == *alg;
             let bg = if is_selected {
-                colors::BLUE
+                self.palette.blue
             } else {
-                colors::SURFACE0
+                self.palette.surface0
             };
             let fg = if is_selected {
-                colors::CRUST
+                self.palette.crust
             } else {
-                colors::TEXT
+                self.palette.text
             };
 
             rt.fill_rounded_rect(bx, cy, alg_btn_w, BUTTON_HEIGHT, bg, CornerRadii::all(4.0));
@@ -3808,7 +3802,7 @@ impl DiskImagerApp {
             x: px,
             y: cy,
             text: "Expected Hash (optional)".to_string(),
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -3822,7 +3816,7 @@ impl DiskImagerApp {
             cy,
             input_w,
             28.0,
-            colors::SURFACE0,
+            self.palette.surface0,
             CornerRadii::all(4.0),
         );
         rt.push(RenderCommand::StrokeRect {
@@ -3830,7 +3824,7 @@ impl DiskImagerApp {
             y: cy,
             width: input_w,
             height: 28.0,
-            color: colors::SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -3840,9 +3834,9 @@ impl DiskImagerApp {
             &self.expected_hash
         };
         let hash_color = if self.expected_hash.is_empty() {
-            colors::OVERLAY0
+            self.palette.overlay0
         } else {
-            colors::TEXT
+            self.palette.text
         };
         rt.push(RenderCommand::Text {
             x: px + 8.0,
@@ -3859,9 +3853,9 @@ impl DiskImagerApp {
         // Compute button
         let can_hash = self.loaded_image.is_some() && !self.operation.is_active();
         let btn_color = if can_hash {
-            colors::MAUVE
+            self.palette.mauve
         } else {
-            colors::SURFACE1
+            self.palette.surface1
         };
         let btn_w = 180.0_f32;
         rt.fill_rounded_rect(
@@ -3877,9 +3871,9 @@ impl DiskImagerApp {
             y: cy + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
             text: format!("Compute {} Hash", self.hash_algorithm.name()),
             color: if can_hash {
-                colors::CRUST
+                self.palette.crust
             } else {
-                colors::OVERLAY0
+                self.palette.overlay0
             },
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
@@ -3894,7 +3888,7 @@ impl DiskImagerApp {
                 x: px,
                 y: cy,
                 text: "Computed Hash".to_string(),
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -3907,14 +3901,14 @@ impl DiskImagerApp {
                 cy,
                 input_w,
                 28.0,
-                colors::SURFACE0,
+                self.palette.surface0,
                 CornerRadii::all(4.0),
             );
             rt.push(RenderCommand::Text {
                 x: px + 8.0,
                 y: cy + 6.0,
                 text: hash.clone(),
-                color: colors::GREEN,
+                color: self.palette.green,
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(input_w - 16.0),
@@ -3937,7 +3931,7 @@ impl DiskImagerApp {
                         x: px + 12.0,
                         y: cy + 8.0,
                         text: "MATCH - Hashes are identical".to_string(),
-                        color: colors::GREEN,
+                        color: self.palette.green,
                         font_size: UI_FONT_SIZE,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(input_w - 24.0),
@@ -3957,7 +3951,7 @@ impl DiskImagerApp {
                         x: px + 12.0,
                         y: cy + 6.0,
                         text: "MISMATCH - Hashes differ!".to_string(),
-                        color: colors::RED,
+                        color: self.palette.red,
                         font_size: UI_FONT_SIZE,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(input_w - 24.0),
@@ -3979,7 +3973,7 @@ impl DiskImagerApp {
                         x: px + 12.0,
                         y: cy + 24.0,
                         text: elide_hash("Expected", expected),
-                        color: colors::RED,
+                        color: self.palette.red,
                         font_size: SMALL_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(hash_room),
@@ -3989,7 +3983,7 @@ impl DiskImagerApp {
                         x: px + 12.0,
                         y: cy + 38.0,
                         text: elide_hash("Computed", computed),
-                        color: colors::RED,
+                        color: self.palette.red,
                         font_size: SMALL_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(hash_room),
@@ -4008,7 +4002,7 @@ impl DiskImagerApp {
             y,
             width,
             90.0,
-            colors::SURFACE0,
+            self.palette.surface0,
             CornerRadii::all(CORNER_RADIUS),
         );
         rt.push(RenderCommand::StrokeRect {
@@ -4016,7 +4010,7 @@ impl DiskImagerApp {
             y,
             width,
             height: 90.0,
-            color: colors::SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -4031,7 +4025,7 @@ impl DiskImagerApp {
             y: ty,
             // Lossy only here, one step before the glyphs are measured.
             text: filename.to_string_lossy().into_owned(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
@@ -4049,7 +4043,7 @@ impl DiskImagerApp {
                 format_bytes(img.file_size),
                 img.boot_type.name()
             ),
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PANEL_PADDING * 2.0),
@@ -4063,7 +4057,7 @@ impl DiskImagerApp {
                 x: tx,
                 y: ty,
                 text: format!("Volume: {}", img.volume_label),
-                color: colors::TEAL,
+                color: self.palette.teal,
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 2.0),
@@ -4078,7 +4072,7 @@ impl DiskImagerApp {
                 x: tx,
                 y: ty,
                 text: format!("Filesystem: {}", img.filesystem_type),
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 2.0),
@@ -4094,14 +4088,14 @@ impl DiskImagerApp {
                 y + 8.0,
                 68.0,
                 20.0,
-                colors::GREEN,
+                self.palette.green,
                 CornerRadii::all(10.0),
             );
             rt.push(RenderCommand::Text {
                 x: badge_x + 8.0,
                 y: y + 12.0,
                 text: "Bootable".to_string(),
-                color: colors::CRUST,
+                color: self.palette.crust,
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -4123,7 +4117,7 @@ impl DiskImagerApp {
             y,
             width,
             60.0,
-            colors::SURFACE0,
+            self.palette.surface0,
             CornerRadii::all(CORNER_RADIUS),
         );
         rt.push(RenderCommand::StrokeRect {
@@ -4131,7 +4125,7 @@ impl DiskImagerApp {
             y,
             width,
             height: 60.0,
-            color: colors::SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -4142,7 +4136,7 @@ impl DiskImagerApp {
             x: tx,
             y: y + 8.0,
             text: format!("{} {}", drive.drive_type.icon(), drive.name),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PANEL_PADDING * 2.0),
@@ -4158,7 +4152,7 @@ impl DiskImagerApp {
                 drive.size_display(),
                 drive.partition_table.name()
             ),
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PANEL_PADDING * 2.0),
@@ -4177,7 +4171,7 @@ impl DiskImagerApp {
                     &drive.serial
                 }
             ),
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PANEL_PADDING * 2.0),
@@ -4192,7 +4186,7 @@ impl DiskImagerApp {
                 y + 8.0,
                 88.0,
                 20.0,
-                colors::RED,
+                self.palette.red,
                 CornerRadii::all(10.0),
             );
             rt.push(RenderCommand::Text {
@@ -4204,7 +4198,7 @@ impl DiskImagerApp {
                     "Read-Only"
                 }
                 .to_string(),
-                color: colors::CRUST,
+                color: self.palette.crust,
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -4226,7 +4220,7 @@ impl DiskImagerApp {
             y,
             width,
             80.0,
-            colors::SURFACE0,
+            self.palette.surface0,
             CornerRadii::all(CORNER_RADIUS),
         );
         rt.push(RenderCommand::StrokeRect {
@@ -4234,7 +4228,7 @@ impl DiskImagerApp {
             y,
             width,
             height: 80.0,
-            color: colors::SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -4257,7 +4251,7 @@ impl DiskImagerApp {
                 x: tx,
                 y: ty,
                 text: line.clone(),
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PANEL_PADDING * 2.0),
@@ -4269,15 +4263,21 @@ impl DiskImagerApp {
 
     fn render_status_bar(&self, rt: &mut RenderTree) {
         let sy = self.window_height - STATUS_BAR_HEIGHT;
-        rt.fill_rect(0.0, sy, self.window_width, STATUS_BAR_HEIGHT, colors::CRUST);
+        rt.fill_rect(
+            0.0,
+            sy,
+            self.window_width,
+            STATUS_BAR_HEIGHT,
+            self.palette.crust,
+        );
 
         // Status message
         let status_color = if self.status_is_error {
-            colors::RED
+            self.palette.red
         } else if self.operation.is_active() {
-            colors::YELLOW
+            self.palette.yellow
         } else {
-            colors::SUBTEXT0
+            self.palette.subtext0
         };
 
         rt.push(RenderCommand::Text {
@@ -4303,7 +4303,7 @@ impl DiskImagerApp {
                 ),
                 y: sy + (STATUS_BAR_HEIGHT - SMALL_FONT_SIZE) / 2.0,
                 text: op_text.to_string(),
-                color: colors::YELLOW,
+                color: self.palette.yellow,
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -4321,7 +4321,7 @@ impl DiskImagerApp {
                 ),
                 y: sy + (STATUS_BAR_HEIGHT - SMALL_FONT_SIZE) / 2.0,
                 text: info,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -4342,7 +4342,7 @@ impl DiskImagerApp {
             bar_y - PANEL_PADDING,
             bar_w + PANEL_PADDING * 2.0,
             PROGRESS_BAR_HEIGHT + 50.0,
-            colors::MANTLE,
+            self.palette.mantle,
             CornerRadii::all(CORNER_RADIUS),
         );
         rt.push(RenderCommand::StrokeRect {
@@ -4350,7 +4350,7 @@ impl DiskImagerApp {
             y: bar_y - PANEL_PADDING,
             width: bar_w + PANEL_PADDING * 2.0,
             height: PROGRESS_BAR_HEIGHT + 50.0,
-            color: colors::SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -4361,7 +4361,7 @@ impl DiskImagerApp {
             bar_y,
             bar_w,
             PROGRESS_BAR_HEIGHT,
-            colors::SURFACE0,
+            self.palette.surface0,
             CornerRadii::all(PROGRESS_BAR_HEIGHT / 2.0),
         );
 
@@ -4369,11 +4369,11 @@ impl DiskImagerApp {
         let fill_w = bar_w * self.progress.fraction();
         if fill_w > 0.0 {
             let progress_color = match &self.operation {
-                Operation::WritingImage => colors::BLUE,
-                Operation::VerifyingWrite => colors::TEAL,
-                Operation::CreatingImage => colors::GREEN,
-                Operation::ComputingHash => colors::MAUVE,
-                _ => colors::BLUE,
+                Operation::WritingImage => self.palette.blue,
+                Operation::VerifyingWrite => self.palette.teal,
+                Operation::CreatingImage => self.palette.green,
+                Operation::ComputingHash => self.palette.mauve,
+                _ => self.palette.blue,
             };
             rt.fill_rounded_rect(
                 bar_x,
@@ -4396,7 +4396,7 @@ impl DiskImagerApp {
             ),
             y: bar_y + (PROGRESS_BAR_HEIGHT - SMALL_FONT_SIZE) / 2.0,
             text: pct_text,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -4408,7 +4408,7 @@ impl DiskImagerApp {
             x: bar_x,
             y: bar_y + PROGRESS_BAR_HEIGHT + 6.0,
             text: self.progress.summary(),
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bar_w),
@@ -4420,7 +4420,7 @@ impl DiskImagerApp {
             x: bar_x + bar_w - 100.0,
             y: bar_y + PROGRESS_BAR_HEIGHT + 6.0,
             text: "Esc to cancel".to_string(),
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -4565,6 +4565,10 @@ fn read_le_u16(data: &[u8], offset: usize) -> u16 {
 // ============================================================================
 
 impl oswindow::app::App for DiskImagerApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Disk Imager")
     }
@@ -7587,5 +7591,68 @@ removable=true
         // ISO 9660 writes all-zero digits for "not specified"; formatting them
         // gives the reader a confident "0000-00-00 00:00:00".
         assert!(extract_iso_datetime(b"00000000000000000", 0).is_empty());
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        use oswindow::app::App as _;
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut DiskImagerApp) -> Vec<Color> {
+            // Fully qualified: this application also has an *inherent*
+            // `render(&mut RenderTree)`, which wins method resolution over the
+            // trait's and takes different arguments.
+            oswindow::app::App::render(app, 1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = DiskImagerApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

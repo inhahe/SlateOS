@@ -26,6 +26,7 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::similar_names)]
 
+use appearance::Palette;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -905,29 +906,6 @@ use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-mod colors {
-    use guitk::Color;
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const CRUST: Color = Color::from_hex(0x11111B);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    #[allow(dead_code)]
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const _RED: Color = Color::from_hex(0xF38BA8);
-    #[allow(dead_code)]
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const TEAL: Color = Color::from_hex(0x94E2D5);
-    pub const _LAVENDER: Color = Color::from_hex(0xB4BEFE);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
-}
-
 /// Columns of the results table.
 ///
 /// One definition that the header row and the body rows both read, so they
@@ -981,6 +959,12 @@ pub struct FileSearchApp {
     pub status_message: String,
     pub is_searching: bool,
     pub search_time_ms: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for FileSearchApp {
@@ -993,6 +977,7 @@ impl FileSearchApp {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             index: FileIndex::new(),
             criteria: SearchCriteria::new(""),
             results: Vec::new(),
@@ -1300,7 +1285,7 @@ impl FileSearchApp {
             y: 0.0,
             width,
             height,
-            color: colors::BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1310,7 +1295,7 @@ impl FileSearchApp {
             y: 0.0,
             width,
             height: header_h,
-            color: colors::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1320,7 +1305,7 @@ impl FileSearchApp {
             y: 8.0,
             text: "File Search".to_string(),
             font_size: 14.0,
-            color: colors::BLUE,
+            color: self.palette.blue,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1334,7 +1319,7 @@ impl FileSearchApp {
             y: 28.0,
             width: search_w,
             height: 28.0,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -1349,9 +1334,9 @@ impl FileSearchApp {
             text: search_text,
             font_size: 13.0,
             color: if self.criteria.query.is_empty() {
-                colors::OVERLAY0
+                self.palette.overlay0
             } else {
-                colors::TEXT
+                self.palette.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(search_w - 120.0),
@@ -1364,7 +1349,7 @@ impl FileSearchApp {
             y: 30.0,
             width: 68.0,
             height: 24.0,
-            color: colors::SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -1372,7 +1357,7 @@ impl FileSearchApp {
             y: 36.0,
             text: self.criteria.mode.to_string(),
             font_size: 11.0,
-            color: colors::MAUVE,
+            color: self.palette.mauve,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1388,7 +1373,7 @@ impl FileSearchApp {
                 y: content_y,
                 width: sidebar_w,
                 height: content_h,
-                color: colors::MANTLE,
+                color: self.palette.mantle,
                 corner_radii: CornerRadii::ZERO,
             });
 
@@ -1413,7 +1398,7 @@ impl FileSearchApp {
             y: sy,
             width,
             height: status_h,
-            color: colors::CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
@@ -1421,7 +1406,7 @@ impl FileSearchApp {
             y: sy + 6.0,
             text: format!("{} indexed  |  {}", self.index.count(), self.status_message),
             font_size: 11.0,
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -1439,7 +1424,7 @@ impl FileSearchApp {
             y: fy,
             text: "File Type".to_string(),
             font_size: 11.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1466,7 +1451,7 @@ impl FileSearchApp {
                     y: fy,
                     width: w - 8.0,
                     height: 22.0,
-                    color: colors::SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -1476,9 +1461,9 @@ impl FileSearchApp {
                 text: format!("{} {cat}", category_icon(*cat)),
                 font_size: 11.0,
                 color: if is_sel {
-                    colors::BLUE
+                    self.palette.blue
                 } else {
-                    colors::SUBTEXT1
+                    self.palette.subtext1
                 },
                 font_weight: if is_sel {
                     FontWeightHint::Bold
@@ -1498,7 +1483,7 @@ impl FileSearchApp {
             y: fy,
             text: "Size".to_string(),
             font_size: 11.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1522,7 +1507,7 @@ impl FileSearchApp {
                     y: fy,
                     width: w - 8.0,
                     height: 22.0,
-                    color: colors::SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -1532,9 +1517,9 @@ impl FileSearchApp {
                 text: sf.label().to_string(),
                 font_size: 11.0,
                 color: if is_sel {
-                    colors::BLUE
+                    self.palette.blue
                 } else {
-                    colors::SUBTEXT1
+                    self.palette.subtext1
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 24.0),
@@ -1550,7 +1535,7 @@ impl FileSearchApp {
             y: fy,
             text: "Modified".to_string(),
             font_size: 11.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1572,9 +1557,9 @@ impl FileSearchApp {
                 text: df.label().to_string(),
                 font_size: 11.0,
                 color: if is_sel {
-                    colors::BLUE
+                    self.palette.blue
                 } else {
-                    colors::SUBTEXT1
+                    self.palette.subtext1
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 24.0),
@@ -1596,7 +1581,7 @@ impl FileSearchApp {
     /// be relying on. All five now go through [`Table::cell`].
     fn render_results(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
         let table = Table::new(RESULT_COLUMNS, x);
-        table.header(cmds, y + 4.0, colors::OVERLAY0, ROW_FONT_SMALL);
+        table.header(cmds, y + 4.0, self.palette.overlay0, ROW_FONT_SMALL);
 
         let row_h = 28.0;
         let mut ry = y + 24.0;
@@ -1612,7 +1597,7 @@ impl FileSearchApp {
                 y: y + h / 2.0,
                 text: msg.to_string(),
                 font_size: 14.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1637,7 +1622,7 @@ impl FileSearchApp {
                     y: ry,
                     width: w - 4.0,
                     height: row_h - 2.0,
-                    color: colors::SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -1656,9 +1641,9 @@ impl FileSearchApp {
                 cy,
                 &format!("{icon} {}", entry.name),
                 if entry.is_directory {
-                    colors::BLUE
+                    self.palette.blue
                 } else {
-                    colors::TEXT
+                    self.palette.text
                 },
                 ROW_FONT,
                 Fit::Start,
@@ -1671,7 +1656,7 @@ impl FileSearchApp {
                 COL_PATH,
                 cy,
                 entry.parent_dir(),
-                colors::SUBTEXT0,
+                self.palette.subtext0,
                 ROW_FONT_SMALL,
                 Fit::End,
             );
@@ -1685,7 +1670,7 @@ impl FileSearchApp {
                 } else {
                     format_size(entry.size)
                 },
-                colors::SUBTEXT1,
+                self.palette.subtext1,
                 ROW_FONT_SMALL,
                 Fit::Start,
             );
@@ -1696,7 +1681,7 @@ impl FileSearchApp {
                 COL_MODIFIED,
                 cy,
                 &format_relative_time(age),
-                colors::SUBTEXT0,
+                self.palette.subtext0,
                 ROW_FONT_SMALL,
                 Fit::Start,
             );
@@ -1712,7 +1697,7 @@ impl FileSearchApp {
                 } else {
                     entry.extension.to_uppercase()
                 },
-                colors::PEACH,
+                self.palette.peach,
                 ROW_FONT_SMALL,
                 Fit::Start,
             );
@@ -1728,7 +1713,7 @@ impl FileSearchApp {
             y,
             width: 1.0,
             height: h,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1740,7 +1725,7 @@ impl FileSearchApp {
                 y: y + h / 2.0,
                 text: "Select a file".to_string(),
                 font_size: 13.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1763,7 +1748,7 @@ impl FileSearchApp {
             y: py,
             text: format!("{icon} {}", entry.name),
             font_size: 14.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
             overflow: TextOverflow::Ellipsis,
@@ -1802,7 +1787,7 @@ impl FileSearchApp {
                 y: py,
                 text: label.to_string(),
                 font_size: 11.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1812,7 +1797,7 @@ impl FileSearchApp {
                 y: py,
                 text: value.clone(),
                 font_size: 11.0,
-                color: colors::SUBTEXT1,
+                color: self.palette.subtext1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w - 80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1827,7 +1812,7 @@ impl FileSearchApp {
             y: py,
             text: "Actions".to_string(),
             font_size: 11.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1841,7 +1826,7 @@ impl FileSearchApp {
                 y: py,
                 width: max_w,
                 height: 24.0,
-                color: colors::SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -1849,7 +1834,7 @@ impl FileSearchApp {
                 y: py + 5.0,
                 text: action.to_string(),
                 font_size: 11.0,
-                color: colors::TEAL,
+                color: self.palette.teal,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1880,6 +1865,10 @@ pub fn format_relative_time(seconds: u64) -> String {
 // ─── Main ────────────────────────────────────────────────────────────
 
 impl App for FileSearchApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         if self.criteria.query.is_empty() {
             "File Search".to_owned()
@@ -3015,6 +3004,67 @@ mod tests {
         assert!(
             paths.iter().any(|p| p == "/tmp"),
             "a path that fits must be drawn verbatim: {paths:?}"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        use guitk::Color;
+
+        fn fills(app: &mut FileSearchApp) -> Vec<Color> {
+            app.render(900.0, 650.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = FileSearchApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

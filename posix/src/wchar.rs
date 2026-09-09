@@ -377,7 +377,14 @@ pub unsafe extern "C" fn mbstowcs(dst: *mut WcharT, src: *const u8, n: usize) ->
     let mut src_off: usize = 0;
     let mut dst_count: usize = 0;
 
-    while dst_count < n {
+    // `n` bounds the *writing*, not the counting. C says that when `dst` is
+    // null the function returns the length the conversion would need and `n`
+    // is ignored -- and this loop used to be bounded by `n` regardless, so
+    // the idiomatic `mbstowcs(NULL, s, 0)` measurement answered 0 for every
+    // input. The doc comment above has always claimed the correct behaviour;
+    // only the code disagreed. Found by `printf::vswprintf`, which measures
+    // exactly that way and silently formatted nothing.
+    while dst.is_null() || dst_count < n {
         let lead = unsafe { *src.add(src_off) };
         if lead == 0 {
             if !dst.is_null() {
@@ -465,8 +472,12 @@ pub unsafe extern "C" fn wcstombs(dst: *mut u8, src: *const WcharT, n: usize) ->
             return usize::MAX; // Invalid code point.
         }
 
-        // Check if there's room in the output buffer.
-        if dst_off + enc_len > n {
+        // Check if there's room in the output buffer -- but only when there
+        // *is* an output buffer. With `dst` null this is a measurement and
+        // `n` is ignored, which is what C specifies and what the doc comment
+        // above has always said; the check used to run unconditionally, so
+        // `wcstombs(NULL, s, 0)` reported 0 bytes needed for every input.
+        if !dst.is_null() && dst_off + enc_len > n {
             return dst_off; // Buffer full, stop.
         }
 
@@ -1646,6 +1657,60 @@ pub unsafe extern "C" fn wcstof(nptr: *const WcharT, endptr: *mut *const WcharT)
     };
     if negative { -value } else { value }
 }
+
+/// `wcstold` — convert a wide string to `long double`.
+///
+/// The wide sibling of [`crate::stdlib::strtold`], and built the same way for
+/// the same reason: Rust cannot express a function that returns a value in
+/// `%st(0)`, which is where the x86-64 ABI puts a `long double`. So the Rust
+/// half computes an `f64` under the name `__wcstold_f64`, and the exported
+/// `wcstold` is the assembly thunk below.
+///
+/// Found missing by linking a C++ program against this libc: libc++'s
+/// `<locale>` needs `wcstold`, and it was the only member of the family
+/// absent — `wcstod` and `wcstof` have been here all along.
+///
+/// Precision is `f64`, not the 80-bit format the type can hold. That is the
+/// sysroot's documented limitation, shared with `strtold`
+/// (`known-issues.md` → TD-POSIX-LONG-DOUBLE-PRECISION), and it degrades
+/// gracefully: every `f64` widens exactly into the 80-bit format, so the
+/// answer is a correctly-rounded `double` rather than a wrong `long double`.
+///
+/// # Safety
+///
+/// `nptr` must point to a valid null-terminated wide string, and `endptr`
+/// must be null or writable.
+#[cfg_attr(target_os = "none", unsafe(export_name = "__wcstold_f64"))]
+pub unsafe extern "C" fn wcstold(nptr: *const WcharT, endptr: *mut *const WcharT) -> f64 {
+    // SAFETY: `wcstod`'s safety requirements are identical, and forwarding
+    // rather than re-scanning is what keeps the two from ever disagreeing
+    // about where the subject sequence ended.
+    unsafe { wcstod(nptr, endptr) }
+}
+
+// The `%st(0)` thunk, identical in shape to `strtold`'s: forward `nptr` and
+// `endptr` untouched in `%rdi`/`%rsi`, take the `f64` back in `%xmm0`, and
+// re-load it through memory with `fld qword`, which widens exactly.
+//
+// Stack discipline: `push rbp; mov rbp, rsp` leaves `%rsp` 16-byte aligned so
+// the `call` satisfies the ABI, and the 16-byte frame is the spill slot for
+// `%xmm0` (8 needed, 16 to keep the alignment). Exactly one x87 register is
+// live on return, as the ABI requires.
+#[cfg(target_os = "none")]
+core::arch::global_asm!(
+    ".global wcstold",
+    ".type wcstold, @function",
+    "wcstold:",
+    "push rbp",
+    "mov rbp, rsp",
+    "sub rsp, 16",
+    "call __wcstold_f64",
+    "movsd [rsp], xmm0",
+    "fld qword ptr [rsp]",
+    "add rsp, 16",
+    "pop rbp",
+    "ret",
+);
 
 /// Scan a float subject sequence from a wide string and set `*endptr`.
 ///
@@ -3456,6 +3521,117 @@ mod tests {
         let val = unsafe { wcstod(s.as_ptr(), &raw mut end) };
         assert!(val.is_nan());
         assert_eq!(end, unsafe { s.as_ptr().add(8) });
+    }
+
+    // -- the null-destination measuring form -----------------------------
+    //
+    // Both functions have always documented "if `dst` is null, just counts",
+    // and until 2026-09-09 neither did: `mbstowcs`'s loop was bounded by `n`
+    // and `wcstombs`'s capacity check ran unconditionally, so the idiomatic
+    // `f(NULL, src, 0)` measurement answered 0 for every input. Nothing in
+    // the tree called them that way, so nothing noticed until `vswprintf`
+    // did -- and its symptom was formatting an empty string, not an error.
+
+    #[test]
+    fn mbstowcs_with_a_null_destination_counts_and_ignores_n() {
+        let src = b"hello ";
+        let got = unsafe { mbstowcs(core::ptr::null_mut(), src.as_ptr(), 0) };
+        assert_eq!(got, 5, "n must be ignored when dst is null");
+        // A large n must give the same answer.
+        let same = unsafe { mbstowcs(core::ptr::null_mut(), src.as_ptr(), 999) };
+        assert_eq!(same, 5);
+    }
+
+    /// Counting is in *characters*, so a multibyte string counts short.
+    #[test]
+    fn mbstowcs_counts_characters_not_bytes() {
+        // U+00E9, U+20AC, U+1F642 -- 2 + 3 + 4 = 9 bytes, 3 characters.
+        // Written as byte values rather than escapes: this literal reached
+        // the file through a shell heredoc once and came back as the decoded
+        // characters, which the compiler then rejected.
+        let src: &[u8] = &[0xc3, 0xa9, 0xe2, 0x82, 0xac, 0xf0, 0x9f, 0x99, 0x82, 0x00];
+        let got = unsafe { mbstowcs(core::ptr::null_mut(), src.as_ptr(), 0) };
+        assert_eq!(got, 3);
+    }
+
+    #[test]
+    fn wcstombs_with_a_null_destination_counts_and_ignores_n() {
+        let src = wide("hello");
+        let got = unsafe { wcstombs(core::ptr::null_mut(), src.as_ptr(), 0) };
+        assert_eq!(got, 5, "n must be ignored when dst is null");
+        let same = unsafe { wcstombs(core::ptr::null_mut(), src.as_ptr(), 999) };
+        assert_eq!(same, 5);
+    }
+
+    /// Counting is in *bytes*, so a multibyte string counts long -- the
+    /// mirror image of `mbstowcs`, and the reason a caller sizing a buffer
+    /// must ask the right one.
+    #[test]
+    fn wcstombs_counts_bytes_not_characters() {
+        let src: &[WcharT] = &[0x00e9, 0x20ac, 0x1f642, 0];
+        let got = unsafe { wcstombs(core::ptr::null_mut(), src.as_ptr(), 0) };
+        assert_eq!(got, 9, "2 + 3 + 4 bytes");
+    }
+
+    /// The bounded, writing form is unchanged: `n` still stops it.
+    #[test]
+    fn a_real_destination_still_respects_n() {
+        let src = wide("hello");
+        let mut out = [0u8; 8];
+        let written = unsafe { wcstombs(out.as_mut_ptr(), src.as_ptr(), 3) };
+        assert_eq!(written, 3, "n still bounds a real write");
+
+        let msrc = b"hello ";
+        let mut wout = [0 as WcharT; 8];
+        let got = unsafe { mbstowcs(wout.as_mut_ptr(), msrc.as_ptr(), 2) };
+        assert_eq!(got, 2);
+    }
+
+    /// `wcstold` is `wcstod` under another name, and the test says so rather
+    /// than re-deriving values: the contract is that the two never disagree,
+    /// so comparing them is the property, and comparing `wcstold` against
+    /// hand-written constants would pass even if it had drifted.
+    #[test]
+    fn wcstold_agrees_with_wcstod() {
+        for text in [
+            "0",
+            "-0",
+            "3.14159265358979",
+            "  \t+2.5e10tail",
+            "1e400",
+            "-1e-400",
+            "INFINITY",
+            "-inf",
+            "not a number",
+        ] {
+            let s = wide(text);
+            let (mut e1, mut e2): (*const WcharT, *const WcharT) =
+                (core::ptr::null(), core::ptr::null());
+            let a = unsafe { wcstod(s.as_ptr(), &raw mut e1) };
+            let b = unsafe { wcstold(s.as_ptr(), &raw mut e2) };
+            assert_eq!(a.is_nan(), b.is_nan(), "{text:?}");
+            if !a.is_nan() {
+                assert_eq!(a, b, "{text:?}");
+            }
+            assert_eq!(e1, e2, "endptr for {text:?}");
+        }
+    }
+
+    /// The `nan(...)` form goes through the same scanner, payload and all.
+    #[test]
+    fn wcstold_accepts_nan_with_a_payload() {
+        let s = wide("nan(0x7)tail");
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstold(s.as_ptr(), &raw mut end) };
+        assert!(val.is_nan());
+        assert_eq!(end, unsafe { s.as_ptr().add(8) });
+    }
+
+    /// A null `endptr` is accepted, as POSIX requires.
+    #[test]
+    fn wcstold_tolerates_a_null_endptr() {
+        let s = wide("2.5");
+        assert_eq!(unsafe { wcstold(s.as_ptr(), core::ptr::null_mut()) }, 2.5);
     }
 
     /// Delegating to `wcstod` and narrowing rounded twice: this value sits a

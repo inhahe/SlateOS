@@ -12,7 +12,9 @@
 //! than in most programs, because almost everything on screen is laid out by
 //! running `y` down the window rather than at a fixed coordinate.
 
+use appearance::Palette;
 use guitk::color::Color;
+use guitk::colorpicker::{self, Hsv};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
 use guitk::frame::Rect;
 use guitk::probe::Probe;
@@ -25,22 +27,7 @@ use std::process::ExitCode;
 // Catppuccin Mocha palette
 // ============================================================================
 
-mod mocha {
-    use guitk::color::Color;
-
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
-}
+mod mocha {}
 
 // ============================================================================
 // Layout constants
@@ -222,16 +209,14 @@ pub struct Hsl {
 // HSV type
 // ============================================================================
 
-/// Hue/Saturation/Value representation.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Hsv {
-    /// Hue in degrees [0, 360).
-    pub h: f32,
-    /// Saturation [0, 1].
-    pub s: f32,
-    /// Value [0, 1].
-    pub v: f32,
-}
+// `Hsv` is `guitk::colorpicker::Hsv`, imported above.
+//
+// It used to be declared here -- the same three fields, the same units,
+// documented the same way -- alongside its own RGB conversions, while the
+// toolkit's identical pair sat behind a `#![allow(dead_code)]` that nobody
+// could see past. That is the cost the attribute was hiding: not the unused
+// lines but the second implementation written because the first was invisible.
+// See `known-issues.md` TD-C-TWENTY-FOUR-THOUSAND-LINES-BEHIND-ALLOW-DEAD-CODE.
 
 // ============================================================================
 // CMYK type
@@ -454,66 +439,17 @@ impl PickedColor {
     // -- RGB <-> HSV -------------------------------------------------------
 
     /// Convert to HSV.
+    ///
+    /// Through `guitk::colorpicker`, which clamps its inputs and takes the hue
+    /// modulo 360 where this file's own version did neither.
     pub fn to_hsv(self) -> Hsv {
-        let r = self.r as f32 / 255.0;
-        let g = self.g as f32 / 255.0;
-        let b = self.b as f32 / 255.0;
-
-        let max = r.max(g).max(b);
-        let min = r.min(g).min(b);
-        let delta = max - min;
-
-        let v = max;
-        let s = if max < f32::EPSILON { 0.0 } else { delta / max };
-
-        if delta < f32::EPSILON {
-            return Hsv { h: 0.0, s: 0.0, v };
-        }
-
-        let h = if (max - r).abs() < f32::EPSILON {
-            let mut hue = (g - b) / delta;
-            if hue < 0.0 {
-                hue += 6.0;
-            }
-            hue * 60.0
-        } else if (max - g).abs() < f32::EPSILON {
-            ((b - r) / delta + 2.0) * 60.0
-        } else {
-            ((r - g) / delta + 4.0) * 60.0
-        };
-
-        Hsv { h, s, v }
+        colorpicker::rgb_to_hsv(self.r, self.g, self.b)
     }
 
     /// Create from HSV values (h in [0,360), s and v in [0,1]).
     pub fn from_hsv(hsv: Hsv) -> Self {
-        let Hsv { h, s, v } = hsv;
-        if s < f32::EPSILON {
-            let val = (v * 255.0).round() as u8;
-            return Self::from_rgb(val, val, val);
-        }
-
-        let h_sector = h / 60.0;
-        let i = h_sector.floor() as u32;
-        let f = h_sector - i as f32;
-        let p = v * (1.0 - s);
-        let q = v * (1.0 - s * f);
-        let t = v * (1.0 - s * (1.0 - f));
-
-        let (r, g, b) = match i % 6 {
-            0 => (v, t, p),
-            1 => (q, v, p),
-            2 => (p, v, t),
-            3 => (p, q, v),
-            4 => (t, p, v),
-            _ => (v, p, q),
-        };
-
-        Self::from_rgb(
-            (r * 255.0).round() as u8,
-            (g * 255.0).round() as u8,
-            (b * 255.0).round() as u8,
-        )
+        let (r, g, b) = colorpicker::hsv_to_rgb(hsv);
+        Self::from_rgb(r, g, b)
     }
 
     // -- RGB -> CMYK -------------------------------------------------------
@@ -874,6 +810,12 @@ pub struct ColorPickerApp {
     /// an event handler — which is given no size — can hit-test against the
     /// same layout the user is looking at.
     window_size: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl ColorPickerApp {
@@ -891,6 +833,7 @@ impl ColorPickerApp {
         let _ = default_palette.add("Magenta", PickedColor::from_rgb(255, 0, 255));
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             current: PickedColor::from_rgb(137, 180, 250), // Catppuccin Blue
             active_format: ColorFormat::Hex,
             history: ColorHistory::with_capacity(MAX_HISTORY),
@@ -1483,7 +1426,7 @@ impl ColorPickerApp {
             y: 0.0,
             width,
             height,
-            color: mocha::BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1528,7 +1471,7 @@ impl ColorPickerApp {
             x: PADDING,
             y: *y,
             text: "Color Picker".to_string(),
-            color: mocha::TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_LARGE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1550,7 +1493,7 @@ impl ColorPickerApp {
                     x: status_x,
                     y: *y + 4.0,
                     text: self.status.clone(),
-                    color: mocha::SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(room),
@@ -1560,9 +1503,9 @@ impl ColorPickerApp {
         }
 
         let btn_color = if self.eyedropper.active {
-            mocha::BLUE
+            self.palette.blue
         } else {
-            mocha::SURFACE1
+            self.palette.surface1
         };
         cmds.push(RenderCommand::FillRect {
             x: btn_x,
@@ -1577,7 +1520,7 @@ impl ColorPickerApp {
             x: btn_x + 10.0,
             y: *y + 1.0,
             text: "Eyedropper".to_string(),
-            color: mocha::TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1616,7 +1559,7 @@ impl ColorPickerApp {
             y: *y,
             width: SWATCH_SIZE,
             height: SWATCH_SIZE,
-            color: mocha::OVERLAY0,
+            color: self.palette.overlay0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -1629,9 +1572,9 @@ impl ColorPickerApp {
         for fmt in ColorFormat::ALL {
             let text = self.current.format_as(*fmt);
             let label_color = if *fmt == self.active_format {
-                mocha::BLUE
+                self.palette.blue
             } else {
-                mocha::SUBTEXT0
+                self.palette.subtext0
             };
             cmds.push(RenderCommand::Text {
                 x: info_x,
@@ -1653,7 +1596,7 @@ impl ColorPickerApp {
             y: copy_y,
             width: 60.0,
             height: 22.0,
-            color: mocha::SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         cmds.hit(Target::CopyButton, Rect::new(info_x, copy_y, 60.0, 22.0));
@@ -1661,7 +1604,7 @@ impl ColorPickerApp {
             x: info_x + 12.0,
             y: copy_y + 3.0,
             text: "Copy".to_string(),
-            color: mocha::TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1680,7 +1623,7 @@ impl ColorPickerApp {
             y: *y,
             width: width - 2.0 * PADDING,
             height: TAB_HEIGHT,
-            color: mocha::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
 
@@ -1698,15 +1641,15 @@ impl ColorPickerApp {
                     y: *y,
                     width: tab_width,
                     height: TAB_HEIGHT,
-                    color: mocha::SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(SMALL_RADIUS),
                 });
             }
 
             let text_color = if is_active {
-                mocha::BLUE
+                self.palette.blue
             } else {
-                mocha::SUBTEXT0
+                self.palette.subtext0
             };
 
             cmds.push(RenderCommand::Text {
@@ -1737,7 +1680,7 @@ impl ColorPickerApp {
             y: *y,
             width: field_w,
             height: 30.0,
-            color: mocha::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         cmds.hit(Target::ValueBox, Rect::new(PADDING, *y, field_w, 30.0));
@@ -1751,12 +1694,12 @@ impl ColorPickerApp {
                 self.hex_input.is_empty(),
                 PickedColor::from_hex_str(&self.hex_input).is_some(),
             ) {
-                (true, _) => mocha::BLUE,
-                (false, true) => mocha::GREEN,
-                (false, false) => mocha::RED,
+                (true, _) => self.palette.blue,
+                (false, true) => self.palette.green,
+                (false, false) => self.palette.red,
             }
         } else {
-            mocha::OVERLAY0
+            self.palette.overlay0
         };
         cmds.push(RenderCommand::StrokeRect {
             x: PADDING,
@@ -1781,7 +1724,7 @@ impl ColorPickerApp {
             x: PADDING + 8.0,
             y: *y + 7.0,
             text,
-            color: mocha::TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(field_w - 16.0),
@@ -1811,6 +1754,7 @@ impl ColorPickerApp {
     #[allow(clippy::too_many_arguments)]
     fn render_slider(
         cmds: &mut Frame,
+        pal: &Palette,
         x: f32,
         y: f32,
         width: f32,
@@ -1824,7 +1768,7 @@ impl ColorPickerApp {
             x,
             y: y + 2.0,
             text: channel.label().to_string(),
-            color: mocha::SUBTEXT0,
+            color: pal.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1848,7 +1792,7 @@ impl ColorPickerApp {
             y: track_y,
             width: track_w,
             height: SLIDER_TRACK_HEIGHT,
-            color: mocha::SURFACE0,
+            color: pal.surface0,
             corner_radii: CornerRadii::all(SLIDER_TRACK_HEIGHT / 2.0),
         });
 
@@ -1873,7 +1817,7 @@ impl ColorPickerApp {
             y: y + 2.0,
             width: 12.0,
             height: SLIDER_HEIGHT - 4.0,
-            color: mocha::TEXT,
+            color: pal.text,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -1887,7 +1831,7 @@ impl ColorPickerApp {
             x: track_x + track_w + 8.0,
             y: y + 4.0,
             text: val_text,
-            color: mocha::TEXT,
+            color: pal.text,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1900,7 +1844,7 @@ impl ColorPickerApp {
             x: PADDING,
             y: *y,
             text: "RGB".to_string(),
-            color: mocha::TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1911,6 +1855,7 @@ impl ColorPickerApp {
         let slider_w = width - 2.0 * PADDING;
         Self::render_slider(
             cmds,
+            &self.palette,
             PADDING,
             *y,
             slider_w,
@@ -1923,6 +1868,7 @@ impl ColorPickerApp {
 
         Self::render_slider(
             cmds,
+            &self.palette,
             PADDING,
             *y,
             slider_w,
@@ -1935,6 +1881,7 @@ impl ColorPickerApp {
 
         Self::render_slider(
             cmds,
+            &self.palette,
             PADDING,
             *y,
             slider_w,
@@ -1953,7 +1900,7 @@ impl ColorPickerApp {
             x: PADDING,
             y: *y,
             text: "HSL".to_string(),
-            color: mocha::TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1964,37 +1911,40 @@ impl ColorPickerApp {
         let slider_w = width - 2.0 * PADDING;
         Self::render_slider(
             cmds,
+            &self.palette,
             PADDING,
             *y,
             slider_w,
             Channel::H,
             hsl.h,
             360.0,
-            mocha::MAUVE,
+            self.palette.mauve,
         );
         *y += SLIDER_HEIGHT + 4.0;
 
         Self::render_slider(
             cmds,
+            &self.palette,
             PADDING,
             *y,
             slider_w,
             Channel::S,
             hsl.s,
             1.0,
-            mocha::PEACH,
+            self.palette.peach,
         );
         *y += SLIDER_HEIGHT + 4.0;
 
         Self::render_slider(
             cmds,
+            &self.palette,
             PADDING,
             *y,
             slider_w,
             Channel::L,
             hsl.l,
             1.0,
-            mocha::YELLOW,
+            self.palette.yellow,
         );
         *y += SLIDER_HEIGHT + PADDING;
     }
@@ -2004,7 +1954,7 @@ impl ColorPickerApp {
             x: PADDING,
             y: *y,
             text: "Harmony".to_string(),
-            color: mocha::TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2040,7 +1990,7 @@ impl ColorPickerApp {
                 y: *y,
                 width: cell_w,
                 height: cell_h - 14.0,
-                color: mocha::OVERLAY0,
+                color: self.palette.overlay0,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
@@ -2048,7 +1998,7 @@ impl ColorPickerApp {
                 x: cx + 4.0,
                 y: *y + cell_h - 12.0,
                 text: label.to_string(),
-                color: mocha::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL - 1.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2064,7 +2014,7 @@ impl ColorPickerApp {
             x: PADDING,
             y: *y,
             text: "Contrast Checker".to_string(),
-            color: mocha::TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2081,7 +2031,7 @@ impl ColorPickerApp {
             y: *y,
             width: width - 2.0 * PADDING,
             height: CONTRAST_PANEL_HEIGHT,
-            color: mocha::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
 
@@ -2108,7 +2058,7 @@ impl ColorPickerApp {
             x: PADDING + 8.0,
             y: *y + 52.0,
             text: "FG".to_string(),
-            color: mocha::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2128,7 +2078,7 @@ impl ColorPickerApp {
             x: PADDING + 8.0 + sw + 8.0,
             y: *y + 52.0,
             text: "BG".to_string(),
-            color: mocha::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2141,7 +2091,7 @@ impl ColorPickerApp {
             x: ratio_x,
             y: *y + 12.0,
             text: format!("Ratio: {ratio:.2}:1"),
-            color: mocha::TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2150,10 +2100,10 @@ impl ColorPickerApp {
 
         // WCAG level
         let level_color = match level {
-            WcagLevel::Aaa => mocha::GREEN,
-            WcagLevel::Aa => mocha::BLUE,
-            WcagLevel::AaLarge => mocha::YELLOW,
-            WcagLevel::Fail => mocha::RED,
+            WcagLevel::Aaa => self.palette.green,
+            WcagLevel::Aa => self.palette.blue,
+            WcagLevel::AaLarge => self.palette.yellow,
+            WcagLevel::Fail => self.palette.red,
         };
         cmds.push(RenderCommand::Text {
             x: ratio_x,
@@ -2195,7 +2145,7 @@ impl ColorPickerApp {
             x: PADDING,
             y: *y,
             text: "Recent".to_string(),
-            color: mocha::TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2233,7 +2183,7 @@ impl ColorPickerApp {
                 y: cy,
                 width: HISTORY_CELL,
                 height: HISTORY_CELL,
-                color: mocha::OVERLAY0,
+                color: self.palette.overlay0,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
@@ -2262,7 +2212,7 @@ impl ColorPickerApp {
             x: PADDING,
             y: *y,
             text: format!("Palette: {}", palette.name),
-            color: mocha::TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2298,7 +2248,7 @@ impl ColorPickerApp {
                 y: cy,
                 width: PALETTE_CELL,
                 height: PALETTE_CELL,
-                color: mocha::OVERLAY0,
+                color: self.palette.overlay0,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
@@ -2306,7 +2256,7 @@ impl ColorPickerApp {
                 x: cx,
                 y: cy + PALETTE_CELL + 2.0,
                 text: name.clone(),
-                color: mocha::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL - 1.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(PALETTE_CELL),
@@ -2321,6 +2271,10 @@ impl ColorPickerApp {
 // ============================================================================
 
 impl App for ColorPickerApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Color Picker".to_string()
     }
@@ -3773,6 +3727,130 @@ mod tests {
         assert!(
             app.hex_input.is_empty(),
             "a chord typed no text, so nothing should have been appended"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut ColorPickerApp) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 800.0, 600.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = ColorPickerApp::create();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
+    }
+
+    /// A hue outside [0, 360) and a saturation outside [0, 1] produce a real
+    /// colour rather than nonsense.
+    ///
+    /// This is what routing through `guitk::colorpicker` bought. The version
+    /// this file used to carry indexed a six-way `match i % 6` on
+    /// `(h / 60.0).floor() as u32` -- for a negative hue, `as u32` saturates to
+    /// zero and every hue below 0 came out as the same red. The shared version
+    /// takes the hue modulo 360 and clamps s and v first.
+    #[test]
+    fn an_out_of_range_hue_wraps_instead_of_collapsing() {
+        // 400 degrees is 40 degrees, and -60 is 300.
+        assert_eq!(
+            PickedColor::from_hsv(Hsv {
+                h: 400.0,
+                s: 1.0,
+                v: 1.0
+            }),
+            PickedColor::from_hsv(Hsv {
+                h: 40.0,
+                s: 1.0,
+                v: 1.0
+            }),
+        );
+        assert_eq!(
+            PickedColor::from_hsv(Hsv {
+                h: -60.0,
+                s: 1.0,
+                v: 1.0
+            }),
+            PickedColor::from_hsv(Hsv {
+                h: 300.0,
+                s: 1.0,
+                v: 1.0
+            }),
+        );
+
+        // And out-of-range saturation clamps rather than overflowing the
+        // channel arithmetic.
+        let over = PickedColor::from_hsv(Hsv {
+            h: 0.0,
+            s: 4.0,
+            v: 1.0,
+        });
+        assert_eq!(
+            over,
+            PickedColor::from_hsv(Hsv {
+                h: 0.0,
+                s: 1.0,
+                v: 1.0
+            })
         );
     }
 }

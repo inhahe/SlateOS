@@ -1069,7 +1069,7 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
-    use crate::palette_check::assert_colours_from;
+    use appearance::palette_check::assert_colours_from;
 
     // ======================================================================
     // Helper: palettes
@@ -1738,7 +1738,7 @@ mod tests {
         region.x = 50.0;
 
         // get_mut should have set dirty=true.
-        assert_eq!(*mgr.dirty.get(&1).expect("dirty flag"), true);
+        assert!(*mgr.dirty.get(&1).expect("dirty flag"));
     }
 
     // ======================================================================
@@ -1757,7 +1757,7 @@ mod tests {
         mgr.cache.insert(1, PixelRect::new(10, 10));
 
         mgr.invalidate(1);
-        assert_eq!(*mgr.dirty.get(&1).expect("dirty"), true);
+        assert!(*mgr.dirty.get(&1).expect("dirty"));
     }
 
     #[test]

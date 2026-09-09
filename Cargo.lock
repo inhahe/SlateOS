@@ -635,6 +635,7 @@ dependencies = [
 name = "archivemanager"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "ziparchive",
@@ -2908,6 +2909,7 @@ dependencies = [
 name = "colorpicker"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -3848,12 +3850,16 @@ name = "desktop"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "authlib",
  "guiremote",
  "guitk",
  "imagecodec",
  "inputsettings",
  "keylayout",
+ "loginusers",
  "oswindow",
+ "posix",
+ "scratchdir",
  "settingsfile",
  "tzrules",
  "yamldoc",
@@ -4038,6 +4044,7 @@ dependencies = [
 name = "diskimager"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "md5",
  "oswindow",
@@ -4590,6 +4597,7 @@ dependencies = [
 name = "ebook"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -4627,6 +4635,7 @@ dependencies = [
 name = "editor"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "compositor",
  "diffcore",
  "guitk",
@@ -4758,6 +4767,7 @@ dependencies = [
 name = "email"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -4786,6 +4796,7 @@ dependencies = [
 name = "emojipicker"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -5267,6 +5278,7 @@ dependencies = [
 name = "filediff"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "diffcore",
  "guitk",
  "oswindow",
@@ -5276,6 +5288,7 @@ dependencies = [
 name = "filesearch"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "globmatch",
  "guitk",
  "oswindow",
@@ -7232,6 +7245,7 @@ version = "0.1.0"
 name = "hexeditor"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -8372,6 +8386,7 @@ version = "0.1.0"
 name = "kanban"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -9010,6 +9025,7 @@ dependencies = [
 name = "launcher"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -9410,8 +9426,10 @@ dependencies = [
 name = "lockscreen"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "authlib",
  "guitk",
+ "loginusers",
  "oswindow",
  "posix",
  "pwkdf",
@@ -9490,6 +9508,15 @@ dependencies = [
  "authlib",
  "libservicebus",
  "posix",
+ "scratchdir",
+ "userdb",
+]
+
+[[package]]
+name = "loginusers"
+version = "0.1.0"
+dependencies = [
+ "authlib",
  "scratchdir",
  "userdb",
 ]
@@ -10573,6 +10600,7 @@ dependencies = [
 name = "metronome"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -14488,6 +14516,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "randdist"
+version = "0.1.0"
+dependencies = [
+ "randrange",
+]
+
+[[package]]
 name = "randrange"
 version = "0.1.0"
 
@@ -15518,6 +15553,7 @@ version = "0.1.0"
 name = "screenrecorder"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -16517,6 +16553,7 @@ dependencies = [
 name = "soundrecorder"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -17589,6 +17626,7 @@ dependencies = [
 name = "systray"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "tzrules",
@@ -18241,6 +18279,7 @@ dependencies = [
 name = "torrent"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -18524,6 +18563,7 @@ dependencies = [
 name = "typingtutor"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -18636,6 +18676,7 @@ dependencies = [
 name = "unitconverter"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

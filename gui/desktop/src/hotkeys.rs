@@ -411,6 +411,18 @@ pub enum HotkeyAction {
     ToggleZoneOverlay,
     /// Minimize every window on the current desktop.
     ShowDesktop,
+    /// Switch to the next installed keyboard layout.
+    ///
+    /// Super+Space by default, and deliberately *only* that of the three
+    /// shortcuts `input_method::SwitchShortcut` offers. The other two --
+    /// Alt+Shift and Ctrl+Shift -- are modifier-only chords: on every desktop
+    /// that has them they fire when the pair is *released with no other key
+    /// pressed in between*, which is not what a `(Key, Modifiers)` grab means.
+    /// Registering `(LeftShift, alt)` would fire the moment Shift went down
+    /// with Alt held, which is the first half of Alt+Shift+Tab -- so binding it
+    /// would break reverse window switching outright. See `known-issues.md`
+    /// `TD-C-TWO-OF-THREE-LAYOUT-SHORTCUTS-NEED-RELEASE-SEMANTICS`.
+    SwitchInputLayout,
 
     // ---- moving between windows ----------------------------------------
     /// Step the Alt+Tab switcher forwards, opening it if it is closed.
@@ -558,6 +570,7 @@ impl HotkeyAction {
     /// Serialize the action to a string for configuration persistence.
     fn to_config_value(&self) -> String {
         match self {
+            Self::SwitchInputLayout => "switch_input_layout".to_string(),
             Self::CloseWindow => "close_window".to_string(),
             Self::MinimizeWindow => "minimize_window".to_string(),
             Self::MaximizeWindow => "maximize_window".to_string(),
@@ -603,6 +616,7 @@ impl HotkeyAction {
             return Ok(Self::SwitchDesktop(n));
         }
         match value {
+            "switch_input_layout" => Ok(Self::SwitchInputLayout),
             "close_window" => Ok(Self::CloseWindow),
             "minimize_window" => Ok(Self::MinimizeWindow),
             "maximize_window" => Ok(Self::MaximizeWindow),
@@ -639,6 +653,7 @@ impl HotkeyAction {
     #[must_use]
     pub fn display_label(&self) -> &str {
         match self {
+            Self::SwitchInputLayout => "Switch Keyboard Layout",
             Self::CloseWindow => "Close Window",
             Self::MinimizeWindow => "Minimize Window",
             Self::MaximizeWindow => "Maximize Window",
@@ -854,6 +869,10 @@ fn register_defaults(reg: &mut HotkeyRegistry) {
             HotkeyAction::CloseWindow,
         ),
         (Hotkey::new(Key::D, sup()), HotkeyAction::ShowDesktop),
+        (
+            Hotkey::new(Key::Space, sup()),
+            HotkeyAction::SwitchInputLayout,
+        ),
         (Hotkey::new(Key::Left, sup()), HotkeyAction::SnapLeft),
         (Hotkey::new(Key::Right, sup()), HotkeyAction::SnapRight),
         (Hotkey::new(Key::Up, sup()), HotkeyAction::MaximizeWindow),
@@ -1781,7 +1800,7 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
     use guitk::color::Color;
 
     /// More room than any card will ever ask for, so the layout stays at one

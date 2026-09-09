@@ -133,7 +133,7 @@ fn centre(r: Rect) -> (f32, f32) {
 fn the_shell_opens_a_background_a_panel_a_menu_and_an_overlay_surface() {
     let (session, desktop) = session();
     let specs = created(&desktop);
-    assert_eq!(specs.len(), 4, "a shell is four surfaces, not one");
+    assert_eq!(specs.len(), 5, "a shell is five surfaces, not one");
 
     // The band each one is in is the load-bearing part: a taskbar in
     // `Layer::Normal` vanishes behind the first window the user opens.
@@ -141,6 +141,13 @@ fn the_shell_opens_a_background_a_panel_a_menu_and_an_overlay_surface() {
     assert_eq!(specs[1].layer, oswindow::Layer::Overlay);
     assert_eq!(specs[2].layer, oswindow::Layer::Overlay);
     assert_eq!(specs[3].layer, oswindow::Layer::Overlay);
+    assert_eq!(specs[4].layer, oswindow::Layer::Overlay);
+
+    // The login screen is created *last* of the five, which is what puts it
+    // above the other three within the band. Order is the only thing that says
+    // so -- there is no layer above `Overlay` -- so it is asserted here rather
+    // than left to the reading order of `start`.
+    assert_eq!(specs[4].title, "Login");
 
     // None of them is a window in the ordinary sense.
     for spec in &specs {
@@ -160,6 +167,7 @@ fn the_shell_opens_a_background_a_panel_a_menu_and_an_overlay_surface() {
     assert_eq!((specs[0].width, specs[0].height), (2560, 1440));
     assert_eq!((specs[2].width, specs[2].height), (2560, 1440));
     assert_eq!((specs[3].width, specs[3].height), (2560, 1440));
+    assert_eq!((specs[4].width, specs[4].height), (2560, 1440));
 
     // And the origins the session will translate by say the same thing.
     assert_eq!(session.background().origin(), (0.0, 0.0));
@@ -3243,4 +3251,212 @@ fn a_press_beside_the_box_closes_it_without_starting_anything() {
         "a click on the desktop left the box up"
     );
     assert!(session.take_launches().is_empty());
+}
+
+// ---- the login screen ----
+
+/// A session over an account database of our own, with one account whose
+/// password is `password`.
+///
+/// The hash is *computed*, not pasted: a literal `$6$…` copied from somewhere
+/// is a test that keeps passing after the hasher it was copied from has
+/// changed. Same reason `apps/lockscreen`'s end-to-end test computes one.
+fn session_with_login() -> (Session, Desktop, scratchdir::ScratchDir) {
+    let dir = scratchdir::ScratchDir::new("shell-login");
+    let path = dir.path("users.yaml");
+    let mut setting_buf = posix::crypt::buf();
+    let setting =
+        posix::crypt::setting_into(posix::crypt::Method::Sha512, b"shelllgn", &mut setting_buf)
+            .expect("setting")
+            .to_string();
+    let mut hash_buf = posix::crypt::buf();
+    let stored = posix::crypt::hash_into(b"password", setting.as_bytes(), &mut hash_buf)
+        .expect("hash")
+        .to_string();
+    std::fs::write(
+        &path,
+        format!(
+            "users:
+             - username: alice
+   uid: 1000
+   display_name: Alice
+   password_hash: {stored}
+"
+        ),
+    )
+    .unwrap();
+    let (events, desktop) = wired();
+    let session =
+        ShellSession::start_with_stores(events, &path).expect("the harness refused a surface");
+    (session, desktop, dir)
+}
+
+/// Type `password` at the login screen and press Enter, through the real event
+/// path: the compositor delivers to the login surface, the session routes it.
+fn type_password(desktop: &Desktop, session: &mut Session, password: &str) {
+    let window = session.login_surface().window();
+    let mut events = Vec::new();
+    for c in password.chars() {
+        events.push(InputEvent::new(
+            window,
+            guitk::event::Event::Key(KeyEvent {
+                // The key name is irrelevant: what lands in the field is
+                // `text`, which is what the layout produced.
+                key: Key::A,
+                pressed: true,
+                modifiers: Modifiers::default(),
+                text: c.to_string(),
+            }),
+        ));
+    }
+    events.push(InputEvent::new(window, key(Key::Enter)));
+    desktop.borrow_mut().send_input(&events);
+    session.pump().expect("pump");
+}
+
+/// The whole point of the feature: a machine with accounts comes up asking who
+/// you are, not showing you the desktop.
+#[test]
+fn a_machine_with_accounts_comes_up_locked() {
+    let (session, _desktop, _dir) = session_with_login();
+    assert!(session.is_locked());
+    assert_eq!(
+        session.login().unwrap().current_user().unwrap().username,
+        "alice"
+    );
+}
+
+/// And a machine with no account database does not, because there would be
+/// nobody to authenticate as. `authlib` answers `Unusable` to every name it
+/// cannot find, so a screen here would be one that nothing could ever unlock —
+/// a machine that cannot be used rather than a machine that is secure.
+/// See design-decisions.md 824.
+#[test]
+fn a_machine_with_no_account_database_comes_up_unlocked() {
+    let dir = scratchdir::ScratchDir::new("shell-nologin");
+    let (events, _desktop) = wired();
+    let session = ShellSession::start_with_stores(events, &dir.path("absent.yaml"))
+        .expect("the harness refused a surface");
+    assert!(!session.is_locked());
+}
+
+/// End to end, through the real verifier and the real store: the right
+/// password opens the machine.
+#[test]
+fn the_right_password_unlocks_the_desktop() {
+    let (mut session, desktop, _dir) = session_with_login();
+    type_password(&desktop, &mut session, "password");
+    assert!(
+        !session.is_locked(),
+        "the desktop is still behind a login screen after the right password"
+    );
+}
+
+/// The wrong one does not, and says so without saying *which* part was wrong.
+#[test]
+fn the_wrong_password_is_refused_and_the_machine_stays_locked() {
+    let (mut session, desktop, _dir) = session_with_login();
+    type_password(&desktop, &mut session, "wrong");
+    assert!(session.is_locked());
+    let screen = session.login().unwrap();
+    assert_eq!(screen.phase, crate::login_screen::LoginPhase::Failed);
+    assert_eq!(
+        screen.error_message.as_deref(),
+        Some("Incorrect password"),
+        "a refusal must not say whether it was the name or the password"
+    );
+}
+
+/// The load-bearing half of a login screen: while it is up, the desktop's own
+/// shortcuts are dead. The panel is where the global grabs are held, so a
+/// keystroke aimed at *it* is the case that would leak — Alt+Tab must not
+/// switch windows for somebody who has not logged in.
+#[test]
+fn the_desktops_shortcuts_do_nothing_while_the_machine_is_locked() {
+    let (mut session, desktop, _dir) = session_with_login();
+    // Two windows, because Alt+Tab with fewer is consumed *without* opening
+    // the switcher — so a version of this test with an empty desktop passes
+    // whether or not the login screen gates anything, which is a test that
+    // does nothing. (It was written that way first, and the mutation that
+    // deletes the gate did not fail it.)
+    desktop
+        .borrow_mut()
+        .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt")]);
+    session.pump().expect("pump");
+    assert_eq!(
+        session.shell().taskbar_windows().len(),
+        2,
+        "two to switch between"
+    );
+
+    let alt_tab = InputEvent::new(
+        session.panel().window(),
+        guitk::event::Event::Key(KeyEvent {
+            key: Key::Tab,
+            pressed: true,
+            modifiers: Modifiers::alt(),
+            text: String::new(),
+        }),
+    );
+    desktop
+        .borrow_mut()
+        .send_input(std::slice::from_ref(&alt_tab));
+    session.pump().expect("pump");
+    assert!(
+        !session.shell().alt_tab_active,
+        "Alt+Tab reached the desktop through a login screen"
+    );
+
+    // And the same keystroke *does* open it once the machine is unlocked,
+    // which is what proves the assertion above is about the login screen and
+    // not about Alt+Tab being broken.
+    type_password(&desktop, &mut session, "password");
+    assert!(!session.is_locked());
+    desktop.borrow_mut().send_input(&[alt_tab]);
+    session.pump().expect("pump");
+    assert!(
+        session.shell().alt_tab_active,
+        "Alt+Tab does nothing even unlocked, so the test above proved nothing"
+    );
+}
+
+/// Nothing the shell owns may be drawn over a login screen, and within
+/// `Layer::Overlay` the only thing that says so is creation order.
+#[test]
+fn the_login_surface_is_created_last_and_accepts_the_mouse() {
+    let (_session, desktop, _dir) = session_with_login();
+    let specs = created(&desktop);
+    let login = specs.last().expect("five surfaces");
+    assert_eq!(login.title, "Login");
+    assert!(
+        !login.input_transparent,
+        "a login screen that declines the mouse cannot be clicked"
+    );
+}
+
+/// The power menu's choice comes back out rather than being acted on here: a
+/// window manager has no channel to whatever turns the machine off, and
+/// inventing one would put the policy in the wrong place — the same rule
+/// `take_launches` follows.
+#[test]
+fn a_power_choice_is_reported_rather_than_acted_on() {
+    let (mut session, desktop, _dir) = session_with_login();
+    let (button, row) = {
+        let screen = session.login().expect("locked");
+        (screen.power_button_rect(), screen.power_menu_row_rect(0))
+    };
+    press_at(
+        &desktop,
+        session.login_surface(),
+        button.x + 2.0,
+        button.y + 2.0,
+    );
+    session.pump().expect("pump");
+    press_at(&desktop, session.login_surface(), row.x + 2.0, row.y + 2.0);
+    session.pump().expect("pump");
+    assert_eq!(
+        session.take_login_power(),
+        Some(crate::login_screen::LoginPowerAction::Shutdown)
+    );
+    assert_eq!(session.take_login_power(), None, "draining it empties it");
 }

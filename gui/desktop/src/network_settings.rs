@@ -2612,7 +2612,7 @@ mod tests {
 
     use super::*;
     use crate::draw_check::assert_nothing_is_drawn_and_never_seen;
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
 
     /// An address has exactly four fields. The count and the reads used to be
     /// separate statements; these are the inputs that tell them apart.

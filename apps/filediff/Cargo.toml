@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS File Diff/Compare Tool — side-by-side, unified, and inline diff views with merge support"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 
 # The app-facing compositor client. An app names `oswindow` and never

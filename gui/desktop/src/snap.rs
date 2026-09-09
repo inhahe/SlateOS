@@ -780,8 +780,8 @@ mod tests {
     )]
 
     use super::*;
-    use crate::palette_check::assert_drawn_from;
     use appearance::AccentColor;
+    use appearance::palette_check::assert_drawn_from;
 
     /// A palette for `light` whose accent is off-palette.
     ///

@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use guitk::color::Color;
+use appearance::Palette;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -14,19 +14,6 @@ use guitk::text;
 // ============================================================================
 // Theme colors (same palette as main settings)
 // ============================================================================
-
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_SURFACE2: Color = Color::from_hex(0x585B70);
-const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COL_SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const COL_ACCENT: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
 
 // ============================================================================
 // Layout constants
@@ -953,31 +940,38 @@ impl AssociationsPageState {
     }
 
     /// Render the full associations page into a RenderTree.
-    pub fn render(&self, tree: &mut RenderTree, x: f32, start_y: f32, content_width: f32) {
+    pub fn render(
+        &self,
+        pal: &Palette,
+        tree: &mut RenderTree,
+        x: f32,
+        start_y: f32,
+        content_width: f32,
+    ) {
         let mut y = start_y;
 
         // Page title
-        y = self.render_page_title(tree, x, y);
+        y = self.render_page_title(pal, tree, x, y);
 
         // Search bar
-        y = self.render_search_bar(tree, x, y, content_width);
+        y = self.render_search_bar(pal, tree, x, y, content_width);
         y += SECTION_SPACING;
 
         // Category tabs
-        y = self.render_category_tabs(tree, x, y);
+        y = self.render_category_tabs(pal, tree, x, y);
         y += SECTION_SPACING;
 
         // File type list
-        self.render_file_list(tree, x, y, content_width);
+        self.render_file_list(pal, tree, x, y, content_width);
     }
 
     /// Render the page title.
-    fn render_page_title(&self, tree: &mut RenderTree, x: f32, y: f32) -> f32 {
+    fn render_page_title(&self, pal: &Palette, tree: &mut RenderTree, x: f32, y: f32) -> f32 {
         tree.push(RenderCommand::Text {
             x,
             y,
             text: "File Type Associations".into(),
-            color: COL_TEXT,
+            color: pal.text,
             font_size: 20.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -987,7 +981,7 @@ impl AssociationsPageState {
             x,
             y: y + 28.0,
             text: "Choose which apps open each file type".into(),
-            color: COL_SUBTEXT0,
+            color: pal.subtext0,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -997,7 +991,14 @@ impl AssociationsPageState {
     }
 
     /// Render the search/filter bar.
-    fn render_search_bar(&self, tree: &mut RenderTree, x: f32, y: f32, content_width: f32) -> f32 {
+    fn render_search_bar(
+        &self,
+        pal: &Palette,
+        tree: &mut RenderTree,
+        x: f32,
+        y: f32,
+        content_width: f32,
+    ) -> f32 {
         // Search field background
         let bar_width = content_width.min(500.0);
         tree.fill_rounded_rect(
@@ -1005,7 +1006,7 @@ impl AssociationsPageState {
             y,
             bar_width,
             SEARCH_BAR_HEIGHT,
-            COL_SURFACE0,
+            pal.surface0,
             CornerRadii::all(8.0),
         );
         tree.push(RenderCommand::StrokeRect {
@@ -1013,7 +1014,7 @@ impl AssociationsPageState {
             y,
             width: bar_width,
             height: SEARCH_BAR_HEIGHT,
-            color: COL_SURFACE2,
+            color: pal.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -1023,7 +1024,7 @@ impl AssociationsPageState {
             x: x + 12.0,
             y: y + 12.0,
             text: "\u{1F50D}".into(), // magnifying glass
-            color: COL_OVERLAY0,
+            color: pal.overlay0,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1037,9 +1038,9 @@ impl AssociationsPageState {
             &self.search_query
         };
         let text_color = if self.search_query.is_empty() {
-            COL_OVERLAY0
+            pal.overlay0
         } else {
-            COL_TEXT
+            pal.text
         };
         tree.push(RenderCommand::Text {
             x: x + 36.0,
@@ -1056,7 +1057,7 @@ impl AssociationsPageState {
     }
 
     /// Render the category filter tabs.
-    fn render_category_tabs(&self, tree: &mut RenderTree, x: f32, y: f32) -> f32 {
+    fn render_category_tabs(&self, pal: &Palette, tree: &mut RenderTree, x: f32, y: f32) -> f32 {
         let mut tab_x = x;
 
         for &cat in FileCategory::ALL {
@@ -1067,7 +1068,7 @@ impl AssociationsPageState {
             let tab_width = (label.len() as f32) * 8.0 + TAB_PADDING * 2.0;
 
             // Tab background
-            let bg_color = if is_active { COL_ACCENT } else { COL_SURFACE0 };
+            let bg_color = if is_active { pal.blue } else { pal.surface0 };
             tree.fill_rounded_rect(
                 tab_x,
                 y,
@@ -1078,7 +1079,7 @@ impl AssociationsPageState {
             );
 
             // Tab text
-            let text_color = if is_active { COL_BASE } else { COL_SUBTEXT0 };
+            let text_color = if is_active { pal.base } else { pal.subtext0 };
             tree.push(RenderCommand::Text {
                 x: tab_x + TAB_PADDING,
                 y: y + 10.0,
@@ -1101,7 +1102,14 @@ impl AssociationsPageState {
     }
 
     /// Render the scrollable file type list.
-    fn render_file_list(&self, tree: &mut RenderTree, x: f32, start_y: f32, content_width: f32) {
+    fn render_file_list(
+        &self,
+        pal: &Palette,
+        tree: &mut RenderTree,
+        x: f32,
+        start_y: f32,
+        content_width: f32,
+    ) {
         let entries = self.visible_entries();
         let mut y = start_y - self.scroll_offset;
 
@@ -1121,9 +1129,9 @@ impl AssociationsPageState {
             // Row background (expanded and hovered both use SURFACE0 to give
             // a single highlight tone for any "active" row state).
             let row_bg = if is_expanded || is_hovered {
-                COL_SURFACE0
+                pal.surface0
             } else {
-                COL_BASE
+                pal.base
             };
             tree.fill_rounded_rect(
                 x,
@@ -1142,7 +1150,7 @@ impl AssociationsPageState {
                 icon_y,
                 ICON_SIZE,
                 ICON_SIZE,
-                COL_SURFACE1,
+                pal.surface1,
                 CornerRadii::all(4.0),
             );
 
@@ -1152,7 +1160,7 @@ impl AssociationsPageState {
                 x: ext_x,
                 y: y + 10.0,
                 text: entry.extension.clone(),
-                color: COL_TEXT,
+                color: pal.text,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -1164,7 +1172,7 @@ impl AssociationsPageState {
                 x: ext_x,
                 y: y + 30.0,
                 text: entry.description.clone(),
-                color: COL_SUBTEXT0,
+                color: pal.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
@@ -1177,9 +1185,9 @@ impl AssociationsPageState {
                 None => "No app assigned".into(),
             };
             let app_color = if entry.default_app.is_some() {
-                COL_SUBTEXT1
+                pal.subtext1
             } else {
-                COL_PEACH
+                pal.peach
             };
             tree.push(RenderCommand::Text {
                 x: x + content_width - 200.0,
@@ -1196,7 +1204,7 @@ impl AssociationsPageState {
 
             // Expanded detail panel
             if is_expanded {
-                y = self.render_expanded_panel(tree, x, y, content_width, entry);
+                y = self.render_expanded_panel(pal, tree, x, y, content_width, entry);
             }
 
             // Separator line
@@ -1205,7 +1213,7 @@ impl AssociationsPageState {
                 y1: y,
                 x2: x + content_width - 12.0,
                 y2: y,
-                color: COL_SURFACE0,
+                color: pal.surface0,
                 width: 1.0,
             });
         }
@@ -1214,6 +1222,7 @@ impl AssociationsPageState {
     /// Render the expanded details panel for a selected file type.
     fn render_expanded_panel(
         &self,
+        pal: &Palette,
         tree: &mut RenderTree,
         x: f32,
         y: f32,
@@ -1230,7 +1239,7 @@ impl AssociationsPageState {
             y,
             content_width - 16.0,
             EXPAND_PANEL_HEIGHT,
-            COL_SURFACE0,
+            pal.surface0,
             CornerRadii::all(8.0),
         );
 
@@ -1239,7 +1248,7 @@ impl AssociationsPageState {
             x: panel_x,
             y: py,
             text: "Choose default app:".into(),
-            color: COL_TEXT,
+            color: pal.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1257,11 +1266,7 @@ impl AssociationsPageState {
 
             // Radio button circle
             let radio_y = py + 2.0;
-            let radio_color = if is_selected {
-                COL_ACCENT
-            } else {
-                COL_SURFACE2
-            };
+            let radio_color = if is_selected { pal.blue } else { pal.surface2 };
             tree.push(RenderCommand::StrokeRect {
                 x: panel_x,
                 y: radio_y,
@@ -1279,16 +1284,16 @@ impl AssociationsPageState {
                     radio_y + inner_offset,
                     inner_size,
                     inner_size,
-                    COL_ACCENT,
+                    pal.blue,
                     CornerRadii::all(inner_size / 2.0),
                 );
             }
 
             // App name
             let name_color = if app.installed {
-                COL_TEXT
+                pal.text
             } else {
-                COL_OVERLAY0
+                pal.overlay0
             };
             tree.push(RenderCommand::Text {
                 x: panel_x + RADIO_SIZE + 10.0,
@@ -1309,7 +1314,7 @@ impl AssociationsPageState {
                     x: marker_x,
                     y: py + 2.0,
                     text: "(uninstalled)".into(),
-                    color: COL_RED,
+                    color: pal.red,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -1329,14 +1334,14 @@ impl AssociationsPageState {
             py,
             btn_width,
             btn_height,
-            COL_SURFACE1,
+            pal.surface1,
             CornerRadii::all(6.0),
         );
         tree.push(RenderCommand::Text {
             x: panel_x + 12.0,
             y: py + 7.0,
             text: "Choose another app...".into(),
-            color: COL_ACCENT,
+            color: pal.blue,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1350,14 +1355,14 @@ impl AssociationsPageState {
             py,
             140.0,
             btn_height,
-            COL_SURFACE1,
+            pal.surface1,
             CornerRadii::all(6.0),
         );
         tree.push(RenderCommand::Text {
             x: reset_x + 12.0,
             y: py + 7.0,
             text: "Reset to default".into(),
-            color: COL_SUBTEXT0,
+            color: pal.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1716,9 +1721,10 @@ mod tests {
 
     #[test]
     fn test_render_produces_commands() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let state = AssociationsPageState::new();
         let mut tree = RenderTree::new();
-        state.render(&mut tree, 0.0, 0.0, 800.0);
+        state.render(&pal, &mut tree, 0.0, 0.0, 800.0);
         assert!(!tree.is_empty(), "Render must produce commands");
         assert!(tree.len() > 10, "Expected substantial render output");
     }

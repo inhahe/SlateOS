@@ -1616,7 +1616,7 @@ mod tests {
     // ========================================================================
 
     use crate::draw_check::assert_nothing_is_drawn_and_never_seen;
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
     // Only the tests name a colour type now. Production code here reads
     // roles off the palette it was handed and never constructs one.
     use guitk::color::Color;

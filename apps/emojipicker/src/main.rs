@@ -17,6 +17,7 @@
 //! twice -- once in `render_grid` and once in `grid_hit_test` -- from the same
 //! constants, which is agreement by coincidence rather than by construction.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -38,30 +39,12 @@ use std::process::ExitCode;
 mod mocha {
     use guitk::color::Color;
 
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const CRUST: Color = Color::from_hex(0x11111B);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const SURFACE2: Color = Color::from_hex(0x585B70);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-    pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const TEAL: Color = Color::from_hex(0x94E2D5);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
     pub const PINK: Color = Color::from_hex(0xF5C2E7);
     pub const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
     // `0x89DCEB`. Was `0x89DCFE` — a transposed byte pair copied from
     // `gui/appearance`. See known-issues.md
     // TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO.
-    pub const SKY: Color = Color::from_hex(0x89DCEB);
+
     pub const ROSEWATER: Color = Color::from_hex(0xF5E0DC);
 }
 
@@ -1218,12 +1201,19 @@ pub struct EmojiPickerState {
     pub width: f32,
     /// Height of the window being drawn into.
     pub height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl EmojiPickerState {
     /// Create a new picker state with an initialized database.
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             active_tab: Tab::Category(EmojiCategory::SmileysAndPeople),
             selected_category: EmojiCategory::SmileysAndPeople,
             search_query: String::new(),
@@ -1335,7 +1325,7 @@ impl EmojiPickerState {
         }
         let layout = Layout::new(width, height);
 
-        fill(&mut frame, layout.window, mocha::BASE, CORNER_RADIUS);
+        fill(&mut frame, layout.window, self.palette.base, CORNER_RADIUS);
         self.draw_tab_bar(&mut frame, &layout);
         self.draw_search_field(&mut frame, &layout);
         self.draw_grid(&mut frame, &layout);
@@ -1346,7 +1336,7 @@ impl EmojiPickerState {
 
     /// The category tab bar.
     fn draw_tab_bar(&self, frame: &mut Frame, layout: &Layout) {
-        fill(frame, layout.tab_bar, mocha::MANTLE, 0.0);
+        fill(frame, layout.tab_bar, self.palette.mantle, 0.0);
         let tab_w = layout.tab_width();
 
         for (i, &tab) in tabs().iter().enumerate() {
@@ -1362,7 +1352,7 @@ impl EmojiPickerState {
                         (cell.w - 4.0).max(0.0),
                         (cell.h - 4.0).max(0.0),
                     ),
-                    mocha::SURFACE0,
+                    self.palette.surface0,
                     6.0,
                 );
             }
@@ -1374,9 +1364,9 @@ impl EmojiPickerState {
                 tab.icon(),
                 TAB_ICON_SIZE,
                 if is_active {
-                    mocha::BLUE
+                    self.palette.blue
                 } else {
-                    mocha::OVERLAY0
+                    self.palette.overlay0
                 },
                 FontWeightHint::Regular,
                 Some(tab_w),
@@ -1389,7 +1379,7 @@ impl EmojiPickerState {
             y1: layout.tab_bar.bottom(),
             x2: layout.window.w,
             y2: layout.tab_bar.bottom(),
-            color: mocha::SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -1400,9 +1390,9 @@ impl EmojiPickerState {
             return;
         };
 
-        fill(frame, field, mocha::SURFACE0, 6.0);
+        fill(frame, field, self.palette.surface0, 6.0);
         if self.search_focused {
-            stroke(frame, field, mocha::BLUE, 1.5, 6.0);
+            stroke(frame, field, self.palette.blue, 1.5, 6.0);
         }
 
         let text_y = field.y + (field.h - LABEL_FONT_SIZE) / 2.0;
@@ -1412,16 +1402,16 @@ impl EmojiPickerState {
             text_y,
             "\u{1F50D}",
             LABEL_FONT_SIZE,
-            mocha::OVERLAY0,
+            self.palette.overlay0,
             FontWeightHint::Regular,
             Option::None,
         );
 
         let avail = (field.w - 36.0).max(0.0);
         let (text, color) = if self.search_query.is_empty() {
-            ("Search emoji...", mocha::OVERLAY0)
+            ("Search emoji...", self.palette.overlay0)
         } else {
-            (self.search_query.as_str(), mocha::TEXT)
+            (self.search_query.as_str(), self.palette.text)
         };
         label(
             frame,
@@ -1455,7 +1445,7 @@ impl EmojiPickerState {
                 fill(
                     frame,
                     Rect::new(cell.x + 1.0, cell.y + 1.0, cell.w - 2.0, cell.h - 2.0),
-                    mocha::SURFACE1,
+                    self.palette.surface1,
                     6.0,
                 );
             }
@@ -1469,7 +1459,7 @@ impl EmojiPickerState {
                 cell.y + CELL_PADDING,
                 &self.skin_tone.apply(&entry.emoji),
                 EMOJI_FONT_SIZE,
-                mocha::TEXT,
+                self.palette.text,
                 FontWeightHint::Regular,
                 Some(CELL_SIZE - CELL_PADDING * 2.0),
             );
@@ -1489,14 +1479,14 @@ impl EmojiPickerState {
         let Some(strip) = layout.strip else {
             return;
         };
-        fill(frame, strip, mocha::MANTLE, 0.0);
+        fill(frame, strip, self.palette.mantle, 0.0);
         label(
             frame,
             strip.x + 8.0,
             strip.y + (strip.h - LABEL_FONT_SIZE) / 2.0,
             "Skin tone:",
             LABEL_FONT_SIZE - 1.0,
-            mocha::SUBTEXT0,
+            self.palette.subtext0,
             FontWeightHint::Regular,
             Option::None,
         );
@@ -1516,7 +1506,7 @@ impl EmojiPickerState {
                     circle.w + 4.0,
                     circle.h + 4.0,
                 );
-                stroke(frame, ring, mocha::BLUE, 2.0, ring.w / 2.0);
+                stroke(frame, ring, self.palette.blue, 2.0, ring.w / 2.0);
             }
 
             if let Some(cell) = layout.swatch_cell(i) {
@@ -1533,7 +1523,7 @@ impl EmojiPickerState {
         fill_radii(
             frame,
             preview,
-            mocha::CRUST,
+            self.palette.crust,
             CornerRadii {
                 top_left: 0.0,
                 top_right: 0.0,
@@ -1554,7 +1544,7 @@ impl EmojiPickerState {
                     preview.y + 10.0,
                     &self.skin_tone.apply(&entry.emoji),
                     PREVIEW_EMOJI_SIZE,
-                    mocha::TEXT,
+                    self.palette.text,
                     FontWeightHint::Regular,
                     Option::None,
                 );
@@ -1564,7 +1554,7 @@ impl EmojiPickerState {
                     preview.y + 12.0,
                     &entry.name,
                     LABEL_FONT_SIZE,
-                    mocha::SUBTEXT1,
+                    self.palette.subtext1,
                     FontWeightHint::Bold,
                     Some(text_width),
                 );
@@ -1574,7 +1564,7 @@ impl EmojiPickerState {
                     preview.y + 30.0,
                     entry.category.label(),
                     LABEL_FONT_SIZE - 2.0,
-                    mocha::OVERLAY0,
+                    self.palette.overlay0,
                     FontWeightHint::Regular,
                     Some(text_width),
                 );
@@ -1586,7 +1576,7 @@ impl EmojiPickerState {
                     preview.y + (preview.h - LABEL_FONT_SIZE) / 2.0,
                     "Hover over an emoji to preview",
                     LABEL_FONT_SIZE,
-                    mocha::OVERLAY0,
+                    self.palette.overlay0,
                     FontWeightHint::Regular,
                     Some((preview.w - 24.0).max(0.0)),
                 );
@@ -1775,6 +1765,10 @@ fn handle_mouse(state: &mut EmojiPickerState, mouse: &MouseEvent) -> EventResult
 // ============================================================================
 
 impl App for EmojiPickerState {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Emoji Picker")
     }
@@ -3364,6 +3358,65 @@ mod tests {
             "offset {} exceeds the new maximum {}",
             state.scroll_offset,
             state.max_scroll()
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut EmojiPickerState) -> Vec<Color> {
+            app.render(600.0, 500.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = EmojiPickerState::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

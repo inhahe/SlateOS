@@ -14,6 +14,7 @@
 
 #![allow(dead_code)]
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -24,22 +25,6 @@ use core::fmt;
 // ============================================================================
 // Theme colors (same Catppuccin Mocha palette as main settings)
 // ============================================================================
-
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_SURFACE2: Color = Color::from_hex(0x585B70);
-const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-#[allow(dead_code)]
-const COL_SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const COL_ACCENT: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
-#[allow(dead_code)]
-const COL_TEAL: Color = Color::from_hex(0x94E2D5);
 
 // ============================================================================
 // Layout constants
@@ -134,13 +119,13 @@ impl SnapshotType {
     }
 
     /// Color used for the type badge in the UI.
-    pub fn badge_color(&self) -> Color {
+    pub fn badge_color(&self, pal: &Palette) -> Color {
         match self {
-            Self::System => COL_ACCENT,
-            Self::UserData => COL_GREEN,
-            Self::Custom(_) => COL_TEAL,
-            Self::PreUpdate => COL_PEACH,
-            Self::PreInstall => COL_PEACH,
+            Self::System => pal.blue,
+            Self::UserData => pal.green,
+            Self::Custom(_) => pal.teal,
+            Self::PreUpdate => pal.peach,
+            Self::PreInstall => pal.peach,
         }
     }
 }
@@ -257,12 +242,12 @@ impl SnapshotStatus {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Complete => COL_GREEN,
-            Self::InProgress => COL_ACCENT,
-            Self::Failed => COL_RED,
-            Self::PendingDeletion => COL_OVERLAY0,
+            Self::Complete => pal.green,
+            Self::InProgress => pal.blue,
+            Self::Failed => pal.red,
+            Self::PendingDeletion => pal.overlay0,
         }
     }
 }
@@ -1244,32 +1229,46 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
 }
 
 /// Helper: section header with underline.
-fn render_section_header(tree: &mut RenderTree, x: f32, y: f32, title: &str) -> f32 {
-    text_bold(tree, x, y, title, COL_TEXT, 16.0);
+fn render_section_header(pal: &Palette, tree: &mut RenderTree, x: f32, y: f32, title: &str) -> f32 {
+    text_bold(tree, x, y, title, pal.text, 16.0);
     tree.push(RenderCommand::FillRect {
         x,
         y: y + 24.0,
         width: 580.0,
         height: 1.0,
-        color: COL_SURFACE1,
+        color: pal.surface1,
         corner_radii: CornerRadii::ZERO,
     });
     y + 36.0
 }
 
 /// Helper: render a small colored badge.
-fn render_badge(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) -> f32 {
+fn render_badge(
+    pal: &Palette,
+    tree: &mut RenderTree,
+    x: f32,
+    y: f32,
+    label: &str,
+    color: Color,
+) -> f32 {
     let width = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
     fill_rounded(tree, x, y, width, 20.0, color, 4.0);
-    tree.text(x + 8.0, y + 3.0, label, COL_BASE, 11.0);
+    tree.text(x + 8.0, y + 3.0, label, pal.base, 11.0);
     width
 }
 
 /// Helper: render a clickable button.
-fn render_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) -> f32 {
+fn render_button(
+    pal: &Palette,
+    tree: &mut RenderTree,
+    x: f32,
+    y: f32,
+    label: &str,
+    color: Color,
+) -> f32 {
     let width = text::padded_width(label, 12.0, 13.0, FontWeightHint::Regular);
     fill_rounded(tree, x, y, width, 32.0, color, 6.0);
-    tree.text(x + 12.0, y + 8.0, label, COL_BASE, 13.0);
+    tree.text(x + 12.0, y + 8.0, label, pal.base, 13.0);
     width
 }
 
@@ -1278,6 +1277,7 @@ fn render_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Colo
 /// Displays a list of snapshots with metadata, action buttons, a tree
 /// visualization, and retention settings.
 pub fn render_snapshots_page(
+    pal: &Palette,
     tree: &mut RenderTree,
     x: f32,
     start_y: f32,
@@ -1287,12 +1287,12 @@ pub fn render_snapshots_page(
     let right_x = x + 400.0;
 
     // Section: System Snapshots
-    y = render_section_header(tree, x, y, "System Snapshots");
+    y = render_section_header(pal, tree, x, y, "System Snapshots");
     tree.text(
         x,
         y + 4.0,
         "Point-in-time captures for safe rollback and recovery:",
-        COL_SUBTEXT0,
+        pal.subtext0,
         13.0,
     );
     y += 28.0;
@@ -1300,42 +1300,43 @@ pub fn render_snapshots_page(
     // Snapshot list.
     let snapshots = manager.tree.all_snapshots();
     if snapshots.is_empty() {
-        tree.text(x + 16.0, y + 12.0, "No snapshots yet.", COL_OVERLAY0, 13.0);
+        tree.text(x + 16.0, y + 12.0, "No snapshots yet.", pal.overlay0, 13.0);
         y += ROW_HEIGHT;
     } else {
         for snap in snapshots {
             let bg = match snap.status {
-                SnapshotStatus::InProgress => COL_SURFACE2,
-                _ => COL_SURFACE0,
+                SnapshotStatus::InProgress => pal.surface2,
+                _ => pal.surface0,
             };
             fill_rounded(tree, x, y, 580.0, ROW_HEIGHT, bg, 6.0);
 
             // Name and type badge.
-            text_bold(tree, x + 12.0, y + 8.0, &snap.name, COL_TEXT, 13.0);
+            text_bold(tree, x + 12.0, y + 8.0, &snap.name, pal.text, 13.0);
             // Placed from a *bold* measurement, because that is how the name
             // above was drawn: a byte count at a guessed regular advance either
             // buried the badge in a long name or left a ragged gap after a short
             // one.
             let name_w = text::measure(&snap.name, 13.0, FontWeightHint::Bold);
             render_badge(
+                pal,
                 tree,
                 x + 12.0 + name_w + 8.0,
                 y + 8.0,
                 snap.snapshot_type.label(),
-                snap.snapshot_type.badge_color(),
+                snap.snapshot_type.badge_color(pal),
             );
 
             // Description.
             if !snap.description.is_empty() {
-                tree.text(x + 12.0, y + 30.0, &snap.description, COL_SUBTEXT0, 11.0);
+                tree.text(x + 12.0, y + 30.0, &snap.description, pal.subtext0, 11.0);
             }
 
             // Size.
             let size_label = format_size(snap.size_bytes);
-            tree.text(right_x, y + 8.0, &size_label, COL_SUBTEXT0, 12.0);
+            tree.text(right_x, y + 8.0, &size_label, pal.subtext0, 12.0);
 
             // Status.
-            let status_color = snap.status.color();
+            let status_color = snap.status.color(pal);
             tree.text(
                 right_x + 100.0,
                 y + 8.0,
@@ -1347,7 +1348,7 @@ pub fn render_snapshots_page(
             // Tags.
             if !snap.tags.is_empty() {
                 let tags_str = snap.tags.join(", ");
-                tree.text(right_x, y + 28.0, &tags_str, COL_OVERLAY0, 10.0);
+                tree.text(right_x, y + 28.0, &tags_str, pal.overlay0, 10.0);
             }
 
             y += ROW_HEIGHT + 4.0;
@@ -1357,22 +1358,22 @@ pub fn render_snapshots_page(
     y += SECTION_SPACING;
 
     // Action buttons row.
-    render_button(tree, x, y, "Create Snapshot", COL_ACCENT);
-    render_button(tree, x + 150.0, y, "Restore", COL_GREEN);
-    render_button(tree, x + 240.0, y, "Delete", COL_RED);
-    render_button(tree, x + 320.0, y, "Diff", COL_PEACH);
+    render_button(pal, tree, x, y, "Create Snapshot", pal.blue);
+    render_button(pal, tree, x + 150.0, y, "Restore", pal.green);
+    render_button(pal, tree, x + 240.0, y, "Delete", pal.red);
+    render_button(pal, tree, x + 320.0, y, "Diff", pal.peach);
     y += 44.0 + SECTION_SPACING;
 
     // Section: Snapshot Tree.
-    y = render_section_header(tree, x, y, "Snapshot Tree");
+    y = render_section_header(pal, tree, x, y, "Snapshot Tree");
     let tree_lines = manager.tree.render_tree_ascii();
     if tree_lines.is_empty() {
-        tree.text(x + 16.0, y + 4.0, "(empty)", COL_OVERLAY0, 12.0);
+        tree.text(x + 16.0, y + 4.0, "(empty)", pal.overlay0, 12.0);
         y += TREE_NODE_HEIGHT;
     } else {
         for line in &tree_lines {
             // Use monospace-style rendering for the tree.
-            tree.text(x + 16.0, y + 4.0, line, COL_TEXT, 12.0);
+            tree.text(x + 16.0, y + 4.0, line, pal.text, 12.0);
             y += TREE_NODE_HEIGHT / 1.5;
         }
     }
@@ -1380,58 +1381,58 @@ pub fn render_snapshots_page(
     y += SECTION_SPACING;
 
     // Section: Retention Settings.
-    y = render_section_header(tree, x, y, "Retention Settings");
+    y = render_section_header(pal, tree, x, y, "Retention Settings");
 
     // Max snapshots.
-    fill_rounded(tree, x, y, 580.0, 40.0, COL_SURFACE0, 6.0);
-    tree.text(x + 12.0, y + 12.0, "Maximum snapshots", COL_TEXT, 13.0);
+    fill_rounded(tree, x, y, 580.0, 40.0, pal.surface0, 6.0);
+    tree.text(x + 12.0, y + 12.0, "Maximum snapshots", pal.text, 13.0);
     tree.text(
         right_x + 80.0,
         y + 12.0,
         &manager.retention.max_snapshots.to_string(),
-        COL_ACCENT,
+        pal.blue,
         13.0,
     );
     y += 48.0;
 
     // Max age.
-    fill_rounded(tree, x, y, 580.0, 40.0, COL_SURFACE0, 6.0);
+    fill_rounded(tree, x, y, 580.0, 40.0, pal.surface0, 6.0);
     tree.text(
         x + 12.0,
         y + 12.0,
         "Auto-delete after (days)",
-        COL_TEXT,
+        pal.text,
         13.0,
     );
     tree.text(
         right_x + 80.0,
         y + 12.0,
         &manager.retention.max_age_days.to_string(),
-        COL_ACCENT,
+        pal.blue,
         13.0,
     );
     y += 48.0;
 
     // Protected count.
-    fill_rounded(tree, x, y, 580.0, 40.0, COL_SURFACE0, 6.0);
-    tree.text(x + 12.0, y + 12.0, "Protected snapshots", COL_TEXT, 13.0);
+    fill_rounded(tree, x, y, 580.0, 40.0, pal.surface0, 6.0);
+    tree.text(x + 12.0, y + 12.0, "Protected snapshots", pal.text, 13.0);
     tree.text(
         right_x + 80.0,
         y + 12.0,
         &manager.retention.protected.len().to_string(),
-        COL_GREEN,
+        pal.green,
         13.0,
     );
     y += 48.0;
 
     // Auto-prune count.
-    fill_rounded(tree, x, y, 580.0, 40.0, COL_SURFACE0, 6.0);
-    tree.text(x + 12.0, y + 12.0, "Keep auto-snapshots", COL_TEXT, 13.0);
+    fill_rounded(tree, x, y, 580.0, 40.0, pal.surface0, 6.0);
+    tree.text(x + 12.0, y + 12.0, "Keep auto-snapshots", pal.text, 13.0);
     tree.text(
         right_x + 80.0,
         y + 12.0,
         &AUTO_SNAPSHOT_KEEP_COUNT.to_string(),
-        COL_ACCENT,
+        pal.blue,
         13.0,
     );
 
@@ -1470,9 +1471,10 @@ mod tests {
 
     #[test]
     fn a_badge_fits_its_label() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut tree = RenderTree::new();
         for label in ["System", "User", "Pre-Update", "Sicherheitskopie"] {
-            let w = render_badge(&mut tree, 0.0, 0.0, label, COL_ACCENT);
+            let w = render_badge(&pal, &mut tree, 0.0, 0.0, label, pal.blue);
             assert!(
                 w >= text::measure(label, 11.0, FontWeightHint::Regular) + 16.0,
                 "{label} overflows its badge"
@@ -1482,9 +1484,10 @@ mod tests {
 
     #[test]
     fn a_button_fits_its_label() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut tree = RenderTree::new();
         for label in ["Restore", "Delete", "Wiederherstellen"] {
-            let w = render_button(&mut tree, 0.0, 0.0, label, COL_ACCENT);
+            let w = render_button(&pal, &mut tree, 0.0, 0.0, label, pal.blue);
             assert!(
                 w >= text::measure(label, 13.0, FontWeightHint::Regular) + 24.0,
                 "{label} overflows its button"

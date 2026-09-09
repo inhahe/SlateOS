@@ -1,0 +1,26 @@
+[package]
+name = "loginusers"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS — which accounts a lock or login screen offers, and whether each has a password"
+
+[dependencies]
+# The account database. This crate is a *policy* over it and holds no store of
+# its own: everything it answers is read from `users.yaml` at the moment it is
+# asked, so an account added while the screen is up appears on the next read
+# rather than at the next reboot.
+userdb = { path = "../../userspace/userdb" }
+
+# For `DEFAULT_USERS_YAML` alone — the one path both this crate and the thing
+# that checks the password must agree on. Naming it here rather than repeating
+# the literal is the whole point: a screen that enumerates one file while the
+# authenticator resolves against another offers names that cannot answer.
+authlib = { path = "../../userspace/authlib" }
+
+[dev-dependencies]
+# The fixtures write a `users.yaml` and read it back through the filter, so two
+# tests naming one file would each assert against the other's data.
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

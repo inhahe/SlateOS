@@ -1350,7 +1350,7 @@ mod tests {
     )]
 
     use super::*;
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
 
     /// A dark palette with an accent that is *not* one of its own roles.
     ///

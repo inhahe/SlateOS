@@ -930,7 +930,7 @@ mod tests {
     )]
 
     use super::*;
-    use crate::palette_check;
+    use appearance::palette_check;
 
     /// The dark palette, which is what every deleted constant used to hold.
     fn test_palette() -> Palette {

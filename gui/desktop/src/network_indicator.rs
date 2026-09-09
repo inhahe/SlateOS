@@ -727,7 +727,7 @@ mod tests {
     )]
 
     use super::*;
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
 
     /// The palette these tests render against: the shell's own dark answer.
     fn test_palette() -> Palette {

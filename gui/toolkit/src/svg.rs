@@ -11,7 +11,6 @@
 //! - Container elements: svg (with viewBox), g (with inheritance)
 //! - Color parsing: hex, named colors, rgb(), rgba(), none, transparent, currentColor
 
-#![allow(dead_code)]
 // Geometry functions inherently need many coordinate parameters.
 #![allow(clippy::too_many_arguments)]
 

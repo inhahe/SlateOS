@@ -20,8 +20,8 @@
 //! Network I/O is performed through Slate OS syscalls; simulated with
 //! representative data for initial development.
 
-#[allow(unused_imports)]
 use appearance::Palette;
+#[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};

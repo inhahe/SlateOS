@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS App Launcher — quick launch dialog with search"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 # The window and its event loop. Without this the whole dialog was
 # unreachable: `fn main` built a launcher, rendered one frame into a `let _`,

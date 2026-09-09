@@ -50,8 +50,8 @@
 #![allow(clippy::match_same_arms)]
 #![allow(clippy::cognitive_complexity)]
 
-#[allow(unused_imports)]
 use appearance::Palette;
+#[allow(unused_imports)]
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;

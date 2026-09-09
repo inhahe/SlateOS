@@ -1929,13 +1929,13 @@ mod tests {
         for light in [false, true] {
             let p = accented(light);
             let cmds = full_fixture().render(&p, 1920.0, 48.0);
-            crate::palette_check::assert_drawn_from(&p, &cmds, &[], "taskbar (full)");
+            appearance::palette_check::assert_drawn_from(&p, &cmds, &[], "taskbar (full)");
 
             let cmds = label_fixture().render(&p, 1920.0, 48.0);
-            crate::palette_check::assert_drawn_from(&p, &cmds, &[], "taskbar (labels)");
+            appearance::palette_check::assert_drawn_from(&p, &cmds, &[], "taskbar (labels)");
 
             let cmds = default_state().render(&p, 1920.0, 48.0);
-            crate::palette_check::assert_drawn_from(&p, &cmds, &[], "taskbar (empty)");
+            appearance::palette_check::assert_drawn_from(&p, &cmds, &[], "taskbar (empty)");
         }
     }
 

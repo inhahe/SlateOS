@@ -740,6 +740,11 @@ without breaking the existing specific-pid syscall ABI.
 
 ## 8. coreutils — standalone per-tool crates are canonical (retire the multi-call bundle)
 
+> **SUPERSEDED by §1005** (2026-09-07) — `coreutils` is the one home for the
+> command-line tools; the surviving code is chosen per utility. This entry's
+> "standalone per-tool crates are canonical" is no longer the policy. Kept for
+> the reasoning, which §1005 argues against rather than ignores.
+
 **Date:** 2026-06-12
 
 **Decided by:** Operator (Claude recommended option (a) — standalone per-tool
@@ -1963,6 +1968,12 @@ label). The declined C surface would additionally have touched
 `kernel/src/fs/vfs.rs` (file-identity) and `kernel/src/fs/cache.rs`.
 
 ## 23. File-backed `mmap` (reopened) — adopt **C-lite** (a unified *read-only* page cache) when a concrete consumer appears; writable `MAP_SHARED` writeback stays declined
+
+> **LIFTED by §36** (2026-06-24) — the C-lite read-only page cache was built,
+> and its precursor (stable VFS file identity) landed with it: `FileId`,
+> `Vfs::file_identity`, and `mm::page_cache::get_or_fill`, which
+> `proc/pcb.rs` already sources file-backed pages from. **Do not schedule the
+> "precursor work that must land first" below — it exists.**
 
 **Date:** 2026-06-14
 
@@ -5317,6 +5328,49 @@ call, not a code commitment. If YSH becomes urgent before the C++ toolchain
 lands, fall back to a Rust reimplementation; the `userspace/oils` crate is
 isolated so either a YSH-in-Rust module or a swap to genuine Oils is a local
 change.
+
+### ANNOTATION 2026-09-09 (lane B) — the prerequisite has fired. Not flipped: this is an Operator decision.
+
+**The C++/slateos cross-toolchain this entry waits on now demonstrably
+exists.** Measured today, not inferred:
+
+| Step | Result |
+|---|---|
+| `zig c++ --target=x86_64-linux-musl -std=c++17 -c` on a TU using `<string>`, `<vector>`, `<memory>` and a `throw`/`catch` | compiles, 245 KB object |
+| the same, with the slateos codegen flags (`-mcmodel=large -fno-pic -fno-pie -fno-builtin -O2`) | compiles, 185 KB object |
+| linking that object against **our** `toolchain/sysroot/lib/libc.a` with `rust-lld` | 8 undefined symbols, **all** of them libc++/C++-ABI (`operator new`, `std::__1::basic_string::append`, `typeinfo for std::length_error`, …) and **zero** of them libc |
+| `zig c++ --target=x86_64-linux-musl -static` end to end | builds libc++ from source and links a 3.4 MB `ET_EXEC` x86-64 binary |
+
+The reading: the compiler exists, the C++ standard library exists, and our libc
+already satisfies everything a C++ program asks of C. What is missing is the
+*link line* — combining zig's `libc++` with our `libc.a` — which is wiring, not
+a toolchain.
+
+**That wiring was then measured too**, on 2026-09-09, and it is a short list
+rather than a vague one: `known-issues.md` →
+`B-THE-C-PLUS-PLUS-LINK-LINE-NEEDS-TWO-DECISIONS-AND-ONE-MISSING-FAMILY`. Two
+decisions (our libc already ships a C++ ABI that collides with zig's
+`libc++abi`, and dropping zig's then loses the standard exception classes) and
+one gap (`swprintf`/`vswprintf`; `wcstold` was the third and is fixed).
+
+**What this does NOT establish**, stated because the gap matters: nobody has
+cross-compiled genuine Oils, and nobody has run a C++ binary on SlateOS. This
+says the **prerequisite** named here has fired, so YSH moves from
+"blocked-on-C++-toolchain" to "blocked-on-effort" — which is exactly the
+distinction this entry drew, and the only thing it made conditional.
+
+**Why this was worth going and looking for.** §305's root cause, recorded in
+`todo.txt` as a standing rule: §72 rejected cross-compiling bash because no
+C-to-slateos toolchain existed, the clause fired four days later when `zig cc`
+landed, nobody checked for 25 days, and ~1,100 commits went onto a dead
+premise. `zig cc` and `zig c++` are *the same binary*. The C half was noticed
+in July; the C++ half sat unnoticed in the same executable for seven weeks,
+and `todo.txt` recorded it as "the C++ half has NOT [fired]" — a statement
+nobody had tested. This is that failure caught by the rule that was written
+after it.
+
+**The deferred sub-decision above is now live** and is the operator's:
+`open-questions.md` → **B-Q9**.
 
 ## 74. osh error diagnostics — adopt bash's `<name>: line N:` prefix, but keep osh's own `$0` name (not bash's `environment` pseudo-name) and a uniform syntax-error form
 
@@ -36060,6 +36114,10 @@ undo that has to *find* what it is undoing is a guess; an undo that restores
 what it saved is not.
 
 ## §359 — One binary name, one producer: the duplicated utilities consolidate into `coreutils`, but the surviving *code* is chosen per utility
+
+> **UN-SUSPENDED by §1005** (2026-09-07) — this entry was suspended and is
+> live again; §1005 supersedes §8 and restores this one as the rule for which
+> half of each duplicated utility survives.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
@@ -69465,3 +69523,119 @@ entry runs or is dropped.
 `/.deferred-ops/` to write to, so the file manager cannot offer to defer
 anything. Lane A has said the format does not block it from starting.
 
+
+## 824. A login screen appears exactly when there is somebody to log in as
+
+**Date:** 2026-09-08
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** the desktop now asks who you are before it lets you in. It asks
+whenever the machine's list of user accounts has anybody on it. If that list
+cannot be read at all — the file is missing, or unreadable — the desktop comes
+up without asking, because there would be nobody to ask *about*: every name
+would be refused, so the screen would be one that nothing could ever get past.
+That is a machine nobody can use, which is worse than a machine that did not
+ask.
+
+**The decision.** `ShellSession::start` builds a `LoginScreen` when
+`loginusers::offered_from_system()` returns a non-empty list, and does not when
+it returns an empty one.
+
+**Why the empty case cannot be "show it anyway".** The screen is answered by
+`authlib`, which resolves names against `/etc/users.yaml`. That is the same file
+the list is read from — deliberately, so a name on the screen is a name that can
+answer. So if the file cannot be read, `authlib` answers `Unusable` to every
+name, for every password, for ever. A screen shown in that state is not a
+locked machine; it is a bricked one, with no recovery path that does not involve
+another computer. Note that this is not the same as *no accounts in a readable
+file*: that also yields an empty list, and also means there is nobody to
+authenticate as.
+
+**Why it is not "never show it", which is what the code did until now.** The
+module has existed, fully written, since before the three-lane split and was
+constructed by nothing — 2,417 lines of login screen that no keystroke could
+reach (`known-issues.md`
+`TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED`). §815 names the
+login screen specifically as a thing that "stays in the shell and gets wired
+up", so leaving it unreachable was not an option on the table.
+
+**The rejected alternative: a setting.** An `appearance.yaml` key — "show a
+login screen: yes/no" — is how a lot of desktops do it, and it was rejected for
+two reasons. It puts a security-relevant default in the same file as the
+wallpaper, where a user editing colours can turn off authentication by accident
+and nothing tells them. And it answers a question the account database already
+answers: a machine with accounts wants a login screen, a machine without one
+cannot use it. A setting would let those two disagree, and the only way to
+resolve the disagreement is to pick one — at which point the setting is doing
+nothing except being wrong occasionally.
+
+**What this does not decide.** Autologin. `LoginUser::autologin` is read from
+the database and carried onto the screen, and `LoginScreen::autologin_user`
+exists, but nothing acts on it yet: an account marked for autologin still gets
+a prompt. Skipping the prompt is a second decision — it needs a rule for how a
+user *escapes* an autologin to reach a different account, and a way to hold the
+autologin at boot when the machine is being recovered — and doing it in the
+same change as this one would have bundled a question with an answer. Logged in
+`todo.txt`.
+
+**A smaller call folded in.** With exactly one account the screen opens on the
+password field rather than on a list of one row. A list the user must dismiss
+to reach the field they were already looking at is a step that carries no
+information. This matches the same file's existing treatment of Escape, which
+clears the field rather than "going back" when there is only one account.
+
+
+## 825. The e-reader's "Dark" reading theme becomes "System"; Sepia stays fixed
+
+**Date:** 2026-09-08
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** the e-book reader has a button that switches its page between two
+looks, labelled "Dark" and "Sepia". The "Dark" one was a private copy of the
+desktop's dark colours, so switching the desktop to a light theme left the
+reader dark, for no reason anybody had chosen. It now simply *is* the desktop's
+theme, and the button says "System" instead — because a button labelled "Dark"
+while the screen is light is a label that contradicts what you can see. "Sepia"
+is unchanged and deliberately still fixed: warm paper is a reading surface you
+pick for your eyes, and one that turned dark along with the desktop would be
+the single thing it exists not to do.
+
+**What was actually there.** `ThemeColors::dark()` set fourteen fields, and
+every one of them was a Catppuccin Mocha value that the desktop `Palette`
+already carries under a name: `background` was `base`, `surface` was
+`surface0`, `surface_alt` and `separator` and `selected_bg` were `surface1`,
+`text` was `text`, `text_dim` was `subtext0`, `accent` was `blue`, `accent_dim`
+was `surface2`, `bookmark_color` and `error` were `red`, `progress_bar` was
+`green`. Not "similar to" the palette — the same twenty-hex table, written out
+a second time.
+
+**The decision.** `dark()` becomes `from_palette(&Palette)`, `ThemeKind::Dark`
+becomes `ThemeKind::System`, and the label follows. `sepia()` is untouched.
+
+**Why this is not simply the palette conversion applied.** Everywhere else in
+the sweep the rule has been mechanical: a colour resolved at draw time follows
+the theme, a colour stored on the user's data stays fixed. Here the reading
+theme is *neither* — it is a display preference for the document, chosen in the
+app, which is exactly the kind of thing that has a legitimate claim to ignore
+the desktop. Sepia keeps that claim. What "Dark" could not defend is being a
+**duplicate**: it offered no choice the desktop did not already offer, and the
+duplication meant a user who set a light desktop theme had no way to get a
+light reader at all — the two options were dark-Mocha and sepia.
+
+**The renamed variant is the reason this is recorded rather than just done.**
+It changes a word on screen. The alternatives were to leave the label reading
+"Dark" while the reader draws light (a label that lies), or to keep a third
+variant so "Dark" still means Mocha specifically (which reintroduces the
+duplicate palette this removes, and leaves the reader unable to follow a
+light desktop unless the user knows to pick "System"). Neither is better than
+being accurate about what the button does. The operator may prefer a different
+word — "Desktop", "Automatic", "Match system" — and that is a one-line change.
+
+**A test was replaced, not just updated.** `test_dark_theme_colors` asserted
+`tc.background.r < 100` — "the dark theme is dark". That passed just as well
+when the reader held its own hardcoded copy and ignored the desktop entirely,
+so it could not distinguish the bug from the fix. It now asserts the fields
+*equal the palette's*, and that a light desktop produces a different background
+— which is the property that was actually wrong.

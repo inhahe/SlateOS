@@ -7,6 +7,23 @@
 //! It implements the HTTP/1.1 protocol with support for chunked transfer encoding,
 //! redirects, cookies, and common authentication schemes.
 //!
+//! # What this crate does *not* do: send anything
+//!
+//! There is no transport here -- no `connect`, no `send`, no `TcpStream`. This
+//! is the protocol, not the client: it turns a request into bytes and bytes
+//! back into a response, and **the caller carries them**.
+//!
+//! `userspace/pkg` is the worked example. It depends on this crate, builds a
+//! `Request` with it, and hands the bytes to its own `http_roundtrip`, some
+//! forty lines of `TcpStream` with read and write timeouts. So the sentence
+//! above -- "used by the package manager for network fetching" -- is exactly
+//! true, and the split is deliberate rather than unfinished.
+//!
+//! A second caller wanting to fetch something (the DynDNS updater in
+//! `apps/settings/src/remote.rs` is the next in line) needs a transport of its
+//! own, or `pkg`'s lifted somewhere both can reach. That is the open question,
+//! not the absence of one here.
+//!
 //! # Example
 //!
 //! ```rust

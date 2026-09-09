@@ -69648,3 +69648,718 @@ when the reader held its own hardcoded copy and ignored the desktop entirely,
 so it could not distinguish the bug from the fix. It now asserts the fields
 *equal the palette's*, and that a light desktop produces a different background
 — which is the property that was actually wrong.
+
+
+
+## 826. The light theme's text inks, chosen by the operator: `#000000`, `#373739`, `#0036A3` on `#EFF1F5`
+
+**Date:** 2026-09-09
+**Lane:** C
+**Decided by:** Operator (Claude asked C-Q10 with four options and recommended A, then withdrew that recommendation on measuring it; the operator supplied values instead of choosing, and they are better than any of the four)
+
+**In short:** in the light theme, the smaller grey text and the accent-coloured
+text were too faint to read wherever they sat on a shaded box rather than
+directly on the page — about 850 places. The operator picked new colours: black
+for main text, a very dark grey for secondary text, a deep blue for links, on
+the existing off-white page. They are now in use and a test enforces them.
+
+**The values**
+
+| role | was | now |
+|---|---|---|
+| main text (`LIGHT_TEXT`) | `#4C4F69` | `#000000` |
+| secondary text (`LIGHT_SUBTEXT1`) | `#5C5F77` | `#373739` |
+| default accent (`LIGHT_BLUE`) | `#1D62EC` | `#0036A3` |
+| page (`LIGHT_BASE`) | `#EFF1F5` | `#EFF1F5` — unchanged |
+
+**Why this beat every option the question offered.** C-Q10 put four to the
+operator (darken the greys, lighten the cards, forbid text on dark cards, do
+nothing) and recommended the first — then withdrew that recommendation, because
+measuring it showed the greys would have to go so dark to clear the greyest card
+that all the inks landed at *identical* luminance: body text, captions and links
+weighing exactly the same, with hue the only thing left to tell them apart, and
+hue is the channel colour-blind vision cannot use. It traded one accessibility
+defect for another.
+
+The operator's values do not, because they move the *card* as well as the ink.
+Measured across every surface in the theme:
+
+| ink | page | surface0 | surface1 | surface2 |
+|---|---|---|---|---|
+| main | 18.57 | 13.60 | 11.55 | 9.71 |
+| secondary | 10.50 | 7.69 | 6.53 | 5.49 |
+| accent | 9.03 | 6.61 | 5.62 | 4.72 |
+
+Everything clears the 4.5 floor, and main-to-secondary separation is 1.77 where
+option A would have given 1.00.
+
+**Three things the decision did not settle, recorded so they are not mistaken
+for having been.**
+
+1. **The card colour.** The operator also gave `#A0AECA` for "Card (shaded)".
+   It is not applied: the theme has five shaded surfaces in use and the palette
+   names one, so how it maps is still open — and the operator is now weighing
+   whether cards should be shaded at all or delineated by borders.
+   `scripts/contrast-explorer.html` renders the options.
+2. **`LIGHT_SUBTEXT0`.** A third grey role that the palette does not name, so a
+   value was derived: `#3D3D3F`, the lightest that still clears 4.5 on
+   `surface2`. It sits 1.10 from `LIGHT_SUBTEXT1` — the same colour to any eye.
+   That is forced by the surface, not chosen: `surface2` gives 9.71:1 against
+   pure black, so every ink clearing 4.5 on it is crowded into the top of that
+   range. A three-level grey hierarchy cannot exist on a card that dark.
+3. **The other thirteen accents.** All still fail on every card (2.33–3.52).
+   They were derived together by scaling each Latte accent until it cleared 4.5
+   *on the page* and nowhere else — the same mistake as the greys, made once and
+   applied fourteen times. `TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS`.
+
+**What enforces it.** `light_inks_clear_the_contrast_floor_on_every_surface`
+checks every ink against every surface and names the failing pair;
+`the_light_inks_are_not_all_the_same_weight` asserts the hierarchy option A
+would have destroyed. The first guards the operator's explicit instruction to
+leave the accent's thin margin (4.57, clearing the floor by 0.07) and add a
+guard rather than adjust the colour.
+
+The guard deliberately excludes the thirteen accents, because asserting a known
+failure means either a red build or a muted test — it grows to cover them when
+item 3 is decided.
+## 1008. The operator's grep features keep GNU's short flags and take long-form spellings; and the proximity rule, read out of the source rather than the example
+
+**Date:** 2026-09-09
+**Lane:** B
+**Decided by:** Claude (autonomous), on a constraint the operator supplied
+
+**In short:** the operator asked for their own `grep`'s extra features to be
+added to SlateOS's, "so that it has all the GNU grep features plus my
+additions". Four of their flags already mean something else in GNU grep, so
+"all the GNU features plus mine" cannot be spelled the way their tool spells
+it. Their sentence decides which side gives way: GNU's meanings keep the short
+flags, and the additions get long names. Nothing is lost at the command line,
+because their tool already has a config file that can alias the short forms
+back.
+
+**Where this came from.** `§919` records the operator's request; lane A then
+read their source, found the collisions, and filed
+`requests/a-b-the-operators-grep-has-features-ours-lacks-and-four-of-them-collide-with-gnu-flags.md`
+with a proposed resolution. This entry adopts it. Lane A's own note is worth
+repeating: §919 said lane B owned the port and nobody filed anything, so for two
+days the request lived only in a decisions file that lane B had no reason to
+re-read.
+
+### The collisions and the resolution
+
+| Addition | Operator's spelling | Collides with | Resolved spelling |
+|---|---|---|---|
+| proximity matching | `-P NUM` | `-P` = `--perl-regexp` | `--near NUM` (see below) |
+| filename globs | `-f PATTERN` | `-f` = patterns from file | `--name PATTERN` |
+| case-sensitive filenames | `-c` | `-c` = `--count` | `--name-case-sensitive` |
+| conjunction across patterns | repeated `-e` | `-e` repeated = alternation | `--every-pattern` (opt-in) |
+
+The last is the sharp one, and the reason this is a decision rather than a
+rename: it is not a spelling clash but an **opposite meaning on identical
+syntax**. `grep -e a -e b f` prints lines matching either under GNU and prints
+nothing unless the file contains both under the operator's. Silently choosing
+either would make a command that already appears in scripts mean something
+new, so conjunction becomes opt-in and alternation stays the default.
+
+### The name is `--every-pattern` and not `--all-patterns`, because the shorter one broke an abbreviation
+
+Written first as `--all-patterns`, which is the better name and could not be
+used. `scripts/getopt-ambiguity-check.py` refused the push and gave the reason:
+
+```text
+grep: --a we say ambiguous, GNU resolves it;
+      matches ['after-context', 'all-patterns']
+```
+
+GNU grep has exactly one long option beginning with `a`, so `grep --a 3 file`
+resolves to `--after-context` today. A second `a` option makes that
+abbreviation ambiguous, and an abbreviation that works now would stop working
+— which is precisely the GNU behaviour this decision promised would survive.
+
+`--every-pattern` has no such prefix. GNU grep has four options starting with
+`e`, so `--e` is already ambiguous on both sides and stays that way; nothing
+starts with `ev`, so every deeper prefix is one GNU rejects today and we accept
+now. That is a divergence rather than a regression: nothing that worked stops
+working.
+
+**The general rule, worth more than this instance:** a new long option may not
+share a prefix with a GNU option unless that prefix is *already* ambiguous in
+GNU. The safe construction is a name whose first letter GNU spends on two or
+more options, diverging from all of them before the depth at which GNU resolves
+uniquely.
+
+The gate now carries an `INTENTIONAL_EXTRAS` table so that a deliberate non-GNU
+option is not reported as a transcription error. Its exemption is deliberately
+narrow: it permits only "we resolve, GNU has never heard of it", never "we made
+ambiguous something GNU resolves". That was verified rather than reasoned about
+— re-adding `all-patterns` *with an exemption in place* still fails the gate on
+`--a`.
+
+
+### `--proximity` was also unusable, by this entry's own rule
+
+The rule above was written after `--all-patterns` broke `--a`. Applying it to
+this entry's *other* proposed name shows the same defect, caught this time
+before any code was written:
+
+```text
+$ echo hello | grep --p hello
+hello
+```
+
+`--p` **resolves** in GNU grep — `--perl-regexp` is its only `p` option — so
+`--proximity` would have made it ambiguous and broken a working abbreviation.
+The name is `--near NUM`. GNU spends six options on `n`, so `--n` is already
+ambiguous on both sides; nothing starts with `ne`, so every deeper prefix is
+one GNU rejects today and we accept now.
+
+Worth noting that both names lane A proposed and this entry adopted were
+unusable for the same reason, and neither of us checked. The rule is cheap to
+apply and was not applied until a gate applied it for us.
+
+### The README's equivalence claim is false, measured
+
+The operator's `README.md` says:
+
+> Because the two share a printing rule, `-P` with a NUM at least as large as
+> the file is exactly equivalent to the default whole-file gate. That
+> equivalence is asserted by the test suite.
+
+It is not. Measured against the operator's own `grep.py` on a three-line file
+containing `ALPHA`, `BETA`, `ALPHA`:
+
+| invocation | prints |
+|---|---|
+| no `-P` (whole-file gate) | lines 1, 2, 3 |
+| `-P 100` (≥ file length) | lines 1, 2 |
+
+The cause is in the code and is not subtle: the `-P` loop calls
+`last_match.clear()` when a window is satisfied, so the `BETA` on line 2 is
+consumed by the window that ends there and the `ALPHA` on line 3 finds no live
+`BETA`. The whole-file path has no such step — it emits every matching line
+once the gate passes. The two do *not* share a printing rule, whatever the
+size of NUM.
+
+**This matters to the port beyond being someone else's bug.** The previous
+entry named that equivalence as the first test worth writing, on the grounds
+that it checks two implementations against each other rather than against my
+reading of either. Had it been written it would have failed, and the obvious
+response — "my window logic must be wrong" — would have been the wrong one.
+
+**Ours follows the code, not the README**, because the code is what the
+operator's own output does and therefore what they are used to. Raised for
+them as `open-questions.md` → B-Q10, since only they can say which of the two
+they meant.
+
+
+### One of the nine features cannot be ported, and the reason is this entry
+
+Lane A's inventory ends with the "your path became the regex" warning, and
+singles it out: *"worth keeping even though it is not a feature in the usual
+sense. It is a guard against a silent wrong answer, which is the class of bug
+this project cares most about."*
+
+It cannot come across. The hazard it guards is created by the operator's
+argument grammar — their README states it plainly: *"the first non-option
+argument is always the search regex … even when you supplied every pattern with
+`-e`"*. So `grep -e math -e logic "d:\book\*.html"` silently searches for the
+path. That grammar is exactly what this entry declined to adopt.
+
+Under GNU's grammar, and therefore ours, the same command is loud. Measured on
+both:
+
+```text
+$ grep -e math -e logic 'd:\book\*.html'
+grep: d:\book\*.html: No such file or directory
+```
+
+A positional argument after `-e` is a **file operand**, so a path that does not
+exist is an error rather than a search that quietly matches nothing. The guard
+has nothing left to guard: porting it would mean first porting the grammar that
+creates the danger.
+
+Worth stating because it is the opposite of the usual finding. Every other
+collision in this entry cost the operator a spelling; this one is a case where
+keeping GNU's meaning removed a defect rather than trading one away.
+
+### `--escape-control` covers the whole line, where the operator's covers the match
+
+The operator's grep escapes control bytes *inside matched text*, "in their own
+colour". Ours escapes the whole printed body, and the divergence is deliberate.
+
+Escaping only the match is a display choice — it shows you what you matched.
+Escaping everything is a safety one, and safety is the reading that survives:
+an `ESC [ 2 J` in the unmatched half of a line clears the reader's screen
+exactly as readily as one inside the match. An option that stopped some control
+bytes and passed others would be worse than none, because its existence invites
+the belief that the output is now safe to look at.
+
+Measured, without and with:
+
+```text
+h i t   033 [ 2 J   a n d   \a b e l l        <- raw ESC and BEL reach the terminal
+h i t   \ x 1 b [ 2 J   a n d   \ x 0 7 b e l l
+```
+
+Faithful in the details that are not about safety: `0x00`–`0x1f` except `\n`
+and `\r`, tab included, `0x7f` left alone because the operator leaves it alone.
+Off unless asked, because it changes GNU's byte-exact output.
+
+Flagged here rather than done quietly. If the operator wants match-only
+escaping, it is a smaller option than the one now implemented and can be added
+beside it.
+
+
+### Correction to the table above: `--name` is not being added, because we already have it
+
+The resolution table near the top of this entry promises `--name PATTERN` and
+`--name-case-sensitive`. Measuring the feature before implementing it shows
+that three quarters of "built-in filename globbing" is already in our grep
+under GNU's own spellings, and the fourth quarter belongs to the shell. The
+table stays as written because it records what was decided from lane A's
+inventory; this section records what measuring found, and it wins.
+
+The inventory listed the whole group under "these have no GNU grep
+equivalent". For file selection that is not so:
+
+| Operator's flag | Ours | Measured |
+|---|---|---|
+| `--x_files GLOB` | `--exclude=GLOB` | identical |
+| `--x_paths NAME` (one component) | `--exclude-dir=NAME` | identical -- both skip every `NAME` at every depth |
+| `--x_paths 'node_*'` | `--exclude-dir='node_*'` | **ours is the stronger one**: theirs compares components for equality and matches nothing here |
+| `-f GLOB`, positional globs | the shell | `osh` does pathname expansion, so `grep pat *.rs` already works |
+| `-c` case-sensitive names | -- | nothing to turn on; see below |
+| `--x_paths A/B` (two components) | -- | **the one real gap** |
+
+`--name PATTERN` would therefore be a second spelling of `--include`, and a
+tool with two spellings for one behaviour is worse than one with a single
+spelling, whichever is prettier.
+
+**`-c` is a flag about Windows, not about grep.** The operator's grep matches
+filenames case-*in*sensitively by default and `-c` turns that off, because that
+is what Windows does. `fnmatch` is case-sensitive, GNU's `--include` is
+case-sensitive, and `design.txt` makes the filesystem case-sensitive, so
+`--name-case-sensitive` would be a flag that switches on the only behaviour we
+have. Note the useful flag here is the *inverse* of the one proposed --
+a case-insensitive `--include`, which neither GNU nor we have -- and nobody
+asked for it, so it is not part of this port.
+
+### `--exclude-path=A/B`, the one thing in that group GNU cannot say
+
+`--exclude-dir` matches a **name**, so it cannot say *which* `temp` to skip.
+Ask it to and it agrees and does nothing: the pattern is compared against
+`ent->fts_name`, which never holds a `/`, so a pattern containing one can never
+match. Measured on GNU grep and on ours, on a tree holding `build/temp` and
+`keep/temp`:
+
+| command | skips |
+|---|---|
+| `--exclude-dir=temp` | both |
+| `--exclude-dir=build/temp` | **neither**, silently |
+| operator's `--x_paths build/temp` | `build/temp` |
+| our new `--exclude-path=build/temp` | `build/temp` |
+
+A silent no-op on a plausible command is the class of defect this project cares
+most about, and it is exactly the gap the operator's `--x_paths` fills.
+
+**The spelling passes this entry's own prefix rule, checked before writing
+code** rather than by a gate afterwards. GNU spends four options on `e`;
+`--exclude-` is *already* ambiguous there (`from`, `dir`), `--exclude-d` and
+`--exclude-f` still resolve uniquely after the addition, and `--exclude-p` is
+unknown to GNU today. Every prefix that works now still works.
+
+**Two deliberate divergences from `--x_paths`, both supersets.** Their
+components are compared for equality; ours are globs, so `--exclude-path='node_*/deep'`
+works and a plain name still means itself -- a spec with no metacharacters
+behaves exactly as theirs does. And the glob is applied *per component*, so `*`
+cannot cross a `/` here even though gnulib lets it cross one inside a name:
+`*/temp` means "a `temp` with a parent". Anything else would let a
+two-component spec match a one-component path and undo the distinction the
+option exists to draw.
+
+**A spec that could never match is refused, not accepted.** `--exclude-path=`,
+`--exclude-path=/a` and `--exclude-path=a//b` are usage errors. An option whose
+whole reason for existing is that `--exclude-dir=a/b` silently matches nothing
+must not be able to silently match nothing itself.
+
+
+### `--allow-match-colors` is the third proposed name that breaks a GNU abbreviation
+
+It is spelled `--keep-color-escapes`. `--allow-match-colors` cannot be used for
+the same reason `--all-patterns` could not: GNU grep has exactly one long
+option beginning with `a`, so `grep --a 3 file` resolves to `--after-context`
+today and a second `a` option would stop it resolving.
+
+That is now three for three -- `--all-patterns`, `--proximity` and
+`--allow-match-colors` -- and only the first was caught by a gate. The rule
+in this entry is worth stating as a *procedure* rather than a principle:
+enumerate GNU's long options by first letter once, and read the answer off the
+table before choosing a name.
+
+```text
+a h m o p q s t u v   one option each  -- a new name here BREAKS an abbreviation
+b c d e f i l n r w   two or more      -- safe if the name diverges early
+g j k x y z …         none at all      -- entirely free
+```
+
+`--keep-color-escapes` is in the third row, which is the strongest position
+available: GNU grep has no long option beginning with `k` at all, so every
+prefix of it, down to `--k`, is one GNU rejects today and we accept now.
+
+### What `--keep-color-escapes` lets through is a whitelist, not a blacklist
+
+The operator's `--allow-match-colors` "passes through ANSI colour sequences
+already present in matched text while still filtering every other escape". Ours
+recognises exactly one shape -- `ESC [`, parameter bytes, `m` -- and escapes
+everything else. Written that way round because a blacklist has to be right
+about every sequence that exists and a whitelist only has to be right about
+one.
+
+Measured on the built binary with `od -c`, all in one line of input:
+
+| input | with `--escape-control --keep-color-escapes` |
+|---|---|
+| `ESC [ 3 1 m` … `ESC [ 0 m` | passes through raw |
+| `ESC [ 2 J` (erase display) | `\x1b[2J` |
+| `ESC ] 0 ; pwned BEL` (set window title) | `\x1b]0;pwned\x07` |
+| `ESC [ 3 1` (unfinished) | `\x1b[31` |
+| `BEL` | `\x07` |
+
+The unfinished case is the one worth naming: a sequence with no final byte is
+*not* passed on, because a terminal that receives it will swallow whatever
+arrives next -- including the rest of the grep output -- looking for one.
+
+**Stated honestly, because a safety option that overstates itself is worse than
+none:** SGR is the whole graphic-rendition set, not only colour, so `ESC [ 8 m`
+(conceal) survives and can make text invisible. The line this option draws is
+that output cannot move the cursor, clear the screen, retitle the window or
+provoke a reply from the terminal. It is not a promise that the text is
+legible, and anyone needing the stronger guarantee leaves the option off, which
+is the default.
+
+**It is refused without `--escape-control`, not ignored.** On its own it exempts
+something from an escaping that is not happening, so it could only ever be a
+no-op -- the same defect `--exclude-path` was added to remove, and it would be
+absurd to reintroduce it two commits later. It deliberately does not *imply*
+`--escape-control` either: a flag whose name promises to keep something should
+not quietly start rewriting everything else.
+
+**Whole body, not the match**, for the same reason `--escape-control` is whole
+body: colour in the unmatched half of a line is as much a colour as colour
+inside the match, so covering only the match would leave half the output
+looking like a bug.
+
+
+### `--escape-control` introduced an ambiguity, and `GREP_COLORS` `ec=` answers it
+
+Noticed while porting the operator's sixth colour element rather than while
+writing the option, which is the wrong order and worth saying so.
+
+Under `--escape-control`, a file holding a real `ESC` byte and a file holding
+the four characters `\x1b` produce **the same output**. The option was shipped
+without noticing that, and it is inherent: escaping without escaping the escape
+always collapses those two inputs. `cat -v` has the same defect and no answer
+to it. Doubling every backslash would resolve it and would make every ordinary
+path in the output unreadable, which is the worse trade.
+
+The operator's grep already had the answer, and it is the reason their sixth
+colour element exists: **colour the escape display**. An escape grep wrote is
+painted; one the file contained is not. Ours is `GREP_COLORS` `ec=`, defaulting
+to `94` -- the bright blue theirs uses -- because a disambiguation nobody
+switches on disambiguates nothing.
+
+**Two of the operator's six colour elements were genuinely missing; four were
+already `GREP_COLORS` under other names.**
+
+| Operator's element | Ours |
+|---|---|
+| filename | `fn` |
+| colon separator | `se` |
+| line number | `ln` |
+| match text | `ms` / `mc` |
+| escape code display | **new: `ec`** |
+| error message | still missing -- see below |
+
+`GREP_COLORS` is the *larger* set: `sl`, `cx`, `bn`, `rv` and `ne` have no
+counterpart in the operator's six. An unknown key is ignored in silence by GNU,
+measured, so a `GREP_COLORS` naming `ec` still works there minus the colour --
+the safe direction for a divergence.
+
+**SGR does not nest, so the implementation has to close and reopen.** `ESC[m`
+is an absolute reset, not a pop, so an escape run inside a coloured match emits
+`end(match) start(ec) …\xNN… end(ec) start(match)`. Getting this wrong leaves
+the rest of the match uncoloured, which is why it has a test that reads the
+whole byte sequence rather than checking for the presence of a colour.
+
+**Still missing: the error-message colour**, and deliberately not added with
+this. GNU never colours stderr, and `--color=auto` tests *stdout*, so a
+faithful `er` would need its own check on fd 2 -- a different question from the
+one this entry is answering, and the wrong thing to bundle into a commit about
+stdout.
+
+
+### The last two features, and what the whole exercise turned out to be about
+
+**`--dotall` is `-zo`.** Measured on the operator's `grep.py`, on GNU and on
+ours, on the same three-line file:
+
+```text
+$ python grep.py 'alpha.beta' -f dot.txt --dotall
+dot.txt:alpha
+beta
+
+$ grep -zoH 'alpha.beta' dot.txt | od -c
+0000000 d o t . t x t : a l p h a \n b e t a \0
+```
+
+Byte-identical but for the terminator, and ours matches GNU byte for byte.
+`-z` makes the record separator NUL, so a file with no NUL is one record, `.`
+crosses newlines because they are no longer the separator, and `-o` prints the
+match rather than the record. Their `--dotall` prints the match too, which is
+why their README disables line numbers under it -- a match can span lines.
+
+Lane A's porting constraint said "ours will want a bound, since we have no
+guarantee about file size". The bound question is real and it is `-z`'s, not a
+new option's: our reader is `read_until(NUL, &mut line)` on a growable `Vec`, so
+a whole-file record is a whole file in memory. That is inherent to what `-z`
+*means* and is not new today, so it is left as it is rather than made to
+diverge from upstream on the strength of a hypothetical.
+
+**`--set-colors` splits into a real feature and a Windows workaround.** The real
+part is the seventeen colour *names*: `--set-colors brightgreen brightblack
+brightred default brightred brightblue` against `GREP_COLORS='fn=92:se=90:ln=91:ms=39:ec=94'`.
+Any `GREP_COLORS` capability may now be written by name. The workaround part is
+`--remember`, which writes them to a config file; a shell profile already
+persists an environment variable, and `osh` reads `/etc/profile`,
+`~/.bash_profile`, `~/.bashrc` and `$BASH_ENV` -- verified in
+`userspace/oils/src/main.rs`, not assumed. A config file that duplicates the
+profile would be a second place for the same setting to be wrong.
+
+The direction of that divergence is worth naming, because it is the *unsafe*
+one: GNU ignores a `GREP_COLORS` value that is not SGR parameters, so
+`fn=brightgreen` works here and does nothing there. Accepted because
+`GREP_COLORS` is per-user preference rather than a script interface, and the
+failure mode on a foreign grep is the default colour, not a wrong answer.
+
+### What nine features came to
+
+| | outcome |
+|---|---|
+| proximity matching | built: `--near NUM` |
+| conjunction across patterns | built: `--every-pattern` |
+| control bytes as `\xNN` | built: `--escape-control` (+ `--keep-color-escapes`, + `ec=`) |
+| six colour elements | four were `GREP_COLORS` already; `ec` built; names built; `er` left |
+| filename globbing | `--exclude`/`--exclude-dir` already; **`--exclude-path` built** for the one gap |
+| `--dotall` | already `-zo` |
+| `--allow-match-colors` | built as `--keep-color-escapes` |
+| persistent colour config | the shell profile, already |
+| "your path became the regex" | unportable: the hazard needs their grammar |
+
+**Three of the nine exist because their tool runs on Windows and this one does
+not.** `-f`'s built-in globbing is there because `cmd.exe` does not glob and
+`osh` does; `-c`'s case-sensitive filename matching is there because Windows
+matches names case-insensitively and `design.txt` makes our filesystem
+case-sensitive; `--remember` is there because `cmd.exe` has no profile to put
+an environment variable in. None of the three is a grep feature at all -- each
+is a shell or filesystem capability that their grep had to supply itself.
+
+That is the finding worth keeping from the whole exercise. The request was
+"integrate my grep's additional features", and the honest answer was not nine
+ports: it was six new things, four already present under GNU's own spellings
+(and one of ours *stronger* than theirs), and three that dissolve on a system
+with a real shell.
+
+
+**Against the choice, honestly:** it is the operator's OS, and their muscle
+memory is a real cost that falls on them rather than on a hypothetical GNU
+user. The mitigation is only a mitigation — aliasing the short forms back
+through their config file restores the typing, not the habit of `-P` meaning
+proximity everywhere else. If they would rather their spellings won, that is
+their call to make and this entry is the thing to overrule.
+
+### The proximity rule, and why the README's example is not enough to derive it
+
+This is recorded because it nearly cost a wrong implementation. `README.md`
+gives one worked example: `ALPHA` on line 3, `BETA` on line 5, `ALPHA` again on
+line 7, with `--proximity 3`, and says lines 3 and 5 print while line 7 does
+not, "its `ALPHA` has no `BETA` within 3 lines".
+
+But `|7 - 5| = 2`, which *is* within 3. Every obvious reading of the sentence —
+nearest-neighbour distance, or a forward window of NUM lines — either
+contradicts the stated output or prints line 7. The rule is not derivable from
+the example.
+
+`grep.py`'s own header states it:
+
+> a history buffer of `proximity + before_context + 1` lines is kept. For each
+> line all regexes are checked and `last_match[idx]` updated; entries older
+> than `proximity` lines expire. When every regex has a live match the window
+> is satisfied, and the matching lines within it (expanded by before/after
+> context) are printed from the buffer. **`last_match` is then cleared** to
+> look for the next window.
+
+The clearing is the missing piece: the window ending at line 5 *consumes*
+`BETA@5`, so when `ALPHA@7` arrives there is no live `BETA` left and no window
+is satisfied. Windows are non-overlapping and greedy, earliest-first.
+
+**The lesson, since it generalises:** a worked example pins down what the
+output is, not what the rule is, and a rule inferred from one example is a
+guess that happens to fit. The implementation is the specification when the
+two are available; the prose is a summary of it.
+
+**Two porting constraints**, from lane A's request and kept here because they
+are easy to lose:
+
+* **No UTF-8 assumption.** Both of the operator's builds emit UTF-8 and
+  reconfigure the console for it — right on Windows, wrong here. SlateOS
+  filenames may contain every byte but `/` and NUL, so names and matched text
+  stay `&[u8]`/`OsStr`. Forcing UTF-8 would corrupt exactly the filenames the
+  tool handles well.
+* **`--dotall` reads whole files**, which their README notes disables line
+  numbers. Ours needs a bound; we make no guarantee about file size.
+
+**If it is never revisited:** nothing degrades — our grep stays GNU-compatible
+and simply lacks the additions. The cost is only that the operator keeps two
+greps.
+
+## 1009. `SA_ONSTACK` is honoured in libc, and storing the stack without using it would have been worse than the stub
+
+**Date:** 2026-09-09
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** a program can ask that its crash handler run on a separate,
+private stack, so it still works when the crash *is* the main stack running
+out. We used to accept that request, report it disabled, and run every handler
+on the ordinary stack. Now the stack is stored, reported honestly, and actually
+used -- the handler really does run on it. One case is still not covered, and
+it is the headline one: a handler recovering from a stack overflow, because the
+kernel writes its own bookkeeping onto the exhausted stack before any of our
+code runs. That last piece is asked of the kernel lane.
+
+### Why the two halves had to land together
+
+`known-issues.md` said the old stub's virtue plainly, and it was right:
+"`sigaltstack` reporting `SS_DISABLE` is *honest* -- it is not the `setgroups`
+shape, because it declines rather than pretending. A caller that checks gets a
+true answer."
+
+That is the argument against the obvious increment. The entry named the libc
+half as "actually storing the alternate stack rather than discarding it", and
+doing *only* that would have made `sigaltstack` report a registered stack that
+no handler would ever run on -- converting an honest decline into exactly the
+`setgroups` shape the same document had just praised it for avoiding. A stub
+that says no is better than an implementation that says yes and means no.
+
+So the storage and the use are one change. The switch is what makes the report
+true.
+
+### Where the switch is, and where it deliberately is not
+
+`__call_on_alt_stack` is an assembly thunk that moves `RSP` around the call to
+the **user handler** and nothing else:
+
+```text
+push rbp          ; the interrupted stack, in a register the handler must give back
+mov  rbp, rsp
+mov  rax, rdi     ; handler
+mov  rsp, rdx     ; switch
+and  rsp, -16     ; align, whatever ss_sp+ss_size was
+mov  edi, esi     ; signum becomes arg0
+call rax
+mov  rsp, rbp     ; back
+pop  rbp
+ret
+```
+
+Everything `dispatch_self_signal` does either side of the call -- the
+disposition lookup, `SA_RESETHAND`, the mask bookkeeping -- stays on the
+interrupted stack. The point of an alternate stack is to give the *caller's*
+code room, not to relocate ours, and a narrower switch is a smaller thing to
+get wrong. `RBP` is callee-saved, which is what makes it a safe place to keep
+the interrupted stack pointer across a call into code we did not write.
+
+The entry point is `ss_sp + ss_size`, because x86 stacks grow down and the
+caller allocated the region upwards. Getting that backwards hands the handler a
+stack pointer at the bottom of its own stack, which writes below the allocation
+on its first push -- the precise corruption an alternate stack exists to
+prevent. It has its own test for that reason.
+
+### Four conditions, and the third is the one that is easy to miss
+
+A handler runs on the alternate stack only when it asked (`SA_ONSTACK`), a
+stack is registered, it is big enough (`sigaltstack` already refused otherwise),
+and **we are not already on it**. Without the third, a signal delivered during
+a handler already running there restarts at the top and overwrites the frames of
+the handler it interrupted -- silently, and only under nesting.
+
+### Ten behaviours, measured on Linux 6.6 rather than recalled
+
+Written as a C program and run under WSL before the Rust was written:
+
+| | Linux says |
+|---|---|
+| fresh | `ss_flags = SS_DISABLE`, `ss_sp = NULL`, `ss_size = 0` |
+| registered, not in use | `ss_flags = 0` -- **not** `SS_DISABLE` |
+| stack below `MINSIGSTKSZ` | `ENOMEM` |
+| ...and after that refusal | the previous registration is intact |
+| `SS_AUTODISARM` | reported back as `0x80000000` |
+| inside a handler on it | `ss_flags = SS_ONSTACK` |
+| changing it from there | `EPERM` |
+| after the handler returns | `ss_flags = 0` again |
+| `SS_DISABLE` with zero `ss_sp`/`ss_size` | accepted; neither field is read |
+| after disabling | `SS_DISABLE`, null, 0 |
+
+Ours now matches all ten. The second row is the one the old code got wrong in a
+way nobody would notice: it reported `SS_DISABLE` unconditionally, so a caller
+that registered a stack and asked was told it had none.
+
+### A test that asserted a false thing about Linux, and the reason it was believable
+
+`test_phase75_sigaltstack_invalid_new_does_not_corrupt_old` failed when `oss`
+stopped being written on error. Its comment gave the ground: "oss is *still*
+populated first (Linux behaviour)".
+
+That is true of `do_sigaltstack`, which fills a kernel-local `old` before it
+validates anything. It is false of the function a program calls, because
+`SYSCALL_DEFINE2(sigaltstack, ...)` copies that local out under
+`if (!err && uoss && copy_to_user(...))`. **The internal ordering of a kernel
+helper was mistaken for the ABI** -- a reading of the source that was accurate
+about the line it read and wrong about the question being asked.
+
+Measured, with `oss` pre-filled and an `ss` carrying garbage flags:
+
+```text
+ret=-1 errno=22 (Invalid argument)
+oss.ss_sp=0xdeadbeef oss.ss_flags=0xcafe oss.ss_size=2989
+```
+
+Untouched, all three fields. The test's own *name* -- "does not corrupt old" --
+described the measured behaviour better than its assertions did.
+
+Worth keeping as a shape: reading upstream source is better than remembering
+it, and running upstream is better than reading it. This lane has now made the
+same class of error twice in one session in the opposite direction, believing a
+README over the program it documented; the correction is the same either way.
+
+### What is left, and it is one write
+
+The kernel builds the `SignalContext` on the interrupted thread's stack and
+points `RSP` at it before jumping to `__signal_trampoline`. When the interrupted
+stack is the one that just overflowed, that store faults inside the kernel --
+before libc exists to switch away. Asked of lane A in
+`requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md`, along with
+the open question that request cannot answer for itself: the kernel has no way
+to *see* the registered stack, so this needs either a new syscall or an
+extension to `SYS_SIGNAL_REGISTER`, and which of those is right depends on
+whether reading user memory during frame construction is safe -- which is lane
+A's to judge.
+
+**Against this change, honestly:** it moves `sigaltstack` from "declines
+clearly" to "works in most cases and not the famous one", and someone reading
+only the function signature will now assume the famous one works too. That is a
+real cost and the reason the doc comment leads with the exception rather than
+burying it. The alternative -- waiting for the kernel piece and shipping
+nothing -- leaves `SA_ONSTACK` as a constant nothing reads for however long
+that takes, and leaves the kernel request without a working half to attach to.
+

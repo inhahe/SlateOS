@@ -53417,6 +53417,34 @@ the feature is not near enough to specify an interface against.
 program the user runs, silently and continuously. The desktop works; the
 privacy property a user would assume it has is simply absent.
 
+**Scope note, 2026-09-09 — the title list is the example, not the extent.**
+Found while wiring the Settings dynamic-DNS page, and recorded here rather than
+as a new entry because the cause is the one above, not a second one. Two facts
+this entry did not state:
+
+- **The missing gate is not specific to `SubscribeWindowList`.**
+  `Server::accept_pending` (`gui/compositor/src/server.rs`) adopts every
+  connection that arrives, assigns it a client id and pushes a `Client` — it
+  does not look at the peer at all, and `Listener::accept` discards the peer
+  address before it could. `require_shell` (`wire.rs:361`) then returns
+  `Ok(())` unconditionally by design. So a connected client can also inject
+  input, move and resize windows it does not own, and destroy them. Reading
+  titles is simply the cheapest thing to demonstrate.
+- **`SLATE_DISPLAY` can move the listener off loopback.** The default is
+  `127.0.0.1:7373`, so out of the box only local processes reach it. But the
+  address comes from the environment (`socket.rs`, `display_addr`), and setting
+  it to `0.0.0.0:7373` exposes the same ungated surface to the network, with
+  nothing warning that it has been. The proper fix below covers this too — the
+  gate is at accept either way — but until it exists, the loopback default is
+  the only thing standing between an unauthenticated peer and the desktop.
+
+**The one place authentication for this was ever written down** is
+`apps/settings/src/remote.rs` — `RemoteDesktopConfig`'s `require_authentication`
+and `allowed_users`, together with a port and an encryption level. That file is
+unreachable (`TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING`), so
+the design exists and nothing reads it. It is retained for that reason: it is
+the only statement in the tree of what the gate should ask.
+
 ## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE — PART 1 DONE 2026-08-22, PART 2 DONE 2026-08-24
 
 **Status, 2026-08-22.** Part 1 below is **done**: `appearance::Palette` exists,
@@ -123495,7 +123523,7 @@ already has the delivery path -- `kernel/src/proc/signal.rs` mentions
 silently is the one option that is wrong in every case.
 
 
-## B-NO-ALTERNATE-SIGNAL-STACK-SO-A-STACK-OVERFLOW-HANDLER-CANNOT-RUN (lane B, 2026-09-07)
+## B-NO-ALTERNATE-SIGNAL-STACK-SO-A-STACK-OVERFLOW-HANDLER-CANNOT-RUN (lane B, 2026-09-07) -- MOSTLY FIXED 2026-09-09
 
 **In short:** a program can ask that its crash handler run on a separate, small,
 private stack, so that it still works when the crash *is* the main stack running
@@ -123523,9 +123551,44 @@ interactive-CPython work, which is why it was found.
 
 **The proper fix** is for the kernel's `deliver_pending_signal` to honour
 `SA_ONSTACK` by switching to the registered stack before entering the
-trampoline, which makes it partly lane A's. Not filed as a request yet: the
+trampoline, which makes it partly lane A's. ~~Not filed as a request yet: the
 libc half (actually storing the alternate stack rather than discarding it) has
-to exist first, and that is this lane's and not written.
+to exist first, and that is this lane's and not written.~~
+
+### The libc half is written -- 2026-09-09, and it does more than store
+
+`sigaltstack` now stores the stack, reports it per POSIX, and **uses** it: a
+handler registered with `SA_ONSTACK` runs on it. `posix/src/signal.rs` gained
+`__call_on_alt_stack`, an assembly thunk that switches `RSP` around the call to
+the user handler and nothing else, and `dispatch_self_signal` calls it when all
+four conditions hold (asked for, registered, not already in use, big enough).
+See `design-decisions.md` 1009.
+
+**Storing it without using it would have been worse than the stub**, which is
+why the two landed together. This entry says the old behaviour was *honest* --
+"it declines rather than pretending" -- and that is exactly right. A version
+that recorded the stack and reported it back while still running every handler
+on the interrupted stack would have converted an honest decline into the
+`setgroups` shape.
+
+**What is left is one kernel write.** The kernel builds the `SignalContext` on
+the interrupted thread's stack and points `RSP` at it before jumping to
+`__signal_trampoline`, so when the interrupted stack is the one that just ran
+out, the fault happens in the kernel's own store -- before any libc code exists
+to switch away from it. Filed as
+`requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md`.
+
+So the title is now too broad. There *is* an alternate signal stack; what a
+stack-overflow handler still cannot do is reach it.
+
+**Also not done: `SS_AUTODISARM` is stored and reported, not acted on.** It
+exists so that `siglongjmp` out of a handler does not leave the stack
+permanently marked in use, and without it we have the footgun Linux has: a
+handler that jumps out never reaches the line clearing the flag, so
+`sigaltstack` reports `SS_ONSTACK` for ever after and further changes are
+`EPERM`. Honouring it means disarming in the delivery path, which is where the
+kernel work above lands, so it waits for the same request rather than being
+half done.
 
 
 ## B-CTEST-FIXTURES-CANNOT-FIND-THE-FASTPY-CHECKOUT-AFTER-THE-E-DRIVE-MIGRATION (lane B, 2026-09-07)
@@ -125120,7 +125183,37 @@ their suites.
 
 ---
 
-## TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING
+## TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING — TWO OF THREE RESOLVED 2026-09-09
+
+**Status, 2026-09-09.** Two of the three are gone. `snapshots.rs` (2,256
+lines) was deleted down to a 313-line `/proc/snapshots` reader, and
+`associations.rs` (1,753) was deleted outright after its fallback-handler
+logic was ported into `apps/fileassoc` — where it fixed a real bug, two
+records that could disagree about the default handler.
+
+**`remote.rs` (1,619 lines) remains, and is deliberately kept.** Both halves
+of it hold design that is recorded nowhere else, so deleting it would lose
+knowledge rather than remove duplication:
+
+- **The remote-desktop half** — `RemoteDesktopConfig`'s `require_authentication`,
+  `allowed_users`, port and encryption level — is the only statement in the
+  tree of what the compositor's connection gate should ask. The compositor
+  really does listen on a TCP socket and really does accept anyone; see the
+  2026-09-09 scope note on `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`.
+- **The dynamic-DNS half** was superseded only in part. The kernel owns the
+  entry list and the update mechanism, and the Settings page now reads it from
+  `/proc/dyndns` — but the kernel models credentials as one generic
+  `update_url` per entry, whereas `ProviderSettings` records *which* credentials
+  each provider actually needs (NoIP: email + password; DuckDNS: domain + token;
+  Dynu: hostname + username + password; FreeDNS: domain + auth token). That
+  mapping is real, non-obvious knowledge with no other home until an add-entry
+  flow exists. See `TD-C-DYNDNS-PAGE-IS-READ-ONLY`.
+
+**Trigger to delete each half:** the remote-desktop half, when the capability
+gate lands and the real config lives wherever the compositor reads it; the
+dynamic-DNS half, when the provider credential shapes are ported to whatever
+builds an entry — the same port-then-delete that `associations.rs` got, and the
+reason that one could be deleted and this one cannot yet.
 
 **Date:** 2026-09-08. **Lane:** C.
 **Where:** `apps/settings/src/snapshots.rs` (2,256 lines),
@@ -125204,6 +125297,103 @@ needs that the kernel does not provide. Do not "choose between the two pages" �
 that framing, which the first version of this entry used, assumes one of them
 shows real snapshots and neither does.
 
+**First two thirds done 2026-09-08.** `snapshots::system_snapshots()` reads
+`/proc/snapshots`, and `build_snapshots_page` renders it; the four invented
+rows are gone, and a machine with no snapshots now says so. `SnapshotRow::path`
+is `Vec<u8>` — the escaping exists to carry bytes a text table otherwise
+could not, and a `String` there would undo that with a lossy conversion in the
+one field where a wrong answer names a different directory. The page's label
+converts lossily and says why, at the one point where a person has to read it.
+
+The parser anchors from **both ends** rather than by column, and that is not
+defensiveness for its own sake: it is what makes it correct against the two
+malformed shapes reported in
+`requests/c-a-proc-snapshots-escapes-the-path-but-not-the-name.md` — a name
+with a space in it, and a name longer than its column. Both are covered by
+tests here, so if lane A escapes the name the tests keep passing and the parser
+does not need to change.
+
+**And the model is gone, same day.** `snapshots.rs` is **2,256 → 313 lines**:
+the reader, `format_size`, and their tests. Removing the
+`#![allow(dead_code)]` *first* is what made the deletion safe — the compiler
+named all **41** unreachable items, so the cut was made from its list rather
+than by eye.
+
+**30 passing tests were deleted with it**, and that is the right outcome rather
+than a cost to regret: they tested `SnapshotManager`, `BlockHash`,
+`SnapshotIncludes` and the rest — a userspace reimplementation of a kernel
+subsystem that should not exist. A test suite over code that should be deleted
+is an argument for keeping it, which is exactly the trap. The eight tests that
+matter — the ones over the format the kernel actually emits — all remain.
+
+**The other two, checked the same day, and neither is a delete either.** Both
+turn out to be the colorpicker shape again — the unreachable copy holds
+something the reachable one does not — so "it duplicates a working app,
+therefore remove it" is wrong for both.
+
+| | duplicates | but holds, uniquely |
+|---|---|---|
+| ~~`associations.rs`~~ **deleted 2026-09-08** | `apps/fileassoc` | ~~**fallback handlers**~~ — ported first, as `FileType::handler_history`. The rest was checked item by item before deleting: `fileassoc` has `search`/`search_in_category` for the filtering, and config-line serialisation this file never had. The module doc's third claim, "per-extension icons", was a field set once at construction and **never read** — a promise the code did not keep, so nothing to preserve. |
+| `remote.rs` (1,619) | `apps/remotedesktop` — 5,199 lines, likewise a real app | **DynDNS** — but *not* uniquely, as an earlier version of this row claimed. `kernel/src/fs/dyndns.rs` implements it (584 lines: `add_entry`, `list_entries`, `set_enabled`, `set_interval`, `set_update_url`, `update_now`, plus UPnP/NAT-PMP forwarding) and publishes `/proc/dyndns`. See below. |
+
+So the shape of the work is the same for both, and it is not deletion:
+
+1. Move the unique part to the application that owns the domain — fallback
+   handlers into `apps/fileassoc`, remote-desktop settings into
+   `apps/remotedesktop`.
+2. ~~Decide where DynDNS belongs.~~ **Already decided, in the roadmap.**
+   `roadmap-detailed.md` line 2531: "DynDNS setup helper **in settings**
+   (prefer free services, especially dynu.net)", and `design.txt` line 1301 asks
+   for it. So `remote.rs`'s DynDNS half is a planned feature sitting in the
+   right application — it has simply never been given a page. Nearly written up
+   as an open question before checking; the roadmap had answered it.
+
+   **And it is the snapshots case a second time, which I found only by
+   re-auditing my own greps.** `kernel/src/fs/dyndns.rs` implements dynamic
+   DNS — 584 lines, with UPnP/NAT-PMP port forwarding beside it — and its own
+   module doc states the architecture it expects:
+
+   ```text
+   Settings panel → Network → Dynamic DNS
+     → dyndns::list_providers() → configured providers
+   ```
+
+   That settings panel is `remote.rs`, unreachable, carrying a parallel
+   in-memory model. `/proc/dyndns` publishes the stats, the detected router,
+   and a table of entries (ID, NAME, PROVIDER, HOSTNAME, STATUS, IP).
+
+   **Two earlier claims in this entry were wrong and are corrected above:**
+   that `remote.rs` held the only dynamic-DNS configuration in the tree (the
+   grep behind it excluded `kernel/`), and that wiring it needs an HTTP
+   transport first (`dyndns::update_now` is the kernel's job, not the panel's).
+
+   **So the work is the same shape as the snapshots page:** read
+   `/proc/dyndns`, render that, give it a `SettingsPage`, and delete the
+   in-memory model. It is *not* blocked, which is the opposite of what this
+   entry said an hour ago.
+3. *Then* delete the husk.
+
+**Porting the fallback design found a live bug in the app it moved to.**
+`AssociationRegistry::remove_app` deleted every association naming the removed
+application and stopped there, which is wrong twice over. It orphaned the file
+types — uninstalling an editor left every `.rs`, `.toml` and `.log` with no
+handler at all, though the user had a perfectly good previous one. And it
+updated only **one of the two records** of "what opens this": `associations`
+lost the entry while `file_types[ext].default_app_id` went on naming the
+removed application, so the registry disagreed with itself and which answer a
+caller got depended on which map it asked.
+
+No test caught the second because each map was only ever checked on its own.
+Three of the five new tests fail against the old `remove_app`.
+
+**The recurring lesson, now four for four.** Every module in this entry that
+looked like a straightforward deletion turned out to hold something the
+reachable code lacked: the toolkit's HSV was the *correct* implementation, the
+snapshots model was redundant only because a *kernel* subsystem covers it, and
+these two each carry a feature that exists nowhere else. Unreachable is not the
+same as worthless, and the check that keeps finding this is cheap: diff the
+feature lists before deleting, not after.
+
 **Found by** the palette conversion. Every audit until then read only
 `main.rs`, so these three files were never looked at; they were found by
 grepping every `.rs` under `apps/*/src` for the twenty Catppuccin hex values,
@@ -125224,6 +125414,53 @@ least no longer *divergent* dead code.
    to become unreachable says so.
 
 ---
+
+## TD-C-DYNDNS-PAGE-IS-READ-ONLY
+
+**Date:** 2026-09-09. **Lane:** C.
+**Where:** `apps/settings/src/main.rs` — `build_dyndns_page`;
+`apps/settings/src/dyndns.rs`; `kernel/src/fs/dyndns.rs`.
+
+**In short:** the new Settings → Network → Dynamic DNS page shows the entries
+the machine has, but the user cannot add, edit or remove one from it. Dynamic
+DNS keeps a hostname pointing at your home address as your ISP changes it;
+right now the only way to set one up is from inside the kernel, so in practice
+the page will read "No dynamic-DNS entries are configured" on every machine and
+there is no way to make it say anything else.
+
+**Why:** the kernel implements the whole feature — `add_entry`, `remove_entry`,
+`set_update_url`, `update_now`, plus UPnP/NAT-PMP forwarding — but exposes none
+of it to userspace. There is no dyndns syscall (`grep -rn dyndns kernel/src/sys*`
+returns nothing) and `/proc/dyndns` is generated read-only by `gen_dyndns`.
+Userspace can therefore observe the state and change nothing about it.
+
+**This is not the page being unfinished.** Rendering an Add button that cannot
+add would be the mistake the page was written to avoid — see the test
+`the_dyndns_page_invents_no_entries` and the unreachable version in `remote.rs`
+that defaults to a fabricated `home.example.com` entry. A read-only page that
+is honest about what it can do is the correct intermediate state.
+
+**Proper fix:** a capability-gated syscall pair for add/remove plus one for
+`update_now`, and then the page grows an editor. Two things it will need that
+exist already and should be used rather than rewritten: the per-provider
+credential shapes in `apps/settings/src/remote.rs` (`ProviderSettings`), which
+the kernel does not model — it stores one generic `update_url` per entry — and
+`apps/settings/src/dyndns.rs`'s `PROVIDERS`, which must stay in step with the
+kernel enum either way.
+
+**Trigger to fix:** when the syscall exists. That is lane A's; no request is
+filed yet, because the interface should be specified against a real editor
+design rather than guessed at now.
+
+**If never fixed:** the page is accurate and inert. Nothing breaks; the feature
+is simply unreachable by any user, exactly as it was before the page existed —
+the page's value in the meantime is that it stops the *next* reader concluding
+from `remote.rs` that dynamic DNS is wired up and working.
+
+**Related:** an entry can also read `Success` while publishing an address the
+router no longer has. The page flags that ("address out of date") by comparing
+each entry's last published address with the router's external address, because
+the status alone does not show it.
 
 ## TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS
 
@@ -125968,3 +126205,112 @@ python scripts/test-reclaim-space.py
 ```
 
 …while a backup or indexing pass is touching `%TEMP%`.
+
+---
+
+## TD-C-THE-HTTP-CLIENT-CANNOT-MAKE-A-REQUEST — **WITHDRAWN, THE CLAIM WAS FALSE**
+
+**Date:** 2026-09-08. **Lane:** C. **Withdrawn the same hour it was written.**
+
+**The claim was that `net/httpclient` has no transport and nothing in the OS
+can fetch anything. The second half is simply wrong.** `userspace/pkg` depends
+on this crate (`Cargo.toml` line 19), builds requests with it, and carries them
+over its own `http_roundtrip` — forty lines of `std::net::TcpStream` with read
+and write timeouts. The package manager fetches. The module doc sentence I
+"corrected" — *"used by the package manager and other applications for network
+fetching"* — was accurate, and has been restored.
+
+**How the mistake was made, because the mechanism is worth more than the
+retraction.** The evidence offered was:
+
+```
+grep -rln httpclient --include=*.toml pkg/ apps/ net/   →  only net/httpclient
+grep -rn "TcpStream" --include=*.rs pkg/                 →  nothing
+```
+
+**There is no `pkg/` directory.** It is `userspace/pkg`. Both greps searched a
+path that does not exist, returned nothing, and that nothing was read as *"no
+crate depends on it"* and *"the package manager has no socket code"*.
+
+An empty result from a path that does not exist is byte-for-byte identical to
+an empty result from a path with no matches. `grep -r` does print
+`No such file or directory` to stderr — and the pipeline swallowed it, because
+the habit of this session has been `2>/dev/null` on tree-wide greps to keep
+permission noise out of the output.
+
+**The rule that follows:** a negative grep result is evidence of nothing until
+the path is known to exist. When a search is about to become a *claim*, confirm
+the haystack first — `ls -d` the directories, or check the pattern matches
+something known to be there. This is the second time today a negative result
+misled me: the palette survey counted declarations and reported "0 left" three
+times while sixteen, then five, then more applications were outstanding.
+
+**What survives of the finding**, much narrower and not a bug: the transport is
+the *caller's* by design, and exactly one caller has written one. A second —
+the DynDNS updater in `apps/settings/src/remote.rs`, which is specified in
+`roadmap-detailed.md` line 2531 — will need either its own copy of
+`http_roundtrip` or `pkg`'s lifted somewhere both can reach. That is a genuine
+question about where a shared transport lives, and it is recorded in the
+crate's own module docs where the next person to need one will read it.
+
+---
+
+## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS
+
+**Date:** 2026-09-09. **Lane:** C.
+**Where:** `gui/appearance/src/lib.rs` — `LIGHT_LAVENDER` through
+`LIGHT_SAPPHIRE`, thirteen constants.
+
+**In short:** the user can pick one of fourteen accent colours for the desktop.
+On the light theme, thirteen of them are too faint to read wherever they land
+on a shaded card — which is most places accent text appears. Only blue, which
+the operator supplied a new value for on 2026-09-09, is readable.
+
+**The measurement.** Against the four surfaces text is drawn on:
+
+| accent | page | surface0 | surface1 | surface2 |
+|---|---|---|---|---|
+| blue (fixed) | 9.03 | 6.61 | 5.62 | 4.72 |
+| lavender | 4.65 | **3.41** | **2.89** | **2.43** |
+| teal | 4.62 | **3.39** | **2.88** | **2.42** |
+| … | … | … | … | … |
+| sapphire | 4.60 | **3.37** | **2.86** | **2.41** |
+
+Every one of the thirteen lands between 4.60 and 4.80 on the page, and between
+**2.33 and 3.52** on every card. The floor is 4.5.
+
+**Why they are all *just* over on the page and nowhere else.** They were
+derived together, by scaling each Catppuccin Latte accent's channels until it
+cleared 4.5 **on the base**, and no other surface was checked. The crate's own
+comment says so: *"reaches 4.6:1 on `#EFF1F5`"*. So the whole set shares one
+mistake made once — the same mistake the greys had, which is what C-Q10 was
+about. Fixing the greys and blue without the other thirteen leaves the defect
+for any user who prefers green.
+
+**Why this is not simply "apply the same rule again".** The rule that produced
+these values — scale until it clears the *page* — is the bug. Any replacement
+has to clear the floor on the deepest surface text is drawn on, and that is a
+much harder constraint: `surface2` gives only 9.71:1 against pure black, so
+every accent clearing 4.5 there is nearly black, and fourteen nearly-black
+accents are not fourteen accents. **A user picking "green" would get something
+indistinguishable from "blue".** That is the same trap option A fell into for
+the greys, one dimension over, and it is why this is logged rather than swept.
+
+**Which makes it the operator's call**, and it is bound up with the card
+question still open from C-Q10: the darker the card, the less room the accents
+have. `#A0AECA` is already the darkest card the *current* four inks survive —
+one step to `#9CAAC6` puts blue at 4.37 — so there is no headroom to spend.
+Plausible directions, none free:
+
+1. **Accent text does not go on the deepest cards.** Constrains layout, changes
+   no colour, keeps fourteen distinguishable accents.
+2. **Accents get a per-surface variant** — a lighter one for the page, a darker
+   one for cards. Doubles the table and every lookup has to know its background.
+3. **Accept fourteen near-black accents.** Cheapest, and throws away the point
+   of letting the user choose.
+
+**Not urgent, and it does not get worse on its own.** It has been shipping this
+way; what changed today is that it is now measured and written down. The guard
+test `light_inks_clear_the_contrast_floor_on_every_surface` deliberately does
+**not** cover the accents, because asserting a known failure means either a red
+build or a muted test — it grows to cover them the day this is decided.

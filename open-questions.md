@@ -364,177 +364,73 @@ Nothing is blocked and nothing degrades. The two dialects are documented in
 a recorded decision rather than an accident. The only ongoing cost is that a user
 who learns one pattern language may assume the other works the same way.
 
-## C-Q10 — [C] In the light theme, small grey text on a shaded card is too faint to meet the readability standard, in about 850 places. Fixing it changes how the whole light theme looks. Which way? — Status: OPEN
+## C-Q10 — [C] Light-theme text was too faint on shaded cards. **The inks are decided and shipped (§826); what remains is whether cards should be shaded at all.** — Status: OPEN (narrowed)
 
-**In short:** The desktop has a light theme and a dark theme. In the light one,
-the smaller grey text — the second line of a list row, a caption under a
-heading, a hint — is *too faint* wherever it sits on a shaded box rather than
-directly on the page. There is a published standard for how far apart text and
-its background have to be to count as readable (4.5, on a scale where 1 is
-invisible and 21 is black-on-white). This text measures 3.4. It happens in
-roughly 850 places across the settings screens, the launcher, the network and
-sound panels, and more. The dark theme is fine. Fixing it means changing
-colours that every screen and every application uses, so it will visibly change
-what the light theme looks like — which is why I am asking rather than picking.
+**In short:** the original question — the smaller grey text and the accent text
+being too faint to read on a shaded box, in about 850 places — **is answered.**
+The operator supplied colours on 2026-09-09, they are in use, and a test
+enforces them. Recorded as `design-decisions.md` §826.
 
-**Glossary, because the options below need three terms:**
-- **Contrast ratio** — how far apart two colours are in lightness. 1 = identical
-  (invisible), 21 = black on white. The standard asks 4.5 for normal-sized text.
-- **Card** — any box drawn slightly shaded against the page, to group things:
-  a settings row, a search result, a panel section. The theme has four shades
-  of card, from barely-there to noticeably grey.
-- **Secondary text** — the smaller, greyer text: captions, second lines, hints.
-  Deliberately quieter than the main text, and that is the point of it.
+What is still open is a different and larger question the answer raised, and it
+is recorded here rather than as a new entry because it is the same decision seen
+further along.
 
-**How this was found.** The problem was already logged, but only half of it: the
-old note measured the *main* text colour and found two of the four card shades
-slightly under the line. A measuring tool built on 2026-09-03 checked every
-piece of text the desktop actually draws, against whatever is actually behind
-it. The real table (light theme only; bold = below the 4.5 standard):
+### Settled, 2026-09-09 — do not re-litigate
 
-| ink | on the page | palest card | … | greyest card |
-|---|---|---|---|---|
-| main text | 7.06 | 5.17 | | **3.69** |
-| secondary text | **4.64** | **3.40** | | **2.42** |
-| accent (the themed blue) | **4.63** | **3.39** | | **2.42** |
+| role | now |
+|---|---|
+| main text | `#000000` |
+| secondary text | `#373739` |
+| default accent | `#0036A3` |
+| page | `#EFF1F5` (unchanged) |
 
-Main text is mostly fine. Secondary text passes *only* on the bare page, at
-4.64 — because that is the one place it was ever checked when it was chosen.
-Put it on any card and it fails.
+Every ink clears the 4.5 floor on every surface in the theme, and the
+hierarchy between them survives — which the option this file previously
+recommended would have destroyed. Full reasoning in §826.
 
-### Correction, 2026-09-07 — the table is missing an ink, and option A is flatter than stated
+### Still open — shaded cards, or borders?
 
-Two measured findings, both of which change the choice. Ratios recomputed
-independently here; the three numbers above are confirmed exactly.
+The operator also gave `#A0AECA` for "Card (shaded)", and it is **not applied**,
+because the theme has five shaded surfaces in use and the palette names one.
+While looking at how it should map, the operator raised the better question:
+whether cards should be shaded at all, or delineated by nested borders.
 
-**1. There is a fourth text ink, and it fails too.** The table's "secondary
-text" is `LIGHT_SUBTEXT0` (`#686B80`). The palette has a *second* grey below
-main text, `LIGHT_SUBTEXT1` (`#5C5F77`) — and `gui/appearance`'s own struct
-documents that one, not the other, as "Secondary text: the second line of a
-list row, a caption, a hint". It draws text in **58 places** and was never
-measured. On the page it is fine (5.53); on the greyest card it is **2.89**,
-which fails exactly like the others.
+**Grepping what the three shades are actually used for changed the shape of
+this.** They are not three depths of card:
 
-So option A is **four constants, not three**. Darkening `LIGHT_SUBTEXT1`
-until it clears 4.5 on the greyest card puts it at about `#414354`.
-
-**2. Option A makes the three inks the same colour.** The cost column says the
-hierarchy goes "a little flatter". Measured, it goes completely flat:
-
-| separation between two inks | today | under option A |
+| shade | uses | what it really is |
 |---|---|---|
-| main text vs secondary text | 1.52 | **1.00** |
-| main text vs the accent blue | 1.53 | **1.00** |
+| `surface0` | 1012 | the row/card **fill** — hovered row, selected row, panel background |
+| `surface1` | 542 | mostly a **border already** — menu edge, popup edge, header separator, badge outline |
+| `surface2` | 159 | almost entirely **control chrome** — the track of an off switch, a close button at rest |
 
-1.00 means *identical luminance*. Body text, captions and links would all
-weigh the same; a link would stop looking like a link to anyone reading by
-brightness, which is precisely the reader option A is meant to help — hue is
-the channel colour-blind vision cannot use, and it would be the only channel
-left. Everything is squeezed into the narrow band the greyest card allows:
-that card gives only 9.71:1 even against pure black, so any ink clearing 4.5
-on it must be nearly black, and four nearly-black inks are one ink.
+So nothing in the desktop nests a card three deep; the deepest real stack is
+*page → row → selected row*, and one of the three shades is already doing the
+border job. **And a border needs no contrast against the ink, because no text
+sits on it** — so the problem this question is about disappears entirely for
+anything drawn that way. It is the fills that constrain the palette, and there
+are fewer of those than the shade count suggests.
 
-**What this does to the options.** It is an argument against A as drawn, not
-against fixing the problem. Worth considering instead:
+**To look at before deciding:** `scripts/contrast-explorer.html` — open it in a
+browser. It renders all five surfaces with live ratios, the three ladder
+options as editable presets, and three real compositions taken from the code
+(a settings list, a context menu, a toggle row) drawn twice: shaded as today,
+and with borders doing the work.
 
-- **A′ — darken the greys, but not the accent.** Keeps the accent readable as
-  a *different* thing by leaving it lighter, and accepts that the accent needs
-  the card restriction (C) rather than a colour change. Splits the problem by
-  ink instead of solving it with one hammer.
-- **A+C — darken the greys, and stop putting text on the two greyest cards.**
-  The greyest card is what forces near-black. Remove that constraint and the
-  inks have room to stay distinct while still passing on the cards that remain.
+*What changes:* whether `surface1`/`surface2` remain fills at all, or become
+outline-only, and whether `#A0AECA` lands on one card, all of them, or the
+deepest.
 
-**If you would rather not decide:** my earlier note said I would take A. I
-withdraw that. A as measured trades one accessibility defect for another, and
-I would not ship it without you seeing these numbers.
+**One option is already ruled out by measurement**, so it is not on the table:
+re-deriving the ladder *downward* from `#A0AECA` cannot work. `#A0AECA` is
+exactly the darkest card these inks survive — one step to `#9CAAC6` puts the
+accent at 4.37 — so a descending ladder has no room. If the ladder is kept, the
+operator's colour has to be the *deepest* card with the shallower ones mixed
+toward the page.
 
-### The options
-
-| | *What changes* | Cost |
-|---|---|---|
-| **A. Darken the greys** (recommended) | Captions and hints in the light theme look a bit darker and less delicate. Nothing moves; only three colours change. | The light theme reads slightly heavier. Contrast between "main" and "secondary" text shrinks, so the visual hierarchy is a little flatter. |
-| **B. Lighten the cards** | Cards in the light theme become fainter — the shading that separates a settings row from the page gets subtler. | At the pale end the cards may stop being visible as cards at all, which is its own legibility problem (a different one, about structure rather than text). |
-| **C. Forbid text on the darker cards** | Nothing changes colour. Panels would have to stop using the two greyest card shades behind text, and about 190 places would be re-laid-out. | The most work by far, and it constrains every future panel. But it is the only option that changes nothing a user has already got used to. |
-| **D. Do nothing** | Nothing. | The text stays measurably below the standard, and it gets *wider* every time a new panel puts a caption on a card, because nothing stops it. |
-
-**Why A is my recommendation.** It is three colour values, it fixes all four
-card shades at once, and it is the same move already made once for this exact
-palette: the secondary grey was *already* darkened, in June, to get it from 4.37
-to 4.64 — but only ever checked against the bare page, which is why it fails on
-cards now. Option A is finishing that job properly rather than starting a new
-one. B fights the purpose of the cards, and C is real work that also permanently
-narrows what a designer may do.
-
-**If you would rather not decide:** say so and I will take A, since D is the
-only option that leaves a known accessibility defect shipped, and A is the
-cheapest of the three that fix it. It is fully reversible — three constants.
-
-**What happens if this is never answered:** nothing breaks and nothing gets
-worse on its own, but the light theme keeps shipping text below the readability
-standard, and the count grows slowly as panels are added. The measuring tool is
-in place either way, so whatever is decided can be verified rather than assumed.
-
-**Where it bites:** `gui/appearance/src/lib.rs` — the light role table
-(`LIGHT_SUBTEXT0`, `LIGHT_SUBTEXT1`, the `LIGHT_*` accents, and the
-`LIGHT_SURFACE*` ladder). Full measurements and the module-by-module counts are
-in known-issues.md under
-`TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR`.
-
-**A smaller, separate question found alongside it, same file:** if a user picks
-a *custom* accent colour rather than one of the fourteen presets, it is used
-exactly as given — the presets get a light-mode variant, a custom colour does
-not, and nothing checks it is legible. So a user who picks a pale pink in the
-light theme gets accent text at about 1:1, i.e. invisible. Should a custom
-accent be (i) adjusted for the mode like the presets are, (ii) accepted but
-warned about in the picker, or (iii) left exactly as chosen on the grounds that
-the user asked for it? I lean (i), matching what the presets already do.
-
-## Which group is a user in? Two files answer, and nothing keeps them agreeing. (lane B, 2026-09-06)
-
-**In short:** "Alice is in the `audio` group" is written down in two separate
-places on this machine: once in `/etc/group`, which lists the members of each
-group, and once in Alice's own account record in `/etc/users.yaml`, which lists
-the groups she is in. Nothing makes the two agree — they are simply two copies
-of the same sentence, and copies drift. We already fixed exactly this problem
-for *user accounts* (`design-decisions.md` §353: one file is the truth, the
-others are generated from it). The question is whether to do the same for
-groups, and if so which of the two copies survives.
-
-**How it bites today:** a program that asks "what groups is Alice in?" gets a
-different answer depending on which file it happens to read. `id` and `chown`
-read one, the graphical settings app reads the other. If they disagree, a file
-Alice should be able to open looks closed to one tool and open to another. This
-is the same class of defect that had `sudo` and `doas` disagreeing about who
-was an administrator, which is what §353 was decided to end.
-
-**What has been done so far (2026-09-06):** `useradd`/`usermod`/`groupadd`/
-`groupmod`/`groupdel` are one binary, and it now updates *both* copies through
-a single set of methods, so it cannot change one and forget the other. That
-closes the hole for the only tool that currently writes groups. It does not
-close the hole — the next writer has nothing stopping it, and a hand-edit of
-either file makes them disagree immediately.
-
-### The options
-
-| Option | *What changes:* | |
-|---|---|---|
-| **A. `/etc/groups.yaml` is the truth; `/etc/group` and `/etc/gshadow` are generated from it** (recommended) | Nothing visible day to day. Editing `/etc/group` by hand stops sticking — the next account change overwrites it — exactly as editing `/etc/passwd` already stops sticking. | The same answer §353 gave for users, for the same reasons, and it reuses the machinery that already exists. It is also the most work: a new file, a new parser, and the group half of `useradd` rewritten. |
-| **B. Keep two files but make the account record's `groups` list the only writable one, and generate `/etc/group` from the accounts** | Also nothing visible. No new file: the group's member list becomes a view of who claims membership. | Cheaper than A. But a group has facts of its own — its gid, its password, its administrators (`/etc/gshadow`) — that no account record has anywhere to put, so those would still need a home. That is how §353's rejected option B failed. |
-| **C. Drop the `groups` list from account records; `/etc/group` is the only answer** | The graphical settings app has to read `/etc/group` instead of the account file it reads now. | The smallest change, and it puts the fact in the file the POSIX world expects. It contradicts `design.txt`'s "configuration files will be yaml" for one of the two most security-sensitive files, which is the objection that sank the same option for users. |
-| **D. Leave it. Keep both copies and keep them in step by hand.** | Nothing. | Free today. The cost arrives with the second writer, and it arrives as a security bug rather than a visible breakage. |
-
-### If it is never answered
-
-Nothing gets worse on its own, and nothing is blocked: `useradd` keeps both
-copies in step, and it is the only tool that writes groups. The risk is a
-future one — the *next* program that writes a group membership starts the drift,
-and it will be found the way the `sudo`/`doas` split was found, by reading the
-code rather than by anything failing.
-
-The full context, including the non-atomicity of a save across the two stores,
-is in `todo.txt` under "`/etc/group` and `/etc/gshadow` are still hand-written,
-not generated".
+**If this is never answered:** nothing degrades. The inks are fixed and guarded,
+so the accessibility defect is closed; what is left is a visual-design choice
+about how cards are delineated, and today's shading continues to work.
 
 ## C-Q11: Should something build every crate before a merge? (raised by lane C, 2026-09-06)
 
@@ -1215,6 +1111,65 @@ The cost is only that YSH stays absent and our shell keeps needing hand-work.
 The one thing worth avoiding is leaving the *reason* stale — the project has
 already lost ~1,100 commits once to a decision whose premise had quietly
 expired, which is why this was checked at all.
+
+## B-Q10 — [B] Your grep's manual and your grep disagree about one flag. Which one is right? — Status: OPEN
+
+**In short:** we are copying your `grep`'s extra features into SlateOS's. One
+of them — the `-P` proximity search — behaves differently from the way your
+`README.md` describes it, and we found this by running your own program. Before
+copying it, we would like to know which of the two you meant, because we will
+faithfully reproduce whichever you say.
+
+### What the manual says
+
+> `-P` with a NUM at least as large as the file is exactly equivalent to the
+> default whole-file gate. That equivalence is asserted by the test suite.
+
+### What the program does
+
+A three-line file, searched for two words:
+
+```text
+line 01 ALPHA
+line 02 BETA
+line 03 ALPHA
+```
+
+| command | prints |
+|---|---|
+| `grep.py ALPHA -e BETA` (no `-P`) | lines 1, 2, **3** |
+| `grep.py -P 100 ALPHA -e BETA` | lines 1, 2 |
+
+100 is far larger than the file, so by the manual these should match. They do
+not: line 3 is missing from the second.
+
+### Why
+
+`-P` clears its record of which words it has seen each time it completes a
+group. The `BETA` on line 2 is used up by the group that ends there, so the
+`ALPHA` on line 3 has no `BETA` left to pair with and is not part of any group.
+The no-`-P` path has no such step — once the file is known to contain every
+word, it prints every matching line.
+
+### The options
+
+| | *What changes:* |
+|---|---|
+| **(a) The program is right; the manual is wrong** | Nothing changes in your tool. SlateOS's grep copies the behaviour above, and the README sentence gets corrected. |
+| **(b) The manual is right; the program has a bug** | Your `-P` would print line 3 as well, i.e. a word can belong to more than one group. SlateOS's grep copies *that*, and your tool needs a fix. |
+| **(c) Both are intended, and the manual means something narrower** | Say what the equivalence is meant to hold for and we will test that instead. |
+
+### If this is never answered
+
+Nothing breaks. We implement **(a)** — the behaviour your program actually has,
+since that is what you are used to seeing — and note the divergence from your
+manual. The risk of leaving it is only that if you meant (b), we will have
+faithfully copied a bug, and it will be harder to change later once scripts
+depend on it.
+
+**Not urgent, and not a criticism of the tool.** We only found it because the
+port needed the exact rule, and the manual's own example was not enough to
+derive it either.
 
 # Resolved
 

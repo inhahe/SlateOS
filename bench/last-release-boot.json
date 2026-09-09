@@ -1,6 +1,6 @@
 {
-    "sha": "af1b02d99",
-    "date": "2026-09-02T22:38:09+00:00",
+    "sha": "4bd25f390",
+    "date": "2026-09-09T23:25:26+00:00",
     "boot_number": null,
-    "note": "Seeded from the last release-profile entry in boot-history.jsonl (bench run, BENCH_OK marker). The gate script (check-release-staleness.py) counts kernel-touching commits since this SHA and fails the pre-push when the count exceeds the threshold."
+    "note": "Set from an actual release-profile boot test (run bsqqmo5cn, 2026-09-09: BOOT_OK after 117 s, gates 1252 s, build 704 s, total 2095 s). The previous value was seeded from boot-history rather than taken from a run. The gate (check-release-staleness.py) counts kernel-touching commits since this SHA and refuses the pre-push once the count exceeds its threshold; it fired at 101 commits, which is what prompted this run."
 }

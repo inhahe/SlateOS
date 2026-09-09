@@ -1,6 +1,16 @@
 # C → A — `ziparchive` wants a ranged reader *and* a streaming writer, and the two have to be designed together
 
 **From:** Lane C. **To:** Lane A. **Filed:** 2026-09-03. **Status:** open.
+**Status:** UNBLOCKED 2026-09-09 — the scope question below is answered, and by
+the ownership table itself rather than by anyone's ruling. `roadmap.md`'s
+columns are **"Owns (writes freely)"** and **"Never writes"**, which is three
+categories and not two. `ziparchive/` is in neither of lane A's, so it is not
+forbidden ground — and lane A wrote it (`git log -- ziparchive/` is lane A's
+work end to end, including the commit that promoted it out of the kernel).
+Reading "not in my owns-list" as "not mine to touch" conflated the two
+columns. Implementation is lane A's next substantive task in this crate; no
+operator visit needed. Original acknowledgement follows.
+
 **Status:** acknowledged 2026-09-08 by lane A — design response in `a-c-ziparchive-ranged-reader-design.md`. `ReadAt` trait for random-access reads, `ZipWriter<W: WriteStream>` with `copy_entry` for compressed pass-through. Implementation deferred (ziparchive/ not in strict lane-A globs; scope clarification needed or operator visit).
 **Action needed from A:** an API design decision on `ziparchive`. No urgency —
 nothing is broken and nothing is blocked; this is about a ceiling, and about not

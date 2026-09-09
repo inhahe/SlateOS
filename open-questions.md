@@ -1226,6 +1226,65 @@ answered question left in the body is pure cost — and, being older, it sorts
 *first*, right where it is most in the way. (Why this is not append-only:
 `design-decisions.md` §437.)
 
+## B-Q10 — [B] Your grep's manual and your grep disagree about one flag. Which one is right? — Status: OPEN
+
+**In short:** we are copying your `grep`'s extra features into SlateOS's. One
+of them — the `-P` proximity search — behaves differently from the way your
+`README.md` describes it, and we found this by running your own program. Before
+copying it, we would like to know which of the two you meant, because we will
+faithfully reproduce whichever you say.
+
+### What the manual says
+
+> `-P` with a NUM at least as large as the file is exactly equivalent to the
+> default whole-file gate. That equivalence is asserted by the test suite.
+
+### What the program does
+
+A three-line file, searched for two words:
+
+```text
+line 01 ALPHA
+line 02 BETA
+line 03 ALPHA
+```
+
+| command | prints |
+|---|---|
+| `grep.py ALPHA -e BETA` (no `-P`) | lines 1, 2, **3** |
+| `grep.py -P 100 ALPHA -e BETA` | lines 1, 2 |
+
+100 is far larger than the file, so by the manual these should match. They do
+not: line 3 is missing from the second.
+
+### Why
+
+`-P` clears its record of which words it has seen each time it completes a
+group. The `BETA` on line 2 is used up by the group that ends there, so the
+`ALPHA` on line 3 has no `BETA` left to pair with and is not part of any group.
+The no-`-P` path has no such step — once the file is known to contain every
+word, it prints every matching line.
+
+### The options
+
+| | *What changes:* |
+|---|---|
+| **(a) The program is right; the manual is wrong** | Nothing changes in your tool. SlateOS's grep copies the behaviour above, and the README sentence gets corrected. |
+| **(b) The manual is right; the program has a bug** | Your `-P` would print line 3 as well, i.e. a word can belong to more than one group. SlateOS's grep copies *that*, and your tool needs a fix. |
+| **(c) Both are intended, and the manual means something narrower** | Say what the equivalence is meant to hold for and we will test that instead. |
+
+### If this is never answered
+
+Nothing breaks. We implement **(a)** — the behaviour your program actually has,
+since that is what you are used to seeing — and note the divergence from your
+manual. The risk of leaving it is only that if you meant (b), we will have
+faithfully copied a bug, and it will be harder to change later once scripts
+depend on it.
+
+**Not urgent, and not a criticism of the tool.** We only found it because the
+port needed the exact rule, and the manual's own example was not enough to
+derive it either.
+
 ## Resolved — lane A
 
 - Q45 Convert the whole shell to bytes, or only the expanded word? — resolved

@@ -69677,7 +69677,7 @@ re-read.
 
 | Addition | Operator's spelling | Collides with | Resolved spelling |
 |---|---|---|---|
-| proximity matching | `-P NUM` | `-P` = `--perl-regexp` | `--proximity NUM` |
+| proximity matching | `-P NUM` | `-P` = `--perl-regexp` | `--near NUM` (see below) |
 | filename globs | `-f PATTERN` | `-f` = patterns from file | `--name PATTERN` |
 | case-sensitive filenames | `-c` | `-c` = `--count` | `--name-case-sensitive` |
 | conjunction across patterns | repeated `-e` | `-e` repeated = alternation | `--every-pattern` (opt-in) |
@@ -69722,6 +69722,62 @@ narrow: it permits only "we resolve, GNU has never heard of it", never "we made
 ambiguous something GNU resolves". That was verified rather than reasoned about
 — re-adding `all-patterns` *with an exemption in place* still fails the gate on
 `--a`.
+
+
+### `--proximity` was also unusable, by this entry's own rule
+
+The rule above was written after `--all-patterns` broke `--a`. Applying it to
+this entry's *other* proposed name shows the same defect, caught this time
+before any code was written:
+
+```text
+$ echo hello | grep --p hello
+hello
+```
+
+`--p` **resolves** in GNU grep — `--perl-regexp` is its only `p` option — so
+`--proximity` would have made it ambiguous and broken a working abbreviation.
+The name is `--near NUM`. GNU spends six options on `n`, so `--n` is already
+ambiguous on both sides; nothing starts with `ne`, so every deeper prefix is
+one GNU rejects today and we accept now.
+
+Worth noting that both names lane A proposed and this entry adopted were
+unusable for the same reason, and neither of us checked. The rule is cheap to
+apply and was not applied until a gate applied it for us.
+
+### The README's equivalence claim is false, measured
+
+The operator's `README.md` says:
+
+> Because the two share a printing rule, `-P` with a NUM at least as large as
+> the file is exactly equivalent to the default whole-file gate. That
+> equivalence is asserted by the test suite.
+
+It is not. Measured against the operator's own `grep.py` on a three-line file
+containing `ALPHA`, `BETA`, `ALPHA`:
+
+| invocation | prints |
+|---|---|
+| no `-P` (whole-file gate) | lines 1, 2, 3 |
+| `-P 100` (≥ file length) | lines 1, 2 |
+
+The cause is in the code and is not subtle: the `-P` loop calls
+`last_match.clear()` when a window is satisfied, so the `BETA` on line 2 is
+consumed by the window that ends there and the `ALPHA` on line 3 finds no live
+`BETA`. The whole-file path has no such step — it emits every matching line
+once the gate passes. The two do *not* share a printing rule, whatever the
+size of NUM.
+
+**This matters to the port beyond being someone else's bug.** The previous
+entry named that equivalence as the first test worth writing, on the grounds
+that it checks two implementations against each other rather than against my
+reading of either. Had it been written it would have failed, and the obvious
+response — "my window logic must be wrong" — would have been the wrong one.
+
+**Ours follows the code, not the README**, because the code is what the
+operator's own output does and therefore what they are used to. Raised for
+them as `open-questions.md` → B-Q10, since only they can say which of the two
+they meant.
 
 
 **Against the choice, honestly:** it is the operator's OS, and their muscle

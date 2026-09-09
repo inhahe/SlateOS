@@ -66159,9 +66159,19 @@ is simply an account whose Linux default set is non-empty.
 ### What this costs, and what is not yet decided
 
 Enforcing parity means the Linux layer checks the rights the native layer does.
-Today `linux.rs` has **two** `require_cap_type` sites (`open` and the mutating
-`*at` calls) against **eight** in `handlers.rs`; `stat`, `lstat`, `statx`,
-`readlink`, `statvfs` and the xattr readers go straight through. Blast radius as
+Counted against the tree on 2026-09-09 rather than copied from the question,
+whose figures were written on 2026-09-03 and have since drifted (it said two
+against eight). `linux.rs` holds **three** `require_cap_type` sites, and only
+two of them concern the filesystem at all — one File-`READ` and one File-`WRITE`
+(the `require_fs_write` helper); the third gates `InputDevice` for keyboard
+reads and is unrelated to this question. It checks `Rights::METADATA`
+**nowhere** — zero occurrences in the whole file — while `handlers.rs` carries
+87 `require_cap_type` sites, **ten** of them requiring `METADATA`.
+
+So the asymmetry is sharper than the question made it sound: on the specific
+right at issue it is **ten against zero**, not two against eight. `stat`,
+`lstat`, `statx`, `readlink`, `statvfs` and the xattr readers go straight
+through. Blast radius as
 filed: ~50 Path-Z tests, plus dash, tcc, python and `ld.so`.
 
 That blast radius is the reason this is not a single change: **the prompt path
@@ -66175,7 +66185,7 @@ check needs a prompt and there is no user to ask. The boot test is exactly that
 case, so it has to be answered before parity lands — but it is an implementation
 question, not another decision for the operator.
 
-**Where it bites:** `kernel/src/syscall/linux.rs` (the two `require_cap_type`
+**Where it bites:** `kernel/src/syscall/linux.rs` (the two filesystem `require_cap_type`
 sites), `kernel/src/syscall/handlers.rs:8365+` (the native gates),
 `kernel/src/proc/spawn.rs` (`SpawnOptions.capabilities`, the only place a grant
 is made today).

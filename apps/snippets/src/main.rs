@@ -86,6 +86,7 @@
 //! because nothing in the program can modify a snippet), and `apply_template`,
 //! which nothing but a test has ever called.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
@@ -100,25 +101,6 @@ use std::process::ExitCode;
 // ============================================================================
 // Catppuccin Mocha theme
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const SKY: Color = Color::from_hex(0x89DCEB);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 
 // ============================================================================
 // Layout constants
@@ -269,21 +251,21 @@ impl Language {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Rust => PEACH,
-            Self::Python => BLUE,
-            Self::JavaScript => YELLOW,
-            Self::TypeScript => BLUE,
-            Self::C => TEAL,
-            Self::Cpp => TEAL,
-            Self::Java => RED,
-            Self::Go => SKY,
-            Self::Shell => GREEN,
-            Self::Sql => MAUVE,
-            Self::Html => PEACH,
-            Self::Css => LAVENDER,
-            Self::PlainText => SUBTEXT0,
+            Self::Rust => pal.peach,
+            Self::Python => pal.blue,
+            Self::JavaScript => pal.yellow,
+            Self::TypeScript => pal.blue,
+            Self::C => pal.teal,
+            Self::Cpp => pal.teal,
+            Self::Java => pal.red,
+            Self::Go => pal.sky,
+            Self::Shell => pal.green,
+            Self::Sql => pal.mauve,
+            Self::Html => pal.peach,
+            Self::Css => pal.lavender,
+            Self::PlainText => pal.subtext0,
         }
     }
 
@@ -551,17 +533,17 @@ enum TokenKind {
 }
 
 impl TokenKind {
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Keyword => MAUVE,
-            Self::String => GREEN,
-            Self::Number => PEACH,
-            Self::Comment => OVERLAY0,
-            Self::Operator => RED,
-            Self::Punctuation => SUBTEXT1,
-            Self::Identifier => TEXT,
-            Self::Type => YELLOW,
-            Self::Plain => TEXT,
+            Self::Keyword => pal.mauve,
+            Self::String => pal.green,
+            Self::Number => pal.peach,
+            Self::Comment => pal.overlay0,
+            Self::Operator => pal.red,
+            Self::Punctuation => pal.subtext1,
+            Self::Identifier => pal.text,
+            Self::Type => pal.yellow,
+            Self::Plain => pal.text,
         }
     }
 }
@@ -1402,6 +1384,12 @@ pub struct App {
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against. Only stored for that.
     size: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl App {
@@ -1417,7 +1405,7 @@ impl App {
             name: "General".into(),
             parent_id: None,
             expanded: true,
-            color: BLUE,
+            color: Color::from_hex(0x89B4FA),
         });
 
         let web_id = id_gen.next_id();
@@ -1426,7 +1414,7 @@ impl App {
             name: "Web Dev".into(),
             parent_id: None,
             expanded: true,
-            color: PEACH,
+            color: Color::from_hex(0xFAB387),
         });
 
         let utils_id = id_gen.next_id();
@@ -1435,7 +1423,7 @@ impl App {
             name: "Utilities".into(),
             parent_id: None,
             expanded: true,
-            color: GREEN,
+            color: Color::from_hex(0xA6E3A1),
         });
 
         // One folder inside another, so the sidebar opens on a tree rather
@@ -1449,7 +1437,7 @@ impl App {
             name: "Regex".into(),
             parent_id: Some(utils_id),
             expanded: true,
-            color: TEAL,
+            color: Color::from_hex(0x94E2D5),
         });
 
         // Sample snippets
@@ -1534,6 +1522,7 @@ impl App {
         });
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             snippets,
             folders,
             id_gen,
@@ -1617,7 +1606,7 @@ impl App {
             name: name.into(),
             parent_id: self.selected_folder_id,
             expanded: true,
-            color: BLUE,
+            color: Color::from_hex(0x89B4FA),
         });
         Some(id)
     }
@@ -2270,7 +2259,7 @@ impl App {
     pub fn frame(&self, width: f32, height: f32) -> Frame<Target> {
         let mut f = Frame::new(width, height);
         let l = Layout::new(width, height);
-        fill(&mut f, l.window, BASE, CornerRadii::ZERO);
+        fill(&mut f, l.window, self.palette.base, CornerRadii::ZERO);
         self.draw_toolbar(&mut f, &l);
         self.draw_sidebar(&mut f, &l);
         self.draw_list(&mut f, &l);
@@ -2283,7 +2272,7 @@ impl App {
 
     fn draw_toolbar(&self, f: &mut Frame<Target>, l: &Layout) {
         let bar = l.toolbar;
-        fill(f, bar, CRUST, CornerRadii::ZERO);
+        fill(f, bar, self.palette.crust, CornerRadii::ZERO);
         f.clip(bar);
         let mut rest = inset_x(bar, l.pad);
 
@@ -2302,7 +2291,7 @@ impl App {
                 text: &count,
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
             },
             count_rect,
         );
@@ -2322,15 +2311,15 @@ impl App {
                 text: TOOLBAR_TITLE,
                 size: l.title,
                 weight: FontWeightHint::Bold,
-                color: TEXT,
+                color: self.palette.text,
             },
             title_rect,
         );
 
         for (label, color, target) in [
-            ("+ New", BLUE, Target::New),
-            ("Export", GREEN, Target::Export),
-            ("Stats", MAUVE, Target::Stats),
+            ("+ New", self.palette.blue, Target::New),
+            ("Export", self.palette.green, Target::Export),
+            ("Stats", self.palette.mauve, Target::Stats),
         ] {
             // Drawn bold, so measured bold: the old estimate sized "Import"
             // from its regular-weight guess and let the bold label touch the
@@ -2344,7 +2333,7 @@ impl App {
                     text: label,
                     size: l.small,
                     weight: FontWeightHint::Bold,
-                    color: CRUST,
+                    color: self.palette.crust,
                 },
                 button,
             );
@@ -2359,14 +2348,14 @@ impl App {
             return;
         }
         let round = CornerRadii::all(outer.h / 2.0);
-        fill(f, outer, SURFACE0, round);
+        fill(f, outer, self.palette.surface0, round);
         // Recorded before the two controls inside it, because a hit test takes
         // the last match and these are drawn on top of the box.
         f.hit(Target::Search, outer);
         if self.search_focus {
             // The one thing that says a letter will be typed rather than acted
             // on.
-            stroke(f, outer, BLUE, 1.0, round);
+            stroke(f, outer, self.palette.blue, 1.0, round);
         }
 
         let mut inner = inset_x(outer, outer.h / 2.0);
@@ -2382,7 +2371,7 @@ impl App {
                     text: CLEAR_MARK,
                     size: l.small,
                     weight: FontWeightHint::Bold,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                 },
                 cross,
             );
@@ -2401,16 +2390,16 @@ impl App {
                 text: scope,
                 size: l.tiny,
                 weight: FontWeightHint::Bold,
-                color: LAVENDER,
+                color: self.palette.lavender,
             },
             scope_rect,
         );
         f.hit(Target::Scope, scope_rect);
 
         let (shown, color) = if self.search_query.is_empty() {
-            (SEARCH_PLACEHOLDER, OVERLAY0)
+            (SEARCH_PLACEHOLDER, self.palette.overlay0)
         } else {
-            (self.search_query.as_str(), TEXT)
+            (self.search_query.as_str(), self.palette.text)
         };
         label_left(
             f,
@@ -2429,7 +2418,7 @@ impl App {
         if side.is_empty() {
             return;
         }
-        fill(f, side, MANTLE, CornerRadii::ZERO);
+        fill(f, side, self.palette.mantle, CornerRadii::ZERO);
         f.clip(side);
 
         // One icon column, as wide as the widest icon. They used to be drawn
@@ -2448,7 +2437,7 @@ impl App {
             }
             let selected = view == self.sidebar_view;
             if selected {
-                fill(f, r, SURFACE0, CornerRadii::all(l.pad * 0.5));
+                fill(f, r, self.palette.surface0, CornerRadii::all(l.pad * 0.5));
             }
             let mut rest = inset_x(r, l.pad * 0.5);
             let icon = take_left(&mut rest, icon_w, l.pad);
@@ -2458,7 +2447,11 @@ impl App {
                     text: view.icon(),
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: if selected { BLUE } else { OVERLAY0 },
+                    color: if selected {
+                        self.palette.blue
+                    } else {
+                        self.palette.overlay0
+                    },
                 },
                 icon,
             );
@@ -2472,7 +2465,11 @@ impl App {
                     } else {
                         FontWeightHint::Regular
                     },
-                    color: if selected { TEXT } else { SUBTEXT0 },
+                    color: if selected {
+                        self.palette.text
+                    } else {
+                        self.palette.subtext0
+                    },
                 },
                 rest,
             );
@@ -2486,7 +2483,7 @@ impl App {
             (side.w - l.pad * 2.0).max(0.0),
             1.0,
         );
-        fill(f, sep, SURFACE1, CornerRadii::ZERO);
+        fill(f, sep, self.palette.surface1, CornerRadii::ZERO);
 
         let items = Rect::new(
             side.x,
@@ -2510,7 +2507,7 @@ impl App {
                         text: &note,
                         size: l.small,
                         weight: FontWeightHint::Regular,
-                        color: OVERLAY0,
+                        color: self.palette.overlay0,
                     },
                     Rect::new(items.x + l.pad * 2.0, items.y, items.w, l.row),
                 );
@@ -2539,7 +2536,7 @@ impl App {
             );
             let selected = self.selected_folder_id == Some(id);
             if selected {
-                fill(f, r, SURFACE0, CornerRadii::all(l.pad * 0.5));
+                fill(f, r, self.palette.surface0, CornerRadii::all(l.pad * 0.5));
             }
             f.hit(Target::Folder(id), r);
 
@@ -2565,7 +2562,7 @@ impl App {
                         },
                         size: l.tiny,
                         weight: FontWeightHint::Bold,
-                        color: SUBTEXT0,
+                        color: self.palette.subtext0,
                     },
                     twisty,
                 );
@@ -2587,7 +2584,7 @@ impl App {
                         text: CLEAR_MARK,
                         size: l.small,
                         weight: FontWeightHint::Bold,
-                        color: RED,
+                        color: self.palette.red,
                     },
                     cross,
                 );
@@ -2611,7 +2608,7 @@ impl App {
                     text: &count,
                     size: l.tiny,
                     weight: FontWeightHint::Regular,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                 },
                 count_rect,
             );
@@ -2635,7 +2632,11 @@ impl App {
                     text: &folder.name,
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: if selected { TEXT } else { SUBTEXT0 },
+                    color: if selected {
+                        self.palette.text
+                    } else {
+                        self.palette.subtext0
+                    },
                 },
                 rest,
             );
@@ -2662,7 +2663,7 @@ impl App {
                 text: NEW_FOLDER_LABEL,
                 size: l.small,
                 weight: FontWeightHint::Bold,
-                color: BLUE,
+                color: self.palette.blue,
             },
             inset_x(new_row, l.pad),
         );
@@ -2687,7 +2688,7 @@ impl App {
             );
             let selected = self.selected_tag.as_deref() == Some(tag.as_str());
             if selected {
-                fill(f, r, SURFACE0, CornerRadii::all(l.pad * 0.5));
+                fill(f, r, self.palette.surface0, CornerRadii::all(l.pad * 0.5));
             }
             f.hit(Target::Tag(index), r);
 
@@ -2704,7 +2705,7 @@ impl App {
                     text: &shown,
                     size: l.tiny,
                     weight: FontWeightHint::Regular,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                 },
                 count_rect,
             );
@@ -2716,7 +2717,11 @@ impl App {
                     text: &label,
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: if selected { TEXT } else { TEAL },
+                    color: if selected {
+                        self.palette.text
+                    } else {
+                        self.palette.teal
+                    },
                 },
                 rest,
             );
@@ -2744,7 +2749,7 @@ impl App {
             );
             let selected = self.selected_language == Some(lang);
             if selected {
-                fill(f, r, SURFACE0, CornerRadii::all(l.pad * 0.5));
+                fill(f, r, self.palette.surface0, CornerRadii::all(l.pad * 0.5));
             }
             f.hit(Target::Lang(lang), r);
 
@@ -2761,7 +2766,7 @@ impl App {
                     text: &shown,
                     size: l.tiny,
                     weight: FontWeightHint::Regular,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                 },
                 count_rect,
             );
@@ -2776,7 +2781,7 @@ impl App {
                     dot_side,
                     dot_side,
                 ),
-                lang.color(),
+                lang.color(&self.palette),
                 CornerRadii::all(dot_side / 2.0),
             );
             label_left(
@@ -2785,7 +2790,11 @@ impl App {
                     text: lang.name(),
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: if selected { TEXT } else { SUBTEXT0 },
+                    color: if selected {
+                        self.palette.text
+                    } else {
+                        self.palette.subtext0
+                    },
                 },
                 rest,
             );
@@ -2797,16 +2806,16 @@ impl App {
         if col.is_empty() {
             return;
         }
-        fill(f, col, BASE, CornerRadii::ZERO);
+        fill(f, col, self.palette.base, CornerRadii::ZERO);
         fill(
             f,
             Rect::new(col.x, col.y, 1.0, col.h),
-            SURFACE0,
+            self.palette.surface0,
             CornerRadii::ZERO,
         );
 
         let head = self.list_header(l);
-        fill(f, head, CRUST, CornerRadii::ZERO);
+        fill(f, head, self.palette.crust, CornerRadii::ZERO);
         let sort = format!("Sort: {}", self.sort_order.label());
         label_left(
             f,
@@ -2814,7 +2823,7 @@ impl App {
                 text: &sort,
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
             },
             inset_x(head, l.pad),
         );
@@ -2859,7 +2868,7 @@ impl App {
                     text: EMPTY_LIST,
                     size: l.font,
                     weight: FontWeightHint::Regular,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                 },
                 Rect::new(body.x, body.y, body.w, l.list_row),
             );
@@ -2871,7 +2880,12 @@ impl App {
         let selected = self.selected_snippet_id == Some(s.id);
         let card = shrink(r, l.pad * 0.5);
         if selected {
-            fill(f, card, SURFACE0, CornerRadii::all(l.pad * 0.5));
+            fill(
+                f,
+                card,
+                self.palette.surface0,
+                CornerRadii::all(l.pad * 0.5),
+            );
         }
         f.hit(Target::Row(s.id), r);
 
@@ -2894,7 +2908,11 @@ impl App {
                 text: STAR,
                 size: l.font,
                 weight: FontWeightHint::Bold,
-                color: if s.favorite { YELLOW } else { SURFACE1 },
+                color: if s.favorite {
+                    self.palette.yellow
+                } else {
+                    self.palette.surface1
+                },
             },
             star,
         );
@@ -2910,7 +2928,7 @@ impl App {
         fill(
             f,
             badge,
-            s.language.color(),
+            s.language.color(&self.palette),
             CornerRadii::all(badge_h / 2.0),
         );
         label_centred(
@@ -2919,7 +2937,7 @@ impl App {
                 text: name,
                 size: l.tiny,
                 weight: FontWeightHint::Bold,
-                color: CRUST,
+                color: self.palette.crust,
             },
             badge,
         );
@@ -2932,7 +2950,11 @@ impl App {
                 text: &s.title,
                 size: l.font,
                 weight: FontWeightHint::Bold,
-                color: if selected { TEXT } else { SUBTEXT1 },
+                color: if selected {
+                    self.palette.text
+                } else {
+                    self.palette.subtext1
+                },
             },
             title,
         );
@@ -2951,7 +2973,7 @@ impl App {
                     text: &shown,
                     size: l.tiny,
                     weight: FontWeightHint::Regular,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                 },
                 Rect::new(
                     inner.x,
@@ -2968,11 +2990,11 @@ impl App {
         if col.is_empty() {
             return;
         }
-        fill(f, col, MANTLE, CornerRadii::ZERO);
+        fill(f, col, self.palette.mantle, CornerRadii::ZERO);
         fill(
             f,
             Rect::new(col.x, col.y, 1.0, col.h),
-            SURFACE0,
+            self.palette.surface0,
             CornerRadii::ZERO,
         );
         let parts = self.editor_parts(l);
@@ -2993,7 +3015,7 @@ impl App {
                     text: EMPTY_HEADLINE,
                     size: l.head,
                     weight: FontWeightHint::Regular,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                 },
                 headline,
             );
@@ -3003,7 +3025,7 @@ impl App {
                     text: EMPTY_SUBLINE,
                     size: l.font,
                     weight: FontWeightHint::Regular,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                 },
                 Rect::new(
                     col.x,
@@ -3018,7 +3040,7 @@ impl App {
     }
 
     fn draw_editor_header(&self, f: &mut Frame<Target>, l: &Layout, s: &Snippet, area: Rect) {
-        fill(f, area, CRUST, CornerRadii::ZERO);
+        fill(f, area, self.palette.crust, CornerRadii::ZERO);
         let mut top = Rect::new(
             area.x + l.pad,
             area.y + l.pad,
@@ -3027,8 +3049,8 @@ impl App {
         );
 
         for (label, color, target) in [
-            (DELETE_LABEL, RED, Target::Delete),
-            (USE_LABEL, BLUE, Target::Use),
+            (DELETE_LABEL, self.palette.red, Target::Delete),
+            (USE_LABEL, self.palette.blue, Target::Use),
         ] {
             let want = text::padded_width(label, l.pad * 2.0, l.tiny, FontWeightHint::Bold);
             let button = inset_y(take_right(&mut top, want, l.pad), l.pad * 0.25);
@@ -3039,7 +3061,7 @@ impl App {
                     text: label,
                     size: l.tiny,
                     weight: FontWeightHint::Bold,
-                    color: CRUST,
+                    color: self.palette.crust,
                 },
                 button,
             );
@@ -3055,14 +3077,14 @@ impl App {
                 ),
                 l.pad * 0.25,
             );
-            fill(f, pill, YELLOW, CornerRadii::all(pill.h / 2.0));
+            fill(f, pill, self.palette.yellow, CornerRadii::all(pill.h / 2.0));
             label_centred(
                 f,
                 &Label {
                     text: TEMPLATE_LABEL,
                     size: l.tiny,
                     weight: FontWeightHint::Bold,
-                    color: CRUST,
+                    color: self.palette.crust,
                 },
                 pill,
             );
@@ -3074,7 +3096,7 @@ impl App {
                 text: &s.title,
                 size: l.head,
                 weight: FontWeightHint::Bold,
-                color: TEXT,
+                color: self.palette.text,
             },
             top,
         );
@@ -3102,7 +3124,7 @@ impl App {
                 text: &lang,
                 size: l.small,
                 weight: FontWeightHint::Bold,
-                color: s.language.color(),
+                color: s.language.color(&self.palette),
             },
             lang_rect,
         );
@@ -3113,7 +3135,7 @@ impl App {
                 text: &used,
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
             },
             second,
         );
@@ -3125,7 +3147,7 @@ impl App {
                     text: &s.description,
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                 },
                 Rect::new(
                     area.x + l.pad,
@@ -3141,7 +3163,7 @@ impl App {
         if area.is_empty() {
             return;
         }
-        fill(f, area, BASE, CornerRadii::all(l.pad * 0.6));
+        fill(f, area, self.palette.base, CornerRadii::all(l.pad * 0.6));
         f.clip(area);
         f.hit(Target::Code, area);
 
@@ -3177,7 +3199,7 @@ impl App {
                     text: &number,
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                 },
                 inner.x,
                 y,
@@ -3207,7 +3229,7 @@ impl App {
                         text: &token.text,
                         size: l.font,
                         weight,
-                        color: token.kind.color(),
+                        color: token.kind.color(&self.palette),
                     },
                     pen,
                     y,
@@ -3224,7 +3246,7 @@ impl App {
         if area.is_empty() {
             return;
         }
-        fill(f, area, CRUST, CornerRadii::ZERO);
+        fill(f, area, self.palette.crust, CornerRadii::ZERO);
         let mut rest = inset_x(area, l.pad);
 
         if let Some(s) = self.selected_snippet() {
@@ -3240,7 +3262,7 @@ impl App {
                     text: &lines,
                     size: l.tiny,
                     weight: FontWeightHint::Regular,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                 },
                 rect,
             );
@@ -3250,8 +3272,8 @@ impl App {
         // say, because it is news and the tags are not.
         if let Some(note) = &self.export_note {
             let (message, color) = match note {
-                Ok(message) => (message, GREEN),
-                Err(message) => (message, RED),
+                Ok(message) => (message, self.palette.green),
+                Err(message) => (message, self.palette.red),
             };
             label_left(
                 f,
@@ -3276,14 +3298,19 @@ impl App {
             let label = format!("#{tag}");
             let want = text::padded_width(&label, l.pad * 2.0, l.tiny, FontWeightHint::Regular);
             let pill = inset_y(take_left(&mut rest, want, l.pad * 0.5), l.pad * 0.25);
-            fill(f, pill, SURFACE0, CornerRadii::all(pill.h / 2.0));
+            fill(
+                f,
+                pill,
+                self.palette.surface0,
+                CornerRadii::all(pill.h / 2.0),
+            );
             label_centred(
                 f,
                 &Label {
                     text: &label,
                     size: l.tiny,
                     weight: FontWeightHint::Regular,
-                    color: TEAL,
+                    color: self.palette.teal,
                 },
                 pill,
             );
@@ -3330,7 +3357,7 @@ impl App {
             w,
             h,
         );
-        fill(f, dialog, MANTLE, CornerRadii::all(l.pad));
+        fill(f, dialog, self.palette.mantle, CornerRadii::all(l.pad));
         f.clip(dialog);
 
         let inner = shrink(dialog, l.pad * 2.0);
@@ -3342,7 +3369,7 @@ impl App {
                 text: STATS_TITLE,
                 size: l.head,
                 weight: FontWeightHint::Bold,
-                color: BLUE,
+                color: self.palette.blue,
             },
             Rect::new(inner.x, y, inner.w, head_h),
         );
@@ -3356,7 +3383,7 @@ impl App {
                     text: name,
                     size: l.font,
                     weight: FontWeightHint::Regular,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                 },
                 Rect::new(row.x, row.y, name_w, row.h),
             );
@@ -3366,7 +3393,7 @@ impl App {
                     text: value,
                     size: l.font,
                     weight: FontWeightHint::Bold,
-                    color: TEXT,
+                    color: self.palette.text,
                 },
                 Rect::new(row.x + name_w + l.pad * 2.0, row.y, value_w, row.h),
             );
@@ -3380,7 +3407,7 @@ impl App {
             fill(
                 f,
                 Rect::new(row.x, row.y + (row.h - dot_side) / 2.0, dot_side, dot_side),
-                lang.color(),
+                lang.color(&self.palette),
                 CornerRadii::all(dot_side / 2.0),
             );
             let label = format!("{}: {count}", lang.name());
@@ -3390,7 +3417,7 @@ impl App {
                     text: &label,
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                 },
                 Rect::new(
                     row.x + dot_side + l.pad,
@@ -3690,6 +3717,10 @@ pub fn handle_event(app: &mut App, event: &Event) -> EventResult {
 }
 
 impl WindowApp for App {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         TOOLBAR_TITLE.to_string()
     }
@@ -5776,6 +5807,7 @@ mod tests {
 
     #[test]
     fn an_export_that_worked_says_so_in_green() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let dir = std::env::temp_dir().join("snippets-export-ok");
         std::fs::create_dir_all(&dir).unwrap();
         let mut a = app_with(&["one"]);
@@ -5785,13 +5817,14 @@ mod tests {
             .into_iter()
             .find(|(t, ..)| t.starts_with("Exported "))
             .unwrap_or_else(|| panic!("no export note in {:?}", texts(&a, W)));
-        assert_eq!(note.4, GREEN);
+        assert_eq!(note.4, pal.green);
         assert!(a.export_path.exists());
         let _ = std::fs::remove_file(&a.export_path);
     }
 
     #[test]
     fn an_export_that_failed_says_so_in_red() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         // The note used to be a bare `String` set on both paths, so a write
         // that failed reported the same cheerful "Exported 6 snippets" as one
         // that worked — the `Result` was dropped with a `let _ =`.
@@ -5804,7 +5837,7 @@ mod tests {
             .into_iter()
             .find(|(t, ..)| t.starts_with("Could not write "))
             .unwrap_or_else(|| panic!("no failure note in {:?}", texts(&a, W)));
-        assert_eq!(note.4, RED);
+        assert_eq!(note.4, pal.red);
         assert!(!a.export_path.exists());
     }
 
@@ -6223,5 +6256,64 @@ mod tests {
         // clicks "nothing" silently click something.
         let a = app();
         assert!(bare_point(&a, W).is_some());
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut App) -> Vec<Color> {
+            app.render(1200.0, 800.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = App::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

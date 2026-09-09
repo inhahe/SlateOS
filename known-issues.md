@@ -125380,6 +125380,80 @@ least no longer *divergent* dead code.
 
 ---
 
+## TD-C-ACCESSIBILITY-STOPS-AT-THE-WINDOW-FRAME
+
+**Date:** 2026-09-09. **Lane:** C.
+**Where:** `gui/desktop/src/a11y.rs` (the settings); `gui/toolkit/src/**` (the
+widgets that ignore them).
+
+**In short:** the accessibility settings only change the desktop shell — the
+taskbar, the launcher, the window animations. They do not change anything
+*inside* an application window, because the toolkit that draws every
+application's text, buttons and text fields cannot see them. So a user who
+turns on high contrast gets a high-contrast taskbar and an unchanged
+application; and three settings — bigger text, a wider text cursor, and a
+visible focus ring — do nothing at all, because those three could only ever
+have been applied by the toolkit.
+
+**The evidence, and why it is one finding rather than three.** Counting uses of
+each `AccessibilityConfig` field outside `a11y.rs`:
+
+| setting | uses outside `a11y.rs` | where its consumer would have to live |
+|---|---|---|
+| `high_contrast` | 117 | shell |
+| `color_filter` | 26 | shell / compositor |
+| `reduced_motion` | 17 | shell (`animations.rs`) |
+| `magnifier` | 16 | shell overlay |
+| `visual_alerts` | 4 | shell |
+| `text_scale` | **0** | **toolkit** — every text draw |
+| `caret_width` | **0** | **toolkit** — every text field |
+| `focus_indicator` | **0** | **toolkit** — every focusable widget |
+| `screen_reader` | **0** | nowhere yet; the feature does not exist |
+
+The split is not a coincidence and not a to-do list of three forgotten
+wirings. Every setting that works is one whose consumer happens to live in
+`gui/desktop`; every setting that does nothing is one whose consumer would have
+to live in `gui/toolkit`. And `grep -rn 'reduced_motion|high_contrast|color_filter'
+gui/toolkit/src` returns **nothing** — not one accessibility setting crosses
+that boundary, so the three dead ones are the visible symptom of a channel that
+was never built.
+
+**Why nothing warned, and why the tests did not catch it.** `text_scale` and
+`caret_width` each have tests — `a11y.rs` round-trips them through the config
+file and checks the clamping (`text_scale=100` clamps to 3.0). Those tests pass
+and always have. They prove the setting is *stored*, not that it does anything,
+which is exactly the kind of coverage that makes a dead setting look wired.
+
+**The structural cause.** `gui/toolkit` has no dependency on `gui/appearance`
+and none on the accessibility config; its widgets draw from their own
+constants (`pathbar.rs`'s `COLOR_LAVENDER`, `CURSOR_WIDTH = 2.0`). It has no
+channel for user presentation config of any kind. That is the same missing
+channel `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`
+part 2 needs in order to thread `&Palette` into those modules, and the two
+should be fixed together: a second, ad-hoc parameter threaded now just for the
+caret would have to be unified with the palette channel later.
+
+**A smaller, real inconsistency visible from the same survey.** The carets that
+*are* drawn disagree about their width with no reason recorded: `pathbar.rs`
+2.0 (named `CURSOR_WIDTH`), `launcher.rs` 2.0 (inline), `run_dialog.rs` 1.0
+(inline). `caret_width` is documented as a *multiplier*, so it scales whatever
+base each field uses — which means these three want a shared base before the
+multiplier means anything consistent.
+
+**Proper fix:** give `gui/toolkit` one presentation-config channel carrying the
+palette and the accessibility scalars together, then apply `caret_width` at the
+caret draw sites, `text_scale` at the font-size source, and `focus_indicator`
+around the focused widget. Not three separate wirings.
+
+**Trigger:** do it as part of the palette entry's part 2, which needs the same
+channel and is much the larger half.
+
+**If never fixed:** accessibility is shell-deep. A low-vision user can enlarge
+nothing they actually read, and the settings page — which does not currently
+expose `text_scale` or `caret_width` at all, so they can only be set by editing
+the config file by hand — is not lying to them only because it does not offer
+them. If it ever grows those controls without this fix, it will be.
+
 ## TD-C-DYNDNS-PAGE-IS-READ-ONLY
 
 **Date:** 2026-09-09. **Lane:** C.

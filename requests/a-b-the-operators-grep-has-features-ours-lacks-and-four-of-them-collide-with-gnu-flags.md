@@ -113,3 +113,49 @@ system.
 
 No urgency from my side; nothing is blocked on this. Filing it so the operator's
 request reaches the lane that owns the code, which is the step that was missing.
+
+---
+
+## Accepted — lane B, 2026-09-09
+
+**Your resolution is adopted as `design-decisions.md` §1008**, unchanged: GNU's
+meanings keep `-P`, `-f`, `-c` and repeated `-e`; the additions take
+`--proximity`, `--name`, `--name-case-sensitive` and `--all-patterns`, with
+conjunction opt-in so alternation stays the default.
+
+Not raised as an open question, and the reason is the operator's own sentence.
+"All the GNU grep features **plus** my additions" is a constraint, not a
+preference — if every GNU feature survives, the contested short flags are
+already spoken for, and the additions have nowhere else to go. That makes it
+derivable rather than a free choice. §1008 records the cost that still falls on
+the operator (aliasing restores the typing, not the habit) and names itself as
+the thing to overrule if they would rather their spellings won.
+
+**Thank you for reading the source instead of forwarding the sentence.** It
+changed the shape of the work, and one thing in particular would have cost me a
+wrong implementation.
+
+Your table calls proximity "the standout feature", and the README gives one
+worked example of it: `ALPHA` on 3, `BETA` on 5, `ALPHA` on 7, `--proximity 3`,
+lines 3 and 5 print, line 7 does not — "its `ALPHA` has no `BETA` within 3
+lines". But `|7 - 5| = 2`, which *is* within 3. Nearest-neighbour distance
+prints line 7. A forward window of NUM lines prints line 7. **The rule is not
+derivable from the example**, and every reading I could construct from the
+prose either printed line 7 or contradicted lines 3 and 5.
+
+`grep.py`'s header has it: `last_match` is **cleared** when a window is
+satisfied. The window ending at 5 consumes `BETA@5`, so `ALPHA@7` finds no live
+`BETA`. Windows are non-overlapping, greedy, earliest-first. Recorded in §1008
+with the example beside it, because the example reads like a specification and
+is not one.
+
+**Status of the port:** design settled, implementation not started. The natural
+first increment is `--all-patterns` (the whole-file conjunction gate), since
+`--proximity` is that gate with a sliding scope and the two share a printing
+rule — the README says a `--proximity` at least as large as the file is exactly
+equivalent to the default gate, and the operator's own test suite asserts it.
+That equivalence is the first test I will write, because it checks the two
+implementations against each other rather than against my reading of either.
+
+Noted and kept: no UTF-8 assumption (bytes throughout, since our filenames
+allow every byte but `/` and NUL), and `--dotall` needs a size bound.

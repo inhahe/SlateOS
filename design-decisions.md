@@ -69648,3 +69648,95 @@ when the reader held its own hardcoded copy and ignored the desktop entirely,
 so it could not distinguish the bug from the fix. It now asserts the fields
 *equal the palette's*, and that a light desktop produces a different background
 — which is the property that was actually wrong.
+
+
+## 1008. The operator's grep features keep GNU's short flags and take long-form spellings; and the proximity rule, read out of the source rather than the example
+
+**Date:** 2026-09-09
+**Lane:** B
+**Decided by:** Claude (autonomous), on a constraint the operator supplied
+
+**In short:** the operator asked for their own `grep`'s extra features to be
+added to SlateOS's, "so that it has all the GNU grep features plus my
+additions". Four of their flags already mean something else in GNU grep, so
+"all the GNU features plus mine" cannot be spelled the way their tool spells
+it. Their sentence decides which side gives way: GNU's meanings keep the short
+flags, and the additions get long names. Nothing is lost at the command line,
+because their tool already has a config file that can alias the short forms
+back.
+
+**Where this came from.** `§919` records the operator's request; lane A then
+read their source, found the collisions, and filed
+`requests/a-b-the-operators-grep-has-features-ours-lacks-and-four-of-them-collide-with-gnu-flags.md`
+with a proposed resolution. This entry adopts it. Lane A's own note is worth
+repeating: §919 said lane B owned the port and nobody filed anything, so for two
+days the request lived only in a decisions file that lane B had no reason to
+re-read.
+
+### The collisions and the resolution
+
+| Addition | Operator's spelling | Collides with | Resolved spelling |
+|---|---|---|---|
+| proximity matching | `-P NUM` | `-P` = `--perl-regexp` | `--proximity NUM` |
+| filename globs | `-f PATTERN` | `-f` = patterns from file | `--name PATTERN` |
+| case-sensitive filenames | `-c` | `-c` = `--count` | `--name-case-sensitive` |
+| conjunction across patterns | repeated `-e` | `-e` repeated = alternation | `--all-patterns` (opt-in) |
+
+The last is the sharp one, and the reason this is a decision rather than a
+rename: it is not a spelling clash but an **opposite meaning on identical
+syntax**. `grep -e a -e b f` prints lines matching either under GNU and prints
+nothing unless the file contains both under the operator's. Silently choosing
+either would make a command that already appears in scripts mean something
+new, so conjunction becomes opt-in and alternation stays the default.
+
+**Against the choice, honestly:** it is the operator's OS, and their muscle
+memory is a real cost that falls on them rather than on a hypothetical GNU
+user. The mitigation is only a mitigation — aliasing the short forms back
+through their config file restores the typing, not the habit of `-P` meaning
+proximity everywhere else. If they would rather their spellings won, that is
+their call to make and this entry is the thing to overrule.
+
+### The proximity rule, and why the README's example is not enough to derive it
+
+This is recorded because it nearly cost a wrong implementation. `README.md`
+gives one worked example: `ALPHA` on line 3, `BETA` on line 5, `ALPHA` again on
+line 7, with `--proximity 3`, and says lines 3 and 5 print while line 7 does
+not, "its `ALPHA` has no `BETA` within 3 lines".
+
+But `|7 - 5| = 2`, which *is* within 3. Every obvious reading of the sentence —
+nearest-neighbour distance, or a forward window of NUM lines — either
+contradicts the stated output or prints line 7. The rule is not derivable from
+the example.
+
+`grep.py`'s own header states it:
+
+> a history buffer of `proximity + before_context + 1` lines is kept. For each
+> line all regexes are checked and `last_match[idx]` updated; entries older
+> than `proximity` lines expire. When every regex has a live match the window
+> is satisfied, and the matching lines within it (expanded by before/after
+> context) are printed from the buffer. **`last_match` is then cleared** to
+> look for the next window.
+
+The clearing is the missing piece: the window ending at line 5 *consumes*
+`BETA@5`, so when `ALPHA@7` arrives there is no live `BETA` left and no window
+is satisfied. Windows are non-overlapping and greedy, earliest-first.
+
+**The lesson, since it generalises:** a worked example pins down what the
+output is, not what the rule is, and a rule inferred from one example is a
+guess that happens to fit. The implementation is the specification when the
+two are available; the prose is a summary of it.
+
+**Two porting constraints**, from lane A's request and kept here because they
+are easy to lose:
+
+* **No UTF-8 assumption.** Both of the operator's builds emit UTF-8 and
+  reconfigure the console for it — right on Windows, wrong here. SlateOS
+  filenames may contain every byte but `/` and NUL, so names and matched text
+  stay `&[u8]`/`OsStr`. Forcing UTF-8 would corrupt exactly the filenames the
+  tool handles well.
+* **`--dotall` reads whole files**, which their README notes disables line
+  numbers. Ours needs a bound; we make no guarantee about file size.
+
+**If it is never revisited:** nothing degrades — our grep stays GNU-compatible
+and simply lacks the additions. The cost is only that the operator keeps two
+greps.

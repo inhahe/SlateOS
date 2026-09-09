@@ -5318,10 +5318,7 @@ mod tests {
         let mut saved = SigsetT::EMPTY;
         let mut want = SigsetT::EMPTY;
         want.bits[0] = 1u64 << (SIGUSR2 - 1);
-        assert_eq!(
-            sigprocmask(SIG_SETMASK, &raw const want, &raw mut saved),
-            0
-        );
+        assert_eq!(sigprocmask(SIG_SETMASK, &raw const want, &raw mut saved), 0);
 
         let mut during = SigsetT::EMPTY;
         during.bits[0] = 1u64 << (SIGUSR1 - 1);

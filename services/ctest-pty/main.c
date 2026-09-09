@@ -40,8 +40,38 @@
  * Deliberately no timeouts.  `alarm`/`setitimer` report success and arm
  * nothing (`known-issues.md` -> `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING`), so
  * a fixture that trusted them would hang the boot test rather than fail it.
- * Every read here is non-blocking with a bounded spin, and every wait for the
- * child is bounded, so this fixture can fail but cannot hang.
+ *
+ * Two independent bounds, because the first version of this file had only one
+ * and it did not hold.  It set `O_NONBLOCK` and trusted it, and hung the boot
+ * test for two hours at check 14: `O_NONBLOCK` is a flag in libc's descriptor
+ * table that each read arm has to *consult*, and the pty-slave arm dispatched
+ * the handle-less `SYS_TTY_READ`, which resolves `current_tty()` -- the
+ * console -- and so had no descriptor whose flags it could honour.  The flag
+ * was set, read by nobody, and dropped (`TD-A-CTEST-PTY-HANGS-BOOT`).  That
+ * root cause is fixed (872/873, lane B 2026-09-09).
+ *
+ * So now: `O_NONBLOCK` is set **and** every read is gated on
+ * `poll(POLLIN, 0)`.
+ *
+ * The exact strength of the poll gate, stated precisely because the last
+ * confident sentence in this comment was wrong.  `pty::readable()` answers
+ * *are there bytes* -- `pending > 0 || !input.is_empty() || master_gone()` --
+ * which is exact for a master and for a raw-mode slave, and an **upper bound**
+ * for a canonical slave, where the bytes have yet to go through the line
+ * editor (the kernel says so itself on `SYS_PTY_READABLE_BYTES`).  So:
+ *
+ *   * master, raw slave -- poll alone bounds the read; `O_NONBLOCK` is belt.
+ *   * canonical slave with an incomplete line -- poll says readable and a
+ *     blocking read would still park.  Only `O_NONBLOCK` bounds that one.
+ *
+ * Every canonical read here is issued after the newline has been written, so
+ * a complete line is already queued and neither bound is load-bearing; the
+ * pair is what makes that true by construction rather than by luck.
+ *
+ * Writes are not gated, by inspection rather than by omission: every write
+ * here is 1-3 bytes into a freshly created pty whose ring is empty, so none
+ * can fill it.  `O_NONBLOCK` is still set, so a surprise there fails rather
+ * than parks.
  *
  * Exit code 42 == every check passed; anything else identifies the first
  * failing check (see the legend in the kernel rung that runs this).
@@ -49,6 +79,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pty.h>
 #include <signal.h>
 #include <string.h>
@@ -63,11 +94,36 @@
  * always wins, finite so a broken one fails instead of hanging. */
 #define SPIN 2000000L
 
-/* Read exactly `want` bytes, or give up.  Returns bytes read. */
+/* Is `fd` readable right now?  Zero timeout, so this never waits. */
+static int readable(int fd)
+{
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    if (poll(&pfd, 1, 0) <= 0) {
+        return 0;
+    }
+    /* POLLHUP counts: a read at hangup returns 0 immediately rather than
+     * blocking, and treating it as "not ready" would spin to the budget and
+     * then report a timeout for what is really an EOF. */
+    return (pfd.revents & (POLLIN | POLLHUP)) != 0;
+}
+
+/* Read exactly `want` bytes, or give up.  Returns bytes read.
+ *
+ * A read is issued only once `readable()` says bytes are present, which makes
+ * this bounded without relying on `O_NONBLOCK` for a master or a raw-mode
+ * slave.  For a canonical slave with an incomplete line the gate is an upper
+ * bound and `O_NONBLOCK` is what bounds the read -- see the header.  Both are
+ * in place; neither is trusted alone. */
 static long read_bounded(int fd, char *buf, long want)
 {
     long got = 0;
     for (long i = 0; i < SPIN && got < want; i++) {
+        if (!readable(fd)) {
+            continue;
+        }
         long n = read(fd, buf + got, (size_t)(want - got));
         if (n > 0) {
             got += n;
@@ -86,6 +142,9 @@ static void drain(int fd)
 {
     char junk[256];
     for (int i = 0; i < 64; i++) {
+        if (!readable(fd)) {
+            break;
+        }
         long n = read(fd, junk, sizeof junk);
         if (n <= 0) {
             break;
@@ -205,8 +264,20 @@ int main(void)
         return 21;
     }
     {
-        /* No newline yet, so canonical mode must hold the line back.  A
-         * short bounded read that finds nothing is the assertion. */
+        /* No newline yet, so canonical mode must hold the line back.
+         *
+         * Asked as "does a read return nothing?" and deliberately NOT as
+         * "does poll say not-readable".  Poll would be the wrong instrument:
+         * `pty::readable()` reports byte *presence*, and on a canonical slave
+         * the two bytes of "hi" are present while the line is not complete --
+         * so poll says readable here and is right to.  A poll-based version
+         * of this check failed the fixture with a spurious 22 that read as
+         * "canonical mode leaked a partial line" when it meant "poll is an
+         * upper bound".  The read is what the line editor actually gates.
+         *
+         * This read cannot park: the fd carries `O_NONBLOCK` and the slave
+         * arm dispatches `SYS_PTY_SLAVE_TRY_READ`, so an incomplete line is
+         * `EAGAIN` rather than a wait. */
         char buf[8];
         long n = 0;
         for (int i = 0; i < 2000; i++) {

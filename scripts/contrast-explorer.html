@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>SlateOS — contrast explorer (open-questions C-Q10)</title>
+<style>
+  :root { color-scheme: light; }
+  body { margin:0; font:14px/1.5 "Segoe UI",system-ui,sans-serif; background:#f6f7f9; color:#1a1c22; }
+  header { padding:18px 24px 6px; }
+  h1 { font-size:17px; margin:0 0 4px; font-weight:650; }
+  header p { margin:0; color:#5c6070; max-width:75ch; }
+  .wrap { display:grid; grid-template-columns:340px 1fr; gap:22px; padding:18px 24px 40px; align-items:start; }
+  .panel { background:#fff; border:1px solid #dfe2e8; border-radius:10px; padding:14px 16px; }
+  .panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:#6a6f80; margin:0 0 10px; font-weight:650; }
+  .presets { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
+  .presets button { flex:1 1 auto; padding:7px 10px; border:1px solid #d3d7e0; background:#f3f4f7; border-radius:7px; cursor:pointer; font:inherit; font-size:13px; }
+  .presets button.on { background:#1d62ec; border-color:#1d62ec; color:#fff; font-weight:600; }
+  .row { display:grid; grid-template-columns:1fr auto auto; gap:8px; align-items:center; margin-bottom:8px; }
+  .row label { font-size:13px; }
+  .row input[type=color] { width:40px; height:26px; padding:0; border:1px solid #cfd3dc; border-radius:5px; background:none; cursor:pointer; }
+  .row input[type=text] { width:82px; font:12px ui-monospace,Consolas,monospace; padding:4px 6px; border:1px solid #cfd3dc; border-radius:5px; }
+  .stage { border-radius:10px; padding:26px; border:1px solid #dfe2e8; }
+  .card { border-radius:10px; padding:20px 22px; margin-top:20px; }
+  .sample .main { font-size:15px; margin:0 0 5px; }
+  .sample .sec  { font-size:13px; margin:0 0 5px; }
+  .sample .acc  { font-size:13px; margin:0; font-weight:600; }
+  .where { font-size:11px; text-transform:uppercase; letter-spacing:.07em; opacity:.65; margin:0 0 10px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; margin-top:6px; }
+  th,td { text-align:left; padding:5px 6px; border-bottom:1px solid #eceef2; }
+  th { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:#6a6f80; font-weight:600; }
+  td.num { font:13px ui-monospace,Consolas,monospace; text-align:right; }
+  .badge { display:inline-block; min-width:34px; text-align:center; padding:1px 6px; border-radius:999px; font-size:11px; font-weight:700; }
+  .pass { background:#d8f5e0; color:#106b32; } .fail { background:#fddede; color:#98111f; } .aaa { background:#d9e8ff; color:#123f8f; }
+  .note { font-size:12px; color:#6a6f80; margin:10px 0 0; }
+  .swatchrow { display:flex; gap:6px; margin-top:4px; }
+  .swatchrow button { flex:1; height:26px; border:1px solid #cfd3dc; border-radius:5px; cursor:pointer; font-size:10px; color:#333; }
+</style>
+
+<header>
+  <h1>Contrast explorer — main / secondary / accent on a shaded card</h1>
+  <p>Live WCAG contrast for every text colour against whatever is actually behind it. The card sits inside a wider
+     unshaded page area that carries the same three text roles, so you can see both at once. Presets are the real
+     palette values from <code>gui/appearance/src/lib.rs</code>; “A” and “B” are my proposals for
+     <code>open-questions.md</code> → C-Q10. <b>Worth knowing before you pick:</b> the greyest card
+     (SURFACE2) tops out at 9.71 : 1 even against pure black, so A is reachable but needs genuinely
+     dark ink; and B <i>cannot</i> fix secondary or accent on its own — at today's grey they need a
+     card lighter than the page itself.</p>
+</header>
+
+<div class="wrap">
+  <div class="panel">
+    <h2>Preset</h2>
+    <div class="presets">
+      <button data-p="cur" class="on">Current</button>
+      <button data-p="a">A — darken greys</button>
+      <button data-p="b">B — lighten cards</button>
+    </div>
+
+    <h2>Colours</h2>
+    <div class="row"><label>Main text</label><input type="color" id="c_main"><input type="text" id="t_main"></div>
+    <div class="row"><label>Secondary (subtext0)</label><input type="color" id="c_sec"><input type="text" id="t_sec"></div>
+    <div class="row"><label>Secondary (subtext1)</label><input type="color" id="c_sec1"><input type="text" id="t_sec1"></div>
+    <div class="row"><label>Accent text</label><input type="color" id="c_acc"><input type="text" id="t_acc"></div>
+    <div class="row"><label>Page (unshaded)</label><input type="color" id="c_page"><input type="text" id="t_page"></div>
+    <div class="row"><label>Card (shaded)</label><input type="color" id="c_card"><input type="text" id="t_card"></div>
+
+    <h2 style="margin-top:14px">Card shade</h2>
+    <div class="swatchrow" id="shades"></div>
+    <p class="note">The four card shades the desktop actually uses, palest → greyest. C-Q10’s table is measured
+       against these.</p>
+  </div>
+
+  <div>
+    <div class="stage" id="stage">
+      <div class="sample">
+        <p class="where">wider unshaded area — the bare page</p>
+        <p class="main" id="pg_main">Display settings</p>
+        <p class="sec"  id="pg_sec">Choose how windows and text appear on each monitor.</p>
+        <p class="sec"  id="pg_sec1">Captions and hints are drawn in the second grey.</p>
+        <p class="acc"  id="pg_acc">Learn more about scaling</p>
+      </div>
+
+      <div class="card" id="card">
+        <div class="sample">
+          <p class="where">shaded card</p>
+          <p class="main" id="cd_main">Scale and layout</p>
+          <p class="sec"  id="cd_sec">Recommended for this display: 150 %. Changing this signs you out of some apps.</p>
+          <p class="sec"  id="cd_sec1">Captions and hints are drawn in the second grey.</p>
+          <p class="acc"  id="cd_acc">Advanced scaling settings</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>Contrast ratio — live</h2>
+      <table>
+        <thead><tr><th>ink</th><th>background</th><th class="num">ratio</th><th>normal text (4.5)</th><th>large/bold (3.0)</th></tr></thead>
+        <tbody id="tbl"></tbody>
+      </table>
+      <p class="note">WCAG 2.x relative luminance. <b>AA</b> = meets the 4.5 : 1 standard C-Q10 measures against;
+         <b>AAA</b> = 7 : 1. Large-text column applies at ≥ 18.66 px bold or ≥ 24 px.</p>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>Ink vs ink &mdash; how far apart the four text colours are</h2>
+      <table>
+        <thead><tr><th>pair</th><th class="num">separation</th><th>reads as</th></tr></thead>
+        <tbody id="sep"></tbody>
+      </table>
+      <p class="note">The number no contrast checker shows, and the one that decides this question.
+         Every table above asks &ldquo;can you read this ink on that background&rdquo;. This asks
+         <em>can you tell two inks apart</em> &mdash; which is what makes a caption look like a caption
+         and a link look like a link. Same WCAG ratio, ink against ink instead of ink against paper;
+         <b>1.00 means the two are one colour</b> to it. Luminance is also the channel that survives
+         colour&#8209;blindness, so when it goes it is the reader this change is for who loses most.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+// --- the real palette (gui/appearance/src/lib.rs) -------------------------------------------
+const SHADES = [
+  { name:'BASE',     hex:'#EFF1F5' },   // the page
+  { name:'MANTLE',   hex:'#E6E9EF' },
+  { name:'CRUST',    hex:'#DCE0E8' },
+  { name:'SURFACE0', hex:'#CCD0DA' },
+  { name:'SURFACE1', hex:'#BCC0CC' },
+  { name:'SURFACE2', hex:'#ACB0BE' },   // the greyest card
+];
+const PRESETS = {
+  // as shipped: LIGHT_TEXT, LIGHT_SUBTEXT0, LIGHT_SUBTEXT1, LIGHT_BLUE, LIGHT_BASE, LIGHT_SURFACE2
+  //
+  // subtext1 (#5C5F77) was missing from the first version of this tool and from
+  // C-Q10's table, which both showed three inks and asked the operator to fix
+  // "three colours". There are four. Found by lane C, which also recomputed
+  // every ratio here independently; 5.53 on the page and 2.89 on the greyest
+  // card both reproduce exactly. See
+  // requests/c-b-the-contrast-tool-is-missing-an-ink-and-its-option-a-is-one-colour.md
+  cur: { main:'#4C4F69', sec:'#686B80', sec1:'#5C5F77', acc:'#1D62EC', page:'#EFF1F5', card:'#ACB0BE' },
+  // A — darken all three inks until each clears 4.5 on the GREYEST card (SURFACE2 #ACB0BE),
+  //     which is the binding case. Computed, not eyeballed: that card's ceiling against pure
+  //     black is 9.71, so it needs ink luminance <= 0.0579; these sit just inside it.
+  //     subtext1's darkened value is #414354, which lands on exactly 4.50 there.
+  //     Note what the ink-vs-ink panel then says: all four are 1.00-1.01 apart,
+  //     i.e. one colour. That is not a flaw in the preset, it is forced -- the
+  //     card's ceiling against pure black is 9.71, so everything clearing 4.5
+  //     on it is nearly black, and four nearly-black inks are one ink. The
+  //     constraint is the card, not the choice of ink.
+  a:   { main:'#404258', sec:'#414350', sec1:'#414354', acc:'#123E95', page:'#EFF1F5', card:'#ACB0BE' },
+  // B — lighten the cards instead, inks untouched. Shown at the LIGHTEST card the palette has
+  //     (MANTLE) so you can see the ceiling: secondary and accent still land at 4.31, because
+  //     they would need a card lighter than the page itself to clear 4.5. B cannot fix them
+  //     alone; it only helps main text.
+  b:   { main:'#4C4F69', sec:'#686B80', sec1:'#5C5F77', acc:'#1D62EC', page:'#EFF1F5', card:'#E6E9EF' },
+};
+
+const $ = id => document.getElementById(id);
+const KEYS = ['main','sec','sec1','acc','page','card'];
+let cur = { ...PRESETS.cur };
+
+// --- WCAG contrast ---------------------------------------------------------------------------
+const srgb = c => { c /= 255; return c <= 0.03928 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4); };
+function lum(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return 0.2126*srgb((n>>16)&255) + 0.7152*srgb((n>>8)&255) + 0.0722*srgb(n&255);
+}
+function ratio(a, b) {
+  const l1 = lum(a), l2 = lum(b);
+  return (Math.max(l1,l2) + 0.05) / (Math.min(l1,l2) + 0.05);
+}
+const badge = (r, lim) => r >= 7 && lim === 4.5
+  ? '<span class="badge aaa">AAA</span>'
+  : (r >= lim ? '<span class="badge pass">AA</span>' : '<span class="badge fail">fail</span>');
+
+function render() {
+  for (const k of KEYS) { $('c_'+k).value = cur[k]; $('t_'+k).value = cur[k].toUpperCase(); }
+  $('stage').style.background = cur.page;
+  $('card').style.background  = cur.card;
+  for (const [el, col] of [['pg_main','main'],['pg_sec','sec'],['pg_sec1','sec1'],['pg_acc','acc'],
+                           ['cd_main','main'],['cd_sec','sec'],['cd_sec1','sec1'],['cd_acc','acc']])
+    $(el).style.color = cur[col];
+
+  const rows = [];
+  for (const [bgName, bg] of [['page (unshaded)', cur.page], ['card (shaded)', cur.card]])
+    for (const [inkName, ink] of [['main text', cur.main], ['secondary (subtext0)', cur.sec],
+                                 ['secondary (subtext1)', cur.sec1], ['accent', cur.acc]]) {
+      const r = ratio(ink, bg);
+      rows.push(`<tr><td>${inkName}</td><td>${bgName}</td><td class="num">${r.toFixed(2)}</td>` +
+                `<td>${badge(r,4.5)}</td><td>${badge(r,3.0)}</td></tr>`);
+    }
+  $('tbl').innerHTML = rows.join('');
+
+  // Ink against ink. Six pairs, because four inks have six.
+  const NAME = { main:'main', sec:'subtext0', sec1:'subtext1', acc:'accent' };
+  const pairs = [['main','sec'],['main','sec1'],['main','acc'],
+                 ['sec','sec1'],['sec','acc'],['sec1','acc']];
+  $('sep').innerHTML = pairs.map(([x, y]) => {
+    const r = ratio(cur[x], cur[y]);
+    // 1.10 and 1.30 are judgement, not standard: WCAG says nothing about ink
+    // against ink. They are labelled as a reading of the number rather than a
+    // verdict on it, and the number is always shown next to them.
+    const reads = r < 1.10 ? '<span class="badge fail">one colour</span>'
+                : r < 1.30 ? '<span class="badge fail">barely distinct</span>'
+                : '<span class="badge pass">distinct</span>';
+    return `<tr><td>${NAME[x]} vs ${NAME[y]}</td><td class="num">${r.toFixed(2)}</td><td>${reads}</td></tr>`;
+  }).join('');
+}
+
+for (const k of KEYS) {
+  $('c_'+k).addEventListener('input', e => { cur[k] = e.target.value; render(); });
+  $('t_'+k).addEventListener('change', e => {
+    const v = e.target.value.trim().replace(/^#?/, '#');
+    if (/^#[0-9a-fA-F]{6}$/.test(v)) { cur[k] = v; }
+    render();
+  });
+}
+document.querySelectorAll('.presets button').forEach(b =>
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.presets button').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    cur = { ...PRESETS[b.dataset.p] };
+    render();
+  }));
+
+$('shades').innerHTML = SHADES.map(s =>
+  `<button data-hex="${s.hex}" style="background:${s.hex}" title="${s.name} ${s.hex}">${s.name.replace('SURFACE','S')}</button>`).join('');
+$('shades').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  cur.card = b.dataset.hex; render();
+});
+
+render();
+</script>

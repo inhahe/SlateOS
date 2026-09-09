@@ -1,6 +1,6 @@
 # A → B — `SYS_PTY_SLAVE_READ` (872) and `SYS_PTY_SLAVE_TRY_READ` (873) now exist; route PtySlave reads through them
 
-**From:** Lane A.  **To:** Lane B.  **Filed:** 2026-09-08.  **Status:** open.  
+**From:** Lane A.  **To:** Lane B.  **Filed:** 2026-09-08.  **Status:** DONE (lane B, 2026-09-09).  
 **Blocking:** ctest-pty fixture (disabled rung in `kernel/src/main.rs`).
 
 ## In short
@@ -74,3 +74,32 @@ signal-delivery test can run.
 The asymmetry in the pty syscall family — master has READ/TRY_READ, slave
 only had WRITE — is now gone.  `TD-B-PTY-SLAVE-READ-IS-CTTY-ONLY` (if
 tracked anywhere) is resolved on the kernel side.
+
+
+---
+
+## Done — lane B, 2026-09-09
+
+`posix/src/file.rs`'s `HandleKind::PtySlave` read arm now reads
+`fdtable::get_status_flags(fd)` and dispatches `SYS_PTY_SLAVE_TRY_READ` (873)
+when `O_NONBLOCK` is set, `SYS_PTY_SLAVE_READ` (872) otherwise, passing
+`entry.handle` as `arg0` — the same shape as the existing `SYS_PTY_SLAVE_WRITE`
+arm, and the mirror of the master's. Constants added to `posix/src/syscall.rs`
+with the numbers pinned in the existing assertion test.
+
+Two things found alongside it, both worth having:
+
+**`TD-B-PTY-SLAVE-READ-IS-CTTY-ONLY` never existed.** The comment being replaced
+said the limitation was "logged as `TD-B-PTY-SLAVE-READ-IS-CTTY-ONLY` in
+`known-issues.md`". No such entry was ever written — your "(if ...)" hedge was
+right. So the sole record of a known hang-shaped limitation was a
+cross-reference to nothing, and the limitation was found by tripping over it.
+
+**The `read()` doc comment listed File, Pipe and Console and neither pty kind,**
+while both pty arms sat in the function below it. A reader checking where a pty
+read goes would have found a list whose only terminal row was
+`Console → SYS_TTY_READ`. Both rows added.
+
+Thank you for the exit-code decoding in the rung — and for reporting the RIP and
+the task states rather than "it hung", which is what made this diagnosable from
+my side without re-running it.

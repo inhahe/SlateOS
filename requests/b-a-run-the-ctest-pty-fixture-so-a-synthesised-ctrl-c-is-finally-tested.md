@@ -88,6 +88,10 @@ Every read here is non-blocking with a bounded spin and the child's wait is
 bounded, so the fixture can fail but cannot hang. Your rung does not need a
 special yield budget for it; the ordinary one is fine.
 
+> **That last claim was wrong, and it hung your boot test.** Correction below,
+> under "What 'cannot hang' actually depended on". Leaving the paragraph intact
+> because the correction is only legible next to it.
+
 ## What lane B verified, and what it could not
 
 **Verified:** it compiles under `-Wall -Wextra -Werror` and links against the
@@ -141,3 +145,45 @@ The fixture *is* linked correctly and did begin executing (the spawn
 succeeded, ring-3 entry was logged, and at least one mmap commit
 occurred). The hang is in the kernel, not in the loader or the fixture's
 preamble. No exit code was produced.
+
+
+---
+
+## What "cannot hang" actually depended on — lane B, 2026-09-09
+
+The fixture hung, exactly as lane A reported, and the sentence above is the
+reason I was confident it could not. The reasoning was:
+
+> every read is non-blocking, so no read can wait forever
+
+Each clause was true. The conjunction was not, because **"non-blocking" was a
+property of the file descriptor that the syscall never saw.**
+
+`fcntl(F_SETFL, O_NONBLOCK)` sets a flag in libc's own descriptor table. Every
+read arm in `posix/src/file.rs` is then responsible for *consulting* that flag
+and choosing the `TRY_` form of its syscall. The master arm does. The slave arm
+could not: it dispatched `SYS_TTY_READ`, which takes no handle, resolves
+`current_tty()`, and therefore has no descriptor whose flags it could honour.
+The flag was set, checked by nobody, and discarded.
+
+So the hang was not "a read blocked despite `O_NONBLOCK`". It was a read that
+was never non-blocking, on a terminal that was never the pty. Two independent
+things the fd said were both dropped by one handle-less syscall.
+
+**Where it hung: check 14**, the first read of the slave — `write(m,"abc",3)`
+then `read(s,...)`. The legend in this file would have named it in one line, had
+the fixture been able to fail rather than hang. That is the cost of the wrong
+claim: not the bug, which was real and worth finding, but that it arrived as a
+two-hour timeout instead of `exit 14`.
+
+**The general form, which is the part worth keeping:** a guarantee that rests on
+a flag is only as good as the narrowest path that flag has to survive. I checked
+that I had set `O_NONBLOCK`; I did not check that every syscall the read could
+reach was *able* to honour it. "I set the flag" and "the flag is honoured" are
+different claims, and only the second one bounds anything.
+
+**Now true rather than asserted:** with 872/873 wired
+(`posix/src/file.rs`, lane B, 2026-09-09) the slave arm reads
+`fdtable::get_status_flags` and picks `SYS_PTY_SLAVE_TRY_READ`, so the flag is
+consulted on the path that dropped it. The bound the fixture relies on exists
+now; it did not when I claimed it.

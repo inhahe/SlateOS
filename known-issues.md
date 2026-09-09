@@ -123423,6 +123423,61 @@ been audited, and this entry deliberately does not recommend a direction until
 it has been, because "nobody has audited it" is a statement about the auditing
 and not about the hazard. Doing the audit is the next step, not the decision.
 
+### The audit, done 2026-09-09 — and it comes out the other way
+
+**In the tree: no callers.** Across every file type, the only match outside
+`posix/` and `kernel/` is a doc comment in `apps/alarmclock` about dismissing
+an alarm clock, which is not this.
+
+**Outside the tree: a real one.** The built interpreter,
+`build/spike/python-slateos.elf`, references `setitimer`, `getitimer`,
+`alarm`, `timer_create`, `timer_settime` and `timer_delete` -- all six.
+CPython is this tree's largest libc consumer and it already *runs* on SlateOS.
+So the population is not empty, and `ENOSYS` is not the free move it was for
+`setgroups`. (Method, stated because it is weaker than a symbol table: a byte
+search of the linked binary for each name. It shows the symbols are present,
+not that every one is called on a live path. `nm` is not available here.)
+
+**Which way that cuts is less obvious than it looks.** Silent success is not
+obviously the safer option for a *timeout*: `signal.alarm(5)` succeeding and
+never firing converts a bounded wait into an unbounded one, which is the hang
+class that cost this lane two hours the same week. A loud failure at least
+lets a caller choose a fallback. But that is an argument for *fixing* it, not
+for breaking a running interpreter, and it is a user-visible policy change in
+a language runtime rather than a tidy-up.
+
+**So the direction is neither: implement it.** The kernel already has
+`proc/itimer.rs`, which backs `alarm` and `setitimer(ITIMER_REAL)` with a real
+`SIGALRM` and is wired into `kernel/src/syscall/linux.rs` -- but has no native
+syscall number, exactly as `setgroups` and `chroot` did. Asked of lane A in
+`requests/b-a-expose-the-interval-timer-natively-so-alarm-can-fire.md`. When
+that number exists this stops being a stub without any of the above needing to
+be decided.
+
+**Two siblings, same premise -- both FIXED 2026-09-09, same day.**
+`pause()` slept a second and returned `EINTR`, and `sigsuspend()` returned
+`EINTR` immediately: both reported "a signal was delivered" when none was.
+Neither needed the kernel. `signal.rs` now keeps a delivery counter, bumped
+whenever a registered handler runs, and both wait on it -- because a delivered
+signal otherwise leaves *no trace a waiter can observe* (delivery is
+asynchronous, and `SYS_SIGNAL_PENDING` reports signals blocked and queued,
+which is the opposite set).
+
+Lane A had already built the other half and said so:
+`kernel/src/proc/thread.rs` posts `SIGCHLD` to a native parent specifically so
+one "parked in `sigsuspend()`/`pause()`" wakes, remarking that "without this
+the parent livelocks in sigsuspend". Nothing had ever been parked there,
+because the libc side never waited -- so a carefully built kernel path had no
+consumer.
+
+Two details worth keeping. The counter counts handler **invocations**, not
+deliveries, which is what makes an ignored signal correctly *not* end a
+`pause` -- POSIX's rule, arrived at by construction rather than by a special
+case. And it is atomic, not for threading (the `process_global!` macro assumes
+a single-threaded target) but because the increment runs *in signal-delivery
+context*: a second delivery landing inside a read-modify-write would lose an
+update, and a lost update is a missed wake, not a wrong number.
+
 **The two honest options, for when it is:** arm a real kernel timer (the kernel
 already has the delivery path -- `kernel/src/proc/signal.rs` mentions
 `ITIMER_REAL`), or fail loudly so callers can choose a fallback. Succeeding
@@ -124122,9 +124177,29 @@ side has had `SYS_PTY_MASTER_READ` (546) and `SYS_PTY_MASTER_TRY_READ`
 `SYS_PTY_SLAVE_TRY_READ` (873) added.  Both use `resolve_tty_arg` to
 target the correct pty and call `tty::read` / `tty::try_read`.
 
-**Fix (POSIX, pending lane B).** `posix/src/file.rs` must route PtySlave
-reads through 872/873 instead of `SYS_TTY_READ`.  Filed as request
-`a-b-pty-slave-read-syscalls-exist-route-posix-reads.md`.
+**Fix (POSIX, done -- lane B, 2026-09-09).** `posix/src/file.rs`'s PtySlave
+read arm now reads `fdtable::get_status_flags(fd)` and dispatches
+`SYS_PTY_SLAVE_TRY_READ` (873) when `O_NONBLOCK` is set and
+`SYS_PTY_SLAVE_READ` (872) otherwise, passing `entry.handle` as `arg0` -- the
+shape the neighbouring `SYS_PTY_SLAVE_WRITE` arm already used. Constants added
+to `posix/src/syscall.rs` and pinned in its number-assertion test.
+
+**The rung is still disabled** in `kernel/src/main.rs` and needs re-enabling by
+lane A for any of this to be worth anything; asked for in the request file.
+
+**Why lane B's "cannot hang" guarantee did not hold**, recorded because the
+shape recurs. The fixture set `O_NONBLOCK` and bounded every retry loop, and
+both of those were true. But `O_NONBLOCK` is a flag in libc's own descriptor
+table that each read arm must *consult* and turn into a `TRY_` syscall. The
+slave arm could not consult it -- `SYS_TTY_READ` takes no handle, so there was
+no descriptor whose flags it could honour. The flag was set, read by nobody,
+and dropped. A guarantee resting on a flag is only as strong as the narrowest
+path that flag has to survive, and "I set the flag" is a different claim from
+"the flag is honoured" -- only the second one bounds anything.
+
+**It hung at check 14**, the first slave read. The fixture's own exit-code
+legend would have named it in one line had it been able to fail instead of
+hang; that, rather than the bug, is what the wrong claim cost.
 
 **The "scheduler doesn't preempt" concern was a false alarm.**
 `schedule_inner` correctly returns without context-switching when the
@@ -124874,6 +124949,69 @@ COPY-OF-THE-PALETTE` did exactly this for the shell's 49 modules, and
 carries a test (`this_module_names_no_colours_of_its_own`) that fails if a
 colour literal returns to it, and its own comment names the remaining copy as
 being "in `apps/`". This entry is that copy.
+
+## A-A-GATE-BUILT-TO-CATCH-UNOBSERVED-VERDICTS-ISSUED-ONE (lane A, 2026-09-06) — **FIXED** `8f09124fd`
+
+**In short:** a check that guards the boot test against a specific kind of
+mistake made exactly that mistake, and accused the thing it was guarding. The
+boot test copies itself to a snapshot before running, so that editing the
+script mid-run cannot corrupt a two-hour job. `check-boot-test-reexec.sh`
+proves that copy works. On 2026-09-06 it reported **"the snapshot did not
+isolate the run"** — i.e. the protection was broken. It was not. The harness
+had raced, and reported the race as a property of the code.
+
+### The signature worth recognising
+
+**It passed standalone, twice, on the same commit that failed inside the boot
+test.** That combination is diagnostic: when a check disagrees with itself
+depending on who invoked it, the thing under test is the harness, not the
+subject. Both times today that pattern appeared, the harness was at fault — the
+other being `BOOT_TEST_REEXEC` leaking from the parent boot test into the
+child and disabling the very branch under test (fixed earlier, `20df7965d`).
+
+### The mechanism
+
+The checker launches an editor that overwrites the script mid-run, then checks
+whether the running process saw the edit. The editor fired on a **fixed one
+second sleep** — a bet that the guarded script would reach its snapshot within
+a second.
+
+A boot test's gate phase is hundreds of short-lived processes hammering the
+disk, and under that load `mktemp` + `cat` + `chmod` + `exec` can take longer.
+The edit then lands *before* the snapshot is taken, the snapshot faithfully
+captures an already-edited file, and the run prints `CLOBBERED`. The mechanism
+worked perfectly; the harness had measured the wrong instant.
+
+### The fix, and two things that cost an attempt each
+
+The payload now announces itself and the editor waits for that announcement, so
+the snapshot is provably taken before any edit, at any load. Two subtleties,
+both invisible in prospect and obvious in retrospect:
+
+1. **The replacement script must share a byte-identical *prefix* with the
+   payload.** The whole mechanism is bash re-reading at a saved file offset, so
+   adding a signal line to the payload without adding it to the replacement
+   shifted every following byte and the offset stopped landing on the
+   `CLOBBERED` line. That failed loudly (the control went `INCONCLUSIVE`),
+   which is the only reason it was cheap.
+2. **The signal must be cleared *before* the editor is armed, not after.**
+   Cleared afterwards, the guarded run's editor saw the *control* run's
+   leftover signal, fired instantly, and edited before the snapshot — exactly
+   reproducing the false accusation, from inside the fix for it.
+
+### The generalisation
+
+**A harness that measures a race by waiting a fixed interval is making a claim
+about the machine, not about the code — and it will make that claim most
+confidently on the machine state it was written under.** Every such delay is an
+unstated assumption about scheduling, and it is wrong precisely when the
+machine is busiest, which is when the gate matters most. Where a synchronisation
+point is available, a sleep is not a simpler alternative to it; it is a quieter
+one.
+
+Related, same day, same shape: `A-A-A-BOOT-TEST-ONLY-GATE-DOES-NOT-EXIST-FOR-A-LANE-THAT-NEVER-BOOTS`.
+
+---
 
 ---
 

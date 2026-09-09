@@ -314,6 +314,30 @@ pub const SYS_PTY_MASTER_TRY_WRITE: u64 = 1065;
 /// the returned count is in *the caller's* bytes rather than the expanded ones
 /// — so a short write can be resumed from without re-sending half a CRLF.
 pub const SYS_PTY_SLAVE_WRITE: u64 = 548;
+/// Read terminal input from a pty's **slave** end.  `arg0` = slave handle, or
+/// `0` for the caller's controlling terminal; `arg1` = buffer, `arg2` = cap.
+///
+/// The counterpart of [`SYS_PTY_MASTER_READ`], and the read half of
+/// [`SYS_PTY_SLAVE_WRITE`].  It goes through the line discipline of *the
+/// terminal named by the handle*, honouring that pty's `ICANON`, `VMIN`/
+/// `VTIME` and `ISIG` — which is the entire reason it exists.
+///
+/// Until 2026-09-08 there was no such syscall and libc reached for
+/// [`SYS_TTY_READ`], which takes no handle and resolves `current_tty()`.  For
+/// a process that had called `openpty` but not `login_tty` that is the
+/// *console*, whose default termios is canonical with `VMIN=1`, so the read
+/// blocked on a keystroke that was never coming and the pty's own raw termios
+/// was never consulted.  That hung a boot test
+/// (`known-issues.md` → `TD-A-CTEST-PTY-HANGS-BOOT`).
+pub const SYS_PTY_SLAVE_READ: u64 = 872;
+/// Non-blocking [`SYS_PTY_SLAVE_READ`]: `WouldBlock` (→ `EAGAIN`) instead of
+/// parking when no input is queued.  Same arguments.
+///
+/// This is the one libc picks when the fd carries `O_NONBLOCK`, exactly as
+/// [`SYS_PTY_MASTER_TRY_READ`] is picked for a non-blocking master.  A
+/// `fcntl(F_SETFL, O_NONBLOCK)` on a slave fd that still dispatched to the
+/// blocking form would be a silent lie about the flag.
+pub const SYS_PTY_SLAVE_TRY_READ: u64 = 873;
 /// Drop one reference to a pty end.  `arg0` = the handle.
 ///
 /// Last *master* reference: the slave's readers see EOF, its writers get
@@ -1610,6 +1634,12 @@ mod tests {
         // constant's docs and `file::write`'s `count == 0` short-circuit.
         assert_eq!(SYS_PTY_MASTER_WRITE, 545);
         assert_eq!(SYS_PTY_MASTER_TRY_READ, 547);
+        // The slave read pair is 872/873 rather than a number beside 548,
+        // because it was added long after the 543-556 block was allocated.
+        // Pinned here so a renumbering has to be deliberate: these two are
+        // what stand between a pty read and the console.
+        assert_eq!(SYS_PTY_SLAVE_READ, 872);
+        assert_eq!(SYS_PTY_SLAVE_TRY_READ, 873);
     }
 
     // -- Syscall number ranges match zone allocation --

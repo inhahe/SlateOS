@@ -125142,9 +125142,49 @@ and now covers 5,628 lines.
 exists and is drawn by `SettingsState::build_snapshots_page` in `main.rs` —
 a *different* implementation from `snapshots::render_snapshots_page`. So there
 are two snapshot pages, and any change made to the one the user cannot see is
-work thrown away. Whichever is kept, the other must go; they cannot both be
-maintained, and the file-scope palette this entry was discovered through was
-being maintained in both.
+work thrown away.
+
+**Investigated 2026-09-08, and the answer is "neither, as they stand".** The
+first guess — keep the reachable one, delete the other — is wrong in both
+directions:
+
+* The **reachable** page renders a hardcoded array:
+  `("Gen 42", "2026-05-17 09:00", "Current")`, `("Gen 41", …)`. It is a
+  mockup. 238 lines.
+* The **unreachable** one is backed by a genuine model — `SnapshotId`,
+  `BlockHash::compute`, `SnapshotIncludes`, `SnapshotManager`, a
+  copy-on-write block store, snapshot trees. 2,256 lines. But
+  `SnapshotManager::new()` builds it **in memory** and nothing in the file
+  reads a byte from disk, so it too displays only what the process itself
+  put there.
+
+**And the real thing exists, done, in the kernel.** `roadmap.md` line 2434:
+`fs::snapshot` — "CAS-backed point-in-time directory tree snapshots with
+create/restore/delete/diff/list; branching (parent→child tree), selective
+include/exclude filters, metadata preservation" — marked `[x]`, with a
+`fssnapshot` kshell command and **`/proc/snapshots`**. So `snapshots.rs` is a
+2,256-line userspace reimplementation of a kernel subsystem that was already
+finished, and the page the user sees is a picture of neither.
+
+**The format is settled, so the fix is not open-ended.** `gen_snapshots()` in
+`kernel/src/fs/procfs.rs` emits a fixed-column table:
+
+```
+Filesystem snapshots: <n>
+
+  ID  NAME                  PATH                               FILES         BYTES  PARENT
+```
+
+with `PARENT` as an id or `-`, and the path **octal-escaped**
+(`mangle_mount_field`) precisely so a root path containing a newline cannot
+forge a row — a reader must un-escape it and must not assume one line is one
+snapshot until it has.
+
+**So the work is:** read `/proc/snapshots`, render *that*, delete the mockup,
+and delete or drastically reduce `snapshots.rs` to whatever the page still
+needs that the kernel does not provide. Do not "choose between the two pages" —
+that framing, which the first version of this entry used, assumes one of them
+shows real snapshots and neither does.
 
 **Found by** the palette conversion. Every audit until then read only
 `main.rs`, so these three files were never looked at; they were found by

@@ -1023,8 +1023,12 @@ answered question left in the body is pure cost — and, being older, it sorts
 - A-Q6 [deletion commits + fake-name commits in published history] — resolved
   2026-09-07 (§920): **A, leave history as-is.**
 - A-Q7 [70 ms/file-open on D: — antivirus or disk?] — resolved 2026-09-07
-  (§921): D: already excluded; likely CPU saturation + backup jobs; re-measure
-  on E:.
+  (§921), **closed by measurement 2026-09-09 (§923): it was the disk.**
+  Cold reads cost 19.3 s on D: vs 0.27 s on E: for the same 807 files (71x);
+  warm, both drives are identical. The "warm pass still costs 61.8 s"
+  observation that ruled out the disk does not reproduce (0.19 s). No
+  antivirus exclusion should be requested. Re-runnable:
+  `python bench/file-read-latency.py`.
 
 ## Resolved — lane B
 

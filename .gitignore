@@ -123,6 +123,19 @@ __pycache__/
 # even though the blanket *.html rule above ignores saved web pages.
 !Aero Desktop (offline).html
 
+# Exception: HTML we *wrote* under scripts/ is a developer tool, not a saved
+# web page, and the blanket rule above was never meant to cover it.
+#
+# This is a directory rule rather than a filename because a filename would have
+# to be remembered. It was not: `scripts/contrast-explorer.html` — the tool the
+# operator was pointed at to decide open-questions C-Q10 — sat untracked
+# outside the repository for a day because `git add` on it did nothing and said
+# nothing. Lane C found it, by opening the published path and finding no such
+# directory (`requests/c-b-the-contrast-tool-is-not-where-you-said-and-is-not-in-git.md`).
+# An ignore rule that silently swallows an intended add is the same shape as a
+# stub that returns success: the caller is told nothing went wrong.
+!/scripts/*.html
+
 # HarfBuzz sources fetched for reference by the Indic shaper work.
 # Not ours, not built, not shipped.
 .hbref/

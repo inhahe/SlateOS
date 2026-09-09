@@ -125193,6 +125193,28 @@ needs that the kernel does not provide. Do not "choose between the two pages" �
 that framing, which the first version of this entry used, assumes one of them
 shows real snapshots and neither does.
 
+**First two thirds done 2026-09-08.** `snapshots::system_snapshots()` reads
+`/proc/snapshots`, and `build_snapshots_page` renders it; the four invented
+rows are gone, and a machine with no snapshots now says so. `SnapshotRow::path`
+is `Vec<u8>` — the escaping exists to carry bytes a text table otherwise
+could not, and a `String` there would undo that with a lossy conversion in the
+one field where a wrong answer names a different directory. The page's label
+converts lossily and says why, at the one point where a person has to read it.
+
+The parser anchors from **both ends** rather than by column, and that is not
+defensiveness for its own sake: it is what makes it correct against the two
+malformed shapes reported in
+`requests/c-a-proc-snapshots-escapes-the-path-but-not-the-name.md` — a name
+with a space in it, and a name longer than its column. Both are covered by
+tests here, so if lane A escapes the name the tests keep passing and the parser
+does not need to change.
+
+**Still outstanding:** the 2,256-line in-memory model in `snapshots.rs` is
+still there, still unreachable, and is now clearly redundant rather than merely
+unused — the kernel does this. It should shrink to the display types the page
+needs. Left for a separate change because deleting two thousand lines and
+rewriting a page in one commit makes both harder to review.
+
 **Found by** the palette conversion. Every audit until then read only
 `main.rs`, so these three files were never looked at; they were found by
 grepping every `.rs` under `apps/*/src` for the twenty Catppuccin hex values,

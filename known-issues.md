@@ -123523,7 +123523,7 @@ already has the delivery path -- `kernel/src/proc/signal.rs` mentions
 silently is the one option that is wrong in every case.
 
 
-## B-NO-ALTERNATE-SIGNAL-STACK-SO-A-STACK-OVERFLOW-HANDLER-CANNOT-RUN (lane B, 2026-09-07)
+## B-NO-ALTERNATE-SIGNAL-STACK-SO-A-STACK-OVERFLOW-HANDLER-CANNOT-RUN (lane B, 2026-09-07) -- MOSTLY FIXED 2026-09-09
 
 **In short:** a program can ask that its crash handler run on a separate, small,
 private stack, so that it still works when the crash *is* the main stack running
@@ -123551,9 +123551,44 @@ interactive-CPython work, which is why it was found.
 
 **The proper fix** is for the kernel's `deliver_pending_signal` to honour
 `SA_ONSTACK` by switching to the registered stack before entering the
-trampoline, which makes it partly lane A's. Not filed as a request yet: the
+trampoline, which makes it partly lane A's. ~~Not filed as a request yet: the
 libc half (actually storing the alternate stack rather than discarding it) has
-to exist first, and that is this lane's and not written.
+to exist first, and that is this lane's and not written.~~
+
+### The libc half is written -- 2026-09-09, and it does more than store
+
+`sigaltstack` now stores the stack, reports it per POSIX, and **uses** it: a
+handler registered with `SA_ONSTACK` runs on it. `posix/src/signal.rs` gained
+`__call_on_alt_stack`, an assembly thunk that switches `RSP` around the call to
+the user handler and nothing else, and `dispatch_self_signal` calls it when all
+four conditions hold (asked for, registered, not already in use, big enough).
+See `design-decisions.md` 1009.
+
+**Storing it without using it would have been worse than the stub**, which is
+why the two landed together. This entry says the old behaviour was *honest* --
+"it declines rather than pretending" -- and that is exactly right. A version
+that recorded the stack and reported it back while still running every handler
+on the interrupted stack would have converted an honest decline into the
+`setgroups` shape.
+
+**What is left is one kernel write.** The kernel builds the `SignalContext` on
+the interrupted thread's stack and points `RSP` at it before jumping to
+`__signal_trampoline`, so when the interrupted stack is the one that just ran
+out, the fault happens in the kernel's own store -- before any libc code exists
+to switch away from it. Filed as
+`requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md`.
+
+So the title is now too broad. There *is* an alternate signal stack; what a
+stack-overflow handler still cannot do is reach it.
+
+**Also not done: `SS_AUTODISARM` is stored and reported, not acted on.** It
+exists so that `siglongjmp` out of a handler does not leave the stack
+permanently marked in use, and without it we have the footgun Linux has: a
+handler that jumps out never reaches the line clearing the flag, so
+`sigaltstack` reports `SS_ONSTACK` for ever after and further changes are
+`EPERM`. Honouring it means disarming in the delivery path, which is where the
+kernel work above lands, so it waits for the same request rather than being
+half done.
 
 
 ## B-CTEST-FIXTURES-CANNOT-FIND-THE-FASTPY-CHECKOUT-AFTER-THE-E-DRIVE-MIGRATION (lane B, 2026-09-07)

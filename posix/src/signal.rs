@@ -688,6 +688,145 @@ fn plan_self_dispatch(
     SelfDispatch::Default
 }
 
+/// The alternate signal stack registered by [`sigaltstack`].
+///
+/// `sp == 0` means none is registered, which is what makes `SS_DISABLE` the
+/// reported state rather than a separate flag: "no stack" and "a stack at
+/// address zero" are the same impossible thing.
+#[derive(Clone, Copy)]
+struct AltStack {
+    /// Base address, growing *upwards* the way the caller allocated it. The
+    /// stack pointer starts at `sp + size` because x86 stacks grow down.
+    sp: usize,
+    size: usize,
+    /// Whether a handler is running on it right now. POSIX's `SS_ONSTACK`,
+    /// and the reason changing the stack is `EPERM` while it is set: moving
+    /// the ground out from under a running handler is not a request that can
+    /// be honoured.
+    on: bool,
+    /// `SS_AUTODISARM`, remembered so `sigaltstack` reports back what it was
+    /// given. Nothing acts on it yet -- see the note in [`sigaltstack`].
+    autodisarm: bool,
+}
+
+impl AltStack {
+    const NONE: Self = Self {
+        sp: 0,
+        size: 0,
+        on: false,
+        autodisarm: false,
+    };
+}
+
+process_global! {
+    /// The process's alternate signal stack. See [`AltStack`].
+    fn altstack_ptr() -> AltStack = AltStack::NONE;
+}
+
+/// A copy of the registered alternate stack.
+fn altstack() -> AltStack {
+    // SAFETY: `altstack_ptr()` is this process's only view of the value, and
+    // `AltStack` is `Copy`, so nothing escapes the read.
+    unsafe { *altstack_ptr() }
+}
+
+/// The stack pointer a handler should start from, or `None` when this signal
+/// is not to run on the alternate stack.
+///
+/// Four conditions, all of them necessary:
+///
+/// * the handler asked, with `SA_ONSTACK`;
+/// * a stack is registered;
+/// * we are not already on it -- a nested delivery must not restart at the
+///   top and overwrite the frames of the handler it interrupted;
+/// * it is big enough, which `sigaltstack` already enforced, so this is a
+///   restatement rather than a check.
+fn altstack_entry(sa_flags: u64) -> Option<usize> {
+    if sa_flags & SA_ONSTACK == 0 {
+        return None;
+    }
+    let alt = altstack();
+    if alt.sp == 0 || alt.on {
+        return None;
+    }
+    alt.sp.checked_add(alt.size)
+}
+
+/// Record that a handler is (or is no longer) running on the alternate stack.
+fn set_altstack_on(on: bool) {
+    // SAFETY: as `altstack`.
+    unsafe {
+        (*altstack_ptr()).on = on;
+    }
+}
+
+// The thunk that runs a handler on a different stack.
+//
+// On entry: RDI = handler, ESI = signal number, RDX = the address to start
+// the stack at (one past its end -- x86 stacks grow down).
+//
+// RBP is callee-saved, so the handler is obliged to give it back, which is
+// what makes it a safe place to keep the interrupted stack pointer across a
+// call to code we did not write. `and rsp, -16` establishes the alignment the
+// SysV ABI requires at a `call`: 16-aligned there, so the callee sees
+// `rsp % 16 == 8` after the return address is pushed.
+#[cfg(target_os = "none")]
+core::arch::global_asm!(
+    ".globl __call_on_alt_stack",
+    "__call_on_alt_stack:",
+    "push rbp",
+    "mov rbp, rsp", // the interrupted stack, in a register the handler must preserve
+    "mov rax, rdi", // handler
+    "mov rsp, rdx", // switch
+    "and rsp, -16", // …and align, whatever the caller's ss_sp+ss_size was
+    "mov edi, esi", // signum becomes arg0
+    "call rax",
+    "mov rsp, rbp", // back to the interrupted stack
+    "pop rbp",
+    "ret",
+);
+
+#[cfg(target_os = "none")]
+unsafe extern "C" {
+    /// See the `global_asm!` above.
+    fn __call_on_alt_stack(handler: extern "C" fn(i32), signum: i32, top: usize);
+}
+
+/// Run `func(sig)`, on the alternate signal stack when `top` says so.
+///
+/// The switch is around the *handler* and nothing else. Everything the
+/// dispatcher does either side of it -- the mask bookkeeping, the disposition
+/// lookup -- stays on the interrupted stack, because the point of an
+/// alternate stack is to give the caller's code room, not to relocate ours.
+fn run_handler(func: extern "C" fn(i32), sig: i32, top: Option<usize>) {
+    let Some(top) = top else {
+        func(sig);
+        return;
+    };
+    set_altstack_on(true);
+    #[cfg(target_os = "none")]
+    // SAFETY: `func` was registered through `signal`/`sigaction`, which is the
+    // same trust the direct call above extends it. `top` is `ss_sp + ss_size`
+    // for a stack the caller registered and `sigaltstack` accepted, so it is
+    // one past a region of at least `MINSIGSTKSZ` writable bytes. The thunk
+    // restores RSP from RBP before returning, so the interrupted stack is
+    // exactly as it was.
+    unsafe {
+        __call_on_alt_stack(func, sig, top);
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // The host build must not switch to a stack the test harness did not
+        // allocate for that purpose, so `top` is computed and deliberately not
+        // used. The flag either side of the call is still set and cleared, so
+        // the bookkeeping every test here asserts on is the same code the
+        // target runs.
+        let _ = top;
+        func(sig);
+    }
+    set_altstack_on(false);
+}
+
 /// Read the registered `(handler, sa_flags, sa_mask_low)` for `sig`.
 ///
 /// Out-of-range signals report the default disposition.
@@ -877,7 +1016,10 @@ fn dispatch_self_signal(sig: i32) -> i32 {
                 unsafe { core::mem::transmute::<usize, extern "C" fn(i32)>(handler) };
             // Before the call, not after: see `note_delivery`.
             note_delivery();
-            func(sig);
+            // `SA_ONSTACK` is honoured here and nowhere else. See
+            // [`altstack_entry`] for the four conditions, and `known-issues.md`
+            // for the one case this still cannot serve.
+            run_handler(func, sig, altstack_entry(sa_flags));
 
             // Restore the mask the handler ran under.  This may unblock a
             // signal raised during the handler, which the kernel then
@@ -1648,40 +1790,76 @@ pub struct StackT {
 
 /// Set and/or get the alternate signal stack.
 ///
-/// Reports `SS_DISABLE`, and accepts any configuration silently.
+/// The stack is stored, reported back, and **used**: a handler registered with
+/// `SA_ONSTACK` runs on it. See [`run_handler`], which is where the switch
+/// happens, and [`altstack_entry`] for the conditions.
 ///
-/// The behaviour is right; the reason previously given for it was not.
-/// This used to read "our OS doesn't deliver Unix signals, so there is
-/// no signal stack to configure".  Signals *are* delivered -- see
-/// [`signal`].  The real reason is narrower and outlives the
-/// correction: `SA_ONSTACK` is a defined constant that nothing reads,
-/// and `__signal_trampoline` runs the handler on the interrupted
-/// thread's own stack, pushing the context pointer and calling with no
-/// stack switch anywhere in the path.  There is genuinely no alternate
-/// stack in play, so reporting one would be the lie.
+/// # The one case it still cannot serve, and why
 ///
-/// The consequence worth knowing: a handler for a stack-overflow fault
-/// cannot run, since it would need the very stack that just overflowed.
-/// A program installing a `SIGSEGV` handler on an alternate stack --
-/// CPython's `faulthandler` among them -- gets the disposition recorded
-/// and no alternate stack behind it.  Tracked in `known-issues.md`.
+/// A handler for a *stack overflow* still cannot run. The kernel builds the
+/// [`SignalContext`] on the interrupted thread's stack and points RSP at it
+/// before jumping to `__signal_trampoline`, so when the interrupted stack is
+/// the one that just ran out, the fault happens in the kernel's own write --
+/// before any libc code exists to switch away from it. Closing that needs
+/// `deliver_pending_signal` to place the frame on the alternate stack, which
+/// is lane A's; requested in
+/// `requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md`.
+///
+/// So the state after this change is: `SA_ONSTACK` works for every handler
+/// that is not recovering from an overflow, which is most of them, and the
+/// remaining gap is one specific and now-narrow thing rather than "the flag is
+/// a constant nothing reads".
+///
+/// # Reporting
+///
+/// `oss.ss_flags` follows POSIX exactly, and the three states are genuinely
+/// different:
+///
+/// | state | `ss_flags` |
+/// |---|---|
+/// | no stack registered | `SS_DISABLE` |
+/// | registered, not in use | `0` |
+/// | a handler is running on it | `SS_ONSTACK` |
+///
+/// # Errors
+///
+/// * `EINVAL` -- `ss_flags` names a mode that is not one of
+///   `{0, SS_ONSTACK, SS_DISABLE}` once `SS_AUTODISARM` is masked off.
+/// * `ENOMEM` -- a stack smaller than `MINSIGSTKSZ` is being enabled.
+/// * `EPERM` -- the stack is changed while a handler is running on it. Linux
+///   returns this and the reason is not bureaucratic: the running handler's
+///   frames are on that memory.
+///
+/// On any error `oss` is left untouched, which is Linux's order and the useful
+/// one -- a failed call should not also have written somewhere.
+///
+/// # `SS_AUTODISARM`
+///
+/// Stored and reported, not acted on. It exists so that `siglongjmp` out of a
+/// handler does not leave the stack permanently marked in use, and we have the
+/// same footgun that Linux has without it: a handler that jumps out never
+/// reaches the line that clears the flag, so `sigaltstack` reports `SS_ONSTACK`
+/// for ever after and further changes are `EPERM`. Honouring it needs the
+/// disarm to happen in the delivery path, which is the same place the kernel
+/// work above lands, so it waits for the same request rather than being half
+/// done here.
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
-    // Return old stack state if requested.
-    if !oss.is_null() {
-        // SAFETY: oss is valid (caller contract).
-        unsafe {
-            (*oss).ss_sp = core::ptr::null_mut();
-            (*oss).ss_flags = SS_DISABLE;
-            (*oss).ss_size = 0;
-        }
-    }
+    let old = altstack();
 
-    // Validate new stack if provided.
     if !ss.is_null() {
+        // SAFETY: caller contract -- `ss` points at a readable `StackT`.
         let new_ss = unsafe { &*ss };
+
+        // Before anything else: the running handler's frames live on this
+        // memory, so it cannot be moved out from under it.
+        if old.on {
+            errno::set_errno(errno::EPERM);
+            return -1;
+        }
+
         // Linux `do_sigaltstack` strips the SS_AUTODISARM bit and then
         // requires the remaining mode to be exactly one of:
         // {0 (== SS_ONSTACK semantics), SS_ONSTACK, SS_DISABLE}.
@@ -1694,13 +1872,49 @@ pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
             errno::set_errno(errno::EINVAL);
             return -1;
         }
-        // POSIX: if ss_flags does not contain SS_DISABLE, and the stack
-        // size is below MINSIGSTKSZ, return ENOMEM.
-        if new_ss.ss_flags & SS_DISABLE == 0 && new_ss.ss_size < MINSIGSTKSZ {
-            errno::set_errno(errno::ENOMEM);
-            return -1;
+
+        if mode == SS_DISABLE {
+            // `ss_sp` and `ss_size` are not read when disabling, which is
+            // Linux's behaviour and lets `stack_t{.ss_flags = SS_DISABLE}`
+            // with everything else zero be the idiomatic way to turn it off.
+            // SAFETY: as `altstack`.
+            unsafe {
+                *altstack_ptr() = AltStack::NONE;
+            }
+        } else {
+            // POSIX: if ss_flags does not contain SS_DISABLE, and the stack
+            // size is below MINSIGSTKSZ, return ENOMEM.
+            if new_ss.ss_size < MINSIGSTKSZ {
+                errno::set_errno(errno::ENOMEM);
+                return -1;
+            }
+            // SAFETY: as `altstack`.
+            unsafe {
+                *altstack_ptr() = AltStack {
+                    sp: new_ss.ss_sp as usize,
+                    size: new_ss.ss_size,
+                    on: false,
+                    autodisarm: new_ss.ss_flags & SS_AUTODISARM != 0,
+                };
+            }
         }
-        // Accept silently — we don't actually use the alternate stack.
+    }
+
+    // Last, so that a rejected `ss` leaves it alone.
+    if !oss.is_null() {
+        let flags = if old.on {
+            SS_ONSTACK
+        } else if old.sp == 0 {
+            SS_DISABLE
+        } else {
+            0
+        } | if old.autodisarm { SS_AUTODISARM } else { 0 };
+        // SAFETY: caller contract -- `oss` points at a writable `StackT`.
+        unsafe {
+            (*oss).ss_sp = old.sp as *mut u8;
+            (*oss).ss_flags = flags;
+            (*oss).ss_size = old.size;
+        }
     }
 
     0
@@ -2123,6 +2337,178 @@ pub unsafe extern "C" fn psiginfo(info: *const SiginfoT, msg: *const u8) {
 #[allow(clippy::field_reassign_with_default)] // Tests build SiginfoT etc. by mutating defaults; clearer than functional-update for single-field tweaks.
 mod tests {
     use super::*;
+
+    // -- sigaltstack: the stack is stored, reported and used --
+
+    /// A `StackT` for a region that is never actually run on -- these tests
+    /// exercise the bookkeeping, which is the half that is the same on the
+    /// host and on the target.
+    fn stack_at(sp: usize, size: usize, flags: i32) -> StackT {
+        StackT {
+            ss_sp: sp as *mut u8,
+            ss_flags: flags,
+            ss_size: size,
+        }
+    }
+
+    fn query() -> StackT {
+        let mut oss = stack_at(0xdead_beef, 12345, -1);
+        assert_eq!(sigaltstack(core::ptr::null(), &raw mut oss), 0);
+        oss
+    }
+
+    fn clear() {
+        let off = stack_at(0, 0, SS_DISABLE);
+        assert_eq!(sigaltstack(&raw const off, core::ptr::null_mut()), 0);
+    }
+
+    /// The three reported states are genuinely different, and "registered but
+    /// not in use" is `0` rather than either of the named flags. Reporting
+    /// `SS_DISABLE` for it -- which is what this function used to do
+    /// unconditionally -- would say a registered stack does not exist.
+    #[test]
+    fn sigaltstack_reports_disabled_then_registered() {
+        clear();
+        let none = query();
+        assert_eq!(none.ss_flags, SS_DISABLE);
+        assert!(none.ss_sp.is_null());
+        assert_eq!(none.ss_size, 0);
+
+        let on = stack_at(0x9000, SIGSTKSZ, 0);
+        assert_eq!(sigaltstack(&raw const on, core::ptr::null_mut()), 0);
+        let got = query();
+        assert_eq!(got.ss_flags, 0);
+        assert_eq!(got.ss_sp as usize, 0x9000);
+        assert_eq!(got.ss_size, SIGSTKSZ);
+        clear();
+    }
+
+    /// Disabling reads neither `ss_sp` nor `ss_size`, so the idiomatic
+    /// `stack_t{.ss_flags = SS_DISABLE}` with everything else zero works.
+    #[test]
+    fn sigaltstack_disable_ignores_the_rest_of_the_struct() {
+        clear();
+        let on = stack_at(0x9000, SIGSTKSZ, 0);
+        assert_eq!(sigaltstack(&raw const on, core::ptr::null_mut()), 0);
+        // Zero size would be ENOMEM if the size were consulted.
+        clear();
+        assert_eq!(query().ss_flags, SS_DISABLE);
+    }
+
+    /// A stack below `MINSIGSTKSZ` is refused, and the refusal leaves the
+    /// previous registration alone -- a failed call must not half-succeed.
+    #[test]
+    fn sigaltstack_refuses_a_stack_too_small_to_use() {
+        clear();
+        let good = stack_at(0x9000, SIGSTKSZ, 0);
+        assert_eq!(sigaltstack(&raw const good, core::ptr::null_mut()), 0);
+
+        let tiny = stack_at(0x1_0000, MINSIGSTKSZ - 1, 0);
+        crate::errno::set_errno(0);
+        assert_eq!(sigaltstack(&raw const tiny, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOMEM);
+        assert_eq!(query().ss_sp as usize, 0x9000);
+        clear();
+    }
+
+    /// `SS_ONSTACK|SS_DISABLE` is not a mode. Checked before the size, so a
+    /// caller passing nonsense flags does not get `ENOMEM` by accident.
+    #[test]
+    fn sigaltstack_refuses_a_mode_that_is_not_one_of_the_three() {
+        clear();
+        let bad = stack_at(0x9000, 1, SS_ONSTACK | SS_DISABLE);
+        crate::errno::set_errno(0);
+        assert_eq!(sigaltstack(&raw const bad, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// On a rejected call `oss` is left untouched. Linux's order, and the
+    /// useful one: a call that failed should not also have written somewhere.
+    /// This function used to write `oss` first and validate afterwards.
+    #[test]
+    fn a_rejected_sigaltstack_does_not_write_the_old_stack() {
+        clear();
+        let mut oss = stack_at(0xabcd, 999, 0x5555);
+        let bad = stack_at(0x9000, 1, SS_ONSTACK | SS_DISABLE);
+        assert_eq!(sigaltstack(&raw const bad, &raw mut oss), -1);
+        assert_eq!(oss.ss_sp as usize, 0xabcd);
+        assert_eq!(oss.ss_size, 999);
+        assert_eq!(oss.ss_flags, 0x5555);
+    }
+
+    /// `SS_AUTODISARM` round-trips. It is stored and reported and nothing
+    /// acts on it yet -- which is a smaller claim than the flag makes, and is
+    /// why the doc comment says so out loud.
+    #[test]
+    fn sigaltstack_remembers_autodisarm() {
+        clear();
+        let on = stack_at(0x9000, SIGSTKSZ, SS_ONSTACK | SS_AUTODISARM);
+        assert_eq!(sigaltstack(&raw const on, core::ptr::null_mut()), 0);
+        assert_eq!(query().ss_flags, SS_AUTODISARM);
+        clear();
+    }
+
+    /// While a handler is running on it: `SS_ONSTACK` is reported, and a
+    /// change is `EPERM` because the running handler's frames are on that
+    /// memory.
+    #[test]
+    fn the_stack_cannot_be_moved_out_from_under_a_running_handler() {
+        clear();
+        let on = stack_at(0x9000, SIGSTKSZ, 0);
+        assert_eq!(sigaltstack(&raw const on, core::ptr::null_mut()), 0);
+        set_altstack_on(true);
+        assert_eq!(query().ss_flags, SS_ONSTACK);
+
+        let other = stack_at(0x2_0000, SIGSTKSZ, 0);
+        crate::errno::set_errno(0);
+        assert_eq!(sigaltstack(&raw const other, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        // …and the registration is unchanged.
+        assert_eq!(query().ss_sp as usize, 0x9000);
+
+        set_altstack_on(false);
+        clear();
+    }
+
+    /// The four conditions, one test each. The third is the one that is easy
+    /// to leave out and impossible to notice: a signal delivered *during* a
+    /// handler already on the alternate stack must not restart at the top and
+    /// overwrite the frames it interrupted.
+    #[test]
+    fn a_handler_runs_on_the_alternate_stack_only_when_all_four_hold() {
+        clear();
+        // No SA_ONSTACK: never, however well registered.
+        let on = stack_at(0x9000, SIGSTKSZ, 0);
+        assert_eq!(sigaltstack(&raw const on, core::ptr::null_mut()), 0);
+        assert_eq!(altstack_entry(0), None);
+        assert_eq!(altstack_entry(SA_RESTART), None);
+
+        // Asked for, registered, not in use: the top of the region.
+        assert_eq!(altstack_entry(SA_ONSTACK), Some(0x9000 + SIGSTKSZ));
+
+        // Already on it: not again.
+        set_altstack_on(true);
+        assert_eq!(altstack_entry(SA_ONSTACK), None);
+        set_altstack_on(false);
+
+        // Nothing registered: nothing to run on.
+        clear();
+        assert_eq!(altstack_entry(SA_ONSTACK), None);
+    }
+
+    /// `ss_sp + ss_size`, because x86 stacks grow down and the caller
+    /// allocated the region upwards. Getting this backwards gives a handler a
+    /// stack pointer at the *bottom* of its own stack, which writes below the
+    /// allocation on its first push and is exactly the corruption the
+    /// alternate stack exists to avoid.
+    #[test]
+    fn the_entry_point_is_the_far_end_of_the_region() {
+        clear();
+        let on = stack_at(0x1_0000, 0x4000, 0);
+        assert_eq!(sigaltstack(&raw const on, core::ptr::null_mut()), 0);
+        assert_eq!(altstack_entry(SA_ONSTACK), Some(0x1_4000));
+        clear();
+    }
 
     // -- sigwaitinfo is sigtimedwait(set, info, NULL), verified as such --
 
@@ -4972,12 +5358,29 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// A rejected call leaves `oss` alone.
+    ///
+    /// **This test used to assert the opposite**, on the stated grounds that
+    /// "oss is *still* populated first (Linux behaviour)". That is true of
+    /// `do_sigaltstack`, which fills a kernel-local `old` before validating --
+    /// and false of the function a program calls, because
+    /// `SYSCALL_DEFINE2(sigaltstack, ...)` copies that local out under
+    /// `if (!err && uoss && copy_to_user(...))`. The internal ordering was
+    /// mistaken for the ABI.
+    ///
+    /// Measured rather than reasoned about, on Linux 6.6, with `oss`
+    /// pre-filled and an `ss` carrying garbage flags:
+    ///
+    /// ```text
+    /// ret=-1 errno=22 (Invalid argument)
+    /// oss.ss_sp=0xdeadbeef oss.ss_flags=0xcafe oss.ss_size=2989
+    /// ```
+    ///
+    /// Untouched, all three fields. The name the test already had --
+    /// "does not corrupt old" -- describes the measured behaviour better than
+    /// the assertions under it did.
     #[test]
     fn test_phase75_sigaltstack_invalid_new_does_not_corrupt_old() {
-        // When the new ss is invalid, oss is *still* populated first
-        // (Linux behaviour) — caller should be able to read the old
-        // state even if its set side fails.  We capture oss before
-        // calling and verify it gets overwritten.
         let mut oss = StackT {
             ss_sp: 0xDEAD_BEEF as *mut u8,
             ss_flags: 0xCAFE,
@@ -4993,10 +5396,9 @@ mod tests {
         let ret = sigaltstack(&raw const ss, &raw mut oss);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-        // oss was populated before the validation failure.
-        assert!(oss.ss_sp.is_null());
-        assert_eq!(oss.ss_flags, SS_DISABLE);
-        assert_eq!(oss.ss_size, 0);
+        assert_eq!(oss.ss_sp as usize, 0xDEAD_BEEF);
+        assert_eq!(oss.ss_flags, 0xCAFE);
+        assert_eq!(oss.ss_size, 0xBAD);
     }
 
     // -- sigsuspend: NULL mask validation --

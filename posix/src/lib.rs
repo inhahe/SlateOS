@@ -43,8 +43,10 @@
 //!   `posix_madvise`, `shm_open`/`shm_unlink`, `memfd_create`
 //! - **Pipes**: `pipe`, `pipe2`
 //! - **Signals**: Stub constants and handlers (partial), `sigwait`,
-//!   `sigtimedwait`, `sigqueue`, `sigaltstack`, `siginterrupt`,
-//!   `psiginfo`, `siginfo_t`
+//!   `sigtimedwait`, `sigqueue`, `siginterrupt`,
+//!   `psiginfo`, `siginfo_t`; `sigaltstack` is **real** -- the stack is
+//!   stored, reported per POSIX and used, so a handler registered with
+//!   `SA_ONSTACK` runs on it (design-decisions.md 1009)
 //! - **Threads**: `pthread` stubs, working mutex ops,
 //!   `pthread_setaffinity_np`/`pthread_getaffinity_np` (CPU affinity)
 //! - **C Standard Library**: `malloc`/`free`/`calloc`/`realloc`,

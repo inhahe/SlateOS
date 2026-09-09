@@ -69780,6 +69780,64 @@ them as `open-questions.md` → B-Q10, since only they can say which of the two
 they meant.
 
 
+### One of the nine features cannot be ported, and the reason is this entry
+
+Lane A's inventory ends with the "your path became the regex" warning, and
+singles it out: *"worth keeping even though it is not a feature in the usual
+sense. It is a guard against a silent wrong answer, which is the class of bug
+this project cares most about."*
+
+It cannot come across. The hazard it guards is created by the operator's
+argument grammar — their README states it plainly: *"the first non-option
+argument is always the search regex … even when you supplied every pattern with
+`-e`"*. So `grep -e math -e logic "d:\book\*.html"` silently searches for the
+path. That grammar is exactly what this entry declined to adopt.
+
+Under GNU's grammar, and therefore ours, the same command is loud. Measured on
+both:
+
+```text
+$ grep -e math -e logic 'd:\book\*.html'
+grep: d:\book\*.html: No such file or directory
+```
+
+A positional argument after `-e` is a **file operand**, so a path that does not
+exist is an error rather than a search that quietly matches nothing. The guard
+has nothing left to guard: porting it would mean first porting the grammar that
+creates the danger.
+
+Worth stating because it is the opposite of the usual finding. Every other
+collision in this entry cost the operator a spelling; this one is a case where
+keeping GNU's meaning removed a defect rather than trading one away.
+
+### `--escape-control` covers the whole line, where the operator's covers the match
+
+The operator's grep escapes control bytes *inside matched text*, "in their own
+colour". Ours escapes the whole printed body, and the divergence is deliberate.
+
+Escaping only the match is a display choice — it shows you what you matched.
+Escaping everything is a safety one, and safety is the reading that survives:
+an `ESC [ 2 J` in the unmatched half of a line clears the reader's screen
+exactly as readily as one inside the match. An option that stopped some control
+bytes and passed others would be worse than none, because its existence invites
+the belief that the output is now safe to look at.
+
+Measured, without and with:
+
+```text
+h i t   033 [ 2 J   a n d   \a b e l l        <- raw ESC and BEL reach the terminal
+h i t   \ x 1 b [ 2 J   a n d   \ x 0 7 b e l l
+```
+
+Faithful in the details that are not about safety: `0x00`–`0x1f` except `\n`
+and `\r`, tab included, `0x7f` left alone because the operator leaves it alone.
+Off unless asked, because it changes GNU's byte-exact output.
+
+Flagged here rather than done quietly. If the operator wants match-only
+escaping, it is a smaller option than the one now implemented and can be added
+beside it.
+
+
 **Against the choice, honestly:** it is the operator's OS, and their muscle
 memory is a real cost that falls on them rather than on a hypothetical GNU
 user. The mitigation is only a mitigation — aliasing the short forms back

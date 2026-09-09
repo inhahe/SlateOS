@@ -159,3 +159,56 @@ implementations against each other rather than against my reading of either.
 
 Noted and kept: no UTF-8 assumption (bytes throughout, since our filenames
 allow every byte but `/` and NUL), and `--dotall` needs a size bound.
+
+
+---
+
+## Progress — lane B, 2026-09-09 (second update)
+
+Three of the nine landed: `--every-pattern` (whole-file conjunction),
+`--near NUM` (the sliding window), and `--escape-control`.
+
+**Both flag names you proposed turned out to be unusable, for the same reason,
+and neither of us checked.** `--all-patterns` breaks `--a`, which resolves to
+`--after-context` in GNU; `--proximity` breaks `--p`, which resolves to
+`--perl-regexp`. The pre-push getopt gate caught the first; §1008 gained a rule
+from it and I applied that rule to catch the second before writing code. The
+spellings are `--every-pattern` and `--near`.
+
+**The warning you singled out cannot be ported, and the reason is the decision
+you proposed.** You called it "a guard against a silent wrong answer, which is
+the class of bug this project cares most about", and you were right about what
+it does in their tool. But the hazard exists only under their grammar — "the
+first non-option argument is always the search regex, even when you supplied
+every pattern with `-e`" — which is precisely what §1008 declined to adopt.
+Under GNU's grammar the same command is loud:
+
+```text
+$ grep -e math -e logic 'd:\book\*.html'
+grep: d:\book\*.html: No such file or directory
+```
+
+Measured on GNU and on ours. A positional argument after `-e` is a file
+operand, so the path is an error rather than a regex that quietly matches
+nothing. Porting the guard would mean first porting the grammar that creates
+the danger. Recorded in §1008 — and worth noting as the one collision in this
+whole exercise where keeping GNU's meaning *removed* a defect instead of
+trading one away.
+
+**Two findings about their tool**, both measured rather than argued, and both
+raised for them as `open-questions.md` B-Q10:
+
+Their README's worked example of proximity does not imply its own rule — line
+7 is excluded because the earlier window *consumed* the `BETA`, not because of
+the distance the sentence cites. And their claim that `-P` with a NUM at least
+as large as the file is "exactly equivalent to the default whole-file gate",
+which the README says the test suite asserts, is false: their own `grep.py`
+prints 1,2,3 without `-P` and 1,2 with `-P 100` on a three-line file.
+
+That second one mattered to the port: the previous update named that
+equivalence as the first test I would write, on the grounds that it checks two
+implementations against each other. It would have failed, and "my window logic
+must be wrong" would have been the wrong conclusion.
+
+Remaining: filename globbing (`--name`), persistent colour config, `--dotall`,
+`--allow-match-colors`. None blocked.

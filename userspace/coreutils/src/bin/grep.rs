@@ -451,6 +451,9 @@ fn glob_matches(glob: &[u8], name: &[u8]) -> bool {
 struct Options {
     syntax: Syntax,
     ignore_case: bool,
+    /// `--escape-control`: render control bytes as `\xNN` instead of sending
+    /// them to the terminal. See [`escaped`].
+    escape_control: bool,
     /// `--near NUM`: every pattern must occur within NUM lines of another,
     /// and only matching lines inside a satisfying window are selected. The
     /// sliding-window form of [`Options::every_pattern`]; see
@@ -822,6 +825,7 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("regexp", Takes::Required),
     ("every-pattern", Takes::Nothing),
     ("near", Takes::Required),
+    ("escape-control", Takes::Nothing),
     ("invert-match", Takes::Nothing),
     ("silent", Takes::Nothing),
     ("text", Takes::Nothing),
@@ -899,6 +903,7 @@ Miscellaneous:
   -s, --no-messages         suppress error messages
       --every-pattern        a file must contain every pattern, not any of them
       --near=NUM             every pattern within NUM lines of another
+      --escape-control       show control bytes as \\xNN instead of sending them
   -v, --invert-match        select non-matching lines
   -V, --version             display version information and exit
       --help                display this help text and exit
@@ -1025,6 +1030,7 @@ enum Flag {
     Short(u8),
     EveryPattern,
     Near,
+    EscapeControl,
     BinaryFiles,
     Color,
     Exclude,
@@ -1070,6 +1076,7 @@ fn long_flag(name: &str) -> Flag {
         "group-separator" => Flag::GroupSeparator,
         "every-pattern" => Flag::EveryPattern,
         "near" => Flag::Near,
+        "escape-control" => Flag::EscapeControl,
         "include" => Flag::Include,
         "ignore-case" => Flag::Short(b'i'),
         "no-ignore-case" => Flag::NoIgnoreCase,
@@ -1359,6 +1366,7 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
             Flag::Label => opts.label = Some(quote::os_bytes(&required(value)).into_owned()),
             Flag::EveryPattern => opts.every_pattern = true,
             Flag::Near => opts.near = near_arg(&quote::os_bytes(&required(value)))?,
+            Flag::EscapeControl => opts.escape_control = true,
             Flag::LineBuffered => opts.line_buffered = true,
             // Upstream's `default: usage (EXIT_TROUBLE)`. Unreachable as things
             // stand — `SHORT_OPTIONS` lists exactly the letters matched above,
@@ -2900,6 +2908,53 @@ fn line_flush(out: &mut impl Write, opts: &Options) -> io::Result<()> {
 /// The two stages together are why `GREP_COLORS='ms='` and
 /// `GREP_COLORS='ms=:sl=33'` produce differently *shaped* output rather than
 /// the same shape with one escape missing.
+/// Line content with control bytes rendered as `\xNN`, when `--escape-control`
+/// asks for it.
+///
+/// Returns a borrow when there is nothing to change, which is almost always:
+/// the cost of the option on ordinary text is one scan and no allocation.
+///
+/// # Which bytes, and why not the others
+///
+/// `0x00`–`0x1f` except `\n` and `\r`, following the operator's grep. The two
+/// exceptions are structural rather than aesthetic: a line break is what the
+/// reader is *for*, and a `\r` at end of line belongs to a CRLF file rather
+/// than to its content — [`write_body`] already treats that `\r` specially so
+/// that colour does not paint it. `0x7f` (DEL) is left alone because the
+/// operator's tool leaves it alone; it is a control character by most
+/// definitions and this is a port, not an improvement.
+///
+/// # Why the whole line and not only the matched part
+///
+/// The operator's grep escapes control bytes *inside matched text*. Ours does
+/// the whole body, and the difference is deliberate. Escaping only the match
+/// is a display choice; escaping everything is a safety one, and the safety
+/// reading is the one that survives scrutiny: a `\x1b[2J` sitting in the
+/// unmatched half of a line clears the reader's screen exactly as readily as
+/// one inside the match. An option that stopped some control bytes and passed
+/// others would be worse than none, because it invites the belief that output
+/// is now safe to look at.
+///
+/// Flagged to the operator rather than done quietly — see `design-decisions.md`
+/// §1008.
+fn escaped<'a>(body: &'a [u8], opts: &Options) -> Cow<'a, [u8]> {
+    if !opts.escape_control || !body.iter().any(|b| *b < 0x20 && *b != b'\n' && *b != b'\r') {
+        return Cow::Borrowed(body);
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(body.len());
+    for &b in body {
+        if b < 0x20 && b != b'\n' && b != b'\r' {
+            out.extend_from_slice(b"\\x");
+            out.push(HEX[usize::from(b >> 4)]);
+            out.push(HEX[usize::from(b & 0x0f)]);
+        } else {
+            out.push(b);
+        }
+    }
+    Cow::Owned(out)
+}
+
 fn write_body(
     out: &mut impl Write,
     body: &[u8],
@@ -2908,7 +2963,7 @@ fn write_body(
     opts: &Options,
 ) -> io::Result<()> {
     if !opts.color {
-        return out.write_all(body);
+        return out.write_all(&escaped(body, opts));
     }
     let line_cap = opts.line_cap(selected);
     let match_cap = opts.match_cap(selected);
@@ -2922,12 +2977,11 @@ fn write_body(
                 continue;
             }
             out.write_all(&opts.colors.start(line_cap))?;
-            out.write_all(body.get(done..s).unwrap_or_default())?;
-            out.write_all(
-                &opts
-                    .colors
-                    .wrap(match_cap, body.get(s..e).unwrap_or_default()),
-            )?;
+            out.write_all(&escaped(body.get(done..s).unwrap_or_default(), opts))?;
+            out.write_all(&opts.colors.wrap(
+                match_cap,
+                &escaped(body.get(s..e).unwrap_or_default(), opts),
+            ))?;
             done = e;
         }
     }
@@ -2937,12 +2991,12 @@ fn write_body(
             .saturating_sub(usize::from(body.last() == Some(&b'\r')));
         if tail_end > done {
             out.write_all(&opts.colors.start(line_cap))?;
-            out.write_all(body.get(done..tail_end).unwrap_or_default())?;
+            out.write_all(&escaped(body.get(done..tail_end).unwrap_or_default(), opts))?;
             out.write_all(&opts.colors.end(line_cap))?;
             done = tail_end;
         }
     }
-    out.write_all(body.get(done..).unwrap_or_default())
+    out.write_all(&escaped(body.get(done..).unwrap_or_default(), opts))
 }
 
 /// The one stream being searched, and what its prefixes need to know about it.
@@ -3987,6 +4041,53 @@ mod tests {
     fn gate(text: &str, patterns: &[&str], opts: &Options) -> bool {
         let ps = many_pats(patterns, opts);
         every_pattern_present(text.as_bytes(), &ps, opts).unwrap()
+    }
+
+    fn esc(bytes: &[u8], on: bool) -> Vec<u8> {
+        let mut o = Options::default();
+        o.escape_control = on;
+        escaped(bytes, &o).into_owned()
+    }
+
+    /// Off by default: this changes GNU's output, so it only happens on ask.
+    #[test]
+    fn escape_control_is_off_unless_asked() {
+        assert_eq!(esc(b"a\x1bb", false), b"a\x1bb");
+    }
+
+    #[test]
+    fn escape_control_renders_control_bytes_as_hex() {
+        assert_eq!(esc(b"a\x1bb", true), b"a\\x1bb".to_vec());
+        assert_eq!(esc(b"\x00\x07\x1f", true), b"\\x00\\x07\\x1f".to_vec());
+    }
+
+    /// Tab is escaped and the newline family is not: a line break is what the
+    /// reader is for, and a trailing CR belongs to a CRLF file rather than to
+    /// its content.
+    #[test]
+    fn escape_control_leaves_the_newline_family_alone() {
+        assert_eq!(esc(b"a\nb\r", true), b"a\nb\r".to_vec());
+        assert_eq!(esc(b"a\tb", true), b"a\\x09b".to_vec());
+    }
+
+    /// The whole body, not only the matched part. A screen-clearing sequence
+    /// in the unmatched half reaches the terminal exactly as readily as one
+    /// inside the match, so an option that stopped only some of them would
+    /// invite the belief that the output is safe to look at.
+    #[test]
+    fn escape_control_covers_text_outside_the_match() {
+        let dangerous = b"safe \x1b[2J unmatched";
+        let out = esc(dangerous, true);
+        assert!(!out.contains(&0x1b), "an escape byte survived: {out:?}");
+        assert!(out.windows(4).any(|w| w == b"\\x1b"));
+    }
+
+    /// Nothing to do means nothing allocated.
+    #[test]
+    fn escape_control_borrows_when_there_is_nothing_to_change() {
+        let mut o = Options::default();
+        o.escape_control = true;
+        assert!(matches!(escaped(b"ordinary text", &o), Cow::Borrowed(_)));
     }
 
     fn near_set(text: &str, patterns: &[&str], near: usize, opts: &Options) -> Vec<usize> {

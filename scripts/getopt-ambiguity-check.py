@@ -516,6 +516,12 @@ def gnu_help_table(runner: list[str], util: str) -> set[str] | None:
 # than trusted.
 INTENTIONAL_EXTRAS: dict[str, dict[str, str]] = {
     "grep": {
+        "escape-control": (
+            "design-decisions.md 1008: render control bytes as \\xNN rather "
+            "than sending them to the terminal. GNU has no equivalent. Safe "
+            "under the prefix rule because --e is already ambiguous in GNU "
+            "and nothing there starts with es."
+        ),
         "near": (
             "design-decisions.md 1008: proximity matching, which GNU grep has "
             "no equivalent for. Spelled --near rather than --proximity because "

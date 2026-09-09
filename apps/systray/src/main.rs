@@ -13,6 +13,7 @@
 //!
 //! Uses the guitk library for all rendering.
 
+use appearance::Palette;
 use guitk::color::Color;
 // The calendar popup's date arithmetic comes from the shared civil-date
 // module rather than a local copy. See known-issues.md
@@ -33,28 +34,7 @@ use std::time::Duration;
 // reads as a choice from the scheme rather than a fresh hex literal, and the
 // entries nothing currently draws with are the point of having it.
 #[allow(dead_code)]
-mod palette {
-    use guitk::color::Color;
-
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const CRUST: Color = Color::from_hex(0x11111B);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const SURFACE2: Color = Color::from_hex(0x585B70);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
-    pub const TEAL: Color = Color::from_hex(0x94E2D5);
-    pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-}
+mod palette {}
 
 // ============================================================================
 // Constants
@@ -676,6 +656,12 @@ pub struct SystemTray {
     /// that arms this, `Move`s that follow it, and a `Release` that disarms it.
     /// Without it a slider could only be jumped to, never dragged.
     dragging: Option<Slider>,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl SystemTray {
@@ -698,6 +684,7 @@ impl SystemTray {
         let tray_width = icon_count * ICON_CELL_SIZE;
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             icons,
             active_popup: PopupType::None,
             quick_settings: QuickSettingsState::default(),
@@ -1096,7 +1083,7 @@ impl SystemTray {
             y: self.tray_y,
             width: self.tray_width,
             height: TRAY_HEIGHT,
-            color: palette::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -1114,7 +1101,7 @@ impl SystemTray {
                 PopupLayout::Volume(l) => self.render_volume_popup(&mut tree, l),
                 PopupLayout::Network(l) => self.render_network_popup(&mut tree, l),
                 PopupLayout::Calendar(l) => self.render_calendar_popup(&mut tree, l),
-                PopupLayout::Menu(l) => Self::render_menu(&mut tree, l),
+                PopupLayout::Menu(l) => Self::render_menu(&mut tree, &self.palette, l),
             }
         }
 
@@ -1651,7 +1638,7 @@ impl SystemTray {
             x: center_x - font_size / 2.0,
             y: center_y - font_size / 2.0,
             text: display_text,
-            color: palette::TEXT,
+            color: self.palette.text,
             font_size,
             font_weight: FontWeightHint::Regular,
             max_width: Some(ICON_CELL_SIZE),
@@ -1665,7 +1652,7 @@ impl SystemTray {
                 y: self.tray_y + 4.0,
                 width: 8.0,
                 height: 8.0,
-                color: palette::RED,
+                color: self.palette.red,
                 corner_radii: CornerRadii::all(4.0),
             });
         }
@@ -1707,12 +1694,19 @@ impl SystemTray {
     }
 
     /// Push a bold header run.
-    fn push_header(tree: &mut RenderTree, x: f32, y: f32, text: String, max_width: f32) {
+    fn push_header(
+        tree: &mut RenderTree,
+        pal: &Palette,
+        x: f32,
+        y: f32,
+        text: String,
+        max_width: f32,
+    ) {
         tree.push(RenderCommand::Text {
             x,
             y,
             text,
-            color: palette::TEXT,
+            color: pal.text,
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_width),
@@ -1721,9 +1715,10 @@ impl SystemTray {
     }
 
     fn render_quick_settings(&self, tree: &mut RenderTree, l: &QuickSettingsLayout) {
-        Self::render_popup_background(tree, l.frame);
+        Self::render_popup_background(tree, &self.palette, l.frame);
         Self::push_header(
             tree,
+            &self.palette,
             l.content_x,
             l.header_y,
             String::from("Quick Settings"),
@@ -1731,7 +1726,7 @@ impl SystemTray {
         );
 
         for row in &l.rows {
-            Self::render_toggle_row(tree, row);
+            Self::render_toggle_row(tree, &self.palette, row);
         }
 
         Self::push_text(
@@ -1739,15 +1734,16 @@ impl SystemTray {
             l.content_x,
             l.brightness_label_y,
             format!("Brightness: {}%", self.quick_settings.brightness),
-            palette::SUBTEXT0,
+            self.palette.subtext0,
             POPUP_FONT_SIZE,
             Some(l.content_width),
         );
         Self::render_slider(
             tree,
+            &self.palette,
             l.brightness,
             self.quick_settings.brightness,
-            palette::YELLOW,
+            self.palette.yellow,
         );
 
         Self::push_text(
@@ -1755,26 +1751,28 @@ impl SystemTray {
             l.content_x,
             l.volume_label_y,
             format!("Volume: {}%", self.volume.master_volume),
-            palette::SUBTEXT0,
+            self.palette.subtext0,
             POPUP_FONT_SIZE,
             Some(l.content_width),
         );
         Self::render_slider(
             tree,
+            &self.palette,
             l.volume,
             self.volume.master_volume,
             if self.volume.muted {
-                palette::SURFACE2
+                self.palette.surface2
             } else {
-                palette::BLUE
+                self.palette.blue
             },
         );
     }
 
     fn render_volume_popup(&self, tree: &mut RenderTree, l: &VolumeLayout) {
-        Self::render_popup_background(tree, l.frame);
+        Self::render_popup_background(tree, &self.palette, l.frame);
         Self::push_header(
             tree,
+            &self.palette,
             l.content_x,
             l.header_y,
             String::from("Volume"),
@@ -1786,7 +1784,7 @@ impl SystemTray {
             l.content_x,
             l.device_y,
             self.volume.output_device.clone(),
-            palette::SUBTEXT0,
+            self.palette.subtext0,
             POPUP_FONT_SIZE - 1.0,
             Some(l.content_width),
         );
@@ -1798,21 +1796,22 @@ impl SystemTray {
             l.master_label.y,
             format!("Master: {}%{}", self.volume.master_volume, mute_label),
             if self.volume.muted {
-                palette::OVERLAY0
+                self.palette.overlay0
             } else {
-                palette::TEXT
+                self.palette.text
             },
             POPUP_FONT_SIZE,
             Some(l.content_width),
         );
         Self::render_slider(
             tree,
+            &self.palette,
             l.master_slider,
             self.volume.master_volume,
             if self.volume.muted {
-                palette::SURFACE2
+                self.palette.surface2
             } else {
-                palette::BLUE
+                self.palette.blue
             },
         );
 
@@ -1821,7 +1820,7 @@ impl SystemTray {
             y: l.separator_y,
             width: l.content_width,
             height: 1.0,
-            color: palette::SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1836,30 +1835,32 @@ impl SystemTray {
                 app.label.y,
                 format!("{}: {}%{}", entry.app_name, entry.volume, mute_marker),
                 if entry.muted {
-                    palette::OVERLAY0
+                    self.palette.overlay0
                 } else {
-                    palette::SUBTEXT1
+                    self.palette.subtext1
                 },
                 POPUP_FONT_SIZE,
                 Some(l.content_width),
             );
             Self::render_slider(
                 tree,
+                &self.palette,
                 app.slider,
                 entry.volume,
                 if entry.muted {
-                    palette::SURFACE2
+                    self.palette.surface2
                 } else {
-                    palette::TEAL
+                    self.palette.teal
                 },
             );
         }
     }
 
     fn render_network_popup(&self, tree: &mut RenderTree, l: &NetworkLayout) {
-        Self::render_popup_background(tree, l.frame);
+        Self::render_popup_background(tree, &self.palette, l.frame);
         Self::push_header(
             tree,
+            &self.palette,
             l.content_x,
             l.header_y,
             String::from("Network"),
@@ -1867,9 +1868,9 @@ impl SystemTray {
         );
 
         let (status_text, status_color) = if self.network.connected {
-            ("Connected", palette::GREEN)
+            ("Connected", self.palette.green)
         } else {
-            ("Disconnected", palette::RED)
+            ("Disconnected", self.palette.red)
         };
         Self::push_text(
             tree,
@@ -1885,7 +1886,7 @@ impl SystemTray {
             l.content_x,
             l.ssid_y,
             format!("Network: {}", self.network.ssid),
-            palette::SUBTEXT1,
+            self.palette.subtext1,
             POPUP_FONT_SIZE,
             Some(l.content_width),
         );
@@ -1894,7 +1895,7 @@ impl SystemTray {
             l.content_x,
             l.signal_label_y,
             format!("Signal: {}%", self.network.signal_strength),
-            palette::SUBTEXT0,
+            self.palette.subtext0,
             POPUP_FONT_SIZE,
             Some(l.content_width),
         );
@@ -1902,16 +1903,17 @@ impl SystemTray {
         // `Slider`, so no click can move it.
         Self::render_slider(
             tree,
+            &self.palette,
             l.signal_bar,
             self.network.signal_strength,
-            palette::GREEN,
+            self.palette.green,
         );
         Self::push_text(
             tree,
             l.content_x,
             l.ip_y,
             format!("IP: {}", self.network.ip_address),
-            palette::SUBTEXT0,
+            self.palette.subtext0,
             POPUP_FONT_SIZE,
             Some(l.content_width),
         );
@@ -1920,26 +1922,27 @@ impl SystemTray {
             l.settings.x,
             l.settings.y,
             String::from("Network Settings..."),
-            palette::BLUE,
+            self.palette.blue,
             POPUP_FONT_SIZE,
             Some(l.content_width),
         );
     }
 
     fn render_calendar_popup(&self, tree: &mut RenderTree, l: &CalendarLayout) {
-        Self::render_popup_background(tree, l.frame);
+        Self::render_popup_background(tree, &self.palette, l.frame);
 
         Self::push_text(
             tree,
             l.prev.x,
             l.header_y,
             String::from("\u{25C0}"),
-            palette::SUBTEXT0,
+            self.palette.subtext0,
             POPUP_FONT_SIZE,
             None,
         );
         Self::push_header(
             tree,
+            &self.palette,
             l.title.x,
             l.header_y,
             format!("{} {}", date::month_name(l.month), l.year),
@@ -1950,7 +1953,7 @@ impl SystemTray {
             l.next.x,
             l.header_y,
             String::from("\u{25B6}"),
-            palette::SUBTEXT0,
+            self.palette.subtext0,
             POPUP_FONT_SIZE,
             None,
         );
@@ -1964,7 +1967,7 @@ impl SystemTray {
                 l.content_x + (i as f32) * CALENDAR_CELL + CALENDAR_CELL / 2.0 - 6.0,
                 l.weekday_header_y,
                 String::from(header),
-                palette::OVERLAY0,
+                self.palette.overlay0,
                 POPUP_FONT_SIZE - 1.0,
                 None,
             );
@@ -1979,7 +1982,7 @@ impl SystemTray {
                     y: cell.y + 2.0,
                     width: CALENDAR_CELL - 4.0,
                     height: CALENDAR_CELL - 4.0,
-                    color: palette::BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::all(CALENDAR_CELL / 2.0 - 2.0),
                 });
             }
@@ -1988,9 +1991,9 @@ impl SystemTray {
                 y: cell.y + 8.0,
                 text: format!("{day}"),
                 color: if is_today {
-                    palette::CRUST
+                    self.palette.crust
                 } else {
-                    palette::TEXT
+                    self.palette.text
                 },
                 font_size: POPUP_FONT_SIZE,
                 font_weight: if is_today {
@@ -2008,7 +2011,7 @@ impl SystemTray {
             y: l.events_y - ITEM_SPACING,
             width: l.content_width,
             height: 1.0,
-            color: palette::SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::ZERO,
         });
         Self::push_text(
@@ -2016,16 +2019,16 @@ impl SystemTray {
             l.content_x,
             l.events_y,
             String::from("No upcoming events"),
-            palette::OVERLAY0,
+            self.palette.overlay0,
             POPUP_FONT_SIZE - 1.0,
             Some(l.content_width),
         );
     }
 
-    fn render_menu(tree: &mut RenderTree, l: &MenuLayout) {
-        Self::render_popup_background(tree, l.frame);
+    fn render_menu(tree: &mut RenderTree, pal: &Palette, l: &MenuLayout) {
+        Self::render_popup_background(tree, pal, l.frame);
         if let Some((text, y)) = &l.header {
-            Self::push_header(tree, l.content_x, *y, text.clone(), l.content_width);
+            Self::push_header(tree, pal, l.content_x, *y, text.clone(), l.content_width);
         }
         for item in &l.items {
             Self::push_text(
@@ -2033,7 +2036,7 @@ impl SystemTray {
                 item.rect.x,
                 item.rect.y,
                 item.label.clone(),
-                palette::TEXT,
+                pal.text,
                 POPUP_FONT_SIZE,
                 Some(l.content_width),
             );
@@ -2045,7 +2048,7 @@ impl SystemTray {
     // ========================================================================
 
     /// Render a popup background with shadow, rounded corners, and border.
-    fn render_popup_background(tree: &mut RenderTree, frame: Rect) {
+    fn render_popup_background(tree: &mut RenderTree, pal: &Palette, frame: Rect) {
         let Rect {
             x,
             y,
@@ -2072,7 +2075,7 @@ impl SystemTray {
             y,
             width,
             height,
-            color: palette::BASE,
+            color: pal.base,
             corner_radii: CornerRadii::all(POPUP_RADIUS),
         });
 
@@ -2082,7 +2085,7 @@ impl SystemTray {
             y,
             width,
             height,
-            color: palette::SURFACE1,
+            color: pal.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(POPUP_RADIUS),
         });
@@ -2092,7 +2095,13 @@ impl SystemTray {
     ///
     /// `track` is the rect the hit-test uses, so the thumb cannot be drawn
     /// anywhere the pointer is not accepted.
-    fn render_slider(tree: &mut RenderTree, track: Rect, value: u8, active_color: Color) {
+    fn render_slider(
+        tree: &mut RenderTree,
+        pal: &Palette,
+        track: Rect,
+        value: u8,
+        active_color: Color,
+    ) {
         let Rect {
             x,
             y,
@@ -2109,7 +2118,7 @@ impl SystemTray {
             y: track_y,
             width,
             height: SLIDER_TRACK_HEIGHT,
-            color: palette::SURFACE0,
+            color: pal.surface0,
             corner_radii: CornerRadii::all(SLIDER_TRACK_HEIGHT / 2.0),
         });
 
@@ -2133,14 +2142,14 @@ impl SystemTray {
             y: thumb_y,
             width: SLIDER_THUMB_RADIUS * 2.0,
             height: SLIDER_THUMB_RADIUS * 2.0,
-            color: palette::TEXT,
+            color: pal.text,
             corner_radii: CornerRadii::all(SLIDER_THUMB_RADIUS),
         });
     }
 
     /// Render a toggle row (label + optional subtitle + toggle pill) into the
     /// rect the layout gave it.
-    fn render_toggle_row(tree: &mut RenderTree, row: &ToggleRowLayout) {
+    fn render_toggle_row(tree: &mut RenderTree, pal: &Palette, row: &ToggleRowLayout) {
         let Rect {
             x,
             y,
@@ -2155,7 +2164,7 @@ impl SystemTray {
             x,
             y,
             text: String::from(label),
-            color: palette::TEXT,
+            color: pal.text,
             font_size: POPUP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - TOGGLE_WIDTH - 8.0),
@@ -2168,7 +2177,7 @@ impl SystemTray {
                 x,
                 y: y + POPUP_FONT_SIZE + 2.0,
                 text: String::from(subtitle),
-                color: palette::OVERLAY0,
+                color: pal.overlay0,
                 font_size: POPUP_FONT_SIZE - 2.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - TOGGLE_WIDTH - 8.0),
@@ -2184,11 +2193,7 @@ impl SystemTray {
         let toggle_x = x + width - TOGGLE_WIDTH;
         let toggle_y = y + (height - TOGGLE_HEIGHT) / 2.0;
 
-        let pill_color = if enabled {
-            palette::BLUE
-        } else {
-            palette::SURFACE1
-        };
+        let pill_color = if enabled { pal.blue } else { pal.surface1 };
         tree.push(RenderCommand::FillRect {
             x: toggle_x,
             y: toggle_y,
@@ -2211,7 +2216,7 @@ impl SystemTray {
             y: knob_y,
             width: knob_radius * 2.0,
             height: knob_radius * 2.0,
-            color: palette::TEXT,
+            color: pal.text,
             corner_radii: CornerRadii::all(knob_radius),
         });
     }
@@ -2376,6 +2381,10 @@ const CLOCK_TICK: Duration = Duration::from_secs(1);
 const DEFAULT_VIEWPORT: (u32, u32) = (1920, 1080);
 
 impl oswindow::app::App for SystemTray {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("System Tray")
     }
@@ -3105,7 +3114,9 @@ mod tests {
                     height,
                     color,
                     ..
-                } if (height - SLIDER_TRACK_HEIGHT).abs() < 0.01 && color == palette::SURFACE0 => {
+                } if (height - SLIDER_TRACK_HEIGHT).abs() < 0.01
+                    && color == tray.palette.surface0 =>
+                {
                     Some(Rect::new(x, y, width, height))
                 }
                 _ => None,
@@ -3376,7 +3387,7 @@ mod tests {
                 height,
                 color,
                 ..
-            } if color == palette::BLUE && (width - (CALENDAR_CELL - 4.0)).abs() < 0.01 => {
+            } if color == tray.palette.blue && (width - (CALENDAR_CELL - 4.0)).abs() < 0.01 => {
                 Some(Rect::new(x, y, width, height))
             }
             _ => None,
@@ -3711,5 +3722,79 @@ mod tests {
             kind: MouseEventKind::Press(MouseButton::Left),
         }));
         assert_eq!(response, Response::Exit);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut SystemTray) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 400.0, 40.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = SystemTray::new(0.0, 0.0);
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        oswindow::app::App::theme_changed(
+            &mut app,
+            &theme(
+                appearance::ThemeMode::Dark,
+                Some(appearance::HighContrastScheme::WhiteOnBlack),
+            ),
+        );
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

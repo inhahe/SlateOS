@@ -124459,8 +124459,28 @@ no evidence at all.
 
 The converter now recovers the enclosing module for each constant and
 substitutes the *qualified* name, since a bare `BASE` matches nothing at the
-use site. Corrected counts: **58 converted, 16 outstanding**, 42 games, 24
-naming no palette roles.
+use site.
+
+**And then a *fourth* shape turned up, by not trusting the survey a third
+time.** With all sixteen done, the survey again said zero left. Rather than
+report that, the tree was searched for the twenty Mocha hex values *in any
+form* — and five more applications appeared: `editor` (42 sites),
+`typingtutor` (18), `metronome` (13), `ebook` (13) and `settings` (2). They
+declare no colour constants at all; they write `Color::from_hex(0x1E1E2E)`
+**inline at the use site**. A survey that looks for `const NAME: Color = …` is
+blind to those in both directions — it cannot report them as outstanding *or*
+as done, so they simply never appeared in any count.
+
+**The lesson, stated plainly because it has now cost three corrections:** the
+survey counts *declarations*, and the thing that actually matters is *uses*.
+Every time the declaration shape has varied — file scope, module scope,
+underscore-prefixed, and now no declaration at all — the count has been wrong
+in the direction that makes the work look finished. The check that has never
+been fooled is grepping for the twenty hex values themselves and subtracting
+the sites deliberately kept fixed. That is the check to run before saying
+"done", and the survey is only a work queue.
+
+Corrected counts: **74 converted, 5 outstanding**, 42 games.
 
 The earlier fix to `survey_all.py` still stands: it used to overlap its buckets
 and report "0 already converted", because a converted application has no

@@ -4302,11 +4302,39 @@ fn test_dispatch_setgroups() -> KernelResult<()> {
     use crate::proc::{pcb, thread};
     use crate::sched;
 
+    // Registration first, because it needs no process. The boot self-tests run
+    // with no owning process, so the guard below skipped this test in its
+    // entirety on every boot -- it has never once reported that SYS_PROCESS_SETGROUPS (1067) is
+    // wired to a handler. The handler's own pid lookup comes before everything
+    // else and answers `NoSuchProcess`, which is a different fact from
+    // `NoSuchSyscall` (-10, "the number is not registered"), so dispatching
+    // here separates "wired but unreachable from this context" from "never
+    // wired at all".
+    {
+        let r = dispatch(
+            SYS_PROCESS_SETGROUPS,
+            &SyscallArgs {
+                arg0: 0,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        );
+        if r.value == SyscallResult::err(KernelError::NoSuchSyscall).value {
+            serial_println!(
+                "[syscall]   FAIL: SYS_PROCESS_SETGROUPS (1067) is not registered -- dispatch returned                  NoSuchSyscall, so the number was never wired to a handler"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
     let task_id = sched::current_task_id();
     let Some(pid) = thread::owner_process(task_id) else {
-        // Kernel-mode task with no owning process — skip this test
-        // rather than fail on a path the handler itself handles.
-        serial_println!("[syscall]   Dispatch setgroups: SKIP (no owning process)");
+        serial_println!(
+            "[syscall]   setgroups (1067 registered): OK — the group-list cases              SKIPPED (no owning process to hold a group list)"
+        );
         return Ok(());
     };
 
@@ -4381,9 +4409,39 @@ fn test_dispatch_chroot() -> KernelResult<()> {
     use crate::proc::{pcb, thread};
     use crate::sched;
 
+    // Registration first, because it needs no process. The boot self-tests run
+    // with no owning process, so the guard below skipped this test in its
+    // entirety on every boot -- it has never once reported that SYS_PROCESS_CHROOT (1068) is
+    // wired to a handler. The handler's own pid lookup comes before everything
+    // else and answers `NoSuchProcess`, which is a different fact from
+    // `NoSuchSyscall` (-10, "the number is not registered"), so dispatching
+    // here separates "wired but unreachable from this context" from "never
+    // wired at all".
+    {
+        let r = dispatch(
+            SYS_PROCESS_CHROOT,
+            &SyscallArgs {
+                arg0: 0,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        );
+        if r.value == SyscallResult::err(KernelError::NoSuchSyscall).value {
+            serial_println!(
+                "[syscall]   FAIL: SYS_PROCESS_CHROOT (1068) is not registered -- dispatch returned                  NoSuchSyscall, so the number was never wired to a handler"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
     let task_id = sched::current_task_id();
     let Some(pid) = thread::owner_process(task_id) else {
-        serial_println!("[syscall]   Dispatch chroot: SKIP (no owning process)");
+        serial_println!(
+            "[syscall]   chroot (1068 registered): OK — the root-dir case SKIPPED              (no owning process to hold a root directory)"
+        );
         return Ok(());
     };
 

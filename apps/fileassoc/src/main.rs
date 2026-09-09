@@ -162,6 +162,15 @@ impl FileCategory {
 // FileType — describes a single file type (extension)
 // ============================================================================
 
+/// How many previous handlers a file type remembers.
+///
+/// Three, as `apps/settings/src/associations.rs` had it. This is a fallback
+/// chain rather than a history the user browses: what it has to survive is an
+/// application being uninstalled, and needing to walk back further than three
+/// means three of a type's handlers were uninstalled between one use and the
+/// next.
+const MAX_HANDLER_HISTORY: usize = 3;
+
 /// Metadata for a file type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileType {
@@ -173,6 +182,18 @@ pub struct FileType {
     pub description: String,
     /// ID of the default application to open this type, if any.
     pub default_app_id: Option<String>,
+    /// Handlers this type had before the current one, most recent first.
+    ///
+    /// Exists so that uninstalling an application does not orphan every file
+    /// type it opened: [`AssociationRegistry::remove_app`] walks this for the
+    /// first handler still installed. Bounded by [`MAX_HANDLER_HISTORY`] --
+    /// this is a fallback chain, not an audit log, and an unbounded one would
+    /// grow with every change the user ever made.
+    ///
+    /// Ported from `apps/settings/src/associations.rs`, which had the design
+    /// and was unreachable; see `known-issues.md`
+    /// `TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING`.
+    pub handler_history: Vec<String>,
 }
 
 impl FileType {
@@ -183,6 +204,7 @@ impl FileType {
             mime_type: mime_type.to_string(),
             description: description.to_string(),
             default_app_id: None,
+            handler_history: Vec::new(),
         }
     }
 
@@ -197,6 +219,7 @@ impl FileType {
             extension: extension.to_string(),
             mime_type: mime_type.to_string(),
             description: description.to_string(),
+            handler_history: Vec::new(),
             default_app_id: Some(app_id.to_string()),
         }
     }
@@ -457,21 +480,84 @@ impl AssociationRegistry {
         self.apps.insert(app.id.clone(), app);
     }
 
-    /// Remove an application. Also clears any associations pointing to it.
+    /// Remove an application, handing each file type it opened back to its
+    /// previous handler.
+    ///
+    /// # What this used to do, and why it was wrong twice
+    ///
+    /// It deleted every association naming the app and stopped there.
+    ///
+    /// *First*, that orphans the file types: uninstalling an editor left every
+    /// `.rs`, `.toml` and `.log` on the machine with no handler at all, even
+    /// though the user had a perfectly good previous one. That is what
+    /// [`FileType::handler_history`] now prevents.
+    ///
+    /// *Second* — and this is the part no test caught — it updated only *one*
+    /// of the two records of "what opens this". `associations` lost the entry
+    /// while `file_types[ext].default_app_id` went on naming the removed
+    /// application, so the registry disagreed with itself and which answer a
+    /// caller got depended on which map it happened to ask.
     pub fn remove_app(&mut self, app_id: &str) -> Result<AppInfo, AssocError> {
-        // Remove associations that reference this app.
-        let to_remove: Vec<String> = self
+        let affected: Vec<String> = self
+            .file_types
+            .iter()
+            .filter(|(_, ft)| ft.default_app_id.as_deref() == Some(app_id))
+            .map(|(ext, _)| ext.clone())
+            .collect();
+
+        // Gone before the fallback search, so an app cannot fall back to
+        // itself through a stale history entry.
+        let removed = self
+            .apps
+            .remove(app_id)
+            .ok_or_else(|| AssocError::AppNotFound(app_id.to_string()))?;
+
+        for ext in affected {
+            let successor = self.file_types.get(&ext).and_then(|ft| {
+                ft.handler_history
+                    .iter()
+                    .find(|h| self.apps.contains_key(*h))
+                    .cloned()
+            });
+            match successor {
+                Some(next) => {
+                    self.associations
+                        .insert(ext.clone(), Association::new(&ext, &next));
+                    if let Some(ft) = self.file_types.get_mut(&ext) {
+                        ft.default_app_id = Some(next.clone());
+                        ft.handler_history.retain(|h| h != &next);
+                    }
+                }
+                None => {
+                    self.associations.remove(&ext);
+                    if let Some(ft) = self.file_types.get_mut(&ext) {
+                        ft.default_app_id = None;
+                    }
+                }
+            }
+            // Whatever happened, the departed app is not a future fallback.
+            if let Some(ft) = self.file_types.get_mut(&ext) {
+                ft.handler_history.retain(|h| h != app_id);
+            }
+        }
+
+        // Associations naming the app for a type it was not the *default* of.
+        let stale: Vec<String> = self
             .associations
             .iter()
             .filter(|(_, a)| a.app_id == app_id)
             .map(|(k, _)| k.clone())
             .collect();
-        for ext in to_remove {
+        for ext in stale {
             self.associations.remove(&ext);
+            if let Some(ft) = self.file_types.get_mut(&ext) {
+                if ft.default_app_id.as_deref() == Some(app_id) {
+                    ft.default_app_id = None;
+                }
+            }
         }
-        self.apps
-            .remove(app_id)
-            .ok_or_else(|| AssocError::AppNotFound(app_id.to_string()))
+
+        Ok(removed)
     }
 
     /// Get an application by ID.
@@ -519,9 +605,16 @@ impl AssociationRegistry {
         self.associations
             .insert(ext.clone(), Association::new(&ext, app_id));
 
-        // Also update the file type's default_app_id.
+        // Also update the file type's default_app_id, remembering the handler
+        // being replaced so that uninstalling the new one can fall back to it.
         if let Some(ft) = self.file_types.get_mut(&ext) {
-            ft.default_app_id = Some(app_id.to_string());
+            if let Some(previous) = ft.default_app_id.replace(app_id.to_string()) {
+                if previous != app_id {
+                    ft.handler_history.retain(|h| h != &previous);
+                    ft.handler_history.insert(0, previous);
+                    ft.handler_history.truncate(MAX_HANDLER_HISTORY);
+                }
+            }
         }
 
         Ok(())
@@ -4638,6 +4731,117 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    // ---- uninstalling a handler ------------------------------------------
+
+    /// A type whose handler is uninstalled goes back to the handler it had
+    /// before, rather than being left with none.
+    #[test]
+    fn uninstalling_a_handler_falls_back_to_the_previous_one() {
+        let mut reg = AssociationRegistry::with_defaults();
+        let openers: Vec<String> = reg
+            .apps_for_extension("txt")
+            .iter()
+            .map(|a| a.id.clone())
+            .collect();
+        assert!(
+            openers.len() >= 2,
+            "this test needs two apps that open .txt; found {openers:?}"
+        );
+
+        reg.set_default_app("txt", &openers[0]).expect("assignable");
+        reg.set_default_app("txt", &openers[1]).expect("assignable");
+        reg.remove_app(&openers[1]).expect("registered");
+
+        assert_eq!(
+            reg.file_types["txt"].default_app_id.as_ref(),
+            Some(&openers[0]),
+            "uninstalling the handler orphaned the file type instead of              falling back to the one before it"
+        );
+    }
+
+    /// And the two records of "what opens this" agree afterwards.
+    ///
+    /// They did not: `remove_app` deleted the `associations` entry and left
+    /// `file_types[ext].default_app_id` naming the removed application, so
+    /// which answer a caller got depended on which map it asked. No test
+    /// covered it because each map was only ever checked on its own.
+    #[test]
+    fn both_records_of_the_default_agree_after_a_removal() {
+        let mut reg = AssociationRegistry::with_defaults();
+        let openers: Vec<String> = reg
+            .apps_for_extension("txt")
+            .iter()
+            .map(|a| a.id.clone())
+            .collect();
+        reg.set_default_app("txt", &openers[0]).expect("assignable");
+        reg.set_default_app("txt", &openers[1]).expect("assignable");
+        reg.remove_app(&openers[1]).expect("registered");
+
+        assert_eq!(
+            reg.file_types["txt"].default_app_id.as_deref(),
+            reg.associations.get("txt").map(|a| a.app_id.as_str()),
+            "the registry disagrees with itself about what opens .txt"
+        );
+    }
+
+    /// With nothing to fall back to, the type is cleared — in *both* records.
+    #[test]
+    fn uninstalling_the_only_handler_clears_the_type_in_both_records() {
+        let mut reg = AssociationRegistry::with_defaults();
+        let only = reg.apps_for_extension("pdf").first().map(|a| a.id.clone());
+        let Some(only) = only else { return };
+        if reg.apps_for_extension("pdf").len() != 1 {
+            return; // another opener exists; that is the test above
+        }
+        reg.set_default_app("pdf", &only).expect("assignable");
+        reg.remove_app(&only).expect("registered");
+
+        assert_eq!(reg.file_types["pdf"].default_app_id, None);
+        assert!(!reg.associations.contains_key("pdf"));
+    }
+
+    /// The history is a fallback chain and not an audit log, so it is bounded.
+    #[test]
+    fn the_handler_history_is_bounded() {
+        let mut reg = AssociationRegistry::with_defaults();
+        let openers: Vec<String> = reg
+            .apps_for_extension("txt")
+            .iter()
+            .map(|a| a.id.clone())
+            .collect();
+        // Cycle through the openers enough times to overflow the bound.
+        for round in 0..(MAX_HANDLER_HISTORY + 3) {
+            let id = &openers[round % openers.len()];
+            reg.set_default_app("txt", id).expect("assignable");
+        }
+        assert!(
+            reg.file_types["txt"].handler_history.len() <= MAX_HANDLER_HISTORY,
+            "the history grew past its bound: {:?}",
+            reg.file_types["txt"].handler_history
+        );
+    }
+
+    /// Re-selecting the current handler does not push it onto its own history,
+    /// which would let an app fall back to itself after being uninstalled.
+    #[test]
+    fn an_app_never_becomes_its_own_fallback() {
+        let mut reg = AssociationRegistry::with_defaults();
+        let one = reg.apps_for_extension("txt")[0].id.clone();
+        reg.set_default_app("txt", &one).expect("assignable");
+        reg.set_default_app("txt", &one).expect("assignable");
+        assert!(
+            !reg.file_types["txt"].handler_history.contains(&one),
+            "the current handler is in its own fallback history"
+        );
+
+        reg.remove_app(&one).expect("registered");
+        assert_ne!(
+            reg.file_types["txt"].default_app_id.as_ref(),
+            Some(&one),
+            "an uninstalled app came back as its own fallback"
         );
     }
 }

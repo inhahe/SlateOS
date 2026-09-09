@@ -125240,7 +125240,7 @@ therefore remove it" is wrong for both.
 
 | | duplicates | but holds, uniquely |
 |---|---|---|
-| `associations.rs` (1,753) | `apps/fileassoc` — 4,643 lines, a launching windowed app for exactly this ("which applications open which file types, browsing by category, search/filter, default-app assignment") | **fallback handlers**: the previous handler is remembered so that uninstalling an application auto-switches its file types back instead of orphaning them. `grep -in fallback apps/fileassoc/src/main.rs` → nothing. |
+| ~~`associations.rs` (1,753)~~ | `apps/fileassoc` — 4,643 lines, a launching windowed app for exactly this | ~~**fallback handlers**~~ — **ported 2026-09-08.** `FileType::handler_history` (bounded at three), recorded by `set_default_app` and walked by `remove_app`. The husk can now be deleted. |
 | `remote.rs` (1,619) | `apps/remotedesktop` — 5,199 lines, likewise a real app | **DynDNS**. `grep -rln "DuckDNS\|dyndns\|NoIP"` across `apps/`, `net/`, `gui/` and `userspace/` returns *this file and nothing else*. It is the only dynamic-DNS configuration in the tree. |
 
 So the shape of the work is the same for both, and it is not deletion:
@@ -125253,6 +125253,19 @@ So the shape of the work is the same for both, and it is not deletion:
    network-settings page or its own small application are both defensible, and
    this is the one genuine open question of the three.
 3. *Then* delete the husk.
+
+**Porting the fallback design found a live bug in the app it moved to.**
+`AssociationRegistry::remove_app` deleted every association naming the removed
+application and stopped there, which is wrong twice over. It orphaned the file
+types — uninstalling an editor left every `.rs`, `.toml` and `.log` with no
+handler at all, though the user had a perfectly good previous one. And it
+updated only **one of the two records** of "what opens this": `associations`
+lost the entry while `file_types[ext].default_app_id` went on naming the
+removed application, so the registry disagreed with itself and which answer a
+caller got depended on which map it asked.
+
+No test caught the second because each map was only ever checked on its own.
+Three of the five new tests fail against the old `remove_app`.
 
 **The recurring lesson, now four for four.** Every module in this entry that
 looked like a straightforward deletion turned out to hold something the

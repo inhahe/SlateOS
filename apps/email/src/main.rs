@@ -27,6 +27,7 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::similar_names)]
 
+use appearance::Palette;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -1761,30 +1762,6 @@ const WINDOW_HEIGHT: f32 = 900.0;
 use guitk::style::CornerRadii;
 use guitk::text;
 
-mod colors {
-    use guitk::Color;
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const CRUST: Color = Color::from_hex(0x11111B);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const _SURFACE2: Color = Color::from_hex(0x585B70);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    // Kept for palette completeness (Catppuccin Mocha) even if no current caller.
-    #[allow(dead_code)]
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const _TEAL: Color = Color::from_hex(0x94E2D5);
-    pub const _LAVENDER: Color = Color::from_hex(0xB4BEFE);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const _MAUVE: Color = Color::from_hex(0xCBA6F7);
-}
-
 /// Active UI panel
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Panel {
@@ -1833,6 +1810,12 @@ pub struct EmailApp {
     pub searching: bool,
     /// Which field of the open draft the keyboard is typing into.
     pub compose_field: ComposeField,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 /// A field of the compose form.
@@ -1865,6 +1848,7 @@ impl EmailApp {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             accounts: Vec::new(),
             mailboxes: Vec::new(),
             messages: Vec::new(),
@@ -2520,7 +2504,7 @@ impl EmailApp {
             y: 0.0,
             width,
             height,
-            color: colors::BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2530,7 +2514,7 @@ impl EmailApp {
             y: 0.0,
             width,
             height: header_h,
-            color: colors::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
@@ -2538,7 +2522,7 @@ impl EmailApp {
             y: 14.0,
             text: "Mail".to_string(),
             font_size: 18.0,
-            color: colors::BLUE,
+            color: self.palette.blue,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2551,7 +2535,7 @@ impl EmailApp {
                 y: 10.0,
                 width: 32.0,
                 height: 22.0,
-                color: colors::RED,
+                color: self.palette.red,
                 corner_radii: CornerRadii::all(11.0),
             });
             cmds.push(RenderCommand::Text {
@@ -2559,7 +2543,7 @@ impl EmailApp {
                 y: 14.0,
                 text: self.unread_count.to_string(),
                 font_size: 12.0,
-                color: colors::BASE,
+                color: self.palette.base,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2572,7 +2556,7 @@ impl EmailApp {
             y: 10.0,
             width: 300.0,
             height: 28.0,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
         let search_text = if self.search_query.is_empty() {
@@ -2586,9 +2570,9 @@ impl EmailApp {
             text: search_text,
             font_size: 12.0,
             color: if self.search_query.is_empty() {
-                colors::OVERLAY0
+                self.palette.overlay0
             } else {
-                colors::TEXT
+                self.palette.text
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(276.0),
@@ -2602,7 +2586,7 @@ impl EmailApp {
             y: ty,
             width,
             height: toolbar_h,
-            color: colors::CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
         let buttons = ["Compose", "Reply", "Forward", "Delete", "Archive", "Spam"];
@@ -2615,9 +2599,9 @@ impl EmailApp {
                 width: bw,
                 height: 28.0,
                 color: if *label == "Compose" {
-                    colors::BLUE
+                    self.palette.blue
                 } else {
-                    colors::SURFACE0
+                    self.palette.surface0
                 },
                 corner_radii: CornerRadii::all(4.0),
             });
@@ -2627,9 +2611,9 @@ impl EmailApp {
                 text: label.to_string(),
                 font_size: 12.0,
                 color: if *label == "Compose" {
-                    colors::BASE
+                    self.palette.base
                 } else {
-                    colors::TEXT
+                    self.palette.text
                 },
                 font_weight: if *label == "Compose" {
                     FontWeightHint::Bold
@@ -2650,7 +2634,7 @@ impl EmailApp {
             y: content_y,
             width: sidebar_w,
             height: content_h,
-            color: colors::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2674,7 +2658,7 @@ impl EmailApp {
                 y: content_y + 24.0,
                 text: acct.email.clone(),
                 font_size: 10.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sidebar_w - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2695,7 +2679,7 @@ impl EmailApp {
                     y: my,
                     width: sidebar_w - 8.0,
                     height: 28.0,
-                    color: colors::SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -2716,9 +2700,9 @@ impl EmailApp {
                 text: format!("{icon} {}", mb.name),
                 font_size: 12.0,
                 color: if is_sel {
-                    colors::BLUE
+                    self.palette.blue
                 } else {
-                    colors::SUBTEXT1
+                    self.palette.subtext1
                 },
                 font_weight: if is_sel {
                     FontWeightHint::Bold
@@ -2735,7 +2719,7 @@ impl EmailApp {
                     y: my + 7.0,
                     text: mb.unread_messages.to_string(),
                     font_size: 11.0,
-                    color: colors::BLUE,
+                    color: self.palette.blue,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2769,7 +2753,7 @@ impl EmailApp {
             y: sy,
             width,
             height: status_h,
-            color: colors::CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
         let total_msgs: u32 = self
@@ -2789,7 +2773,7 @@ impl EmailApp {
                 self.status_message,
             ),
             font_size: 11.0,
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -2809,7 +2793,7 @@ impl EmailApp {
                 y: y + h / 2.0 - 10.0,
                 text: "No messages".to_string(),
                 font_size: 14.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2831,7 +2815,7 @@ impl EmailApp {
                     y: ry,
                     width: w - 8.0,
                     height: row_h - 2.0,
-                    color: colors::SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -2843,7 +2827,7 @@ impl EmailApp {
                     y: ry + 24.0,
                     width: 6.0,
                     height: 6.0,
-                    color: colors::BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::all(3.0),
                 });
             }
@@ -2855,7 +2839,7 @@ impl EmailApp {
                     y: ry + 6.0,
                     text: "★".to_string(),
                     font_size: 14.0,
-                    color: colors::YELLOW,
+                    color: self.palette.yellow,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2876,9 +2860,9 @@ impl EmailApp {
                     .unwrap_or_else(|| msg.from.address()),
                 font_size: 12.0,
                 color: if is_unread {
-                    colors::TEXT
+                    self.palette.text
                 } else {
-                    colors::SUBTEXT1
+                    self.palette.subtext1
                 },
                 font_weight: if is_unread {
                     FontWeightHint::Bold
@@ -2895,7 +2879,7 @@ impl EmailApp {
                 y: ry + 6.0,
                 text: msg.date.clone(),
                 font_size: 10.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(70.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2908,9 +2892,9 @@ impl EmailApp {
                 text: msg.subject.clone(),
                 font_size: 12.0,
                 color: if is_unread {
-                    colors::TEXT
+                    self.palette.text
                 } else {
-                    colors::SUBTEXT1
+                    self.palette.subtext1
                 },
                 font_weight: if is_unread {
                     FontWeightHint::Bold
@@ -2927,7 +2911,7 @@ impl EmailApp {
                 y: ry + 42.0,
                 text: msg.preview.clone(),
                 font_size: 11.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
                 overflow: TextOverflow::Ellipsis,
@@ -2940,7 +2924,7 @@ impl EmailApp {
                     y: ry + 24.0,
                     text: "📎".to_string(),
                     font_size: 12.0,
-                    color: colors::SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2954,7 +2938,7 @@ impl EmailApp {
                     y: ry + 42.0,
                     text: "❗".to_string(),
                     font_size: 12.0,
-                    color: colors::RED,
+                    color: self.palette.red,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2973,7 +2957,7 @@ impl EmailApp {
                     y: ry + 54.0,
                     width: lw,
                     height: 14.0,
-                    color: colors::SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(3.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -2981,7 +2965,7 @@ impl EmailApp {
                     y: ry + 55.0,
                     text: label.clone(),
                     font_size: 9.0,
-                    color: colors::PEACH,
+                    color: self.palette.peach,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -3000,7 +2984,7 @@ impl EmailApp {
             y,
             width: 1.0,
             height: _h,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3015,7 +2999,7 @@ impl EmailApp {
                 y: y + _h / 2.0 - 10.0,
                 text: "Select a message to read".to_string(),
                 font_size: 13.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3033,7 +3017,7 @@ impl EmailApp {
             y: py,
             text: msg.subject.clone(),
             font_size: 16.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
             overflow: TextOverflow::Ellipsis,
@@ -3046,7 +3030,7 @@ impl EmailApp {
             y: py,
             text: format!("From: {}", msg.from),
             font_size: 12.0,
-            color: colors::SUBTEXT1,
+            color: self.palette.subtext1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
             overflow: TextOverflow::Ellipsis,
@@ -3065,7 +3049,7 @@ impl EmailApp {
             y: py,
             text: format!("To: {to_str}"),
             font_size: 12.0,
-            color: colors::SUBTEXT1,
+            color: self.palette.subtext1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
             overflow: TextOverflow::Ellipsis,
@@ -3085,7 +3069,7 @@ impl EmailApp {
                 y: py,
                 text: format!("Cc: {cc_str}"),
                 font_size: 12.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
                 overflow: TextOverflow::Ellipsis,
@@ -3099,7 +3083,7 @@ impl EmailApp {
             y: py,
             text: format!("Date: {}", msg.date),
             font_size: 11.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3112,7 +3096,7 @@ impl EmailApp {
             y: py,
             width: max_w,
             height: 1.0,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
         py += 12.0;
@@ -3123,7 +3107,7 @@ impl EmailApp {
             y: py,
             text: msg.preview.clone(),
             font_size: 13.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
             overflow: TextOverflow::Ellipsis,
@@ -3134,6 +3118,10 @@ impl EmailApp {
 // ─── Main ────────────────────────────────────────────────────────────
 
 impl App for EmailApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // The unread count, because that is what a mail window is consulted
         // for without being raised. The harness re-reads this as the program
@@ -4414,5 +4402,66 @@ mod tests {
         assert_eq!(addrs.len(), 2);
         assert_eq!(addrs[0].local_part, "alice");
         assert_eq!(addrs[1].display_name.as_deref(), Some("Bob"));
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        use guitk::Color;
+
+        fn fills(app: &mut EmailApp) -> Vec<Color> {
+            app.render(1100.0, 750.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = EmailApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

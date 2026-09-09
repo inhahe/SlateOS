@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Lock Screen — secure graphical lock screen with clock, password entry, and multi-user support"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 # The password hash, and the constant-time comparison it is checked with. This
 # file used to carry its own copy of both.

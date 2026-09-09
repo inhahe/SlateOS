@@ -15,6 +15,7 @@
 //! Uses the guitk library for UI rendering.
 
 #[allow(unused_imports)]
+use appearance::Palette;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{
@@ -39,30 +40,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 mod theme {
     use guitk::color::Color;
 
-    /// Base background.
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    /// Surface0 — elevated surfaces.
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    /// Surface1 — interactive element backgrounds.
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    /// Surface2 — borders, dividers.
-    pub const SURFACE2: Color = Color::from_hex(0x585B70);
-    /// Text — primary text.
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    /// Subtext — secondary/dimmer text.
-    pub const SUBTEXT: Color = Color::from_hex(0xA6ADC8);
-    /// Blue — accent color.
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    /// Red — error/warning color.
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    /// Green — success color.
-    #[allow(dead_code, reason = "the palette is kept complete")]
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
     /// Overlay — for tinted wallpaper backdrop.
     #[allow(dead_code, reason = "the palette is kept complete")]
     pub const OVERLAY: Color = Color::rgba(0, 0, 0, 140);
-    /// Avatar background — muted blue.
-    pub const AVATAR_BG: Color = Color::from_hex(0x585B70);
 }
 
 // ============================================================================
@@ -946,6 +926,12 @@ pub struct LockScreen {
     submit_hovered: bool,
     /// Whether the password field is focused.
     password_focused: bool,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl LockScreen {
@@ -962,6 +948,7 @@ impl LockScreen {
     ) -> Self {
         let users = UserList::new(users);
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             state: LockScreenState::Clock,
             screen_width: SCREEN_WIDTH,
             screen_height: SCREEN_HEIGHT,
@@ -1522,7 +1509,7 @@ impl LockScreen {
             x: time_x,
             y: CLOCK_Y,
             text: time_str,
-            color: theme::TEXT,
+            color: self.palette.text,
             font_size: CLOCK_FONT_SIZE,
             font_weight: FontWeightHint::Light,
             max_width: None,
@@ -1541,7 +1528,7 @@ impl LockScreen {
                 x: date_x,
                 y: date_y,
                 text: date_str,
-                color: theme::SUBTEXT,
+                color: self.palette.subtext0,
                 font_size: DATE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1559,7 +1546,7 @@ impl LockScreen {
             x: hint_x,
             y: hint_y,
             text: hint_text.to_string(),
-            color: theme::SUBTEXT,
+            color: self.palette.subtext0,
             font_size: hint_font_size,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1586,7 +1573,7 @@ impl LockScreen {
             x: name_x,
             y: name_y,
             text: name.clone(),
-            color: theme::TEXT,
+            color: self.palette.text,
             font_size: DISPLAY_NAME_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1614,7 +1601,7 @@ impl LockScreen {
                 x: err_x,
                 y: err_y,
                 text: error_text.to_string(),
-                color: theme::RED,
+                color: self.palette.red,
                 font_size: ERROR_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1635,7 +1622,7 @@ impl LockScreen {
                 x: lock_x,
                 y: lock_y,
                 text: lockout_msg,
-                color: theme::RED,
+                color: self.palette.red,
                 font_size: LOCKOUT_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -1656,7 +1643,7 @@ impl LockScreen {
                 x: hint_x,
                 y: hint_y,
                 text: hint_str,
-                color: theme::SUBTEXT,
+                color: self.palette.subtext0,
                 font_size: HINT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1689,7 +1676,7 @@ impl LockScreen {
             top_y,
             diameter,
             diameter,
-            theme::AVATAR_BG,
+            self.palette.surface2,
             CornerRadii::all(radius),
         );
 
@@ -1702,7 +1689,7 @@ impl LockScreen {
             x: text_x,
             y: text_y,
             text: initials.clone(),
-            color: theme::TEXT,
+            color: self.palette.text,
             font_size,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1713,9 +1700,9 @@ impl LockScreen {
     /// Render the password input field.
     fn render_password_field(&self, tree: &mut RenderTree, x: f32, y: f32) {
         let border_color = if self.password_focused {
-            theme::BLUE
+            self.palette.blue
         } else {
-            theme::SURFACE2
+            self.palette.surface2
         };
 
         // Field background.
@@ -1724,7 +1711,7 @@ impl LockScreen {
             y,
             PASSWORD_FIELD_WIDTH,
             PASSWORD_FIELD_HEIGHT,
-            theme::SURFACE0,
+            self.palette.surface0,
             CornerRadii::all(PASSWORD_FIELD_RADIUS),
         );
 
@@ -1745,7 +1732,7 @@ impl LockScreen {
                 x: x + 20.0,
                 y: y + (PASSWORD_FIELD_HEIGHT - PASSWORD_FONT_SIZE) / 2.0,
                 text: "Password".to_string(),
-                color: theme::SUBTEXT,
+                color: self.palette.subtext0,
                 font_size: PASSWORD_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(PASSWORD_FIELD_WIDTH - 40.0),
@@ -1786,7 +1773,7 @@ impl LockScreen {
                     dot_y,
                     PASSWORD_DOT_DIAMETER,
                     PASSWORD_DOT_DIAMETER,
-                    theme::TEXT,
+                    self.palette.text,
                     CornerRadii::all(dot_radius),
                 );
             }
@@ -1798,14 +1785,14 @@ impl LockScreen {
     /// Render the submit (arrow) button.
     fn render_submit_button(&self, tree: &mut RenderTree, x: f32, y: f32) {
         let bg_color = if self.submit_hovered {
-            theme::BLUE
+            self.palette.blue
         } else {
-            theme::SURFACE1
+            self.palette.surface1
         };
         let arrow_color = if self.submit_hovered {
-            theme::BASE
+            self.palette.base
         } else {
-            theme::TEXT
+            self.palette.text
         };
 
         // Circle background.
@@ -1852,7 +1839,7 @@ impl LockScreen {
             x: label_x,
             y: label_y,
             text: label.to_string(),
-            color: theme::SUBTEXT,
+            color: self.palette.subtext0,
             font_size: label_font_size,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1865,9 +1852,9 @@ impl LockScreen {
 
             // Item background.
             let bg_color = if is_selected {
-                theme::SURFACE1
+                self.palette.surface1
             } else {
-                theme::SURFACE0
+                self.palette.surface0
             };
             tree.fill_rounded_rect(
                 list_x,
@@ -1887,7 +1874,7 @@ impl LockScreen {
                 avatar_y,
                 SMALL_AVATAR_DIAMETER,
                 SMALL_AVATAR_DIAMETER,
-                theme::AVATAR_BG,
+                self.palette.surface2,
                 CornerRadii::all(small_radius),
             );
 
@@ -1904,7 +1891,7 @@ impl LockScreen {
                 x: initials_x,
                 y: initials_y,
                 text: user.initials.clone(),
-                color: theme::TEXT,
+                color: self.palette.text,
                 font_size: SMALL_AVATAR_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -1919,7 +1906,7 @@ impl LockScreen {
                 x: name_x,
                 y: name_y,
                 text: user.display_name.clone(),
-                color: theme::TEXT,
+                color: self.palette.text,
                 font_size: 14.0,
                 font_weight: if is_selected {
                     FontWeightHint::Bold
@@ -2172,6 +2159,10 @@ const ANIMATION_TICK: Duration = Duration::from_millis(16);
 const CLOCK_TICK: Duration = Duration::from_secs(1);
 
 impl oswindow::app::App for LockScreen {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Lock Screen")
     }
@@ -3274,6 +3265,7 @@ mod tests {
 
     #[test]
     fn test_render_with_error_includes_error_text() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut ls = single_user_lockscreen();
         ls.enter_password_mode();
         ls.type_char('x');
@@ -3282,7 +3274,7 @@ mod tests {
         // Look for the error text command.
         let has_error_text = tree.commands.iter().any(|cmd| {
             matches!(cmd, RenderCommand::Text { text, color, .. }
-                if text == "Incorrect password" && *color == theme::RED)
+                if text == "Incorrect password" && *color == pal.red)
         });
         assert!(
             has_error_text,
@@ -3747,4 +3739,87 @@ mod tests {
     // `/etc/shadow` beside the database, holding a different password and an
     // account the database does not have, and neither honoured. There is
     // nothing left for this screen to assert about a file it no longer opens.
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut LockScreen) -> Vec<Color> {
+            oswindow::app::App::render(app, 1920.0, 1080.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        use oswindow::app::App as _;
+
+        // One account, and it has to be there: with an empty user list the only
+        // thing this screen fills is the wallpaper tint, which is a fixed
+        // `rgba(0, 0, 0, 140)` by design -- so the two themes drew identically
+        // and the test failed for the right reason on a screen that was
+        // actually converted. No authority, because nothing here submits a
+        // password.
+        let mut app = LockScreen::new(
+            vec![UserInfo::new("alice", "Alice", true)],
+            LockScreenConfig::default(),
+            None,
+        );
+        // The clock view fills nothing but the wallpaper tint, which is a fixed
+        // `rgba(0, 0, 0, alpha)` by design and identical under both themes.
+        // Every themed surface this screen has -- the field, the button, the
+        // user row, the error strip -- is on the password view.
+        app.enter_password_mode();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
+    }
 }

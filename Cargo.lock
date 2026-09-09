@@ -4763,6 +4763,7 @@ dependencies = [
 name = "email"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -9417,6 +9418,7 @@ dependencies = [
 name = "lockscreen"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "authlib",
  "guitk",
  "loginusers",

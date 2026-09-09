@@ -125037,10 +125037,26 @@ that survived checking.
    describes only the `check-*.py` phase, not the tool; `boot-test.sh`'s
    "~40-minute" figure is the honest one for the whole run.
 
-   So it is a real pre-flight with a real price, not a free one. Worth it
-   before a boot test you care about; not worth it after every small edit —
-   for that, run the single gate that guards the file you touched, which is
-   what would have caught both of today's losses in under a second.
+   **Sharper still, and this reverses the advice:** on current hardware
+   `pre-boot.py` costs *more* than the run it is meant to protect. Measured
+   today, a boot test is ~26 min — gates 1102 s, build 76 s, QEMU 392 s — so
+   the most a pre-flight can save you is the **8 minutes** of build and QEMU.
+   `pre-boot.py` pays the same ~18 minutes of gates *plus* a
+   `cargo check --workspace --all-targets` over 2,700+ crates. **≥18 minutes
+   spent to save 8.**
+
+   Its docstring's own rationale — "costs the same ~6 minutes the gate phase
+   would have cost, and buys back the ~13-minute run that would have been
+   thrown away" — was true when written and has since **inverted**: the gate
+   phase is nothing like 6 minutes, and the SSD shrank build+QEMU to under
+   eight. The tool is not broken; the ratio it was designed around moved.
+
+   So: it is worth running when you want the checks **without** booting. It
+   is *not* worth running before a boot test you intend to run anyway, which
+   is exactly what this entry originally recommended. For catching an edit
+   mistake, run the single gate that guards the file you touched — that would
+   have caught both of today's lost runs in under a second, at a cost of
+   nothing.
 2. **Move `check_kernel_clippy` earlier in `boot-test.sh`'s sequence.** Free —
    it does not change the total when everything passes, only how soon you learn
    it did not. Costs at most one thing: a cheap text gate's failure is then

@@ -125150,3 +125150,68 @@ least no longer *divergent* dead code.
    should go.
 3. Remove the three `#![allow(dead_code)]` attributes, so that the next module
    to become unreachable says so.
+
+
+## B-THE-C-PLUS-PLUS-LINK-LINE-NEEDS-TWO-DECISIONS-AND-ONE-MISSING-FAMILY (lane B, 2026-09-09)
+
+**In short:** we can now compile C++ for SlateOS — that was established today
+and annotated on `design-decisions.md` §73. Actually *linking* a C++ program
+against our own C library turns out to need two small things nobody has
+decided, and one function family we do not have. None is hard; all three are
+invisible until someone tries the link, which is why they are written down
+here rather than discovered again.
+
+**What was measured.** A C++ TU using `<string>`, `<vector>`, `<memory>` and a
+`throw`/`catch`, compiled with our own codegen flags (`-mcmodel=large
+-fno-pic -fno-pie -fno-builtin -O2`) and linked with `rust-lld` against
+`toolchain/sysroot/lib/libc.a` plus zig's prebuilt `libc++.a`,
+`libc++abi.a` and `libunwind.a`.
+
+### 1. Our libc already ships a C++ ABI, and it collides
+
+Linking zig's `libc++abi.a` produced **duplicate** symbol errors, not missing
+ones: `__cxa_allocate_exception`, `__cxa_begin_catch`, `__cxa_deleted_virtual`
+and friends are defined in *both* archives. `posix` has carried a C++ ABI shim
+for some time. Dropping zig's `libc++abi.a` left exactly one further duplicate,
+`_Unwind_Resume`, so our libc supplies part of the unwinder too.
+
+That is a good position to be in and it is still a decision: **whose C++ ABI
+wins.** Ours, and zig's `libc++.a` links against it; or zig's, and posix's shim
+is excluded from the link. The two cannot both be in the line. This is not
+something a porter should have to work out under time pressure with a wall of
+duplicate-symbol errors in front of them, which is the shape it takes today.
+
+### 2. With zig's `libc++abi` dropped, the exception *types* go missing
+
+`typeinfo for std::out_of_range`, `std::out_of_range::~out_of_range()`,
+`std::bad_array_new_length` and `__cxa_free_exception` are then undefined —
+they live in `libc++abi`, which is exactly the archive that collided. So
+option "use ours" is not free: our shim covers the ABI *entry points* but not
+the standard exception classes. Whoever decides (1) has to cover these.
+
+### 3. `swprintf`, `vswprintf` and `wcstold` — real libc gaps
+
+These are ours, not a packaging question.
+
+* **`wcstold`** — **FIXED 2026-09-09**, the same day it was found. It was the
+  only absent member of a family we already had: `wcstod` and `wcstof` have
+  been here all along. Built on `strtold`'s proven pattern — an `f64` core
+  named `__wcstold_f64` plus an `%st(0)` assembly thunk, because Rust cannot
+  express a `long double` return.
+* **`swprintf` / `vswprintf`** — still missing, and not a one-liner: `posix`
+  has **no wide-character `printf` family at all**. libc++'s `<locale>` uses
+  `swprintf` for numeric formatting, so it is on the path for any C++ port,
+  and a correct implementation is a whole `printf` engine over `wchar_t`
+  rather than a wrapper.
+
+**Why this matters more than its size.** §73 defers YSH until a C++/slateos
+toolchain exists, and that prerequisite has now fired. The entry moves YSH
+from blocked-on-toolchain to blocked-on-effort — and this is the effort. It is
+a short list, and it is much better to have it as a list than as a surprise.
+
+**How to reproduce**, since the measurement is cheap and will need redoing
+when any of the three moves: compile any C++ TU with the slateos flags, link
+it with `rust-lld -static --no-dynamic-linker` against
+`toolchain/sysroot/lib/libc.a` and zig's `libc++.a`, and read the undefined
+and duplicate lists. Zig's archives are built on demand into its global cache
+by any `zig c++ -static` build.

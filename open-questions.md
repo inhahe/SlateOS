@@ -1083,6 +1083,14 @@ been run on SlateOS. This says the *obstacle* is gone, not that the job is
 done. Expect the port to be real work — just ordinary work rather than
 blocked work.
 
+**How much work, measured since this was written:** the remaining link-line
+gaps are now a named list rather than an unknown — two small decisions and one
+missing function family, in `known-issues.md` →
+`B-THE-C-PLUS-PLUS-LINK-LINE-NEEDS-TWO-DECISIONS-AND-ONE-MISSING-FAMILY`. One
+of the three (`wcstold`) was fixed the day it was found. That does not change
+the options below; it means whoever answers is choosing against a known cost
+rather than an open one.
+
 ### The options
 
 | | *What changes:* |

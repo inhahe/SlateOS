@@ -5346,6 +5346,13 @@ already satisfies everything a C++ program asks of C. What is missing is the
 *link line* — combining zig's `libc++` with our `libc.a` — which is wiring, not
 a toolchain.
 
+**That wiring was then measured too**, on 2026-09-09, and it is a short list
+rather than a vague one: `known-issues.md` →
+`B-THE-C-PLUS-PLUS-LINK-LINE-NEEDS-TWO-DECISIONS-AND-ONE-MISSING-FAMILY`. Two
+decisions (our libc already ships a C++ ABI that collides with zig's
+`libc++abi`, and dropping zig's then loses the standard exception classes) and
+one gap (`swprintf`/`vswprintf`; `wcstold` was the third and is fixed).
+
 **What this does NOT establish**, stated because the gap matters: nobody has
 cross-compiled genuine Oils, and nobody has run a C++ binary on SlateOS. This
 says the **prerequisite** named here has fired, so YSH moves from

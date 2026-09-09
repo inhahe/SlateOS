@@ -124887,3 +124887,82 @@ point is available, a sleep is not a simpler alternative to it; it is a quieter
 one.
 
 Related, same day, same shape: `A-A-A-BOOT-TEST-ONLY-GATE-DOES-NOT-EXIST-FOR-A-LANE-THAT-NEVER-BOOTS`.
+
+
+---
+
+## A-KERNEL-CLIPPY-IS-CHECKED-ONLY-INSIDE-A-19-MINUTE-BOOT-TEST (lane A, 2026-09-09)
+
+**In short:** nothing checks that the kernel passes clippy until you are
+nineteen minutes into a boot test. `cargo clippy -p kernel` is a *deny*-level
+gate — a single lint refuses the build outright — but it runs only inside
+`boot-test.sh`, and only after the whole `check-*.py` gate phase has finished.
+So a lint can be committed, pushed, merged, and sit in the tree until somebody
+starts a boot test and waits a third of an hour to be told about a one-line
+fix. That happened today, and the tree had been red at that gate for about a
+day before anyone found out.
+
+**What it cost, concretely (2026-09-09).** `kernel/src/selftest.rs:260` failed
+`clippy::vec_init_then_push`. I ran `cargo check -p kernel` first — it passed,
+because **`cargo check` does not run clippy** — committed, pushed, and started
+a boot test. It spent 19 minutes on the gate phase and refused to build. The
+fix was mechanical and took two minutes. The `Vec::new()`-then-push shape it
+objected to was already in the file before yesterday's §914 commits, so this
+was not a fresh mistake being caught promptly; it was an old one finally being
+reached.
+
+**`known-issues.md` states the cadence wrongly, and that is the part worth
+fixing.** `TD-B-NOTHING-RUNS-CLIPPY-OVER-USERSPACE-OFTEN-ENOUGH-TO-MATTER`
+carries a table headed "where the two clippy gates are, and why neither caught
+it", whose first row reads:
+
+| gate | scope | when it runs |
+|---|---|---|
+| `scripts/pre-boot.py` | `cargo clippy -p kernel` | every push (pre-push hook) |
+
+**It does not run on every push, and it is not in the pre-push hook.** Checked
+2026-09-09:
+
+- `scripts/hooks/pre-push` is the real hook (`.git/hooks/pre-push` is a 533-byte
+  trampoline that `exec`s it). It has fifteen gates. It never mentions
+  `pre-boot.py`, and its only compiler gate — gate 12 — is scoped to
+  **coreutils**, which is lane B's zone. Nothing there compiles the kernel.
+- `scripts/pre-boot.py` is invoked by `boot-test.sh`, and `boot-test.sh:3658`
+  describes it in its own words as "a ~40-minute local pre-flight **nobody is
+  obliged to run**."
+
+The row matters because the table is the *argument* for how much clippy
+coverage exists. Read as written, kernel lints are caught at push time and only
+userspace is exposed. Read correctly, **neither** is checked at push time, and
+the kernel's gate is a manual tool plus a 19-minute wait. The conclusion drawn
+from that table is therefore narrower than the truth.
+
+**Why this is not simply "run `pre-boot.py`".** It is the right advice and I
+should have taken it — the tool exists precisely for this, and its docstring
+describes the failure I hit almost word for word, down to a previous instance
+on 2026-08-26. But a gate whose trigger is *remembering to run a 40-minute
+optional tool* is the "periodic needs a trigger nobody has defined" shape the
+operator explicitly ruled out when answering Q46: "Make a solution that will
+not result in 'never' in practice." Two people have now hit the identical trap
+two weeks apart, which is the evidence that the trigger does not work.
+
+**The proper fix.** Run `cargo clippy -p kernel` in the pre-push hook, scoped
+the way gate 12 already scopes its compiler: **only when the pushed commits
+touch `kernel/**`**. Measured today, warm, it is ~100 s — real friction, but
+paid only by the pushes that can actually break it, and against a failure that
+currently costs 19 minutes to discover and blocks all three lanes, since a red
+kernel stops every boot test. Gate 12's own comment already argues this trade
+for its crate; the kernel has a stronger case, because it is the one crate
+whose breakage blocks everybody.
+
+*Not built yet* — the boot test was mid-run and a second cargo invocation would
+contend on the same target-directory lock. It also deserves a moment's thought
+about whether `--all-targets` or plain is wanted, and gate ordering inside
+`boot-test.sh` (moving clippy earlier in the gate phase is a cheaper partial
+win: it does not change the total when everything passes, only the time to
+learn that something did not).
+
+**If it is never fixed:** nothing rots on its own, but every kernel lint costs
+a 19-minute boot test to find, and the tree can sit red at a deny-level gate
+for days — as it just did — because the only thing that looks is the slowest
+thing we run.

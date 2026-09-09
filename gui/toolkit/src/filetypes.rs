@@ -5,8 +5,6 @@
 //! component that needs to display, open, or classify a file should go
 //! through this module rather than hard-coding extension lists.
 
-#![allow(dead_code)]
-
 // ---------------------------------------------------------------------------
 // FileCategory
 // ---------------------------------------------------------------------------

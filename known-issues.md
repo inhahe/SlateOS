@@ -125462,11 +125462,31 @@ either way.
 
 **What to do, in order.**
 
-1. **Take the `#![allow(dead_code)]` off `gui/toolkit`'s modules** and see what
-   the compiler says. That is the cheap step and it is the one that stops the
-   next 24,000 lines accumulating. A `pub` item in a library is not dead code
-   to rustc, so this will be quieter than it sounds — which is itself the
-   point: the attribute is not earning anything on those files.
+1. ~~**Take the `#![allow(dead_code)]` off `gui/toolkit`'s modules**~~ —
+   **done 2026-09-08.** It was as quiet as predicted: seven attributes removed,
+   **three** warnings, all of them genuinely-unused *private* items. A `pub`
+   item in a library is not dead code to rustc, so the attribute had been
+   earning nothing on those files while suppressing the three things it should
+   have been reporting. Those three are worth listing, because two of them were
+   not what they looked like:
+
+   * `disabled::DISABLED_OPACITY` — the module documents 50% as the standard
+     dimming for a disabled control, `render_disabled` takes the opacity as a
+     *parameter*, and the constant was private. So every caller would have
+     written `0.5` itself, which is how a standard stops being one. Now `pub`.
+   * `colorpicker::DialogLayout::height` — a stored copy of a value that *is*
+     used (`button_y` is measured back from it) but only during construction.
+     The field was removed. **The first attempt at this comment claimed the
+     layout ignored its height entirely and that the buttons could fall off a
+     short dialog; the compiler disproved that three lines later.** Worth
+     recording as a caution: an unused *field* is not evidence that the
+     *value* is unused.
+   * `textview::col_x` — deleted as dead, and it was not: its only caller is a
+     `#[cfg(test)]` test that asserts its clamping rule, which a *lib* build's
+     "never used" warning does not account for. Restored, and marked
+     `#[cfg(test)]` so both builds are quiet. **The general lesson: "never
+     used" from `cargo build` means "no non-test caller", which is a different
+     claim.**
 2. **Decide the two application modules.** `imageviewer/video.rs` and
    `procexplorer/features.rs` are unreachable inside their own binaries, where
    `pub` buys nothing. Each is either wired or deleted; neither should stay as

@@ -19,8 +19,6 @@
 //! assert!(group.is_disabled());
 //! ```
 
-#![allow(dead_code)]
-
 use crate::color::Color;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
@@ -94,7 +92,14 @@ impl DisabledState {
 // ---------------------------------------------------------------------------
 
 /// Default opacity multiplier for disabled controls.
-const DISABLED_OPACITY: f32 = 0.5;
+///
+/// `pub` since 2026-09-08. It was private, and `render_disabled` takes the
+/// opacity as a *parameter*, so this module documented 50% as the standard and
+/// gave no caller any way to ask for it -- every one would have written `0.5`
+/// itself, which is how a standard stops being one. Found by removing this
+/// file's `#![allow(dead_code)]`, which had been suppressing the "never used"
+/// warning that says exactly this.
+pub const DISABLED_OPACITY: f32 = 0.5;
 
 /// Tooltip delay before showing reason (milliseconds).
 const TOOLTIP_DELAY_MS: u64 = 500;

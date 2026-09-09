@@ -133,3 +133,51 @@ add them.
 Worth noting for whoever wires it: this fixture goes red if the *libc half*
 regresses, which is the half that exists. It is useful before your change, not
 only after.
+
+---
+
+## Second addendum — a real ABI bug the fixture found before it ever ran
+
+Writing the fixture turned up something bigger than the thing it was written
+for, and it is worth your knowing because it touches the Linux-ABI side you own.
+
+**Our libc's `struct sigaction` was the kernel's layout, not the C library's.**
+There are two on x86_64, same size, different order:
+
+| | offsets |
+|---|---|
+| kernel (`rt_sigaction`) — what our *libc* had | handler 0, flags 8, restorer 16, mask 24 |
+| glibc and musl — what a C caller passes | handler 0, mask 8, flags 136, restorer 144 |
+
+Measured with `offsetof` under glibc on Linux 6.6 and asserted at compile time
+against musl with `zig cc --target=x86_64-linux-musl`.
+
+Effect: `sa_flags` was read from the first word of the caller's `sa_mask`,
+which `sigemptyset` has just zeroed — so **every flag a C program passed was
+silently dropped**. `sa_handler` is at offset 0 in both, which is why handlers
+worked and nothing ever looked wrong.
+
+**Your side is fine and should not change.** `kernel/src/proc/elf.rs` builds
+`rt_sigaction` arguments in the kernel order, which is correct for the kernel;
+the bug was only in the userspace function a C program calls. I mention it in
+case the two ever get compared and the difference looks like a discrepancy —
+it is not, they are genuinely different structures.
+
+Fixed in the same push; `design-decisions.md` §1010 and `known-issues.md` →
+`B-SIGACTION-USED-THE-KERNEL-STRUCT-LAYOUT-NOT-THE-C-LIBRARYS`.
+
+Two things about how it survived, since both are about testing rather than
+about signals:
+
+* **No Rust test could have caught it.** Rust builds the struct by field name,
+  so it agrees with itself whichever order it declares. `#[repr(C)]` only
+  matters at a boundary with C, and the crate's own tests have none — the same
+  reason `services/ctest-longdouble/` is written in C.
+* **There was a test and it certified the bug**, pinning
+  `offset_of!(Sigaction, sa_flags) == 8` under a comment reading "glibc
+  x86_64". A test encoding a mistaken premise is worse than no test: it makes
+  the next reader confident.
+
+The fixture now round-trips a flag and a mask through `sigaction` and back,
+which is the check that would have caught it — checks 32–37, so if you see one
+of those numbers it is this and not the alternate stack.

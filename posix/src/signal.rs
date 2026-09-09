@@ -346,7 +346,7 @@ pub extern "C" fn sysv_signal(signum: i32, handler: SighandlerT) -> SighandlerT 
 fn install_signal_with_flags(
     signum: i32,
     handler: SighandlerT,
-    flags: u64,
+    flags: u32,
     mask_self: bool,
 ) -> SighandlerT {
     if !(1..NSIG).contains(&signum) || signum == SIGKILL || signum == SIGSTOP {
@@ -408,36 +408,81 @@ impl SigsetT {
 }
 
 // ---------------------------------------------------------------------------
-// sigaction structure (must match glibc x86_64 layout: 152 bytes)
+// sigaction structure (matches the C library's x86_64 layout: 152 bytes)
 // ---------------------------------------------------------------------------
 
 /// `sigaction` structure for `sigaction()`.
 ///
-/// Field order matches glibc x86_64 (`struct sigaction`):
-///   sa_handler (8) + sa_flags (8) + sa_restorer (8) + sa_mask (128) = 152 bytes.
+/// # This is the C library's layout, which is not the kernel's
+///
+/// There are **two** `struct sigaction` on x86_64 Linux and they are different
+/// orders. Until 2026-09-09 this was the kernel's, with a comment claiming it
+/// was the C library's:
+///
+/// | | offsets |
+/// |---|---|
+/// | kernel (`rt_sigaction`) | handler 0, **flags 8**, restorer 16, **mask 24** |
+/// | glibc *and* musl | handler 0, **mask 8**, **flags 136**, restorer 144 |
+///
+/// Both are 152 bytes, which is why nothing caught it by size. Measured, not
+/// recalled: `offsetof` printed under glibc, and the musl numbers asserted at
+/// compile time with `zig cc --target=x86_64-linux-musl`, which is the
+/// toolchain every C port here is built with.
+///
+/// This function is the one a C program calls, so it takes the C library's
+/// layout. The kernel's is right for the kernel and appears in
+/// `kernel/src/proc/elf.rs`, which builds `rt_sigaction` arguments and should
+/// stay as it is.
+///
+/// # What the old layout did, and why nobody noticed for months
+///
+/// `sa_handler` is at offset 0 in both. That is the field every signal test in
+/// the tree exercises, so handlers worked and everything looked fine. The rest
+/// was read from the wrong place:
+///
+/// * `sa_flags` came from bytes 8..12 -- the first word of the caller's
+///   `sa_mask`, which `sigemptyset` has just zeroed. So **every flag a C
+///   program passed was silently dropped**, and read back as zero. No flag was
+///   implemented until `SA_ONSTACK` on 2026-09-09, so nothing depended on one.
+/// * `sa_mask` came from byte 24 -- 16 bytes into the caller's mask. An empty
+///   mask is still empty when shifted, so the common case survived; a
+///   non-empty one blocked the wrong signals.
+/// * `oldact` was written in the wrong order too, so a caller reading back
+///   `sa_flags` got bytes out of the middle of its own mask.
+///
+/// The lesson worth keeping is the shape: the one field that happened to agree
+/// is the one every test touched, so a total ABI mismatch presented as a
+/// working feature.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Sigaction {
     /// Signal handler (sa_handler or sa_sigaction).
     pub sa_handler: SighandlerT,
+    /// Additional signals to block during handler execution.
+    ///
+    /// Second, not last: this is where the C library puts it.
+    pub sa_mask: SigsetT,
     /// Flags (SA_RESTART, SA_NOCLDSTOP, etc.).
     ///
-    /// glibc uses `unsigned long` (u64 on x86_64).
-    pub sa_flags: u64,
+    /// `u32`, because the C declaration is `int` -- 4 bytes at offset 136 with
+    /// 4 bytes of padding after it. A `u64` here would occupy the padding and
+    /// land on the same offsets, and would be wrong: those 4 bytes belong to
+    /// the caller and hold whatever was in the struct before, unless it
+    /// happened to `memset` it.
+    pub sa_flags: u32,
     /// Restore handler (used by the kernel's signal trampoline).
     pub sa_restorer: usize,
-    /// Additional signals to block during handler execution.
-    pub sa_mask: SigsetT,
 }
 
-/// Flags for sigaction (type u64 to match `unsigned long` sa_flags).
-pub const SA_NOCLDSTOP: u64 = 1;
-pub const SA_NOCLDWAIT: u64 = 2;
-pub const SA_SIGINFO: u64 = 4;
-pub const SA_ONSTACK: u64 = 0x0800_0000;
-pub const SA_RESTART: u64 = 0x1000_0000;
-pub const SA_NODEFER: u64 = 0x4000_0000;
-pub const SA_RESETHAND: u64 = 0x8000_0000;
+/// Flags for sigaction. `u32` to match the C declaration, which is `int` --
+/// see [`Sigaction`] for why the width matters and not only the offset.
+pub const SA_NOCLDSTOP: u32 = 1;
+pub const SA_NOCLDWAIT: u32 = 2;
+pub const SA_SIGINFO: u32 = 4;
+pub const SA_ONSTACK: u32 = 0x0800_0000;
+pub const SA_RESTART: u32 = 0x1000_0000;
+pub const SA_NODEFER: u32 = 0x4000_0000;
+pub const SA_RESETHAND: u32 = 0x8000_0000;
 
 /// Examine and change a signal action.
 ///
@@ -547,7 +592,7 @@ fn sigmask_bit(sig: i32) -> u64 {
 /// is set — adds the delivered signal itself.  Per POSIX this is the set
 /// of signals blocked while the handler runs, which prevents the handler
 /// from being re-entered by its own signal.
-fn handler_block_mask(saved: u64, sa_mask_low: u64, sa_flags: u64, sig: i32) -> u64 {
+fn handler_block_mask(saved: u64, sa_mask_low: u64, sa_flags: u32, sig: i32) -> u64 {
     let mut m = saved | sa_mask_low;
     if sa_flags & SA_NODEFER == 0 {
         m |= sigmask_bit(sig);
@@ -666,7 +711,7 @@ fn plan_self_dispatch(
     sig: i32,
     blocked_low: u64,
     handler: usize,
-    sa_flags: u64,
+    sa_flags: u32,
     sa_mask_low: u64,
 ) -> SelfDispatch {
     // Blocked signals are not delivered now — they become pending and
@@ -741,7 +786,7 @@ fn altstack() -> AltStack {
 ///   top and overwrite the frames of the handler it interrupted;
 /// * it is big enough, which `sigaltstack` already enforced, so this is a
 ///   restatement rather than a check.
-fn altstack_entry(sa_flags: u64) -> Option<usize> {
+fn altstack_entry(sa_flags: u32) -> Option<usize> {
     if sa_flags & SA_ONSTACK == 0 {
         return None;
     }
@@ -830,7 +875,7 @@ fn run_handler(func: extern "C" fn(i32), sig: i32, top: Option<usize>) {
 /// Read the registered `(handler, sa_flags, sa_mask_low)` for `sig`.
 ///
 /// Out-of-range signals report the default disposition.
-fn lookup_action(sig: i32) -> (usize, u64, u64) {
+fn lookup_action(sig: i32) -> (usize, u32, u64) {
     if !(1..NSIG).contains(&sig) {
         return (SIG_DFL, 0, 0);
     }
@@ -2614,12 +2659,24 @@ mod tests {
 
     #[test]
     fn test_sigaction_layout() {
-        // glibc x86_64: sa_handler(8) + sa_flags(8) + sa_restorer(8) + sa_mask(128) = 152
+        // The C library's layout, measured rather than recalled: `offsetof`
+        // printed under glibc, and asserted at compile time against musl with
+        // `zig cc --target=x86_64-linux-musl`, which is what every C port here
+        // is built with. Both agree:
+        //
+        //     size=152 handler=0 mask=8 flags=136 restorer=144
+        //
+        // The kernel's `struct sigaction` is a *different order* at the same
+        // size -- handler, flags, restorer, mask -- and this struct used to be
+        // that one, under a comment saying it was glibc's. See `Sigaction`.
         assert_eq!(core::mem::size_of::<Sigaction>(), 152);
         assert_eq!(core::mem::offset_of!(Sigaction, sa_handler), 0);
-        assert_eq!(core::mem::offset_of!(Sigaction, sa_flags), 8);
-        assert_eq!(core::mem::offset_of!(Sigaction, sa_restorer), 16);
-        assert_eq!(core::mem::offset_of!(Sigaction, sa_mask), 24);
+        assert_eq!(core::mem::offset_of!(Sigaction, sa_mask), 8);
+        assert_eq!(core::mem::offset_of!(Sigaction, sa_flags), 136);
+        assert_eq!(core::mem::offset_of!(Sigaction, sa_restorer), 144);
+        // `int`, not `unsigned long`: the four bytes after it are the caller's
+        // padding and may hold anything.
+        assert_eq!(core::mem::size_of::<u32>(), 4);
     }
 
     #[test]

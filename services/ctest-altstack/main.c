@@ -260,5 +260,43 @@ int main(void)
     if (inside_alt(g_handler_sp))
         return 31;
 
+    /*
+     * 12. The struct ABI itself, which is what checks 1-11 quietly depend on.
+     *
+     * `struct sigaction` has two different layouts on x86_64 at the same size:
+     * the kernel's (handler, flags, restorer, mask) and the C library's
+     * (handler, mask, flags, restorer). Our libc used the kernel's under a
+     * comment saying it was glibc's until 2026-09-09. `sa_handler` is at
+     * offset 0 in both, which is why handlers worked and nothing noticed --
+     * and why no Rust test could see it, since Rust builds the struct by field
+     * name and agrees with itself whichever order it picks.
+     *
+     * A flag that does not survive a round trip is that bug and nothing else.
+     */
+    {
+        struct sigaction set;
+        struct sigaction got;
+
+        memset(&set, 0, sizeof set);
+        memset(&got, 0, sizeof got);
+        set.sa_handler = on_ordinary;
+        set.sa_flags = SA_NODEFER;
+        sigemptyset(&set.sa_mask);
+        sigaddset(&set.sa_mask, SIGUSR2);
+        if (sigaction(SIGUSR1, &set, NULL) != 0)
+            return 32;
+        if (sigaction(SIGUSR1, NULL, &got) != 0)
+            return 33;
+        if (got.sa_handler != on_ordinary)
+            return 34;
+        if ((got.sa_flags & SA_NODEFER) == 0)
+            return 35;
+        if (!sigismember(&got.sa_mask, SIGUSR2))
+            return 36;
+        /* …and nothing it was not given. */
+        if (sigismember(&got.sa_mask, SIGALRM))
+            return 37;
+    }
+
     return 42;
 }

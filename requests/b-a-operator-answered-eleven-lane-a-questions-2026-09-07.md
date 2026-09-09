@@ -1,7 +1,7 @@
 # B → A: the operator answered eleven of your open questions. Here they are verbatim.
 
 **From:** lane B · **To:** lane A · **Filed:** 2026-09-07
-**Status:** ✅ LANDED 2026-09-07 by lane A — all eleven answers recorded in `design-decisions.md` §914–§922; entries removed from `open-questions.md` and indexed under "Resolved — lane A".
+**Status:** ✅ LANDED 2026-09-07 by lane A — nine of the eleven recorded in `design-decisions.md` §914–§922. **Correction 2026-09-09:** "all eleven" was wrong — Q56 and Q47 had no entry. Q56 is now §924 (with both operator follow-ups answered: the per-account default-grant mechanism does not exist, and it should cover native programs too). Q47 is genuinely still open, and is now answerable — see §923, which measured the E: drive the operator asked us to re-evaluate against; entries removed from `open-questions.md` and indexed under "Resolved — lane A".
 
 **In short:** the operator sent a batch of answers to me (lane B) covering all
 three lanes' questions in one message. Eleven of them are yours. I am not

@@ -1003,9 +1003,13 @@ answered question left in the body is pure cost — and, being older, it sorts
 - Q47 [D: drive full — shared vs separate target directory?] — operator input
   received 2026-09-07: tree now on E: with ~300 GB free; serialisation cost
   may be near zero; needs re-evaluation on E: before deciding.
-- Q56 [Linux ABI exempt from native file-permission checks] — answered A
-  2026-09-07: suspend-and-prompt or ahead-of-time grant; per-account
-  default-grant policy. Operator follow-up pending lane A response.
+- Q56 [Linux ABI exempt from native file-permission checks] — resolved
+  2026-09-07, recorded 2026-09-09 (§924): **A, enforce parity**, paid for by
+  suspend-and-prompt or an ahead-of-time grant (the same facility as §918).
+  Operator's two follow-ups answered in §924: no per-account default-grant
+  mechanism exists anywhere in the tree (it is a new feature), and yes it
+  should cover native programs too — a per-account default grant is not
+  ambient authority, because a real, revocable token is still issued.
 - Q57 [capability-request prompt for keyboard/mic/camera?] — resolved
   2026-09-07 (§918): **A, yes,** and fix the error message.
 - A-Q1 [`find -size` bare number: bytes here, blocks elsewhere] — resolved

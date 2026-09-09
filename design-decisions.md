@@ -740,6 +740,11 @@ without breaking the existing specific-pid syscall ABI.
 
 ## 8. coreutils — standalone per-tool crates are canonical (retire the multi-call bundle)
 
+> **SUPERSEDED by §1005** (2026-09-07) — `coreutils` is the one home for the
+> command-line tools; the surviving code is chosen per utility. This entry's
+> "standalone per-tool crates are canonical" is no longer the policy. Kept for
+> the reasoning, which §1005 argues against rather than ignores.
+
 **Date:** 2026-06-12
 
 **Decided by:** Operator (Claude recommended option (a) — standalone per-tool
@@ -1963,6 +1968,12 @@ label). The declined C surface would additionally have touched
 `kernel/src/fs/vfs.rs` (file-identity) and `kernel/src/fs/cache.rs`.
 
 ## 23. File-backed `mmap` (reopened) — adopt **C-lite** (a unified *read-only* page cache) when a concrete consumer appears; writable `MAP_SHARED` writeback stays declined
+
+> **LIFTED by §36** (2026-06-24) — the C-lite read-only page cache was built,
+> and its precursor (stable VFS file identity) landed with it: `FileId`,
+> `Vfs::file_identity`, and `mm::page_cache::get_or_fill`, which
+> `proc/pcb.rs` already sources file-backed pages from. **Do not schedule the
+> "precursor work that must land first" below — it exists.**
 
 **Date:** 2026-06-14
 
@@ -36096,6 +36107,10 @@ undo that has to *find* what it is undoing is a guess; an undo that restores
 what it saved is not.
 
 ## §359 — One binary name, one producer: the duplicated utilities consolidate into `coreutils`, but the surviving *code* is chosen per utility
+
+> **UN-SUSPENDED by §1005** (2026-09-07) — this entry was suspended and is
+> live again; §1005 supersedes §8 and restores this one as the rule for which
+> half of each duplicated utility survives.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)

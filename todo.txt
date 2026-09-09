@@ -54026,7 +54026,18 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##     grep -nE "no C/C\+\+|cross-toolchain|prerequisite|How to reverse" design-decisions.md
 ##   Whoever landed zig cc was best placed to notice, and didn't.
 ##   ACTION: periodically re-read every "How to reverse"/"revisit if..." clause
-##   in design-decisions.md and confirm its premise still holds. Known clauses
+##   in design-decisions.md and confirm its premise still holds.
+##   HOW TO SCAN IT (lane B, 2026-09-09, learned the hard way): use HEADING_RE
+##   from scripts/check-design-decisions-bands.py, NOT a hand-written
+##   `^## (\d+)\.`. The file uses two heading styles and the naive form sees
+##   201 of 527 -- the script's own comment says this is "the most plausible
+##   mechanism by which 268-276 came to be duplicated nine times over without
+##   anyone noticing". Running the audit with the naive regex undercounted the
+##   headings, misattributed one supersession to the wrong section, and only
+##   agreed with reality once the script's regex was borrowed. Also: do not
+##   pipe the greps through `head` while triaging -- a truncated match list
+##   twice produced a confident "no such reference" here that was simply the
+##   6th result being cut off. Known clauses
 ##   of this shape today: S72 (SPENT -- superseded by S305), S73 (YSH: "once a
 ##   C++/slateos toolchain exists").
 ##   S73 UPDATE 2026-09-09 (lane B): the C++ half HAS fired, and the line above

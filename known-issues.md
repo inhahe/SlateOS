@@ -125017,10 +125017,30 @@ that survived checking.
 
 **What to do instead, in order of value:**
 
-1. **Run `scripts/pre-boot.py` before starting a boot test.** It already does
-   exactly this check and exists for exactly this reason. The objection that it
-   is a "40-minute optional tool" is now itself a stale measurement: the gate
-   phase it duplicates is 440 s on E:, not 62 min.
+1. **Run `scripts/pre-boot.py` before starting a boot test** — but know what it
+   costs. It performs exactly this check and exists for exactly this reason.
+
+   **Correction (2026-09-09, same day):** I first wrote here that the
+   "40-minute optional tool" objection was itself a stale measurement, on the
+   grounds that the phase it duplicates is 440 s on E:. **That was wrong, and
+   it is my own error made in the entry complaining about exactly this.** The
+   440 s covers only the gates that go through `run_checker`. It excludes the
+   34 `scripts/test-*.py` suites (540–660 s) *and* the `cfg(unix)` workspace
+   clippy, which appears nowhere in the timing log either — `boot-test.sh`'s
+   own accounting put the gate phase at **1102 s** on a run that stopped
+   *before* kernel clippy and `cfg(unix)` had started.
+
+   `pre-boot.py` additionally runs `cargo check --workspace --exclude kernel
+   --all-targets`, across 2,700+ crates. That is CPU-bound compilation, so the
+   SSD barely helped it — the same result the kernel clippy measurement gave
+   (101 s on E: against a D:-era 113 s). Its own docstring's "~6 minutes"
+   describes only the `check-*.py` phase, not the tool; `boot-test.sh`'s
+   "~40-minute" figure is the honest one for the whole run.
+
+   So it is a real pre-flight with a real price, not a free one. Worth it
+   before a boot test you care about; not worth it after every small edit —
+   for that, run the single gate that guards the file you touched, which is
+   what would have caught both of today's losses in under a second.
 2. **Move `check_kernel_clippy` earlier in `boot-test.sh`'s sequence.** Free —
    it does not change the total when everything passes, only how soon you learn
    it did not. Costs at most one thing: a cheap text gate's failure is then

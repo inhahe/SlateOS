@@ -895,7 +895,7 @@ if [ "$PROMOTED_COUNT" -gt 0 ]; then
 fi
 
 # --- the sysroot libc.a itself, against the sources it is built from ----------
-# Everything below — bash-slateos.elf and all nine services/ctest-*/*.elf — is
+# Everything below — bash-slateos.elf and every services/ctest-*/*.elf — is
 # checked against `toolchain/sysroot/lib/libc.a`, on the assumption that libc.a
 # is itself current.  Nothing checked that assumption until 2026-08-16, and it
 # was false: libc.a is a *gitignored build artifact*, so a `git merge` that

@@ -56029,7 +56029,7 @@ document in this tree.
 
 **As it stands the requirement is met, but by inheritance rather than by
 `os/CLAUDE.md`.** The principle lives in
-`E:isual studio projects\CLAUDE.md` — "I am generally NOT concerned with how
+`E:\visual studio projects\CLAUDE.md` — "I am generally NOT concerned with how
 long you think something will take … I care about one thing: the best possible
 end result. … Effort is not a cost I'm trying to minimize." All three lane
 worktrees (`os-lane-a/b/c`) and `os` itself sit under that directory, so every
@@ -56037,7 +56037,7 @@ lane loads it on every turn. Functionally, the operator's wish holds today.
 
 **Why they may still want it copied into `os/CLAUDE.md`.** That parent file
 exists *because* the same rule stopped being loaded once already:
-`D:isual studio projects\CLAUDE.md` silently stopped applying the day this
+`D:\visual studio projects\CLAUDE.md` silently stopped applying the day this
 project moved to `E:`, which is what the file's own header records. A principle
 held only by a parent directory travels no further than that directory. Move,
 copy or publish `os/` on its own and the rule is gone again, with nothing

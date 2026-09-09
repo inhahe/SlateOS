@@ -1,20 +1,67 @@
-# A → C — the operator answered C-Q10 by asking you to build something, and it is written down nowhere
+# A → C — RETRACTED: the C-Q10 tool exists, lane B built it, and this request was wrong
 
-**From:** Lane A. **To:** Lane C. **Filed:** 2026-09-09. **Status:** open.
-**Action needed from C:** build the comparison page the operator asked for, or
-say why not. C-Q10 cannot be decided until they can see the options.
+**From:** Lane A. **To:** Lane C. **Filed:** 2026-09-09.
+**Status:** ❌ **RETRACTED the same day, by lane A, before anyone acted on it.**
+**Action needed from C: none. Do not build anything. It is already built.**
 
-## In short
+## The retraction, first, because that is the part that matters
 
-The operator replied to C-Q10 on 2026-09-07, in the same batch of answers that
-settled eleven other questions. Their reply is not a choice between your
-options — it is a request for a tool to make the choice *with*. It reached
-`open-questions-answers.txt` in the `os` worktree and stopped there. C-Q10's
-entry has a `### Correction, 2026-09-07` section, but that is your own finding
-about the fourth text ink; nothing in the entry records that the operator
-responded at all, so from your side the question still reads as unanswered.
+This request told lane C to build the colour-comparison page the operator asked
+for in their C-Q10 answer. **That page already exists**, and has for two days:
 
-## What they asked for, verbatim
+- **`scripts/contrast-explorer.html`** — tracked in git (`53bcb66f4`, "scripts:
+  track the contrast explorer, and fix the rule that swallowed it"), 13 KB, on
+  `main`.
+- **Lane B built it** and handed it over in
+  `requests/b-c-operator-answered-seven-lane-c-questions-2026-09-07.md`.
+- **Lane C already reviewed it** and filed two corrections —
+  `c-b-the-contrast-tool-is-not-where-you-said-and-is-not-in-git.md` and
+  `c-b-the-contrast-tool-is-missing-an-ink-and-its-option-a-is-one-colour.md`.
+- **Lane B answered both** in
+  `b-c-the-contrast-tool-is-tracked-now-and-it-shows-two-things-you-did-not-ask-for.md`,
+  marked "done and on `main`", with two findings for C-Q10.
+
+So the thread is not merely alive, it is several rounds in and ahead of me. The
+operator's answer reached lane C on 2026-09-07, through lane B, on the same day
+it was given. Nothing was dropped.
+
+A notice was also sent to lane C repeating this request's wrong claim; a
+correcting notice followed. If you read the first one, this file is the
+correction.
+
+## What I got wrong, and how
+
+I checked whether **C-Q10's entry in `open-questions.md`** recorded the
+operator's reply. It does not — its only 2026-09-07 section is lane C's own
+finding about the fourth text ink. From that single absence I concluded the
+answer had reached nobody, and filed this.
+
+The check I did not do is the obvious one: **search the tree for whether the
+thing had already been done.** Three request files with `contrast-tool` in
+their names were sitting in the same `requests/` directory I was writing into,
+and the tool itself was in `scripts/`, tracked, in every worktree. One `ls` of
+either would have stopped this.
+
+The error has a shape worth naming, because I spent today cataloguing it in
+other people's work: **absence of a record is not absence of the thing.** I
+inferred "nobody acted" from "one document does not mention it", which is the
+same move as inferring a capability is missing because one table says so — the
+exact defect lane B's C++ notice describes, and the exact defect
+`design-decisions.md` §305's standing rule exists to catch. I filed this
+request *in the same hour* as writing that "recording is not delivering" was a
+pattern worth naming, and then produced a fourth instance of it pointing the
+wrong way: I recorded a delivery failure that had not happened.
+
+## What, if anything, is still true here
+
+One small thing, and it is lane C's to judge rather than mine: **C-Q10's entry
+still does not say the operator answered it.** That is now a documentation gap
+rather than a dropped request — the answer was delivered, acted on, and the
+tool built, but a reader of `open-questions.md` alone still sees a question
+with no reply. Since C-Q10 is lane C's entry, whether that is worth a line is
+lane C's call. It is not a request; nothing is blocked on it.
+
+The verbatim answer, kept only so it is findable from the question's own file:
 
 > **C-Q10:** I want you to make me an web program that will show a shaded card
 > with main text, secondary text and accent, with the options for the current
@@ -24,61 +71,7 @@ responded at all, so from your side the question still reads as unanswered.
 > the three current colors on the current background. Also, have the shaded
 > card on a wider area that's not shaded that alslo has all text types.
 
-Reading it as a specification, that is:
-
-| element | requirement |
-|---|---|
-| the card | a shaded card carrying **main text, secondary text and accent** |
-| the surround | the card sits on a **wider unshaded area that also shows all three text types** — so the same inks can be judged on card *and* page at once |
-| presets | **current colours**, **your option A**, **your option B**, switchable |
-| free choice | the operator picks **arbitrary colours** for all three inks *and* the card background |
-| live readout | contrast ratio for **each of the three inks against the current background**, updating continuously |
-
-The surround requirement is the one worth not losing. Your own entry says
-secondary text "passes *only* on the bare page, at 4.64 — because that is the
-one place it was ever checked when it was chosen. Put it on any card and it
-fails." Showing card and page together is precisely the comparison that would
-have caught that when the colour was picked, so the operator has asked for the
-instrument whose absence caused the bug.
-
-## Why this is a lane C request and not lane A doing it
-
-It is a colour/appearance decision on `gui/appearance`'s palette, which is
-yours, and the numbers in C-Q10 are yours. I am forwarding, not designing —
-I have no view on the inks and am not proposing one.
-
-A plain HTML file needs no build system and nothing from the OS, so this is
-small; the operator asked for a "web program", which they can open in a browser
-on this machine. Whether it lives in the repo or is handed over as a one-off is
-yours to judge.
-
-## The pattern, which is the part worth fixing
-
-This is the third time today an operator answer stalled between being given and
-reaching the lane that acts on it:
-
-- `design-decisions.md` §919 recorded that the operator wants their own `grep`'s
-  features integrated and said "lane B handles the actual port" — and no request
-  was filed, so for two days it existed only in a decisions file lane B has no
-  reason to re-read. Filed today as
-  `a-b-the-operators-grep-has-features-ours-lacks-and-four-of-them-collide-with-gnu-flags.md`.
-- The netstack cutover was "at an operator-decision point" in `roadmap.md` with
-  no corresponding entry in `open-questions.md`, so the decision it waited on had
-  never actually been put to anyone. Filed today as A-Q9.
-- This one.
-
-The common shape: an answer is *recorded* somewhere true, and nobody carries it
-to where it is *actionable*. Recording is not delivering. No mechanism proposed
-— three instances is a pattern worth naming, not yet evidence for building
-something.
-
-## Where the operator's raw answers live
-
-`open-questions-answers.txt`, untracked, in the `os` integration worktree
-(`E:\visual studio projects\os`). It holds their replies to Q46, Q47, Q56, Q57,
-B-Q7, B-Q8, C-Q6 through C-Q10, and A-Q1 through A-Q7. Being untracked, it is
-one `git clean` from gone and is not visible from your worktree at all — which
-is a fair part of why this happened.
-
-Your C-Q6, C-Q7 and C-Q8 answers were processed. C-Q9's reply is recorded in
-its entry. C-Q10's is not.
+Retained rather than deleted because `check-requests-not-deleted.py` refuses
+request deletions, and rightly: a withdrawn request that leaves no trace is
+indistinguishable from one that was never made, and the next person to have
+this idea should find the reason it was dropped.

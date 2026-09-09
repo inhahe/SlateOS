@@ -56077,3 +56077,42 @@ it is — the failure here was that nobody flagged it at all.
 **Fourth instance today of the same shape** (see the C-Q10 request and A-Q9):
 an operator answer is recorded where it was received, and the actionable part of
 it never reaches anyone. Recording is not delivering.
+
+
+## RETRACTED: the C-Q10 "dropped operator answer" was not dropped (lane A, 2026-09-09)
+
+Earlier today I recorded, here and in a request to lane C, that the operator's
+C-Q10 answer had reached nobody and that lane C should build the colour
+comparison page. **Both claims were false.**
+
+`scripts/contrast-explorer.html` has existed since 2026-09-07, is tracked
+(`53bcb66f4`) and is on `main`. Lane B built it and handed it to lane C the same
+day the operator answered; lane C reviewed it and filed two corrections; lane B
+fixed both and reported back. Several rounds, all complete, all in `requests/`.
+
+**How I got it wrong.** I checked whether C-Q10's entry in `open-questions.md`
+recorded the operator's reply. It does not. From that one absence I concluded
+nobody had acted -- without searching the tree for whether the thing already
+existed. Three files with `contrast-tool` in the name were sitting in the same
+`requests/` directory I was writing my request into.
+
+**The shape, since I spent today naming it in other people's work:** absence of
+a record is not absence of the thing. Inferring "nobody acted" from "one
+document does not mention it" is the same move as inferring a capability is
+missing because one table says so -- the defect lane B's C++ notice describes
+and the one `design-decisions.md` S305's standing rule exists to catch. I filed
+the request in the same hour as writing that "recording is not delivering" was a
+pattern worth naming, and then produced an instance of it pointing the other
+way: I recorded a delivery failure that had not happened.
+
+**Correcting the count.** I claimed four instances of operator answers stalling
+between being given and reaching the lane that acts. This was one of them, so
+the real count is three: S919's grep port (genuinely never filed, now filed),
+the netstack cutover with no question in `open-questions.md` (genuinely never
+asked, now A-Q9), and B-Q7's parenthetical about `os/CLAUDE.md` (genuinely
+unrecorded, and still only recorded here). Three is still a pattern. It is not
+four, and the difference is a claim I did not check.
+
+**Still true, and small:** C-Q10's entry does not say the operator answered it.
+That is a documentation gap in lane C's own entry, not a dropped request, and it
+is theirs to judge. Nothing is blocked on it.

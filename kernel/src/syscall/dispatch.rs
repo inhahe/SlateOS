@@ -4324,7 +4324,7 @@ fn test_dispatch_setgroups() -> KernelResult<()> {
         );
         if r.value == SyscallResult::err(KernelError::NoSuchSyscall).value {
             serial_println!(
-                "[syscall]   FAIL: SYS_PROCESS_SETGROUPS (1067) is not registered -- dispatch returned                  NoSuchSyscall, so the number was never wired to a handler"
+                "[syscall]   FAIL: SYS_PROCESS_SETGROUPS (1067) is not registered -- dispatch returned NoSuchSyscall, so the number was never wired to a handler"
             );
             return Err(KernelError::InternalError);
         }
@@ -4333,7 +4333,7 @@ fn test_dispatch_setgroups() -> KernelResult<()> {
     let task_id = sched::current_task_id();
     let Some(pid) = thread::owner_process(task_id) else {
         serial_println!(
-            "[syscall]   setgroups (1067 registered): OK — the group-list cases              SKIPPED (no owning process to hold a group list)"
+            "[syscall]   setgroups (1067 registered): OK — the group-list cases SKIPPED (no owning process to hold a group list)"
         );
         return Ok(());
     };
@@ -4431,7 +4431,7 @@ fn test_dispatch_chroot() -> KernelResult<()> {
         );
         if r.value == SyscallResult::err(KernelError::NoSuchSyscall).value {
             serial_println!(
-                "[syscall]   FAIL: SYS_PROCESS_CHROOT (1068) is not registered -- dispatch returned                  NoSuchSyscall, so the number was never wired to a handler"
+                "[syscall]   FAIL: SYS_PROCESS_CHROOT (1068) is not registered -- dispatch returned NoSuchSyscall, so the number was never wired to a handler"
             );
             return Err(KernelError::InternalError);
         }
@@ -4440,7 +4440,7 @@ fn test_dispatch_chroot() -> KernelResult<()> {
     let task_id = sched::current_task_id();
     let Some(pid) = thread::owner_process(task_id) else {
         serial_println!(
-            "[syscall]   chroot (1068 registered): OK — the root-dir case SKIPPED              (no owning process to hold a root directory)"
+            "[syscall]   chroot (1068 registered): OK — the root-dir case SKIPPED (no owning process to hold a root directory)"
         );
         return Ok(());
     };
@@ -4543,7 +4543,7 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         );
         if r.value == no_such {
             serial_println!(
-                "[syscall]   FAIL: {} ({}) is not registered -- dispatch returned                  NoSuchSyscall, so the number was never wired to a handler",
+                "[syscall]   FAIL: {} ({}) is not registered -- dispatch returned NoSuchSyscall, so the number was never wired to a handler",
                 name,
                 nr
             );
@@ -4551,7 +4551,7 @@ fn test_dispatch_itimer() -> KernelResult<()> {
         }
         if r.value != bad_which {
             serial_println!(
-                "[syscall]   FAIL: {} ({}) returned {} for ITIMER_VIRTUAL, expected                  InvalidArgument ({}). Accepting it would arm a wall-clock timer                  for a CPU-time request",
+                "[syscall]   FAIL: {} ({}) returned {} for ITIMER_VIRTUAL, expected InvalidArgument ({}). Accepting it would arm a wall-clock timer for a CPU-time request",
                 name,
                 nr,
                 r.value,
@@ -4564,7 +4564,7 @@ fn test_dispatch_itimer() -> KernelResult<()> {
     let task_id = sched::current_task_id();
     if thread::owner_process(task_id).is_none() {
         serial_println!(
-            "[syscall]   itimer (1069/1070 registered, ITIMER_VIRTUAL refused by              both): OK -- arming SKIPPED (no owning process to own a timer)"
+            "[syscall]   itimer (1069/1070 registered, ITIMER_VIRTUAL refused by both): OK -- arming SKIPPED (no owning process to own a timer)"
         );
         return Ok(());
     }

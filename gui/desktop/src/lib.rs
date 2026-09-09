@@ -4064,6 +4064,20 @@ impl DesktopShell {
             self.font_size(TextRole::Caption),
         );
 
+        // The keyboard layout, immediately right of it. Without this, Super+Space
+        // changes what every key on the keyboard produces and nothing on screen
+        // says so -- which is worse than not having the shortcut.
+        let layout_w = self.layout_indicator_width();
+        if layout_w > 0.0 {
+            tree.text(
+                tray_x + padding + self.desktop_indicator_width() + self.scale(TRAY_PADDING),
+                tray_text_y,
+                self.input_methods.tray_label(),
+                self.theme.taskbar_fg,
+                self.font_size(TextRole::Caption),
+            );
+        }
+
         tree
     }
 
@@ -4407,6 +4421,24 @@ impl DesktopShell {
         )
     }
 
+    /// How wide the keyboard-layout indicator is, or zero when there is only
+    /// one layout installed.
+    ///
+    /// Zero rather than a fixed reserve: a machine with one layout has nothing
+    /// to switch between, and an indicator that always read "US" would be a
+    /// permanent label for a control that does nothing. The tray's width is
+    /// derived from its contents (see `tray_width`), so returning zero removes
+    /// the space as well as the text.
+    fn layout_indicator_width(&self) -> f32 {
+        if self.input_methods.layouts.len() < 2 {
+            return 0.0;
+        }
+        text::width(
+            self.input_methods.tray_label(),
+            self.font_size(TextRole::Caption),
+        ) + self.scale(TRAY_PADDING)
+    }
+
     /// What the virtual-desktop indicator reads.
     fn desktop_indicator_string(&self) -> String {
         format!("Desktop {}", self.current_desktop_number())
@@ -4422,8 +4454,10 @@ impl DesktopShell {
     /// since nothing about a clipped clock says which end was cut.
     fn tray_width(&self) -> f32 {
         let padding = self.scale(TRAY_PADDING);
-        let content =
-            self.clock_width() + self.scale(TRAY_BELL_WIDTH) + self.desktop_indicator_width();
+        let content = self.clock_width()
+            + self.scale(TRAY_BELL_WIDTH)
+            + self.desktop_indicator_width()
+            + self.layout_indicator_width();
         // Padding at the right edge, between each pair of items, and at the
         // left of the tray.
         (content + padding * 4.0).max(self.scale(TRAY_MIN_WIDTH))
@@ -10405,5 +10439,46 @@ mod run_box_wiring_tests {
                 "the file and the indicator disagree about which layout is active"
             );
         });
+    }
+
+    /// The taskbar says which layout is active, and says something different
+    /// after a switch.
+    ///
+    /// Without this the shortcut changes what every key on the keyboard
+    /// produces and nothing on screen reports it -- which is worse than not
+    /// having the shortcut, because the user has no way to find out what
+    /// happened or how to undo it.
+    #[test]
+    fn the_taskbar_reports_which_keyboard_layout_is_active() {
+        fn tray_strings(shell: &DesktopShell) -> Vec<String> {
+            shell
+                .render_taskbar()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut shell = shell();
+        assert!(
+            shell.input_methods.layouts.len() > 1,
+            "a machine with one layout draws no indicator, so this proves nothing"
+        );
+        let before = shell.input_methods.tray_label().to_string();
+        assert!(
+            tray_strings(&shell).contains(&before),
+            "the active layout is not named anywhere in the taskbar"
+        );
+
+        shell.input_methods.next_layout();
+        let after = shell.input_methods.tray_label().to_string();
+        assert_ne!(before, after, "the switcher did not move");
+        assert!(
+            tray_strings(&shell).contains(&after),
+            "the taskbar still names the old layout after a switch"
+        );
     }
 }

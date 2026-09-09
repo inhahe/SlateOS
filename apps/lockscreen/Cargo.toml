@@ -31,6 +31,12 @@ authlib = { path = "../../userspace/authlib" }
 # the names offered cannot drift from the names that can answer. See
 # `system_users`.
 userdb = { path = "../../userspace/userdb" }
+# *Which* of those accounts a screen offers, and whether each needs a password.
+# The policy is shared with the desktop shell's login screen rather than
+# written out at both: two answers to "which names is the person at this
+# machine offered" would drift silently, and the person cannot tell a hidden
+# account from a deleted one.
+loginusers = { path = "../../gui/loginusers" }
 
 # Test-only. The fixtures here write a `users.yaml` or a shadow line and read
 # it back over the code that decides who gets in, so two tests naming one file

@@ -2055,19 +2055,6 @@ impl PasswordAuthority for SystemAuthority {
 // The production user list
 // ============================================================================
 
-/// The uids that belong to people rather than to the system.
-///
-/// `login.defs`' conventional `UID_MIN`/`UID_MAX`, and the range `useradd`
-/// allocates from. A lock screen that lists `daemon` and `nobody` is not merely
-/// untidy: every name on it is a name an attacker standing at the machine gets
-/// for free.
-///
-/// The *upper* bound is the half that is easy to leave out and wrong to. `nobody`
-/// is conventionally uid 65534 — above the range, not below it — so a bare
-/// `uid >= 1000` filter drops `daemon` and keeps `nobody`, which is the account
-/// the filter most obviously exists to hide.
-const HUMAN_UIDS: core::ops::RangeInclusive<u32> = 1000..=60_000;
-
 /// Whether `username` has a password that must be typed.
 ///
 /// # Why this is fail-*closed*, and why that matters more than it looks
@@ -2110,7 +2097,8 @@ const HUMAN_UIDS: core::ops::RangeInclusive<u32> = 1000..=60_000;
 /// above.
 ///
 /// No caller today, deliberately kept. [`system_users`] answers this from a
-/// record it already holds, through [`record_has_password`]. This wrapper is
+/// record it already holds, through [`loginusers::record_has_password`]. This
+/// wrapper is
 /// for the caller that does not start from a record -- a typed username, which
 /// this screen does not yet accept. See `todo.txt`.
 #[allow(dead_code, reason = "no typed-username path yet -- see todo.txt")]
@@ -2118,38 +2106,19 @@ fn account_has_password(users_yaml: &Path, username: &str) -> bool {
     if let Ok(db) = userdb::UserDb::load(users_yaml)
         && let Some(record) = db.find(username)
     {
-        return record_has_password(record);
+        return loginusers::record_has_password(record);
     }
     // Unreadable store, missing store, or unknown user. Fail closed: assume a
     // password and let the authority be the one to say otherwise.
     true
 }
 
-/// The native-database half of [`account_has_password`], for a caller that has
-/// already loaded the database.
-///
-/// Split out rather than written twice so that [`system_users`] does not reopen
-/// and reparse `users.yaml` once per account — but mostly so that there is one
-/// statement of the policy. Two copies of "does this account have a password?"
-/// is two copies of a rule that decides who gets in.
-fn record_has_password(record: &userdb::Record) -> bool {
-    // A locked account keeps its hash so that unlocking restores the old
-    // password. It has one; it just will not open. Prompt for it, and let the
-    // authority say `Locked`.
-    if record.is_locked() {
-        return true;
-    }
-    !record
-        .get(userdb::field::PASSWORD_HASH)
-        .unwrap_or_default()
-        .is_empty()
-}
-
 /// The people this machine will offer to unlock for.
 ///
 /// Read from the same store the authority resolves against, so a name on the
 /// screen is a name that can be answered for. System accounts are filtered out
-/// by [`HUMAN_UIDS`]; a record with no readable uid is *kept*, because a
+/// by [`loginusers::HUMAN_UIDS`]; a record with no readable uid is *kept*,
+/// because a
 /// hand-edited `users.yaml` that omits the field describes a person far more
 /// often than it describes a daemon, and dropping the machine's only account is
 /// a worse failure than listing one extra.
@@ -2164,27 +2133,20 @@ fn record_has_password(record: &userdb::Record) -> bool {
 /// whose user database cannot be read — a prompt that refuses everything, not
 /// an open door.
 fn system_users(users_yaml: &Path) -> Vec<UserInfo> {
-    let Ok(db) = userdb::UserDb::load(users_yaml) else {
-        // No account database to enumerate, and nothing else to enumerate
-        // from: `/etc/passwd` and `/etc/shadow` are generated from this file
-        // (design-decisions section 353), so a machine where it cannot be read
-        // has no account list at all.
-        return Vec::new();
-    };
-    db.records()
-        .iter()
-        .filter(|record| record.uid().is_none_or(|uid| HUMAN_UIDS.contains(&uid)))
-        .filter_map(|record| {
-            let username = record.username()?;
-            let display = record.display_name().unwrap_or_else(|| username.clone());
-            // The record is in hand, so the answer comes from it directly --
-            // which is now the only way to answer, `authlib` having deleted
-            // its second store (design-decisions section 353).
-            Some(UserInfo::new(
-                &username,
-                &display,
-                record_has_password(record),
-            ))
+    // The filter itself lives in `loginusers`, not here. It used to be written
+    // out in this function, and the desktop shell's login screen was about to
+    // acquire a second copy of it -- two answers to "which names is the person
+    // standing at this machine offered", free to drift, with the drift visible
+    // to nobody. What is left here is the part that is genuinely this screen's:
+    // turning an account into the row this screen draws.
+    loginusers::offered(users_yaml)
+        .into_iter()
+        .map(|account| {
+            UserInfo::new(
+                &account.username,
+                &account.display_name,
+                account.has_password,
+            )
         })
         .collect()
 }

@@ -3853,7 +3853,9 @@ dependencies = [
  "imagecodec",
  "inputsettings",
  "keylayout",
+ "loginusers",
  "oswindow",
+ "scratchdir",
  "settingsfile",
  "tzrules",
  "yamldoc",
@@ -9412,6 +9414,7 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "guitk",
+ "loginusers",
  "oswindow",
  "posix",
  "pwkdf",
@@ -9490,6 +9493,15 @@ dependencies = [
  "authlib",
  "libservicebus",
  "posix",
+ "scratchdir",
+ "userdb",
+]
+
+[[package]]
+name = "loginusers"
+version = "0.1.0"
+dependencies = [
+ "authlib",
  "scratchdir",
  "userdb",
 ]

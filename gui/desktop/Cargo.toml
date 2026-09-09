@@ -85,6 +85,12 @@ imagecodec = { path = "../imagecodec" }
 # nothing and does not drag a display server in behind it.
 keylayout = { path = "../keylayout" }
 
+# Which accounts the login screen offers, and whether each needs a password.
+# Shared with `apps/lockscreen` rather than written out at both: two answers to
+# "which names is the person standing at this machine offered" would drift
+# silently, and the person cannot tell a hidden account from a deleted one.
+loginusers = { path = "../loginusers" }
+
 [lints]
 workspace = true
 
@@ -94,4 +100,9 @@ workspace = true
 # `store`/`Watcher` pair without touching the developer's own
 # `~/.config/slateos`.
 [dev-dependencies]
+# Test-only. The account-list tests write a `users.yaml` and read it back
+# through the offer filter, so two tests naming one file would each assert
+# against the other's data.
+scratchdir = { path = "../../userspace/scratchdir" }
+
 settingsfile = { path = "../settingsfile", features = ["testing"] }

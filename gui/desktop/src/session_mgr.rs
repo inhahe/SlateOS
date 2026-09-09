@@ -1706,7 +1706,7 @@ mod tests {
         for light in [false, true] {
             let p = accented(light);
             let (picker, ws) = scene();
-            crate::palette_check::assert_drawn_from(
+            appearance::palette_check::assert_drawn_from(
                 &p,
                 &picker.render(&p, &ws),
                 &[USER_PINK],

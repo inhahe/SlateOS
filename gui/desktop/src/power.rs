@@ -2308,7 +2308,7 @@ mod tests {
     //    the per-site tables are not a supplement to the sweep: they are the
     //    only thing left. Anyone who trims them is removing the whole proof.
 
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
     use appearance::readable_on;
 
     /// An accent that is in neither palette, so a site reaching for the accent

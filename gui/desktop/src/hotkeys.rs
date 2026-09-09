@@ -1781,7 +1781,7 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
     use guitk::color::Color;
 
     /// More room than any card will ever ask for, so the layout stays at one

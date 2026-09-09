@@ -1042,7 +1042,7 @@ mod tests {
     fn every_colour_the_tray_draws_comes_from_its_palette() {
         for light in [false, true] {
             let p = accented(light);
-            crate::palette_check::assert_drawn_from(
+            appearance::palette_check::assert_drawn_from(
                 &p,
                 &InputMethodManager::default().render_tray_indicator(&p, 0.0, 0.0),
                 &[],
@@ -1055,7 +1055,7 @@ mod tests {
     fn every_colour_the_preview_draws_comes_from_its_palette() {
         for light in [false, true] {
             let p = accented(light);
-            crate::palette_check::assert_drawn_from(
+            appearance::palette_check::assert_drawn_from(
                 &p,
                 &previewing(builtin("de-qwertz")).render_preview(&p, 0.0, 0.0, 400.0),
                 &[],

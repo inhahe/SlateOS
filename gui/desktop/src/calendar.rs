@@ -5132,7 +5132,7 @@ description: Just a test";
                         // nothing checks.
                         cal.next_month();
                     }
-                    crate::palette_check::assert_drawn_from(
+                    appearance::palette_check::assert_drawn_from(
                         &p,
                         &cal.render(&p, 0.0, 0.0, 1.0, NOW, &store),
                         &derived,

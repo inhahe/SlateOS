@@ -21,5 +21,13 @@ yamldoc = { path = "../../yamldoc" }
 # (and through it on the toolkit). See gui/settingsfile/src/lib.rs.
 settingsfile = { path = "../settingsfile" }
 
+[features]
+# Compiles `appearance::palette_check`, the sweep that proves a module draws
+# from the palette rather than from colours of its own. A dependent turns it on
+# in its own `[dev-dependencies]`, so the helper exists for `cargo test` and
+# nowhere else. It cannot be `#[cfg(test)]`: that is only set when *this* crate
+# is under test, not when a dependent is.
+testing = []
+
 [lints]
 workspace = true

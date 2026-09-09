@@ -1469,7 +1469,7 @@ mod tests {
     )]
 
     use super::*;
-    use crate::palette_check;
+    use appearance::palette_check;
 
     fn make_key(key: Key, ctrl: bool, shift: bool, text: Option<char>) -> KeyEvent {
         KeyEvent {
@@ -2149,7 +2149,7 @@ mod tests {
     /// that does the work: the sixteen constants deleted from this module were
     /// all Catppuccin Mocha, so one left behind is a value the Latte palette
     /// does not contain, and
-    /// [`palette_check::assert_drawn_from`](crate::palette_check::assert_drawn_from)
+    /// [`palette_check::assert_drawn_from`](appearance::palette_check::assert_drawn_from)
     /// names it.
     ///
     /// The states below are chosen because each one *selects a colour* no

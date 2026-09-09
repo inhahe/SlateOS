@@ -1486,7 +1486,7 @@ mod tests {
             let p = accented(light);
             for &tab in AboutTab::ALL {
                 for dlg in [dialog_with_licenses(tab), empty_dialog(tab)] {
-                    crate::palette_check::assert_drawn_from(
+                    appearance::palette_check::assert_drawn_from(
                         &p,
                         &dlg.render(&p, 0.0, 0.0, 500.0, 400.0),
                         &[p.accent],

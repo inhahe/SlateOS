@@ -35,6 +35,10 @@ osfont = { path = "../font" }
 # own. Cargo unifies this with the ordinary dependency when building tests,
 # so the module exists for `cargo test` and nowhere else.
 [dev-dependencies]
+# `appearance::palette_check`, the sweep that proves a module draws from the
+# palette rather than from colours of its own. Cargo unifies this with the
+# ordinary dependency when building tests.
+appearance = { path = "../appearance", features = ["testing"] }
 settingsfile = { path = "../settingsfile", features = ["testing"] }
 
 [lints]

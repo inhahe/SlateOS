@@ -2318,7 +2318,7 @@ mod tests {
     // ========================================================================
 
     use crate::draw_check::assert_nothing_is_drawn_and_never_seen;
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
 
     const SW: f32 = 1920.0;
     const SH: f32 = 1080.0;

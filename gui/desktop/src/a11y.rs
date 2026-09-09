@@ -950,7 +950,7 @@ mod tests {
                     let mut m = lens(shape);
                     m.config.show_crosshairs = crosshairs;
                     let cmds = m.render_overlay(&p, SCREEN_W);
-                    crate::palette_check::assert_drawn_from(
+                    appearance::palette_check::assert_drawn_from(
                         &p,
                         &cmds,
                         &derived,
@@ -966,7 +966,7 @@ mod tests {
                 fi.animate = animate;
                 for frame in [0_u64, 15, 30, 45] {
                     let cmds = fi.render(&p, 10.0, 20.0, 100.0, 50.0, frame);
-                    crate::palette_check::assert_drawn_from(
+                    appearance::palette_check::assert_drawn_from(
                         &p,
                         &cmds,
                         &derived,

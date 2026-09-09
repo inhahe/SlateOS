@@ -314,6 +314,93 @@ impl Layer {
     }
 }
 
+/// What a surface wants blurred behind it, if anything.
+///
+/// # Why a *kind* crosses the wire and not the parameters
+///
+/// A blur is five numbers and a colour — radius, opacity, tint, saturation,
+/// noise — and it would be easy to send those. Sending a role name instead is
+/// deliberate, for three reasons that all point the same way:
+///
+/// * **Cost.** The radius decides how much work the compositor does per frame.
+///   A client that asked for radius 200 over a full-screen region would make
+///   the compositor spend its frame budget on that client's behalf, and there
+///   is no sensible refusal — the request is well-formed. Naming a role leaves
+///   the cost where it can be reasoned about.
+/// * **Theme.** The tint comes from the palette, and the compositor has the
+///   authoritative one. A client sending a colour would send the colour it
+///   believed in when it created the window, which is wrong the moment the
+///   user changes theme.
+/// * **Stability.** A role is a durable thing to name across a protocol; a
+///   radius is a tuning value someone will change. `BlurEffect::taskbar` can
+///   be re-tuned without every client re-linking.
+///
+/// The cost is that a client cannot invent an effect the compositor does not
+/// have a name for. That is the intended trade: this exists so the shell's
+/// chrome can be translucent in the way `design.txt` asks for ("taskbar and/or
+/// window titlebars support blurry transparency like the Windows aero theme"),
+/// not so any window can composite arbitrarily.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BlurKind {
+    /// No blur. What every window gets unless it asks otherwise, and what a
+    /// compositor that cannot blur gives everyone.
+    #[default]
+    None,
+    /// The taskbar's backdrop.
+    Taskbar,
+    /// A window's title bar.
+    TitleBar,
+    /// A menu or popup.
+    Menu,
+    /// A notification toast.
+    Notification,
+    /// The general-purpose effect, for a surface that wants blur without
+    /// matching one of the named roles.
+    Standard,
+}
+
+impl BlurKind {
+    /// The wire byte for this kind.
+    #[must_use]
+    pub const fn as_byte(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Taskbar => 1,
+            Self::TitleBar => 2,
+            Self::Menu => 3,
+            Self::Notification => 4,
+            Self::Standard => 5,
+        }
+    }
+
+    /// The kind a wire byte names, or `None` if it names none of them.
+    ///
+    /// Returning `None` rather than defaulting to [`BlurKind::None`] is
+    /// deliberate, and for [`Layer::from_byte`]'s reason: a byte we do not
+    /// recognise means the peer is speaking a protocol we do not, and quietly
+    /// dropping the blur would leave a surface the client believes is
+    /// translucent drawn flat — a wrong desktop rather than a refused
+    /// connection.
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::None),
+            1 => Some(Self::Taskbar),
+            2 => Some(Self::TitleBar),
+            3 => Some(Self::Menu),
+            4 => Some(Self::Notification),
+            5 => Some(Self::Standard),
+            _ => None,
+        }
+    }
+
+    /// Whether this asks for any blur at all.
+    #[must_use]
+    pub const fn is_blurred(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 // ============================================================================
 // Acting on somebody else's window
 // ============================================================================
@@ -667,6 +754,14 @@ pub struct WindowSpec {
     /// panel silently demoted to [`Layer::Normal`] would be worse than no
     /// panel — it would disappear behind the first window the user opened.
     pub layer: Layer,
+    /// What the compositor should blur behind this surface, if anything.
+    ///
+    /// Advisory in the way [`transparent`](Self::transparent) is: a compositor
+    /// that cannot blur draws the surface flat, and the client is not told.
+    /// Unlike [`layer`](Self::layer), which is refused rather than demoted,
+    /// because a panel behind the windows is a broken desktop while an
+    /// unblurred panel is merely a plainer one.
+    pub blur_behind: BlurKind,
 }
 
 impl WindowSpec {
@@ -694,6 +789,7 @@ impl WindowSpec {
             min_size: None,
             max_size: None,
             layer: Layer::Normal,
+            blur_behind: BlurKind::None,
         }
     }
 }
@@ -1376,6 +1472,7 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             write_optional_size(out, spec.min_size);
             write_optional_size(out, spec.max_size);
             out.push(spec.layer.as_byte());
+            out.push(spec.blur_behind.as_byte());
         }
         RequestBody::DestroyWindow { window } => {
             out.push(RequestTag::DestroyWindow as u8);
@@ -1712,6 +1809,9 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             let max_size = read_optional_size(r)?;
             let layer_byte = r.read_u8()?;
             let layer = Layer::from_byte(layer_byte).ok_or(DecodeError::BadTag(layer_byte))?;
+            let blur_byte = r.read_u8()?;
+            let blur_behind =
+                BlurKind::from_byte(blur_byte).ok_or(DecodeError::BadTag(blur_byte))?;
             RequestBody::CreateWindow(WindowSpec {
                 title,
                 app_id,
@@ -1725,6 +1825,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 min_size,
                 max_size,
                 layer,
+                blur_behind,
             })
         }
         RequestTag::DestroyWindow => RequestBody::DestroyWindow {
@@ -2012,6 +2113,10 @@ mod tests {
             input_transparent: false,
             min_size: Some((320, 240)),
             max_size: Some((3840, 2160)),
+            // Not `None`, and not the same ordinal as `layer`: both are single
+            // bytes written adjacently, so a codec that read them back swapped
+            // would still round-trip if they happened to hold equal values.
+            blur_behind: BlurKind::Menu,
             layer: Layer::Overlay,
         }
     }
@@ -3087,5 +3192,30 @@ mod tests {
             },
         );
         assert_eq!(round_trip_requests(std::slice::from_ref(&req)), vec![req]);
+    }
+
+    /// Every ordinal survives the wire, and an unknown one is refused rather
+    /// than defaulted.
+    ///
+    /// The refusal is the half worth testing: a byte we do not recognise means
+    /// the peer is speaking a protocol we do not, and quietly treating it as
+    /// "no blur" would draw a surface the client believes is translucent as a
+    /// flat one -- a wrong desktop rather than a refused connection.
+    #[test]
+    fn every_blur_kind_round_trips_and_an_unknown_byte_is_refused() {
+        for kind in [
+            BlurKind::None,
+            BlurKind::Taskbar,
+            BlurKind::TitleBar,
+            BlurKind::Menu,
+            BlurKind::Notification,
+            BlurKind::Standard,
+        ] {
+            assert_eq!(BlurKind::from_byte(kind.as_byte()), Some(kind));
+        }
+        assert_eq!(BlurKind::from_byte(6), None);
+        assert_eq!(BlurKind::from_byte(u8::MAX), None);
+        assert!(!BlurKind::None.is_blurred());
+        assert!(BlurKind::Taskbar.is_blurred());
     }
 }

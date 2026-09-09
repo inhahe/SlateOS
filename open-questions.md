@@ -969,6 +969,89 @@ answered question left in the body is pure cost — and, being older, it sorts
 *first*, right where it is most in the way. (Why this is not append-only:
 `design-decisions.md` §437.)
 
+## C-Q12 — [C] There are two system trays, and neither can do what the spec asks. Which one is the real one? — Status: OPEN
+
+**In short:** the little row of icons at the right-hand end of the taskbar —
+the clock, the volume and network icons, the icons programs put there when they
+tuck themselves away — exists twice in this codebase, built two different ways,
+and the two halves cannot see each other. One of them draws the clock but has
+no way to hold a program's icon. The other holds program icons but is a
+separate program of its own. `design.txt` asks that you be able to **drag icons
+into and out of the tray**, and the code for that drag-and-drop is written —
+1,184 lines of it — but it lives with the half that has no icons to drag. So
+the feature cannot be finished without first deciding which half is the real
+tray. Nothing is broken today; the drag-and-drop simply does nothing, because
+nothing constructs it.
+
+**The two halves.**
+
+| | `gui/desktop` (the shell's taskbar) | `apps/systray` |
+|---|---|---|
+| What it is | Part of the desktop shell, drawn into the taskbar the shell already owns | A standalone program, 3,715 lines, with its own window |
+| What it draws | Clock, notification bell, virtual-desktop indicator | Tray icons with badges and tooltips, quick-settings flyout, volume popup, network popup, calendar popup |
+| Icons a program can add | **None.** There is no list of them anywhere in the shell | Yes — `TrayIconId`, add/remove/show/hide |
+| Drag-and-drop | `tray_dnd.rs`, fully written, **constructed by nothing** | None |
+| Reached by anything today | Yes, the shell runs it | **No.** Nothing launches it |
+
+**What the spec says.** `design.txt` line 710 lists the tray's contents as
+"optional icons on taskbar like Windows: clock, wifi, ... volume", and 714–716
+add "a system tray like on Windows / can drag and drop icons into and out of
+the system tray / apps have the option of starting in system tray or minimizing
+to system tray". It reads as one thing, in the taskbar. It does not say whether
+the program that *draws* it must be the shell.
+
+**The options.**
+
+**A — the tray belongs to the shell; fold `apps/systray` into it.**
+*What changes:* the taskbar grows a real icon list and the popups that go with
+it; `apps/systray` stops existing as a program.
+Pros: one taskbar drawn by one program, so the icons and the clock cannot
+disagree about where the tray starts or how wide it is; `tray_dnd.rs` is then
+in the right place and can be wired as written; dragging an icon *out of* the
+tray and onto the taskbar is a move within one program rather than a protocol.
+Cons: the largest of the three — 3,715 lines to merge into a shell that is
+already the biggest thing in `gui/`; a crash in a tray popup takes the taskbar
+with it.
+
+**B — the tray is its own program; move `tray_dnd.rs` to it.**
+*What changes:* `apps/systray` gets launched and given a strip of the taskbar
+to draw into; the shell reserves the space and stays out of it.
+Pros: smallest change to what already exists, and the two halves are already
+split this way; a misbehaving tray icon cannot take the taskbar down; matches
+the microkernel instinct of the rest of the project.
+Cons: needs a protocol the shell does not have — the shell must tell the tray
+how much room it has and where, and the tray must tell the shell when it wants
+more, on every clock tick that changes the clock's width. Dragging an icon from
+the tray to the taskbar crosses a process boundary. Two programs must agree on
+the theme, the scale factor and the autohide animation, all of which the shell
+currently owns outright.
+
+**C — leave it, and delete `tray_dnd.rs`.**
+*What changes:* nothing a user sees; 1,184 lines of unreachable code go.
+Pros: honest about the fact that neither half is finished; nothing pretends to
+work.
+Cons: throws away written, tested code for a feature the spec explicitly asks
+for, and the decision still has to be made the day anyone wants tray icons.
+
+**My recommendation: A.** The reason is not size but the one thing neither
+option can fake — the tray and the taskbar share a *layout*. The tray's width
+is computed from its contents (the clock alone roughly triples in width when
+the date is switched on, which already had to be handled), and the taskbar's
+window buttons shrink to fit what is left. Under B that arithmetic spans two
+programs and has to be renegotiated on every change, which is the kind of seam
+that produces a tray overlapping its neighbours in one theme and not another.
+Under A it stays one function. The crash-isolation argument for B is real, but
+it is an argument for isolating *tray icon plugins* — which is a separate
+mechanism either way, since a third-party icon should not run in-process under
+A *or* B.
+
+**If this is never answered:** nothing degrades and nothing breaks. The tray
+keeps showing a clock, a bell and a desktop indicator; no program can put an
+icon in it; `tray_dnd.rs` stays unreachable. The cost is only that the
+"minimize to tray" feature in `design.txt` cannot be started, since it needs
+somewhere to minimise *to*.
+
+
 ## Resolved — lane A
 
 - Q45 Convert the whole shell to bytes, or only the expanded word? — resolved

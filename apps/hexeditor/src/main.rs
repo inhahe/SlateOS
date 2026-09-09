@@ -21,6 +21,7 @@
 //! Uses the guitk library for UI rendering with Catppuccin Mocha colors.
 
 #[allow(unused_imports)]
+use appearance::Palette;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{
@@ -47,23 +48,7 @@ use std::collections::VecDeque;
 // ============================================================================
 
 /// Catppuccin Mocha theme colors used throughout the hex editor.
-pub mod colors {
-    use guitk::color::Color;
-
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-}
+pub mod colors {}
 
 // ============================================================================
 // Configuration constants
@@ -1072,7 +1057,12 @@ impl HexDocument {
         if self.bookmarks.iter().any(|b| b.offset == offset) {
             self.remove_bookmark(offset);
         } else {
-            self.add_bookmark(offset, "", colors::YELLOW);
+            // A bookmark's colour is *stored on the bookmark*, so it is the
+            // user's data rather than chrome: nothing rewrites it when the
+            // theme changes, and a themed value here would leave old bookmarks
+            // in the old scheme and new ones in the new. Same rule as
+            // `snippets`' folder colours and `tmux`'s parsed ANSI cells.
+            self.add_bookmark(offset, "", Color::from_hex(0xF9E2AF));
         }
     }
 
@@ -1494,12 +1484,19 @@ pub struct HexEditor {
     /// Empty when there is nothing to say. Replaced by the next copy or paste
     /// rather than expiring on a timer, since this app has no frame clock.
     pub status_message: String,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl HexEditor {
     /// Create a new hex editor with one empty document.
     pub fn new(width: f32, height: f32) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             documents: vec![HexDocument::new()],
             active_tab: 0,
             search: SearchState::default(),
@@ -2441,7 +2438,7 @@ impl HexEditor {
             y: 0.0,
             width: self.window_width,
             height: self.window_height,
-            color: colors::BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2471,7 +2468,7 @@ impl HexEditor {
             y: 0.0,
             width: self.window_width,
             height: TOOLBAR_HEIGHT,
-            color: colors::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2492,14 +2489,14 @@ impl HexEditor {
                 y: 4.0,
                 width: 44.0,
                 height: 28.0,
-                color: colors::SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             tree.push(RenderCommand::Text {
                 x: x + 6.0,
                 y: 10.0,
                 text: label.to_string(),
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(38.0),
@@ -2513,7 +2510,7 @@ impl HexEditor {
             y1: TOOLBAR_HEIGHT - 1.0,
             x2: self.window_width,
             y2: TOOLBAR_HEIGHT - 1.0,
-            color: colors::SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
     }
@@ -2528,7 +2525,7 @@ impl HexEditor {
             y,
             width: self.window_width,
             height: TAB_BAR_HEIGHT,
-            color: colors::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2543,9 +2540,9 @@ impl HexEditor {
             let tab_width = tab_label_width(&label);
 
             let bg_color = if i == self.active_tab {
-                colors::BASE
+                self.palette.base
             } else {
-                colors::SURFACE0
+                self.palette.surface0
             };
 
             tree.push(RenderCommand::FillRect {
@@ -2563,9 +2560,9 @@ impl HexEditor {
             });
 
             let text_color = if i == self.active_tab {
-                colors::TEXT
+                self.palette.text
             } else {
-                colors::SUBTEXT0
+                self.palette.subtext0
             };
 
             tree.push(RenderCommand::Text {
@@ -2588,7 +2585,7 @@ impl HexEditor {
             y1: y + TAB_BAR_HEIGHT - 1.0,
             x2: self.window_width,
             y2: y + TAB_BAR_HEIGHT - 1.0,
-            color: colors::SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
     }
@@ -2638,7 +2635,7 @@ impl HexEditor {
                 x: 4.0,
                 y,
                 text: offset_str,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: HEX_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(char_w * 11.0),
@@ -2661,9 +2658,9 @@ impl HexEditor {
 
                 // Determine background color for this byte.
                 let bg_color = if doc.selection.as_ref().is_some_and(|s| s.contains(offset)) {
-                    Some(colors::SURFACE1)
+                    Some(self.palette.surface1)
                 } else if offset == doc.cursor {
-                    Some(colors::SURFACE0)
+                    Some(self.palette.surface0)
                 } else if doc.bookmarks.iter().any(|b| b.offset == offset) {
                     Some(Color::rgba(250, 179, 135, 60))
                 } else {
@@ -2684,13 +2681,13 @@ impl HexEditor {
 
                 // Hex text color.
                 let text_color = if offset == doc.cursor && doc.cursor_in_hex {
-                    colors::BLUE
+                    self.palette.blue
                 } else if byte == 0 {
-                    colors::OVERLAY0
+                    self.palette.overlay0
                 } else if byte.is_ascii_graphic() || byte == b' ' {
-                    colors::TEXT
+                    self.palette.text
                 } else {
-                    colors::PEACH
+                    self.palette.peach
                 };
 
                 tree.push(RenderCommand::Text {
@@ -2726,7 +2723,7 @@ impl HexEditor {
                     y1: y,
                     x2: ascii_start_x - char_w,
                     y2: y + LINE_HEIGHT,
-                    color: colors::SURFACE1,
+                    color: self.palette.surface1,
                     width: 1.0,
                 });
 
@@ -2746,7 +2743,7 @@ impl HexEditor {
                             y,
                             width: char_w + 1.0,
                             height: LINE_HEIGHT,
-                            color: colors::SURFACE1,
+                            color: self.palette.surface1,
                             corner_radii: CornerRadii::ZERO,
                         });
                     } else if offset == doc.cursor {
@@ -2755,7 +2752,7 @@ impl HexEditor {
                             y,
                             width: char_w + 1.0,
                             height: LINE_HEIGHT,
-                            color: colors::SURFACE0,
+                            color: self.palette.surface0,
                             corner_radii: CornerRadii::ZERO,
                         });
                     }
@@ -2767,11 +2764,11 @@ impl HexEditor {
                     };
 
                     let ascii_color = if offset == doc.cursor && !doc.cursor_in_hex {
-                        colors::BLUE
+                        self.palette.blue
                     } else if byte.is_ascii_graphic() || byte == b' ' {
-                        colors::TEXT
+                        self.palette.text
                     } else {
-                        colors::OVERLAY0
+                        self.palette.overlay0
                     };
 
                     tree.push(RenderCommand::Text {
@@ -2807,7 +2804,7 @@ impl HexEditor {
             y: panel_y,
             width: INSPECTOR_WIDTH,
             height: panel_height,
-            color: colors::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2817,7 +2814,7 @@ impl HexEditor {
             y1: panel_y,
             x2: panel_x,
             y2: panel_y + panel_height,
-            color: colors::SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
 
@@ -2826,7 +2823,7 @@ impl HexEditor {
             x: panel_x + 8.0,
             y: panel_y + 6.0,
             text: String::from("Data Inspector"),
-            color: colors::LAVENDER,
+            color: self.palette.lavender,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(INSPECTOR_WIDTH - 16.0),
@@ -2847,7 +2844,7 @@ impl HexEditor {
                 x: label_x,
                 y,
                 text: dtype.label().to_string(),
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(90.0),
@@ -2861,7 +2858,7 @@ impl HexEditor {
                 x: value_x,
                 y,
                 text: value_str,
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(INSPECTOR_WIDTH - 108.0),
@@ -2883,7 +2880,7 @@ impl HexEditor {
             y,
             width: self.window_width,
             height: STATUS_BAR_HEIGHT,
-            color: colors::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2893,7 +2890,7 @@ impl HexEditor {
             y1: y,
             x2: self.window_width,
             y2: y,
-            color: colors::SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
 
@@ -2907,7 +2904,7 @@ impl HexEditor {
             x: 8.0,
             y: text_y,
             text: offset_text.clone(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
@@ -2922,7 +2919,7 @@ impl HexEditor {
                 x: sel_x,
                 y: text_y,
                 text: sel_text,
-                color: colors::GREEN,
+                color: self.palette.green,
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
@@ -2941,7 +2938,7 @@ impl HexEditor {
                     x: msg_x,
                     y: text_y,
                     text: self.status_message.clone(),
-                    color: colors::SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: UI_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(msg_width),
@@ -2956,7 +2953,7 @@ impl HexEditor {
             x: self.window_width - 400.0,
             y: text_y,
             text: size_text,
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(140.0),
@@ -2970,9 +2967,9 @@ impl HexEditor {
             EditMode::Overwrite => "OVR",
         };
         let mode_color = match doc.edit_mode {
-            EditMode::ReadOnly => colors::RED,
-            EditMode::Insert => colors::GREEN,
-            EditMode::Overwrite => colors::BLUE,
+            EditMode::ReadOnly => self.palette.red,
+            EditMode::Insert => self.palette.green,
+            EditMode::Overwrite => self.palette.blue,
         };
         tree.push(RenderCommand::Text {
             x: self.window_width - 240.0,
@@ -2991,7 +2988,7 @@ impl HexEditor {
             x: self.window_width - 190.0,
             y: text_y,
             text: col_text.to_string(),
-            color: colors::LAVENDER,
+            color: self.palette.lavender,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(50.0),
@@ -3004,7 +3001,7 @@ impl HexEditor {
                 x: self.window_width - 120.0,
                 y: text_y,
                 text: String::from("Modified"),
-                color: colors::YELLOW,
+                color: self.palette.yellow,
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(70.0),
@@ -3017,7 +3014,7 @@ impl HexEditor {
             x: self.window_width - 50.0,
             y: text_y,
             text: String::from("Hex"),
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(40.0),
@@ -3052,7 +3049,7 @@ impl HexEditor {
             y,
             width: bar_width,
             height: bar_height,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -3061,7 +3058,7 @@ impl HexEditor {
             y,
             width: bar_width,
             height: bar_height,
-            color: colors::BLUE,
+            color: self.palette.blue,
             line_width: 1.0,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -3071,7 +3068,7 @@ impl HexEditor {
             x: x + 10.0,
             y: y + 12.0,
             text: String::from("Find:"),
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(40.0),
@@ -3085,9 +3082,9 @@ impl HexEditor {
             self.search.input_text.clone()
         };
         let input_color = if self.search.input_text.is_empty() {
-            colors::OVERLAY0
+            self.palette.overlay0
         } else {
-            colors::TEXT
+            self.palette.text
         };
         tree.push(RenderCommand::Text {
             x: x + 50.0,
@@ -3106,7 +3103,7 @@ impl HexEditor {
                 x: x + bar_width - 70.0,
                 y: y + 12.0,
                 text: format!("{} found", self.search.match_count),
-                color: colors::GREEN,
+                color: self.palette.green,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(65.0),
@@ -3142,7 +3139,7 @@ impl HexEditor {
             y,
             width: dialog_width,
             height: dialog_height,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -3151,7 +3148,7 @@ impl HexEditor {
             y,
             width: dialog_width,
             height: dialog_height,
-            color: colors::LAVENDER,
+            color: self.palette.lavender,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -3161,7 +3158,7 @@ impl HexEditor {
             x: x + 12.0,
             y: y + 12.0,
             text: String::from("Go to Offset"),
-            color: colors::LAVENDER,
+            color: self.palette.lavender,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(dialog_width - 24.0),
@@ -3174,7 +3171,7 @@ impl HexEditor {
             y: y + 36.0,
             width: dialog_width - 24.0,
             height: 28.0,
-            color: colors::BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -3183,7 +3180,7 @@ impl HexEditor {
             y: y + 36.0,
             width: dialog_width - 24.0,
             height: 28.0,
-            color: colors::SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -3195,9 +3192,9 @@ impl HexEditor {
             self.goto_text.clone()
         };
         let text_color = if self.goto_text.is_empty() {
-            colors::OVERLAY0
+            self.palette.overlay0
         } else {
-            colors::TEXT
+            self.palette.text
         };
         tree.push(RenderCommand::Text {
             x: x + 20.0,
@@ -3298,6 +3295,10 @@ pub fn format_hex_line(data: &[u8], offset: usize, bytes_per_line: usize) -> Str
 // ============================================================================
 
 impl App for HexEditor {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         let doc = self.active_doc();
         let name = doc
@@ -4632,8 +4633,9 @@ mod tests {
 
     #[test]
     fn test_add_bookmark() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut doc = HexDocument::from_data(vec![0; 100]);
-        doc.add_bookmark(10, "test", colors::YELLOW);
+        doc.add_bookmark(10, "test", pal.yellow);
         assert_eq!(doc.bookmarks.len(), 1);
         assert_eq!(doc.bookmarks[0].offset, 10);
         assert_eq!(doc.bookmarks[0].label, "test");
@@ -4641,18 +4643,20 @@ mod tests {
 
     #[test]
     fn test_add_bookmark_no_duplicates() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut doc = HexDocument::from_data(vec![0; 100]);
-        doc.add_bookmark(10, "first", colors::YELLOW);
-        doc.add_bookmark(10, "second", colors::BLUE);
+        doc.add_bookmark(10, "first", pal.yellow);
+        doc.add_bookmark(10, "second", pal.blue);
         assert_eq!(doc.bookmarks.len(), 1);
     }
 
     #[test]
     fn test_add_bookmark_sorted() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut doc = HexDocument::from_data(vec![0; 100]);
-        doc.add_bookmark(50, "b", colors::YELLOW);
-        doc.add_bookmark(10, "a", colors::BLUE);
-        doc.add_bookmark(30, "c", colors::GREEN);
+        doc.add_bookmark(50, "b", pal.yellow);
+        doc.add_bookmark(10, "a", pal.blue);
+        doc.add_bookmark(30, "c", pal.green);
         assert_eq!(doc.bookmarks[0].offset, 10);
         assert_eq!(doc.bookmarks[1].offset, 30);
         assert_eq!(doc.bookmarks[2].offset, 50);
@@ -4660,8 +4664,9 @@ mod tests {
 
     #[test]
     fn test_remove_bookmark() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut doc = HexDocument::from_data(vec![0; 100]);
-        doc.add_bookmark(10, "test", colors::YELLOW);
+        doc.add_bookmark(10, "test", pal.yellow);
         doc.remove_bookmark(10);
         assert!(doc.bookmarks.is_empty());
     }
@@ -4677,9 +4682,10 @@ mod tests {
 
     #[test]
     fn test_next_bookmark() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut doc = HexDocument::from_data(vec![0; 100]);
-        doc.add_bookmark(10, "a", colors::YELLOW);
-        doc.add_bookmark(30, "b", colors::BLUE);
+        doc.add_bookmark(10, "a", pal.yellow);
+        doc.add_bookmark(30, "b", pal.blue);
         doc.cursor = 0;
         assert_eq!(doc.next_bookmark(), Some(10));
         doc.cursor = 15;
@@ -4688,17 +4694,19 @@ mod tests {
 
     #[test]
     fn test_next_bookmark_wraps() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut doc = HexDocument::from_data(vec![0; 100]);
-        doc.add_bookmark(10, "a", colors::YELLOW);
+        doc.add_bookmark(10, "a", pal.yellow);
         doc.cursor = 50;
         assert_eq!(doc.next_bookmark(), Some(10));
     }
 
     #[test]
     fn test_prev_bookmark() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut doc = HexDocument::from_data(vec![0; 100]);
-        doc.add_bookmark(10, "a", colors::YELLOW);
-        doc.add_bookmark(30, "b", colors::BLUE);
+        doc.add_bookmark(10, "a", pal.yellow);
+        doc.add_bookmark(30, "b", pal.blue);
         doc.cursor = 50;
         assert_eq!(doc.prev_bookmark(), Some(30));
     }
@@ -5050,25 +5058,27 @@ mod tests {
 
     #[test]
     fn test_highlight_color_at_match() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut doc = HexDocument::from_data(vec![0xAA, 0xBB, 0xCC, 0xDD]);
         doc.highlights.push(HighlightPattern {
             pattern: vec![0xBB, 0xCC],
-            color: colors::RED,
+            color: pal.red,
             label: String::from("test"),
             enabled: true,
         });
-        assert_eq!(doc.highlight_color_at(1), Some(colors::RED));
-        assert_eq!(doc.highlight_color_at(2), Some(colors::RED));
+        assert_eq!(doc.highlight_color_at(1), Some(pal.red));
+        assert_eq!(doc.highlight_color_at(2), Some(pal.red));
         assert_eq!(doc.highlight_color_at(0), None);
         assert_eq!(doc.highlight_color_at(3), None);
     }
 
     #[test]
     fn test_highlight_disabled() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut doc = HexDocument::from_data(vec![0xAA, 0xBB]);
         doc.highlights.push(HighlightPattern {
             pattern: vec![0xAA],
-            color: colors::RED,
+            color: pal.red,
             label: String::from("off"),
             enabled: false,
         });
@@ -5529,12 +5539,13 @@ mod tests {
 
     #[test]
     fn test_catppuccin_colors() {
-        assert_eq!(colors::BASE, Color::from_hex(0x1E1E2E));
-        assert_eq!(colors::MANTLE, Color::from_hex(0x181825));
-        assert_eq!(colors::SURFACE0, Color::from_hex(0x313244));
-        assert_eq!(colors::TEXT, Color::from_hex(0xCDD6F4));
-        assert_eq!(colors::BLUE, Color::from_hex(0x89B4FA));
-        assert_eq!(colors::RED, Color::from_hex(0xF38BA8));
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(pal.base, Color::from_hex(0x1E1E2E));
+        assert_eq!(pal.mantle, Color::from_hex(0x181825));
+        assert_eq!(pal.surface0, Color::from_hex(0x313244));
+        assert_eq!(pal.text, Color::from_hex(0xCDD6F4));
+        assert_eq!(pal.blue, Color::from_hex(0x89B4FA));
+        assert_eq!(pal.red, Color::from_hex(0xF38BA8));
     }
 
     // ====================================================================
@@ -5580,5 +5591,76 @@ mod tests {
         editor.goto_text = String::from("9999");
         editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
         assert_eq!(editor.active_doc().cursor, 99);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut HexEditor) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = HexEditor::new(1000.0, 700.0);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

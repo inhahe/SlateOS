@@ -2908,6 +2908,7 @@ dependencies = [
 name = "colorpicker"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -7240,6 +7241,7 @@ version = "0.1.0"
 name = "hexeditor"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -9018,6 +9020,7 @@ dependencies = [
 name = "launcher"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

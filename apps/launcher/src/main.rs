@@ -9,6 +9,7 @@
 //! Uses the guitk library for UI rendering.
 
 #[allow(unused_imports)]
+use appearance::Palette;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{
@@ -34,32 +35,32 @@ mod theme {
     /// Base background (slightly transparent for floating dialog feel).
     pub const BASE: Color = Color::rgba(30, 30, 46, 240);
     /// Mantle — slightly darker background for input area.
-    pub const MANTLE: Color = Color::from_hex(0x181825);
+
     /// Surface0 — card/result row background.
     #[allow(dead_code, reason = "the palette is kept complete")]
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
+
     /// Surface1 — hover/selected highlight.
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
+
     /// Surface2 — borders.
-    pub const SURFACE2: Color = Color::from_hex(0x585B70);
+
     /// Text — primary text color.
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
+
     /// Subtext0 — secondary text (descriptions, category badges).
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
+
     /// Subtext1 — dimmer text.
-    pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
+
     /// Overlay0 — placeholder text.
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
+
     /// Blue — accent color (selected item highlight, input caret).
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
+
     /// Mauve — category badge accent.
-    pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
+
     /// Green — system command badge.
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
+
     /// Peach — settings badge.
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
+
     /// Red — destructive actions.
-    pub const RED: Color = Color::from_hex(0xF38BA8);
+
     /// Shadow color for the dialog box.
     pub const SHADOW: Color = Color::rgba(0, 0, 0, 100);
 }
@@ -205,13 +206,13 @@ impl Category {
     }
 
     /// Badge color per category (Catppuccin palette).
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Application => theme::BLUE,
-            Self::System => theme::RED,
-            Self::Setting => theme::PEACH,
-            Self::File => theme::GREEN,
-            Self::Command => theme::MAUVE,
+            Self::Application => pal.blue,
+            Self::System => pal.red,
+            Self::Setting => pal.peach,
+            Self::File => pal.green,
+            Self::Command => pal.mauve,
         }
     }
 }
@@ -395,6 +396,12 @@ pub struct LauncherState {
     /// nothing happened" is indistinguishable from a hung machine. Cleared by
     /// [`Self::update_results`], i.e. as soon as the user types anything.
     error: Option<String>,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl LauncherState {
@@ -402,6 +409,7 @@ impl LauncherState {
     pub fn new(viewport_width: f32, viewport_height: f32) -> Self {
         let apps = builtin_app_database();
         let mut state = Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             query: String::new(),
             cursor: 0,
             results: Vec::new(),
@@ -870,7 +878,7 @@ impl LauncherState {
             y: 0.0,
             width: input_width,
             height: INPUT_HEIGHT - PADDING,
-            color: theme::MANTLE,
+            color: self.palette.mantle,
             corner_radii: input_radii,
         });
 
@@ -880,7 +888,7 @@ impl LauncherState {
             y: 0.0,
             width: input_width,
             height: INPUT_HEIGHT - PADDING,
-            color: theme::SURFACE2,
+            color: self.palette.surface2,
             line_width: 1.0,
             corner_radii: input_radii,
         });
@@ -891,7 +899,7 @@ impl LauncherState {
             y: (INPUT_HEIGHT - PADDING) / 2.0 - INPUT_FONT_SIZE / 2.0 + 2.0,
             text: "Search...".to_string(),
             color: if self.query.is_empty() {
-                theme::OVERLAY0
+                self.palette.overlay0
             } else {
                 Color::TRANSPARENT
             },
@@ -907,7 +915,7 @@ impl LauncherState {
                 x: 12.0,
                 y: (INPUT_HEIGHT - PADDING) / 2.0 - INPUT_FONT_SIZE / 2.0 + 2.0,
                 text: self.query.clone(),
-                color: theme::TEXT,
+                color: self.palette.text,
                 font_size: INPUT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(input_width - 24.0),
@@ -934,7 +942,7 @@ impl LauncherState {
             y1: (INPUT_HEIGHT - PADDING) / 2.0 - INPUT_FONT_SIZE / 2.0 + 2.0,
             x2: cursor_x,
             y2: (INPUT_HEIGHT - PADDING) / 2.0 + INPUT_FONT_SIZE / 2.0 + 2.0,
-            color: theme::BLUE,
+            color: self.palette.blue,
             width: 2.0,
         });
 
@@ -945,14 +953,19 @@ impl LauncherState {
                 y: error_top,
                 width: input_width,
                 height: ERROR_HEIGHT - 4.0,
-                color: Color::rgba(theme::RED.r, theme::RED.g, theme::RED.b, 40),
+                color: Color::rgba(
+                    self.palette.red.r,
+                    self.palette.red.g,
+                    self.palette.red.b,
+                    40,
+                ),
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
                 x: 10.0,
                 y: error_top + (ERROR_HEIGHT - 4.0) / 2.0 - DESC_FONT_SIZE / 2.0,
                 text: message.clone(),
-                color: theme::RED,
+                color: self.palette.red,
                 font_size: DESC_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 // Elided rather than clipped: a path cut off mid-character
@@ -982,7 +995,7 @@ impl LauncherState {
                     y: row_y,
                     width: input_width,
                     height: ROW_HEIGHT,
-                    color: theme::SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(6.0),
                 });
 
@@ -992,7 +1005,7 @@ impl LauncherState {
                     y: row_y + 8.0,
                     width: 3.0,
                     height: ROW_HEIGHT - 16.0,
-                    color: theme::BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::all(1.5),
                 });
             }
@@ -1005,7 +1018,7 @@ impl LauncherState {
                 y: icon_y,
                 width: 24.0,
                 height: 24.0,
-                color: entry.category.color(),
+                color: entry.category.color(&self.palette),
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -1016,9 +1029,9 @@ impl LauncherState {
                 y: row_y + 8.0,
                 text: entry.name.clone(),
                 color: if is_selected {
-                    theme::TEXT
+                    self.palette.text
                 } else {
-                    theme::SUBTEXT1
+                    self.palette.subtext1
                 },
                 font_size: NAME_FONT_SIZE,
                 font_weight: if is_selected {
@@ -1035,7 +1048,7 @@ impl LauncherState {
                 x: text_x,
                 y: row_y + 26.0,
                 text: entry.description.clone(),
-                color: theme::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: DESC_FONT_SIZE,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(input_width - text_x - 80.0),
@@ -1055,9 +1068,9 @@ impl LauncherState {
                 width: badge_width,
                 height: 20.0,
                 color: Color::rgba(
-                    entry.category.color().r,
-                    entry.category.color().g,
-                    entry.category.color().b,
+                    entry.category.color(&self.palette).r,
+                    entry.category.color(&self.palette).g,
+                    entry.category.color(&self.palette).b,
                     40,
                 ),
                 corner_radii: CornerRadii::all(4.0),
@@ -1067,7 +1080,7 @@ impl LauncherState {
                 x: badge_x + 6.0,
                 y: badge_y + 4.0,
                 text: badge_text.to_string(),
-                color: entry.category.color(),
+                color: entry.category.color(&self.palette),
                 font_size: DESC_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1081,7 +1094,7 @@ impl LauncherState {
                     x: input_width - badge_width - 40.0,
                     y: row_y + (ROW_HEIGHT - DESC_FONT_SIZE) / 2.0,
                     text: hint,
-                    color: theme::OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Light,
                     max_width: None,
@@ -1096,7 +1109,7 @@ impl LauncherState {
                 x: input_width / 2.0 - 40.0,
                 y: results_y_start + 16.0,
                 text: "No results found".to_string(),
-                color: theme::OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: NAME_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1365,6 +1378,10 @@ fn spawn_program(path: &str) -> Result<(), String> {
 }
 
 impl oswindow::app::App for LauncherState {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Launcher")
     }
@@ -1476,6 +1493,7 @@ mod tests {
     /// precisely because its characters do not share a width.
     #[test]
     fn the_caret_sits_where_the_query_text_ends() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let caret_x = |query: &str| {
             let mut state = LauncherState::new(1280.0, 800.0);
             state.visible = true;
@@ -1486,7 +1504,7 @@ mod tests {
                 .into_iter()
                 .find_map(|cmd| match cmd {
                     RenderCommand::Line { x1, x2, color, .. }
-                        if (x1 - x2).abs() < f32::EPSILON && color == theme::BLUE =>
+                        if (x1 - x2).abs() < f32::EPSILON && color == pal.blue =>
                     {
                         Some(x1)
                     }
@@ -1951,6 +1969,7 @@ mod tests {
 
     #[test]
     fn test_category_label_and_color() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         assert_eq!(Category::Application.label(), "App");
         assert_eq!(Category::System.label(), "Sys");
         assert_eq!(Category::Setting.label(), "Set");
@@ -1958,8 +1977,8 @@ mod tests {
         assert_eq!(Category::Command.label(), "Cmd");
 
         // Colors should not be transparent
-        assert_ne!(Category::Application.color().a, 0);
-        assert_ne!(Category::System.color().a, 0);
+        assert_ne!(Category::Application.color(&pal).a, 0);
+        assert_ne!(Category::System.color(&pal).a, 0);
     }
 
     #[test]
@@ -2375,6 +2394,83 @@ mod tests {
         assert!(
             launcher.error().is_none(),
             "the error outlived the query it was about"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut LauncherState) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 700.0, 500.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = LauncherState::new(700.0, 500.0);
+        // `new` leaves it hidden -- the shell may keep one alive between
+        // invocations -- and a hidden launcher draws nothing at all.
+        app.show();
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        oswindow::app::App::theme_changed(
+            &mut app,
+            &theme(
+                appearance::ThemeMode::Dark,
+                Some(appearance::HighContrastScheme::WhiteOnBlack),
+            ),
+        );
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

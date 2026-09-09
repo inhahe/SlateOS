@@ -11272,7 +11272,18 @@ honour non-blocking recv/send/connect, honest poll/epoll readiness,
 `recvfrom` source-address out-param, and the `MSG_DONTWAIT`/`MSG_WAITALL`/
 `MSG_PEEK` per-call flags. The remaining daemon-socket gaps are the large,
 non-incremental ones: **(1) server sockets** (`bind`/`listen`/`accept4`) —
-*gated on operator decision Q23* (`open-questions.md`); **(2) UDP `SOCK_DGRAM`**
+**DONE** (corrected 2026-09-09; this line read "gated on operator decision
+Q23" long after Q23 was answered). Q23 resolved to **Option A** (§71): a
+listening socket keeps one daemon session and each `accept` installs a new
+fd sharing that session under its own `conn_id`, so no daemon-ABI change was
+needed. What survives is *not* a missing feature but the cost of that
+choice: **the listener and every connection it accepts share one SPSC
+session behind one lock, so a server's accepted connections are served
+strictly one at a time — one slow client holds up the others.** That
+head-of-line blocking is the last thing standing between here and the 5.7
+default flip, and removing it is an asynchronous rewrite of the session
+layer, not a patch. It is why `open-questions.md` A-Q9 recommends fixing
+this *before* the flip rather than after; **(2) UDP `SOCK_DGRAM`**
 — now **complete end-to-end**: the daemon datagram-socket layer, ring ABI, kernel
 client, *and* the AF_INET socket-fd wiring are all landed. A userspace
 `socket(AF_INET, SOCK_DGRAM)` is a real daemon-backed UDP socket:

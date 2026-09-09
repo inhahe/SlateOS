@@ -965,6 +965,15 @@ pub struct DesktopShell {
     /// that the two front ends cannot offer different applications.
     pub apps: Vec<AppEntry>,
     /// Whether Alt+Tab switcher is active.
+    /// The installed keyboard layouts and which one is active.
+    ///
+    /// The shell owns *which* layout is chosen; the compositor owns applying it
+    /// to keystrokes. The two meet at `input.yaml`: switching writes the
+    /// setting, and the compositor's existing settings watcher picks it up --
+    /// the same route the Settings app already uses, so a layout chosen with
+    /// the keyboard and one chosen in a panel cannot disagree, and the choice
+    /// survives a restart the way a user expects.
+    pub input_methods: input_method::InputMethodManager,
     pub alt_tab_active: bool,
     /// Alt+Tab selection index.
     pub alt_tab_index: usize,
@@ -1433,6 +1442,10 @@ impl DesktopShell {
             shortcut_capture: None,
             shortcut_message: None,
             apps: launcher::builtin_app_database(),
+            // The layouts this machine has, from `keylayout`'s built-in set.
+            // Which one is *active* is corrected from `input.yaml` by
+            // `load_input_settings`; this is only the list.
+            input_methods: input_method::InputMethodManager::with_builtins(),
             alt_tab_active: false,
             alt_tab_index: 0,
             overview: overview::OverviewState::new(),
@@ -3388,8 +3401,42 @@ impl DesktopShell {
     /// a program, and is handed back for the same reason in
     /// [`launches`](HotkeyOutcome::launches): the shell has no connection to the
     /// process server either.
+    /// Write the newly-chosen keyboard layout to `input.yaml`.
+    ///
+    /// This is what makes the switch reach the *keys*. The shell decides which
+    /// layout is active; the compositor decides what a scancode means, and it
+    /// reads that from the settings file it already watches. Going through the
+    /// file rather than inventing a protocol message has three things to
+    /// recommend it: the mechanism exists and is tested, a layout chosen with
+    /// the keyboard and one chosen in the Settings panel cannot disagree
+    /// because they are the same value in the same place, and the choice
+    /// survives a restart, which is what a user expects of a layout.
+    ///
+    /// A failure is swallowed deliberately, and is the one place in this file
+    /// where that is right: the layout has already changed in the shell's own
+    /// model and the indicator will show it, so a read-only configuration
+    /// directory costs the user persistence, not the feature. Refusing the
+    /// keystroke because a file could not be written would be worse.
+    fn persist_input_layout(&mut self) {
+        let Some(id) = self.input_methods.active_layout_id() else {
+            return;
+        };
+        let mut file = inputsettings::InputFile::load();
+        if file.settings.keyboard.layout == id {
+            return;
+        }
+        file.settings.keyboard.layout = id.to_string();
+        // See the note above on why this is not propagated.
+        let _ = file.save();
+    }
+
     fn run_desktop_action(&mut self, action: &HotkeyAction) -> HotkeyOutcome {
         match action {
+            HotkeyAction::SwitchInputLayout => {
+                self.input_methods.next_layout();
+                self.persist_input_layout();
+                HotkeyOutcome::consumed()
+            }
             HotkeyAction::CycleWindows => {
                 if self.alt_tab_active {
                     self.next_alt_tab();
@@ -10262,5 +10309,101 @@ mod run_box_wiring_tests {
         let mut shell = card_shell();
         drop(shell.handle_hotkey(&tap(Key::Escape)));
         assert!(!shell.shortcut_card_open);
+    }
+
+    /// Super+Space moves to the next installed layout.
+    ///
+    /// Asserted on the *active layout id*, not on the chord being consumed: a
+    /// hotkey that is swallowed and does nothing is exactly the failure this
+    /// feature had for months, when `input_method.rs` was 1,278 lines that
+    /// nothing constructed.
+    #[test]
+    fn super_space_switches_to_the_next_keyboard_layout() {
+        let mut shell = shell();
+        let first = shell
+            .input_methods
+            .active_layout_id()
+            .expect("a machine with no layouts cannot type at all")
+            .to_string();
+
+        // Built inline rather than through a `press` helper: this module has
+        // one that takes a *mouse* position, and the key-event one lives in a
+        // different test module.
+        let outcome = shell.handle_hotkey(&KeyEvent {
+            key: Key::Space,
+            pressed: true,
+            modifiers: Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        });
+        assert!(outcome.consumed, "Super+Space was not claimed by the shell");
+
+        let second = shell
+            .input_methods
+            .active_layout_id()
+            .expect("switching lost the layout list");
+        assert_ne!(
+            first, second,
+            "Super+Space was consumed but the active layout did not move"
+        );
+    }
+
+    /// The chord is *grabbed*, which is the half a consumed-and-ignored test
+    /// cannot see: a shortcut the compositor never routes to the shell is one
+    /// the shell never gets to consume.
+    #[test]
+    fn the_layout_chord_is_one_the_shell_actually_asks_for() {
+        let wanted = (
+            Key::Space,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        );
+        assert!(
+            shell().global_chords().contains(&wanted),
+            "Super+Space is bound but not grabbed, so it never reaches the shell"
+        );
+    }
+
+    /// The switch reaches `input.yaml`, which is what makes it reach the keys.
+    ///
+    /// The compositor decides what a scancode means and reads that from this
+    /// file. A test that only checked the shell's own field would pass on a
+    /// build where the user pressed the chord, saw the indicator change, and
+    /// went on typing in the old layout.
+    #[test]
+    fn switching_layout_writes_the_setting_the_compositor_reads() {
+        inputsettings::config::testing::with_scratch_config("shell-layout", |_root| {
+            let mut shell = shell();
+            let before = inputsettings::InputFile::load().settings.keyboard.layout;
+
+            let outcome = shell.handle_hotkey(&KeyEvent {
+                key: Key::Space,
+                pressed: true,
+                modifiers: Modifiers {
+                    super_key: true,
+                    ..Modifiers::NONE
+                },
+                text: String::new(),
+            });
+            assert!(outcome.consumed, "the chord was not claimed at all");
+
+            let after = inputsettings::InputFile::load().settings.keyboard.layout;
+            assert_ne!(
+                before, after,
+                "the chord changed the shell's model but not the file the                  compositor reads, so the keys would not have moved"
+            );
+            assert_eq!(
+                after,
+                shell
+                    .input_methods
+                    .active_layout_id()
+                    .expect("the shell still has a layout"),
+                "the file and the indicator disagree about which layout is active"
+            );
+        });
     }
 }

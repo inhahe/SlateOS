@@ -3009,11 +3009,16 @@ fn itimer_timeval_valid(tv: &Timeval) -> bool {
 
 /// Set an interval timer.
 ///
-/// Stores the timer value so `getitimer` can retrieve it.  The timer
-/// never actually fires because we don't have signal delivery.
-/// Programs that use `setitimer` for periodic alarms won't get
-/// SIGALRM/SIGVTALRM/SIGPROF, but they will see their own settings
-/// reflected back via `getitimer`.
+/// Stores the timer value so `getitimer` can retrieve it.  The timer never
+/// actually fires, so programs using `setitimer` for periodic alarms get no
+/// SIGALRM/SIGVTALRM/SIGPROF -- though they do see their own settings
+/// reflected back, which is the part that makes this hard to notice.
+///
+/// **Not "because we don't have signal delivery", which is what this said
+/// until 2026-09-09.** Signals are delivered (`signal.rs`'s trampoline).
+/// Nothing here asks the kernel for a timer: `proc/itimer.rs` implements this
+/// with a real `SIGALRM` but is reachable only through the Linux-ABI table.
+/// See [`crate::unistd::alarm`] for the full position and the request.
 ///
 /// Argument-domain validation (Linux-matching):
 ///   - `which` ∉ {ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF} → EINVAL.

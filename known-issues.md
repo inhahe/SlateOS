@@ -123423,6 +123423,61 @@ been audited, and this entry deliberately does not recommend a direction until
 it has been, because "nobody has audited it" is a statement about the auditing
 and not about the hazard. Doing the audit is the next step, not the decision.
 
+### The audit, done 2026-09-09 — and it comes out the other way
+
+**In the tree: no callers.** Across every file type, the only match outside
+`posix/` and `kernel/` is a doc comment in `apps/alarmclock` about dismissing
+an alarm clock, which is not this.
+
+**Outside the tree: a real one.** The built interpreter,
+`build/spike/python-slateos.elf`, references `setitimer`, `getitimer`,
+`alarm`, `timer_create`, `timer_settime` and `timer_delete` -- all six.
+CPython is this tree's largest libc consumer and it already *runs* on SlateOS.
+So the population is not empty, and `ENOSYS` is not the free move it was for
+`setgroups`. (Method, stated because it is weaker than a symbol table: a byte
+search of the linked binary for each name. It shows the symbols are present,
+not that every one is called on a live path. `nm` is not available here.)
+
+**Which way that cuts is less obvious than it looks.** Silent success is not
+obviously the safer option for a *timeout*: `signal.alarm(5)` succeeding and
+never firing converts a bounded wait into an unbounded one, which is the hang
+class that cost this lane two hours the same week. A loud failure at least
+lets a caller choose a fallback. But that is an argument for *fixing* it, not
+for breaking a running interpreter, and it is a user-visible policy change in
+a language runtime rather than a tidy-up.
+
+**So the direction is neither: implement it.** The kernel already has
+`proc/itimer.rs`, which backs `alarm` and `setitimer(ITIMER_REAL)` with a real
+`SIGALRM` and is wired into `kernel/src/syscall/linux.rs` -- but has no native
+syscall number, exactly as `setgroups` and `chroot` did. Asked of lane A in
+`requests/b-a-expose-the-interval-timer-natively-so-alarm-can-fire.md`. When
+that number exists this stops being a stub without any of the above needing to
+be decided.
+
+**Two siblings, same premise -- both FIXED 2026-09-09, same day.**
+`pause()` slept a second and returned `EINTR`, and `sigsuspend()` returned
+`EINTR` immediately: both reported "a signal was delivered" when none was.
+Neither needed the kernel. `signal.rs` now keeps a delivery counter, bumped
+whenever a registered handler runs, and both wait on it -- because a delivered
+signal otherwise leaves *no trace a waiter can observe* (delivery is
+asynchronous, and `SYS_SIGNAL_PENDING` reports signals blocked and queued,
+which is the opposite set).
+
+Lane A had already built the other half and said so:
+`kernel/src/proc/thread.rs` posts `SIGCHLD` to a native parent specifically so
+one "parked in `sigsuspend()`/`pause()`" wakes, remarking that "without this
+the parent livelocks in sigsuspend". Nothing had ever been parked there,
+because the libc side never waited -- so a carefully built kernel path had no
+consumer.
+
+Two details worth keeping. The counter counts handler **invocations**, not
+deliveries, which is what makes an ignored signal correctly *not* end a
+`pause` -- POSIX's rule, arrived at by construction rather than by a special
+case. And it is atomic, not for threading (the `process_global!` macro assumes
+a single-threaded target) but because the increment runs *in signal-delivery
+context*: a second delivery landing inside a read-modify-write would lose an
+update, and a lost update is a missed wake, not a wrong number.
+
 **The two honest options, for when it is:** arm a real kernel timer (the kernel
 already has the delivery path -- `kernel/src/proc/signal.rs` mentions
 `ITIMER_REAL`), or fail loudly so callers can choose a fallback. Succeeding

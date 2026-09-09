@@ -125380,6 +125380,51 @@ least no longer *divergent* dead code.
 
 ---
 
+## TD-C-CARGO-BUILD-WORKSPACE-ON-THE-HOST-TARGET-FAILS-ON-THE-KERNEL
+
+**Date:** 2026-09-09. **Lane:** C.
+**Where:** not a code defect — a trap in the prescribed workflow.
+
+**In short:** running the whole-project build the way the instructions describe
+fails with a wall of linker errors that look alarming and have nothing to do
+with whatever you just changed. It is trying to build the kernel — a bare-metal
+binary with its own linker script — as an ordinary Windows program, which
+cannot work. Everything else builds fine.
+
+**The command and the result:**
+
+```
+cargo build --workspace --target x86_64-pc-windows-gnu
+  → error: linking with `x86_64-w64-mingw32-gcc` failed
+    relocation truncated to fit: IMAGE_REL_AMD64_ADDR32NB
+    ... `-T kernel/linker.ld`
+  → error: could not compile `kernel` (bin "kernel")
+```
+
+**Why it is reachable by accident.** Both halves are what an agent is told to
+do: `CLAUDE.md` says to run the workspace build/test before merging, and every
+`cargo` invocation in this tree needs `--target x86_64-pc-windows-gnu` because
+the host is Windows. Put together they ask for the kernel to be linked for the
+host, with `kernel/linker.ld`, against mingw's CRT.
+
+**What to run instead**, when the point is "did I break anything outside my own
+crate":
+
+```
+cargo build --workspace --exclude kernel --target x86_64-pc-windows-gnu
+```
+
+**Why this is worth writing down rather than just knowing.** The failure names
+`libmsvcrt.a`, relocations and a linker script — none of which appear in a GUI
+change — so the natural first reaction is that something is badly wrong, and the
+natural second is to start bisecting a change that is innocent. It cost lane C a
+detour today on the way to merging a caret-width change.
+
+**Proper fix (not done):** the kernel package could carry
+`forced-target = "x86_64-slateos"`, which would make cargo build it for its own
+target regardless of `--target` on the command line and let the plain workspace
+command work. That is lane A's file, so it is written here rather than done.
+
 ## TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY
 
 **Date:** 2026-09-09. **Lane:** C.

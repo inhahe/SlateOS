@@ -126112,3 +126112,65 @@ the DynDNS updater in `apps/settings/src/remote.rs`, which is specified in
 `http_roundtrip` or `pkg`'s lifted somewhere both can reach. That is a genuine
 question about where a shared transport lives, and it is recorded in the
 crate's own module docs where the next person to need one will read it.
+
+---
+
+## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS
+
+**Date:** 2026-09-09. **Lane:** C.
+**Where:** `gui/appearance/src/lib.rs` — `LIGHT_LAVENDER` through
+`LIGHT_SAPPHIRE`, thirteen constants.
+
+**In short:** the user can pick one of fourteen accent colours for the desktop.
+On the light theme, thirteen of them are too faint to read wherever they land
+on a shaded card — which is most places accent text appears. Only blue, which
+the operator supplied a new value for on 2026-09-09, is readable.
+
+**The measurement.** Against the four surfaces text is drawn on:
+
+| accent | page | surface0 | surface1 | surface2 |
+|---|---|---|---|---|
+| blue (fixed) | 9.03 | 6.61 | 5.62 | 4.72 |
+| lavender | 4.65 | **3.41** | **2.89** | **2.43** |
+| teal | 4.62 | **3.39** | **2.88** | **2.42** |
+| … | … | … | … | … |
+| sapphire | 4.60 | **3.37** | **2.86** | **2.41** |
+
+Every one of the thirteen lands between 4.60 and 4.80 on the page, and between
+**2.33 and 3.52** on every card. The floor is 4.5.
+
+**Why they are all *just* over on the page and nowhere else.** They were
+derived together, by scaling each Catppuccin Latte accent's channels until it
+cleared 4.5 **on the base**, and no other surface was checked. The crate's own
+comment says so: *"reaches 4.6:1 on `#EFF1F5`"*. So the whole set shares one
+mistake made once — the same mistake the greys had, which is what C-Q10 was
+about. Fixing the greys and blue without the other thirteen leaves the defect
+for any user who prefers green.
+
+**Why this is not simply "apply the same rule again".** The rule that produced
+these values — scale until it clears the *page* — is the bug. Any replacement
+has to clear the floor on the deepest surface text is drawn on, and that is a
+much harder constraint: `surface2` gives only 9.71:1 against pure black, so
+every accent clearing 4.5 there is nearly black, and fourteen nearly-black
+accents are not fourteen accents. **A user picking "green" would get something
+indistinguishable from "blue".** That is the same trap option A fell into for
+the greys, one dimension over, and it is why this is logged rather than swept.
+
+**Which makes it the operator's call**, and it is bound up with the card
+question still open from C-Q10: the darker the card, the less room the accents
+have. `#A0AECA` is already the darkest card the *current* four inks survive —
+one step to `#9CAAC6` puts blue at 4.37 — so there is no headroom to spend.
+Plausible directions, none free:
+
+1. **Accent text does not go on the deepest cards.** Constrains layout, changes
+   no colour, keeps fourteen distinguishable accents.
+2. **Accents get a per-surface variant** — a lighter one for the page, a darker
+   one for cards. Doubles the table and every lookup has to know its background.
+3. **Accept fourteen near-black accents.** Cheapest, and throws away the point
+   of letting the user choose.
+
+**Not urgent, and it does not get worse on its own.** It has been shipping this
+way; what changed today is that it is now measured and written down. The guard
+test `light_inks_clear_the_contrast_floor_on_every_surface` deliberately does
+**not** cover the accents, because asserting a known failure means either a red
+build or a muted test — it grows to cover them the day this is decided.

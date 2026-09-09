@@ -19,6 +19,25 @@
   .uc .t2 { font-size:11px; margin-top:2px; }
   .uc .sw { width:34px; height:18px; border-radius:9px; position:relative; flex:0 0 auto; }
   .uc .sw i { position:absolute; top:2px; width:14px; height:14px; border-radius:50%; background:#fff; }
+  .fp { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .fp h3 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:#666; margin:0 0 6px; font-weight:600; }
+  .win { border-radius:9px; overflow:hidden; border:1px solid #c9ccd4; box-shadow:0 6px 18px rgba(0,0,0,.10);
+         position:relative; font-size:12px; }
+  .win .tb { padding:7px 11px; font-weight:600; font-size:12px; }
+  .win .bd { display:flex; min-height:236px; }
+  .win .side { width:116px; flex:0 0 auto; padding:8px 7px; }
+  .win .cnt { flex:1; padding:11px 13px; }
+  .win .nav { padding:6px 8px; border-radius:6px; margin-bottom:3px; }
+  .win .sec { font-size:10px; text-transform:uppercase; letter-spacing:.05em; margin:1px 0 8px; font-weight:700; }
+  .win .r { padding:8px 10px; border-radius:6px; margin-bottom:6px; display:flex; align-items:center; gap:9px; }
+  .win .r .g { flex:1; }
+  .win .t2s { font-size:10.5px; margin-top:2px; }
+  .win .btn { padding:5px 13px; border-radius:6px; display:inline-block; margin-right:7px; }
+  .win .menu { position:absolute; border-radius:8px; padding:4px; width:154px; z-index:5;
+               box-shadow:0 10px 26px rgba(0,0,0,.20); }
+  .win .mi { padding:6px 9px; border-radius:5px; }
+  .win .tag { position:absolute; font:10px ui-monospace,Consolas,monospace; color:#8a8f9c;
+              background:rgba(255,255,255,.82); border-radius:3px; padding:0 3px; pointer-events:none; }
   .presets { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
   .presets button { flex:1 1 auto; padding:7px 10px; border:1px solid #d3d7e0; background:#f3f4f7; border-radius:7px; cursor:pointer; font:inherit; font-size:13px; }
   .presets button.on { background:#1d62ec; border-color:#1d62ec; color:#fff; font-weight:600; }
@@ -113,6 +132,17 @@
          <code>mantle</code> (353) and <code>crust</code> (285) are <em>lighter</em> than the page. A palette
          naming one card colour has to say what becomes of the other four. Anything below 4.5 is marked.</p>
       <div id="allsurf"></div>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>Whole windows &mdash; the same palette, in the places it actually lands</h2>
+      <p class="note" style="margin-top:0">The strip below shows the shades in isolation and the pairs after it show
+         one element at a time. This shows them <b>composed</b>, which is the only way to judge the question you are
+         actually being asked: not &ldquo;is this card readable&rdquo; but <em>does a screen made of these read as
+         organised or as busy</em>. Left column is today's shaded build; right column is the same window with the
+         fills removed and a border doing the work. Both follow the colours you pick above.</p>
+      <div class="fp" id="fp"></div>
+      <p class="note" id="fp_note"></p>
     </div>
 
     <div class="panel" style="margin-top:18px">
@@ -277,6 +307,137 @@ const badge = (r, lim) => r >= 7 && lim === 4.5
 // `p.accent` and `p.surface2` for exactly that. `surface1` is the menu border
 // (context_ext.rs) and the selected-row fill (datetime_settings.rs:811).
 // `surface0` is the hovered/selected row (context_ext.rs:1045).
+// Whole-window mockups. Every element is drawn from the same six values the
+// controls above set, and each window is emitted twice from one function --
+// `b` true means "borders instead of fills" -- so the two columns cannot drift
+// apart structurally and the only difference the eye sees is the one under
+// discussion.
+function renderFullPages() {
+  const L = (cur.ladder || SHIPPED_LADDER);
+  const ink = cur.main, dim = cur.sec1, acc = cur.acc, page = cur.page;
+  const esc = t => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+
+  // A filled surface, or the same element outlined. `edge` overrides the
+  // outline colour -- the selected row uses the accent rather than a shade,
+  // because with no fill available it is the only thing left to select with.
+  const surf = (b, shade, edge) => b
+    ? `background:transparent;border:1px solid ${edge || L.s2};`
+    : `background:${shade};border:1px solid transparent;`;
+
+  const T1 = `color:${ink}`, T2 = `color:${dim}`, TA = `color:${acc}`;
+
+  // --- 1. Settings: sidebar + rows. Where surface0 mostly lives. ---
+  const settings = b => `
+    <div class="win" style="background:${page}">
+      <div class="tb" style="${b ? `background:${page};` : `background:${L.mantle};`}
+           border-bottom:1px solid ${L.s1};${T1}">Settings</div>
+      <div class="bd">
+        <div class="side" style="${b ? `background:${page};border-right:1px solid ${L.s2};`
+                                     : `background:${L.crust};`}">
+          ${['System', 'Network', 'Personalisation', 'Accounts'].map((n, i) =>
+            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${i === 1 ? T1 : T2}">${n}</div>`
+          ).join('')}
+        </div>
+        <div class="cnt">
+          <div class="sec" style="${T2}">Wi-Fi</div>
+          <div class="r" style="${surf(b, L.s0)}">
+            <div class="g"><div style="${T1}">Home network</div>
+              <div class="t2s" style="${T2}">Connected &middot; 5 GHz &middot; strong</div></div>
+            <div style="${TA}">Disconnect</div>
+          </div>
+          <div class="r" style="${surf(b, L.s0)}">
+            <div class="g"><div style="${T1}">Guest</div>
+              <div class="t2s" style="${T2}">Saved network</div></div>
+          </div>
+          <div class="sec" style="${T2}">Options</div>
+          <div class="r" style="${surf(b, L.s0)}">
+            <div class="g"><div style="${T1}">Connect automatically</div></div>
+            <div class="sw" style="background:${acc}"><i style="right:2px"></i></div>
+          </div>
+          <div class="r" style="${surf(b, L.s0)}">
+            <div class="g"><div style="${T1}">Metered connection</div></div>
+            <div class="sw" style="background:${L.s2}"><i style="left:2px"></i></div>
+          </div>
+          <div style="margin-top:11px">
+            <span class="btn" style="background:${acc};color:${page}">Save</span>
+            <span class="btn" style="${surf(b, L.s0)}${T1}">Cancel</span>
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  // --- 2. File manager with a menu open. Where mantle/crust live. ---
+  const files = b => `
+    <div class="win" style="background:${page}">
+      <div class="tb" style="${b ? `background:${page};` : `background:${L.mantle};`}
+           border-bottom:1px solid ${L.s1};${T1}">Documents</div>
+      <div class="bd">
+        <div class="side" style="${b ? `background:${page};border-right:1px solid ${L.s2};`
+                                     : `background:${L.crust};`}">
+          ${['Home', 'Documents', 'Pictures', 'Downloads'].map((n, i) =>
+            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${i === 1 ? T1 : T2}">${n}</div>`
+          ).join('')}
+        </div>
+        <div class="cnt" style="position:relative">
+          ${['design.txt', 'roadmap.md', 'notes.md', 'budget.ods', 'photo.png'].map((n, i) =>
+            `<div class="r" style="${i === 2 ? surf(b, L.s1, acc) : surf(b, L.s0)}">
+               <div class="g" style="${T1}">${esc(n)}</div>
+               <div class="t2s" style="${T2}">${['12 KB', '48 KB', '3 KB', '21 KB', '1.4 MB'][i]}</div>
+             </div>`).join('')}
+          <div class="menu" style="left:74px;top:64px;${b ? `background:${page};border:1px solid ${L.s2};`
+                                                          : `background:${L.mantle};border:1px solid ${L.s1};`}">
+            <div class="mi" style="${T1}">Open</div>
+            <div class="mi" style="${surf(b, L.s0, acc)}${T1}">Rename</div>
+            <div class="mi" style="${T1}">Duplicate</div>
+            <div class="mi" style="${T1}">Delete</div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  // --- 3. A dialog and a notification, floating over a window. ---
+  const dialog = b => `
+    <div class="win" style="background:${L.s2}">
+      <div style="padding:26px 20px">
+        <div style="${b ? `background:${page};border:1px solid ${L.s2};` : `background:${L.mantle};`}
+             border-radius:9px;padding:14px 15px;box-shadow:0 10px 26px rgba(0,0,0,.22)">
+          <div style="font-weight:600;margin-bottom:5px;${T1}">Discard changes?</div>
+          <div class="t2s" style="margin-bottom:12px;${T2}">
+            design.txt has unsaved edits. Closing now loses them.</div>
+          <div style="text-align:right">
+            <span class="btn" style="${surf(b, L.s0)}${T1}">Cancel</span>
+            <span class="btn" style="background:${acc};color:${page};margin-right:0">Discard</span>
+          </div>
+        </div>
+        <div style="${b ? `background:${page};border:1px solid ${L.s2};` : `background:${L.mantle};`}
+             border-radius:9px;padding:11px 13px;margin-top:13px;box-shadow:0 6px 16px rgba(0,0,0,.16)">
+          <div style="font-weight:600;${T1}">Backup finished</div>
+          <div class="t2s" style="${T2}">4,812 files &middot; 2.1 GB &middot; 3 min 14 s</div>
+          <div class="t2s" style="margin-top:5px;${TA}">Show report</div>
+        </div>
+      </div>
+    </div>`;
+
+  const shots = [
+    ['Settings &mdash; rows on a page, sidebar behind', settings],
+    ['File manager &mdash; with a menu open over the list', files],
+    ['A dialog and a notification, over a window', dialog],
+  ];
+  $('fp').innerHTML = shots.map(([name, make]) =>
+    `<div><h3>${name} &mdash; shaded (today)</h3>${make(false)}</div>` +
+    `<div><h3>&hellip; the same, with borders</h3>${make(true)}</div>`
+  ).join('');
+
+  $('fp_note').innerHTML =
+    'Which rung is where, so these can be read against the strip at the top: the <b>title bar</b>, and the ' +
+    '<b>menu</b> and <b>dialog</b> panels, are <code>mantle</code>; the <b>sidebar</b> is <code>crust</code>; ' +
+    'the <b>rows</b> are <code>surface0</code>; a <b>selected</b> row or nav item is <code>surface1</code>; the ' +
+    '<b>off switch track</b> is <code>surface2</code>. The page behind everything is unshaded. ' +
+    'Two things are easiest to judge here and nowhere else: the shaded column puts <b>five</b> different greys ' +
+    'on screen at once in a single window, and in the bordered column the accent has to carry selection by ' +
+    'itself &mdash; which is why the selected row and nav item are outlined in it rather than filled.';
+}
+
 function renderUseCases() {
   const L = (cur.ladder || SHIPPED_LADDER);
   const ink = cur.main, dim = cur.sec1, acc = cur.acc;
@@ -342,8 +503,8 @@ function renderAllSurfaces() {
   const L = (cur.ladder || SHIPPED_LADDER);
   const surfaces = [
     ['page (unshaded)',    cur.page, ''],
-    ['mantle  (353 uses)', L.mantle, 'lighter than the page'],
-    ['crust   (285 uses)', L.crust,  'lighter than the page'],
+    ['mantle  (353 uses)', L.mantle, 'one step off the page — menus, title bars'],
+    ['crust   (285 uses)', L.crust,  'two steps — sidebars, the deepest chrome'],
     ['surface0 (1012)',    L.s0,     'the ordinary card'],
     ['surface1 (542)',     L.s1,     ''],
     ['surface2 (159)',     L.s2,     'the deepest card'],
@@ -408,6 +569,7 @@ function render() {
   $('tbl').innerHTML = rows.join('');
   renderAllSurfaces();
   renderUseCases();
+  renderFullPages();
 
   // Ink against ink. Six pairs, because four inks have six.
   const NAME = { main:'main', sec:'subtext0', sec1:'subtext1', acc:'accent' };

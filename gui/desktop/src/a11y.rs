@@ -1261,15 +1261,32 @@ mod tests {
         }
     }
 
-    /// No high-contrast colour is a palette role, in either mode.
+    /// Which high-contrast colours coincide with a palette role, pinned exactly.
     ///
-    /// This is what makes the exemption an exemption rather than an oversight:
-    /// these twelve values are outside the palette by construction, so a sweep
-    /// that included them could only ever fail. If one of them ever *became* a
-    /// role, that would be the signal to revisit §533's reasoning rather than
-    /// to widen the exemption.
+    /// This began as "none of them do", which was true when it was written and
+    /// stopped being true on 2026-09-09, when the operator chose `#000000` for
+    /// the light theme's main text (§826). Black is now the light palette's
+    /// `text` *and* the background of three of the four high-contrast schemes,
+    /// and the text of the fourth.
+    ///
+    /// Neither side can move. `#000000` is what the operator picked, and a
+    /// scheme named "white on black" cannot be given a black that is not black.
+    /// Nor can these draws be routed through `Palette::text`: it is black only
+    /// in light mode and near-white in dark mode, so a high-contrast scheme
+    /// built on it would invert itself with the theme and stop being a
+    /// high-contrast scheme at all. The coincidence is real and permanent.
+    ///
+    /// So the assertion is now the exact set rather than the empty set, which
+    /// is the stronger of the two: a *new* coincidence — someone making
+    /// `LIGHT_BASE` pure white, say, which would collide with `BlackOnWhite`'s
+    /// background — still fails this test, while the four unavoidable ones are
+    /// written down with their reason instead of silently tolerated. That is
+    /// the same "pinned by an exact hand-written table rather than merely
+    /// excused" rule this module's header states, applied to its own exception.
+    /// `design-decisions.md` §828.
     #[test]
-    fn no_high_contrast_colour_is_a_palette_role() {
+    fn the_high_contrast_colours_that_are_palette_roles_are_the_known_four() {
+        let mut found = Vec::new();
         for light in [false, true] {
             let p = Palette::for_mode(light);
             for scheme in [
@@ -1284,15 +1301,23 @@ mod tests {
                         .iter()
                         .find(|(_, r)| r.r == c.r && r.g == c.g && r.b == c.b)
                     {
-                        panic!(
-                            "{scheme:?} {what} is the {} palette's `{role}`; the \
-                             high-contrast exemption now hides a role",
-                            if light { "light" } else { "dark" }
-                        );
+                        let mode = if light { "light" } else { "dark" };
+                        found.push(format!("{scheme:?} {what} is {mode} {role}"));
                     }
                 }
             }
         }
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                "BlackOnWhite text is light text",
+                "GreenOnBlack background is light text",
+                "WhiteOnBlack background is light text",
+                "YellowOnBlack background is light text",
+            ],
+            "the set of high-contrast colours that are also palette roles              changed; if a role moved onto one of these values, that is the              signal to revisit it rather than to widen this list"
+        );
     }
 
     /// Every high-contrast scheme is legible with itself.

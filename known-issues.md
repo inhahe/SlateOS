@@ -125531,6 +125531,19 @@ either way.
    one, and the `#![allow(dead_code)]` on the correct one is why nobody
    compared them.
 
+   **The generalisation was swept, and came back clean** — recorded so nobody
+   repeats it. `clippy::cast_sign_loss` is `allow` workspace-wide with a
+   documented reason (~2000 hits, casts usually deliberate, "leave to manual
+   review"), so this was the manual review for the one shape that actually
+   bites: a float that can be negative, cast to an unsigned type, where Rust's
+   `as` *saturates to zero* rather than wrapping or trapping. Every
+   `.floor() as u{8,16,32,size}` in `gui/**`, `apps/**`, `net*/**` and `pkg/**`
+   was checked — fifteen sites. Fourteen are guarded, most by an explicit
+   `.max(0.0)` and `guitk::grid`'s hit test by an early `if content_x < 0.0 {
+   return None }`. The fifteenth was `apps/colorpicker`, above. `gui/compositor`
+   already carries written warnings about the same hazard at two sites
+   (`lib.rs:377`, `:13576`), so that crate had learned it independently.
+
 **Related.** `TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING` is
 the same mechanism with 5,628 more lines, found the same way and logged
 separately because it also has a *duplicate wired page*, which is a worse

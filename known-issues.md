@@ -125255,14 +125255,21 @@ So the shape of the work is the same for both, and it is not deletion:
    right application — it has simply never been given a page. Nearly written up
    as an open question before checking; the roadmap had answered it.
 
-   **But do not wire it yet.** `force_update()` says outright: *"In a live
-   system this would spawn a network request. Here we transition the status to
-   `Updating`."* And it cannot do better — `net/httpclient` has no transport at
-   all (`TD-C-THE-HTTP-CLIENT-CANNOT-MAKE-A-REQUEST`). Giving it a page today
-   produces a settings screen whose "Update now" button changes a label and
-   nothing else, which is the same trap as the snapshots mockup. The provider
-   table it holds — NoIP, DuckDNS, Dynu, FreeDNS with their real update URLs —
-   is worth keeping exactly where it is until there is something to send.
+   **But it needs a transport before it is wired.** `force_update()` says
+   outright: *"In a live system this would spawn a network request. Here we
+   transition the status to `Updating`."* `net/httpclient` builds and parses
+   HTTP and deliberately does not send it — the caller carries the bytes, and
+   `userspace/pkg` is the one caller that has written that part (its
+   `http_roundtrip`, forty lines of `TcpStream` with timeouts). So the work is
+   a transport for this second caller, either its own or `pkg`'s lifted
+   somewhere both can reach — not, as an earlier version of this paragraph
+   claimed, the absence of any transport in the OS. See the withdrawn
+   `TD-C-THE-HTTP-CLIENT-CANNOT-MAKE-A-REQUEST` for how that error was made.
+
+   Until then, giving it a page produces a settings screen whose "Update now"
+   button changes a label and nothing else, which is the snapshots-mockup trap.
+   The provider table it holds — NoIP, DuckDNS, Dynu, FreeDNS with their real
+   update URLs — is worth keeping exactly where it is.
 3. *Then* delete the husk.
 
 **Porting the fallback design found a live bug in the app it moved to.**
@@ -126053,57 +126060,47 @@ python scripts/test-reclaim-space.py
 
 ---
 
-## TD-C-THE-HTTP-CLIENT-CANNOT-MAKE-A-REQUEST
+## TD-C-THE-HTTP-CLIENT-CANNOT-MAKE-A-REQUEST — **WITHDRAWN, THE CLAIM WAS FALSE**
 
-**Date:** 2026-09-08. **Lane:** C.
-**Where:** `net/httpclient/src/lib.rs` (1,784 lines).
+**Date:** 2026-09-08. **Lane:** C. **Withdrawn the same hour it was written.**
 
-**In short:** the OS has a library for speaking HTTP and no way to send it
-anywhere. It can build a request, parse a reply, handle cookies and chunked
-encoding — everything except open a connection. So nothing in the system can
-fetch anything over the network, and the two features that would need to
-(installing a package, updating a dynamic-DNS record) cannot be finished.
+**The claim was that `net/httpclient` has no transport and nothing in the OS
+can fetch anything. The second half is simply wrong.** `userspace/pkg` depends
+on this crate (`Cargo.toml` line 19), builds requests with it, and carries them
+over its own `http_roundtrip` — forty lines of `std::net::TcpStream` with read
+and write timeouts. The package manager fetches. The module doc sentence I
+"corrected" — *"used by the package manager and other applications for network
+fetching"* — was accurate, and has been restored.
 
-**The evidence.** `grep -rn "TcpStream\|std::net" net/httpclient/src/` returns
-nothing. There is no `send`, `execute` or `connect` anywhere in the crate. Its
-own module doc is accurate about what it is — *"URL parsing, request building,
-response parsing, cookie handling, and HTTP protocol
-serialization/deserialization"* — and its very next line is not:
+**How the mistake was made, because the mechanism is worth more than the
+retraction.** The evidence offered was:
 
-> This library is used by the package manager and other applications for
-> network fetching.
+```
+grep -rln httpclient --include=*.toml pkg/ apps/ net/   →  only net/httpclient
+grep -rn "TcpStream" --include=*.rs pkg/                 →  nothing
+```
 
-**No crate depends on it.** `grep -rln httpclient --include=*.toml` across
-`pkg/`, `apps/` and `net/` matches only `net/httpclient`'s own manifest. The
-package manager does not use it, and `pkg/` contains no `TcpStream` either.
+**There is no `pkg/` directory.** It is `userspace/pkg`. Both greps searched a
+path that does not exist, returned nothing, and that nothing was read as *"no
+crate depends on it"* and *"the package manager has no socket code"*.
 
-**Why this is a finding and not just an unfinished library.** A protocol
-implementation with no transport is a perfectly reasonable thing to write
-first — the split is a good one, and the parsing half is the harder half to get
-right. What makes it debt is the doc comment claiming a caller that does not
-exist: someone planning work reads "used by the package manager for network
-fetching", concludes the fetching problem is solved, and builds on it. It cost
-lane C about ten minutes today, on the way to something else; it will cost more
-when someone schedules the package manager's download path.
+An empty result from a path that does not exist is byte-for-byte identical to
+an empty result from a path with no matches. `grep -r` does print
+`No such file or directory` to stderr — and the pipeline swallowed it, because
+the habit of this session has been `2>/dev/null` on tree-wide greps to keep
+permission noise out of the output.
 
-**What is actually missing.** A transport: connect, write, read, and TLS for
-`https`. Every URL in the DynDNS provider table is `https`, and so is every
-plausible package mirror, so a plaintext-only transport would not unblock
-either. Whether that lives in this crate behind a `Transport` trait, or beside
-it, is an open design question rather than a decided one.
+**The rule that follows:** a negative grep result is evidence of nothing until
+the path is known to exist. When a search is about to become a *claim*, confirm
+the haystack first — `ls -d` the directories, or check the pattern matches
+something known to be there. This is the second time today a negative result
+misled me: the palette survey counted declarations and reported "0 left" three
+times while sixteen, then five, then more applications were outstanding.
 
-**Two features are waiting on it**, and both currently exist as UI over
-nothing:
-
-* **DynDNS.** `design.txt` line 1301 and `roadmap-detailed.md` line 2531
-  ("DynDNS setup helper in settings"). The provider table — NoIP, DuckDNS,
-  Dynu, FreeDNS, with their real update URLs and parameter names — is written
-  in `apps/settings/src/remote.rs`, and `force_update()` says outright: *"In a
-  live system this would spawn a network request. Here we transition the status
-  to `Updating` so the UI can reflect it."*
-* **Package fetching**, per this crate's own doc.
-
-**Minimum honest fix, today:** correct the module doc, which is the part that
-misleads. Delete "is used by the package manager and other applications for
-network fetching" or mark it as intent. The transport is real work; the
-sentence is one line and is actively wrong now.
+**What survives of the finding**, much narrower and not a bug: the transport is
+the *caller's* by design, and exactly one caller has written one. A second —
+the DynDNS updater in `apps/settings/src/remote.rs`, which is specified in
+`roadmap-detailed.md` line 2531 — will need either its own copy of
+`http_roundtrip` or `pkg`'s lifted somewhere both can reach. That is a genuine
+question about where a shared transport lives, and it is recorded in the
+crate's own module docs where the next person to need one will read it.

@@ -3,6 +3,7 @@
 //! A native HTTP/1.1 client library for `Slate OS`. Provides URL parsing, request building,
 //! response parsing, cookie handling, and HTTP protocol serialization/deserialization.
 //!
+//! This library is used by the package manager and other applications for network fetching.
 //! It implements the HTTP/1.1 protocol with support for chunked transfer encoding,
 //! redirects, cookies, and common authentication schemes.
 //!
@@ -10,16 +11,18 @@
 //!
 //! There is no transport here -- no `connect`, no `send`, no `TcpStream`. This
 //! is the protocol, not the client: it turns a request into bytes and bytes
-//! back into a response, and something else has to carry them.
+//! back into a response, and **the caller carries them**.
 //!
-//! This paragraph used to read "is used by the package manager and other
-//! applications for network fetching". That was not true and had probably
-//! never been true: no crate in the tree depends on this one, and `pkg/`
-//! contains no socket code either. It is corrected rather than deleted because
-//! the sentence cost lane C ten minutes on 2026-09-08 -- reading it, believing
-//! the fetching problem was solved, and planning on top of that -- and the
-//! next reader deserves to be told the opposite plainly. See `known-issues.md`
-//! `TD-C-THE-HTTP-CLIENT-CANNOT-MAKE-A-REQUEST`.
+//! `userspace/pkg` is the worked example. It depends on this crate, builds a
+//! `Request` with it, and hands the bytes to its own `http_roundtrip`, some
+//! forty lines of `TcpStream` with read and write timeouts. So the sentence
+//! above -- "used by the package manager for network fetching" -- is exactly
+//! true, and the split is deliberate rather than unfinished.
+//!
+//! A second caller wanting to fetch something (the DynDNS updater in
+//! `apps/settings/src/remote.rs` is the next in line) needs a transport of its
+//! own, or `pkg`'s lifted somewhere both can reach. That is the open question,
+//! not the absence of one here.
 //!
 //! # Example
 //!

@@ -65826,6 +65826,28 @@ want them to differ; (3) D's real cost is one macro-level change (a
 `#[severity]` attribute or classification table) plus incremental per-test
 judgement, not 12 674 individual site edits.
 
+**`Severity` governs the kernel, not the harness — and the name invites the
+confusion.** Added 2026-09-09 after the distinction cost a boot test and four
+wrong statements in a row. `Severity::Diagnostic` decides whether the *machine*
+keeps booting, which is exactly what the operator asked for: a user's computer
+should not refuse to start over a cosmetic terminal flag. It says nothing about
+the *boot test*. `check_selftest_failures` in `scripts/boot-test.sh` greps the
+serial log for `self-test failed` and fails the entire run on a match, with no
+allowlist and no reference to severity.
+
+Both behaviours are right and they are not in tension: a shipped kernel should
+survive a cosmetic failure, and a development harness should refuse to call a
+run green when a test failed. The trap is purely that one word appears to
+answer both questions. It does not. A `Diagnostic` rung that fails will still
+redden every lane's boot test until the failure is fixed — see
+`kernel/src/main.rs`'s disabled `ctest-pty` rung, which is disabled for that
+reason and not for being wrong.
+
+**Migration progress, measured 2026-09-09:** 924 classified dispatch sites
+(138 `Integrity`, 786 `Diagnostic`) against 1,319 `self_test*` functions in
+`kernel/src`. The 15:85 split is the shape the decision predicted — structural
+invariants are the minority.
+
 **Implementation plan:** introduce a per-self-test severity classification
 (e.g. `Integrity` vs `Diagnostic`). `Integrity` tests (memory manager, page
 table, scheduler invariants, capability enforcement) keep the panic-on-failure

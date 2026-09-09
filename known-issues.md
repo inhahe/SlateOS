@@ -57676,7 +57676,7 @@ looking for the tailing loop will not find one.
 
 ### TD-ALL-THE-OS-INTEGRATION-TREE-HAD-CORE-BARE-SET-TO-TRUE — 2026-09-04 — FIXED (watch for recurrence)
 
-**In short.** `D:isual studio projects\os` — the integration checkout every
+**In short.** `D:\visual studio projects\os` — the integration checkout every
 lane merges through — had `core.bare = true` in its `.git/config`, while having
 a complete working tree on disk. Git then refused every command that needs one:
 
@@ -123475,7 +123475,7 @@ you to set an environment variable.
 ```
 [ctest] ERROR: cannot find a fastpy checkout (needs compiler/__init__.py).
 [ctest]        or place the fastpy checkout beside this repo:
-[ctest]          E:isual studio projectsastpy
+[ctest]          E:\visual studio projects\fastpy
 ```
 
 **Workaround, which works today:**
@@ -124905,7 +124905,7 @@ day before anyone found out.
 **What it cost, concretely (2026-09-09).** `kernel/src/selftest.rs:260` failed
 `clippy::vec_init_then_push`. I ran `cargo check -p kernel` first — it passed,
 because **`cargo check` does not run clippy** — committed, pushed, and started
-a boot test. It spent 19 minutes on the gate phase and refused to build. The
+a boot test. It spent nineteen minutes before the build and then refused. The
 fix was mechanical and took two minutes. The `Vec::new()`-then-push shape it
 objected to was already in the file before yesterday's §914 commits, so this
 was not a fresh mistake being caught promptly; it was an old one finally being
@@ -124945,6 +124945,37 @@ optional tool* is the "periodic needs a trigger nobody has defined" shape the
 operator explicitly ruled out when answering Q46: "Make a solution that will
 not result in 'never' in practice." Two people have now hit the identical trap
 two weeks apart, which is the evidence that the trigger does not work.
+
+**What the pre-build phase actually costs, measured on E: (2026-09-09).** "19
+minutes of gates" is how this felt, and it is wrong in a way worth writing
+down. Read from the per-gate timing logs that `run_checker` already writes to
+`<git-common-dir>/worktrees/os-lane-a/boot-test-gate-timing.*.tsv`:
+
+| | gates measured by `run_checker` | slowest single gate |
+|---|---|---|
+| `D:` 2026-09-06 | 219 gates, **3717 s (62 min)** | `scan-orphan-modules` 747 s |
+| `E:` 2026-09-09 | 220 gates, **440 s (7.3 min)** | `check-live-counter-reads` 50 s |
+
+**8.4x faster after the migration**, with `scan-orphan-modules` alone falling
+747 s → 32 s. Any argument that rests on "the gates take an hour" is now false,
+and `run-checker.sh`'s own header — "the gates were 10000 s, 86%" — is a
+pre-migration figure still stated as current.
+
+The nineteen minutes to reach clippy is real, but only 440 s of it is gates.
+The rest is the 34 `scripts/test-*.py` tooling suites, which do not go through
+`run_checker` and so appear nowhere in the timing log — roughly 700 s, and now
+the dominant pre-build cost. **Anyone shortening this phase should start with
+the tooling suites, not the gates.**
+
+**A warning this is the third instance of today.** The `D:`→`E:` migration
+silently invalidated every performance number written in this tree, and the
+documents still state them as current. I have now three times quoted a stale
+figure as a present fact: the `70 ms` per file open (A-Q7 — it was the disk,
+and it is gone; `design-decisions.md` §923), the capability-gate site counts in
+§924, and "19 minutes of gates" here. A number in prose carries neither a date
+nor a machine, so re-dating a document silently re-dates its measurements.
+Prefer citing something *re-runnable* — `bench/file-read-latency.py`, the
+timing TSVs — over a figure copied out of another document.
 
 **The proper fix.** Run `cargo clippy -p kernel` in the pre-push hook, scoped
 the way gate 12 already scopes its compiler: **only when the pushed commits

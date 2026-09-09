@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Color picker widget with HSV wheel, RGB/HSV sliders, hex input, alpha,
 //! preset palette, eyedropper mode, and recent-color history.
 //!
@@ -1802,9 +1801,14 @@ impl ColorPickerDialog {
 /// is what makes the click and the pixel refer to the same thing. It is also
 /// why [`ColorPickerDialog::handle_mouse`] takes the dialog's size: a widget
 /// that lays out against a width cannot hit-test without one.
+/// Note that there is no `height` field. The height *is* used -- `button_y` is
+/// measured back from it, so the button strip sits at the bottom of whatever
+/// the dialog was given -- but it is used during construction and never again,
+/// so storing a copy earned nothing. Found by removing this file's
+/// `#![allow(dead_code)]`, which had been suppressing the "never read"
+/// warning.
 struct DialogLayout {
     width: f32,
-    height: f32,
     /// Top-left corner of the saturation/value square, and its side.
     sv_x: f32,
     sv_y: f32,
@@ -1858,7 +1862,6 @@ impl DialogLayout {
 
         Self {
             width,
-            height,
             sv_x,
             sv_y,
             sv_size,

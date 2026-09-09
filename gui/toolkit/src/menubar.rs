@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Application menu bar widget (File | Edit | View | Help).
 //!
 //! Renders a horizontal bar of top-level labels. Clicking a label opens a

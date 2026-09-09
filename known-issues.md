@@ -124287,13 +124287,15 @@ no other crate depends on it), so nothing outside the corpus could reach them.
 |---|---|---|
 | `login_screen.rs` | ~~`LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig`~~ | **Done, 2026-09-08.** `ShellSession` constructs one when the account database names anybody (`design-decisions.md` §824), draws it on a fifth full-screen surface created last within `Layer::Overlay` so nothing the shell owns is over it, routes every key and click to it while it is up, and answers with `authlib`. What it still lacks is the *session hand-off* — a successful login unmaps the screen and reveals the desktop, but nothing starts a session as that user, because there is nowhere to send that (the shell has no channel to the process server; same gap as `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`). Autologin is read and not acted on; see `todo.txt`. Originally: Construction and a session hand-off. §815 says wire it up. *(Correction, 2026-09-08: an earlier version of this row said §818 has to take effect here. It does not — §818 is about the **lock** screen, `apps/lockscreen`, which is a separate program. See `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.)* |
 | `blur.rs` | ~~`BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager`~~ | **Done, 2026-09-08: moved to `gui/compositor` and wired.** A surface asks with `WindowSpec::blur_behind` (a *role*, so the compositor resolves the parameters from its own palette), and `Compositor::blur_behind_window` runs the pass over the region immediately before that window is drawn — the one moment the framebuffer holds everything behind it and nothing in front. Software targets only; see `TD-C-BLUR-IS-SOFTWARE-ONLY`. Originally it could not be wired in the shell at all: It works on a *framebuffer* (`BlurManager::update_all(&mut [u32], w, h)`) and the shell has no framebuffer: it submits render trees and never sees a pixel of what is behind its surfaces. `blur.rs` was the only file in the whole `gui/desktop` crate to mention `[u32]`. The pixels behind a window are the compositor's, so the pass now lives where it can run; what remains is a protocol way for a surface to ask for it, and a call in the compositor's paint path. Originally: A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
-| `input_method.rs` | `InputMethodManager`, `SwitchShortcut` | A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
+| `input_method.rs` | ~~`InputMethodManager`, `SwitchShortcut`~~ | **Wired 2026-09-08, as the *switcher* it is.** `DesktopShell` owns an `InputMethodManager`; `HotkeyAction::SwitchInputLayout` (Super+Space) advances it and writes `input.yaml`, which the compositor already watches — so the keys actually move, and the choice survives a restart. Two of the three offered shortcuts remain unbound and cannot be bound yet: see `TD-C-TWO-OF-THREE-LAYOUT-SHORTCUTS-NEED-RELEASE-SEMANTICS`. **This is still not an IME** and the note below stands in full. Originally: A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
 | `tray_dnd.rs` | `TrayDragSource`, `TrayDropTarget`, `TrayIconSlot`, `TrayIconArrangement`, `TraySlotConfig`, `TrayArrangementConfig`, `StartInTrayConfig` | A caller in the tray's event path. |
 
 **Order worth doing them in.** `login_screen` first: it is named in §815, it
 gates §818, and a machine with no login screen is a machine with no user
-accounts in any meaningful sense. **(`login_screen` is done as of 2026-09-08 —
-see its row above. Three left.)** Then `tray_dnd` (self-contained, one event
+accounts in any meaningful sense. **(As of 2026-09-08 three of the four are
+done — `login_screen`, `blur` and `input_method`. Only `tray_dnd` is left, and
+it is blocked on C-Q12: there are two system trays and the drag-and-drop sits
+with the half that has no icons.)** Then `tray_dnd` (self-contained, one event
 path). Then `blur` (needs a compositing decision about where the pass runs —
 compare the colour-filter work, which had the same question). `input_method`
 last, because wiring is the small half of it.
@@ -125360,6 +125362,222 @@ it with `rust-lld -static --no-dynamic-linker` against
 and duplicate lists. Zig's archives are built on demand into its global cache
 by any `zig c++ -static` build.
 
+---
+
+---
+
+## TD-C-TWO-OF-THREE-LAYOUT-SHORTCUTS-NEED-RELEASE-SEMANTICS
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/desktop/src/input_method.rs` — `SwitchShortcut`;
+`gui/desktop/src/hotkeys.rs` — `HotkeyAction::SwitchInputLayout`.
+
+**In short:** the keyboard-layout switcher offers three shortcuts to choose
+from — Alt+Shift, Ctrl+Shift, and Super+Space. Only Super+Space is wired up.
+The other two are the kind of shortcut where you hold two modifier keys and
+*let go* without pressing anything else, and the desktop currently has no way
+to notice that; it can only notice "this key went down while those modifiers
+were held". Wiring them as if they were ordinary shortcuts would not merely
+fail — it would break Alt+Shift+Tab, which is how you switch windows backwards.
+
+**The mechanism, precisely.** A shell asks the compositor to route a chord with
+`grab_key(window, key, modifiers)`, and that fires on the **press** of `key`.
+`Key` does have `LeftShift` and `LeftAlt`, so `(LeftShift, alt)` is
+*expressible* — but it means "Shift went down while Alt was held", which is the
+first half of Alt+Shift+Tab. Every reverse Alt-Tab would switch the keyboard
+layout, and the Tab that followed would arrive with the shell holding the grab.
+
+What Alt+Shift means on every desktop that offers it is: the modifier pair was
+released with **no other key pressed in between**. That is a different
+predicate, over a key-*down*/key-*up* sequence, and neither the grab protocol
+nor `HotkeyRegistry` can currently state it.
+
+**What was done instead.** `SwitchInputLayout` is bound to Super+Space, which
+is an ordinary chord and works. `SwitchShortcut::AltShift` and `::CtrlShift`
+remain in the model, unbound. A user who selects one of them today gets no
+layout switching — which is why this is logged rather than left to be
+discovered.
+
+**The proper fix**, in the order the pieces have to arrive:
+
+1. The compositor learns to recognise a modifier-only chord: on the release of
+   a modifier, fire if the matching set was held and no non-modifier key went
+   down while it was.
+2. The protocol gains a way to ask for one — a `grab_modifier_chord` beside
+   `grab_key`, rather than overloading `grab_key` with a key that is itself a
+   modifier, so that the two predicates cannot be confused at the call site.
+3. `HotkeyRegistry` gains a binding kind for it, and `SwitchShortcut`'s other
+   two variants bind through that.
+
+**Until then, do not bind them.** A layout switch on the press of Shift-with-Alt
+is worse than no layout switch: it is a working shortcut (Alt+Shift+Tab) taken
+away in exchange for one that fires at the wrong time.
+
+---
+
+## TD-C-TWENTY-FOUR-THOUSAND-LINES-BEHIND-ALLOW-DEAD-CODE
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/toolkit/src/` — `textview.rs` (4,018 lines), `svg.rs` (3,392),
+`menubar.rs` (3,341), `colorpicker.rs` (2,595), `filetypes.rs` (2,203),
+`disabled.rs` (1,739), `context_ext.rs` (1,604). Plus
+`apps/imageviewer/src/video.rs` (2,435) and
+`apps/procexplorer/src/features.rs` (2,539).
+
+**In short:** roughly twenty-four thousand lines of this lane's code are
+reached by nothing. Seven of them are widgets in the shared toolkit — a text
+view, an SVG renderer, a menu bar, a colour picker, a file-type table, a
+disabled-state helper, a context-menu extension — that no application uses.
+Two are features inside applications (video playback in the image viewer,
+and a features module in the process explorer) that their own `main.rs` never
+calls. Every one of these files opens with `#![allow(dead_code)]`, so the
+compiler has never once mentioned it.
+
+**The measurement**, so it can be repeated rather than believed:
+
+```
+for f in $(grep -rl "^#!\[allow(dead_code)\]" --include=*.rs gui/ apps/); do
+  # ... count `<module>::` references in sibling files, and for a library
+  # crate, count crates outside it that name `guitk::<module>`
+done
+```
+
+For the toolkit the sibling count is not the test — its modules are `pub` and
+exist to be used from outside — so the number that matters is **crates outside
+`gui/toolkit` that mention `guitk::<module>`**. For the seven above that number
+is **zero**. For comparison, the same measurement gives `grid` 5, `scaling` 3
+and `pathbar` 1, which is what a used module looks like.
+
+**A toolkit widget nobody has used yet is not automatically waste** — that is
+the honest counter-argument, and it is why this is a debt entry and not a
+deletion. A toolkit is built ahead of its callers. The reason it is *debt* is
+the next paragraph.
+
+**One verified case of an application reimplementing what the toolkit already
+had.** `guitk::colorpicker` defines `Hsv { h: f32, s: f32, v: f32 }` with
+`hsv_to_rgb`, `rgb_to_hsv` and `color_to_hex_string`. `apps/colorpicker`
+defines its own `Hsv { h: f32, s: f32, v: f32 }` — the same three fields, the
+same units, documented the same way — and its own conversions. Neither knows
+about the other. That is the cost the `allow` is hiding: not the unused lines,
+but the second implementation written because nobody could see the first.
+
+**Deliberately not claimed:** that the other six are duplicated too. It was
+checked for `filetypes` against `apps/explorer`'s file-type handling and the
+two are *not* the same thing, so the pattern is not assumed. `textview`,
+`svg`, `menubar`, `disabled` and `context_ext` have not been checked
+either way.
+
+**What to do, in order.**
+
+1. ~~**Take the `#![allow(dead_code)]` off `gui/toolkit`'s modules**~~ —
+   **done 2026-09-08.** It was as quiet as predicted: seven attributes removed,
+   **three** warnings, all of them genuinely-unused *private* items. A `pub`
+   item in a library is not dead code to rustc, so the attribute had been
+   earning nothing on those files while suppressing the three things it should
+   have been reporting. Those three are worth listing, because two of them were
+   not what they looked like:
+
+   * `disabled::DISABLED_OPACITY` — the module documents 50% as the standard
+     dimming for a disabled control, `render_disabled` takes the opacity as a
+     *parameter*, and the constant was private. So every caller would have
+     written `0.5` itself, which is how a standard stops being one. Now `pub`.
+   * `colorpicker::DialogLayout::height` — a stored copy of a value that *is*
+     used (`button_y` is measured back from it) but only during construction.
+     The field was removed. **The first attempt at this comment claimed the
+     layout ignored its height entirely and that the buttons could fall off a
+     short dialog; the compiler disproved that three lines later.** Worth
+     recording as a caution: an unused *field* is not evidence that the
+     *value* is unused.
+   * `textview::col_x` — deleted as dead, and it was not: its only caller is a
+     `#[cfg(test)]` test that asserts its clamping rule, which a *lib* build's
+     "never used" warning does not account for. Restored, and marked
+     `#[cfg(test)]` so both builds are quiet. **The general lesson: "never
+     used" from `cargo build` means "no non-test caller", which is a different
+     claim.**
+2. **Decide the two application modules.** `imageviewer/video.rs` and
+   `procexplorer/features.rs` are unreachable inside their own binaries, where
+   `pub` buys nothing.
+
+   **Checked 2026-09-08, and "wire it" is wrong for both** — which is worth
+   recording, because it was written above as if the only question were
+   plumbing.
+
+   * `procexplorer/features.rs` holds six *finished* widgets — window picker,
+     blocking analyser, affinity mask, priority selector, environment viewer,
+     memory map — each with its own `render() -> Vec<RenderCommand>`. Wiring
+     them into the Details tab really is a few lines. But
+     `ProcessExplorer::refresh()` is a **placeholder that calls nothing**: its
+     own comment says "in production, call kernel syscalls here", and the data
+     comes from `load_demo_data()`. So the whole application displays invented
+     processes, and wiring `features.rs` would connect one pile of demo data to
+     another — a *more elaborate* display of things that are not true, which is
+     worse than a plain one. The unwired module is a symptom; the missing data
+     source is the disease. See
+     `TD-C-THE-GUI-PROCESS-EXPLORER-HAS-NO-DATA-SOURCE-AND-ONE-EXISTS`.
+   * `imageviewer/video.rs` says plainly in its own module doc that "actual
+     codec decoding is deferred to a future hardware-accelerated decoder
+     service". Wired today it would parse containers, show transport controls,
+     and display no frames. That is the same trap: a feature that appears to
+     exist and does nothing. Its trigger is a decoder service, not a caller.
+3. **Route `apps/colorpicker` through `guitk::colorpicker`,** or delete the
+   toolkit's copy. One of the two, not both.
+
+**Related.** `TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING` is
+the same mechanism with 5,628 more lines, found the same way and logged
+separately because it also has a *duplicate wired page*, which is a worse
+problem than being unreachable. Together they are about 30,000 lines.
+
+---
+
+## TD-C-THE-GUI-PROCESS-EXPLORER-HAS-NO-DATA-SOURCE-AND-ONE-EXISTS
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `apps/procexplorer/src/main.rs` — `ProcessExplorer::refresh`.
+
+**In short:** the graphical process explorer does not show you the processes
+running on the machine. It shows a fixed list of made-up ones. Everything else
+about it works — sorting, filtering, the tabs, the graphs — but the step that
+would ask the system what is actually running was never written, and the
+placeholder that stands in its place says so in a comment nobody sees.
+
+**The evidence, in its own words:**
+
+```rust
+pub fn refresh(&mut self) {
+    // Placeholder: in production, call kernel syscalls here:
+    //   - sys_process_list() -> Vec<ProcessInfo>
+    //   ...
+    // For now, the data vectors are populated externally or via
+    // `load_demo_data()` for development/testing.
+```
+
+**And the data source exists.** `userspace/htop` reads `/proc/<pid>/` for the
+same facts — per-process stats, `/proc/stat`, `/proc/meminfo` — and has done
+for some time. So this is not blocked on the kernel; the GUI explorer simply
+never learned to read what the terminal one already reads.
+
+**Why this outranks wiring `features.rs`.** That module (2,539 lines, six
+finished widgets) is unreachable, and connecting it looks like the obvious next
+job. It is not: pointed at `load_demo_data()`, an affinity editor and a memory
+map would render invented numbers with the same confidence as real ones. **A
+richer display of false data is worse than a plain one**, because it invites
+the user to act on it — the affinity and priority widgets exist precisely to
+*change* things.
+
+**The proper fix, and the part that needs a decision.** Read `/proc`. The
+question is *whose* reader:
+
+| | |
+|---|---|
+| Copy htop's into `apps/procexplorer` | A third copy of `/proc` parsing in the tree, free to drift from htop's — and the two would then disagree about what a process's state letter means. |
+| Extract htop's readers into a shared crate | The right shape, but `userspace/**` is **lane B's**, so this needs a `requests/` note rather than an edit. |
+| A `sysinfo`-style crate in lane C | Avoids the lane boundary and creates the second copy anyway. |
+
+Extracting is the one to ask for. Filed as a request when this is picked up;
+recorded here so the finding is not lost in the meantime.
+
+**Do not wire `features.rs` first.** It would make the wrong data more
+convincing.
 
 ## B-THE-TWO-MULTIBYTE-COUNTING-CALLS-DOCUMENTED-A-BEHAVIOUR-NEITHER-HAD (lane B, 2026-09-09) — FIXED same day
 

@@ -52,3 +52,53 @@ person who wrote the comment, since you know exactly what it should say.
 The kernel side is ready. Lane B can route `openat` through 661 at will,
 and the caller-side identity check in `dirfd.rs` becomes redundant once you
 do. No action needed from lane A.
+
+---
+
+## Done — lane B, 2026-09-09
+
+All three items closed.
+
+**Item 2 (routing).** `openat` no longer joins a remembered path to the
+caller's name. For the case the pin is for — a real descriptor and a relative
+name — it forwards to `SYS_FS_OPENAT2` (661) with `resolve == 0`, so the
+kernel walks from the *handle*. `AT_FDCWD` and absolute paths still short-
+circuit to `open`, because neither reads the descriptor: POSIX ignores `dirfd`
+for an absolute path, and `AT_FDCWD` names no descriptor to pin.
+
+Checked rather than taken on trust, since it decides whether the routing is
+even legal: `resolve == 0` had to mean *no containment*, or plain
+`openat(dirfd, "../x")` would have started failing. `number.rs` says it
+outright — "`resolve == 0` means the same thing in both schemes, which is the
+one value where a pass-through is harmless" — and the table beneath it gives
+relative-fragment-with-a-base as allowed and absolute-with-no-base as allowed.
+That is exactly POSIX `openat(2)`.
+
+**Item 1 (the comment).** The one that needed fixing turned out not to be the
+line I filed. `resolve_dirfd_path`'s doc was fine; the false claim was in the
+"pinned `*at` fast path" block, which said **"The family was completed on
+2026-09-01 by `SYS_FS_RENAMEAT_PINNED` (670)"** while the call every other
+member is named after still concatenated. Corrected, with 661 added to the
+list and the gap named rather than quietly closed.
+
+**Item 3.** Nothing needed; your ring-3 test is the prerequisite and it exists.
+
+Two consequences worth flagging back:
+
+`openat2` with a `resolve` word that has nothing to enforce delegates to
+`openat`, so **that route is now pinned as well**, with `plan_resolve`
+unchanged.
+
+`openat2_forward` now returns `Option<Fd>`, where `None` means only "this
+kernel has no 661" — the single failure the family permits a fallback from.
+`openat2` maps it back to `ENOSYS`, which is what `errno::translate` already
+did with `NO_SUCH_SYSCALL`, so its behaviour is byte-for-byte unchanged. The
+distinction exists because `openat` may fall back and `openat2` must not:
+falling back for a caller who asked to be confined would hand it an
+unrestricted descriptor, which is the one outcome that path exists to prevent.
+
+posix: 20661 passed, clippy clean. The pinned walk itself is not exercisable
+on the host — every native syscall is stubbed there, so the host takes the
+fallback and the existing `openat` tests pass unchanged, which is the evidence
+that the fallback is intact rather than that the pin works. That half is your
+`self_test_openat2_beneath`.

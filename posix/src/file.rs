@@ -3019,11 +3019,11 @@ pub(crate) fn resolve_dirfd_path(
 // that never came into it.  It also breaks with no attacker at all: rename the
 // directory and the descriptor names a path that no longer exists.
 //
-// `SYS_FS_UNLINKAT_PINNED` (662), `SYS_FS_FSTATAT_PINNED` (663),
-// `SYS_FS_FCHMODAT_PINNED` (665), `SYS_FS_MKDIRAT_PINNED` (666),
-// `SYS_FS_SYMLINKAT_PINNED` (667), `SYS_FS_LINKAT_PINNED` (668),
-// `SYS_FS_UTIMENSAT_PINNED` (669) and `SYS_FS_RENAMEAT_PINNED` (670)
-// resolve the handle instead.  Where the
+// `SYS_FS_OPENAT2` (661), `SYS_FS_UNLINKAT_PINNED` (662),
+// `SYS_FS_FSTATAT_PINNED` (663), `SYS_FS_FCHMODAT_PINNED` (665),
+// `SYS_FS_MKDIRAT_PINNED` (666), `SYS_FS_SYMLINKAT_PINNED` (667),
+// `SYS_FS_LINKAT_PINNED` (668), `SYS_FS_UTIMENSAT_PINNED` (669) and
+// `SYS_FS_RENAMEAT_PINNED` (670) resolve the handle instead.  Where the
 // arguments fit their shape — a real directory fd and a single-component name —
 // they are used, and the join is not reached at all.  Everything else still
 // goes through `resolve_dirfd_path`, because a multi-component name is a walk
@@ -3057,7 +3057,22 @@ pub(crate) fn resolve_dirfd_path(
 // path.  Refusing is the point — a fallback there would reintroduce the race on
 // the exact descriptors least able to justify it.
 //
-// The family was completed on 2026-09-01 by `SYS_FS_RENAMEAT_PINNED` (670),
+// **`openat` itself was the last one still joining, until 2026-09-09.**  That
+// is worth stating plainly, because the paragraph below claimed the family was
+// "completed" on 2026-09-01 while the call every other member is named after
+// still glued a remembered path to a caller's name.  Nothing new was needed
+// kernel-side: 661 *is* the pinned `openat` — it resolves the base handle and,
+// with `resolve == 0`, imposes no containment, which is precisely POSIX's
+// `openat(2)`.  Only the routing was missing, and only on this side.  Lane A
+// said so in `requests/a-b-openat-pinning-status-the-ring-3-test-exists.md`
+// after the ring-3 test that pins the marshalling landed.
+//
+// A consequence worth knowing: `openat2` with a `resolve` word that has
+// nothing to enforce delegates to `openat`, so *that* route is now pinned too,
+// without `plan_resolve` changing at all.
+//
+// The rest of the family was completed on 2026-09-01 by
+// `SYS_FS_RENAMEAT_PINNED` (670),
 // the only member that *moves* a name rather than creating, stamping or
 // reading one.  Its source side is therefore the sharp one: an uncontained
 // source name would be a way to unlink something outside the pinned directory,
@@ -3714,14 +3729,43 @@ pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -
         return -1;
     }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
+        // Neither case reads the descriptor: POSIX ignores `dirfd` for an
+        // absolute path, and `AT_FDCWD` names no descriptor to pin. `open`
+        // resolves both against this libc's own cwd, which is the answer.
         return open(path, flags, mode);
     }
+    // A real descriptor and a relative name: the case the pin is for. Ask the
+    // kernel to walk from the *handle* rather than gluing the caller's name
+    // onto whatever path the handle had when it was opened.
+    let how = OpenHow {
+        flags: widen_open_flags(flags),
+        mode: u64::from(mode),
+        resolve: 0,
+    };
+    if let Some(fd) = openat2_forward(dirfd, path, &how, 0) {
+        return fd;
+    }
+    // Only reachable on a kernel with no 661. See `openat2_forward`.
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
     if len == 0 {
         return -1;
     }
     open(full.as_ptr(), flags, mode)
+}
+
+/// Widen `openat`'s `int` flags into `open_how`'s `u64` without sign-extending.
+///
+/// Named for what it avoids rather than what it does, because the bug it
+/// prevents is the one a reader would otherwise write by hand.
+///
+/// `O_*` are bit positions, not a signed quantity, so a flag word with the top
+/// bit set must widen to the same 32 bits rather than to a run of ones — which
+/// is what `as u64` on a negative `i32` would produce, and would then trip
+/// `openat2_forward`'s cast back to `i32` on a value that no longer round-trips.
+#[allow(clippy::cast_sign_loss)]
+fn widen_open_flags(flags: i32) -> u64 {
+    u64::from(flags as u32)
 }
 
 /// Get file status relative to a directory fd.
@@ -6968,14 +7012,29 @@ pub(crate) fn is_pty_device_path(resolved: &[u8]) -> bool {
     resolved == b"/dev/ptmx" || resolved.starts_with(b"/dev/pts/")
 }
 
-/// Forward an `openat2` that carries a restriction to `SYS_FS_OPENAT2`.
+/// Open through `SYS_FS_OPENAT2`, resolving the base **handle** rather than
+/// the path that handle once had.
 ///
-/// Reached only from [`openat2`], and only for a [`ResolvePlan::Forward`], so
-/// `k_resolve` is always non-zero: this is the path that exists *because* the
-/// request cannot be expressed as an `openat`.
+/// The body of [`openat2_forward`]; see that wrapper for what `missing` is
+/// for. Everything else about this function is unchanged from when it served
+/// `openat2` alone.
+///
+/// Two callers now, and `k_resolve` tells them apart. [`openat2`] passes a
+/// non-zero word for a [`ResolvePlan::Forward`] — the path that exists
+/// *because* the request cannot be expressed as an `openat`. [`openat`] passes
+/// **zero**, which asks for no restriction and gets the pinned walk anyway:
+/// `resolve == 0` is the one value meaning the same thing in Linux's numbering
+/// and ours, and under it a relative fragment resolves against the base while
+/// an absolute one ignores it — which is exactly what POSIX `openat(2)` says.
 ///
 /// Returns a file descriptor, or -1 with errno set.
-fn openat2_forward(dirfd: i32, path: *const u8, h: &OpenHow, k_resolve: u64) -> Fd {
+fn openat2_forward_inner(
+    dirfd: i32,
+    path: *const u8,
+    h: &OpenHow,
+    k_resolve: u64,
+    missing: &mut bool,
+) -> Fd {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let posix_flags = h.flags as i32;
 
@@ -7115,6 +7174,15 @@ fn openat2_forward(dirfd: i32, path: *const u8, h: &OpenHow, k_resolve: u64) -> 
     }
 
     if ret < 0 {
+        // The *only* failure a caller may retry by another route, and it is
+        // recorded rather than returned because the two are different claims:
+        // "this kernel has no 661" invites a fallback, and every other error
+        // is an answer that must be passed through. Deliberately not checked
+        // on the scratch-cwd open above — that one failing says nothing about
+        // whether 661 exists.
+        if ret == crate::errno::native::NO_SUCH_SYSCALL || ret == crate::syscall::HOST_ENOSYS {
+            *missing = true;
+        }
         return errno::translate(ret) as Fd;
     }
 
@@ -7142,6 +7210,20 @@ fn openat2_forward(dirfd: i32, path: *const u8, h: &OpenHow, k_resolve: u64) -> 
         errno::set_errno(errno::EMFILE);
         -1
     }
+}
+
+/// Open through `SYS_FS_OPENAT2`, reporting separately whether the call exists.
+///
+/// `Some(fd)` on success and `Some(-1)` with errno set on failure — but
+/// **`None` means only that this kernel has no 661**, which is the single
+/// case the pinned family permits a caller to fall back from. Any other
+/// failure has *answered*; retrying it by path would reintroduce the very race
+/// the pinned call closes, silently, on the failure path nobody watches. See
+/// "The pinned `*at` fast path" above.
+fn openat2_forward(dirfd: i32, path: *const u8, h: &OpenHow, k_resolve: u64) -> Option<Fd> {
+    let mut missing = false;
+    let fd = openat2_forward_inner(dirfd, path, h, k_resolve, &mut missing);
+    if missing { None } else { Some(fd) }
 }
 
 /// `openat2` — open a file relative to a directory fd with extended
@@ -7253,7 +7335,16 @@ pub extern "C" fn openat2(dirfd: i32, path: *const u8, how: *const OpenHow, size
             errno::set_errno(e);
             -1
         }
-        ResolvePlan::Forward(k_resolve) => openat2_forward(dirfd, path, &h, k_resolve),
+        ResolvePlan::Forward(k_resolve) => openat2_forward(dirfd, path, &h, k_resolve)
+            .unwrap_or_else(|| {
+                // A restriction was asked for and there is no call that can
+                // carry it. Falling back to an unrestricted `openat` here
+                // would hand back a descriptor to a caller who asked to be
+                // confined, which is the one outcome this whole path exists
+                // to prevent — so it stays an error, exactly as before.
+                errno::set_errno(errno::ENOSYS);
+                -1
+            }),
         ResolvePlan::Delegate => openat(dirfd, path, h.flags as i32, h.mode as ModeT),
     }
 }
@@ -9930,6 +10021,37 @@ mod tests {
     fn test_openat_invalid_dirfd() {
         assert_eq!(openat(9999, b"file.txt\0".as_ptr(), 0, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// `openat`'s `int` flags widen into `open_how`'s `u64` unchanged.
+    ///
+    /// The `O_*` values are bit positions, not a signed quantity, so a word
+    /// with the top bit set must widen to the same 32 bits. Plain `as u64` on
+    /// a negative `i32` fills the upper half with ones instead, and
+    /// `openat2_forward_inner`'s cast back to `i32` would then be reading a
+    /// value that no longer round-trips — a flag word that survives the trip
+    /// out and comes back different.
+    #[test]
+    fn test_open_flags_widen_without_sign_extension() {
+        for flags in [
+            0,
+            fcntl::O_RDONLY,
+            fcntl::O_CREAT | fcntl::O_WRONLY,
+            fcntl::O_CLOEXEC,
+            i32::MAX,
+            -1,
+            i32::MIN,
+        ] {
+            let wide = widen_open_flags(flags);
+            assert_eq!(
+                wide >> 32,
+                0,
+                "flags {flags:#x} must not reach the upper half"
+            );
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let back = wide as i32;
+            assert_eq!(back, flags, "flags {flags:#x} must round-trip");
+        }
     }
 
     #[test]

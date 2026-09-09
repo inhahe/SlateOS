@@ -50,6 +50,7 @@
 //! | `--near=N` | every pattern within `N` lines of another, and only lines inside a satisfying window are selected |
 //! | `--escape-control` | render control bytes as `\xNN` instead of sending them to the terminal |
 //! | `--keep-color-escapes` | under `--escape-control`, let a complete colour sequence through |
+//! | `GREP_COLORS` `ec=` | the colour of an escape `--escape-control` wrote; ours, default `94` |
 //! | `--exclude-path=A/B` | do not descend into a directory whose *path* ends `A/B` |
 //!
 //! ## Patterns are patterns
@@ -196,6 +197,18 @@ struct Colors {
     /// `se`: every separator — the `:` and `-` between prefix fields, and the
     /// `--` between context groups.
     separator: Vec<u8>,
+    /// `ec`: the `\xNN` that `--escape-control` writes in place of a control
+    /// byte. Ours, not GNU's -- GNU has nothing to colour here, since it has
+    /// no `--escape-control`.
+    ///
+    /// **It exists to remove an ambiguity that option introduces.** A file
+    /// holding a real `ESC` byte and a file holding the four characters
+    /// `\x1b` print identically under `--escape-control`; the colour is what
+    /// tells them apart. `cat -v` has the same ambiguity and no answer to it.
+    /// Defaulted rather than left empty, to the bright blue the operator's
+    /// grep uses, because a disambiguation nobody switches on disambiguates
+    /// nothing.
+    escape: Vec<u8>,
     /// `rv`: swap `sl` and `cx`, but only when `-v` is also in effect. The
     /// point is that under `-v` the *selected* lines are the boring ones.
     reverse_video: bool,
@@ -217,6 +230,9 @@ impl Default for Colors {
             line_number: b"32".to_vec(),
             byte_number: b"32".to_vec(),
             separator: b"36".to_vec(),
+            // Not GNU's -- GNU has no `ec`. `94` is bright blue, which is what
+            // the operator's grep colours its escape display.
+            escape: b"94".to_vec(),
             reverse_video: false,
             no_erase: false,
         }
@@ -305,6 +321,10 @@ impl Colors {
                 b"ln" => set(&mut self.line_number),
                 b"bn" => set(&mut self.byte_number),
                 b"se" => set(&mut self.separator),
+                // Ours. A GREP_COLORS naming it is silently ignored by GNU,
+                // which is the safe direction for a divergence: a variable
+                // written for us still works there, minus the colour.
+                b"ec" => set(&mut self.escape),
                 b"rv" => self.reverse_video = true,
                 b"ne" => self.no_erase = true,
                 _ => {}
@@ -3116,6 +3136,19 @@ fn line_flush(out: &mut impl Write, opts: &Options) -> io::Result<()> {
 /// others would be worse than none, because it invites the belief that output
 /// is now safe to look at.
 ///
+/// # The ambiguity it introduces, and the answer to it
+///
+/// A file holding a real `ESC` byte and a file holding the four characters
+/// `\x1b` print **identically** under this option. That is inherent to
+/// escaping without escaping the escape, and `cat -v` has the same ambiguity
+/// with no answer to it -- doubling every backslash would resolve it and would
+/// make every ordinary path in the output unreadable, which is a worse trade.
+///
+/// The answer here is the `ec` capability: when colour is on, an escape this
+/// function wrote is painted and one the file contained is not. See
+/// [`Colors::escape`], which is defaulted rather than left empty for exactly
+/// this reason.
+///
 /// # The one exemption
 ///
 /// `--keep-color-escapes` lets a *complete* SGR sequence through unescaped, so
@@ -3131,14 +3164,23 @@ fn line_flush(out: &mut impl Write, opts: &Options) -> io::Result<()> {
 ///
 /// Flagged to the operator rather than done quietly — see `design-decisions.md`
 /// §1008.
-fn escaped<'a>(body: &'a [u8], opts: &Options) -> Cow<'a, [u8]> {
+fn escaped<'a>(body: &'a [u8], opts: &Options, cap: &[u8]) -> Cow<'a, [u8]> {
     if !opts.escape_control {
         return Cow::Borrowed(body);
     }
     const HEX: &[u8; 16] = b"0123456789abcdef";
+    // The colour a run of escapes is painted, and the one to restore after it.
+    // Empty unless colour is on and `ec` is set, in which case nothing below
+    // emits an escape of its own and the output is byte-identical to plain
+    // escaping.
+    let ec: &[u8] = if opts.color { &opts.colors.escape } else { &[] };
     // Built at the first byte that actually changes, and never before: the
     // cost of the option on ordinary text is one scan and no allocation.
     let mut out: Option<Vec<u8>> = None;
+    // Whether the bytes just written are inside an open `ec` run. Runs, not
+    // bytes: `\x1b\x5b` is one coloured stretch, not two, which matters
+    // because the alternative writes a colour pair per byte.
+    let mut run = false;
     let mut i = 0usize;
     while i < body.len() {
         if opts.keep_color_escapes
@@ -3146,6 +3188,7 @@ fn escaped<'a>(body: &'a [u8], opts: &Options) -> Cow<'a, [u8]> {
         {
             let end = i.saturating_add(n);
             if let Some(o) = out.as_mut() {
+                close_escape_run(o, &mut run, opts, cap, ec);
                 o.extend_from_slice(body.get(i..end).unwrap_or_default());
             }
             i = end;
@@ -3158,15 +3201,41 @@ fn escaped<'a>(body: &'a [u8], opts: &Options) -> Cow<'a, [u8]> {
                 v.extend_from_slice(body.get(..i).unwrap_or_default());
                 v
             });
+            if !ec.is_empty() && !run {
+                // Close the surrounding colour first: SGR does not nest, so
+                // the only way back to `cap` afterwards is to reopen it.
+                o.extend_from_slice(&opts.colors.end(cap));
+                o.extend_from_slice(&opts.colors.start(ec));
+                run = true;
+            }
             o.extend_from_slice(b"\\x");
             o.push(HEX[usize::from(b >> 4)]);
             o.push(HEX[usize::from(b & 0x0f)]);
         } else if let Some(o) = out.as_mut() {
+            close_escape_run(o, &mut run, opts, cap, ec);
             o.push(b);
         }
         i = i.saturating_add(1);
     }
+    if let Some(o) = out.as_mut() {
+        close_escape_run(o, &mut run, opts, cap, ec);
+    }
     out.map_or(Cow::Borrowed(body), Cow::Owned)
+}
+
+/// End an open `ec` run and put the surrounding capability back.
+///
+/// Split out because it is needed at three points in [`escaped`] -- before
+/// ordinary text, before a passed-through colour sequence, and at the end of
+/// the body -- and forgetting any one of them would leave the terminal painted
+/// in the escape colour.
+fn close_escape_run(out: &mut Vec<u8>, run: &mut bool, opts: &Options, cap: &[u8], ec: &[u8]) {
+    if !*run {
+        return;
+    }
+    out.extend_from_slice(&opts.colors.end(ec));
+    out.extend_from_slice(&opts.colors.start(cap));
+    *run = false;
 }
 
 /// The length of the complete SGR sequence beginning at `body[i]`, if one
@@ -3222,7 +3291,7 @@ fn write_body(
     opts: &Options,
 ) -> io::Result<()> {
     if !opts.color {
-        return out.write_all(&escaped(body, opts));
+        return out.write_all(&escaped(body, opts, b""));
     }
     let line_cap = opts.line_cap(selected);
     let match_cap = opts.match_cap(selected);
@@ -3236,10 +3305,14 @@ fn write_body(
                 continue;
             }
             out.write_all(&opts.colors.start(line_cap))?;
-            out.write_all(&escaped(body.get(done..s).unwrap_or_default(), opts))?;
+            out.write_all(&escaped(
+                body.get(done..s).unwrap_or_default(),
+                opts,
+                line_cap,
+            ))?;
             out.write_all(&opts.colors.wrap(
                 match_cap,
-                &escaped(body.get(s..e).unwrap_or_default(), opts),
+                &escaped(body.get(s..e).unwrap_or_default(), opts, match_cap),
             ))?;
             done = e;
         }
@@ -3250,12 +3323,16 @@ fn write_body(
             .saturating_sub(usize::from(body.last() == Some(&b'\r')));
         if tail_end > done {
             out.write_all(&opts.colors.start(line_cap))?;
-            out.write_all(&escaped(body.get(done..tail_end).unwrap_or_default(), opts))?;
+            out.write_all(&escaped(
+                body.get(done..tail_end).unwrap_or_default(),
+                opts,
+                line_cap,
+            ))?;
             out.write_all(&opts.colors.end(line_cap))?;
             done = tail_end;
         }
     }
-    out.write_all(&escaped(body.get(done..).unwrap_or_default(), opts))
+    out.write_all(&escaped(body.get(done..).unwrap_or_default(), opts, b""))
 }
 
 /// The one stream being searched, and what its prefixes need to know about it.
@@ -4427,7 +4504,7 @@ mod tests {
             escape_control: on,
             ..Options::default()
         };
-        escaped(bytes, &o).into_owned()
+        escaped(bytes, &o, b"").into_owned()
     }
 
     /// Off by default: this changes GNU's output, so it only happens on ask.
@@ -4470,7 +4547,10 @@ mod tests {
             escape_control: true,
             ..Options::default()
         };
-        assert!(matches!(escaped(b"ordinary text", &o), Cow::Borrowed(_)));
+        assert!(matches!(
+            escaped(b"ordinary text", &o, b""),
+            Cow::Borrowed(_)
+        ));
     }
 
     fn esc_keep(bytes: &[u8]) -> Vec<u8> {
@@ -4479,7 +4559,7 @@ mod tests {
             keep_color_escapes: true,
             ..Options::default()
         };
-        escaped(bytes, &o).into_owned()
+        escaped(bytes, &o, b"").into_owned()
     }
 
     /// The whitelist, stated as what it recognises.
@@ -4552,12 +4632,12 @@ mod tests {
             ..Options::default()
         };
         assert!(matches!(
-            escaped(b"\x1b[31mred\x1b[0m", &o),
+            escaped(b"\x1b[31mred\x1b[0m", &o, b""),
             Cow::Borrowed(_)
         ));
         // …and one bad byte among good sequences is enough to make a copy.
         assert!(matches!(
-            escaped(b"\x1b[31mred\x1b[0m\x07", &o),
+            escaped(b"\x1b[31mred\x1b[0m\x07", &o, b""),
             Cow::Owned(_)
         ));
     }
@@ -4574,6 +4654,90 @@ mod tests {
         );
         let both = parse_ok(&["--escape-control", "--keep-color-escapes", "foo"]).opts;
         assert!(both.escape_control && both.keep_color_escapes);
+    }
+
+    fn esc_col(bytes: &[u8], cap: &[u8], ec: &str) -> Vec<u8> {
+        let mut colors = Colors {
+            no_erase: true,
+            ..Colors::default()
+        };
+        colors.apply(format!("ec={ec}").as_bytes());
+        let o = Options {
+            escape_control: true,
+            color: true,
+            colors,
+            ..Options::default()
+        };
+        escaped(bytes, &o, cap).into_owned()
+    }
+
+    /// The escape colour has to close the surrounding one and put it back,
+    /// because SGR does not nest: `ESC[m` is an absolute reset, so without the
+    /// reopen the rest of the match would come out uncoloured.
+    ///
+    /// Measured against the built binary before being written here.
+    #[test]
+    fn the_escape_colour_reopens_the_colour_it_interrupted() {
+        assert_eq!(
+            esc_col(b"AA\x07BB", b"01;31", "94"),
+            b"AA\x1b[m\x1b[94m\\x07\x1b[m\x1b[01;31mBB".to_vec()
+        );
+    }
+
+    /// Outside any coloured region there is nothing to close or reopen, so the
+    /// run is simply painted.
+    #[test]
+    fn the_escape_colour_needs_no_reopen_outside_a_coloured_run() {
+        assert_eq!(
+            esc_col(b"a\x07b", b"", "94"),
+            b"a\x1b[94m\\x07\x1b[mb".to_vec()
+        );
+    }
+
+    /// Consecutive control bytes are one coloured stretch, not one per byte --
+    /// the alternative writes a colour pair around every `\xNN`, which for a
+    /// binary-ish line is most of the output.
+    #[test]
+    fn consecutive_escapes_share_one_colour_run() {
+        assert_eq!(
+            esc_col(b"a\x07\x08\x09b", b"", "94"),
+            b"a\x1b[94m\\x07\\x08\\x09\x1b[mb".to_vec()
+        );
+    }
+
+    /// `ec=` empties the capability, and an empty capability means "write it
+    /// plainly" -- so the output is byte-identical to escaping with no colour
+    /// at all, and a match stays one continuous coloured run.
+    #[test]
+    fn an_empty_escape_colour_writes_the_escapes_plainly() {
+        assert_eq!(esc_col(b"AA\x07BB", b"01;31", ""), b"AA\\x07BB".to_vec());
+    }
+
+    /// With colour off the capability is never consulted, whatever it is set
+    /// to: `--escape-control` alone must not put an escape sequence into
+    /// output that is on its way to a file.
+    #[test]
+    fn the_escape_colour_is_silent_when_colour_is_off() {
+        let o = Options {
+            escape_control: true,
+            ..Options::default()
+        };
+        assert!(!o.color);
+        assert_eq!(escaped(b"a\x07b", &o, b"01;31").into_owned(), b"a\\x07b");
+    }
+
+    /// It is a `GREP_COLORS` capability like any other, and GNU ignores a key
+    /// it does not know, so a variable written for us still works there.
+    #[test]
+    fn ec_is_set_through_grep_colors() {
+        let mut c = Colors::default();
+        assert_eq!(c.escape, b"94"); // ours, not GNU's: GNU has no `ec`
+        c.apply(b"ec=35");
+        assert_eq!(c.escape, b"35");
+        // …and a value that is not SGR parameters is ignored, as for every
+        // other capability.
+        c.apply(b"ec=rm -rf");
+        assert_eq!(c.escape, b"35");
     }
 
     fn near_set(text: &str, patterns: &[&str], near: usize, opts: &Options) -> Vec<usize> {

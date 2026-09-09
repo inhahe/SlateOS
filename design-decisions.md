@@ -69978,6 +69978,54 @@ inside the match, so covering only the match would leave half the output
 looking like a bug.
 
 
+### `--escape-control` introduced an ambiguity, and `GREP_COLORS` `ec=` answers it
+
+Noticed while porting the operator's sixth colour element rather than while
+writing the option, which is the wrong order and worth saying so.
+
+Under `--escape-control`, a file holding a real `ESC` byte and a file holding
+the four characters `\x1b` produce **the same output**. The option was shipped
+without noticing that, and it is inherent: escaping without escaping the escape
+always collapses those two inputs. `cat -v` has the same defect and no answer
+to it. Doubling every backslash would resolve it and would make every ordinary
+path in the output unreadable, which is the worse trade.
+
+The operator's grep already had the answer, and it is the reason their sixth
+colour element exists: **colour the escape display**. An escape grep wrote is
+painted; one the file contained is not. Ours is `GREP_COLORS` `ec=`, defaulting
+to `94` -- the bright blue theirs uses -- because a disambiguation nobody
+switches on disambiguates nothing.
+
+**Two of the operator's six colour elements were genuinely missing; four were
+already `GREP_COLORS` under other names.**
+
+| Operator's element | Ours |
+|---|---|
+| filename | `fn` |
+| colon separator | `se` |
+| line number | `ln` |
+| match text | `ms` / `mc` |
+| escape code display | **new: `ec`** |
+| error message | still missing -- see below |
+
+`GREP_COLORS` is the *larger* set: `sl`, `cx`, `bn`, `rv` and `ne` have no
+counterpart in the operator's six. An unknown key is ignored in silence by GNU,
+measured, so a `GREP_COLORS` naming `ec` still works there minus the colour --
+the safe direction for a divergence.
+
+**SGR does not nest, so the implementation has to close and reopen.** `ESC[m`
+is an absolute reset, not a pop, so an escape run inside a coloured match emits
+`end(match) start(ec) …\xNN… end(ec) start(match)`. Getting this wrong leaves
+the rest of the match uncoloured, which is why it has a test that reads the
+whole byte sequence rather than checking for the presence of a colour.
+
+**Still missing: the error-message colour**, and deliberately not added with
+this. GNU never colours stderr, and `--color=auto` tests *stdout*, so a
+faithful `er` would need its own check on fd 2 -- a different question from the
+one this entry is answering, and the wrong thing to bundle into a commit about
+stdout.
+
+
 **Against the choice, honestly:** it is the operator's OS, and their muscle
 memory is a real cost that falls on them rather than on a hypothetical GNU
 user. The mitigation is only a mitigation — aliasing the short forms back

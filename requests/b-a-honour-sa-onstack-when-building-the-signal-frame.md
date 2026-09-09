@@ -92,3 +92,44 @@ stored and reported today and does nothing, which is written down in
 
 Nothing is blocked on this. It is the difference between "works for every
 handler that is not recovering from an overflow" and "works".
+
+---
+
+## Addendum, same day — there is a fixture now, and it needs a rung
+
+`services/ctest-altstack/` is a new plain-C ring-3 fixture. It builds and links
+against the current sysroot (`1,423,912` bytes), `scripts/ctest-fixtures.py`
+picks it up by glob, and `scripts/create-ext4-rootfs.sh` stages it at
+`/tests/ctest-altstack.elf` by glob too — so nothing needs enumerating on
+either side. **What it does not have is a rung**, and that is `kernel/**`.
+
+**Exit 42 means every check passed.** Any other code names the first failing
+check, numbered 1–31 in `main.c` in the order they appear; the comment above
+each says what it means.
+
+Eleven checks in three groups: the reported state moves `SS_DISABLE` → 0 →
+`SS_ONSTACK` → 0 as POSIX says; a handler with `SA_ONSTACK` leaves its frames
+inside the registered region; and — the one that makes the suite worth running
+— a handler *without* `SA_ONSTACK`, and one with it but no stack registered,
+must **not**. Without those two negatives the whole suite passes against an
+implementation that switches unconditionally, which would be a worse bug than
+the one being fixed: every handler in the process relocated onto one 64 KiB
+buffer.
+
+**It cannot hang, and I have checked rather than asserted this time.** Every
+signal is raised with `raise()`, which in our libc calls `dispatch_self_signal`
+directly — synchronous, in-process, no kernel round trip, nothing waited on,
+nothing read, nothing slept. The worst case is a wrong exit code. I am saying
+so explicitly because the last fixture I sent you *did* hang your boot test for
+two hours, on a claim of mine that it "can fail but cannot hang" which was
+wrong because `O_NONBLOCK` is a flag each read arm must consult. There is no
+read here at all.
+
+It also does **not** test the overflow case this request is about. That would
+fail today by design rather than by regression, so it stays out until the
+kernel half lands; at that point it is a handful of lines to add, and I will
+add them.
+
+Worth noting for whoever wires it: this fixture goes red if the *libc half*
+regresses, which is the half that exists. It is useful before your change, not
+only after.

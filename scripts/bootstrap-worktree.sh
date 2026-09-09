@@ -287,7 +287,7 @@ provision_sysroot() {
     # sysroot can still build and boot the kernel; it is the ctest fixtures
     # that cannot be rebuilt, so this is a partial provision, not a dead one.
     echo "    no PowerShell interpreter found; cannot build the sysroot." >&2
-    echo "    toolchain/sysroot/lib/libc.a is what the nine ctest fixtures" >&2
+    echo "    toolchain/sysroot/lib/libc.a is what the ctest fixtures" >&2
     echo "    link against.  Without it 'ctest-fixtures.py build' cannot run," >&2
     echo "    though the kernel still builds and boots.  Run by hand with:" >&2
     echo "      powershell -File toolchain/build-sysroot.ps1" >&2

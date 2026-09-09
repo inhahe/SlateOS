@@ -3828,22 +3828,26 @@ mod tests {
             ..MvFlags::default()
         };
         let mut copied = Copied::default();
-        let mut job = Job {
-            flags: &flags,
-            out: &mut out,
-            err: &mut err,
-            answers: &mut answers,
-            copied: &mut copied,
-            umask: coreutils::umask::current(),
-        };
-        announce(
-            &mut job,
-            "copied",
-            Path::new("g"),
-            Path::new("/other/g"),
-            None,
-        );
-        drop(job);
+        // A block, not a `drop`: the point is to end `job`'s borrow of `out`
+        // before reading it, and `Job` has no destructor, so `drop` says
+        // something about lifetimes that only the scope actually does.
+        {
+            let mut job = Job {
+                flags: &flags,
+                out: &mut out,
+                err: &mut err,
+                answers: &mut answers,
+                copied: &mut copied,
+                umask: coreutils::umask::current(),
+            };
+            announce(
+                &mut job,
+                "copied",
+                Path::new("g"),
+                Path::new("/other/g"),
+                None,
+            );
+        }
         assert_eq!(String::from_utf8_lossy(&out), "copied 'g' -> '/other/g'\n");
         assert!(err.is_empty());
 

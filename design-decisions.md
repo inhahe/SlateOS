@@ -69910,6 +69910,266 @@ escaping, it is a smaller option than the one now implemented and can be added
 beside it.
 
 
+### Correction to the table above: `--name` is not being added, because we already have it
+
+The resolution table near the top of this entry promises `--name PATTERN` and
+`--name-case-sensitive`. Measuring the feature before implementing it shows
+that three quarters of "built-in filename globbing" is already in our grep
+under GNU's own spellings, and the fourth quarter belongs to the shell. The
+table stays as written because it records what was decided from lane A's
+inventory; this section records what measuring found, and it wins.
+
+The inventory listed the whole group under "these have no GNU grep
+equivalent". For file selection that is not so:
+
+| Operator's flag | Ours | Measured |
+|---|---|---|
+| `--x_files GLOB` | `--exclude=GLOB` | identical |
+| `--x_paths NAME` (one component) | `--exclude-dir=NAME` | identical -- both skip every `NAME` at every depth |
+| `--x_paths 'node_*'` | `--exclude-dir='node_*'` | **ours is the stronger one**: theirs compares components for equality and matches nothing here |
+| `-f GLOB`, positional globs | the shell | `osh` does pathname expansion, so `grep pat *.rs` already works |
+| `-c` case-sensitive names | -- | nothing to turn on; see below |
+| `--x_paths A/B` (two components) | -- | **the one real gap** |
+
+`--name PATTERN` would therefore be a second spelling of `--include`, and a
+tool with two spellings for one behaviour is worse than one with a single
+spelling, whichever is prettier.
+
+**`-c` is a flag about Windows, not about grep.** The operator's grep matches
+filenames case-*in*sensitively by default and `-c` turns that off, because that
+is what Windows does. `fnmatch` is case-sensitive, GNU's `--include` is
+case-sensitive, and `design.txt` makes the filesystem case-sensitive, so
+`--name-case-sensitive` would be a flag that switches on the only behaviour we
+have. Note the useful flag here is the *inverse* of the one proposed --
+a case-insensitive `--include`, which neither GNU nor we have -- and nobody
+asked for it, so it is not part of this port.
+
+### `--exclude-path=A/B`, the one thing in that group GNU cannot say
+
+`--exclude-dir` matches a **name**, so it cannot say *which* `temp` to skip.
+Ask it to and it agrees and does nothing: the pattern is compared against
+`ent->fts_name`, which never holds a `/`, so a pattern containing one can never
+match. Measured on GNU grep and on ours, on a tree holding `build/temp` and
+`keep/temp`:
+
+| command | skips |
+|---|---|
+| `--exclude-dir=temp` | both |
+| `--exclude-dir=build/temp` | **neither**, silently |
+| operator's `--x_paths build/temp` | `build/temp` |
+| our new `--exclude-path=build/temp` | `build/temp` |
+
+A silent no-op on a plausible command is the class of defect this project cares
+most about, and it is exactly the gap the operator's `--x_paths` fills.
+
+**The spelling passes this entry's own prefix rule, checked before writing
+code** rather than by a gate afterwards. GNU spends four options on `e`;
+`--exclude-` is *already* ambiguous there (`from`, `dir`), `--exclude-d` and
+`--exclude-f` still resolve uniquely after the addition, and `--exclude-p` is
+unknown to GNU today. Every prefix that works now still works.
+
+**Two deliberate divergences from `--x_paths`, both supersets.** Their
+components are compared for equality; ours are globs, so `--exclude-path='node_*/deep'`
+works and a plain name still means itself -- a spec with no metacharacters
+behaves exactly as theirs does. And the glob is applied *per component*, so `*`
+cannot cross a `/` here even though gnulib lets it cross one inside a name:
+`*/temp` means "a `temp` with a parent". Anything else would let a
+two-component spec match a one-component path and undo the distinction the
+option exists to draw.
+
+**A spec that could never match is refused, not accepted.** `--exclude-path=`,
+`--exclude-path=/a` and `--exclude-path=a//b` are usage errors. An option whose
+whole reason for existing is that `--exclude-dir=a/b` silently matches nothing
+must not be able to silently match nothing itself.
+
+
+### `--allow-match-colors` is the third proposed name that breaks a GNU abbreviation
+
+It is spelled `--keep-color-escapes`. `--allow-match-colors` cannot be used for
+the same reason `--all-patterns` could not: GNU grep has exactly one long
+option beginning with `a`, so `grep --a 3 file` resolves to `--after-context`
+today and a second `a` option would stop it resolving.
+
+That is now three for three -- `--all-patterns`, `--proximity` and
+`--allow-match-colors` -- and only the first was caught by a gate. The rule
+in this entry is worth stating as a *procedure* rather than a principle:
+enumerate GNU's long options by first letter once, and read the answer off the
+table before choosing a name.
+
+```text
+a h m o p q s t u v   one option each  -- a new name here BREAKS an abbreviation
+b c d e f i l n r w   two or more      -- safe if the name diverges early
+g j k x y z …         none at all      -- entirely free
+```
+
+`--keep-color-escapes` is in the third row, which is the strongest position
+available: GNU grep has no long option beginning with `k` at all, so every
+prefix of it, down to `--k`, is one GNU rejects today and we accept now.
+
+### What `--keep-color-escapes` lets through is a whitelist, not a blacklist
+
+The operator's `--allow-match-colors` "passes through ANSI colour sequences
+already present in matched text while still filtering every other escape". Ours
+recognises exactly one shape -- `ESC [`, parameter bytes, `m` -- and escapes
+everything else. Written that way round because a blacklist has to be right
+about every sequence that exists and a whitelist only has to be right about
+one.
+
+Measured on the built binary with `od -c`, all in one line of input:
+
+| input | with `--escape-control --keep-color-escapes` |
+|---|---|
+| `ESC [ 3 1 m` … `ESC [ 0 m` | passes through raw |
+| `ESC [ 2 J` (erase display) | `\x1b[2J` |
+| `ESC ] 0 ; pwned BEL` (set window title) | `\x1b]0;pwned\x07` |
+| `ESC [ 3 1` (unfinished) | `\x1b[31` |
+| `BEL` | `\x07` |
+
+The unfinished case is the one worth naming: a sequence with no final byte is
+*not* passed on, because a terminal that receives it will swallow whatever
+arrives next -- including the rest of the grep output -- looking for one.
+
+**Stated honestly, because a safety option that overstates itself is worse than
+none:** SGR is the whole graphic-rendition set, not only colour, so `ESC [ 8 m`
+(conceal) survives and can make text invisible. The line this option draws is
+that output cannot move the cursor, clear the screen, retitle the window or
+provoke a reply from the terminal. It is not a promise that the text is
+legible, and anyone needing the stronger guarantee leaves the option off, which
+is the default.
+
+**It is refused without `--escape-control`, not ignored.** On its own it exempts
+something from an escaping that is not happening, so it could only ever be a
+no-op -- the same defect `--exclude-path` was added to remove, and it would be
+absurd to reintroduce it two commits later. It deliberately does not *imply*
+`--escape-control` either: a flag whose name promises to keep something should
+not quietly start rewriting everything else.
+
+**Whole body, not the match**, for the same reason `--escape-control` is whole
+body: colour in the unmatched half of a line is as much a colour as colour
+inside the match, so covering only the match would leave half the output
+looking like a bug.
+
+
+### `--escape-control` introduced an ambiguity, and `GREP_COLORS` `ec=` answers it
+
+Noticed while porting the operator's sixth colour element rather than while
+writing the option, which is the wrong order and worth saying so.
+
+Under `--escape-control`, a file holding a real `ESC` byte and a file holding
+the four characters `\x1b` produce **the same output**. The option was shipped
+without noticing that, and it is inherent: escaping without escaping the escape
+always collapses those two inputs. `cat -v` has the same defect and no answer
+to it. Doubling every backslash would resolve it and would make every ordinary
+path in the output unreadable, which is the worse trade.
+
+The operator's grep already had the answer, and it is the reason their sixth
+colour element exists: **colour the escape display**. An escape grep wrote is
+painted; one the file contained is not. Ours is `GREP_COLORS` `ec=`, defaulting
+to `94` -- the bright blue theirs uses -- because a disambiguation nobody
+switches on disambiguates nothing.
+
+**Two of the operator's six colour elements were genuinely missing; four were
+already `GREP_COLORS` under other names.**
+
+| Operator's element | Ours |
+|---|---|
+| filename | `fn` |
+| colon separator | `se` |
+| line number | `ln` |
+| match text | `ms` / `mc` |
+| escape code display | **new: `ec`** |
+| error message | still missing -- see below |
+
+`GREP_COLORS` is the *larger* set: `sl`, `cx`, `bn`, `rv` and `ne` have no
+counterpart in the operator's six. An unknown key is ignored in silence by GNU,
+measured, so a `GREP_COLORS` naming `ec` still works there minus the colour --
+the safe direction for a divergence.
+
+**SGR does not nest, so the implementation has to close and reopen.** `ESC[m`
+is an absolute reset, not a pop, so an escape run inside a coloured match emits
+`end(match) start(ec) …\xNN… end(ec) start(match)`. Getting this wrong leaves
+the rest of the match uncoloured, which is why it has a test that reads the
+whole byte sequence rather than checking for the presence of a colour.
+
+**Still missing: the error-message colour**, and deliberately not added with
+this. GNU never colours stderr, and `--color=auto` tests *stdout*, so a
+faithful `er` would need its own check on fd 2 -- a different question from the
+one this entry is answering, and the wrong thing to bundle into a commit about
+stdout.
+
+
+### The last two features, and what the whole exercise turned out to be about
+
+**`--dotall` is `-zo`.** Measured on the operator's `grep.py`, on GNU and on
+ours, on the same three-line file:
+
+```text
+$ python grep.py 'alpha.beta' -f dot.txt --dotall
+dot.txt:alpha
+beta
+
+$ grep -zoH 'alpha.beta' dot.txt | od -c
+0000000 d o t . t x t : a l p h a \n b e t a \0
+```
+
+Byte-identical but for the terminator, and ours matches GNU byte for byte.
+`-z` makes the record separator NUL, so a file with no NUL is one record, `.`
+crosses newlines because they are no longer the separator, and `-o` prints the
+match rather than the record. Their `--dotall` prints the match too, which is
+why their README disables line numbers under it -- a match can span lines.
+
+Lane A's porting constraint said "ours will want a bound, since we have no
+guarantee about file size". The bound question is real and it is `-z`'s, not a
+new option's: our reader is `read_until(NUL, &mut line)` on a growable `Vec`, so
+a whole-file record is a whole file in memory. That is inherent to what `-z`
+*means* and is not new today, so it is left as it is rather than made to
+diverge from upstream on the strength of a hypothetical.
+
+**`--set-colors` splits into a real feature and a Windows workaround.** The real
+part is the seventeen colour *names*: `--set-colors brightgreen brightblack
+brightred default brightred brightblue` against `GREP_COLORS='fn=92:se=90:ln=91:ms=39:ec=94'`.
+Any `GREP_COLORS` capability may now be written by name. The workaround part is
+`--remember`, which writes them to a config file; a shell profile already
+persists an environment variable, and `osh` reads `/etc/profile`,
+`~/.bash_profile`, `~/.bashrc` and `$BASH_ENV` -- verified in
+`userspace/oils/src/main.rs`, not assumed. A config file that duplicates the
+profile would be a second place for the same setting to be wrong.
+
+The direction of that divergence is worth naming, because it is the *unsafe*
+one: GNU ignores a `GREP_COLORS` value that is not SGR parameters, so
+`fn=brightgreen` works here and does nothing there. Accepted because
+`GREP_COLORS` is per-user preference rather than a script interface, and the
+failure mode on a foreign grep is the default colour, not a wrong answer.
+
+### What nine features came to
+
+| | outcome |
+|---|---|
+| proximity matching | built: `--near NUM` |
+| conjunction across patterns | built: `--every-pattern` |
+| control bytes as `\xNN` | built: `--escape-control` (+ `--keep-color-escapes`, + `ec=`) |
+| six colour elements | four were `GREP_COLORS` already; `ec` built; names built; `er` left |
+| filename globbing | `--exclude`/`--exclude-dir` already; **`--exclude-path` built** for the one gap |
+| `--dotall` | already `-zo` |
+| `--allow-match-colors` | built as `--keep-color-escapes` |
+| persistent colour config | the shell profile, already |
+| "your path became the regex" | unportable: the hazard needs their grammar |
+
+**Three of the nine exist because their tool runs on Windows and this one does
+not.** `-f`'s built-in globbing is there because `cmd.exe` does not glob and
+`osh` does; `-c`'s case-sensitive filename matching is there because Windows
+matches names case-insensitively and `design.txt` makes our filesystem
+case-sensitive; `--remember` is there because `cmd.exe` has no profile to put
+an environment variable in. None of the three is a grep feature at all -- each
+is a shell or filesystem capability that their grep had to supply itself.
+
+That is the finding worth keeping from the whole exercise. The request was
+"integrate my grep's additional features", and the honest answer was not nine
+ports: it was six new things, four already present under GNU's own spellings
+(and one of ours *stronger* than theirs), and three that dissolve on a system
+with a real shell.
+
+
 **Against the choice, honestly:** it is the operator's OS, and their muscle
 memory is a real cost that falls on them rather than on a hypothetical GNU
 user. The mitigation is only a mitigation — aliasing the short forms back

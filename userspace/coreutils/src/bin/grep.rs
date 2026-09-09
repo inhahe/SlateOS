@@ -37,6 +37,23 @@
 //!
 //! Exit status: 0 if a line was selected, 1 if none was, 2 on an error.
 //!
+//! ## Beyond GNU
+//!
+//! Five options GNU does not have, ported from the operator's own grep. Each
+//! is opt-in and each is spelled so that no GNU abbreviation that works today
+//! stops working -- see `design-decisions.md` 1008 for the rule and for what
+//! each one diverges from.
+//!
+//! | option | what it does |
+//! |---|---|
+//! | `--every-pattern` | a file prints nothing unless **every** pattern occurs in it |
+//! | `--near=N` | every pattern within `N` lines of another, and only lines inside a satisfying window are selected |
+//! | `--escape-control` | render control bytes as `\xNN` instead of sending them to the terminal |
+//! | `--keep-color-escapes` | under `--escape-control`, let a complete colour sequence through |
+//! | `GREP_COLORS` `ec=` | the colour of an escape `--escape-control` wrote; ours, default `94` |
+//! | `GREP_COLORS` names | any capability may be written `red`, `brightgreen`, `default`, … instead of SGR digits |
+//! | `--exclude-path=A/B` | do not descend into a directory whose *path* ends `A/B` |
+//!
 //! ## Patterns are patterns
 //!
 //! Until `userspace/ere` existed this program matched with `str::contains`, so
@@ -76,7 +93,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
@@ -181,6 +198,18 @@ struct Colors {
     /// `se`: every separator — the `:` and `-` between prefix fields, and the
     /// `--` between context groups.
     separator: Vec<u8>,
+    /// `ec`: the `\xNN` that `--escape-control` writes in place of a control
+    /// byte. Ours, not GNU's -- GNU has nothing to colour here, since it has
+    /// no `--escape-control`.
+    ///
+    /// **It exists to remove an ambiguity that option introduces.** A file
+    /// holding a real `ESC` byte and a file holding the four characters
+    /// `\x1b` print identically under `--escape-control`; the colour is what
+    /// tells them apart. `cat -v` has the same ambiguity and no answer to it.
+    /// Defaulted rather than left empty, to the bright blue the operator's
+    /// grep uses, because a disambiguation nobody switches on disambiguates
+    /// nothing.
+    escape: Vec<u8>,
     /// `rv`: swap `sl` and `cx`, but only when `-v` is also in effect. The
     /// point is that under `-v` the *selected* lines are the boring ones.
     reverse_video: bool,
@@ -202,10 +231,61 @@ impl Default for Colors {
             line_number: b"32".to_vec(),
             byte_number: b"32".to_vec(),
             separator: b"36".to_vec(),
+            // Not GNU's -- GNU has no `ec`. `94` is bright blue, which is what
+            // the operator's grep colours its escape display.
+            escape: b"94".to_vec(),
             reverse_video: false,
             no_erase: false,
         }
     }
+}
+
+/// The SGR parameters a `GREP_COLORS` colour *name* stands for, if it is one.
+///
+/// # Why names at all
+///
+/// The operator's grep sets its six colours by name -- `--set-colors
+/// brightgreen brightblack brightred default brightred brightblue` -- and
+/// `GREP_COLORS` takes SGR parameters, so the same request there reads
+/// `fn=92:se=90:ln=91:ms=39:ec=94`. The names are the substance of that
+/// feature; the config file it writes them to is not, because a shell profile
+/// already persists an environment variable and `osh` reads `/etc/profile`,
+/// `~/.bashrc` and `$BASH_ENV`. See `design-decisions.md` 1008.
+///
+/// The seventeen are theirs exactly, including `default`, which is SGR 39 --
+/// "the terminal's own foreground", not "no colour at all". `ms=` with an
+/// empty value is what means no colour, and it still does: an empty value is
+/// valid SGR and never reaches this function.
+///
+/// # The divergence, and its direction
+///
+/// GNU ignores a `GREP_COLORS` value that is not SGR parameters, in silence
+/// and by design -- so `GREP_COLORS='fn=brightgreen'` works here and is
+/// ignored there. That is the *unsafe* direction for a divergence in a script
+/// interface, and it is accepted here because `GREP_COLORS` is not one: it is
+/// per-user preference, set once in a profile, and the failure mode on a
+/// foreign grep is the default colour rather than a wrong answer.
+fn color_name(value: &[u8]) -> Option<&'static [u8]> {
+    Some(match value {
+        b"black" => b"30",
+        b"red" => b"31",
+        b"green" => b"32",
+        b"yellow" => b"33",
+        b"blue" => b"34",
+        b"magenta" => b"35",
+        b"cyan" => b"36",
+        b"white" => b"37",
+        b"default" => b"39",
+        b"brightblack" => b"90",
+        b"brightred" => b"91",
+        b"brightgreen" => b"92",
+        b"brightyellow" => b"93",
+        b"brightblue" => b"94",
+        b"brightmagenta" => b"95",
+        b"brightcyan" => b"96",
+        b"brightwhite" => b"97",
+        _ => return None,
+    })
 }
 
 impl Colors {
@@ -268,11 +348,22 @@ impl Colors {
                 None => (item, &[][..], false),
             };
             // A capability is SGR parameters: digits and `;`. Anything else is
-            // not something to hand to a terminal.
-            let sane = valued && value.iter().all(|b| b.is_ascii_digit() || *b == b';');
+            // not something to hand to a terminal -- unless it is one of the
+            // seventeen colour names, which stand for parameters. Order
+            // matters: the digit test runs first, so an empty value stays
+            // empty (GNU's "no highlight") and never looks like an unknown
+            // name.
+            let named = value.iter().all(|b| b.is_ascii_digit() || *b == b';');
+            let params: Option<&[u8]> = if !valued {
+                None
+            } else if named {
+                Some(value)
+            } else {
+                color_name(value)
+            };
             let set = |field: &mut Vec<u8>| {
-                if sane {
-                    *field = value.to_vec();
+                if let Some(p) = params {
+                    *field = p.to_vec();
                 }
             };
             match key {
@@ -290,6 +381,10 @@ impl Colors {
                 b"ln" => set(&mut self.line_number),
                 b"bn" => set(&mut self.byte_number),
                 b"se" => set(&mut self.separator),
+                // Ours. A GREP_COLORS naming it is silently ignored by GNU,
+                // which is the safe direction for a divergence: a variable
+                // written for us still works there, minus the colour.
+                b"ec" => set(&mut self.escape),
                 b"rv" => self.reverse_video = true,
                 b"ne" => self.no_erase = true,
                 _ => {}
@@ -446,6 +541,87 @@ fn glob_matches(glob: &[u8], name: &[u8]) -> bool {
     false
 }
 
+/// One `--exclude-path` value: the path components it names, outermost first.
+///
+/// # Why this exists when `--exclude-dir` already does
+///
+/// `--exclude-dir` matches a **name**, so it cannot say *which* `temp` to
+/// skip. GNU accepts `--exclude-dir=build/temp` and then excludes nothing at
+/// all -- the pattern is compared against `ent->fts_name`, which never holds a
+/// `/`, so it can never match. That is a silent no-op on a plausible command,
+/// which is the class of defect this project cares most about, and it is the
+/// one gap the operator's `--x_paths` fills that GNU has no way to express.
+/// Measured on GNU grep 3.x, on a tree holding `build/temp` and `keep/temp`:
+///
+/// | command | skips |
+/// |---|---|
+/// | `--exclude-dir=temp` | both -- a name matches at every depth |
+/// | `--exclude-dir=build/temp` | **neither** |
+/// | `--exclude-path=build/temp` | `build/temp` only |
+///
+/// # The matching rule
+///
+/// The spec's components are matched against the **tail** of the directory's
+/// path, one glob per component, so `build/temp` skips `./build/temp` and
+/// `a/b/build/temp` alike but leaves `keep/temp` and a bare `build` alone.
+/// A suffix rather than a whole-path match because that is what makes it
+/// useful without knowing where the walk started, and it is the operator's
+/// rule too.
+///
+/// # Two deliberate divergences from the operator's `--x_paths`
+///
+/// Their components are compared for **equality**; ours are globs, so
+/// `--exclude-path='node_*/deep'` works and an ordinary name still means
+/// itself. That is a superset -- a spec with no metacharacters behaves exactly
+/// as theirs does -- and it keeps the option consistent with the
+/// `--exclude-dir` beside it, which is a glob.
+///
+/// The glob is applied **per component**, so a `*` cannot cross a `/` here
+/// even though [`glob_matches`] lets it cross one in a name. `*/temp`
+/// therefore means "a `temp` with a parent", not "any path ending in temp".
+/// Anything else would make a two-component spec able to match one component
+/// and undo the distinction the option exists to draw.
+///
+/// See `design-decisions.md` 1008.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct PathSpec {
+    /// One glob per component. Never empty, and no element is empty --
+    /// [`path_spec_arg`] refuses both, because either would produce a spec
+    /// that silently matches nothing, which is the very defect this option
+    /// removes.
+    components: Vec<Vec<u8>>,
+}
+
+impl PathSpec {
+    /// Whether `path` ends with this spec's components.
+    ///
+    /// `path` is taken **as this run names it**: under `grep -r pat .` the
+    /// walk builds `./build/temp`, and under `grep -r pat /srv/x` it builds
+    /// `/srv/x/build/temp`. A leading `.` is not a component and a `..` is,
+    /// which is `Path::components`' rule and also `pathlib`'s, so the operator's
+    /// specs carry over unchanged.
+    fn matches(&self, path: &Path) -> bool {
+        let names: Vec<Cow<'_, [u8]>> = path
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(n) => Some(quote::os_bytes(n)),
+                Component::ParentDir => Some(Cow::Borrowed(&b".."[..])),
+                // A root, a Windows prefix and a `.` are not names, so they
+                // are not components a spec can name.
+                Component::RootDir | Component::CurDir => None,
+                Component::Prefix(_) => None,
+            })
+            .collect();
+        let Some(start) = names.len().checked_sub(self.components.len()) else {
+            return false;
+        };
+        self.components
+            .iter()
+            .zip(names.get(start..).unwrap_or_default())
+            .all(|(glob, name)| fnmatch(glob, name, FnmatchFlags::NONE))
+    }
+}
+
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct Options {
@@ -454,6 +630,10 @@ struct Options {
     /// `--escape-control`: render control bytes as `\xNN` instead of sending
     /// them to the terminal. See [`escaped`].
     escape_control: bool,
+    /// `--keep-color-escapes`: under `--escape-control`, a complete SGR
+    /// sequence survives instead of being escaped. Meaningless on its own, and
+    /// refused on its own rather than ignored. See [`sgr_len`].
+    keep_color_escapes: bool,
     /// `--near NUM`: every pattern must occur within NUM lines of another,
     /// and only matching lines inside a satisfying window are selected. The
     /// sliding-window form of [`Options::every_pattern`]; see
@@ -484,6 +664,10 @@ struct Options {
     /// `--include` never reaches a directory and cannot filter the walk by the
     /// names of the directories in it.
     dir_selectors: Selectors,
+    /// `--exclude-path`, in the order written. A directory is skipped if
+    /// **any** of them matches -- there is no include form and so no ordering
+    /// to respect, unlike [`Selectors`]. See [`PathSpec`].
+    exclude_paths: Vec<PathSpec>,
     /// `-R`: also follow a symbolic link found *during* the walk.
     ///
     /// `-r` and `-R` differ over exactly this. Both follow a link named on the
@@ -657,6 +841,17 @@ impl Options {
         }
     }
 
+    /// Whether `--exclude-path` rejects this directory.
+    ///
+    /// Deliberately not folded into [`Options::skipped_file`]: that asks one
+    /// glob about one *name*, and this asks a sequence of globs about the tail
+    /// of a *path*. Only directories are ever asked -- the operator's
+    /// `--x_paths` prunes the walk, and a file's own name is `--exclude`'s
+    /// business.
+    fn excluded_dir_path(&self, path: &Path) -> bool {
+        self.exclude_paths.iter().any(|spec| spec.matches(path))
+    }
+
     /// The byte that ends a line of input and of output: `\n`, or NUL under
     /// `-z`.
     fn line_sep(&self) -> u8 {
@@ -799,6 +994,7 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("exclude", Takes::Required),
     ("exclude-from", Takes::Required),
     ("exclude-dir", Takes::Required),
+    ("exclude-path", Takes::Required),
     ("file", Takes::Required),
     ("files-with-matches", Takes::Nothing),
     ("files-without-match", Takes::Nothing),
@@ -826,6 +1022,7 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("every-pattern", Takes::Nothing),
     ("near", Takes::Required),
     ("escape-control", Takes::Nothing),
+    ("keep-color-escapes", Takes::Nothing),
     ("invert-match", Takes::Nothing),
     ("silent", Takes::Nothing),
     ("text", Takes::Nothing),
@@ -904,6 +1101,8 @@ Miscellaneous:
       --every-pattern        a file must contain every pattern, not any of them
       --near=NUM             every pattern within NUM lines of another
       --escape-control       show control bytes as \\xNN instead of sending them
+      --keep-color-escapes   with --escape-control, let a complete colour
+                             sequence through unescaped
   -v, --invert-match        select non-matching lines
   -V, --version             display version information and exit
       --help                display this help text and exit
@@ -932,6 +1131,8 @@ Output control:
       --exclude=GLOB        skip files that match GLOB
       --exclude-from=FILE   skip files that match any file pattern from FILE
       --exclude-dir=GLOB    skip directories that match GLOB
+      --exclude-path=SPEC   skip directories whose path ends with SPEC,
+                            a /-separated sequence of name patterns
   -L, --files-without-match  print only names of FILEs with no selected lines
   -l, --files-with-matches  print only names of FILEs with selected lines
   -c, --count               print only a count of selected lines per FILE
@@ -1031,10 +1232,12 @@ enum Flag {
     EveryPattern,
     Near,
     EscapeControl,
+    KeepColorEscapes,
     BinaryFiles,
     Color,
     Exclude,
     ExcludeDir,
+    ExcludePath,
     ExcludeFrom,
     GroupSeparator,
     NoGroupSeparator,
@@ -1070,6 +1273,7 @@ fn long_flag(name: &str) -> Flag {
         "exclude" => Flag::Exclude,
         "exclude-from" => Flag::ExcludeFrom,
         "exclude-dir" => Flag::ExcludeDir,
+        "exclude-path" => Flag::ExcludePath,
         "file" => Flag::Short(b'f'),
         "files-with-matches" => Flag::Short(b'l'),
         "files-without-match" => Flag::Short(b'L'),
@@ -1077,6 +1281,7 @@ fn long_flag(name: &str) -> Flag {
         "every-pattern" => Flag::EveryPattern,
         "near" => Flag::Near,
         "escape-control" => Flag::EscapeControl,
+        "keep-color-escapes" => Flag::KeepColorEscapes,
         "include" => Flag::Include,
         "ignore-case" => Flag::Short(b'i'),
         "no-ignore-case" => Flag::NoIgnoreCase,
@@ -1340,6 +1545,9 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
                 }
                 opts.dir_selectors.push(false, pat);
             }
+            Flag::ExcludePath => opts
+                .exclude_paths
+                .push(path_spec_arg(&quote::os_bytes(&required(value)))?),
             Flag::ExcludeFrom => {
                 let path = required(value);
                 let raw = fs::read(&path)
@@ -1367,6 +1575,7 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
             Flag::EveryPattern => opts.every_pattern = true,
             Flag::Near => opts.near = near_arg(&quote::os_bytes(&required(value)))?,
             Flag::EscapeControl => opts.escape_control = true,
+            Flag::KeepColorEscapes => opts.keep_color_escapes = true,
             Flag::LineBuffered => opts.line_buffered = true,
             // Upstream's `default: usage (EXIT_TROUBLE)`. Unreachable as things
             // stand — `SHORT_OPTIONS` lists exactly the letters matched above,
@@ -1411,6 +1620,18 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
             _ => first,
         };
         patterns.extend(split_arg_patterns(&stripped));
+    }
+
+    // `--keep-color-escapes` exempts something from an escaping that is off by
+    // default, so on its own it can only be a no-op -- and a silent no-op on a
+    // plausible command is the defect `--exclude-path` was added to remove. It
+    // is refused rather than ignored, and deliberately does *not* imply
+    // `--escape-control`: a flag whose name promises to keep something should
+    // not quietly start rewriting everything else.
+    if opts.keep_color_escapes && !opts.escape_control {
+        return Err(
+            GREP.usage("--keep-color-escapes has no meaning without --escape-control".to_string())
+        );
     }
 
     // Recursion with no operand walks the working directory, as GNU does;
@@ -1484,6 +1705,32 @@ fn near_arg(value: &[u8]) -> Result<Option<usize>, getopt::Error> {
         }
         _ => Err(GREP.usage("invalid --near distance".to_string())),
     }
+}
+
+/// A `--exclude-path` value split into its components, with trailing slashes
+/// stripped as `--exclude-dir` strips them.
+///
+/// # Errors
+///
+/// An empty value, or one holding an empty component (`/a`, `a//b`), is a
+/// usage error rather than a spec that quietly matches nothing. This option
+/// exists *because* `--exclude-dir=a/b` silently matches nothing; one that
+/// could do the same thing itself would be self-defeating.
+fn path_spec_arg(value: &[u8]) -> Result<PathSpec, getopt::Error> {
+    let mut trimmed = value;
+    while trimmed.len() > 1 && trimmed.last() == Some(&b'/') {
+        trimmed = trimmed
+            .get(..trimmed.len().saturating_sub(1))
+            .unwrap_or_default();
+    }
+    if trimmed.is_empty() || trimmed == b"/" {
+        return Err(GREP.usage("empty --exclude-path".to_string()));
+    }
+    let components: Vec<Vec<u8>> = trimmed.split(|b| *b == b'/').map(<[u8]>::to_vec).collect();
+    if components.iter().any(Vec::is_empty) {
+        return Err(GREP.usage("empty component in --exclude-path".to_string()));
+    }
+    Ok(PathSpec { components })
 }
 
 fn max_count_arg(value: &[u8]) -> Result<Option<usize>, getopt::Error> {
@@ -1938,11 +2185,11 @@ fn near_eligible_lines(data: &[u8], pats: &[Pat], opts: &Options, near: usize) -
         // expire, then test. A pattern matched on this line cannot expire on
         // it, since the distance is zero.
         for slot in last.iter_mut() {
-            if let Some(ln) = *slot {
-                if lineno.saturating_sub(ln) >= near {
-                    *slot = None;
-                    live = live.saturating_sub(1);
-                }
+            if let Some(ln) = *slot
+                && lineno.saturating_sub(ln) >= near
+            {
+                *slot = None;
+                live = live.saturating_sub(1);
             }
         }
         // A future window's earliest live match is strictly newer than
@@ -2476,6 +2723,13 @@ impl Run<'_> {
             return;
         }
 
+        // A directory named on the command line faces `--exclude-path` too,
+        // matching `--exclude-dir`, which stops `grep -r pat sub` when `sub`
+        // is excluded rather than only pruning it mid-walk.
+        if is_dir && self.opts.excluded_dir_path(Path::new(f)) {
+            return;
+        }
+
         if is_dir {
             match self.opts.directories {
                 Directories::Recurse => {
@@ -2811,6 +3065,9 @@ impl Run<'_> {
                         if self.opts.skipped_file(&name, target.is_dir()) {
                             continue;
                         }
+                        if target.is_dir() && self.opts.excluded_dir_path(&path) {
+                            continue;
+                        }
                         if target.is_dir() {
                             self.walk(&path, ancestors);
                         } else if !(self.opts.skip_devices(false) && filekind::is_device(&target)) {
@@ -2828,6 +3085,10 @@ impl Run<'_> {
             }
 
             if self.opts.skipped_file(&name, md.is_dir()) {
+                continue;
+            }
+
+            if md.is_dir() && self.opts.excluded_dir_path(&path) {
                 continue;
             }
 
@@ -2935,24 +3196,151 @@ fn line_flush(out: &mut impl Write, opts: &Options) -> io::Result<()> {
 /// others would be worse than none, because it invites the belief that output
 /// is now safe to look at.
 ///
+/// # The ambiguity it introduces, and the answer to it
+///
+/// A file holding a real `ESC` byte and a file holding the four characters
+/// `\x1b` print **identically** under this option. That is inherent to
+/// escaping without escaping the escape, and `cat -v` has the same ambiguity
+/// with no answer to it -- doubling every backslash would resolve it and would
+/// make every ordinary path in the output unreadable, which is a worse trade.
+///
+/// The answer here is the `ec` capability: when colour is on, an escape this
+/// function wrote is painted and one the file contained is not. See
+/// [`Colors::escape`], which is defaulted rather than left empty for exactly
+/// this reason.
+///
+/// # The one exemption
+///
+/// `--keep-color-escapes` lets a *complete* SGR sequence through unescaped, so
+/// that `ls --color | grep --escape-control --keep-color-escapes pat` keeps its
+/// colours. [`sgr_len`] is the whitelist and documents what it deliberately
+/// does not cover. The exemption applies to the whole body for the same reason
+/// the escaping does: colour in the unmatched half of a line is as much a
+/// colour as colour inside the match, so covering only the match would leave
+/// half the output looking like a bug.
+///
+/// The exemption is refused without `--escape-control` rather than ignored --
+/// on its own it could only ever be a no-op.
+///
 /// Flagged to the operator rather than done quietly — see `design-decisions.md`
 /// §1008.
-fn escaped<'a>(body: &'a [u8], opts: &Options) -> Cow<'a, [u8]> {
-    if !opts.escape_control || !body.iter().any(|b| *b < 0x20 && *b != b'\n' && *b != b'\r') {
+fn escaped<'a>(body: &'a [u8], opts: &Options, cap: &[u8]) -> Cow<'a, [u8]> {
+    if !opts.escape_control {
         return Cow::Borrowed(body);
     }
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = Vec::with_capacity(body.len());
-    for &b in body {
-        if b < 0x20 && b != b'\n' && b != b'\r' {
-            out.extend_from_slice(b"\\x");
-            out.push(HEX[usize::from(b >> 4)]);
-            out.push(HEX[usize::from(b & 0x0f)]);
-        } else {
-            out.push(b);
+    // The colour a run of escapes is painted, and the one to restore after it.
+    // Empty unless colour is on and `ec` is set, in which case nothing below
+    // emits an escape of its own and the output is byte-identical to plain
+    // escaping.
+    let ec: &[u8] = if opts.color { &opts.colors.escape } else { &[] };
+    // Built at the first byte that actually changes, and never before: the
+    // cost of the option on ordinary text is one scan and no allocation.
+    let mut out: Option<Vec<u8>> = None;
+    // Whether the bytes just written are inside an open `ec` run. Runs, not
+    // bytes: `\x1b\x5b` is one coloured stretch, not two, which matters
+    // because the alternative writes a colour pair per byte.
+    let mut run = false;
+    let mut i = 0usize;
+    while i < body.len() {
+        if opts.keep_color_escapes
+            && let Some(n) = sgr_len(body, i)
+        {
+            let end = i.saturating_add(n);
+            if let Some(o) = out.as_mut() {
+                close_escape_run(o, &mut run, opts, cap, ec);
+                o.extend_from_slice(body.get(i..end).unwrap_or_default());
+            }
+            i = end;
+            continue;
         }
+        let b = *body.get(i).unwrap_or(&0);
+        if b < 0x20 && b != b'\n' && b != b'\r' {
+            let o = out.get_or_insert_with(|| {
+                let mut v = Vec::with_capacity(body.len().saturating_add(16));
+                v.extend_from_slice(body.get(..i).unwrap_or_default());
+                v
+            });
+            if !ec.is_empty() && !run {
+                // Close the surrounding colour first: SGR does not nest, so
+                // the only way back to `cap` afterwards is to reopen it.
+                o.extend_from_slice(&opts.colors.end(cap));
+                o.extend_from_slice(&opts.colors.start(ec));
+                run = true;
+            }
+            o.extend_from_slice(b"\\x");
+            o.push(HEX[usize::from(b >> 4)]);
+            o.push(HEX[usize::from(b & 0x0f)]);
+        } else if let Some(o) = out.as_mut() {
+            close_escape_run(o, &mut run, opts, cap, ec);
+            o.push(b);
+        }
+        i = i.saturating_add(1);
     }
-    Cow::Owned(out)
+    if let Some(o) = out.as_mut() {
+        close_escape_run(o, &mut run, opts, cap, ec);
+    }
+    out.map_or(Cow::Borrowed(body), Cow::Owned)
+}
+
+/// End an open `ec` run and put the surrounding capability back.
+///
+/// Split out because it is needed at three points in [`escaped`] -- before
+/// ordinary text, before a passed-through colour sequence, and at the end of
+/// the body -- and forgetting any one of them would leave the terminal painted
+/// in the escape colour.
+fn close_escape_run(out: &mut Vec<u8>, run: &mut bool, opts: &Options, cap: &[u8], ec: &[u8]) {
+    if !*run {
+        return;
+    }
+    out.extend_from_slice(&opts.colors.end(ec));
+    out.extend_from_slice(&opts.colors.start(cap));
+    *run = false;
+}
+
+/// The length of the complete SGR sequence beginning at `body[i]`, if one
+/// begins there: `ESC [`, then parameter bytes, then `m`.
+///
+/// # A whitelist, and why it has to be one
+///
+/// This is what `--keep-color-escapes` lets past [`escaped`], so it decides
+/// what a hostile file can still do to the reader's terminal. It is written as
+/// "recognise exactly this and nothing else" rather than "escape the dangerous
+/// ones", because the second form has to be right about every sequence that
+/// exists and the first only has to be right about one.
+///
+/// What that excludes is the point: `ESC [ 2 J` (erase display), `ESC [ H`
+/// (cursor home), `ESC ] 0 ; … BEL` (set the window title), `ESC ] 8 ; ; url`
+/// (a hyperlink whose text need not be its target), `ESC c` (full reset), and
+/// every device-report sequence that makes the terminal *send* something back.
+/// None of them end in `m`, so none of them are matched here.
+///
+/// An **incomplete** sequence is not matched either. `ESC [ 3 1` at the end of
+/// a line has no final byte, so it is escaped like any other stray `ESC`,
+/// rather than being passed on to swallow whatever the terminal reads next.
+///
+/// # What still gets through, honestly
+///
+/// SGR is colour *and* the rest of the graphic-rendition set, so `ESC [ 8 m`
+/// (conceal) survives and can make matched text invisible. That is the cost of
+/// asking for colours to survive, and it is a legibility problem rather than a
+/// terminal-control one -- the line this option draws is that the output
+/// cannot move the cursor, clear the screen, retitle the window or provoke a
+/// reply. Anyone who needs the stronger guarantee should leave this option off,
+/// which is the default.
+fn sgr_len(body: &[u8], i: usize) -> Option<usize> {
+    if body.get(i) != Some(&0x1b) || body.get(i.saturating_add(1)) != Some(&b'[') {
+        return None;
+    }
+    let mut j = i.saturating_add(2);
+    while matches!(body.get(j), Some(b'0'..=b'9' | b';')) {
+        j = j.saturating_add(1);
+    }
+    if body.get(j) == Some(&b'm') {
+        Some(j.saturating_add(1).saturating_sub(i))
+    } else {
+        None
+    }
 }
 
 fn write_body(
@@ -2963,7 +3351,7 @@ fn write_body(
     opts: &Options,
 ) -> io::Result<()> {
     if !opts.color {
-        return out.write_all(&escaped(body, opts));
+        return out.write_all(&escaped(body, opts, b""));
     }
     let line_cap = opts.line_cap(selected);
     let match_cap = opts.match_cap(selected);
@@ -2977,10 +3365,14 @@ fn write_body(
                 continue;
             }
             out.write_all(&opts.colors.start(line_cap))?;
-            out.write_all(&escaped(body.get(done..s).unwrap_or_default(), opts))?;
+            out.write_all(&escaped(
+                body.get(done..s).unwrap_or_default(),
+                opts,
+                line_cap,
+            ))?;
             out.write_all(&opts.colors.wrap(
                 match_cap,
-                &escaped(body.get(s..e).unwrap_or_default(), opts),
+                &escaped(body.get(s..e).unwrap_or_default(), opts, match_cap),
             ))?;
             done = e;
         }
@@ -2991,12 +3383,16 @@ fn write_body(
             .saturating_sub(usize::from(body.last() == Some(&b'\r')));
         if tail_end > done {
             out.write_all(&opts.colors.start(line_cap))?;
-            out.write_all(&escaped(body.get(done..tail_end).unwrap_or_default(), opts))?;
+            out.write_all(&escaped(
+                body.get(done..tail_end).unwrap_or_default(),
+                opts,
+                line_cap,
+            ))?;
             out.write_all(&opts.colors.end(line_cap))?;
             done = tail_end;
         }
     }
-    out.write_all(&escaped(body.get(done..).unwrap_or_default(), opts))
+    out.write_all(&escaped(body.get(done..).unwrap_or_default(), opts, b""))
 }
 
 /// The one stream being searched, and what its prefixes need to know about it.
@@ -3168,7 +3564,7 @@ fn search_stream(
         // can still be reached as context. That is what the operator's README
         // describes, and keeping it here means there is one implementation of
         // context rather than two.
-        let in_window = eligible.map_or(true, |set| set.contains(&lineno));
+        let in_window = eligible.is_none_or(|set| set.contains(&lineno));
         if in_window && line_selected(body, pats, opts).map_err(limit_err)? {
             match_count = match_count.saturating_add(1);
             if stop_at_first {
@@ -3678,6 +4074,126 @@ mod tests {
         assert!(slash.skipped_file(b"deep", true));
     }
 
+    fn xpath(specs: &[&str]) -> Options {
+        let mut argv: Vec<String> = specs
+            .iter()
+            .map(|s| format!("--exclude-path={s}"))
+            .collect();
+        argv.push("foo".to_string());
+        let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+        parse_ok(&borrowed).opts
+    }
+
+    /// The whole reason the option exists: `--exclude-dir` cannot say *which*
+    /// `temp`, and GNU's answer to being asked is to exclude nothing at all.
+    ///
+    /// Measured on GNU grep before this was written -- `--exclude-dir=temp`
+    /// skips `build/temp` and `keep/temp` both, and `--exclude-dir=build/temp`
+    /// skips neither, because the pattern meets a base name that can never
+    /// hold a `/`.
+    #[test]
+    fn exclude_path_names_which_temp() {
+        let o = xpath(&["build/temp"]);
+        assert!(o.excluded_dir_path(Path::new("./build/temp")));
+        assert!(!o.excluded_dir_path(Path::new("./keep/temp")));
+        assert!(!o.excluded_dir_path(Path::new("./build")));
+
+        // …and the one-component spelling still means what --exclude-dir means.
+        let one = xpath(&["temp"]);
+        assert!(one.excluded_dir_path(Path::new("./build/temp")));
+        assert!(one.excluded_dir_path(Path::new("./keep/temp")));
+    }
+
+    /// A suffix match, so the spec need not know where the walk started.
+    #[test]
+    fn exclude_path_matches_at_any_depth() {
+        let o = xpath(&["build/temp"]);
+        assert!(o.excluded_dir_path(Path::new("build/temp")));
+        assert!(o.excluded_dir_path(Path::new("/srv/x/y/build/temp")));
+        // A *prefix* is not a suffix: the components must be the last ones.
+        assert!(!o.excluded_dir_path(Path::new("build/temp/inner")));
+    }
+
+    /// Each component is a glob, which the operator's `--x_paths` is not --
+    /// theirs compares components for equality. A plain name behaves
+    /// identically either way, so this is a superset rather than a divergence.
+    #[test]
+    fn exclude_path_globs_each_component() {
+        let o = xpath(&["node_*/deep"]);
+        assert!(o.excluded_dir_path(Path::new("./node_modules/deep")));
+        assert!(!o.excluded_dir_path(Path::new("./src/deep")));
+    }
+
+    /// The glob is applied per component, so `*` cannot cross a `/` here even
+    /// though [`glob_matches`] lets it cross one inside a name. `*/temp`
+    /// therefore means "a `temp` that has a parent" -- without this, a
+    /// two-component spec could match a one-component path and the distinction
+    /// the option draws would collapse.
+    #[test]
+    fn exclude_path_stars_do_not_cross_a_slash() {
+        let o = xpath(&["*/temp"]);
+        assert!(o.excluded_dir_path(Path::new("./build/temp")));
+        assert!(!o.excluded_dir_path(Path::new("./temp")));
+        assert!(!o.excluded_dir_path(Path::new("temp")));
+    }
+
+    /// More components than the path has is not a match, and not a panic.
+    #[test]
+    fn exclude_path_longer_than_the_path_never_matches() {
+        assert!(!xpath(&["a/b/c"]).excluded_dir_path(Path::new("b/c")));
+        assert!(!xpath(&["a"]).excluded_dir_path(Path::new("")));
+    }
+
+    /// `.` is not a component and `..` is, which is `Path::components`' rule
+    /// and `pathlib`'s -- so the operator's specs carry over unchanged, and a
+    /// spec written without the `./` still matches the path the walk builds.
+    #[test]
+    fn exclude_path_agrees_with_pathlib_about_dot_and_dotdot() {
+        assert!(xpath(&["build/temp"]).excluded_dir_path(Path::new("././build/temp")));
+        assert!(xpath(&["../temp"]).excluded_dir_path(Path::new("a/../temp")));
+    }
+
+    /// Any of several specs may match; they are not ordered against each other
+    /// the way `--include`/`--exclude` segments are, because there is no
+    /// include form for a path and so nothing to order.
+    #[test]
+    fn exclude_path_accepts_more_than_one() {
+        let o = xpath(&["build/temp", "node_modules/deep"]);
+        assert!(o.excluded_dir_path(Path::new("./build/temp")));
+        assert!(o.excluded_dir_path(Path::new("./node_modules/deep")));
+        assert!(!o.excluded_dir_path(Path::new("./keep/temp")));
+    }
+
+    /// A trailing slash is stripped, as `--exclude-dir` strips one: shell
+    /// completion appends them, and the intent is not in doubt.
+    #[test]
+    fn exclude_path_strips_a_trailing_slash() {
+        assert!(xpath(&["build/temp//"]).excluded_dir_path(Path::new("./build/temp")));
+    }
+
+    /// A spec that could never match is refused rather than accepted and
+    /// ignored. This option exists *because* `--exclude-dir=a/b` is a silent
+    /// no-op; one that could be a silent no-op itself would be self-defeating.
+    #[test]
+    fn exclude_path_refuses_a_spec_that_could_never_match() {
+        assert_eq!(
+            parse_err(&["--exclude-path=", "foo"]),
+            "empty --exclude-path"
+        );
+        assert_eq!(
+            parse_err(&["--exclude-path=/", "foo"]),
+            "empty --exclude-path"
+        );
+        assert_eq!(
+            parse_err(&["--exclude-path=/a", "foo"]),
+            "empty component in --exclude-path"
+        );
+        assert_eq!(
+            parse_err(&["--exclude-path=a//b", "foo"]),
+            "empty component in --exclude-path"
+        );
+    }
+
     /// The suffix pass of gnulib's `exclude_fnmatch`, which is what lets a
     /// pattern written without the `./` still match an operand written with it.
     #[test]
@@ -4044,9 +4560,11 @@ mod tests {
     }
 
     fn esc(bytes: &[u8], on: bool) -> Vec<u8> {
-        let mut o = Options::default();
-        o.escape_control = on;
-        escaped(bytes, &o).into_owned()
+        let o = Options {
+            escape_control: on,
+            ..Options::default()
+        };
+        escaped(bytes, &o, b"").into_owned()
     }
 
     /// Off by default: this changes GNU's output, so it only happens on ask.
@@ -4085,9 +4603,265 @@ mod tests {
     /// Nothing to do means nothing allocated.
     #[test]
     fn escape_control_borrows_when_there_is_nothing_to_change() {
-        let mut o = Options::default();
-        o.escape_control = true;
-        assert!(matches!(escaped(b"ordinary text", &o), Cow::Borrowed(_)));
+        let o = Options {
+            escape_control: true,
+            ..Options::default()
+        };
+        assert!(matches!(
+            escaped(b"ordinary text", &o, b""),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    fn esc_keep(bytes: &[u8]) -> Vec<u8> {
+        let o = Options {
+            escape_control: true,
+            keep_color_escapes: true,
+            ..Options::default()
+        };
+        escaped(bytes, &o, b"").into_owned()
+    }
+
+    /// The whitelist, stated as what it recognises.
+    #[test]
+    fn sgr_len_measures_a_complete_colour_sequence() {
+        assert_eq!(sgr_len(b"\x1b[31mx", 0), Some(5));
+        assert_eq!(sgr_len(b"\x1b[0m", 0), Some(4));
+        // No parameters at all is still SGR -- `ESC[m` means `ESC[0m`.
+        assert_eq!(sgr_len(b"\x1b[m", 0), Some(3));
+        assert_eq!(sgr_len(b"\x1b[1;38;5;208mx", 0), Some(13));
+        // …and it measures from `i`, not from the start.
+        assert_eq!(sgr_len(b"ab\x1b[31m", 2), Some(5));
+    }
+
+    /// Everything the whitelist deliberately does not cover. Each of these is
+    /// a sequence a hostile file could carry, and each is what the option is
+    /// *for* -- if any were matched here, the guarantee would be gone.
+    #[test]
+    fn sgr_len_refuses_everything_that_is_not_a_colour() {
+        assert_eq!(sgr_len(b"\x1b[2J", 0), None); // erase display
+        assert_eq!(sgr_len(b"\x1b[H", 0), None); // cursor home
+        assert_eq!(sgr_len(b"\x1b[6n", 0), None); // device status report
+        assert_eq!(sgr_len(b"\x1b]0;title\x07", 0), None); // set window title
+        assert_eq!(sgr_len(b"\x1bc", 0), None); // full reset
+        assert_eq!(sgr_len(b"[31m", 0), None); // no ESC at all
+        // An unfinished one: no final byte, so it is not a sequence yet and is
+        // escaped like any other stray ESC rather than passed on to swallow
+        // whatever the terminal reads next.
+        assert_eq!(sgr_len(b"\x1b[31", 0), None);
+        assert_eq!(sgr_len(b"\x1b[31x", 0), None);
+    }
+
+    /// The colour survives and the dangerous sequence beside it does not, in
+    /// the same line. Measured against the real binary with `od -c` before
+    /// being written down here.
+    #[test]
+    fn keep_color_escapes_passes_colour_and_stops_the_rest() {
+        let out = esc_keep(b"a\x1b[31mhit\x1b[0m b\x1b[2J c\x07");
+        assert_eq!(out, b"a\x1b[31mhit\x1b[0m b\\x1b[2J c\\x07".to_vec());
+    }
+
+    /// A window title is an OSC, not an SGR, and this is the sequence that
+    /// makes the difference worth a whitelist: it ends in BEL, carries
+    /// arbitrary text, and on some terminals can be read back.
+    #[test]
+    fn keep_color_escapes_stops_a_window_title() {
+        assert_eq!(
+            esc_keep(b"t\x1b]0;pwned\x07 x"),
+            b"t\\x1b]0;pwned\\x07 x".to_vec()
+        );
+    }
+
+    /// The exemption covers the whole body, as the escaping does: colour in
+    /// the unmatched half of a line is as much a colour as colour inside the
+    /// match, and covering only the match would leave half the output looking
+    /// like a bug.
+    #[test]
+    fn keep_color_escapes_covers_text_outside_the_match() {
+        let out = esc_keep(b"\x1b[32mbefore\x1b[0m hit \x1b[32mafter\x1b[0m");
+        assert!(!out.windows(4).any(|w| w == b"\\x1b"));
+    }
+
+    /// Nothing to change means nothing allocated, even when the body is full
+    /// of escape sequences.
+    #[test]
+    fn keep_color_escapes_borrows_when_every_sequence_is_a_colour() {
+        let o = Options {
+            escape_control: true,
+            keep_color_escapes: true,
+            ..Options::default()
+        };
+        assert!(matches!(
+            escaped(b"\x1b[31mred\x1b[0m", &o, b""),
+            Cow::Borrowed(_)
+        ));
+        // …and one bad byte among good sequences is enough to make a copy.
+        assert!(matches!(
+            escaped(b"\x1b[31mred\x1b[0m\x07", &o, b""),
+            Cow::Owned(_)
+        ));
+    }
+
+    /// Without `--escape-control` there is nothing to be exempt from, so the
+    /// flag could only ever be a no-op. It is refused instead, and it does not
+    /// imply `--escape-control`: a flag whose name promises to *keep*
+    /// something should not quietly start rewriting everything else.
+    #[test]
+    fn keep_color_escapes_is_refused_on_its_own() {
+        assert_eq!(
+            parse_err(&["--keep-color-escapes", "foo"]),
+            "--keep-color-escapes has no meaning without --escape-control"
+        );
+        let both = parse_ok(&["--escape-control", "--keep-color-escapes", "foo"]).opts;
+        assert!(both.escape_control && both.keep_color_escapes);
+    }
+
+    fn esc_col(bytes: &[u8], cap: &[u8], ec: &str) -> Vec<u8> {
+        let mut colors = Colors {
+            no_erase: true,
+            ..Colors::default()
+        };
+        colors.apply(format!("ec={ec}").as_bytes());
+        let o = Options {
+            escape_control: true,
+            color: true,
+            colors,
+            ..Options::default()
+        };
+        escaped(bytes, &o, cap).into_owned()
+    }
+
+    /// The escape colour has to close the surrounding one and put it back,
+    /// because SGR does not nest: `ESC[m` is an absolute reset, so without the
+    /// reopen the rest of the match would come out uncoloured.
+    ///
+    /// Measured against the built binary before being written here.
+    #[test]
+    fn the_escape_colour_reopens_the_colour_it_interrupted() {
+        assert_eq!(
+            esc_col(b"AA\x07BB", b"01;31", "94"),
+            b"AA\x1b[m\x1b[94m\\x07\x1b[m\x1b[01;31mBB".to_vec()
+        );
+    }
+
+    /// Outside any coloured region there is nothing to close or reopen, so the
+    /// run is simply painted.
+    #[test]
+    fn the_escape_colour_needs_no_reopen_outside_a_coloured_run() {
+        assert_eq!(
+            esc_col(b"a\x07b", b"", "94"),
+            b"a\x1b[94m\\x07\x1b[mb".to_vec()
+        );
+    }
+
+    /// Consecutive control bytes are one coloured stretch, not one per byte --
+    /// the alternative writes a colour pair around every `\xNN`, which for a
+    /// binary-ish line is most of the output.
+    #[test]
+    fn consecutive_escapes_share_one_colour_run() {
+        assert_eq!(
+            esc_col(b"a\x07\x08\x09b", b"", "94"),
+            b"a\x1b[94m\\x07\\x08\\x09\x1b[mb".to_vec()
+        );
+    }
+
+    /// `ec=` empties the capability, and an empty capability means "write it
+    /// plainly" -- so the output is byte-identical to escaping with no colour
+    /// at all, and a match stays one continuous coloured run.
+    #[test]
+    fn an_empty_escape_colour_writes_the_escapes_plainly() {
+        assert_eq!(esc_col(b"AA\x07BB", b"01;31", ""), b"AA\\x07BB".to_vec());
+    }
+
+    /// With colour off the capability is never consulted, whatever it is set
+    /// to: `--escape-control` alone must not put an escape sequence into
+    /// output that is on its way to a file.
+    #[test]
+    fn the_escape_colour_is_silent_when_colour_is_off() {
+        let o = Options {
+            escape_control: true,
+            ..Options::default()
+        };
+        assert!(!o.color);
+        assert_eq!(escaped(b"a\x07b", &o, b"01;31").into_owned(), b"a\\x07b");
+    }
+
+    /// It is a `GREP_COLORS` capability like any other, and GNU ignores a key
+    /// it does not know, so a variable written for us still works there.
+    #[test]
+    fn ec_is_set_through_grep_colors() {
+        let mut c = Colors::default();
+        assert_eq!(c.escape, b"94"); // ours, not GNU's: GNU has no `ec`
+        c.apply(b"ec=35");
+        assert_eq!(c.escape, b"35");
+        // …and a value that is not SGR parameters is ignored, as for every
+        // other capability.
+        c.apply(b"ec=rm -rf");
+        assert_eq!(c.escape, b"35");
+    }
+
+    /// The seventeen names the operator's grep offers, mapped to the SGR
+    /// parameters `GREP_COLORS` already took. Written out rather than
+    /// generated, because a table whose test is the table proves nothing.
+    #[test]
+    fn every_colour_name_maps_to_its_sgr_parameter() {
+        for (name, sgr) in [
+            ("black", "30"),
+            ("red", "31"),
+            ("green", "32"),
+            ("yellow", "33"),
+            ("blue", "34"),
+            ("magenta", "35"),
+            ("cyan", "36"),
+            ("white", "37"),
+            ("default", "39"),
+            ("brightblack", "90"),
+            ("brightred", "91"),
+            ("brightgreen", "92"),
+            ("brightyellow", "93"),
+            ("brightblue", "94"),
+            ("brightmagenta", "95"),
+            ("brightcyan", "96"),
+            ("brightwhite", "97"),
+        ] {
+            assert_eq!(color_name(name.as_bytes()), Some(sgr.as_bytes()), "{name}");
+        }
+    }
+
+    /// The operator's own default palette, written both ways, producing the
+    /// same `Colors`. This is the port: their `--set-colors` request restated
+    /// in the mechanism we already had.
+    #[test]
+    fn a_palette_by_name_equals_the_same_palette_by_number() {
+        let mut named = Colors::default();
+        named.apply(b"fn=brightgreen:se=brightblack:ln=brightred:ms=default:ec=brightblue");
+        let mut numbered = Colors::default();
+        numbered.apply(b"fn=92:se=90:ln=91:ms=39:ec=94");
+        assert_eq!(named, numbered);
+    }
+
+    /// A name that is not one of the seventeen is ignored in silence, exactly
+    /// as a malformed SGR value is -- the capability keeps whatever it had.
+    #[test]
+    fn an_unknown_colour_name_is_ignored() {
+        assert_eq!(color_name(b"chartreuse"), None);
+        let mut c = Colors::default();
+        c.apply(b"fn=chartreuse");
+        assert_eq!(c.filename, b"35"); // GNU's default, untouched
+    }
+
+    /// `default` is SGR 39 -- the terminal's own foreground -- and **not** the
+    /// same as an empty value, which means "write it plainly, with no escape
+    /// at all". Both are reachable and they are different requests.
+    #[test]
+    fn default_is_a_colour_and_empty_is_the_absence_of_one() {
+        let mut named = Colors::default();
+        named.apply(b"ms=default");
+        assert_eq!(named.selected_match, b"39");
+
+        let mut empty = Colors::default();
+        empty.apply(b"ms=");
+        assert!(empty.selected_match.is_empty());
     }
 
     fn near_set(text: &str, patterns: &[&str], near: usize, opts: &Options) -> Vec<usize> {
@@ -4210,8 +4984,10 @@ mod tests {
     /// nothing.
     #[test]
     fn every_pattern_gate_ignores_invert() {
-        let mut o = Options::default();
-        o.invert = true;
+        let o = Options {
+            invert: true,
+            ..Options::default()
+        };
         assert!(gate("alpha\nbeta\n", &["alpha", "beta"], &o));
         assert!(!gate("alpha\nalpha\n", &["alpha", "beta"], &o));
     }
@@ -4220,8 +4996,10 @@ mod tests {
     /// it rather than reimplementing it.
     #[test]
     fn every_pattern_gate_honours_ignore_case() {
-        let mut o = Options::default();
-        o.ignore_case = true;
+        let o = Options {
+            ignore_case: true,
+            ..Options::default()
+        };
         assert!(gate("ALPHA\nBeTa\n", &["alpha", "beta"], &o));
     }
 

@@ -14,8 +14,8 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#[allow(unused_imports)]
 use appearance::Palette;
+#[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{

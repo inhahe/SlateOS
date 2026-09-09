@@ -32,8 +32,8 @@
 //! comment saying what will call it; a crate-wide allow silences the one
 //! diagnostic that catches a feature with no way in.
 
-#[allow(unused_imports)]
 use appearance::Palette;
+#[allow(unused_imports)]
 use guitk::color::Color;
 use guitk::dialog::{DialogAction, FileDialog, list_directory};
 #[allow(unused_imports)]

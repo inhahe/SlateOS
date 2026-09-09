@@ -5275,6 +5275,7 @@ dependencies = [
 name = "filediff"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "diffcore",
  "guitk",
  "oswindow",

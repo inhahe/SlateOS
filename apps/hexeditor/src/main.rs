@@ -20,8 +20,8 @@
 //!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha colors.
 
-#[allow(unused_imports)]
 use appearance::Palette;
+#[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{

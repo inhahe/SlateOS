@@ -54028,9 +54028,19 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   ACTION: periodically re-read every "How to reverse"/"revisit if..." clause
 ##   in design-decisions.md and confirm its premise still holds. Known clauses
 ##   of this shape today: S72 (SPENT -- superseded by S305), S73 (YSH: "once a
-##   C++/slateos toolchain exists" -- the C half has fired, the C++ half has
-##   NOT; YSH is genuine Oils C++, so this one is still correctly blocked -- but
-##   re-check it whenever C++ cross-compilation lands).
+##   C++/slateos toolchain exists").
+##   S73 UPDATE 2026-09-09 (lane B): the C++ half HAS fired, and the line above
+##   said it had not. That line was an assumption nobody had tested, which is
+##   the exact defect this standing rule exists to catch -- so it is corrected
+##   here rather than quietly. Measured: `zig c++` compiles C++17 (string,
+##   vector, memory, exceptions) for x86_64-linux-musl under our own slateos
+##   codegen flags; linking the result against our libc.a leaves 8 undefined
+##   symbols, ALL libc++/C++-ABI and NONE libc; and `zig c++ -static` builds
+##   libc++ from source and links a working ET_EXEC. zig cc and zig c++ are the
+##   same binary -- the one we adopted in July. Annotated in design-decisions
+##   S73 (NOT flipped; Operator decision) and raised as open-questions B-Q9.
+##   NOT established: that genuine Oils cross-compiles, or that any C++ binary
+##   runs on SlateOS. The prerequisite fired; the port is effort.
 ##
 ##   AUDIT PASS 2026-08-18 (lane A) -- IN PROGRESS, resumable. Findings so far:
 ##   * S59 (GPU accel scope, Q18): PREMISE HAS FIRED. It defers the Mesa port

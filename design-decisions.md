@@ -5318,6 +5318,42 @@ lands, fall back to a Rust reimplementation; the `userspace/oils` crate is
 isolated so either a YSH-in-Rust module or a swap to genuine Oils is a local
 change.
 
+### ANNOTATION 2026-09-09 (lane B) — the prerequisite has fired. Not flipped: this is an Operator decision.
+
+**The C++/slateos cross-toolchain this entry waits on now demonstrably
+exists.** Measured today, not inferred:
+
+| Step | Result |
+|---|---|
+| `zig c++ --target=x86_64-linux-musl -std=c++17 -c` on a TU using `<string>`, `<vector>`, `<memory>` and a `throw`/`catch` | compiles, 245 KB object |
+| the same, with the slateos codegen flags (`-mcmodel=large -fno-pic -fno-pie -fno-builtin -O2`) | compiles, 185 KB object |
+| linking that object against **our** `toolchain/sysroot/lib/libc.a` with `rust-lld` | 8 undefined symbols, **all** of them libc++/C++-ABI (`operator new`, `std::__1::basic_string::append`, `typeinfo for std::length_error`, …) and **zero** of them libc |
+| `zig c++ --target=x86_64-linux-musl -static` end to end | builds libc++ from source and links a 3.4 MB `ET_EXEC` x86-64 binary |
+
+The reading: the compiler exists, the C++ standard library exists, and our libc
+already satisfies everything a C++ program asks of C. What is missing is the
+*link line* — combining zig's `libc++` with our `libc.a` — which is wiring, not
+a toolchain.
+
+**What this does NOT establish**, stated because the gap matters: nobody has
+cross-compiled genuine Oils, and nobody has run a C++ binary on SlateOS. This
+says the **prerequisite** named here has fired, so YSH moves from
+"blocked-on-C++-toolchain" to "blocked-on-effort" — which is exactly the
+distinction this entry drew, and the only thing it made conditional.
+
+**Why this was worth going and looking for.** §305's root cause, recorded in
+`todo.txt` as a standing rule: §72 rejected cross-compiling bash because no
+C-to-slateos toolchain existed, the clause fired four days later when `zig cc`
+landed, nobody checked for 25 days, and ~1,100 commits went onto a dead
+premise. `zig cc` and `zig c++` are *the same binary*. The C half was noticed
+in July; the C++ half sat unnoticed in the same executable for seven weeks,
+and `todo.txt` recorded it as "the C++ half has NOT [fired]" — a statement
+nobody had tested. This is that failure caught by the rule that was written
+after it.
+
+**The deferred sub-decision above is now live** and is the operator's:
+`open-questions.md` → **B-Q9**.
+
 ## 74. osh error diagnostics — adopt bash's `<name>: line N:` prefix, but keep osh's own `$0` name (not bash's `environment` pseudo-name) and a uniform syntax-error form
 
 **Date:** 2026-07-19

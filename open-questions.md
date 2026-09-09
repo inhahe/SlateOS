@@ -1052,6 +1052,71 @@ icon in it; `tray_dnd.rs` stays unreachable. The cost is only that the
 somewhere to minimise *to*.
 
 
+## B-Q9 — [B] We wrote our own copy of a shell because we could not build the original. We can now. Keep the copy, or switch to the original? — Status: OPEN
+
+**In short:** the *shell* is the program that runs the commands you type. SlateOS
+has one we wrote ourselves, in Rust — a re-creation of an existing open-source
+shell called Oils. We re-created it because Oils is written in C++, and at the
+time we had no way to build C++ programs for SlateOS. **That is no longer
+true**, as of a measurement made today. So the original is now obtainable, and
+it comes with a second, more modern command language that our copy does not
+have at all. The question is whether to keep our copy, offer both, or replace
+ours with the original.
+
+### What changed
+
+Oils ships two languages: **OSH** (compatible with the shell most people
+already know) and **YSH** (its newer one, with real lists, dictionaries and
+functions). We have a hand-written Rust version of OSH only. YSH has always
+been deferred — not for lack of interest, but because building it meant
+building C++ for SlateOS, which nothing could do.
+
+Today's check: the compiler we already use for C (`zig`) turns out to build
+C++ for our target as well — it is the same program, and we have had it since
+July. A C++ test program compiles under our own build settings, and when
+linked against SlateOS's own C library **every unresolved name is a C++
+standard-library one and none is ours**. So the missing piece is link-line
+wiring, not a missing tool.
+
+**Not yet established:** nobody has built genuine Oils, and no C++ program has
+been run on SlateOS. This says the *obstacle* is gone, not that the job is
+done. Expect the port to be real work — just ordinary work rather than
+blocked work.
+
+### The options
+
+| | *What changes:* |
+|---|---|
+| **(a) Keep ours as the default; ship Oils as an optional install** | Typing `sh` still gets our Rust shell. Someone who wants YSH installs a package and gets it. Two shells exist; each keeps working. |
+| **(b) Replace ours with genuine Oils** | Typing `sh` gets upstream Oils. YSH is present for everyone. Our Rust shell is deleted, and roughly a year of accumulated behaviour goes with it. |
+| **(c) Neither yet — stay as we are** | Nothing changes. No YSH, and our Rust shell keeps needing hand-maintenance to track upstream. |
+
+These are the two the original decision itself left open (`design-decisions.md`
+§73), plus the option of not moving.
+
+### A consideration on each side, briefly
+
+**For (b):** our copy will always chase upstream, and any behaviour we have not
+re-created is a difference someone eventually trips over. The original is the
+definition of correct by construction.
+
+**For (a):** our Rust shell is small, boots early, and has no C++ runtime under
+it — which matters for a shell that has to work when little else does. Deleting
+it trades a dependable small thing for a faithful large one.
+
+**Against hurrying either:** the measurement says the *tool* exists. Whether
+Oils' own build system, which is unusual (it generates C++ from Python),
+survives cross-compilation is unmeasured. It would be reasonable to answer this
+only after somebody tries the build.
+
+### If this is never answered
+
+Nothing breaks and nothing degrades: option (c) is the status quo and is safe.
+The cost is only that YSH stays absent and our shell keeps needing hand-work.
+The one thing worth avoiding is leaving the *reason* stale — the project has
+already lost ~1,100 commits once to a decision whose premise had quietly
+expired, which is why this was checked at all.
+
 ## Resolved — lane A
 
 - Q45 Convert the whole shell to bytes, or only the expanded word? — resolved

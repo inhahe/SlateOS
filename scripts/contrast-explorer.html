@@ -10,6 +10,15 @@
   .wrap { display:grid; grid-template-columns:340px 1fr; gap:22px; padding:18px 24px 40px; align-items:start; }
   .panel { background:#fff; border:1px solid #dfe2e8; border-radius:10px; padding:14px 16px; }
   .panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:#6a6f80; margin:0 0 10px; font-weight:650; }
+  .uc { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .uc h3 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:#666; margin:0 0 6px; font-weight:600; }
+  .uc .frame { padding:12px; border-radius:9px; }
+  .uc .row { padding:9px 11px; border-radius:6px; margin-bottom:5px; }
+  .uc .row:last-child { margin-bottom:0; }
+  .uc .t1 { font-size:13px; }
+  .uc .t2 { font-size:11px; margin-top:2px; }
+  .uc .sw { width:34px; height:18px; border-radius:9px; position:relative; flex:0 0 auto; }
+  .uc .sw i { position:absolute; top:2px; width:14px; height:14px; border-radius:50%; background:#fff; }
   .presets { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
   .presets button { flex:1 1 auto; padding:7px 10px; border:1px solid #d3d7e0; background:#f3f4f7; border-radius:7px; cursor:pointer; font:inherit; font-size:13px; }
   .presets button.on { background:#1d62ec; border-color:#1d62ec; color:#fff; font-weight:600; }
@@ -105,6 +114,30 @@
          naming one card colour has to say what becomes of the other four. Anything below 4.5 is marked.</p>
       <div id="allsurf"></div>
     </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>What the shades are actually used for &mdash; and the same thing with borders instead</h2>
+      <p class="note" style="margin-top:0">Taken from the code, not invented. Grepping every use of the three
+         shades in <code>gui/desktop</code> and <code>apps/settings</code> shows they are <b>not</b> three depths
+         of card:</p>
+      <ul class="note" style="margin-top:4px">
+        <li><code>surface0</code> (1012) &mdash; the <b>row or card fill</b>: a hovered row, a selected row,
+            a selected day in the calendar, a panel background.</li>
+        <li><code>surface1</code> (542) &mdash; mostly a <b>border</b> already: the menu border, the popup
+            border, a header separator, badge outlines. Also the fill of a <em>selected</em> row sitting on
+            <code>surface0</code>.</li>
+        <li><code>surface2</code> (159) &mdash; almost entirely <b>control chrome</b>: the track of a switch in
+            the off position, a close button at rest. Barely a card colour at all.</li>
+      </ul>
+      <p class="note">So the question is narrower than it looked. Nothing in the desktop nests a card three deep;
+         the deepest real stack is <em>page &rarr; row &rarr; selected row</em>, and one of the three shades is
+         already doing the border job. Each example below is drawn twice: shaded on the left as it is today,
+         and on the right with the fills removed and a border doing the work.</p>
+
+      <div class="uc" id="uc"></div>
+      <p class="note" id="uc_note"></p>
+    </div>
+
 
 
     <div class="panel" style="margin-top:18px">
@@ -236,6 +269,75 @@ const badge = (r, lim) => r >= 7 && lim === 4.5
 // ratio under every one. This is the panel the ladder options are for: a
 // preset that names one card colour is answered here, where you can see what
 // the other four become.
+// The three real compositions, each drawn twice: as the desktop draws it today
+// (shaded), and with the fills removed and a border doing the work.
+//
+// Every one is taken from the code. `surface2` is a switch track, not a card --
+// gui/desktop/src/network_settings.rs:1343 and four others pick between
+// `p.accent` and `p.surface2` for exactly that. `surface1` is the menu border
+// (context_ext.rs) and the selected-row fill (datetime_settings.rs:811).
+// `surface0` is the hovered/selected row (context_ext.rs:1045).
+function renderUseCases() {
+  const L = (cur.ladder || SHIPPED_LADDER);
+  const ink = cur.main, dim = cur.sec1, acc = cur.acc;
+  const esc = t => t.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+
+  // A row, either filled or outlined.
+  const row = (title, sub, fill, border, extra) =>
+    `<div class="row" style="background:${fill||'transparent'};` +
+    `${border ? `border:1px solid ${border};` : 'border:1px solid transparent;'}` +
+    `display:flex;align-items:center;gap:10px">` +
+    `<div style="flex:1"><div class="t1" style="color:${ink}">${esc(title)}</div>` +
+    `<div class="t2" style="color:${dim}">${esc(sub)}</div></div>${extra||''}</div>`;
+
+  const sw = on => `<div class="sw" style="background:${on ? acc : L.s2}">` +
+                   `<i style="${on ? 'right:2px' : 'left:2px'}"></i></div>`;
+
+  const examples = [
+    { name: 'Settings list &mdash; a row, and the selected row',
+      shaded: row('Display', 'Resolution, scale, night light', L.s0, null) +
+              row('Sound', 'Output device, volume, per-app mixing', L.s1, null) +
+              row('Network', 'Wi-Fi, Ethernet, VPN', L.s0, null),
+      bordered: row('Display', 'Resolution, scale, night light', null, L.s2) +
+                row('Sound', 'Output device, volume, per-app mixing', null, acc) +
+                row('Network', 'Wi-Fi, Ethernet, VPN', null, L.s2),
+      note: 'The selected row is the only place the desktop really stacks one shade on another. ' +
+            'With borders it becomes an accent outline, which is stronger and does not need a second shade.' },
+
+    { name: 'Context menu &mdash; already bordered today',
+      shaded: `<div style="background:${L.mantle};border:1px solid ${L.s1};border-radius:8px;padding:5px">` +
+              row('Open', '', null, null) + row('Rename', '', L.s0, null) + row('Delete', '', null, null) +
+              `</div>`,
+      bordered: `<div style="background:${cur.page};border:1px solid ${L.s2};border-radius:8px;padding:5px">` +
+                row('Open', '', null, null) + row('Rename', '', null, acc) + row('Delete', '', null, null) +
+                `</div>`,
+      note: 'This one is already a border in the shipped code &mdash; surface1 is the menu edge. Only the ' +
+            'hovered row is a fill.' },
+
+    { name: 'Toggle row &mdash; where surface2 actually lives',
+      shaded: row('Night light', 'Warmer colours after sunset', L.s0, null, sw(true)) +
+              row('Automatic brightness', 'Adjust to ambient light', L.s0, null, sw(false)),
+      bordered: row('Night light', 'Warmer colours after sunset', null, L.s2, sw(true)) +
+                row('Automatic brightness', 'Adjust to ambient light', null, L.s2, sw(false)),
+      note: 'The off switch track is surface2. It is chrome inside a control, not a card &mdash; so it ' +
+            'survives whichever way the card question goes, and needs a shade either way.' },
+  ];
+
+  let html = '';
+  for (const ex of examples) {
+    html += `<div><h3>${ex.name} &mdash; shaded (today)</h3>` +
+            `<div class="frame" style="background:${cur.page}">${ex.shaded}</div></div>` +
+            `<div><h3>&hellip; the same, with borders</h3>` +
+            `<div class="frame" style="background:${cur.page}">${ex.bordered}</div></div>`;
+  }
+  $('uc').innerHTML = html;
+  $('uc_note').innerHTML =
+    'Borders on the right use <code>surface2</code> for the quiet outline and the accent for the selected ' +
+    'row. Note what that buys: <b>a border needs no contrast against the ink</b>, because no text sits on ' +
+    'it &mdash; so the whole problem C&#8209;Q10 is about disappears for any element drawn that way. It is ' +
+    'the fills that constrain the palette, and there are fewer of them than the shade count suggests.';
+}
+
 function renderAllSurfaces() {
   const L = (cur.ladder || SHIPPED_LADDER);
   const surfaces = [
@@ -305,6 +407,7 @@ function render() {
     }
   $('tbl').innerHTML = rows.join('');
   renderAllSurfaces();
+  renderUseCases();
 
   // Ink against ink. Six pairs, because four inks have six.
   const NAME = { main:'main', sec:'subtext0', sec1:'subtext1', acc:'accent' };

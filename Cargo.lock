@@ -4042,6 +4042,7 @@ dependencies = [
 name = "diskimager"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "md5",
  "oswindow",
@@ -4790,6 +4791,7 @@ dependencies = [
 name = "emojipicker"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -5280,6 +5282,7 @@ dependencies = [
 name = "filesearch"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "globmatch",
  "guitk",
  "oswindow",

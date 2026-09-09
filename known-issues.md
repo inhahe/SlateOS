@@ -124439,14 +124439,35 @@ which makes step 1 below larger than one dependency line.
   Each has a test on the rectangles it emits, and each was mutation-checked by
   making `theme_changed` ignore its argument.
 
-**Done: this is now every non-game application in the tree.** The 140
-applications with a `main.rs` divide into 58 converted, 42 games (which the
-operator asked be deprioritised), and 40 that name no palette roles at all and
-so have nothing to convert. The buckets are disjoint and sum to 140 --
-`survey_all.py` used to overlap them and report "0 already converted", because
-a converted application has no constants left and so fell into the
-"nothing to convert" bucket, which was also how its hardcoded games list
-silently hid nineteen games among the work still to do.
+**"Done: every non-game application" was claimed on 2026-09-08 and was wrong
+by sixteen applications.** Corrected the same day. The claim rested on the
+survey, and the survey rested on a regex anchored `^const` -- which sees a
+colour declared at file scope and does *not* see one declared `pub const`
+inside a `mod mocha { … }` block, referred to as `mocha::BASE`. Sixteen
+applications declare theirs that way: `emojipicker`, `unitconverter`,
+`torrent`, `systray`, `filediff`, `diskimager`, `kanban`, `screenrecorder`,
+`filesearch`, `email`, `launcher`, `hexeditor`, `soundrecorder`,
+`colorpicker`, `archivemanager` and `lockscreen`.
+
+**The failure mode is the one that matters here: it did not report them as
+outstanding, it reported them as *finished*.** An application with no
+file-scope constants looks identical to a converted one — both have zero — so
+all sixteen landed in the "names no palette roles at all" bucket and the
+totals still summed to 140. A survey that under-reports work looks exactly
+like a survey that has found none, which is why the arithmetic adding up was
+no evidence at all.
+
+The converter now recovers the enclosing module for each constant and
+substitutes the *qualified* name, since a bare `BASE` matches nothing at the
+use site. Corrected counts: **58 converted, 16 outstanding**, 42 games, 24
+naming no palette roles.
+
+The earlier fix to `survey_all.py` still stands: it used to overlap its buckets
+and report "0 already converted", because a converted application has no
+constants left and so fell into the "nothing to convert" bucket, which was also
+how its hardcoded games list silently hid nineteen games among the work still
+to do. Three bugs in one survey, each of which made the remaining work look
+smaller than it was.
 
 **The sharpest form of the content-vs-chrome rule, learned from `snippets`.**
 The earlier tell -- "the constant is read where no window is in scope" -- does

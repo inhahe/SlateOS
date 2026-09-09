@@ -124287,13 +124287,15 @@ no other crate depends on it), so nothing outside the corpus could reach them.
 |---|---|---|
 | `login_screen.rs` | ~~`LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig`~~ | **Done, 2026-09-08.** `ShellSession` constructs one when the account database names anybody (`design-decisions.md` §824), draws it on a fifth full-screen surface created last within `Layer::Overlay` so nothing the shell owns is over it, routes every key and click to it while it is up, and answers with `authlib`. What it still lacks is the *session hand-off* — a successful login unmaps the screen and reveals the desktop, but nothing starts a session as that user, because there is nowhere to send that (the shell has no channel to the process server; same gap as `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`). Autologin is read and not acted on; see `todo.txt`. Originally: Construction and a session hand-off. §815 says wire it up. *(Correction, 2026-09-08: an earlier version of this row said §818 has to take effect here. It does not — §818 is about the **lock** screen, `apps/lockscreen`, which is a separate program. See `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.)* |
 | `blur.rs` | ~~`BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager`~~ | **Done, 2026-09-08: moved to `gui/compositor` and wired.** A surface asks with `WindowSpec::blur_behind` (a *role*, so the compositor resolves the parameters from its own palette), and `Compositor::blur_behind_window` runs the pass over the region immediately before that window is drawn — the one moment the framebuffer holds everything behind it and nothing in front. Software targets only; see `TD-C-BLUR-IS-SOFTWARE-ONLY`. Originally it could not be wired in the shell at all: It works on a *framebuffer* (`BlurManager::update_all(&mut [u32], w, h)`) and the shell has no framebuffer: it submits render trees and never sees a pixel of what is behind its surfaces. `blur.rs` was the only file in the whole `gui/desktop` crate to mention `[u32]`. The pixels behind a window are the compositor's, so the pass now lives where it can run; what remains is a protocol way for a surface to ask for it, and a call in the compositor's paint path. Originally: A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
-| `input_method.rs` | `InputMethodManager`, `SwitchShortcut` | A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
+| `input_method.rs` | ~~`InputMethodManager`, `SwitchShortcut`~~ | **Wired 2026-09-08, as the *switcher* it is.** `DesktopShell` owns an `InputMethodManager`; `HotkeyAction::SwitchInputLayout` (Super+Space) advances it and writes `input.yaml`, which the compositor already watches — so the keys actually move, and the choice survives a restart. Two of the three offered shortcuts remain unbound and cannot be bound yet: see `TD-C-TWO-OF-THREE-LAYOUT-SHORTCUTS-NEED-RELEASE-SEMANTICS`. **This is still not an IME** and the note below stands in full. Originally: A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
 | `tray_dnd.rs` | `TrayDragSource`, `TrayDropTarget`, `TrayIconSlot`, `TrayIconArrangement`, `TraySlotConfig`, `TrayArrangementConfig`, `StartInTrayConfig` | A caller in the tray's event path. |
 
 **Order worth doing them in.** `login_screen` first: it is named in §815, it
 gates §818, and a machine with no login screen is a machine with no user
-accounts in any meaningful sense. **(`login_screen` is done as of 2026-09-08 —
-see its row above. Three left.)** Then `tray_dnd` (self-contained, one event
+accounts in any meaningful sense. **(As of 2026-09-08 three of the four are
+done — `login_screen`, `blur` and `input_method`. Only `tray_dnd` is left, and
+it is blocked on C-Q12: there are two system trays and the drag-and-drop sits
+with the half that has no icons.)** Then `tray_dnd` (self-contained, one event
 path). Then `blur` (needs a compositing decision about where the pass runs —
 compare the colour-filter work, which had the same question). `input_method`
 last, because wiring is the small half of it.
@@ -125352,3 +125354,54 @@ it with `rust-lld -static --no-dynamic-linker` against
 `toolchain/sysroot/lib/libc.a` and zig's `libc++.a`, and read the undefined
 and duplicate lists. Zig's archives are built on demand into its global cache
 by any `zig c++ -static` build.
+
+---
+
+---
+
+## TD-C-TWO-OF-THREE-LAYOUT-SHORTCUTS-NEED-RELEASE-SEMANTICS
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/desktop/src/input_method.rs` — `SwitchShortcut`;
+`gui/desktop/src/hotkeys.rs` — `HotkeyAction::SwitchInputLayout`.
+
+**In short:** the keyboard-layout switcher offers three shortcuts to choose
+from — Alt+Shift, Ctrl+Shift, and Super+Space. Only Super+Space is wired up.
+The other two are the kind of shortcut where you hold two modifier keys and
+*let go* without pressing anything else, and the desktop currently has no way
+to notice that; it can only notice "this key went down while those modifiers
+were held". Wiring them as if they were ordinary shortcuts would not merely
+fail — it would break Alt+Shift+Tab, which is how you switch windows backwards.
+
+**The mechanism, precisely.** A shell asks the compositor to route a chord with
+`grab_key(window, key, modifiers)`, and that fires on the **press** of `key`.
+`Key` does have `LeftShift` and `LeftAlt`, so `(LeftShift, alt)` is
+*expressible* — but it means "Shift went down while Alt was held", which is the
+first half of Alt+Shift+Tab. Every reverse Alt-Tab would switch the keyboard
+layout, and the Tab that followed would arrive with the shell holding the grab.
+
+What Alt+Shift means on every desktop that offers it is: the modifier pair was
+released with **no other key pressed in between**. That is a different
+predicate, over a key-*down*/key-*up* sequence, and neither the grab protocol
+nor `HotkeyRegistry` can currently state it.
+
+**What was done instead.** `SwitchInputLayout` is bound to Super+Space, which
+is an ordinary chord and works. `SwitchShortcut::AltShift` and `::CtrlShift`
+remain in the model, unbound. A user who selects one of them today gets no
+layout switching — which is why this is logged rather than left to be
+discovered.
+
+**The proper fix**, in the order the pieces have to arrive:
+
+1. The compositor learns to recognise a modifier-only chord: on the release of
+   a modifier, fire if the matching set was held and no non-modifier key went
+   down while it was.
+2. The protocol gains a way to ask for one — a `grab_modifier_chord` beside
+   `grab_key`, rather than overloading `grab_key` with a key that is itself a
+   modifier, so that the two predicates cannot be confused at the call site.
+3. `HotkeyRegistry` gains a binding kind for it, and `SwitchShortcut`'s other
+   two variants bind through that.
+
+**Until then, do not bind them.** A layout switch on the press of Shift-with-Alt
+is worse than no layout switch: it is a working shortcut (Alt+Shift+Tab) taken
+away in exchange for one that fires at the wrong time.

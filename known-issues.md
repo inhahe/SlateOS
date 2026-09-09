@@ -124979,21 +124979,43 @@ nor a machine, so re-dating a document silently re-dates its measurements.
 Prefer citing something *re-runnable* — `bench/file-read-latency.py`, the
 timing TSVs — over a figure copied out of another document.
 
-**The proper fix.** Run `cargo clippy -p kernel` in the pre-push hook, scoped
-the way gate 12 already scopes its compiler: **only when the pushed commits
-touch `kernel/**`**. Measured today, warm, it is ~100 s — real friction, but
-paid only by the pushes that can actually break it, and against a failure that
-currently costs 19 minutes to discover and blocks all three lanes, since a red
-kernel stops every boot test. Gate 12's own comment already argues this trade
-for its crate; the kernel has a stronger case, because it is the one crate
-whose breakage blocks everybody.
+**A pre-push clippy gate was the obvious fix, and the arithmetic rejects it.**
+The proposal was to run `cargo clippy -p kernel` in the pre-push hook, scoped
+the way gate 12 scopes its compiler — only when the pushed commits touch
+`kernel/**`. I wrote the checker before costing it, which was the wrong order.
 
-*Not built yet* — the boot test was mid-run and a second cargo invocation would
-contend on the same target-directory lock. It also deserves a moment's thought
-about whether `--all-targets` or plain is wanted, and gate ordering inside
-`boot-test.sh` (moving clippy earlier in the gate phase is a cheaper partial
-win: it does not change the total when everything passes, only the time to
-learn that something did not).
+Costed afterwards, on this tree:
+
+| quantity | measured |
+|---|---|
+| kernel-touching commits | **138 in 10 days ≈ 14/day** (`git log --since='10 days ago' -- kernel/`) |
+| pushes carrying them | ~5–7/day at `CLAUDE.md`'s "every completed task, or every few commits" |
+| `cargo clippy -p kernel` after a source edit, on E: | **101 s** (6 s warm with nothing changed) |
+| added push latency | **~9–13 min/day, ~150 min/fortnight** |
+| what it prevents | a break roughly fortnightly, costing ~19 min to discover |
+
+**Spending 150 minutes to save 19 is a bad trade**, so the gate is not built.
+The checker is not in the tree; recreating it is a twenty-minute job if the
+numbers ever change, and this table is here so the next person costs it before
+writing it rather than after.
+
+Note the 101 s is CPU-bound compilation, so unlike almost everything else
+measured this week the SSD did not help — the old D:-era figure of 113 s is
+still roughly right, and it is the *only* pre-migration number in this entry
+that survived checking.
+
+**What to do instead, in order of value:**
+
+1. **Run `scripts/pre-boot.py` before starting a boot test.** It already does
+   exactly this check and exists for exactly this reason. The objection that it
+   is a "40-minute optional tool" is now itself a stale measurement: the gate
+   phase it duplicates is 440 s on E:, not 62 min.
+2. **Move `check_kernel_clippy` earlier in `boot-test.sh`'s sequence.** Free —
+   it does not change the total when everything passes, only how soon you learn
+   it did not. Costs at most one thing: a cheap text gate's failure is then
+   reported ~100 s later than it is today.
+3. **Shorten the 34 `scripts/test-*.py` suites** (540–660 s), which are the
+   dominant pre-build cost and are not what most changes can break.
 
 **If it is never fixed:** nothing rots on its own, but every kernel lint costs
 a 19-minute boot test to find, and the tree can sit red at a deny-level gate

@@ -1053,16 +1053,6 @@ cutover), §71 (Q23, shared session for server sockets).
 
 ---
 
-# Resolved
-
-**The body above holds OPEN questions only.** When the operator answers one,
-write it up in `design-decisions.md` as a `Decided by: Operator` entry,
-**delete the entry from the body**, and add one line here. That is the whole
-point of the file: it is scanned for what still needs a decision, so an
-answered question left in the body is pure cost — and, being older, it sorts
-*first*, right where it is most in the way. (Why this is not append-only:
-`design-decisions.md` §437.)
-
 ## C-Q12 — [C] There are two system trays, and neither can do what the spec asks. Which one is the real one? — Status: OPEN
 
 **In short:** the little row of icons at the right-hand end of the taskbar —
@@ -1218,6 +1208,16 @@ The cost is only that YSH stays absent and our shell keeps needing hand-work.
 The one thing worth avoiding is leaving the *reason* stale — the project has
 already lost ~1,100 commits once to a decision whose premise had quietly
 expired, which is why this was checked at all.
+
+# Resolved
+
+**The body above holds OPEN questions only.** When the operator answers one,
+write it up in `design-decisions.md` as a `Decided by: Operator` entry,
+**delete the entry from the body**, and add one line here. That is the whole
+point of the file: it is scanned for what still needs a decision, so an
+answered question left in the body is pure cost — and, being older, it sorts
+*first*, right where it is most in the way. (Why this is not append-only:
+`design-decisions.md` §437.)
 
 ## Resolved — lane A
 

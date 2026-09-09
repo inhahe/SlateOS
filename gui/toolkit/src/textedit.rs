@@ -153,15 +153,40 @@ pub fn cursor_at_click(
     crate::text::cursor_at(text, dx + scroll, font_size, weight)
 }
 
+/// How wide a caret is drawn when nothing has scaled it.
+///
+/// Two rather than one. Every caret in the tree used to pick its own width and
+/// they disagreed — 1.0 in three toolkit fields, 2.0 in the launcher and the
+/// path bar — so a value had to be chosen rather than preserved, and the wider
+/// one is both what the two most-used fields already had and the one that
+/// survives a high-resolution display. A user who wants the hairline back can
+/// scale it: `CARET_WIDTH * 0.5`. `design-decisions.md` §827.
+pub const CARET_WIDTH: f32 = 2.0;
+
 /// Draw the caret as a vertical rule of the line's height.
-pub fn push_caret(tree: &mut RenderTree, x: f32, y: f32, line_h: f32, color: Color) {
+///
+/// `width` is in pixels, and every caret in the tree comes through here so that
+/// there is one place for an accessibility scale to be applied. Pass
+/// [`CARET_WIDTH`] unless the caller has a user preference to apply to it.
+///
+/// A degenerate width would make the caret vanish, which loses the user's place
+/// in the text, so a width that is not a usable positive number falls back to
+/// the default instead of being drawn as given. That is not hypothetical: the
+/// accessibility config parses its multiplier with `str::parse::<f32>`, which
+/// accepts `"nan"`, and `f32::clamp` passes NaN straight through.
+pub fn push_caret(tree: &mut RenderTree, x: f32, y: f32, line_h: f32, color: Color, width: f32) {
+    let width = if width.is_finite() && width > 0.0 {
+        width
+    } else {
+        CARET_WIDTH
+    };
     tree.push(RenderCommand::Line {
         x1: x,
         y1: y,
         x2: x,
         y2: y + line_h,
         color,
-        width: 1.0,
+        width,
     });
 }
 
@@ -196,6 +221,15 @@ pub struct SingleLine<'a> {
     pub weight: FontWeightHint,
     /// Colour of unselected text, and of the caret.
     pub color: Color,
+    /// How wide to draw the caret, in pixels.
+    ///
+    /// A field rather than a constant because it is a user preference: the
+    /// caller reads it from the accessibility settings and passes it in, the
+    /// same way `color` arrives rather than being looked up here. The toolkit
+    /// cannot read those settings itself — `gui/appearance` depends on this
+    /// crate, so the dependency cannot run the other way. See `known-issues.md`
+    /// `TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY`.
+    pub caret_width: f32,
 }
 
 /// Draw a field's selection, text and caret, clipped to the field.
@@ -271,7 +305,14 @@ pub fn draw(tree: &mut RenderTree, f: &SingleLine<'_>) {
     });
 
     if f.focused {
-        push_caret(tree, origin + caret_px, f.y, f.line_height, f.color);
+        push_caret(
+            tree,
+            origin + caret_px,
+            f.y,
+            f.line_height,
+            f.color,
+            f.caret_width,
+        );
     }
     tree.unclip();
 }
@@ -375,5 +416,49 @@ mod tests {
         assert_eq!(anchor, Some(4));
         begin_or_end_selection(false, TextCursor::from(6), &mut anchor);
         assert_eq!(anchor, None);
+    }
+
+    /// The width a caret is drawn at is the width it was given.
+    #[test]
+    fn the_caret_is_drawn_at_the_width_it_is_given() {
+        let mut tree = RenderTree::new();
+        push_caret(&mut tree, 10.0, 20.0, 16.0, Color::from_hex(0x00_0000), 3.5);
+        let widths: Vec<f32> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { width, .. } => Some(*width),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(widths, [3.5]);
+    }
+
+    /// A width that is not a usable positive number falls back to the default
+    /// rather than drawing a caret nobody can see.
+    ///
+    /// NaN is the case that is not hypothetical. The accessibility config parses
+    /// its multiplier with `str::parse::<f32>`, which accepts the string "nan",
+    /// and `f32::clamp` returns NaN unchanged -- so a hand-edited config file
+    /// could otherwise reach here and silently delete every caret in the shell,
+    /// which loses the user's place in the text with no error anywhere.
+    #[test]
+    fn a_degenerate_caret_width_falls_back_to_the_default() {
+        for bad in [f32::NAN, 0.0, -1.0, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut tree = RenderTree::new();
+            push_caret(&mut tree, 10.0, 20.0, 16.0, Color::from_hex(0x00_0000), bad);
+            let width = tree
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Line { width, .. } => Some(*width),
+                    _ => None,
+                })
+                .expect("a caret is still drawn");
+            assert!(
+                (width - CARET_WIDTH).abs() < f32::EPSILON,
+                "width {bad} was drawn as {width}, not the {CARET_WIDTH} default"
+            );
+        }
     }
 }

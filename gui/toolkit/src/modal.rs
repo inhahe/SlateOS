@@ -2002,7 +2002,14 @@ impl InputDialog {
                 overflow: TextOverflow::Ellipsis,
             });
             if field_focused {
-                crate::textedit::push_caret(tree, text_x, text_y, FONT_SIZE, COLOR_TEXT);
+                crate::textedit::push_caret(
+                    tree,
+                    text_x,
+                    text_y,
+                    FONT_SIZE,
+                    COLOR_TEXT,
+                    crate::textedit::CARET_WIDTH,
+                );
             }
         } else {
             // Offsets into the *drawn* string: for a password field that is the
@@ -2023,6 +2030,7 @@ impl InputDialog {
                     font_size: FONT_SIZE,
                     weight: FontWeightHint::Regular,
                     color: COLOR_TEXT,
+                    caret_width: crate::textedit::CARET_WIDTH,
                 },
             );
         }

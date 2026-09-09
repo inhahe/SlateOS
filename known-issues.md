@@ -125415,6 +125415,136 @@ least no longer *divergent* dead code.
 
 ---
 
+## TD-C-CARGO-BUILD-WORKSPACE-ON-THE-HOST-TARGET-FAILS-ON-THE-KERNEL
+
+**Date:** 2026-09-09. **Lane:** C.
+**Where:** not a code defect — a trap in the prescribed workflow.
+
+**In short:** running the whole-project build the way the instructions describe
+fails with a wall of linker errors that look alarming and have nothing to do
+with whatever you just changed. It is trying to build the kernel — a bare-metal
+binary with its own linker script — as an ordinary Windows program, which
+cannot work. Everything else builds fine.
+
+**The command and the result:**
+
+```
+cargo build --workspace --target x86_64-pc-windows-gnu
+  → error: linking with `x86_64-w64-mingw32-gcc` failed
+    relocation truncated to fit: IMAGE_REL_AMD64_ADDR32NB
+    ... `-T kernel/linker.ld`
+  → error: could not compile `kernel` (bin "kernel")
+```
+
+**Why it is reachable by accident.** Both halves are what an agent is told to
+do: `CLAUDE.md` says to run the workspace build/test before merging, and every
+`cargo` invocation in this tree needs `--target x86_64-pc-windows-gnu` because
+the host is Windows. Put together they ask for the kernel to be linked for the
+host, with `kernel/linker.ld`, against mingw's CRT.
+
+**What to run instead**, when the point is "did I break anything outside my own
+crate":
+
+```
+cargo build --workspace --exclude kernel --target x86_64-pc-windows-gnu
+```
+
+**Why this is worth writing down rather than just knowing.** The failure names
+`libmsvcrt.a`, relocations and a linker script — none of which appear in a GUI
+change — so the natural first reaction is that something is badly wrong, and the
+natural second is to start bisecting a change that is innocent. It cost lane C a
+detour today on the way to merging a caret-width change.
+
+**Proper fix (not done):** the kernel package could carry
+`forced-target = "x86_64-slateos"`, which would make cargo build it for its own
+target regardless of `--target` on the command line and let the plain workspace
+command work. That is lane A's file, so it is written here rather than done.
+
+## TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY
+
+**Date:** 2026-09-09. **Lane:** C.
+**Where:** `gui/desktop/src/a11y.rs` — 1,360 lines, referenced by nothing.
+
+**In short:** there are two sets of accessibility settings. One is wired up and
+works. The other is a 1,360-line module that looks like the real one — it has a
+config-file format, range checking and passing tests — and nothing anywhere
+reads it. Three settings exist *only* in the dead copy, so those three do
+nothing at all: a wider text cursor, a visible focus ring, and the screen-reader
+switch.
+
+**The evidence.** `grep -rn "a11y::" gui apps`, excluding the file itself,
+returns **one** hit, and it is inside a doc comment in
+`gui/inputsettings/src/lib.rs` describing this module as superseded. Nothing
+constructs `AccessibilityConfig`, nothing loads it, nothing saves it. The
+module is `pub mod a11y;` in `gui/desktop/src/lib.rs`, so it compiles and is
+public API, and no caller exists.
+
+**Correcting this entry's own first version, because the mistake is instructive.**
+It originally carried a table of "uses outside `a11y.rs`" — `high_contrast` 117,
+`color_filter` 26, `reduced_motion` 17 — and concluded that those settings were
+wired while three others were forgotten. That was wrong. Those are counts of a
+*name*, and the names collide with fields on entirely different structs:
+`high_contrast` and `color_filter` are declared on
+`appearance::AppearanceSettings`, and `reduced_motion` is declared twice, once
+here and once on `animations.rs`'s own config. The live features read the other
+structs. Counting a name cannot distinguish two structs that share a field, and
+the giveaway was in the same survey: `cursor` scored 3,595, which is just the
+English word.
+
+**What each dead field duplicates, and what is genuinely missing:**
+
+| `AccessibilityConfig` field | live equivalent |
+|---|---|
+| `high_contrast` | `appearance::AppearanceSettings::high_contrast` |
+| `color_filter` | `appearance::AppearanceSettings::color_filter` |
+| `cursor` | `AppearanceSettings::cursor_size` / `cursor_scheme` |
+| `reduced_motion` | `AppearanceSettings::animation_speed`, `animations.rs` |
+| `magnifier` | none — `MagnifierConfig` is declared only here |
+| `visual_alerts` | a separate field of the same name in `apps/settings` |
+| `text_scale` | partial: `FontSettings::ui_size` is absolute, not a multiplier |
+| `caret_width` | **none** |
+| `focus_indicator` | **none** |
+| `screen_reader` | **none** — the feature does not exist |
+
+**This is the unfinished remainder of a cleanup that already happened.**
+`TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING`
+found the same defect in the *keyboard* third of these settings — sticky keys,
+filter keys, mouse keys existing three times over with no two copies connected —
+and fixed it by moving one definition into `gui/inputsettings`, a crate the
+compositor, the Settings app and the shell can all see. That fix is the
+precedent; what is left in `a11y.rs` is the visual third, not yet done.
+
+**Why the tests did not catch it.** `text_scale` and `caret_width` each have
+passing tests that round-trip them through the config file and check clamping
+(`text_scale=100` clamps to 3.0). They prove the setting is *stored*, not that
+anything reads it. A dead setting with green tests looks maintained.
+
+**A latent defect in the same code, should any of it be revived:** the parse
+does `v.clamp(0.5, 5.0)` on a value from `str::parse::<f32>`, which accepts
+`"nan"`. `f32::clamp` returns NaN for a NaN input, so `caret_width=nan` in the
+config yields a NaN width rather than being rejected. Any revival wants an
+`is_finite` guard, not just a clamp.
+
+**Proper fix:** delete `a11y.rs`, and add the three genuinely-missing settings
+to `appearance::AppearanceSettings` alongside `high_contrast`, following the
+`inputsettings` precedent. No new channel is needed and none is possible in the
+obvious direction — `gui/appearance` **depends on** `gui/toolkit` (`Palette` is
+built from the toolkit's `Color`), so the toolkit cannot name `Palette` and
+cannot depend on `appearance` without a cycle. The way a per-user value already
+crosses that boundary is that the *caller* passes it in: `textedit::SingleLine`
+takes a `color` field. A caret width travels the same way, as one more field.
+
+**A smaller real inconsistency to fix with it:** the carets that are drawn
+disagree about width for no recorded reason — `textedit::push_caret` draws a
+1.0-wide `Line` (3 callers), `pathbar.rs` a 2.0-wide `FillRect`
+(`CURSOR_WIDTH`), `launcher.rs` 2.0 inline, `run_dialog.rs` 1.0 inline. Six
+sites, three widths. A multiplier means nothing until they share a base.
+
+**If never fixed:** 1,360 lines that read as the accessibility subsystem, and
+are not. The next person to wire an accessibility feature will find this module
+first — it is the one that is *named* for the job — and add to the copy nobody
+reads. That is precisely what happened with sticky keys.
+
 ## TD-C-DYNDNS-PAGE-IS-READ-ONLY
 
 **Date:** 2026-09-09. **Lane:** C.

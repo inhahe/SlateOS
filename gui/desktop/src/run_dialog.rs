@@ -1018,14 +1018,17 @@ impl RunDialog {
             INPUT_FONT_SIZE,
             FontWeightHint::Regular,
         );
-        cmds.push(RenderCommand::Line {
-            x1: input_x + 4.0 + cursor_px,
-            y1: y + INPUT_Y_OFFSET + 4.0,
-            x2: input_x + 4.0 + cursor_px,
-            y2: y + INPUT_Y_OFFSET + INPUT_HEIGHT - 4.0,
-            color: p.text,
-            width: 1.0,
-        });
+        let caret_top = y + INPUT_Y_OFFSET + 4.0;
+        let mut caret = guitk::render::RenderTree::new();
+        guitk::textedit::push_caret(
+            &mut caret,
+            input_x + 4.0 + cursor_px,
+            caret_top,
+            INPUT_HEIGHT - 8.0,
+            p.text,
+            guitk::textedit::CARET_WIDTH,
+        );
+        cmds.extend(caret.commands);
 
         // Error message.
         if let Some(ref err) = self.error_message {
@@ -1748,6 +1751,41 @@ mod tests {
     /// **A failure here is that disagreement**: six Rights, six strictly
     /// increasing positions, because the arrow is walking the screen left to
     /// right and nothing it does may go the other way.
+    /// Every caret in the shell is drawn at the toolkit's one width.
+    ///
+    /// Before 2026-09-09 each field picked its own: this dialog drew 1.0, the
+    /// launcher 2.0, the path bar 2.0, the toolkit's own fields 1.0. Nothing
+    /// had decided that; they were written at different times. They now all go
+    /// through `guitk::textedit::push_caret`, which is what gives an
+    /// accessibility scale a single place to apply -- see `known-issues.md`
+    /// `TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY`.
+    ///
+    /// The assertion is against the toolkit's constant rather than a literal,
+    /// so changing the shared width stays a one-line change; what it forbids is
+    /// a field going back to a width of its own.
+    #[test]
+    fn the_run_dialog_draws_its_caret_at_the_shared_width() {
+        let p = Palette::for_mode(false);
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        dialog.input.set_text("abc");
+        let widths: Vec<f32> = dialog
+            .render(&p)
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Line { x1, x2, width, .. } if (x1 - x2).abs() < f32::EPSILON => {
+                    Some(width)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            widths,
+            [guitk::textedit::CARET_WIDTH],
+            "the dialog drew a caret at a width of its own"
+        );
+    }
+
     #[test]
     fn the_run_dialogs_drawn_caret_only_ever_moves_rightwards_under_the_right_arrow() {
         let p = Palette::for_mode(false);

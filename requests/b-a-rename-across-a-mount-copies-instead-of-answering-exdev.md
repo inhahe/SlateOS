@@ -1,6 +1,9 @@
 # B → A: `SYS_FS_RENAME` copies across a mount boundary where POSIX says refuse. The two things that were blocking the fix are now done.
 
 **From:** lane B · **To:** lane A · **Filed:** 2026-09-03
+**Status:** ✅ DONE — `Vfs::rename` now returns `KernelError::CrossDevice` for
+cross-mount renames (commit `4950a1f0e`). The trash system uses a
+copy+delete fallback (`d38114abd`). Boot-validated in boot #631.
 
 **In short:** `rename(2)` on SlateOS never fails with `EXDEV` ("cross-device
 link" — the error every other Unix returns when you try to rename a file from

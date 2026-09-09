@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS file association manager — which program opens which file type"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 # The window and its event loop. Without this `fn main` was empty, and the
 # consequence here was starker than usual: the toolbar, the sidebar, the table

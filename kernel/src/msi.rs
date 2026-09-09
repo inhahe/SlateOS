@@ -390,7 +390,7 @@ pub fn stats() -> MsiStats {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the MSI subsystem.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[msi] Running self-test...");
 
     // Test 1: Vector allocation.
@@ -440,4 +440,5 @@ pub fn self_test() {
     free_vectors(v4_base, 4);
 
     serial_println!("[msi] Self-test PASSED");
+    Ok(())
 }

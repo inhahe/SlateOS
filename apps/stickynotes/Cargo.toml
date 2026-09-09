@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS sticky notes — a desktop of movable, resizable notes"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 # The window and its event loop. Without this `fn main` was empty, so every
 # note, every drag and the whole undo stack existed only for the tests to call.

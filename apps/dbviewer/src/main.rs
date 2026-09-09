@@ -2,7 +2,7 @@
 //!
 //! A database viewer/browser tool (like DB Browser for `SQLite`) with:
 //! - SQL parser: basic SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, DROP TABLE
-//! - Data types: INTEGER, REAL, TEXT, BLOB, NULL
+//! - Data types: INTEGER, REAL, self.palette.text, BLOB, NULL
 //! - In-memory table storage (simulated `SQLite` engine)
 //! - Table schema viewer with column names, types, constraints
 //! - Paginated data browser with column sorting
@@ -32,6 +32,7 @@
 // it had stopped committing, and would have carried it silently through the
 // next one.
 
+use appearance::Palette;
 use guitk::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
@@ -48,23 +49,6 @@ use std::time::Duration;
 // Catppuccin Mocha theme
 // ============================================================================
 
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 // ============================================================================
 // Layout constants
 // ============================================================================
@@ -356,20 +340,29 @@ pub enum Target {
 /// was: at 400 points across, Import was drawn past the right-hand edge, and a
 /// button drawn off the edge that answers a press is worse than one that is not
 /// drawn at all.
-const TOOLBAR_BUTTONS: &[(&str, Target, Color)] = &[
-    ("Execute", Target::Execute, GREEN),
-    ("New Tab", Target::NewTab, BLUE),
-    ("Export CSV", Target::Export(ExportFormat::Csv), PEACH),
-    ("Export JSON", Target::Export(ExportFormat::Json), PEACH),
+/// One toolbar button: its label, what pressing it means, and the palette
+/// role that paints it.
+///
+/// A role selector rather than a colour, because this is a `const` and the
+/// palette is resolved at run time from the user's settings.
+type ToolbarButton = (&'static str, Target, fn(&Palette) -> Color);
+
+const TOOLBAR_BUTTONS: &[ToolbarButton] = &[
+    ("Execute", Target::Execute, |p| p.green),
+    ("New Tab", Target::NewTab, |p| p.blue),
+    ("Export CSV", Target::Export(ExportFormat::Csv), |p| p.peach),
+    ("Export JSON", Target::Export(ExportFormat::Json), |p| {
+        p.peach
+    }),
     (
         "Export SQL",
         Target::Export(ExportFormat::SqlInserts),
-        PEACH,
+        |p| p.peach,
     ),
-    ("Import", Target::Import, TEAL),
+    ("Import", Target::Import, |p| p.teal),
     // `show_filter_builder` was a field with no switch: it was set in `new` and
     // read by the drawing pass, and nothing between the two could change it.
-    ("Filters", Target::ToggleFilterBuilder, YELLOW),
+    ("Filters", Target::ToggleFilterBuilder, |p| p.yellow),
 ];
 
 /// What the keyboard is reaching.
@@ -521,13 +514,13 @@ fn put_text(
 }
 
 /// The colour a cell of each type is drawn in.
-fn cell_color(cell: &CellValue) -> Color {
+fn cell_color(cell: &CellValue, pal: &Palette) -> Color {
     match cell {
-        CellValue::Null => OVERLAY0,
-        CellValue::Integer(_) => BLUE,
-        CellValue::Real(_) => PEACH,
-        CellValue::Text(_) => TEXT,
-        CellValue::Blob(_) => MAUVE,
+        CellValue::Null => pal.overlay0,
+        CellValue::Integer(_) => pal.blue,
+        CellValue::Real(_) => pal.peach,
+        CellValue::Text(_) => pal.text,
+        CellValue::Blob(_) => pal.mauve,
     }
 }
 
@@ -536,20 +529,20 @@ fn cell_color(cell: &CellValue) -> Color {
 /// The *text* is part of the answer, not just the colour: a string literal is
 /// tokenized without its quotes and drawn with them, so the caller cannot
 /// measure the token by looking at the token.
-fn token_ink(token: &SqlToken) -> (String, Color, FontWeightHint) {
+fn token_ink(token: &SqlToken, pal: &Palette) -> (String, Color, FontWeightHint) {
     match token {
-        SqlToken::Keyword(k) => (k.clone(), MAUVE, FontWeightHint::Bold),
-        SqlToken::Identifier(id) => (id.clone(), TEXT, FontWeightHint::Regular),
-        SqlToken::StringLiteral(s) => (format!("'{s}'"), GREEN, FontWeightHint::Regular),
-        SqlToken::NumberLiteral(n) => (n.clone(), PEACH, FontWeightHint::Regular),
-        SqlToken::Operator(op) => (op.clone(), RED, FontWeightHint::Regular),
-        SqlToken::Comma => (",".to_owned(), TEXT, FontWeightHint::Regular),
-        SqlToken::Semicolon => (";".to_owned(), TEXT, FontWeightHint::Regular),
-        SqlToken::LeftParen => ("(".to_owned(), YELLOW, FontWeightHint::Regular),
-        SqlToken::RightParen => (")".to_owned(), YELLOW, FontWeightHint::Regular),
-        SqlToken::Star => ("*".to_owned(), PEACH, FontWeightHint::Bold),
-        SqlToken::Dot => (".".to_owned(), TEXT, FontWeightHint::Regular),
-        SqlToken::Whitespace => (" ".to_owned(), TEXT, FontWeightHint::Regular),
+        SqlToken::Keyword(k) => (k.clone(), pal.mauve, FontWeightHint::Bold),
+        SqlToken::Identifier(id) => (id.clone(), pal.text, FontWeightHint::Regular),
+        SqlToken::StringLiteral(s) => (format!("'{s}'"), pal.green, FontWeightHint::Regular),
+        SqlToken::NumberLiteral(n) => (n.clone(), pal.peach, FontWeightHint::Regular),
+        SqlToken::Operator(op) => (op.clone(), pal.red, FontWeightHint::Regular),
+        SqlToken::Comma => (",".to_owned(), pal.text, FontWeightHint::Regular),
+        SqlToken::Semicolon => (";".to_owned(), pal.text, FontWeightHint::Regular),
+        SqlToken::LeftParen => ("(".to_owned(), pal.yellow, FontWeightHint::Regular),
+        SqlToken::RightParen => (")".to_owned(), pal.yellow, FontWeightHint::Regular),
+        SqlToken::Star => ("*".to_owned(), pal.peach, FontWeightHint::Bold),
+        SqlToken::Dot => (".".to_owned(), pal.text, FontWeightHint::Regular),
+        SqlToken::Whitespace => (" ".to_owned(), pal.text, FontWeightHint::Regular),
     }
 }
 
@@ -698,13 +691,13 @@ impl DataType {
         }
     }
 
-    fn color(&self) -> Color {
+    fn color(&self, pal: &Palette) -> Color {
         match self {
-            Self::Integer => BLUE,
-            Self::Real => PEACH,
-            Self::Text => GREEN,
-            Self::Blob => MAUVE,
-            Self::Null => OVERLAY0,
+            Self::Integer => pal.blue,
+            Self::Real => pal.peach,
+            Self::Text => pal.green,
+            Self::Blob => pal.mauve,
+            Self::Null => pal.overlay0,
         }
     }
 }
@@ -3404,6 +3397,12 @@ pub struct DbViewerApp {
     window_width: f32,
     /// The height of the last frame drawn. See `window_width`.
     window_height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for DbViewerApp {
@@ -3418,6 +3417,7 @@ impl DbViewerApp {
         let tab = DbTab::new(sample_db);
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             tabs: vec![tab],
             active_tab: 0,
             sql_input: String::from("SELECT * FROM users"),
@@ -3635,7 +3635,7 @@ impl DbViewerApp {
     pub fn frame(&self, w: f32, h: f32) -> Frame<Target> {
         let l = Layout::solve(w, h);
         let mut f = Frame::new(l.window.w, l.window.h);
-        f.push(fill(l.window, BASE, 0.0));
+        f.push(fill(l.window, self.palette.base, 0.0));
 
         self.draw_toolbar(&mut f, l.toolbar);
         self.draw_db_tabs(&mut f, l.tabs);
@@ -3658,7 +3658,7 @@ impl DbViewerApp {
         if area.is_empty() {
             return;
         }
-        f.push(fill(area, MANTLE, 0.0));
+        f.push(fill(area, self.palette.mantle, 0.0));
 
         // The cursor starts after the title and stops at the right-hand edge.
         // The old pass started it at a hard-coded `x = 130` and never asked how
@@ -3672,25 +3672,26 @@ impl DbViewerApp {
             Rect::new(bx, area.y, title_w, area.h),
             "DB Viewer",
             14.0,
-            BLUE,
+            self.palette.blue,
             FontWeightHint::Bold,
         );
         bx += title_w + 18.0;
 
         let btn_h = (area.h - 12.0).max(0.0);
-        for (label, target, color) in TOOLBAR_BUTTONS {
+        for (label, target, role) in TOOLBAR_BUTTONS {
+            let color = role(&self.palette);
             let bw = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
             let btn = Rect::new(bx, area.y + 6.0, bw, btn_h);
             if btn.is_empty() || btn.right() > area.right() {
                 break;
             }
-            f.push(fill(btn, SURFACE0, CORNER_RADIUS));
+            f.push(fill(btn, self.palette.surface0, CORNER_RADIUS));
             put_text(
                 f,
                 inset_x(btn, 8.0),
                 label,
                 11.0,
-                *color,
+                color,
                 FontWeightHint::Regular,
             );
             f.hit(*target, btn);
@@ -3703,7 +3704,7 @@ impl DbViewerApp {
         if area.is_empty() {
             return;
         }
-        f.push(fill(area, CRUST, 0.0));
+        f.push(fill(area, self.palette.crust, 0.0));
 
         let top_corners = CornerRadii {
             top_left: CORNER_RADIUS,
@@ -3729,7 +3730,11 @@ impl DbViewerApp {
                 y: cell.y,
                 width: cell.w,
                 height: cell.h,
-                color: if is_active { BASE } else { CRUST },
+                color: if is_active {
+                    self.palette.base
+                } else {
+                    self.palette.crust
+                },
                 corner_radii: top_corners,
             });
 
@@ -3745,14 +3750,25 @@ impl DbViewerApp {
                 label,
                 &tab.db.name,
                 11.0,
-                if is_active { TEXT } else { SUBTEXT0 },
+                if is_active {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 if is_active {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
             );
-            put_text(f, close, "x", 10.0, OVERLAY0, FontWeightHint::Regular);
+            put_text(
+                f,
+                close,
+                "x",
+                10.0,
+                self.palette.overlay0,
+                FontWeightHint::Regular,
+            );
 
             // The tab first and its close box second: the topmost hit box wins,
             // so recorded the other way round the tab would swallow the `x` and
@@ -3765,8 +3781,15 @@ impl DbViewerApp {
 
         let plus = Rect::new(tx, area.y + 6.0, 24.0, (area.h - 12.0).max(0.0));
         if !plus.is_empty() && plus.right() <= area.right() {
-            f.push(fill(plus, SURFACE0, CORNER_RADIUS));
-            put_text(f, plus, "+", 12.0, SUBTEXT0, FontWeightHint::Bold);
+            f.push(fill(plus, self.palette.surface0, CORNER_RADIUS));
+            put_text(
+                f,
+                plus,
+                "+",
+                12.0,
+                self.palette.subtext0,
+                FontWeightHint::Bold,
+            );
             f.hit(Target::AddTab, plus);
         }
     }
@@ -3789,13 +3812,13 @@ impl DbViewerApp {
         if area.is_empty() {
             return;
         }
-        f.push(fill(area, MANTLE, 0.0));
+        f.push(fill(area, self.palette.mantle, 0.0));
         f.push(RenderCommand::Line {
             x1: area.right(),
             y1: area.y,
             x2: area.right(),
             y2: area.bottom(),
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -3836,13 +3859,20 @@ impl DbViewerApp {
         if name_row.bottom() > area.bottom() {
             return;
         }
-        put_text(f, name_row, &tab.db.name, 12.0, BLUE, FontWeightHint::Bold);
+        put_text(
+            f,
+            name_row,
+            &tab.db.name,
+            12.0,
+            self.palette.blue,
+            FontWeightHint::Bold,
+        );
         y += 22.0;
 
         if y >= area.bottom() {
             return;
         }
-        f.push(hline(inset_x(area, 8.0), y, SURFACE0));
+        f.push(hline(inset_x(area, 8.0), y, self.palette.surface0));
         y += 8.0;
 
         for (i, node) in tab.tree_nodes.iter().enumerate() {
@@ -3862,23 +3892,27 @@ impl DbViewerApp {
                 _ => false,
             };
             let (icon, label, color) = match &node.kind {
-                TreeNodeKind::TablesHeader => ("T", "Tables".to_owned(), BLUE),
+                TreeNodeKind::TablesHeader => ("T", "Tables".to_owned(), self.palette.blue),
                 TreeNodeKind::Table(name) => (
                     "  ",
                     name.clone(),
-                    if is_selected { TEXT } else { SUBTEXT1 },
+                    if is_selected {
+                        self.palette.text
+                    } else {
+                        self.palette.subtext1
+                    },
                 ),
-                TreeNodeKind::IndexesHeader => ("I", "Indexes".to_owned(), PEACH),
-                TreeNodeKind::Index(name) => ("  ", name.clone(), SUBTEXT0),
-                TreeNodeKind::ViewsHeader => ("V", "Views".to_owned(), GREEN),
-                TreeNodeKind::View(name) => ("  ", name.clone(), SUBTEXT0),
-                TreeNodeKind::TriggersHeader => ("!", "Triggers".to_owned(), RED),
-                TreeNodeKind::Trigger(name) => ("  ", name.clone(), SUBTEXT0),
+                TreeNodeKind::IndexesHeader => ("I", "Indexes".to_owned(), self.palette.peach),
+                TreeNodeKind::Index(name) => ("  ", name.clone(), self.palette.subtext0),
+                TreeNodeKind::ViewsHeader => ("V", "Views".to_owned(), self.palette.green),
+                TreeNodeKind::View(name) => ("  ", name.clone(), self.palette.subtext0),
+                TreeNodeKind::TriggersHeader => ("!", "Triggers".to_owned(), self.palette.red),
+                TreeNodeKind::Trigger(name) => ("  ", name.clone(), self.palette.subtext0),
             };
             let is_header = node.depth == 0;
 
             if is_selected {
-                f.push(fill(row, SURFACE0, 3.0));
+                f.push(fill(row, self.palette.surface0, 3.0));
             }
 
             let weight = if is_header {
@@ -3916,7 +3950,7 @@ impl DbViewerApp {
         if area.is_empty() {
             return;
         }
-        f.push(hline(inset_x(area, 8.0), area.y, SURFACE0));
+        f.push(hline(inset_x(area, 8.0), area.y, self.palette.surface0));
 
         let cols: Vec<String> = tab
             .selected_table
@@ -3941,7 +3975,7 @@ impl DbViewerApp {
             heading,
             "FILTER BUILDER",
             10.0,
-            YELLOW,
+            self.palette.yellow,
             FontWeightHint::Bold,
         );
         y += 18.0;
@@ -3954,9 +3988,9 @@ impl DbViewerApp {
             (
                 format!("Column: {col_name}"),
                 Target::FilterColumn,
-                LAVENDER,
+                self.palette.lavender,
             ),
-            (format!("Where: {op}"), Target::FilterOp, MAUVE),
+            (format!("Where: {op}"), Target::FilterOp, self.palette.mauve),
             (
                 if self.filter_value.is_empty() {
                     "Value: (type here)".to_owned()
@@ -3965,12 +3999,16 @@ impl DbViewerApp {
                 },
                 Target::FilterValue,
                 if self.focus == Focus::FilterValue {
-                    TEXT
+                    self.palette.text
                 } else {
-                    SUBTEXT0
+                    self.palette.subtext0
                 },
             ),
-            ("+ Add filter".to_owned(), Target::AddFilter, GREEN),
+            (
+                "+ Add filter".to_owned(),
+                Target::AddFilter,
+                self.palette.green,
+            ),
         ];
         for (label, target, color) in rows {
             let row = Rect::new(
@@ -3982,9 +4020,9 @@ impl DbViewerApp {
             if row.is_empty() || row.bottom() > area.bottom() {
                 return;
             }
-            f.push(fill(row, SURFACE0, 3.0));
+            f.push(fill(row, self.palette.surface0, 3.0));
             if target == Target::FilterValue && self.focus == Focus::FilterValue {
-                f.push(stroke(row, BLUE, 3.0));
+                f.push(stroke(row, self.palette.blue, 3.0));
             }
             put_text(
                 f,
@@ -4004,7 +4042,7 @@ impl DbViewerApp {
                 return;
             }
             let name = cols.get(filter.column_idx).map_or("?", String::as_str);
-            f.push(fill(row, SURFACE0, 3.0));
+            f.push(fill(row, self.palette.surface0, 3.0));
             let remove = Rect::new((row.right() - 16.0).max(row.x), row.y, 16.0, row.h);
             let text_box = Rect::new(row.x + 4.0, row.y, (remove.x - row.x - 4.0).max(0.0), row.h);
             put_text(
@@ -4012,10 +4050,17 @@ impl DbViewerApp {
                 text_box,
                 &format!("{name} {} {}", filter.op.label(), filter.value_str),
                 10.0,
-                TEAL,
+                self.palette.teal,
                 FontWeightHint::Regular,
             );
-            put_text(f, remove, "x", 10.0, RED, FontWeightHint::Regular);
+            put_text(
+                f,
+                remove,
+                "x",
+                10.0,
+                self.palette.red,
+                FontWeightHint::Regular,
+            );
             f.hit(Target::RemoveFilter(fi), remove);
             y += 20.0;
         }
@@ -4028,7 +4073,7 @@ impl DbViewerApp {
         if area.is_empty() {
             return;
         }
-        f.push(fill(area, BASE, 0.0));
+        f.push(fill(area, self.palette.base, 0.0));
 
         let Some(tab) = self.active_db_tab() else {
             return;
@@ -4039,7 +4084,7 @@ impl DbViewerApp {
                 inset(area, 20.0),
                 "No table selected",
                 13.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
             );
             return;
@@ -4078,7 +4123,7 @@ impl DbViewerApp {
         if !header.is_empty() {
             f.push(fill(
                 Rect::new(header.x, header.y, body.w, header.h),
-                SURFACE0,
+                self.palette.surface0,
                 0.0,
             ));
             for (ci, col_name) in col_names.iter().enumerate().take(shown) {
@@ -4099,7 +4144,7 @@ impl DbViewerApp {
                     inset_x(cell, CELL_PADDING),
                     &format!("{col_name}{}", arrow.unwrap_or("")),
                     11.0,
-                    LAVENDER,
+                    self.palette.lavender,
                     FontWeightHint::Bold,
                 );
                 // The header is the sort control. Before this, `toggle_sort`
@@ -4112,7 +4157,7 @@ impl DbViewerApp {
                         y1: header.y,
                         x2: cell.x,
                         y2: rows_area.bottom(),
-                        color: SURFACE1,
+                        color: self.palette.surface1,
                         width: 1.0,
                     });
                 }
@@ -4120,7 +4165,7 @@ impl DbViewerApp {
             f.push(hline(
                 Rect::new(header.x, header.y, body.w, header.h),
                 header.bottom(),
-                SURFACE1,
+                self.palette.surface1,
             ));
         }
 
@@ -4141,7 +4186,11 @@ impl DbViewerApp {
             }
             f.push(fill(
                 Rect::new(line.x, line.y, body.w, line.h),
-                if ri % 2 == 0 { BASE } else { SURFACE0 },
+                if ri % 2 == 0 {
+                    self.palette.base
+                } else {
+                    self.palette.surface0
+                },
                 0.0,
             ));
 
@@ -4152,19 +4201,19 @@ impl DbViewerApp {
                     inset_x(cell_box, CELL_PADDING),
                     &cell.display(),
                     11.0,
-                    cell_color(cell),
+                    cell_color(cell, &self.palette),
                     FontWeightHint::Regular,
                 );
             }
 
             let del = Rect::new(body.right(), ry, delete_w, ROW_HEIGHT);
-            put_text(f, del, "x", 10.0, RED, FontWeightHint::Regular);
+            put_text(f, del, "x", 10.0, self.palette.red, FontWeightHint::Regular);
             // Named by where the row sits in the *table*, not by where it sits
             // on the screen. With a sort in force the two differ, and deleting
             // by screen position removes a row the user was not pointing at.
             f.hit(Target::DeleteRow(*source_idx), del);
 
-            f.push(hline(line, line.bottom(), SURFACE0));
+            f.push(hline(line, line.bottom(), self.palette.surface0));
             ry += ROW_HEIGHT;
         }
         f.unclip();
@@ -4174,7 +4223,7 @@ impl DbViewerApp {
         if bar.is_empty() {
             return;
         }
-        f.push(fill(bar, MANTLE, 0.0));
+        f.push(fill(bar, self.palette.mantle, 0.0));
 
         let total_pages = if total_rows == 0 {
             1
@@ -4202,13 +4251,13 @@ impl DbViewerApp {
             if btn.is_empty() || btn.x < bar.x {
                 break;
             }
-            f.push(fill(btn, SURFACE0, 3.0));
+            f.push(fill(btn, self.palette.surface0, 3.0));
             put_text(
                 f,
                 inset_x(btn, 6.0),
                 label,
                 10.0,
-                SUBTEXT1,
+                self.palette.subtext1,
                 FontWeightHint::Regular,
             );
             f.hit(target, btn);
@@ -4220,7 +4269,7 @@ impl DbViewerApp {
             caption_box,
             &caption,
             10.0,
-            SUBTEXT0,
+            self.palette.subtext0,
             FontWeightHint::Regular,
         );
     }
@@ -4231,8 +4280,8 @@ impl DbViewerApp {
         if area.is_empty() {
             return;
         }
-        f.push(fill(area, MANTLE, 0.0));
-        f.push(hline(area, area.y, SURFACE1));
+        f.push(fill(area, self.palette.mantle, 0.0));
+        f.push(hline(area, area.y, self.palette.surface1));
 
         let tabs = l.panel_tabs();
         let top_corners = CornerRadii {
@@ -4255,7 +4304,11 @@ impl DbViewerApp {
                 y: cell.y,
                 width: cell.w,
                 height: cell.h,
-                color: if is_active { SURFACE0 } else { MANTLE },
+                color: if is_active {
+                    self.palette.surface0
+                } else {
+                    self.palette.mantle
+                },
                 corner_radii: top_corners,
             });
             put_text(
@@ -4263,7 +4316,11 @@ impl DbViewerApp {
                 inset_x(cell, 8.0),
                 label,
                 10.0,
-                if is_active { TEXT } else { SUBTEXT0 },
+                if is_active {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -4311,13 +4368,13 @@ impl DbViewerApp {
         if editor.is_empty() {
             return;
         }
-        f.push(fill(editor, CRUST, CORNER_RADIUS));
+        f.push(fill(editor, self.palette.crust, CORNER_RADIUS));
         f.push(stroke(
             editor,
             if self.focus == Focus::Editor {
-                BLUE
+                self.palette.blue
             } else {
-                SURFACE1
+                self.palette.surface1
             },
             CORNER_RADIUS,
         ));
@@ -4335,13 +4392,13 @@ impl DbViewerApp {
                 line,
                 "Enter SQL query...",
                 12.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
             );
         } else {
             let mut tx = line.x;
             for token in tokenize_sql(&self.sql_input) {
-                let (s, color, weight) = token_ink(&token);
+                let (s, color, weight) = token_ink(&token, &self.palette);
                 // Measured in the token's *own* weight: keywords are drawn
                 // bold, so a fixed cell laid the next token on top of the tail
                 // of every SELECT and WHERE. And a quoted string literal is
@@ -4405,7 +4462,7 @@ impl DbViewerApp {
                 format!("HISTORY ({} of {total} shown)", placed.len())
             },
             10.0,
-            OVERLAY0,
+            self.palette.overlay0,
             FontWeightHint::Bold,
         );
 
@@ -4413,9 +4470,17 @@ impl DbViewerApp {
             let Some(entry) = self.history.get(i) else {
                 continue;
             };
-            f.push(fill(row, SURFACE0, 2.0));
+            f.push(fill(row, self.palette.surface0, 2.0));
             let dot = Rect::new(row.x + 4.0, row.y + (row.h - 6.0) / 2.0, 6.0, 6.0);
-            f.push(fill(dot, if entry.success { GREEN } else { RED }, 3.0));
+            f.push(fill(
+                dot,
+                if entry.success {
+                    self.palette.green
+                } else {
+                    self.palette.red
+                },
+                3.0,
+            ));
             let star = Rect::new((row.right() - 16.0).max(row.x), row.y, 16.0, row.h);
             put_text(
                 f,
@@ -4427,7 +4492,7 @@ impl DbViewerApp {
                 ),
                 &entry.sql,
                 10.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
             );
             put_text(
@@ -4435,7 +4500,11 @@ impl DbViewerApp {
                 star,
                 if entry.favorite { "*" } else { "-" },
                 10.0,
-                if entry.favorite { YELLOW } else { OVERLAY0 },
+                if entry.favorite {
+                    self.palette.yellow
+                } else {
+                    self.palette.overlay0
+                },
                 FontWeightHint::Bold,
             );
             // The row first, the star second: the last box recorded is the one
@@ -4455,7 +4524,7 @@ impl DbViewerApp {
                 Rect::new(area.x + 16.0, area.y + 8.0, (area.w - 32.0).max(0.0), 16.0),
                 "No query results. Execute a query first.",
                 12.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
             );
             return;
@@ -4466,7 +4535,11 @@ impl DbViewerApp {
         // with nothing to mark the cut -- and the messages that run long are
         // exactly the ones worth reading, the SQL errors saying what the engine
         // rejected and where.
-        let msg_color = if result.is_error { RED } else { GREEN };
+        let msg_color = if result.is_error {
+            self.palette.red
+        } else {
+            self.palette.green
+        };
         let msg_width = (area.w - 24.0).max(0.0);
         let mut message = text::wrap(
             &result.message,
@@ -4541,7 +4614,7 @@ impl DbViewerApp {
 
         let header = Rect::new(table.x, table.y, table.w, 20.0_f32.min(table.h));
         if !header.is_empty() {
-            f.push(fill(header, SURFACE0, 0.0));
+            f.push(fill(header, self.palette.surface0, 0.0));
             for (ci, col_name) in result.columns.iter().enumerate().take(shown) {
                 let cell = Rect::new(table.x + ci as f32 * col_w, header.y, col_w, header.h);
                 put_text(
@@ -4549,7 +4622,7 @@ impl DbViewerApp {
                     inset_x(cell, 6.0),
                     col_name,
                     10.0,
-                    LAVENDER,
+                    self.palette.lavender,
                     FontWeightHint::Bold,
                 );
             }
@@ -4570,7 +4643,7 @@ impl DbViewerApp {
                     inset_x(cell_box, 6.0),
                     &cell.display(),
                     10.0,
-                    cell_color(cell),
+                    cell_color(cell, &self.palette),
                     FontWeightHint::Regular,
                 );
             }
@@ -4591,7 +4664,7 @@ impl DbViewerApp {
                 Rect::new(area.x + 16.0, area.y + 8.0, (area.w - 32.0).max(0.0), 16.0),
                 "Select a table to view its schema.",
                 12.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
             );
             return;
@@ -4610,7 +4683,7 @@ impl DbViewerApp {
             title,
             &format!("SCHEMA: {table_name}"),
             12.0,
-            BLUE,
+            self.palette.blue,
             FontWeightHint::Bold,
         );
 
@@ -4629,7 +4702,7 @@ impl DbViewerApp {
         if head.bottom() > area.bottom() {
             return;
         }
-        f.push(fill(head, SURFACE0, 2.0));
+        f.push(fill(head, self.palette.surface0, 2.0));
         let mut hx = area.x + 12.0;
         for (hi, header) in ["Column", "Type", "Constraints"].iter().enumerate() {
             let w = col_w.get(hi).copied().unwrap_or(0.0);
@@ -4638,7 +4711,7 @@ impl DbViewerApp {
                 Rect::new(hx, cy + 1.0, w, 16.0),
                 header,
                 10.0,
-                LAVENDER,
+                self.palette.lavender,
                 FontWeightHint::Bold,
             );
             hx += w;
@@ -4651,9 +4724,12 @@ impl DbViewerApp {
                 return;
             }
             let cells: [(String, Color); 3] = [
-                (col.name.clone(), TEXT),
-                (col.data_type.label().to_owned(), col.data_type.color()),
-                (col.constraints.describe(), YELLOW),
+                (col.name.clone(), self.palette.text),
+                (
+                    col.data_type.label().to_owned(),
+                    col.data_type.color(&self.palette),
+                ),
+                (col.constraints.describe(), self.palette.yellow),
             ];
             let mut rx = row.x;
             for (ci, (label, color)) in cells.into_iter().enumerate() {
@@ -4695,7 +4771,7 @@ impl DbViewerApp {
             heading,
             "FOREIGN KEYS",
             10.0,
-            PEACH,
+            self.palette.peach,
             FontWeightHint::Bold,
         );
         cy += 16.0;
@@ -4713,7 +4789,7 @@ impl DbViewerApp {
                     fk.from_table, fk.from_column, fk.to_table, fk.to_column
                 ),
                 10.0,
-                TEAL,
+                self.palette.teal,
                 FontWeightHint::Regular,
             );
             cy += 16.0;
@@ -4740,7 +4816,7 @@ impl DbViewerApp {
                 Rect::new(area.x + 12.0, area.y + 4.0, (area.w - 24.0).max(0.0), 16.0),
                 "SCHEMA DIAGRAM",
                 12.0,
-                BLUE,
+                self.palette.blue,
                 FontWeightHint::Bold,
             );
             put_line(
@@ -4749,7 +4825,7 @@ impl DbViewerApp {
                 Rect::new(area.x + 16.0, area.y + 28.0, (area.w - 32.0).max(0.0), 14.0),
                 "No tables in database.",
                 11.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
             );
             return;
@@ -4802,21 +4878,21 @@ impl DbViewerApp {
             Rect::new(area.x + 12.0, area.y + 4.0, (area.w - 24.0).max(0.0), 16.0),
             &heading,
             12.0,
-            BLUE,
+            self.palette.blue,
             FontWeightHint::Bold,
         );
 
         // --- the boxes ---
         for (r, table) in &placed {
-            f.push(fill(*r, SURFACE0, CORNER_RADIUS));
-            f.push(stroke(*r, BLUE, CORNER_RADIUS));
+            f.push(fill(*r, self.palette.surface0, CORNER_RADIUS));
+            f.push(stroke(*r, self.palette.blue, CORNER_RADIUS));
             let head = Rect::new(r.x, r.y, r.w, DIAGRAM_HEADER_HEIGHT.min(r.h));
             f.push(RenderCommand::FillRect {
                 x: head.x,
                 y: head.y,
                 width: head.w,
                 height: head.h,
-                color: BLUE,
+                color: self.palette.blue,
                 corner_radii: CornerRadii {
                     top_left: CORNER_RADIUS,
                     top_right: CORNER_RADIUS,
@@ -4829,7 +4905,7 @@ impl DbViewerApp {
                 inset_x(head, 6.0),
                 &table.name,
                 10.0,
-                CRUST,
+                self.palette.crust,
                 FontWeightHint::Bold,
             );
 
@@ -4849,7 +4925,7 @@ impl DbViewerApp {
                     line,
                     &format!("{pk}{}: {}", col.name, col.data_type.label()),
                     9.0,
-                    SUBTEXT1,
+                    self.palette.subtext1,
                     FontWeightHint::Regular,
                 );
                 cy += DIAGRAM_COL_STEP;
@@ -4874,7 +4950,7 @@ impl DbViewerApp {
                 y1: from_y,
                 x2: to.x,
                 y2: to_y,
-                color: PEACH,
+                color: self.palette.peach,
                 width: 1.5,
             });
             let mid_x = f32::midpoint(from.right(), to.x);
@@ -4890,7 +4966,7 @@ impl DbViewerApp {
                 label,
                 &format!("{} -> {}", fk.from_column, fk.to_column),
                 8.0,
-                PEACH,
+                self.palette.peach,
                 FontWeightHint::Regular,
             );
         }
@@ -4909,7 +4985,7 @@ impl DbViewerApp {
         if area.is_empty() {
             return;
         }
-        f.push(fill(area, CRUST, 0.0));
+        f.push(fill(area, self.palette.crust, 0.0));
 
         let tab = self.active_db_tab();
 
@@ -4922,7 +4998,7 @@ impl DbViewerApp {
                 Rect::new(right - count_w, area.y, count_w, area.h),
                 &count,
                 10.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
             );
             right -= count_w + 12.0;
@@ -4931,7 +5007,7 @@ impl DbViewerApp {
         let mut readings: Vec<(String, Color)> = Vec::new();
         readings.push((
             format!("DB: {}", tab.map_or("No database", |t| t.db.name.as_str())),
-            BLUE,
+            self.palette.blue,
         ));
         if let Some(t) = tab
             && let Some(table_name) = t.selected_table.as_ref()
@@ -4943,13 +5019,13 @@ impl DbViewerApp {
                     table.col_count(),
                     table.row_count()
                 ),
-                SUBTEXT0,
+                self.palette.subtext0,
             ));
         }
         // What the last thing the user pressed did. Before this the program had
         // no way to say so: every control was a painted rectangle, and the
         // status line reported only what was already visible elsewhere.
-        readings.push((self.status.clone(), SUBTEXT1));
+        readings.push((self.status.clone(), self.palette.subtext1));
 
         let mut sx = area.x + 10.0;
         for (label, color) in readings {
@@ -5290,6 +5366,10 @@ impl DbViewerApp {
 // ============================================================================
 
 impl App for DbViewerApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("DB Viewer")
     }
@@ -6673,7 +6753,7 @@ mod tests {
                     color,
                     ..
                 } if (font_size - RESULT_MSG_FONT_SIZE).abs() < 0.01
-                    && (*color == RED || *color == GREEN) =>
+                    && (*color == app.palette.red || *color == app.palette.green) =>
                 {
                     Some((*y, text.clone()))
                 }
@@ -8778,6 +8858,7 @@ mod tests {
 
     #[test]
     fn a_run_the_clip_cannot_show_is_not_put_in_the_picture() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         // `put_text` is the funnel every run in this program goes through, and
         // this is the one caller that asks it for the impossible on purpose.
         //
@@ -8796,7 +8877,7 @@ mod tests {
             Rect::new(10.0, 300.0, 200.0, 20.0),
             "three hundred points below the panel",
             13.0,
-            TEXT,
+            pal.text,
             FontWeightHint::Regular,
         );
         f.unclip();
@@ -8815,7 +8896,7 @@ mod tests {
             Rect::new(10.0, 30.0, 200.0, 20.0),
             "inside the panel",
             13.0,
-            TEXT,
+            pal.text,
             FontWeightHint::Regular,
         );
         f.unclip();
@@ -9020,5 +9101,64 @@ mod tests {
                 "asked for {w}x{h}, drew a {width}x{height} background"
             );
         }
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut DbViewerApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = DbViewerApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

@@ -228,6 +228,79 @@ fn the_shell_claims_its_shortcuts_before_it_starts_listening() {
     }
 }
 
+/// A rebound global shortcut is grabbed under its new chord and let go of
+/// under its old one.
+///
+/// The set of chords the shell holds is derived from its registry, so a rebind
+/// changes it -- and nothing recomputed the grabs. The known-issues entry
+/// called this "the piece most likely to be forgotten, and forgetting it means
+/// the rebound shortcut works until the session restarts". It was forgotten,
+/// and this is what stops it being forgotten again.
+///
+/// Both directions are asserted. Grabbing the new chord and keeping the old
+/// one is the quieter half of the bug: the shell goes on holding a chord no
+/// shortcut uses, which is a key no application can ever see.
+#[test]
+fn rebinding_a_shortcut_moves_the_grab_with_it() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+
+    let (old, _) = session
+        .shell()
+        .hotkeys
+        .all_bindings()
+        .find(|(h, a)| !a.is_conditional() && h.key != Key::Escape)
+        .map(|(h, a)| (*h, a.clone()))
+        .expect("an unconditional binding to move");
+
+    // Open the card, land on that row, record a chord nothing else uses.
+    session.shell_mut().toggle_shortcut_card();
+    let row = session
+        .shell()
+        .hotkeys
+        .all_bindings()
+        .position(|(h, _)| *h == old)
+        .expect("the row is in the list");
+    session.shell_mut().shortcut_selected = row;
+
+    let before = desktop.borrow().seen.len();
+    drop(session.shell_mut().handle_hotkey(&KeyEvent {
+        key: Key::Enter,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+        text: String::new(),
+    }));
+    drop(session.shell_mut().handle_hotkey(&KeyEvent {
+        key: Key::F12,
+        pressed: true,
+        modifiers: Modifiers::ctrl(),
+        text: String::new(),
+    }));
+    session.pump().expect("pump");
+
+    let seen = &desktop.borrow().seen;
+    let after = &seen[before.min(seen.len())..];
+
+    assert!(
+        after.iter().any(|r| r.body
+            == RequestBody::GrabKey {
+                window: panel,
+                key: Key::F12,
+                modifiers: Modifiers::ctrl(),
+            }),
+        "the new chord must be claimed, or the rebound shortcut is dead"
+    );
+    assert!(
+        after.iter().any(|r| r.body
+            == RequestBody::UngrabKey {
+                window: panel,
+                key: old.key,
+                modifiers: old.modifiers(),
+            }),
+        "and the old one released, or the shell holds a key nothing uses"
+    );
+}
+
 /// Escape is the one chord held conditionally: a permanent grab takes the key
 /// from every dialog on the desktop, and no grab means a menu opened with the
 /// mouse cannot be closed with the keyboard.

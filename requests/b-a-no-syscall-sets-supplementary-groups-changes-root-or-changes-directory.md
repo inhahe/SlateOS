@@ -5,8 +5,7 @@
 survive measurement.
 **Updated:** 2026-09-07 -- item 2 (lane B's own bug) is fixed; the ask of
 lane A is unchanged.
-**Status:** OPEN, but **much smaller than originally filed** — and one third of
-it is lane B's, not lane A's.
+**Status:** ✅ LANDED 2026-09-07 by lane A — `SYS_PROCESS_SETGROUPS` (1067) and `SYS_PROCESS_CHROOT` (1068) added as native syscalls. Both gate on `(Process, SET_CREDENTIALS)`. The PCB now has a `root_dir: Option<Vec<u8>>` field inherited across fork/exec. Self-tests added for both.
 
 ## The original request was wrong
 

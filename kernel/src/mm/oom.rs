@@ -236,7 +236,7 @@ pub fn oom_kill_count() -> u64 {
 /// 2. No callback → returns 0 gracefully.
 /// 3. Statistics counters increment.
 /// 4. Callback registration works.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[oom] Running self-test...");
     let mut skips = crate::fs::selftest::Skips::new();
 
@@ -295,4 +295,5 @@ pub fn self_test() {
 
     skips.report("[oom]");
     serial_println!("[oom] Self-test PASSED{}", skips.suffix());
+    Ok(())
 }

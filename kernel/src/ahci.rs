@@ -1112,7 +1112,7 @@ pub fn is_available() -> bool {
 /// 1. PCI detection logic runs without panic.
 /// 2. If a device is found, IDENTIFY data is sensible.
 /// 3. Read/write round-trip (if a device exists and is not read-only).
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[ahci] Running self-test...");
 
     // Test 1: Stats are coherent.
@@ -1128,13 +1128,13 @@ pub fn self_test() {
             "[ahci]   No controller found — self-test SKIPPED (OK for VM without SATA)"
         );
         serial_println!("[ahci] Self-test PASSED (no hardware)");
-        return;
+        return Ok(());
     }
 
     if s.device_count == 0 {
         serial_println!("[ahci]   Controller found but no drives attached — PASSED");
         serial_println!("[ahci] Self-test PASSED (no drives)");
-        return;
+        return Ok(());
     }
 
     // Test 2: Block device is registered and readable.
@@ -1169,4 +1169,5 @@ pub fn self_test() {
     }
 
     serial_println!("[ahci] Self-test PASSED");
+    Ok(())
 }

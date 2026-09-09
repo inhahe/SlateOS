@@ -591,7 +591,7 @@ pub fn avg_channel_msg_size() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Self-test for IPC statistics.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[ipc_stats] Running self-test...");
 
     // Test 1: Reset and verify zeroes.
@@ -718,4 +718,5 @@ pub fn self_test() {
     reset();
 
     serial_println!("[ipc_stats] Self-test PASSED");
+    Ok(())
 }

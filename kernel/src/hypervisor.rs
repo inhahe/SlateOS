@@ -260,11 +260,12 @@ pub fn signature_str() -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// Self-test for hypervisor detection.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use crate::selftest;
     serial_println!("[hypervisor] Running self-test...");
 
     // Test 1: Detection has been run (detect() called before self_test).
-    assert_eq!(
+    selftest::check_eq!(
         DETECTED_VALID.load(Ordering::Relaxed),
         1,
         "detect() should have been called before self_test()"
@@ -283,7 +284,7 @@ pub fn self_test() {
     let sig_str = signature_str();
     // Under QEMU with KVM or WHPX, we expect a non-empty signature.
     if hv.is_virtual() {
-        assert!(
+        selftest::check!(
             !sig_str.trim_end_matches('\0').is_empty(),
             "virtual env should have a signature"
         );
@@ -291,14 +292,15 @@ pub fn self_test() {
     serial_println!("[hypervisor]   Signature: {:?}", sig_str);
 
     // Test 4: identify() correctly handles known signatures.
-    assert_eq!(identify(b"KVMKVMKVM\0\0\0"), Hypervisor::Kvm);
-    assert_eq!(identify(b"Microsoft Hv"), Hypervisor::HyperV);
-    assert_eq!(identify(b"VMwareVMware"), Hypervisor::Vmware);
-    assert_eq!(identify(b"VBoxVBoxVBox"), Hypervisor::VirtualBox);
-    assert_eq!(identify(b"XenVMMXenVMM"), Hypervisor::Xen);
-    assert_eq!(identify(b"TCGTCGTCGTCG"), Hypervisor::QemuTcg);
-    assert_eq!(identify(b"\0\0\0\0\0\0\0\0\0\0\0\0"), Hypervisor::Unknown);
+    selftest::check_eq!(identify(b"KVMKVMKVM\0\0\0"), Hypervisor::Kvm);
+    selftest::check_eq!(identify(b"Microsoft Hv"), Hypervisor::HyperV);
+    selftest::check_eq!(identify(b"VMwareVMware"), Hypervisor::Vmware);
+    selftest::check_eq!(identify(b"VBoxVBoxVBox"), Hypervisor::VirtualBox);
+    selftest::check_eq!(identify(b"XenVMMXenVMM"), Hypervisor::Xen);
+    selftest::check_eq!(identify(b"TCGTCGTCGTCG"), Hypervisor::QemuTcg);
+    selftest::check_eq!(identify(b"\0\0\0\0\0\0\0\0\0\0\0\0"), Hypervisor::Unknown);
     serial_println!("[hypervisor]   Signature matching: OK");
 
     serial_println!("[hypervisor] Self-test PASSED");
+    Ok(())
 }

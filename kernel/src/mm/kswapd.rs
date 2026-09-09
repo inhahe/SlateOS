@@ -311,7 +311,7 @@ pub fn spawn() -> KernelResult<()> {
 /// 2. Wake flag set/clear works.
 /// 3. Diagnostic counters are accessible.
 /// 4. kswapd is running (if spawned).
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[kswapd] Running self-test...");
 
     // -- Watermark sanity --
@@ -348,4 +348,5 @@ pub fn self_test() {
     }
 
     serial_println!("[kswapd] Self-test PASSED");
+    Ok(())
 }

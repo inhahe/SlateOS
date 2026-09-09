@@ -33,6 +33,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::unreadable_literal)]
 
+use appearance::Palette;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::RenderTree;
@@ -45,23 +46,6 @@ use std::time::Duration;
 // ============================================================================
 // Catppuccin Mocha theme
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
 
 // ============================================================================
 // Layout constants
@@ -1033,13 +1017,13 @@ impl JobStatus {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Queued => OVERLAY0,
-            Self::Running => BLUE,
-            Self::Completed => GREEN,
-            Self::Failed => RED,
-            Self::Cancelled => YELLOW,
+            Self::Queued => pal.overlay0,
+            Self::Running => pal.blue,
+            Self::Completed => pal.green,
+            Self::Failed => pal.red,
+            Self::Cancelled => pal.yellow,
         }
     }
 }
@@ -1217,6 +1201,12 @@ pub struct MediaConvertApp {
     pub window_height: f32,
     id_gen: IdGen,
     timestamp: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for MediaConvertApp {
@@ -1228,6 +1218,7 @@ impl Default for MediaConvertApp {
 impl MediaConvertApp {
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             sources: Vec::new(),
             jobs: Vec::new(),
             history: Vec::new(),
@@ -1815,7 +1806,7 @@ impl MediaConvertApp {
             y: 0.0,
             width,
             height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1854,7 +1845,7 @@ impl MediaConvertApp {
             y: 0.0,
             width,
             height: TOOLBAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1862,7 +1853,7 @@ impl MediaConvertApp {
             x: 12.0,
             y: 12.0,
             text: "Media Converter".to_owned(),
-            color: BLUE,
+            color: self.palette.blue,
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(160.0),
@@ -1879,14 +1870,14 @@ impl MediaConvertApp {
             y: 8.0,
             width: 200.0,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
             x: 188.0,
             y: 14.0,
             text: format!("Profile: {profile_name}"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
@@ -1900,14 +1891,14 @@ impl MediaConvertApp {
             y: 8.0,
             width: 120.0,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
             x: 400.0,
             y: 14.0,
             text: qual_label,
-            color: TEXT,
+            color: self.palette.text,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(110.0),
@@ -1921,14 +1912,14 @@ impl MediaConvertApp {
             y: 8.0,
             width: 100.0,
             height: 24.0,
-            color: GREEN,
+            color: self.palette.green,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
             x: convert_x + 16.0,
             y: 14.0,
             text: "Convert All".to_owned(),
-            color: CRUST,
+            color: self.palette.crust,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(80.0),
@@ -1940,7 +1931,7 @@ impl MediaConvertApp {
             y1: TOOLBAR_HEIGHT,
             x2: width,
             y2: TOOLBAR_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -1952,7 +1943,7 @@ impl MediaConvertApp {
             y: bar_y,
             width,
             height: STATUS_BAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1969,7 +1960,7 @@ impl MediaConvertApp {
             x: 12.0,
             y: bar_y + 6.0,
             text: status,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
@@ -1983,7 +1974,7 @@ impl MediaConvertApp {
             y,
             width: SIDEBAR_WIDTH,
             height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1992,7 +1983,7 @@ impl MediaConvertApp {
             y1: y,
             x2: SIDEBAR_WIDTH,
             y2: y + height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2001,7 +1992,7 @@ impl MediaConvertApp {
             x: 12.0,
             y: y + 10.0,
             text: format!("SOURCE FILES ({})", self.sources.len()),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 24.0),
@@ -2021,15 +2012,15 @@ impl MediaConvertApp {
                     y: cy,
                     width: SIDEBAR_WIDTH - 8.0,
                     height: ITEM_HEIGHT,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(CORNER_RADIUS),
                 });
             }
 
             let cat_color = match src.category {
-                MediaCategory::Audio => TEAL,
-                MediaCategory::Video => MAUVE,
-                MediaCategory::Image => PEACH,
+                MediaCategory::Audio => self.palette.teal,
+                MediaCategory::Video => self.palette.mauve,
+                MediaCategory::Image => self.palette.peach,
             };
 
             // Category dot
@@ -2047,7 +2038,11 @@ impl MediaConvertApp {
                 x: 26.0,
                 y: cy + 6.0,
                 text: src.file_name.clone(),
-                color: if is_selected { TEXT } else { SUBTEXT1 },
+                color: if is_selected {
+                    self.palette.text
+                } else {
+                    self.palette.subtext1
+                },
                 font_size: 11.0,
                 font_weight: if is_selected {
                     FontWeightHint::Bold
@@ -2068,7 +2063,7 @@ impl MediaConvertApp {
                 x: 26.0,
                 y: cy + 20.0,
                 text: info,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 60.0),
@@ -2083,7 +2078,7 @@ impl MediaConvertApp {
                 x: SIDEBAR_WIDTH / 2.0 - 50.0,
                 y: y + height / 2.0,
                 text: "Drop files here".to_owned(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2105,7 +2100,7 @@ impl MediaConvertApp {
             y,
             width,
             height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2114,7 +2109,7 @@ impl MediaConvertApp {
             y1: y,
             x2: x + width,
             y2: y + height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2127,7 +2122,7 @@ impl MediaConvertApp {
             x: lx,
             y: cy,
             text: "OUTPUT FORMAT".to_owned(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
@@ -2144,14 +2139,14 @@ impl MediaConvertApp {
             y: cy,
             width: max_w,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
             x: lx + 8.0,
             y: cy + 6.0,
             text: fmt_label,
-            color: TEXT,
+            color: self.palette.text,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w - 16.0),
@@ -2171,7 +2166,7 @@ impl MediaConvertApp {
                     x: lx,
                     y: cy,
                     text: "AUDIO SETTINGS".to_owned(),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(max_w),
@@ -2191,7 +2186,7 @@ impl MediaConvertApp {
                         x: lx + 4.0,
                         y: cy,
                         text: line.clone(),
-                        color: TEXT,
+                        color: self.palette.text,
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_w - 8.0),
@@ -2205,7 +2200,7 @@ impl MediaConvertApp {
                     x: lx,
                     y: cy,
                     text: "VIDEO SETTINGS".to_owned(),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(max_w),
@@ -2245,7 +2240,7 @@ impl MediaConvertApp {
                         x: lx + 4.0,
                         y: cy,
                         text: line.clone(),
-                        color: TEXT,
+                        color: self.palette.text,
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_w - 8.0),
@@ -2259,7 +2254,7 @@ impl MediaConvertApp {
                     x: lx,
                     y: cy,
                     text: "IMAGE SETTINGS".to_owned(),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(max_w),
@@ -2294,7 +2289,7 @@ impl MediaConvertApp {
                         x: lx + 4.0,
                         y: cy,
                         text: line.clone(),
-                        color: TEXT,
+                        color: self.palette.text,
                         font_size: 11.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_w - 8.0),
@@ -2308,7 +2303,7 @@ impl MediaConvertApp {
                     x: lx,
                     y: cy,
                     text: "Select a profile".to_owned(),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(max_w),
@@ -2323,7 +2318,7 @@ impl MediaConvertApp {
             x: lx,
             y: cy,
             text: "OUTPUT NAMING".to_owned(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
@@ -2334,7 +2329,7 @@ impl MediaConvertApp {
             x: lx + 4.0,
             y: cy,
             text: format!("Mode: {}", self.output_naming.label()),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w - 8.0),
@@ -2345,7 +2340,7 @@ impl MediaConvertApp {
             x: lx + 4.0,
             y: cy,
             text: format!("Dir: {}", self.output_dir),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w - 8.0),
@@ -2366,7 +2361,7 @@ impl MediaConvertApp {
             y,
             width,
             height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2375,7 +2370,7 @@ impl MediaConvertApp {
             x: x + 12.0,
             y: y + 10.0,
             text: format!("CONVERSION QUEUE ({})", stats.total_jobs),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 24.0),
@@ -2394,7 +2389,7 @@ impl MediaConvertApp {
                 y: cy,
                 width: width - 8.0,
                 height: ITEM_HEIGHT + 8.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
 
@@ -2404,7 +2399,7 @@ impl MediaConvertApp {
                 y: cy + 12.0,
                 width: 8.0,
                 height: 8.0,
-                color: job.status.color(),
+                color: job.status.color(&self.palette),
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -2413,7 +2408,7 @@ impl MediaConvertApp {
                 x: x + 24.0,
                 y: cy + 6.0,
                 text: job.source.file_name.clone(),
-                color: TEXT,
+                color: self.palette.text,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 100.0),
@@ -2425,7 +2420,7 @@ impl MediaConvertApp {
                 x: x + 24.0,
                 y: cy + 20.0,
                 text: job.conversion_label(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 100.0),
@@ -2437,7 +2432,7 @@ impl MediaConvertApp {
                 x: x + width - 80.0,
                 y: cy + 6.0,
                 text: job.status.label().to_owned(),
-                color: job.status.color(),
+                color: job.status.color(&self.palette),
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(70.0),
@@ -2454,7 +2449,7 @@ impl MediaConvertApp {
                     y: bar_y,
                     width: bar_w,
                     height: 4.0,
-                    color: SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(2.0),
                 });
                 let fill_w = bar_w * (job.progress / 100.0);
@@ -2463,7 +2458,7 @@ impl MediaConvertApp {
                     y: bar_y,
                     width: fill_w,
                     height: 4.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::all(2.0),
                 });
             }
@@ -2476,7 +2471,7 @@ impl MediaConvertApp {
                 x: x + width / 2.0 - 60.0,
                 y: y + height / 2.0,
                 text: "No jobs in queue".to_owned(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2509,6 +2504,10 @@ pub struct HistoryStats {
 // ============================================================================
 
 impl App for MediaConvertApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // What the queue is doing, because a batch conversion is something you
         // start and then look away from. The harness re-reads this as the
@@ -3396,5 +3395,64 @@ mod tests {
         assert_eq!(human_file_size(500), "500 B");
         assert_eq!(human_file_size(1024), "1.0 KiB");
         assert_eq!(human_file_size(1048576), "1.0 MiB");
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut MediaConvertApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = MediaConvertApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

@@ -450,7 +450,7 @@ fn read_and_clear_accessed(pml4_phys: u64, virt_addr: u64, hhdm: u64) -> Option<
 // ---------------------------------------------------------------------------
 
 /// Self-test for the page aging system.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::mm::frame;
 
     serial_println!("[page_age] Running self-test...");
@@ -537,4 +537,5 @@ pub fn self_test() {
     unsafe { frame::free_frame(pml4_frame) }.expect("page_age self-test: free pml4");
 
     serial_println!("[page_age] Self-test PASSED");
+    Ok(())
 }

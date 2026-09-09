@@ -463,7 +463,7 @@ pub struct IrqInfo {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the IRQ balancer.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[irqbalance] Running self-test...");
 
     // Test 1: Init doesn't panic.
@@ -620,4 +620,5 @@ pub fn self_test() {
     }
 
     serial_println!("[irqbalance] Self-test PASSED");
+    Ok(())
 }

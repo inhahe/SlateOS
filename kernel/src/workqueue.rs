@@ -344,7 +344,7 @@ pub fn init() -> KernelResult<()> {
 /// 1. Work items are executed asynchronously.
 /// 2. Queue overflow is handled gracefully.
 /// 3. Statistics are accurate.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use core::sync::atomic::AtomicU64;
 
     serial_println!("[workqueue] Running self-test...");
@@ -425,4 +425,5 @@ pub fn self_test() {
     );
 
     serial_println!("[workqueue] Self-test PASSED");
+    Ok(())
 }

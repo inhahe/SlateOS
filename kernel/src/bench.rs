@@ -9372,7 +9372,7 @@ fn bench_dashboard_api_metrics() {
 // ---------------------------------------------------------------------------
 
 /// Verify the benchmark infrastructure works.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[bench] Running self-test...");
 
     // TSC should be calibrated.
@@ -9427,4 +9427,5 @@ pub fn self_test() {
     );
 
     serial_println!("[bench] Self-test PASSED");
+    Ok(())
 }

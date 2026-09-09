@@ -42,6 +42,7 @@
 #![allow(clippy::fn_params_excessive_bools)]
 #![allow(clippy::wildcard_imports)]
 
+use appearance::Palette;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -56,24 +57,6 @@ use std::collections::VecDeque;
 // Catppuccin Mocha theme constants
 // ============================================================================
 
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const SKY: Color = Color::from_hex(0x89DCEB);
 const PINK: Color = Color::from_hex(0xF5C2E7);
 
 // ============================================================================
@@ -203,17 +186,17 @@ impl NodeShape {
     }
 
     /// Accent color for the shape button in the palette.
-    pub fn accent_color(self) -> Color {
+    pub fn accent_color(self, pal: &Palette) -> Color {
         match self {
-            Self::Rectangle => BLUE,
-            Self::RoundedRectangle => TEAL,
-            Self::Diamond => YELLOW,
-            Self::Circle => GREEN,
-            Self::Ellipse => LAVENDER,
-            Self::Parallelogram => PEACH,
-            Self::Hexagon => MAUVE,
-            Self::Triangle => RED,
-            Self::Cylinder => SKY,
+            Self::Rectangle => pal.blue,
+            Self::RoundedRectangle => pal.teal,
+            Self::Diamond => pal.yellow,
+            Self::Circle => pal.green,
+            Self::Ellipse => pal.lavender,
+            Self::Parallelogram => pal.peach,
+            Self::Hexagon => pal.mauve,
+            Self::Triangle => pal.red,
+            Self::Cylinder => pal.sky,
             Self::Cloud => PINK,
         }
     }
@@ -339,8 +322,11 @@ impl DiagramNode {
             width: w,
             height: h,
             label: String::new(),
-            fill_color: SURFACE0,
-            border_color: BLUE,
+            // Content, not chrome: a node's fill and border are the
+            // user's per-node choice and are edited and saved with the
+            // diagram, so they do not follow the desktop theme.
+            fill_color: Color::from_hex(0x313244),
+            border_color: Color::from_hex(0x89B4FA),
             border_width: 2.0,
             font_size: 14.0,
             layer_id,
@@ -416,7 +402,8 @@ impl DiagramEdge {
             to_node: to,
             kind: EdgeKind::Straight,
             label: String::new(),
-            color: TEXT,
+            // Content, as for a node: an edge keeps its own colour.
+            color: Color::from_hex(0xCDD6F4),
             line_style: LineStyle::Solid,
             line_width: 2.0,
             start_arrow: ArrowHead::None,
@@ -801,6 +788,12 @@ pub struct DiagramApp {
     pub edge_source: Option<NodeId>,
     /// Whether app wants to quit.
     pub should_quit: bool,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl DiagramApp {
@@ -815,6 +808,7 @@ impl DiagramApp {
         let layers = vec![Layer::new(default_layer_id, String::from("Layer 1"), 0)];
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             window_w,
             window_h,
             nodes: Vec::new(),
@@ -1786,7 +1780,7 @@ impl DiagramApp {
 
             // Label text
             if !node.label.is_empty() {
-                let text_color = color_to_svg_hex(TEXT);
+                let text_color = color_to_svg_hex(self.palette.text);
                 svg.push_str(&format!(
                     "  <text x=\"{cx}\" y=\"{}\" text-anchor=\"middle\" fill=\"{text_color}\" font-size=\"{}\">{}</text>\n",
                     cy + node.font_size / 3.0,
@@ -2069,7 +2063,7 @@ impl DiagramApp {
             y: 0.0,
             width: self.window_w,
             height: self.window_h,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2095,7 +2089,7 @@ impl DiagramApp {
             y: 0.0,
             width: self.window_w,
             height: TOOLBAR_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2105,7 +2099,7 @@ impl DiagramApp {
             y1: TOOLBAR_HEIGHT,
             x2: self.window_w,
             y2: TOOLBAR_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2118,8 +2112,16 @@ impl DiagramApp {
 
         let mut bx = 8.0;
         for (label, active) in &buttons {
-            let bg = if *active { BLUE } else { SURFACE0 };
-            let fg = if *active { CRUST } else { TEXT };
+            let bg = if *active {
+                self.palette.blue
+            } else {
+                self.palette.surface0
+            };
+            let fg = if *active {
+                self.palette.crust
+            } else {
+                self.palette.text
+            };
             cmds.push(RenderCommand::FillRect {
                 x: bx,
                 y: 6.0,
@@ -2147,7 +2149,7 @@ impl DiagramApp {
             x: bx + 20.0,
             y: 14.0,
             text: zoom_text,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
@@ -2164,7 +2166,11 @@ impl DiagramApp {
             x: bx + 100.0,
             y: 14.0,
             text: String::from(grid_label),
-            color: if self.show_grid { GREEN } else { OVERLAY0 },
+            color: if self.show_grid {
+                self.palette.green
+            } else {
+                self.palette.overlay0
+            },
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
@@ -2181,7 +2187,11 @@ impl DiagramApp {
             x: bx + 190.0,
             y: 14.0,
             text: String::from(snap_label),
-            color: if self.snap_to_grid { GREEN } else { OVERLAY0 },
+            color: if self.snap_to_grid {
+                self.palette.green
+            } else {
+                self.palette.overlay0
+            },
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
@@ -2198,7 +2208,7 @@ impl DiagramApp {
             x: self.window_w - 160.0,
             y: 14.0,
             text: undo_text,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(150.0),
@@ -2220,7 +2230,7 @@ impl DiagramApp {
             y: pal_y,
             width: PALETTE_WIDTH,
             height: pal_h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2230,7 +2240,7 @@ impl DiagramApp {
             y1: pal_y,
             x2: PALETTE_WIDTH,
             y2: pal_y + pal_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2239,7 +2249,7 @@ impl DiagramApp {
             x: 12.0,
             y: pal_y + 16.0,
             text: String::from("Shapes"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PALETTE_WIDTH - 24.0),
@@ -2251,11 +2261,15 @@ impl DiagramApp {
         for shape in NodeShape::all() {
             let is_active = matches!(self.mode, InteractionMode::AddNode(s) if s == *shape);
             let bg = if is_active {
-                shape.accent_color()
+                shape.accent_color(&self.palette)
             } else {
-                SURFACE0
+                self.palette.surface0
             };
-            let fg = if is_active { CRUST } else { TEXT };
+            let fg = if is_active {
+                self.palette.crust
+            } else {
+                self.palette.text
+            };
 
             cmds.push(RenderCommand::FillRect {
                 x: 8.0,
@@ -2272,7 +2286,7 @@ impl DiagramApp {
                 y: by + 6.0,
                 width: 20.0,
                 height: 20.0,
-                color: shape.accent_color(),
+                color: shape.accent_color(&self.palette),
                 corner_radii: if matches!(shape, NodeShape::Circle | NodeShape::Ellipse) {
                     CornerRadii::all(10.0)
                 } else if matches!(shape, NodeShape::RoundedRectangle) {
@@ -2302,7 +2316,7 @@ impl DiagramApp {
             x: 12.0,
             y: by,
             text: String::from("Layers"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PALETTE_WIDTH - 24.0),
@@ -2312,7 +2326,11 @@ impl DiagramApp {
 
         for layer in &self.layers {
             let is_active = layer.id == self.active_layer_id;
-            let bg = if is_active { SURFACE1 } else { SURFACE0 };
+            let bg = if is_active {
+                self.palette.surface1
+            } else {
+                self.palette.surface0
+            };
 
             cmds.push(RenderCommand::FillRect {
                 x: 8.0,
@@ -2324,7 +2342,11 @@ impl DiagramApp {
             });
 
             // Visibility indicator.
-            let vis_color = if layer.visible { GREEN } else { OVERLAY0 };
+            let vis_color = if layer.visible {
+                self.palette.green
+            } else {
+                self.palette.overlay0
+            };
             cmds.push(RenderCommand::FillRect {
                 x: 14.0,
                 y: by + 8.0,
@@ -2338,7 +2360,11 @@ impl DiagramApp {
                 x: 32.0,
                 y: by + 9.0,
                 text: layer.name.clone(),
-                color: if layer.visible { TEXT } else { OVERLAY0 },
+                color: if layer.visible {
+                    self.palette.text
+                } else {
+                    self.palette.overlay0
+                },
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(PALETTE_WIDTH - 48.0),
@@ -2354,7 +2380,7 @@ impl DiagramApp {
             x: 12.0,
             y: by,
             text: String::from("Templates"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PALETTE_WIDTH - 24.0),
@@ -2364,7 +2390,11 @@ impl DiagramApp {
 
         for tmpl in DiagramTemplate::all() {
             let is_active = self.current_template == *tmpl;
-            let fg = if is_active { BLUE } else { SUBTEXT0 };
+            let fg = if is_active {
+                self.palette.blue
+            } else {
+                self.palette.subtext0
+            };
 
             cmds.push(RenderCommand::Text {
                 x: 14.0,
@@ -2406,7 +2436,7 @@ impl DiagramApp {
             y: canvas_y,
             width: canvas_w,
             height: canvas_h,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2464,7 +2494,7 @@ impl DiagramApp {
                 y: ry,
                 width: rw,
                 height: rh,
-                color: BLUE,
+                color: self.palette.blue,
                 line_width: 1.0,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -2480,7 +2510,7 @@ impl DiagramApp {
             return; // Too dense to render.
         }
 
-        let grid_color = SURFACE0;
+        let grid_color = self.palette.surface0;
         let start_x = ((-self.pan_x) / grid).floor() * grid;
         let start_y = ((-self.pan_y) / grid).floor() * grid;
         let end_x = start_x + view_w / self.zoom + grid * 2.0;
@@ -2814,7 +2844,7 @@ impl DiagramApp {
                 x: cx - w * 0.4,
                 y: cy - fs / 2.0,
                 text: node.label.clone(),
-                color: TEXT,
+                color: self.palette.text,
                 font_size: fs,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w * 0.8),
@@ -2829,7 +2859,7 @@ impl DiagramApp {
                 y: y - 3.0,
                 width: w + 6.0,
                 height: h + 6.0,
-                color: BLUE,
+                color: self.palette.blue,
                 line_width: 2.0,
                 corner_radii: CornerRadii::all(2.0),
             });
@@ -2859,7 +2889,11 @@ impl DiagramApp {
         let sy2 = ty * z;
 
         let selected = self.selection.has_edge(edge.id);
-        let color = if selected { BLUE } else { edge.color };
+        let color = if selected {
+            self.palette.blue
+        } else {
+            edge.color
+        };
 
         match edge.kind {
             EdgeKind::Straight | EdgeKind::Bezier => {
@@ -2919,7 +2953,7 @@ impl DiagramApp {
                 x: mx,
                 y: my - 10.0,
                 text: edge.label.clone(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 11.0 * z,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0 * z),
@@ -2987,7 +3021,7 @@ impl DiagramApp {
             y: py,
             width: PROPERTIES_WIDTH,
             height: ph,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2997,7 +3031,7 @@ impl DiagramApp {
             y1: py,
             x2: px,
             y2: py + ph,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -3006,7 +3040,7 @@ impl DiagramApp {
             x: px + 12.0,
             y: py + 16.0,
             text: String::from("Properties"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PROPERTIES_WIDTH - 24.0),
@@ -3102,7 +3136,7 @@ impl DiagramApp {
                 x: px + 12.0,
                 y: row_y,
                 text: String::from("Alignment"),
-                color: TEXT,
+                color: self.palette.text,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(PROPERTIES_WIDTH - 24.0),
@@ -3126,14 +3160,14 @@ impl DiagramApp {
                     y: row_y,
                     width: PROPERTIES_WIDTH - 24.0,
                     height: 22.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(3.0),
                 });
                 cmds.push(RenderCommand::Text {
                     x: px + 18.0,
                     y: row_y + 5.0,
                     text: String::from(op.label()),
-                    color: TEXT,
+                    color: self.palette.text,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(PROPERTIES_WIDTH - 36.0),
@@ -3146,7 +3180,7 @@ impl DiagramApp {
                 x: px + 12.0,
                 y: row_y,
                 text: String::from("No selection"),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(PROPERTIES_WIDTH - 24.0),
@@ -3167,7 +3201,7 @@ impl DiagramApp {
             x: panel_x + 12.0,
             y: *row_y,
             text: String::from(label),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
@@ -3177,7 +3211,7 @@ impl DiagramApp {
             x: panel_x + 100.0,
             y: *row_y,
             text: String::from(value),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(PROPERTIES_WIDTH - 112.0),
@@ -3198,7 +3232,7 @@ impl DiagramApp {
             x,
             y: y + 2.0,
             text: String::from(label),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
@@ -3217,7 +3251,7 @@ impl DiagramApp {
             y,
             width: 18.0,
             height: 18.0,
-            color: SURFACE2,
+            color: self.palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(3.0),
         });
@@ -3235,7 +3269,7 @@ impl DiagramApp {
             y: sy,
             width: self.window_w,
             height: STATUS_BAR_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3245,7 +3279,7 @@ impl DiagramApp {
             y1: sy,
             x2: self.window_w,
             y2: sy,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -3261,7 +3295,7 @@ impl DiagramApp {
             x: 12.0,
             y: sy + 6.0,
             text: info,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.window_w - 24.0),
@@ -3294,7 +3328,7 @@ impl DiagramApp {
             x: self.window_w - 200.0,
             y: sy + 6.0,
             text: String::from(mode_str),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
@@ -3356,6 +3390,10 @@ fn escape_json(s: &str) -> String {
 // ============================================================================
 
 impl App for DiagramApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Diagram".to_owned()
     }
@@ -3712,11 +3750,12 @@ mod tests {
 
     #[test]
     fn test_node_shape_accent_colors_unique() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let all = NodeShape::all();
         for (i, a) in all.iter().enumerate() {
             for (j, b) in all.iter().enumerate() {
                 if i != j {
-                    assert_ne!(a.accent_color(), b.accent_color());
+                    assert_ne!(a.accent_color(&pal), b.accent_color(&pal));
                 }
             }
         }
@@ -4412,10 +4451,11 @@ mod tests {
 
     #[test]
     fn test_set_node_fill() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut app = DiagramApp::new(800.0, 600.0);
         let id = app.add_node(NodeShape::Rectangle, 0.0, 0.0);
-        app.set_node_fill(id, RED);
-        assert_eq!(app.find_node(id).unwrap().fill_color, RED);
+        app.set_node_fill(id, pal.red);
+        assert_eq!(app.find_node(id).unwrap().fill_color, pal.red);
     }
 
     #[test]
@@ -4566,5 +4606,64 @@ mod tests {
         app.move_layer_up(l1_id);
         assert_eq!(app.layers[0].id, l1_id);
         let _ = l2;
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut DiagramApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = DiagramApp::new(1000.0, 700.0);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

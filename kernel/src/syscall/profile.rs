@@ -389,7 +389,7 @@ fn rdtsc() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Self-test for syscall profiling.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[syscall_prof] Running self-test...");
 
     // Test 1: Reset state.
@@ -485,4 +485,5 @@ pub fn self_test() {
     reset();
 
     serial_println!("[syscall_prof] Self-test PASSED");
+    Ok(())
 }

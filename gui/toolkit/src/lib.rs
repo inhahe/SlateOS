@@ -62,6 +62,7 @@ pub use randrange as rng;
 pub mod row_strip;
 pub mod scaling;
 pub mod scroll_window;
+pub mod scrollbar;
 pub mod signal;
 pub mod step;
 pub mod style;

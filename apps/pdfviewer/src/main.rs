@@ -50,6 +50,7 @@ use guitk::text;
 use guitk::textfind;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use printjob::PrintJob;
 
 use std::path::{Path, PathBuf};
 
@@ -825,140 +826,6 @@ pub enum SidebarPanel {
 // Print settings
 // ============================================================================
 
-/// Page range for printing.
-#[derive(Clone, Debug, PartialEq, Default)]
-pub enum PrintPageRange {
-    #[default]
-    All,
-    CurrentPage,
-    /// Specific ranges, e.g., [(0,2), (4,4)] for pages 1-3 and 5.
-    Custom(Vec<(usize, usize)>),
-}
-
-/// Print settings.
-#[derive(Clone, Debug)]
-pub struct PrintSettings {
-    pub page_range: PrintPageRange,
-    pub copies: u32,
-    pub duplex: bool,
-    pub color: bool,
-    pub scale_to_fit: bool,
-}
-
-impl Default for PrintSettings {
-    fn default() -> Self {
-        Self {
-            page_range: PrintPageRange::All,
-            copies: 1,
-            duplex: false,
-            color: true,
-            scale_to_fit: true,
-        }
-    }
-}
-
-impl PrintSettings {
-    /// Resolve the page indices to print from the given page count.
-    pub fn resolve_pages(&self, page_count: usize, current_page: usize) -> Vec<usize> {
-        match &self.page_range {
-            PrintPageRange::All => (0..page_count).collect(),
-            PrintPageRange::CurrentPage => {
-                if current_page < page_count {
-                    vec![current_page]
-                } else {
-                    Vec::new()
-                }
-            }
-            PrintPageRange::Custom(ranges) => {
-                let mut pages: Vec<usize> = ranges
-                    .iter()
-                    // A range that begins past the last page names no pages.
-                    //
-                    // For a document that *has* pages the `end.min(..)` below
-                    // already handled this by accident -- `49..=9` is empty --
-                    // but on a document with **no** pages the clamp saturates
-                    // to `0`, so every range became `start..=0` and a range
-                    // starting at zero yielded `[0]`: a page index into an
-                    // empty document, handed to a caller with every reason to
-                    // trust it. `All` and `CurrentPage` both return nothing
-                    // there; this arm was the odd one out. Saying the
-                    // precondition outright is better than relying on an empty
-                    // `RangeInclusive` to express it, because that reasoning is
-                    // exactly what stopped holding at zero pages.
-                    .filter(|&&(start, _)| start < page_count)
-                    .flat_map(|&(start, end)| start..=end.min(page_count.saturating_sub(1)))
-                    .collect();
-                // Sort-then-dedup rather than a `contains` check per page: the
-                // list is sorted on the way out regardless, and the linear scan
-                // made overlapping ranges over a long document quadratic.
-                pages.sort_unstable();
-                pages.dedup();
-                pages
-            }
-        }
-    }
-
-    /// Parse a user-entered page range string (e.g. "1-3, 5, 7-9").
-    ///
-    /// Returns 0-based, inclusive ranges. Ranges that begin past the end of the
-    /// document are dropped; ranges that merely *extend* past it are kept whole
-    /// and clamped later by [`Self::resolve_pages`], which is the only place
-    /// that knows the page count at the moment of printing rather than at the
-    /// moment of typing. Clamping in both places is the same bound written
-    /// twice, and the two copies disagreed: this one used to clamp the range's
-    /// *start* as well, which turned "50-60" of a ten-page document into
-    /// "page 10" instead of into nothing.
-    pub fn parse_page_range(input: &str, page_count: usize) -> PrintPageRange {
-        if input.trim().is_empty() || input.trim().eq_ignore_ascii_case("all") {
-            return PrintPageRange::All;
-        }
-        let mut ranges = Vec::new();
-        for part in input.split(',') {
-            let part = part.trim();
-            if part.contains('-') {
-                let mut parts = part.splitn(2, '-');
-                let start = parts
-                    .next()
-                    .and_then(|s| s.trim().parse::<usize>().ok())
-                    .unwrap_or(1);
-                let end = parts
-                    .next()
-                    .and_then(|s| s.trim().parse::<usize>().ok())
-                    .unwrap_or(start);
-                // Convert from 1-based to 0-based.
-                let s = start.saturating_sub(1);
-                let e = end.saturating_sub(1);
-                if s <= e && s < page_count {
-                    ranges.push((s, e));
-                }
-            } else if let Ok(n) = part.parse::<usize>() {
-                // `checked_sub` rather than a `n >= 1` guard: page "0" does not
-                // exist in the 1-based numbering the user is typing in, and
-                // failing the subtraction *is* that case.
-                if let Some(idx) = n.checked_sub(1)
-                    && idx < page_count
-                {
-                    ranges.push((idx, idx));
-                }
-            }
-        }
-        // `Custom(vec![])`, deliberately, and not `All`.
-        //
-        // Blank input and the word "all" are already handled above, so reaching
-        // here means the user named specific pages. If none of them exist, the
-        // honest answer is "no pages", which prints nothing and shows as such in
-        // the dialog. Falling back to `All` here meant that typing "50-60" into
-        // a ten-page document -- a plain typo -- printed the entire document.
-        // Of the two ways to be wrong about a range nobody asked for, printing
-        // everything is the expensive one.
-        if ranges.is_empty() {
-            PrintPageRange::Custom(Vec::new())
-        } else {
-            PrintPageRange::Custom(ranges)
-        }
-    }
-}
-
 // ============================================================================
 // Recent files
 // ============================================================================
@@ -1352,7 +1219,19 @@ pub struct PdfViewerApp {
     /// but takes the caret away, exactly as a browser's find bar does.
     pub search_focused: bool,
     pub recent_files: RecentFilesList,
-    pub print_settings: PrintSettings,
+    /// The job the print dialog is filling in, in the format the printing
+    /// service will receive.
+    ///
+    /// This used to be a `PrintSettings` of our own, holding the better of the
+    /// two page-range parsers in the tree plus four fields nothing read.
+    /// `design-decisions.md` §540 settled that printing is a service
+    /// applications submit *messages* to -- "the application depends on a
+    /// message format, not on code" -- so the parser moved to `gui/printjob`
+    /// and this is now that message. The fields nothing reads yet (copies,
+    /// duplex, colour, scale) are no longer dead in the way they were: they
+    /// are what the job *says*, and they gain their reader when the service
+    /// exists.
+    pub print_job: PrintJob,
     pub dark_mode: bool,
     pub window_width: f32,
     pub window_height: f32,
@@ -1381,7 +1260,7 @@ impl std::fmt::Debug for PdfViewerApp {
             .field("search", &self.search)
             .field("search_focused", &self.search_focused)
             .field("recent_files", &self.recent_files)
-            .field("print_settings", &self.print_settings)
+            .field("print_job", &self.print_job)
             .field("dark_mode", &self.dark_mode)
             .field("window_width", &self.window_width)
             .field("window_height", &self.window_height)
@@ -1404,7 +1283,7 @@ impl PdfViewerApp {
             search: SearchState::new(),
             search_focused: false,
             recent_files: RecentFilesList::default(),
-            print_settings: PrintSettings::default(),
+            print_job: PrintJob::default(),
             dark_mode: true,
             window_width: width,
             window_height: height,
@@ -3217,8 +3096,9 @@ impl PdfViewerApp {
             return false;
         };
         let pages = self
-            .print_settings
-            .resolve_pages(doc.page_count(), tab.current_page);
+            .print_job
+            .range
+            .resolve(doc.page_count(), tab.current_page);
         if pages.is_empty() {
             return false;
         }
@@ -3831,6 +3711,9 @@ mod tests {
     )]
 
     use super::*;
+    // Only the tests build a range: nothing in the viewer's UI sets one yet.
+    // See known-issues TD-C-THE-PDF-VIEWER-PRINTS-EVERY-PAGE-OR-NOTHING.
+    use printjob::PageRange;
 
     // -- Search highlight placement -------------------------------------------
 
@@ -4248,188 +4131,63 @@ mod tests {
         assert_eq!(ViewMode::default(), ViewMode::SinglePage);
     }
 
-    // -- PrintSettings tests --------------------------------------------------
+    // -- Print settings -------------------------------------------------------
 
-    #[test]
-    fn test_print_resolve_all() {
-        let ps = PrintSettings::default();
-        let pages = ps.resolve_pages(5, 2);
-        assert_eq!(pages, vec![0, 1, 2, 3, 4]);
-    }
+    // The page-range tests that used to live here moved to `gui/printjob`
+    // along with the parser: sixteen of them, covering reversed spans,
+    // overlaps, page zero, ranges past the end and the empty document. They
+    // were tests of the *format*, and re-asserting them here would only pin a
+    // second copy of behaviour this crate no longer implements.
+    //
+    // What is left is what is genuinely this crate's: that the viewer resolves
+    // the range against the document it has open.
 
-    #[test]
-    fn test_print_resolve_current() {
-        let ps = PrintSettings {
-            page_range: PrintPageRange::CurrentPage,
-            ..Default::default()
-        };
-        let pages = ps.resolve_pages(5, 2);
-        assert_eq!(pages, vec![2]);
-    }
-
-    #[test]
-    fn test_print_resolve_custom_range() {
-        let ps = PrintSettings {
-            page_range: PrintPageRange::Custom(vec![(0, 2), (4, 4)]),
-            ..Default::default()
-        };
-        let pages = ps.resolve_pages(10, 0);
-        assert_eq!(pages, vec![0, 1, 2, 4]);
-    }
-
-    #[test]
-    fn test_print_resolve_custom_clamps() {
-        let ps = PrintSettings {
-            page_range: PrintPageRange::Custom(vec![(0, 100)]),
-            ..Default::default()
-        };
-        let pages = ps.resolve_pages(3, 0);
-        assert_eq!(pages, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn test_print_resolve_current_out_of_range() {
-        let ps = PrintSettings {
-            page_range: PrintPageRange::CurrentPage,
-            ..Default::default()
-        };
-        let pages = ps.resolve_pages(5, 10);
-        assert!(pages.is_empty());
-    }
-
-    // -- Print ranges that name pages the document does not have --------------
-
-    /// A document with no pages has no page zero.
+    /// `print_active` spools the pages the range names *of the open document*.
     ///
-    /// `All` and `CurrentPage` both returned nothing here already; the `Custom`
-    /// arm clamped its range's end to `page_count - 1`, which saturates to `0`,
-    /// so every range collapsed to `0..=0` and it returned `[0]` -- a page
-    /// index handed to a caller with every reason to trust it.
+    /// The range carries no page count -- it is parsed when the user types it
+    /// and resolved when the document is printed -- so this is the step that
+    /// supplies the count, and it must come from the document now open. It was
+    /// untested until the parser moved out and left this as the only part of
+    /// printing this crate still owns.
     #[test]
-    fn a_custom_range_over_an_empty_document_names_no_pages() {
-        let ps = PrintSettings {
-            page_range: PrintPageRange::Custom(vec![(0, 4)]),
-            ..Default::default()
-        };
-        assert!(ps.resolve_pages(0, 0).is_empty());
-    }
+    fn printing_resolves_the_range_against_the_open_document() {
+        static PRINTED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+        fn record(_doc: &PdfDocument, pages: &[usize]) -> bool {
+            *PRINTED.lock().unwrap() = pages.to_vec();
+            true
+        }
 
-    /// A range that begins past the last page prints nothing, rather than
-    /// being dragged down onto the last page: "print 50-60" of a ten-page
-    /// document is a typo, and the answer to it is not "print page ten".
-    #[test]
-    fn a_range_beyond_the_end_prints_nothing() {
-        let ps = PrintSettings {
-            page_range: PrintPageRange::Custom(vec![(49, 59)]),
-            ..Default::default()
-        };
-        assert!(ps.resolve_pages(10, 0).is_empty());
+        let mut app = PdfViewerApp::new(800.0, 600.0);
+        app.set_printer(record);
+        app.load_document(PdfDocument::create_sample(PathBuf::from("a.pdf"), 10));
+        app.print_job.range = PageRange::parse("2-4");
 
-        // A range that merely *extends* past the end still prints the part
-        // that exists -- the two cases are different and used to be conflated.
-        let ps = PrintSettings {
-            page_range: PrintPageRange::Custom(vec![(8, 59)]),
-            ..Default::default()
-        };
-        assert_eq!(ps.resolve_pages(10, 0), vec![8, 9]);
-    }
+        assert!(app.print_active());
+        assert_eq!(*PRINTED.lock().unwrap(), vec![1, 2, 3]);
 
-    /// Overlapping ranges name each page once, in order.
-    #[test]
-    fn overlapping_ranges_are_merged() {
-        let ps = PrintSettings {
-            page_range: PrintPageRange::Custom(vec![(4, 6), (0, 2), (5, 8)]),
-            ..Default::default()
-        };
-        assert_eq!(ps.resolve_pages(10, 0), vec![0, 1, 2, 4, 5, 6, 7, 8]);
-    }
-
-    /// Typing a page range that names nothing must not print the whole
-    /// document. It used to: the parser dropped the out-of-range parts, found
-    /// itself with an empty list, and fell back to `All`. Of the two ways to
-    /// be wrong about a range nobody asked for, printing everything is the
-    /// expensive one.
-    #[test]
-    fn a_page_range_naming_nothing_does_not_print_everything() {
-        let parsed = PrintSettings::parse_page_range("50-60", 10);
-        let ps = PrintSettings {
-            page_range: parsed,
-            ..Default::default()
-        };
-        assert!(
-            ps.resolve_pages(10, 0).is_empty(),
-            "a typo in the page box printed the whole document"
+        // The same range against a shorter document clips to *that* document.
+        app.load_document(PdfDocument::create_sample(PathBuf::from("b.pdf"), 3));
+        assert!(app.print_active());
+        assert_eq!(
+            *PRINTED.lock().unwrap(),
+            vec![1, 2],
+            "the range was resolved against some page count other than the              open document's"
         );
+
+        // A range naming no page of this document never reaches the printer.
+        PRINTED.lock().unwrap().clear();
+        app.print_job.range = PageRange::parse("50-60");
+        assert!(
+            !app.print_active(),
+            "a range naming no page of the document was spooled anyway"
+        );
+        assert!(PRINTED.lock().unwrap().is_empty());
     }
 
-    /// Page "0" does not exist in the 1-based numbering the user types in.
+    /// A viewer that has printed nothing yet prints every page.
     #[test]
-    fn page_zero_is_not_a_page() {
-        let ps = PrintSettings {
-            page_range: PrintSettings::parse_page_range("0", 10),
-            ..Default::default()
-        };
-        assert!(ps.resolve_pages(10, 0).is_empty());
-    }
-
-    /// The end of a range is clamped when the document is printed, not when the
-    /// range is typed, because only the first of those knows how many pages the
-    /// document has *now*.
-    #[test]
-    fn the_end_of_a_range_is_clamped_at_print_time() {
-        let parsed = PrintSettings::parse_page_range("1-100", 10);
-        assert_eq!(parsed, PrintPageRange::Custom(vec![(0, 99)]));
-        let ps = PrintSettings {
-            page_range: parsed,
-            ..Default::default()
-        };
-        assert_eq!(ps.resolve_pages(3, 0), vec![0, 1, 2]);
-        assert_eq!(ps.resolve_pages(10, 0), (0..10).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn test_parse_page_range_all() {
-        let result = PrintSettings::parse_page_range("all", 10);
-        assert_eq!(result, PrintPageRange::All);
-    }
-
-    #[test]
-    fn test_parse_page_range_empty() {
-        let result = PrintSettings::parse_page_range("", 10);
-        assert_eq!(result, PrintPageRange::All);
-    }
-
-    #[test]
-    fn test_parse_page_range_single() {
-        let result = PrintSettings::parse_page_range("3", 10);
-        match result {
-            PrintPageRange::Custom(ranges) => {
-                assert_eq!(ranges, vec![(2, 2)]);
-            }
-            _ => panic!("expected Custom"),
-        }
-    }
-
-    #[test]
-    fn test_parse_page_range_range() {
-        let result = PrintSettings::parse_page_range("2-5", 10);
-        match result {
-            PrintPageRange::Custom(ranges) => {
-                assert_eq!(ranges, vec![(1, 4)]);
-            }
-            _ => panic!("expected Custom"),
-        }
-    }
-
-    #[test]
-    fn test_parse_page_range_mixed() {
-        let result = PrintSettings::parse_page_range("1-3, 5, 7-9", 10);
-        match result {
-            PrintPageRange::Custom(ranges) => {
-                assert_eq!(ranges, vec![(0, 2), (4, 4), (6, 8)]);
-            }
-            _ => panic!("expected Custom"),
-        }
+    fn the_default_settings_print_the_whole_document() {
+        assert_eq!(PrintJob::default().range, PageRange::All);
     }
 
     // -- RecentFilesList tests ------------------------------------------------

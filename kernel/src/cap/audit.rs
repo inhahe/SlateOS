@@ -393,7 +393,7 @@ pub fn denials_for_pid(pid: u32) -> u32 {
 // ---------------------------------------------------------------------------
 
 /// Self-test for capability auditing.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[cap_audit] Running self-test...");
 
     // Test 1: Reset state.
@@ -458,4 +458,5 @@ pub fn self_test() {
     reset();
 
     serial_println!("[cap_audit] Self-test PASSED");
+    Ok(())
 }

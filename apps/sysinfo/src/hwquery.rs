@@ -9,8 +9,6 @@
 //! The `RefreshManager` wraps any provider and caches results with a
 //! configurable TTL, automatically refreshing stale data on access.
 
-#![allow(dead_code)]
-
 use crate::{
     CpuInfo, DiskInfo, DisplayInfo, DmaInfo, DriverInfo, IoPortInfo, IrqInfo, MemoryInfo,
     MemoryMapEntry, MemorySlot, NetworkAdapterInfo, PartitionInfo, PciDeviceInfo, ProcessEntry,

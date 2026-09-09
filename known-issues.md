@@ -995,6 +995,47 @@ turns that into a stuck feature rather than a corrupted document.
 
 ## `apps/pdfviewer` can print nothing at all — the whole model is unwired (lane C)
 
+### Update 2026-09-07: the blocker named here is answered, and the seam now exists
+
+**This entry says "*how* to wire it is `C-Q4`". C-Q4 was answered by the
+operator on 2026-08-21 and written up as `design-decisions.md` §540:** printing
+becomes a background service applications submit jobs to, chosen over a shared
+library on the grounds that a print job is not part of the application's
+lifetime. The architecture question this entry defers to is settled; what
+remained was that nobody had built the thing §540 says an application depends
+on -- *"a message format, not code"*.
+
+**`gui/printjob` is that format**, added today. It is the union of the two
+vocabularies this entry tabulates: the discontiguous page range from the
+viewer, and paper/copies/duplex/quality/scale/collate from the desktop. It has
+no printers, no queue, no I/O and no dependencies -- linking it does not let a
+program print, it lets a program *say what it wants printed*. 15 tests.
+
+**Deliberately nothing submits one.** §540: *"until the service exists, neither
+half gains new callers"*, and wiring an application straight to the desktop's
+printing code is the stop-gap it refused.
+
+**There are now two page-range parsers, and that is temporary and tracked.**
+§540 says the viewer's parser *"should be lifted into the job format, not
+reimplemented"*; it has been lifted, and `apps/pdfviewer` has not yet been
+moved onto the lifted copy. That is 71 references and a dozen tests, and the
+two do not agree in three places, so it is a considered migration rather than
+a rename:
+
+| input | `pdfviewer` today | `printjob` |
+|---|---|---|
+| `9-7` (reversed) | dropped | read as 7-9 |
+| `x-5` (bad start) | becomes 1-5, silently | dropped |
+| `1-5, 3-7` (overlapping) | page 3 printed twice | printed once |
+
+I think `printjob` is right on all three -- a reversed span plainly means
+something, a defaulted-to-1 start invents a page the user did not type, and
+paper spent twice on one page was not asked for -- but each is a behaviour
+change to a shipped app and wants its own commit, not a silent swap at the end
+of another one.
+
+**Next:** move `pdfviewer` onto `printjob::PageRange`, then the service.
+
 **Status: OPEN.** Recorded 2026-08-16 by lane C. *How* to wire it is `C-Q4` in
 `open-questions.md`, because it is an architecture choice rather than a repair.
 
@@ -1734,9 +1775,38 @@ once, since `compare` is the single place case-insensitive ordering is decided.
 Nothing is unsafe and nothing is blocked; the sort is total and stable, just
 not idiomatic for the locale.
 
-## TD-EXPLORER-UNREADABLE-RECYCLE-ENTRY
+## TD-EXPLORER-UNREADABLE-RECYCLE-ENTRY -- **FIXED 2026-09-07**
 
-**Status: OPEN 2026-08-16** (lane C). `apps/explorer/src/fileops.rs`,
+**Fixed 2026-09-07 (lane C).** A damaged entry is listed instead of skipped.
+`RecycleEntry::original_path` and `recycled_at` are `Option`, `None` meaning
+"this entry's metadata would not parse" -- the one thing genuinely unknown is
+marked unknown, rather than the whole row being hidden because part of it is.
+
+What a caller may do follows from the field and needed no second flag:
+restoring wants somewhere to restore *to*, so it is refused with a reason;
+deleting wants only the id, so emptying the bin now reclaims the space.
+
+Three details that are not incidental:
+
+- **The size is still measured**, from the data on disk rather than from
+  `meta.txt`, because space is usually what brings a user to the recycle bin
+  at all. A row that said "unknown item, unknown size" would answer none of
+  the question they came with.
+- **`display_name` never falls back to the id.** The id is a hash; shown in a
+  name column it would read as though it were the file's name.
+- **`purge_old` skips it.** Its age is unknown, and unknown must not be read
+  as old -- ageing it out on a guess would delete a user's file in order to
+  tidy up a metadata problem.
+
+The UI decision the original entry was waiting on turned out to be the one it
+had already proposed, and small enough to take: "Unknown item (damaged entry)",
+delete available, restore refused.
+
+Six tests. Mutation-checked: restoring the old skip fails four of them.
+
+Original entry follows.
+
+**Status: ~~OPEN~~ FIXED 2026-08-16** (lane C). `apps/explorer/src/fileops.rs`,
 `RecycleBin::list`.
 
 The recycle-bin listing skips any entry whose `meta.txt` will not parse, rather
@@ -2219,7 +2289,7 @@ primitive than the three that just landed. Promote it to `requests/` the first
 time a port actually depends on the filter — glibc's `posix_spawn` and
 `pthread_cancel` paths are the likeliest candidates.
 
-### TD-POSIX-NATIVE-GETRUSAGE-REPORTS-SYSTEM-WIDE-CPU. `getrusage()` on our own ABI returns the machine's total CPU time as if it were the caller's — LOGGED 2026-08-16 by lane B, filed to lane A
+### TD-POSIX-NATIVE-GETRUSAGE-REPORTS-SYSTEM-WIDE-CPU. `getrusage()` on our own ABI returns the machine's total CPU time as if it were the caller's — LOGGED 2026-08-16 by lane B, filed to lane A — ✅ FIXED 2026-08-16 by lane A (`SYS_PROCESS_GET_RUSAGE = 1064`, commit `c9bc34347`)
 
 **In short:** a program can ask the OS "how much CPU have I used?". On our own
 ABI it gets an answer, the answer looks entirely plausible, and it is **the
@@ -3172,7 +3242,7 @@ caller, filtered by `may_signal`", keeping the same best-effort fanout and
 model landing — this should be done in the same change, since that is the only
 thing blocking it.
 
-### TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP. `cargo fmt -p posix` rewrites 244 files you did not touch — 2026-08-12 — 🔶 HALF FIXED 2026-08-15 / 2026-08-17 (all of Lane B clean: `posix`, `oils`, `coreutils`, `ere`; `kernel` still drifted — Lane A)
+### TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP. `cargo fmt -p posix` rewrites 244 files you did not touch — 2026-08-12 — ✅ FIXED (all of Lane B clean 2026-08-15/2026-08-17; `kernel` now clean too — `cargo fmt -p kernel -- --check` exits 0 as of 2026-09-08)
 
 > **UPDATE 2026-08-15 — the operator answered Q42 with option A, and Lane B's
 > half is done.** `design-decisions.md` **§310**: one-shot repo-wide reformat,
@@ -16293,7 +16363,7 @@ round trip deliberately does not model expansion (`strip_quotes` does not
 expand and a real shell does), and says so in place, so that gap is not
 silently absorbed into a property that would then read as covering it.
 
-### A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD, so `$HOME/<TAB>` searches for a directory literally named `$HOME` — 2026-09-04 (lane A) — OPEN
+### A-KSHELL-TAB-COMPLETION-LOOKS-UP-THE-UNEXPANDED-WORD, so `$HOME/<TAB>` searches for a directory literally named `$HOME` — 2026-09-04 (lane A) — ✅ FIXED 2026-09-05 by lane A (`eb62e6501`, `completion_view` now calls `expand_vars_speculative_str` before `remove_quotes`)
 
 **In short:** in the kernel shell, press Tab after typing a path that contains
 a variable — `cat $HOME/no<TAB>`, `ls $PWD/<TAB>` — and nothing is offered.
@@ -25469,7 +25539,7 @@ delete.
 directory before it completes, and observe that a partial checkout looks
 identical to a failed one.
 
-### BUG-LIVENESS-SYSTEM-HANG-FALSE-POSITIVE. The total-hang detector fired on a healthy boot and, by disarming, blinded the wall-clock backstop for the remaining ~600 s — 2026-08-15 — OPEN (lane A owns the fix)
+### BUG-LIVENESS-SYSTEM-HANG-FALSE-POSITIVE. The total-hang detector fired on a healthy boot and, by disarming, blinded the wall-clock backstop for the remaining ~600 s — 2026-08-15 — ✅ FIXED (lane A; the total-hang branch no longer disarms, bounded to 3 reports via `LIVENESS_MAX_HANG_REPORTS`; `check_liveness_failures` in boot-test.sh asserts the contract)
 
 **In short.** The boot watchdog announced `SYSTEM HANG`. The machine had not
 hung: the boot continued for another ten minutes and reached `BOOT_OK`. The
@@ -33364,7 +33434,7 @@ above still stands -- in particular, check whether the freeze point *moves*
 between runs, which is what distinguishes this from a deterministic deadlock in
 whichever self-test the log happens to stop at.
 
-## TD-LOCKDEP-CLASS-TABLE-IS-PUBLISHED-TWICE-AND-ONLY-ONE-PATH-IS-ORDERED (lane A, 2026-08-17) - **open**
+## TD-LOCKDEP-CLASS-TABLE-IS-PUBLISHED-TWICE-AND-ONLY-ONE-PATH-IS-ORDERED (lane A, 2026-08-17) - **FIXED** (`e3ae7bae1`)
 
 **In short:** the lock-order checker keeps a table of the locks it has seen. A
 CPU adding a row to that table reserves the row first and fills it in second.
@@ -35161,11 +35231,36 @@ lock held across composition, which is a worse design wearing a better name.
    lane C may not edit the workspace-root `Cargo.toml`, and because a
    dependency added for a build that exists to test another build is a poor
    trade.
-3. **Cheap mitigation available today:** back the tick rate off when there are
-   no clients *and* nothing composited — e.g. poll at 10 Hz while idle, snap
-   back to the frame interval on the first connection. This does not fix the
-   latency floor for connected clients and does fix the idle-battery half.
-   Worth doing if the hosted compositor is ever left running.
+3. ~~**Cheap mitigation available today:** back the tick rate off when there
+   are no clients *and* nothing composited.~~ **Done 2026-09-07 (lane C).**
+   `IdleBackoff` on `Server`: after `SETTLE_TICKS` (60, about a second)
+   consecutive ticks with no client connected, no input and no frame composed,
+   the wait becomes `IDLE_INTERVAL` (100 ms). Any one of the three signals
+   resets it, so the rate snaps back rather than easing up.
+
+   Three things worth knowing about the shape:
+
+   - **The condition is "no clients", not "nothing composed".** A desktop
+     sitting still with clients connected composes nothing either, and backing
+     off there would add up to 100 ms to every request those clients make. The
+     frame timer paces composition; polling at frame rate keeps request
+     latency under one frame. Only with no sockets at all does the second
+     reason disappear.
+   - **It settles rather than switching.** One quiet tick is normal; toggling
+     on it would make the interval jitter across every gap in activity.
+   - **The idle wait never goes below the frame interval**, so a display
+     slower than 10 Hz is not polled *faster* for being idle.
+
+   The latency floor in the first bullet of this entry is untouched, and steps
+   1 and 2 remain the fix for it. **This entry stays OPEN for those.**
+
+   The decision lives on `Server` rather than inside `run_with` specifically so
+   it can be tested: a loop that ends only when its window closes is not
+   something a unit test can drive, so `Server::settle` takes the tick's
+   findings and returns the wait, and the tests drive *that*. Nine tests. The
+   one that matters most is `a_connected_client_keeps_the_loop_at_frame_rate`,
+   because the client-count term is the one a pure `IdleBackoff` test cannot
+   reach; deleting that term fails it.
 
 **Severity.** Low. It is waste and a latency floor, not a defect: every
 request is answered, in order, within a frame. It is logged because the
@@ -36651,7 +36746,16 @@ explaining what used to be there. `apps/explorer/src/thumbs.rs` keeps a
 character count on purpose, and says so: its synthetic text-file minimap has no
 font in the path at all, so a character count is the honest unit there.
 
-## TD-GUI-AND-APPS-HAVE-DRIFTED-FROM-RUSTFMT (lane C, 2026-08-17)
+## TD-GUI-AND-APPS-HAVE-DRIFTED-FROM-RUSTFMT (lane C, 2026-08-17) -- **CLOSED; entry was stale**
+
+**Closed 2026-09-07 (lane C), on measuring it.** `cargo fmt --all --check`
+reports **zero** diffs across the workspace, against the 270 files this entry
+describes. The pre-push `rustfmt` gate is presumably what keeps it that way --
+it refused a push of mine earlier today, which is the gate working.
+
+**Nothing was done to the code for this closure.**
+
+Original entry follows.
 
 **What.** `CLAUDE.md` says "Formatting: rustfmt defaults. No manual formatting
 overrides." The tree does not meet that. `cargo fmt -p osfont -p guitk --check`
@@ -37145,7 +37249,36 @@ a value into a log message is not the same as checking it; where a device tells
 you what it accepts, check the request against it rather than printing both and
 trusting the constant.
 
-## TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS (lane C, 2026-08-17)
+## TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS (lane C, 2026-08-17) -- **FIXED 2026-09-07**
+
+**Fixed 2026-09-07 (lane C), by the first of the two options below.**
+`frame_insets` returns `top = TITLE_BAR_HEIGHT + BORDER_WIDTH`,
+`title_bar_rect` starts `BORDER_WIDTH` down from the frame, and
+`render_border` strokes `frame_rect` unmodified. Drawing and measurement now
+name the same box.
+
+**The second option was eliminated first, on evidence** -- see the update
+below. Stroking `frame_rect` while the bar filled the whole top inset put the
+outline under the title bar, which paints over it. That is why the border was
+drawn outside the frame in the first place.
+
+**The top inset is summed as two scaled values, not a scaled sum.**
+`scale_dimension` rounds, so `scale(bar + border)` and
+`scale(bar) + scale(border)` can differ by one, and `title_bar_rect` subtracts
+the border back out to get the bar's own height. Summing the scaled parts makes
+that subtraction exact at every scale factor -- a 2x display gets a 2x bar and
+a 2x border, and the bar is still exactly `TITLE_BAR_HEIGHT * 2`.
+
+**The drag boundary moved, as the entry warned, and now has a test.**
+`the_border_row_resizes_and_the_title_bar_below_it_moves` presses the border
+row and asserts the window resizes, then presses one row lower and asserts it
+moves without resizing. Both halves, because either alone passes if the whole
+top of the window does one thing.
+
+Six existing tests pinned the old geometry and were updated with the reason
+rather than the number: the frame is one row taller at the top, the bottom and
+both sides are unchanged. Mutation-checked -- putting the title bar back at
+the frame's top edge fails six.
 
 **In short:** the 1-pixel line the compositor draws around a window is drawn
 one pixel higher than the space the layout reserved for it. Nobody sees a
@@ -37171,6 +37304,27 @@ grab band — hence no visible symptom today.
 open-coded constants that merely happened not to match. `frame_insets` is at
 `gui/compositor/src/lib.rs`; `nothing_a_window_draws_falls_outside_its_damage_extent`
 pins the containment that keeps it harmless.
+
+### Update 2026-09-07: one of the two options below is eliminated, on evidence
+
+**Stroking `frame_rect` unmodified does not work.** I tried it, and the top
+edge of the outline disappears: the title bar is painted *over* the frame's
+first row, so a border drawn there is covered. Measured rather than reasoned --
+the pixel at the frame's top-left corner reads `FF313244`, which is exactly
+`theme.title_bar_focused`, where the border colour would be `FF585B70`. The
+existing test `the_border_rounds_with_the_frame_it_traces` fails on the
+"a square border did not paint its own corner pixel" assertion.
+
+So the one-row-above draw is not a slip: it is compensating for the title bar
+covering the row the outline would otherwise occupy. That makes the second
+option below wrong and leaves the first as the fix -- `frame_insets.top`
+becomes `TITLE_BAR_HEIGHT + BORDER_WIDTH` and `title_bar_rect` starts
+`BORDER_WIDTH` down, with the drag tests reviewed because the boundary between
+"title bar, drag to move" and "top border, drag to resize" moves with it.
+
+The attempt was reverted rather than shipped: a window that measures correctly
+and has no visible top edge is worse than the one-pixel disagreement, which
+nobody can see.
 
 **Proper fix:** decide which is right and make both agree.
 - If the border above the title bar is wanted (it is what a real window frame
@@ -47966,7 +48120,22 @@ drawn selected sheet 0`).
 
 241 tests pass; clippy and rustfmt clean.
 
-## C-SPREADSHEET-FREEZE-ACCEPTS-A-BAND-BIGGER-THAN-THE-WINDOW (lane C, 2026-08-20)
+## C-SPREADSHEET-FREEZE-ACCEPTS-A-BAND-BIGGER-THAN-THE-WINDOW (lane C, 2026-08-20) -- **FIXED 2026-09-07**
+
+**Fixed 2026-09-07 (lane C).** A freeze whose band would fill the window is
+refused and says why; the sheet is left as it was. Unfreezing is never
+refused, because the rule is about entering the state, not leaving it.
+
+The policy call this entry deferred was taken rather than escalated, and
+recorded as `design-decisions.md` 820 with the two rejected alternatives, so
+the operator can overrule it cheaply. The reasoning: Excel refuses the same
+operation, the old behaviour was a trap rather than merely imperfect, and
+silently capping to the largest band that fits would have told the user a lie
+about what they asked for -- the same shape as every other defect found here
+this week.
+
+The status bar had no channel for a refusal at all: it was derived entirely
+from the selection. It now prefers a `notice`, cleared by any keystroke.
 
 **Status:** open — degrades safely, but the state is not useful.
 
@@ -50721,7 +50890,7 @@ the file grew by exactly 47 bytes and contains no `0x00`, which is the whole
 of the change. `grep -c fmt_f posix/src/printf.rs` now answers `74` where it
 previously answered `Binary file posix/src/printf.rs matches`.
 
-## OPEN-A-SELF-STOP-ANNOUNCEMENT-WINDOW-IS-PREEMPTIBLE (found by lane B, 2026-08-20) — filed to lane A
+## OPEN-A-SELF-STOP-ANNOUNCEMENT-WINDOW-IS-PREEMPTIBLE (found by lane B, 2026-08-20) — **FIXED** (`dba5e9087`)
 
 **Owner: lane A** (`kernel/**`). Filed as
 `requests/b-a-self-stop-announcement-window-is-preemptible-and-strands-the-child.md`;
@@ -60459,14 +60628,16 @@ it.
 
 ---
 
-## `BUG-CONSOLE-READ-UNINTERRUPTIBLE` — **stage 1 FIXED 2026-08-21; stage 2 open** (lane A)
+## `BUG-CONSOLE-READ-UNINTERRUPTIBLE` — **FIXED** (lane A, stage 1: 2026-08-21, stage 2: 2026-09-08)
 
-**Status:** the user-visible half is fixed — a process blocked reading the
-console is now interruptible by a signal, and `SYS_CONSOLE_READ_CHAR` /
-`tty::read` return `EINTR`. What remains open is that the reader still *polls*
-rather than parking, so the wake costs up to one timer tick and a core cannot
-go idle. See "**The proper fix, corrected**" below: the fix originally recorded
-here would have broken USB keyboards, which is why it was split.
+**Status: FIXED.** Both stages are now complete. A process blocked reading the
+console is interruptible by signals (stage 1) and genuinely parks in the
+scheduler rather than HLT-spinning (stage 2). The keyboard's `read_char_inner`
+uses a lock-free CAS array of waiting task ids (`KEYBOARD_WAITERS`),
+`park_interruptible`, and ISR-safe wakes from `push_char_raw` — matching the
+pty backend's design. Deadline-based reads arm an hrtimer for precise wakeup.
+Kernel-mode readers (kshell) keep the HLT loop, which is correct for their
+use case.
 
 **Stage 1, as landed (2026-08-21).** `kernel/src/keyboard.rs` grew
 `pub enum ReadOutcome { Byte(u8), Interrupted, TimedOut }` and one private
@@ -60520,15 +60691,18 @@ So stage 2 is two changes, in order:
    objection. The poller still wakes nobody, so step 2's wake side is
    untouched — a parked reader would now sleep through a keystroke that *was*
    successfully captured, which is a better failure but still a hang.
-2. **Then** convert the loop to a real park: a waiter set on the scancode
-   queue, `park_interruptible`, and a wake from both the PS/2 IRQ and the new
-   HID poll task. The wake must use the ISR-safe idiom — `sched::try_wake(tid)`
-   and, on failure, `sched::defer_wake(tid)` — **not** `WaitQueue::try_wake_one`
-   and not a `try_lock`ed waiter set: both of those *lose* the wake when the
-   ISR loses the lock, and a lost wake here is a hang. The natural shape is a
-   lock-free CAS array of waiting task ids whose full-array fallback is today's
-   `HLT` poll, so the degenerate case degrades to current behaviour rather than
-   to a deadlock.
+2. ✅ **DONE 2026-09-08.** **Convert the loop to a real park**: a lock-free
+   CAS array of waiting task ids (`KEYBOARD_WAITERS`, 4 slots),
+   `park_interruptible`, and a wake from `push_char_raw` (reached from both
+   the PS/2 IRQ 1 handler and the USB HID poll timer). The wake uses the
+   ISR-safe idiom — `sched::try_wake(tid)` and, on failure,
+   `sched::defer_wake(tid)` — as prescribed. The full-array fallback is the
+   old `HLT` poll, so the degenerate case degrades to current behaviour rather
+   than to a deadlock. Deadline-based reads (VTIME) arm a one-shot hrtimer
+   that wakes the parked task at the deadline, so they no longer rely on the
+   timer tick for wakeup. Kernel-mode readers (`pid == 0` — kshell, boot
+   console) keep the HLT loop: they have no signal context, and `park_interruptible`
+   degrades to `block_current` for pid 0 anyway.
 
 **Original report follows, unedited apart from the heading, because the
 reasoning it records is what stage 1 acted on.**
@@ -69456,7 +69630,7 @@ their slot (8 empty + 8 oversized): OK` and **zero** occurrences of `[frag]
 Evicting reassembly entry`, which is the observable the fix is about — the
 sixteen junk fragments forced no eviction at all.
 
-## `TD-A-MOST-BOOT-SELF-TESTS-PANIC-THE-KERNEL-INSTEAD-OF-REPORTING` — open, found 2026-08-22 (lane A)
+## `TD-A-MOST-BOOT-SELF-TESTS-PANIC-THE-KERNEL-INSTEAD-OF-REPORTING` — resolved 2026-09-07, found 2026-08-22 (lane A)
 
 **In short:** The kernel runs its own test suite on every single boot, and most
 of those tests are written so that a failure **halts the machine** rather than
@@ -70718,7 +70892,28 @@ a crate with no dev-dependencies cannot be using the shared fixture.
 
 ---
 
-## TD-C-THREE-OF-THE-CALENDARS-COLOUR-PAIRINGS-ARE-BELOW-THE-CONTRAST-FLOOR (lane C, 2026-08-23)
+## TD-C-THREE-OF-THE-CALENDARS-COLOUR-PAIRINGS-ARE-BELOW-THE-CONTRAST-FLOOR (lane C, 2026-08-23) -- **CLOSED; entry was stale**
+
+**Closed 2026-09-07 (lane C), on verifying it.** All three fixes are in
+`calendar.rs`, and its module doc records them with the measured numbers:
+adjacent-month day numbers moved `surface2` → `subtext0`, the selected day's
+disc `surface1` → `surface0`, and the event-detail body `subtext0` → `text`.
+The role-category diagnosis this entry made -- a *fill* role used as an *ink*
+is guaranteed low-contrast, so 2.46 and 1.91 were not unlucky values -- is
+quoted in the code where the choice is made.
+
+**The test the entry insisted on is there too, and in the form it insisted
+on.** `every_pairing_the_calendar_draws_clears_the_contrast_floor` iterates
+both modes, reads the roles off `Palette::for_mode`, and *computes* each
+ratio -- the numbers in the table above are not copied into any assertion, as
+this entry required. It covers eighteen pairings, not the three that were
+broken.
+
+**Nothing was done to the code for this closure.** Sixth stale entry closed
+today; `todo.txt` carries the note about what that costs and two preventions
+neither of which is mine to make.
+
+Original entry follows.
 
 **In short:** Three places in the calendar draw text too close in brightness to
 what is behind it to be comfortably readable. The worst is the greyed-out day
@@ -71394,7 +71589,47 @@ it sits.
   It still needs a caller of its own, for the transient messages an OSD is
   actually right for.
 
-## TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE (lane C, 2026-08-25)
+## TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE (lane C, 2026-08-25) -- **FIXED 2026-09-07, with one path unverified here**
+
+**Fixed 2026-09-07 (lane C).** `FileOperation::Link`, `OperationPlan::plan_link`
+and `execute_link_action` exist with the apparatus every other operation has,
+and the refusal in `evaluate_drop` is gone -- an Alt-drag now makes a link.
+
+**A link plan makes one action per source and never walks a directory.**
+Linking a folder means one link *to* the folder; a plan that recursed would
+produce a tree of links to each file inside it, which is not the gesture and is
+not undoable as one thing. `total_bytes` is zero, because counting the target's
+size would put a progress bar on a transfer that is not going to happen.
+
+**Undo removes the link and never the target.** This is the dangerous case the
+entry named, and it needed its own code rather than the copy undo: `is_dir()`
+*follows* a symlink, so the copy arm would reach through a link to a folder.
+`remove_link_or_file` asks `symlink_metadata`, which does not follow. The same
+helper guards replacing an existing link on conflict, where following one would
+delete what the old link pointed at to make room for a new one.
+
+**`OverwriteIfNewer` is treated as plain overwrite** and says so at the arm: the
+comparison is between contents' timestamps and a link has no contents of its
+own.
+
+### The honest part: two tests cannot run on this machine
+
+Windows refuses `symlink_file` without a privilege (error 1314, confirmed by
+probing rather than assumed), so **the link-creation success path is
+unverified on this host**. Two tests --
+`a_link_action_creates_a_link_that_resolves` and
+`undoing_a_link_removes_the_link_and_not_its_target` -- probe for symlink
+support, print `SKIPPED` with the reason, and return. They are not `#[ignore]`d
+and not silently absent: a run on a host that can make links is visibly a
+stronger run than one that cannot, and the output says which happened.
+
+What *is* verified here: the plan shape, the zero byte count, both
+`remove_link_or_file` branches that do not involve a link, and that an Alt-drag
+either produces a symlink or reports a failure -- never a plain copy, which is
+the silent downgrade the entry says is worse than doing nothing.
+
+Original entry follows.
+
 
 **In short:** Holding Alt while dragging a file is the standard way to ask for
 a *symbolic link* — a small stand-in file that points at the real one, so the
@@ -89208,7 +89443,41 @@ is the generic file glyph. Neither reports an error.
 
 ---
 
-## `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE` (lane C, 2026-08-26)
+## `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE` (lane C, 2026-08-26) -- **halved 2026-09-07; still open for the other half**
+
+**Update 2026-09-07: the peak is halved, and the remaining half is not
+reachable from this lane.** `imagecodec::decode_scaled` box-filters during
+scanline reconstruction, exactly as this entry proposed, and the thumbnailer
+uses it. The full-size `Vec<u32>` between decode and downscale is gone -- for a
+24-megapixel photograph, 96 MB of the roughly 190 MB.
+
+**What still costs 96 MB, and why it stays.** The *decompressed scanlines*.
+`zlib_inflate_limited` inflates the whole stream in one call before any
+reconstruction happens, because `deflate` exposes only `inflate` and
+`inflate_limited` over a complete buffer -- there is no incremental API to feed
+rows from. Adding one is what would let `ThumbConfig::max_source_pixels` go
+away entirely, and `deflate/` is not in lane C's globs. That is the piece to
+ask for, not to work around.
+
+**Interlaced files keep the old path**, as the entry predicted: Adam7's passes
+arrive scattered across the image, so a row-by-row accumulator has nothing
+coherent to accumulate. `decode_scaled` falls back rather than refusing, so a
+caller never has to know which case a file is.
+
+**The test that carries the design** asserts a scaled decode gives the same
+answer as decoding and *then* averaging, computed independently in the test
+rather than read back from the code. Two averaging rules would make the same
+photograph look different depending on which path it took. Four more cover the
+edges: a picture smaller than the box is not enlarged, the aspect ratio
+survives, a 400x3 panorama still yields at least one row rather than rounding
+to an empty picture, and every destination cell receives at least one source
+pixel -- an off-by-one leaving the last row untouched is almost invisible by
+eye on a dark image.
+
+Original entry follows.
+
+---
+
 
 **In short:** to draw a 128×128 preview of a photograph, the file manager
 decodes the photograph at full size first and then shrinks it. A 24-megapixel
@@ -89253,7 +89522,40 @@ view: they show the plain green rectangle rather than a preview, while the
 
 ---
 
-## `TD-C-EXPLORER-DOES-ARITHMETIC-ON-UNCHECKED-VALUES` (lane C, 2026-08-26)
+## `TD-C-EXPLORER-DOES-ARITHMETIC-ON-UNCHECKED-VALUES` (lane C, 2026-08-26) -- **CLOSED; entry was stale**
+
+**Closed 2026-09-07 (lane C), on verifying it rather than on doing the work.**
+`cargo clippy -p explorer --all-targets` reports **zero** arithmetic warnings,
+against the 33 this entry describes.
+
+**The check that matters is that they were fixed and not silenced**, because
+this entry's own last paragraph warns that "a blanket `#![allow]` is what turns
+33 known sites into an unknown number". They were fixed:
+
+- No `arithmetic_side_effects` allow exists anywhere in `apps/explorer/src/` or
+  its `Cargo.toml`; the crate takes `[lints] workspace = true`, and the
+  workspace table sets the lint to `warn`.
+- The lint is demonstrably live in this crate. Adding `fn _lint_canary(a:
+  usize, b: usize) -> usize { a + b }` to `columns.rs` produces the warning;
+  removing it returns the count to zero. (It also fired on my own code earlier
+  today, on six `restored += 1` sites in `fileops.rs`.)
+
+**The site this entry called the one that mattered is properly hardened.**
+`parse_jpeg_dimensions` walks the marker chain with `checked_add` and
+`saturating_add`, reads every byte through `data.get(..)?`, and takes segment
+lengths through `byteread::u16_be_at` -- which is exactly the fix the entry
+prescribed ("prefer `byteread`'s bounded accessors ... over hand-rolled offset
+arithmetic"). The overflow that could have turned `pos + 7 > data.len()` into a
+check that passes cannot occur: there is no unchecked `+` left in it.
+
+**Nothing was done to the code for this closure.** Third stale entry closed
+today, after `C-FILEDIALOG-IS-KEYBOARD-ONLY` and `C-ALARMCLOCK-SCROLLS-BY-CLIP-ALONE`
+-- see the note in `todo.txt` about what that pattern is costing.
+
+Original entry follows.
+
+---
+
 
 **In short:** the file manager has 33 places where it adds, multiplies or
 subtracts without checking for overflow, and the project's own lint
@@ -89292,7 +89594,54 @@ directory made the file manager read the wrong bytes. As a developer, every
 
 ---
 
-## `TD-C-EXPLORER-HAS-NO-EDITING-KEYS` (lane C, 2026-08-26)
+## `TD-C-EXPLORER-HAS-NO-EDITING-KEYS` (lane C, 2026-08-26) -- **CLOSED 2026-09-07**
+
+**Closed 2026-09-07 (lane C).** Delete, Shift+Delete, F2, Ctrl+Z and
+Ctrl+C/X/V are bound. Delete and Shift+Delete raise a confirmation before
+acting; F2 opens a rename box holding the current name; Ctrl+Z restores.
+
+**Two of the three blockers below were already gone, and I did not check
+before writing them down.** `gui/toolkit`'s `AlertDialog::destructive` --
+affirmative button carrying the verb, drawn in the error colour, focus
+starting on Cancel -- is precisely the confirmation the `Delete` row asks
+for, and `InputDialog` is a text entry that returns what was typed. Both
+predate this entry. The entry asserted they were missing, and the assertion
+was never re-tested; the work turned out to be wiring, not building.
+
+The `Ctrl+C`/`Ctrl+V` row was wrong in a different way. It said the file
+manager had no clipboard. It has had `copy_selected`, `cut_selected`,
+`paste` and a `clipboard` field the whole time -- what it lacks is a
+*system* clipboard, so a file copied here cannot be pasted into another
+application. That is a real limitation and a narrower one, and it is now
+recorded as its own entry rather than as "no clipboard".
+
+What genuinely did not exist was the *inline* rename field, and it still
+does not. A rename dialog is the other standard shape for the same
+operation, so F2 works today without it.
+
+**A latent bug fell out of wiring Ctrl+Z, and it was the reason to do this
+work carefully.** `delete_selected` recorded each recycled file as
+`(path, None)`, because the bin owns the data and restore is by entry id.
+`execute_undo` only acted `if let Some(d) = dest`, so it skipped every
+recycled file and returned `Ok(())` -- an undo that reported success and
+restored nothing. It was invisible because nothing called it on a recycle
+record. The cause was that `Option<PathBuf>` had to mean two opposite
+things: a permanent delete also recorded `None`, for "nothing to reverse",
+and skipping *that* is correct. `UndoTarget` (`Path` / `Recycled` /
+`Nothing`) names the three cases, and `execute_undo` now takes the bin and
+returns how many items it actually put back, so a caller cannot report a
+restore that did not happen. See `0ffb599de`.
+
+**One test was passing vacuously and mutation-checking caught it.** The
+render test asserted that "notes.txt" appeared among the drawn text -- true
+with the dialog entirely absent, because the listing row draws the same
+name. It now asserts the whole sentence, joined across the word wrap, which
+no listing row can produce.
+
+Original entry follows.
+
+---
+
 
 **In short:** the file manager is now a real window you can click and type in,
 but only the keys that *look* at files work — arrows, Home/End, Enter,
@@ -89327,7 +89676,28 @@ nothing says why.
 
 ---
 
-## `TD-C-EXPLORER-DOES-NOT-SCROLL` (lane C, 2026-08-26)
+## `TD-C-EXPLORER-DOES-NOT-SCROLL` (lane C, 2026-08-26) -- **CLOSED 2026-09-07**
+
+**Closed 2026-09-07 (lane C).** All three views scroll. The narrowing below
+says the icon grid did not yet; it does now, and the narrowing is the stale
+part.
+
+`render_icon_view` reads `viewport.first_visible()`, rounds it down to a whole
+row of icons (starting mid-row would put the first cell in the middle of the
+pane with a gap beside it), takes `scroll_window::capacity` rows' worth of
+cells, clips to the pane so a partial bottom row is cut mid-cell rather than
+vanishing, and lays each cell out by its *visible* position while identifying
+it by its *absolute* index -- so drop zones land on the file that was drawn.
+
+Four tests cover it: `the_icon_grid_scrolls_and_reaches_the_last_file`,
+`a_scrolled_icon_cell_names_the_file_that_is_drawn_in_it`,
+`a_wheel_notch_in_the_grid_moves_a_whole_row_of_icons`, and
+`the_icon_grid_wraps_and_survives_a_pane_narrower_than_a_cell`.
+
+Original entry and its narrowing follow.
+
+---
+
 
 **Narrowed 2026-09-07: the two list views scroll; the icon grid does not yet.**
 `ExplorerState` holds a `ListViewport`, the details and list renderers draw the
@@ -89346,8 +89716,26 @@ the middle of the pane. The wheel multiplies its row step by the column count
 there: a notch is three rows, and in a grid a row is `cols` entries, so
 stepping by entries would move three files and look unresponsive.
 
-**Still open:** a visible scrollbar. There is no way to see how far down a long
-listing you are, or to drag to a position -- only the wheel and the keyboard. `move_selection` also still exists
+**CLOSED 2026-09-07.** The scrollbar landed with the commit after that one:
+a track and a draggable thumb in all three views, a page jump for a click on
+the track either side of it, and no bar at all when the listing fits.
+
+It is drawn from a new shared `guitk::scrollbar`, not a seventh private copy.
+Six places in the tree already had one, each with its own version of the same
+formula. Five now share this module -- the file dialog, `menu`, `menubar`, the
+desktop shell and `apps/dictionary`; the sixth, `apps/spreadsheet`, is
+deliberately left because its bar is generic over the axis and this module is
+vertical-only. (The commit named `window_peek` as one of the six. That file has
+no scrollbar: the grep had matched `max_thumb_height`, which sizes a window
+preview. See the module doc.) The extraction took the file dialog's, which
+was the best documented and the only one with a test for the end-of-list case,
+and `dialog.rs` was converted first so its own tests prove the shared module
+says what its copy did.
+
+**Follow-up worth doing, not done here:** the other five copies. They are
+independent of explorer and each is a small, separately-testable conversion;
+folding them into this change would have made a scrolling fix into a
+five-file refactor. `move_selection` also still exists
 rather than deferring to `ListViewport::select_prev`/`select_next` as the plan
 below suggests -- explorer's multi-selection means the viewport is used for
 scrolling only, and folding the two together is the part that needs the
@@ -89409,7 +89797,50 @@ bottom and the listing never moves.
 
 ---
 
-## `TD-C-TWO-BYTE-ORDERS-ARE-BOTH-CALLED-ARGB` (lane C, 2026-08-26)
+## `TD-C-TWO-BYTE-ORDERS-ARE-BOTH-CALLED-ARGB` (lane C, 2026-08-26) -- **CLOSED 2026-09-07**
+
+**Closed 2026-09-07 (lane C).** The proper fix this entry specified is done:
+the byte order is part of the *type*. `guitk::canvas::WireBytes` has a private
+field and exactly one constructor -- `Canvas::to_argb8888` -- and the upload
+path takes nothing else. `ImageChange::Upload::bytes` and
+`oswindow::Window::upload_image` both require it, so
+`upload_image(.., canvas.to_argb())` is a compile error rather than a picture
+with red and blue exchanged.
+
+**One type covers both wire formats**, and that is not a shortcut:
+`BufferFormat::Xrgb8888` has the same byte order as `Argb8888` and differs only
+in whether the alpha byte is honoured, so the layout question this type answers
+has one answer for both.
+
+**Extraction is allowed and construction is not**, which is the whole design.
+`into_vec` hands the bytes to the encoder that puts them on the wire, at the
+one point past which no other order could be mistaken for them. Making that
+cost a copy of a whole picture per upload would have been a real price for no
+safety -- what needs guarding is what goes *in*.
+
+**Two test fixtures were building wire bytes by hand** and had to stop, which
+is the change working as intended. One of them asserted an upload's contents
+against `vec![1, 2, 3, 4, 5, 6, 7, 8]` -- a literal encoding the test's own
+guess at the byte order, in the one area of this tree where nobody should be
+guessing. It now derives the expectation from the same canvas the fixture
+uploads.
+
+The naming, the cross-referencing tables and
+`the_compositors_argb_is_the_byte_reverse_of_the_other_argb` all stay. They
+were not wrong, they were just not *load-bearing*: nothing stopped the next
+caller. See design-decisions.md §561.
+
+**Still open, and named in the entry below:** the disk-cache order has not had
+the same treatment. `Canvas::from_argb`/`to_argb` remain plain `Vec<u8>`, so
+explorer's on-disk thumbnail cache can still be read with the wrong pair. That
+is a smaller blast radius -- one app, one file format, and a wrong read there
+produces visibly wrong thumbnails rather than a wrong picture on someone
+else's screen -- but it is the same shape of bug.
+
+Original entry follows.
+
+---
+
 
 **In short:** "ARGB" names two *opposite* arrangements of the same four bytes in
 this tree, and both are spelled the same way in code. `Canvas::to_argb` writes
@@ -89644,7 +90075,43 @@ a bug.
 
 ---
 
-## `TD-C-A-SHORTCUT-ONLY-WORKS-WHEN-THE-DESKTOP-IS-FOCUSED` (lane C, 2026-08-26)
+## `TD-C-A-SHORTCUT-ONLY-WORKS-WHEN-THE-DESKTOP-IS-FOCUSED` (lane C, 2026-08-26) -- **CLOSED; entry was stale**
+
+**Closed 2026-09-07 (lane C), on verifying it.** The entry's mechanism claim --
+"there is no global-hotkey path, no key-grab table, and no 'system keys' list
+anywhere in the tree" -- is no longer true. `Compositor::handle_key` consults a
+grab table, and the shell's session claims its chords at startup.
+
+The implementation goes further than the entry asked for, and the comments at
+the call site name the two decisions that matter:
+
+- **Grabs are consulted after the chord is known and before the focused window
+  is looked up.** After, because a grab is on Alt+Tab rather than on scancode
+  `0x0F`, so it cannot be matched until the layout and the AltGr fold have had
+  their say. Before, because the whole point is to reach a client that is not
+  focused.
+- **A match returns rather than also delivering to the focused window** --
+  otherwise a text field would take a bare `Tab` every time the user switched
+  windows.
+- A modifier release owed to a grabber is taken from the table *before* the
+  grab check, because a modifier key can itself be a grabbed chord (the shell
+  holds bare Super, and Super is also the modifier in Super+D), so a debt
+  collected after the early return would never be collected for exactly the
+  keys most likely to owe one.
+
+Eleven grab tests pass, including
+`a_grabbed_chord_reaches_the_grabber_and_not_the_focused_window` and
+`a_shell_grabs_a_chord_over_the_wire_and_receives_it_from_another_window` --
+which is this entry's headline case, Alt+Tab pressed from inside somebody
+else's window.
+
+**Nothing was done to the code for this closure.** Fifth stale entry closed
+today; see the note in `todo.txt`.
+
+Original entry follows.
+
+---
+
 
 **In short:** every keyboard shortcut the desktop defines — Super+N, Alt+Tab,
 Super+D, and now the volume keys — only fires while the taskbar itself has
@@ -90624,7 +91091,38 @@ are recorded as `design-decisions.md` §608.
 
 ---
 
-## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) — **open**, tech debt
+## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) -- **now one of seventeen**
+
+**Update 2026-09-07: sixteen of the seventeen work.** Eleven of the twelve
+this entry describes were built in one session, in the order the entry's own
+increment list proposed. What remains is `target_monitor`, which waits on
+multi-monitor support and is the one the entry always put last.
+
+The title is left as it was written. It is wrong now and that is the point:
+renaming it would lose the thing worth remembering, which is that a settings
+page can accept, save and *display* twelve settings that do nothing, and that
+the only way a user finds out is by writing one and watching nothing happen.
+
+**What the twelve needed, in the end.** Four new privileged requests
+(`ShellSetOpacity`, `ShellMove`/`ShellResize`, `ShellSetStackTier`,
+`ShellSetSizeLimits`, `ShellSetWindowPolicy`), one new verb
+(`ShellControlAction::Fullscreen`), and `CONTROL_VERSION` 4 → 10. Every one
+follows the same shape: a separate wire tag, `require_shell()` rather than
+`link.resolve()`, and -- where an equivalent self-only operation already
+existed -- the *same* `CompositorRequest`, because only the right to ask
+differs.
+
+**Two of the entry's own reasons turned out to be wrong**, and both cost
+investigation before the work could start:
+
+- "the compositor has no per-window constraint store at all" -- it had one,
+  enforced by every resize, by maximise, and at creation. Only the setter was
+  missing.
+- "a per-window layer override" for `always_on_top` -- a layer is the
+  client's, chosen at creation, so an `AboveNormal` layer would let any
+  program put itself above the taskbar. It needed a *tier within* a layer.
+
+## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) -- original entry follows — **open**, tech debt
 
 **In short:** The Settings panel has a "Window rules" page where you can say
 things like *"the editor should always open maximised on desktop 2"* or *"chat
@@ -90646,7 +91144,7 @@ rest.
 |---|---|
 | `skip_taskbar` | shell-local: `ManagedWindow::skip_taskbar`, filtered out of `taskbar_windows` |
 | `skip_alt_tab` | shell-local: filtered out of `switcher_windows` |
-| `initial_state` | `ShellControlAction::Minimize` / `Maximize` (but not `Fullscreen` — see below) |
+| `initial_state` | `ShellControlAction::Minimize` / `Maximize` / `Fullscreen` (all three, since 2026-09-07) |
 | `snap_zone` | `ShellControlAction::SnapToZone(SnapSlot)` |
 | `desktop` | `ShellRequest::MoveWindowToDesktop` |
 
@@ -90662,15 +91160,15 @@ client's windows around.
 
 | Field | What it would need |
 |---|---|
-| `position` (incl. `RememberLast`, `CenterOnMonitor`) | a `ShellMove { window, x, y }` request |
-| `size` (incl. `RememberLast`) | a `ShellResize { window, w, h }` request |
-| `min_size`, `max_size` | a size-constraint request; the compositor has no per-window constraint store at all |
-| `opacity` | a `ShellSetOpacity { window, alpha }` request |
-| `always_on_top`, `always_on_bottom` | a per-window layer override; today `Layer` is fixed at creation by the client |
+| ~~`position`~~ | **Done 2026-09-07**, except `CenterOnMonitor(n>0)`. `RequestBody::ShellMove`, tag `0x1A`. |
+| ~~`size`~~ | **Done 2026-09-07.** `RequestBody::ShellResize`, tag `0x1B`. |
+| ~~`min_size`, `max_size`~~ | **Done 2026-09-07.** The store existed all along — see increment 4. |
+| ~~`opacity`~~ | **Done 2026-09-07.** `RequestBody::ShellSetOpacity`, tag `0x19`, `CONTROL_VERSION` 5 → 6. |
+| ~~`always_on_top`, `always_on_bottom`~~ | **Done 2026-09-07.** A `StackTier` within the layer, not a layer override — see increment 3. |
 | `target_monitor` | multi-monitor placement, which the compositor does not model yet |
 | `no_decorations` | decorations are the client's own; there is no request to strip them |
-| `prevent_close`, `prevent_move`, `prevent_resize` | a per-window policy the *compositor* enforces — these cannot be shell-side, because the shell is not in the path when the user drags a title bar |
-| `initial_state: Fullscreen` | `SetFullscreen` is self-only; needs a `ShellControlAction::Fullscreen` verb |
+| ~~`prevent_close`, `prevent_move`, `prevent_resize`~~ | **Done 2026-09-07.** `WindowPolicy`, enforced in the compositor exactly where the entry said it had to be. |
+| ~~`initial_state: Fullscreen`~~ | **Done 2026-09-07.** `ShellControlAction::Fullscreen`, `CONTROL_VERSION` 4 → 5. |
 
 **The proper fix**, and why it is not one commit: the eight-verb
 `ShellControlAction` is a lane-C-owned enum in `gui/remote`, so adding verbs is
@@ -90678,13 +91176,140 @@ cheap — but `CONTROL_VERSION` is a wire version and each addition costs a bump
 plus a compositor-side implementation, and three of the twelve (`prevent_*`)
 need a policy store the compositor does not have. The honest increments are:
 
-1. `ShellMove` + `ShellResize` (unblocks `position`, `size`, and the
-   already-working `remember_state` bookkeeping that currently feeds nothing).
-2. `ShellSetOpacity` and a `Fullscreen` verb — both are one-line compositor
-   changes on top of state that already exists.
-3. A per-window layer override for `always_on_top` / `always_on_bottom`.
-4. A compositor-side policy store for `prevent_close` / `prevent_move` /
-   `prevent_resize`, and constraints for `min_size` / `max_size`.
+1. ~~`ShellMove` + `ShellResize`~~ — **done 2026-09-07**, `CONTROL_VERSION`
+   6 → 7. Both follow `ShellSetOpacity` exactly: a separate tag, gated on
+   `require_shell` and naming the window directly, mapping to the *existing*
+   `CompositorRequest::Move`/`Resize`. `RememberLast` needed nothing new --
+   `resolve_remembered` already turns it into `Absolute`/`Exact` before the
+   requests are built, so the bookkeeping that "currently feeds nothing" now
+   feeds these.
+
+   **Size is asked for before position, and that is not cosmetic**: a centred
+   placement is computed *from* the size, so a window sized after being
+   centred would be centred for the size it used to have. There is a test on
+   the ordering.
+
+   **Two cases are declined rather than guessed**, and the declining is the
+   part worth reading:
+
+   - *Centring with no size in the rule.* The shell is told window positions
+     in the window list but not the size a program is about to choose, so
+     there is nothing to centre. Declining leaves the window where the program
+     put it; centring against a guess moves it somewhere wrong.
+   - *`CenterOnMonitor(n)` for n > 0.* This shell has bounds for one display.
+     Putting a window on the wrong screen is a worse answer than leaving it
+     alone, so it waits for multi-monitor with `target_monitor`.
+
+   Percentages *are* resolved, against the display the shell was built for.
+2. ~~`ShellSetOpacity` and a `Fullscreen` verb~~ — **half done 2026-09-07**:
+   the `Fullscreen` verb is in. It took a wire byte *past* the zone range
+   rather than the free slot at 7, because the zone bytes are
+   `ZONE_BYTE_BASE + slot` and taking 7 would have shifted all twenty-two of
+   them — renumbering actions every deployed peer already agrees on. An older
+   peer answers `None` to the new byte, which is what it should do with a verb
+   it does not know.
+
+   The compositor arm sets fullscreen to `true` rather than toggling: a rule
+   says "open this fullscreen", and a verb that flipped the state would make
+   the result depend on what the window was already doing and undo itself if
+   the rule ran twice.
+
+   **The test that mattered was the one that nearly was not written.** Wiring
+   the arm to `maximize_window` instead passed all 695 compositor tests --
+   `every_shell_control_action_reaches_its_own_operation` did not know about
+   the new verb, and the shell-side tests only prove the *request* is sent.
+   The action test now distinguishes fullscreen from maximize explicitly, and
+   its doc records the near miss. Mutation-checked afterwards.
+
+   **`ShellSetOpacity` done 2026-09-07 too, so increment 2 is complete.** It
+   is a new request rather than an action byte, and it maps to the *existing*
+   `CompositorRequest::SetOpacity`: the operation is identical to the
+   self-only one and only the right to ask differs, so a second internal
+   variant would have been two copies of "set this window's opacity" free to
+   drift. What differs is the wire arm -- `require_shell()` and a direct
+   `WindowId::from_raw` instead of `link.resolve`, exactly as `ShellControl`
+   does. A separate *tag* rather than a flag on the existing request, so the
+   privileged path cannot be reached by getting a boolean wrong.
+
+   `ShellRequest::SetOpacity` carries a `u8`, not the `f32` the rule stores
+   and the wire carries. `f32` is not `Eq`, and keeping it would have dropped
+   `Eq` from `ShellRequest`, `ShellAction` and `HotkeyOutcome` over one field.
+   It is also what survives: the compositor blends with an eight-bit alpha, so
+   a finer opacity is discarded a layer below. 0.0 and 1.0 convert to 0 and
+   255 exactly, which a test pins -- "fully opaque" arriving as 254 would be
+   almost impossible to see and is the failure worth naming.
+
+   The privilege test drives the *same foreign window* through both requests
+   and asserts the shell one is accepted and the ordinary one refused. Either
+   half alone would pass while the distinction was broken.
+3. ~~A per-window layer override for `always_on_top` / `always_on_bottom`.~~
+   **Done 2026-09-07**, `CONTROL_VERSION` 7 → 8, and *not* as a layer
+   override — that framing turned out to be the wrong one.
+
+   **A layer is the client's; a tier is the shell's.** `Layer` is chosen by
+   the window's own client at creation, so an `AboveNormal` layer would let
+   any program put itself above the taskbar simply by asking. `StackTier`
+   (`Bottom` / `Normal` / `Top`) is set only by a shell applying a user's
+   rule, and orders windows against their neighbours *within* a layer. The
+   stacking key became `(Layer, StackTier)`, so an always-on-top window is
+   above the other applications and still below the desktop's own furniture.
+
+   The test that pins this asserts **both** halves, because only the pair
+   rules out the obvious wrong implementation: reusing `Layer::Overlay` for
+   "always on top" passes "above its neighbours" and fails "below the shell".
+
+   `raise_within_layer` sorts on the same key, which is what makes "always"
+   mean always -- clicking another window cannot lift it past a pinned one.
+   Mutation-checked: dropping the tier from the sort key fails two tests.
+
+   The shell resolves `always_on_top` + `always_on_bottom` set together into
+   one tier rather than sending the compositor a contradiction, and a rule
+   silent on stacking asks for nothing at all.
+4. **Done 2026-09-07.** `min_size`/`max_size` at `CONTROL_VERSION` 9;
+   `prevent_close`/`prevent_move`/`prevent_resize` at 10, as one
+   `WindowPolicy` carried by `ShellSetWindowPolicy` (tag `0x1E`).
+
+   The entry was right that these could not be shell-side, and the three
+   enforcement points are exactly where it said: `request_close`, the
+   title-bar drag, and the edge drag.
+
+   **They restrain the user, never the program.** `prevent_close` refuses the
+   *request* -- what a close button and a taskbar menu send -- and not
+   `destroy_window`, which is how a program exits. A rule that could stop a
+   process exiting would be a way to make one unkillable from a text file.
+
+   **`prevent_move` stops the drag without stopping the press.** A pinned
+   window still focuses and raises from its title bar; refusing the press
+   outright would make it unfocusable by the one part of it a user reliably
+   aims at.
+
+   One request rather than three: the flags are one rule's worth of answer,
+   and sending them separately could leave a window half-restrained if the
+   second frame were refused. An explicit `false` in a rule takes a
+   restriction back; silence imposes none.
+
+   **This entry's claim that "the compositor has no per-window constraint
+   store at all" was wrong when I read it.** `Window::min_size`/`max_size` and
+   `Window::clamp_size` already existed and were already consulted by every
+   resize, by maximise, and at creation. What was missing was only the ability
+   for a *shell* to set them: they came from the client's `WindowSpec` and
+   nowhere else. `RequestBody::ShellSetSizeLimits` (tag `0x1D`) is that.
+
+   **Zeroes on the wire mean "leave this one as it is", not "no limit"**, and
+   that distinction is the whole design. The rule vocabulary has `min_size`
+   and `max_size` as *optional* fields — a rule either names one or says
+   nothing, and there is no way to write "remove the minimum this program
+   asked for". Had zero meant "no limit", a rule naming only a maximum would
+   silently discard the program's own minimum, and the user would find out
+   when the window collapsed under a drag. Mutation-checked: making `None`
+   clear instead of skip fails the test.
+
+   The new limits are applied to the window immediately rather than at the
+   next resize. A rule that says "at most 400 wide" and leaves a 900-wide
+   window alone until somebody drags its edge has not been applied.
+
+   The limits are asked for before the size, so a rule setting both clamps on
+   the way in rather than being corrected afterwards.
 5. `target_monitor` last, behind multi-monitor support.
 
 **Severity while open:** low but *dishonest*, which is the part that matters.
@@ -90902,7 +91527,75 @@ minimum:
 Until then the renderer is dead code that passes its tests, which is the state
 this project has repeatedly found to be worse than absent code: it looks done.
 
-## `TD-C-THE-SHORTCUT-CARD-IS-READ-ONLY` (lane C, 2026-08-26)
+## `TD-C-THE-SHORTCUT-CARD-IS-READ-ONLY` (lane C, 2026-08-26) -- **CLOSED 2026-09-07**
+
+**Two of the three missing parts are done.** The card's rows can be walked with
+the arrow keys, Enter starts recording, and the next chord becomes the binding.
+
+The part the entry called "the real work" is the one that landed: while
+recording, the keystroke is **data**. The check sits at the very top of
+`handle_hotkey_inner`, before every modal surface, because a user rebinding
+"show the desktop" presses Super+D -- and if the shell ran it, the desktop
+would be shown while they were trying to say what those keys mean. Escape
+means "cancel the rebind" there rather than "close the card", and a bare
+modifier does not end the recording, so reaching for Ctrl on the way to Ctrl+F9
+does not bind the shortcut to Ctrl.
+
+A chord already in use is refused and the refusal *names the holder*
+("PrintScreen is already Screenshot"), because "already in use" leaves the user
+hunting. A refused rebind leaves the original binding untouched, and a rebind
+that fails to register puts the old chord back rather than leaving the action
+with no chord at all.
+
+7 tests. Mutation-checked: removing the capture gate -- which is exactly the
+old behaviour -- fails four of them.
+
+**Persistence: done 2026-09-07, and it removed a format rather than adding
+one.** `HotkeyConfig`'s bespoke text file had **no caller outside its own
+tests**, and `design.txt` says configuration files are YAML. So the shell does
+not use it: `HotkeyConfig::write_into`/`read_from` put the bindings in a
+`Document` under `shortcuts`, saved to `shortcuts.yaml` beside the desktop's
+other settings, and the one line parser is shared with the text form so the two
+cannot disagree about what `Ctrl+ +` means.
+
+A YAML *sequence* of `chord=action` strings rather than a mapping, and not by
+taste: two actions carry a parameter (`switch_desktop:3`,
+`launch:/usr/bin/explorer`), so an action-keyed mapping would put a colon and a
+path in a YAML key -- and a chord-keyed one could be written but never read
+back, because nothing in `yamldoc` enumerates a mapping's keys.
+
+**Loading applies over the defaults rather than replacing them.** A file
+written by an older desktop names the shortcuts that existed then; replacing
+the table with it would silently drop every shortcut added since. Each saved
+binding *moves* its action rather than adding a second chord for it, so a
+rebound shortcut does not answer to both its old and new chords after a
+restart. An unparseable file is ignored rather than costing the user the
+defaults.
+
+The save happens on the rebind, not on shutdown -- a desktop that lost power
+between the two would forget it, and the user has no way to know saving was
+pending. If the write fails the card says so, because "Ctrl+F12 is now Show
+Desktop" and "...but could not be saved" are different promises.
+
+**Re-grabbing: done 2026-09-07.** `ShellSession::reconcile_global_grabs` runs
+once per pump, on the same unconditional footing as the existing
+`reconcile_escape_grab` and for the same reason -- a rebind happens several
+layers down inside `handle_hotkey`, and threading a "the chords changed" flag
+back up would be one more thing to forget at one more call site.
+
+The session now *remembers* which chords it holds rather than recomputing
+them, because after a rebind the registry can no longer say which chords were
+grabbed before it, and an ungrab needs exactly that.
+
+Both directions are tested. The quieter half is the ungrab: grabbing the new
+chord without releasing the old one leaves the shell holding a chord no
+shortcut uses, which is a key no application can ever see. Mutation-checked --
+deleting the ungrab loop fails the test.
+
+Original entry follows.
+
+---
+
 
 **In short:** you can now open the card that lists every keyboard shortcut
 (`Super+/`), but you cannot change a shortcut from it. The shortcuts *are*
@@ -113686,7 +114379,7 @@ a structure the loader has to read to know which platform it is for.
 
 ---
 
-## A-EDITING-BOOT-TEST-SH-MID-RUN-KILLS-THE-RUN-WITH-A-LIE — OPEN 2026-09-02
+## A-EDITING-BOOT-TEST-SH-MID-RUN-KILLS-THE-RUN-WITH-A-LIE — FIXED 2026-09-08
 
 **Lane:** A. **Severity:** costs a 20–45 minute run, and — the part that
 matters — blames a line that is innocent, so the first response to it is to
@@ -113767,6 +114460,14 @@ written down rather than left as "obvious":
 
 **Where it is:** `scripts/boot-test.sh` (the whole file is the subject; the
 re-exec belongs immediately after the `set -u`/`SCRIPT_DIR` preamble).
+
+**Fixed 2026-09-08.** The re-exec is in place at lines 302–325 of
+`boot-test.sh`. It copies itself to a temp file via `mktemp`, sets
+`BOOT_TEST_REEXEC=1` and `BOOT_TEST_ORIG_DIR` (so `SCRIPT_DIR` still points
+at the checkout, not the temp directory), and execs the snapshot. The parent
+shell installs a `trap … EXIT INT TERM` that removes the snapshot on every
+exit path. Both details the entry called out — preserving `SCRIPT_DIR` and
+cleaning up the copy — are handled.
 
 ---
 
@@ -114567,7 +115268,44 @@ many crates exist, and that number only goes up.
 
 ---
 
-## C-FILEDIALOG-IS-KEYBOARD-ONLY-SO-EVERY-PICKER-IN-THE-OS-IGNORES-CLICKS (lane C, 2026-09-02)
+## C-FILEDIALOG-IS-KEYBOARD-ONLY-SO-EVERY-PICKER-IN-THE-OS-IGNORES-CLICKS (lane C, 2026-09-02) -- **CLOSED; entry was stale**
+
+**Closed 2026-09-07 (lane C), on finding it had already been fixed and never
+marked.** `FileDialog::frame(width, height) -> Frame<DialogTarget>` and
+`FileDialog::handle_mouse` both exist, and the conversion went further than
+this entry asked for:
+
+- Every control the entry listed is a hit target -- back/forward/up,
+  sidebar shortcuts, sort headers, rows, the confirm and cancel pair.
+- Both rules the entry said the conversion must not break are kept, and
+  visibly: a double-click on a row activates where a single click selects
+  (`MouseEventKind::DoubleClick` acts only on `Entry`, with a comment on why
+  every other control must not act twice), and `DialogTarget::Chrome` exists
+  precisely so a host can tell a click *on* the dialog from a click past its
+  edge -- "the click a modal must not let through".
+- Two controls are recorded but inert on purpose: `AddressBar` and
+  `FilenameInput` swallow a click rather than letting it fall through to the
+  list behind, which is what a user expects of a control they can see.
+- The scrollbar got a draggable thumb and a wheel path with it.
+
+24 click/mouse/drag tests in `dialog.rs`; 110 dialog tests pass.
+
+**The dependents named in the entry have also moved on.**
+`C-VPNMANAGER-IMPORT-EXPORT-HAVE-NO-FILE-PICKER` is marked fixed 2026-09-03,
+and `apps/archivemanager` has a test called `the_pickers_rows_can_be_clicked`.
+Its table of "three reasons `FileDialog` cannot serve as a picker" led with
+"keyboard-only; it records no hit targets" -- that row is no longer true, and
+is left in place as the record of why the fixed path was chosen at the time.
+
+**Nothing was done to the code for this closure.** It is a documentation
+correction: the entry described a defect that had been repaired, and an entry
+that overstates what is broken costs the next reader the same investigation it
+cost me.
+
+Original entry follows.
+
+---
+
 
 **In short:** every Open / Save / Choose-folder dialog in SlateOS can only be
 driven with the keyboard. The dialog draws a list of files, a sidebar of
@@ -115165,7 +115903,7 @@ The verdicts are carried forward into kshell's self-test rungs, so the evidence
 does survive — but only the evidence gathered on the day the rule was written.
 A later edit to `shellquote.rs` that changes behaviour is caught by nothing.
 
-## A-TEST-CANARY-LOADS-LIVE-CASES-FAIL-ON-A-BUSY-HOST — OPEN 2026-09-03 (found by lane B, owned by lane A)
+## A-TEST-CANARY-LOADS-LIVE-CASES-FAIL-ON-A-BUSY-HOST — **FIXED** 2026-09-07 (`0868abf03`) (found by lane B, owned by lane A)
 
 **In short:** `scripts/test-canary-load.py` starts real spinner processes and
 then checks that each one got most of a CPU. On an idle machine that is true;
@@ -122765,3 +123503,1248 @@ is not this project's tree to move), or the search learns the old `D:` location
 once in the environment for all lanes (operator's, and outside any lane's
 files). Lane B has no standing to pick among those, so it is written down with
 the workaround instead.
+
+---
+
+## `TD-C-THE-FILE-MANAGER-CLIPBOARD-STOPS-AT-ITS-OWN-WINDOW` (lane C, 2026-09-07)
+
+**In short:** copying a file in the file manager and pasting it in the file
+manager works. Copying a file there and pasting it *anywhere else* does not,
+because the file manager keeps its copied-files list in a variable of its own
+rather than handing it to the system. Nothing tells the user that; Ctrl+C looks
+identical either way, and the paste simply does not happen in the other window.
+
+**Where it lives.** `apps/explorer/src/main.rs` -> the `clipboard` field, and
+`copy_selected` / `cut_selected` / `paste` around it. The field is an
+`Option<ClipboardOp>` holding `Copy(Vec<PathBuf>)` or `Cut(Vec<PathBuf>)`, and
+it is private to the one running `ExplorerState`.
+
+**Why this entry exists.** It replaces a wrong claim.
+`TD-C-EXPLORER-HAS-NO-EDITING-KEYS` said the file manager had *no* clipboard
+and that Ctrl+C could not be wired until one was built. It has had one all
+along -- what it lacks is a *shared* one. Wiring the keys was therefore
+correct, and the residue is this narrower thing.
+
+### Update 2026-09-07: the clipboard this entry asks for exists, and cannot carry our paths
+
+**The system clipboard is already built, in the kernel.** `fs::clipboard`
+(`roadmap.md` line 2470, marked done) has exactly the shape this entry asks
+for: a `Format::FilePaths` variant and a `FileOp` enum (`Copy`/`Cut`) beside
+it, explicitly "for file manager copy/cut", with `/proc/clipboard` and a
+kshell command. The open question below -- toolkit, compositor or service --
+was answered before it was asked. There are two *more* clipboards in the tree
+that are not it: `guitk`'s text one, and `gui/clipboard`, a written service
+binary that nothing links to or talks to.
+
+**I went to wire the explorer to it and stopped.** `set_files` joins paths
+with `
+` and takes `&[&str]`; `get_files` splits them with `.lines()` after
+a `from_utf8`. This filesystem allows every byte but `/` and NUL, so `
+` and
+`
+` are both legal in a filename and UTF-8 is not required at all. A file
+named `a
+b` pastes as two files; a file whose name is not valid UTF-8 makes
+the whole clipboard read back *empty*, with no error, because the `.ok()?`
+turns a decode failure into "nothing here".
+
+Reported as `requests/c-a-the-system-clipboards-file-list-cannot-carry-our-own-paths.md`
+with a proposed fix (NUL as the separator -- the one byte a path cannot
+contain -- or length-prefixing). `kernel/**` is lane A's, and this is a wire
+format two other lanes will build on, so it should be their shape.
+
+**This entry stays open**, and its blocker is now specific: not "there is no
+system clipboard" but "the system clipboard's file list cannot represent a
+legal path". Wiring the explorer to it as it stands would mangle filenames
+silently, on the user's own files, which is worse than copy stopping at the
+window.
+
+**What the proper fix is.** A clipboard owned outside the app, holding a
+*typed* payload rather than text: a file reference is a list of paths plus
+whether it was a copy or a cut, and flattening it to a newline-joined string
+loses the cut/copy distinction and breaks on any path containing a newline
+(our paths allow every byte except `/` and NUL). `gui/toolkit` has a clipboard
+for text only. Whether the system clipboard belongs in the toolkit, the
+compositor or a service is the open part -- text and files want the same
+ownership rules and different payloads, and a text-only clipboard grown a
+files case by accident is how the two end up disagreeing about which one is
+authoritative.
+
+**How you would notice.** Copy a file in the file manager, switch to any other
+window, press Ctrl+V. Nothing arrives, and nothing says why.
+
+---
+
+## `TD-C-HIGH-CONTRAST-MODE-IS-NOT-CONNECTED-TO-ANYTHING` (lane C, 2026-09-07) -- **mostly CLOSED the same day**
+
+**Update 2026-09-07: high contrast now reaches the screen.** The scheme lives
+in `gui/appearance` as `HighContrastScheme`, `AppearanceSettings` carries
+`high_contrast: Option<HighContrastScheme>` with a YAML round-trip, and
+`Palette::from_settings` branches on it -- the single construction point every
+shell surface already goes through, so the mode applies everywhere at once
+rather than needing each caller taught about a second palette.
+`a11y.rs`'s copy of the enum is now a re-export of that one, so the two sets of
+colour values that could disagree are one set.
+
+**The open design point is settled: the accent follows the user's setting.**
+`design-decisions.md` §816 requires the highlight to be configurable, and a
+scheme-fixed accent would have made it the one colour this mode does not let
+you change. The contrast risk that argued for the scheme is handled without
+overriding anyone: for a named accent the *hue* is kept and the
+better-contrasting of its two existing values is used, which is what
+`for_mode` already does for every other role. A `Custom` accent is used
+verbatim -- an exact colour is an exact request, and there is no second value
+to choose between.
+
+Removing the accent from the scheme removed a guarantee (`accent >= 4.5:1`
+against its own background, four values checked). It is replaced by a wider
+one: `the_worst_accent_on_the_worst_scheme_is_still_legible` sweeps all
+fourteen presets against all four schemes. A second test asserts that the
+variant choice is what achieves it -- the same sweep against each hue's dark
+value alone finds a pairing that fails -- so the mechanism is shown to be
+load-bearing rather than incidental.
+
+**What still stands from the entry below:**
+
+- **The duplication is only half-resolved.** `accessibility_settings.rs`
+  (2,037 lines) still models contrast a third way, and the keyboard-
+  accessibility halves of both modules still overlap. Neither is reachable.
+  Both are lane C, so this needs no cross-lane agreement.
+- ~~**There is still no control.**~~ **Done 2026-09-07.** Settings ->
+  Accessibility -> Visual has a High Contrast row. It turned out a row was
+  already *there* -- a switch bound to `ToggleId::HighContrast`, writing to a
+  `high_contrast: bool` on the settings app's own state that nothing read.
+  The control and the reader both existed and were not connected.
+
+  It is now a list of five (Off, plus the four schemes) rather than a switch
+  plus a scheme picker. A switch over a setting with four values has to answer
+  "on to what?", and either forgets the user's scheme or hides it in state
+  they cannot see -- which is the argument this same page already made for
+  Transparency, in a comment: "a switch that meant 'Off or whatever it was'
+  would forget a user's choice of Full every time they turned it off and on
+  again." The dead bool and `ToggleId::HighContrast` are gone.
+
+  Seven tests, ending with one that carries the choice all the way into
+  `Palette` rather than stopping at `AppearanceSettings` -- a setting that
+  round-trips and is never consumed is exactly the defect this row had for its
+  whole life.
+- **The orphan ratchet claim needs qualifying.** I wrote that
+  `accessibility_settings.rs` is an island missing from the baseline.
+  `scan-orphan-modules.py` counts a module as reached if any of its item
+  names is mentioned elsewhere, and this module's names -- `ColorFilter`,
+  `MagnifierConfig`, `InputSettings` -- were all mentioned elsewhere. They
+  were **homonyms**: separately-defined types of the same name in other
+  files, not references to these. So the scanner was not simply wrong, it was
+  defeated by four enums sharing a name, which is itself the defect (see
+  `TD-C-THE-COLOUR-FILTER-CONTROL-DOES-NOTHING`). With `ColorFilter` now
+  defined once, one of the three homonyms is gone. Whether the module is
+  flagged now has not been re-checked, and the scanner is lane A's file, so
+  this is a report rather than a fix.
+
+Original entry follows.
+
+---
+
+
+**In short:** SlateOS has four high-contrast colour schemes for users who
+cannot read ordinary ones, and there is no way to turn any of them on. The
+code that defines them is complete and tested and is called by nothing. There
+is also a *second*, separate accessibility module that models the same feature
+differently, and it is equally unconnected. A user who needs high contrast
+gets the ordinary theme.
+
+**How this was found.** Acting on `design-decisions.md` §816, which says the
+green-on-black scheme's highlight becomes white and that the highlight must be
+user-configurable. Both halves turned out to mean something other than what
+they appear to:
+
+- **The configurability half is already satisfied**, for everything actually
+  on screen. The live highlight is `Palette::highlight_fill`, which is
+  `with_alpha(self.accent, ...)` -- derived from the accent, which the user
+  already picks in Appearance settings. Nothing needed building.
+- **The white half lands in code nobody runs.** `HighContrastTheme::accent` in
+  `gui/desktop/src/a11y.rs` has no caller outside its own tests.
+
+The colour was changed anyway, because the decision is recorded and the value
+will be right when it *is* wired -- but on its own it changes nothing a user
+sees, and saying so is the point of this entry.
+
+**Where it lives, and the duplication.**
+
+| Module | Lines | Models | Reachable |
+|---|---|---|---|
+| `gui/desktop/src/a11y.rs` | 2,291 | `HighContrastTheme` (4 schemes), colour filters, magnifier, sticky/filter/mouse keys, `AccessibilityConfig` | no -- pinned island #53 |
+| `gui/desktop/src/accessibility_settings.rs` | 2,037 | `ContrastMode` (`HighContrast`, `HighContrastInverse`), sticky/filter/mouse key configs | no -- `pub mod`, no callers |
+
+Both are `pub mod` in `gui/desktop/src/lib.rs` and neither is referenced
+anywhere else. **Both are in lane C**, so unlike the desktop-icon duplication
+(`requests/c-a-two-desktop-icon-models-...`) this one needs no cross-lane
+agreement -- it is mine to settle.
+
+**A side finding about the ratchet.** `a11y.rs` is on
+`scripts/orphan-modules-baseline.txt`; `accessibility_settings.rs` is not,
+although by the same test it is equally an island. `scan-orphan-modules.py`
+reports "no new islands (45 pinned)" and does not flag it. The scanner's
+reachability appears to be name-based -- it reports `a11y.rs` as "also spelled
+in" three files that do not import it -- so a module whose *item names* occur
+elsewhere reads as reached. Not chased further; noted because the baseline is
+used as evidence that nothing new has been stranded, and here it is one short.
+
+**What the proper fix is**, and it is not "wire up `a11y.rs`":
+
+1. **Pick one model and delete the other.** `accessibility_settings.rs`'s
+   `ContrastMode` is the smaller and more honest shape (an enum of modes, not
+   a palette), but `a11y.rs`'s four named schemes are what the operator's
+   question C-Q7 was about and what §816 decides. Neither is obviously right.
+2. **Put high contrast where the palette is built.**
+   `Palette::from_settings` is a four-line function and the *single*
+   construction point every shell surface goes through. A
+   `high_contrast: Option<...>` field on `AppearanceSettings`, branched on
+   there, makes the feature apply everywhere at once. Wiring the island
+   instead would mean teaching every caller about a second palette.
+3. **High contrast collapses the palette's gradations rather than shifting
+   them.** `crust`/`mantle`/`base`/`surface0..2` all become the background and
+   structure is carried by borders, which is what Windows' high contrast does
+   and why it works; `overlay0`, documented as "the faintest legible mark" at
+   3.4:1, must become the text colour, since a deliberately faint role is
+   exactly the thing the mode exists to remove. `panel_alpha` goes to opaque.
+4. **The categorical hues should not collapse.** "Red means failed" has to
+   survive, so those fields come from whichever mode's palette suits the
+   scheme's background rather than being flattened to the text colour.
+
+**The one open design point**, which is why this is written down rather than
+already done: **in high contrast, does the accent follow the user's Appearance
+setting, or the scheme?** Following the setting satisfies §816's
+configurability requirement directly and needs no new machinery, but lets a
+user pick a highlight with poor contrast against the scheme's background --
+in the mode where that matters most. Following the scheme guarantees contrast
+and makes §816's white the visible default, but means the highlight is the one
+colour high contrast does *not* let you change. A third option is to follow the
+setting only while it clears a contrast bar, which is defensible and is also
+the system silently overriding a user's explicit choice.
+
+**How you would notice.** Look for high contrast in Appearance settings. There
+is no control, and there is no setting behind it if there were.
+
+---
+
+## `TD-C-THE-COLOUR-FILTER-CONTROL-DOES-NOTHING` (lane C, 2026-09-07) -- **CLOSED the same day**
+
+**Closed 2026-09-07 (lane C).** Choosing a filter now filters the screen.
+`AppearanceSettings` carries `color_filter`, the compositor reads it, and
+`Server::show` applies it to the frame on its way to the display.
+
+**Where it is applied, and why there.** At the hand-off to the display, over
+the whole buffer -- not during composition. Composition writes only the
+damaged rectangles, so a filter applied there would leave the rest of the
+screen unfiltered, and re-filtering a region that was already filtered would
+compound on every frame. The hand-off is the one point that sees every pixel
+exactly once. `filtering_does_not_touch_the_composed_frame` shows two
+successive `show` calls leave the compositor's own buffer alone, which is what
+makes that safe.
+
+**It costs nothing when it is off.** `ColorFilter::None` returns the pixel it
+was handed without unpacking it, and `show` hands the composed frame straight
+over without copying; `no_filter_means_no_buffer_is_allocated` checks the
+scratch buffer stays empty. That matters -- a full-buffer matrix multiply at
+1920x1080 and 60 Hz is not free, and nobody who has not asked for a filter
+should pay for one.
+
+**`apply_argb` is an encoding of `apply`, not a second implementation.** A
+framebuffer needs packed pixels; writing the unpack/repack at the call site
+would have put a second definition of the filter in the compositor, free to
+drift. `the_packed_filter_agrees_with_the_unpacked_one` runs both over every
+channel value of every filter.
+
+**Stored names are separate from labels** (`yaml_name` / `from_yaml_name`), so
+rewording a caption cannot silently change what an existing config file means.
+
+11 tests across the three crates. Mutation-checked at both ends: removing the
+filter branch in `show` fails two compositor tests, and making the dropdown
+write nothing fails the settings one.
+
+The de-duplication described below is what made this reachable at all -- the
+enum the dropdown used had no transform behind it. `apps/magnifier` still has
+its own for the reason given there, and that remains open.
+
+Original entry follows.
+
+---
+
+
+**In short:** Settings -> Accessibility -> Visual has a "Color Filter" list
+offering Grayscale and the three colour-blindness filters. Choosing one
+changes nothing on screen. The value is kept in a variable belonging to the
+Settings window and is read by nothing else, so a colourblind user selects
+"Deuteranopia" and the display carries on exactly as before.
+
+**Found while checking a claim I had made about something else** -- that the
+orphan-module ratchet was one island short. Chasing why the scanner thought
+`accessibility_settings.rs` was reachable turned up the names it shares with
+other files, and those names turned out to be four *different* enums.
+
+**The duplication, now fixed.** `ColorFilter` was defined four times and the
+four disagreed:
+
+| Where | Variants | Null variant | Transform? |
+|---|---|---|---|
+| `gui/desktop/src/a11y.rs` | 6, incl. `Inverted` | `None` | **yes** -- channel matrices and `apply` |
+| `gui/desktop/src/accessibility_settings.rs` | 5 | `Off` | no |
+| `apps/settings/src/main.rs` | 5 | `None` | no |
+| `apps/magnifier/src/main.rs` | 9 | `None` | its own |
+
+They disagreed on the null variant's name, on membership, and on the spelling
+of grayscale (`Grayscale` against magnifier's `Greyscale`). Only one of them
+could actually transform a colour, and it was in a module nothing calls; the
+one the user's dropdown was bound to was a list of labels.
+
+The definition now lives once, in `gui/appearance` beside the palette, with
+its matrix machinery and its fourteen tests. `a11y.rs` and
+`accessibility_settings.rs` re-export it; `apps/settings` imports it.
+
+**`apps/magnifier` was resolved on 2026-09-07 too, and differently.** Its
+nine variants glue two concepts together, so a straight substitution was the
+wrong fix; what it needed was to keep the *menu* and give up the *arithmetic*.
+It is now `LensMode`, and its `apply` delegates: five modes to
+`appearance::ColorFilter`, three to `appearance::HighContrastScheme`'s two
+colours, one to the identity. Its Brettel matrices, its `mix`, and its literal
+`(255, 255, 0)` for yellow-on-black are gone. Two tests assert the lens agrees
+with the system filter it names -- which nothing could have checked before,
+because neither side knew the other existed. `mix`'s only remaining caller was
+its own test, so both went; the shared `ChannelMix` checks the same invariant
+at compile time.
+
+**The variant-name swap that fell out of it.** `HighContrastScheme::BlackOnWhite`
+drew *white* text on black -- the names read backwards, inherited from the
+module the enum came from, and documented as such. That was survivable until
+the magnifier had to map onto them, because `apps/magnifier` has its own
+`WhiteOnBlack` meaning white-on-black, and a mapping written by name would
+have picked the opposite scheme in silence. The two variants were swapped; the
+stored `yaml_name` strings did not move, so existing config files still mean
+what they meant.
+
+**The original entry's text follows.** Its nine variants glue two concepts
+together. `Inverted`, `Protanopia`, `Deuteranopia`, `Tritanopia` and
+`Greyscale` are colour-vision filters, but `YellowOnBlack`, `WhiteOnBlack` and
+`GreenOnBlack` are high-contrast *schemes* -- the same three that
+`HighContrastScheme` now names. Folding all nine into the shared enum would
+put display schemes into a colour-filter type; folding only the five would
+leave the magnifier with two enums to consult. Unpicking it is a change to
+that app's model, not a substitution, so it is left and recorded here.
+
+**What is still not done: nothing applies the filter.** This entry is not
+closed by the de-duplication. A colour filter is a per-pixel transform of the
+finished frame, so unlike the high-contrast palette it cannot be delivered by
+`Palette::from_settings` -- and it must not be half-delivered by filtering
+palette colours alone, because then the window chrome would shift and the
+photographs would not, which is worse than doing nothing.
+
+**The proper fix**, in order:
+
+1. Apply it at **present** time, over the whole buffer, rather than during
+   composition. The compositor composes damaged rectangles only; a filter
+   applied per-rect is correct but must be applied to every pixel written,
+   and doing it once at the hand-off to the display is simpler to reason
+   about and impossible to apply inconsistently.
+2. **Skip the pass entirely when the filter is `None`**, which is nearly
+   every user, so the cost of the feature is zero for them. A full-buffer
+   matrix multiply at 1920x1080 and 60 Hz is not free and should not be paid
+   by people who have not asked for it.
+3. Only then add `color_filter` to `AppearanceSettings` and point the
+   dropdown at it. **Not before** -- the setting and the code that reads it
+   should land together. This tree has six controls that were wired to fields
+   nothing read; five were found in the last two days, and adding a seventh
+   while fixing the sixth would be a poor joke.
+
+**How you would notice.** Settings -> Accessibility -> Visual -> Color
+Filter, choose Deuteranopia. The label changes; the screen does not.
+
+
+---
+
+## TD-C-THE-PDF-VIEWER-PRINTS-EVERY-PAGE-OR-NOTHING
+
+**Date:** 2026-09-07. **Lane:** C.
+**Where:** `apps/pdfviewer/src/main.rs` — `print_job`, `print_active`,
+`Target::Print`.
+
+**In short:** The PDF viewer has a Print button and no print dialog. There is
+nowhere to say which pages, how many copies, double-sided or not, colour or
+grey. Pressing Print sends the whole document, one copy, every time. All the
+settings exist in the code and none of them can be reached.
+
+**How this came to light.** Moving the page-range parser out into
+`gui/printjob` left `PageRange` imported and unused in the viewer's own
+source: nothing outside the tests ever *builds* a range. The parser has been
+there for months, is the best one in the tree, and has never had a caller
+that was not a test — which is the same "a feature whose only caller is its
+own test does not exist" shape found twice before in this lane.
+
+The four sibling fields are worse: `copies`, `duplex`, `color` and `scale`
+had no reader *and* no writer. They are no longer dead in the same way, since
+they are now fields of the message the printing service will receive rather
+than of a private struct, but nothing sets them either.
+
+**What a user sees.** Print a 400-page manual to read one page of it, and you
+get 400 pages. There is no way to say otherwise short of editing the file.
+
+**The proper fix.** A print dialog: page range box, copies spinner, and the
+duplex/colour/scale controls, writing into `print_job`. The range box wants
+`PageRange::parse`, which already accepts `1-3, 5, 7-9` and is tested. The
+dialog is the whole of the work; the model behind it is finished.
+
+**Why it is not done here.** A print dialog is a feature, and this change was
+a refactor — folding one in would have hidden a behaviour change inside a
+move. Also worth doing *after* the printing service exists (§540), since the
+dialog should show the printers the service reports rather than a list the
+viewer invents, and there is no service yet.
+
+**Not blocking.** Printing works; it just always prints everything. Nothing
+regressed here — this is a gap that was invisible until the parser moved out
+and left an unused import pointing straight at it.
+
+---
+
+## TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING
+
+**Date:** 2026-09-07. **Lane:** C.
+**Where:** `gui/desktop/src/a11y.rs` — `StickyKeys` (317), `FilterKeys` (467),
+`MouseKeys` (545); `gui/desktop/src/accessibility_settings.rs`;
+`apps/settings/src/main.rs`.
+
+**In short:** Sticky keys, filter keys (slow/bounce keys) and mouse keys are
+fully written and thoroughly tested, and none of them is connected to the
+keyboard. A user who turns sticky keys on gets nothing — no error, and the
+toggle stays on. These are the accessibility features people *depend* on to
+use a computer at all, not preferences, and all three are inert.
+
+**The evidence, from the uniquely-named methods** (the ones that cannot be
+confused with a same-named method on another type — `is_active` and
+`is_locked` are useless for this because dozens of unrelated types have them):
+
+| method | owner | production callers | calls from its own tests |
+|---|---|---|---|
+| `on_modifier_press` | `StickyKeys` | **none** | 9 |
+| `on_key_press` | `StickyKeys` | **none** | 2 |
+| `should_accept` | `FilterKeys` | **none** | 8 |
+| `move_delta` | `MouseKeys` | **none** | 9 |
+
+`FilterKeys::new()` is constructed only inside the test module. The logic is
+real — `should_accept` implements both the slow-keys hold threshold and the
+bounce-keys repeat window — and nothing ever asks it.
+
+**There are three parallel models of the same settings, and none of them meet.**
+
+1. `a11y.rs` — the *implementations* above.
+2. `a11y.rs` — `AccessibilityConfig`'s flat fields (`sticky_keys_enabled`,
+   `slow_keys_ms`, `bounce_keys_ms`, `mouse_keys_enabled`, `mouse_keys_speed`,
+   `filter_keys_enabled`). These are **parsed and serialized and read by
+   nothing else**: their only non-test appearances in the whole tree are the
+   two lines that write them to the config file and the two that read them
+   back.
+3. `accessibility_settings.rs` — `StickyKeysConfig`, `FilterKeysConfig`,
+   `MouseKeysConfig`, plus an `A11yFeature` enum; and `apps/settings` has a
+   third set again under `ToggleId`. `accessibility_settings.rs` does not
+   import `a11y` at all.
+
+So a toggle in Settings writes model 3, the config file round-trips model 2,
+and the code that would actually change key handling is model 1, which nobody
+constructs.
+
+**A field-by-field census of `AccessibilityConfig`** (18 fields): 8 reach
+something — `high_contrast`, `color_filter`, `reduced_motion`, `magnifier`,
+`cursor`, `screen_reader`, `text_scale`, `visual_alerts`. 10 do not:
+`sticky_keys_enabled`, `sticky_keys_sound`, `sticky_keys_double_lock`,
+`filter_keys_enabled`, `slow_keys_ms`, `bounce_keys_ms`, `mouse_keys_enabled`,
+`mouse_keys_speed`, `caret_width`, `focus_indicator`. Of those, three
+(`sticky_keys_sound`, `sticky_keys_double_lock`, `focus_indicator`) are not
+even in the serializer — they are read and written by no code whatsoever.
+
+**How you would notice.** Settings → Accessibility → turn on Sticky Keys.
+Press and release Shift, then press A. You get `a`, not `A`. Same for Slow
+Keys (no hold delay is enforced) and Mouse Keys (the numeric keypad does not
+move the pointer).
+
+**The proper fix**, and it is a design decision, not a patch: pick *one* model
+and delete the other two. The natural shape is that `AccessibilityConfig` is
+the persisted truth, the Settings pages edit it, and the compositor owns live
+`StickyKeys`/`FilterKeys`/`MouseKeys` instances rebuilt from it whenever it
+changes — with the key-event path consulting them before dispatch. That last
+part is the piece that does not exist anywhere: there is currently no hook in
+the input path at all, which is why nothing could have been wired even if the
+models agreed.
+
+**Update, 2026-09-07 — the keyboard half is done; the Settings half is not.**
+
+The three features now work. `inputsettings` owns the settings and persists
+them (`AccessibilityKeysConfig`, under `accessibility:` in `input.yaml`), the
+compositor owns the live state machines (`compositor::a11ykeys`) and applies
+them in `handle_key`, and `set_input_settings` is the single road between the
+two. Sticky Shift capitalises the next letter; bounce keys drops a repeat;
+slow keys holds a press until its threshold expires with the key still down
+(`design-decisions.md` §821); the keypad drives the pointer. Eleven
+integration tests go in through `handle_input` as the input driver does,
+because the previous implementation had thorough unit tests *and did nothing*,
+so a test that calls the state machines directly proves only what was already
+known.
+
+Three defects were found in the old logic while moving it, all now fixed: a
+refused keystroke used to start a bounce window (so one tremor silenced that
+key for the whole window after it — the opposite of the feature's purpose);
+switching sticky keys off stranded whatever was held; and `release_on_two_keys`
+was in the config and implemented nowhere.
+
+**Update 2, 2026-09-07 — closed for the three features.** The Settings app's
+toggles now write `input.settings.accessibility`, which `handle_event`'s
+whole-struct comparison saves to `input.yaml` and the compositor re-reads. A
+test clicks the Sticky Keys row and reads the file back off disk. The
+superseded copies are deleted: 543 lines from `desktop::a11y` (the state
+machines, the six config fields, their serialiser and parser, their sixteen
+tests) and the duplicate config structs in
+`desktop::accessibility_settings`, which now re-exports `inputsettings`'.
+
+So the road is whole and single: Settings window -> `input.yaml` ->
+`Compositor::set_input_settings` -> `compositor::a11ykeys` -> `handle_key`.
+
+**Two things this entry stays open for**, both from the original census and
+neither part of the three features above:
+
+- `caret_width` and `focus_indicator` on `AccessibilityConfig` still reach
+  nothing. They are not superseded — they are features never built — so the
+  fields were left rather than deleted, since deleting them would remove the
+  only record that they are wanted.
+- ~~`gui/desktop/src/accessibility_settings.rs`, the 2 019-line panel nothing
+  constructs.~~ **Done 2026-09-08:** deleted under §815. Twelve of its sixteen
+  features were already in the Settings app; the other four are logged as
+  `TD-C-FOUR-ACCESSIBILITY-FEATURES-EXISTED-ONLY-AS-A-DEAD-PANELS-CONTROLS`.
+
+**Superseded — what was still not connected: the Settings UI.**
+`gui/desktop/src/accessibility_settings.rs` and `apps/settings` still write to
+their own `StickyKeysConfig`/`FilterKeysConfig`/`MouseKeysConfig` and to
+`A11yFeature`/`ToggleId`, none of which is `inputsettings`. So the toggle in
+Settings still changes nothing — a user who edits `input.yaml` by hand gets
+all three features, and a user who uses the settings screen gets none. That is
+a smaller and much more ordinary job than the one above: point those panels at
+`inputsettings::AccessibilityKeysConfig` and delete the duplicates, along with
+`desktop::a11y`'s now-superseded state machines and the ten dead
+`AccessibilityConfig` fields.
+
+**Also still open from the census:** `caret_width` and `focus_indicator` reach
+nothing and are not part of the above.
+
+**Where the hook goes, since that was the unknown.** There is exactly one
+funnel: `Compositor::handle_key(scancode, pressed, character)` at
+`gui/compositor/src/lib.rs:6913`, reached only from `InputEvent::KeyDown` and
+`InputEvent::KeyUp` (lines 6532-6533). Both accessibility filters fit inside
+it, in an order the existing code already implies:
+
+- **Filter keys** first, at the very top, before `self.modifiers.update()` —
+  a rejected keystroke must not move the modifier state either. It needs a
+  press timestamp and a hold duration, which `handle_key` does not currently
+  receive; that is the one signature change the work requires.
+- **Sticky keys** folded into the modifier step, since `self.modifiers` is
+  already the thing that decides whether Shift is down when `A` arrives, and
+  sticky keys are precisely a rule about how long that stays true.
+- **Mouse keys** is separate and easier: it turns key events into pointer
+  motion, so it belongs beside the existing pointer handling rather than in
+  the modifier path.
+
+`handle_key` already consults window grabs "after the chord is known, before
+the event is delivered", so the structure for intercepting is there; nothing
+about this needs new architecture, only a decision about which config model
+feeds it.
+
+**Why this is not fixed here.** The keyboard event path is the compositor's,
+the fix spans three files that each hold a competing model, and choosing which
+model survives is exactly the "band-aid accumulation — stop and redesign"
+case in `CLAUDE.md`. It wants its own task, not a corner of a print-format
+change. Logged now because it was found while checking a *different* stale
+"what remains" claim, and an undocumented bug is an invisible one.
+
+**How it was found.** §816 ended "What remains is that no Settings control
+sets it yet", which was stale — the high-contrast control does exist. Checking
+whether the *other* accessibility settings were wired turned up this instead.
+
+---
+
+## TD-C-FOUR-ACCESSIBILITY-FEATURES-EXISTED-ONLY-AS-A-DEAD-PANELS-CONTROLS
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** nowhere any more — that is the point. They were in
+`gui/desktop/src/accessibility_settings.rs`, deleted under
+`design-decisions.md` §815.
+
+**In short:** the shell carried a 2 019-line accessibility settings panel that
+nothing ever opened. §815 says screens you open move to the Settings app and
+the shell's copies go, so it went. Twelve of the sixteen things it offered
+already exist in the Settings app. Four do not, and this is the record of them
+so that deleting the panel does not quietly delete the idea.
+
+**The four, and what each would actually take.** None of them was working
+before — the panel was unreachable, so every one of these was a control with
+no reader. Nothing regressed.
+
+| feature | implementation anywhere? | what it needs |
+|---|---|---|
+| **Magnifier settings** | The feature exists (`apps/magnifier`), the settings do not reach it | A settings page *and* a config route. `a11y::MagnifierConfig` is read only inside `a11y.rs`; `apps/magnifier` keeps its own and never consults it. So this is the same disconnection as the sticky-keys one, one layer along. |
+| **Auto-click / dwell click** | **None.** Zero matches for `auto_click` or `dwell` outside the deleted panel | The feature first: hold the pointer still for *n* ms and a click is synthesised. That is compositor work, in the pointer path, and it wants the same treatment sticky keys just got. |
+| **Flash screen on system sound** | **None** | The feature first. It needs a signal that a system sound played, which nothing currently emits. |
+| **Closed captions** | **None.** The 254 `caption` matches in the tree are window titles and UI subtitles, not subtitle tracks | A media-subtitle pipeline, which is a far larger job than a settings toggle and belongs to whatever plays video. |
+
+**Why they were not ported instead.** §815 says "moves to the Settings app",
+and for the twelve that had somewhere to move to, that had already happened.
+Porting these four would have meant adding four controls to the Settings app
+that read nothing and change nothing — which is exactly the fault the whole
+of this session has been spent removing, and it would have put them somewhere
+a user can actually reach, making it worse rather than better.
+
+**The order to do them in, if they are wanted:** magnifier first (the feature
+exists and only the wiring is missing), then auto-click (self-contained, in
+the compositor's pointer path, and the closest analogue to the sticky-keys
+work just finished). Flash-screen needs a system-sound event to hang off.
+Captions are not really an accessibility-settings job at all.
+
+## TD-A-CTEST-PTY-HANGS-BOOT — PtySlave reads dispatch through SYS_TTY_READ which targets the console, not the pty (lane A, 2026-09-08) — KERNEL SIDE FIXED
+
+**Root cause.** `posix/src/file.rs` routes `HandleKind::PtySlave` reads
+through `SYS_TTY_READ(buf, count)`, which calls `tty_read_into_user` with
+`current_tty()` — hardcoded to the console.  The console's default termios
+is canonical (`ICANON`, `VMIN=1`), so `canonical_read()` blocks forever
+waiting for keyboard input.  The pty slave's own termios (set to raw by
+the `ctest-pty` fixture) is never consulted.
+
+This is the missing `SYS_PTY_SLAVE_READ` half of an asymmetry: the master
+side has had `SYS_PTY_MASTER_READ` (546) and `SYS_PTY_MASTER_TRY_READ`
+(547) since the pty was built; the slave side has `SYS_PTY_SLAVE_WRITE`
+(548) but no read.
+
+**Fix (kernel, done).** `SYS_PTY_SLAVE_READ` (872) and
+`SYS_PTY_SLAVE_TRY_READ` (873) added.  Both use `resolve_tty_arg` to
+target the correct pty and call `tty::read` / `tty::try_read`.
+
+**Fix (POSIX, pending lane B).** `posix/src/file.rs` must route PtySlave
+reads through 872/873 instead of `SYS_TTY_READ`.  Filed as request
+`a-b-pty-slave-read-syscalls-exist-route-posix-reads.md`.
+
+**The "scheduler doesn't preempt" concern was a false alarm.**
+`schedule_inner` correctly returns without context-switching when the
+spinning task is the only runnable one (`picked_id == current_id`).  The
+liveness check's "zero context switches" is technically correct but
+misleading — the scheduler *is* running, it just picks the same task
+because nothing else is runnable.
+
+**Where.** `kernel/src/syscall/number.rs` (872–873),
+`kernel/src/syscall/handlers.rs` (`sys_pty_slave_read`,
+`sys_pty_slave_try_read`), `kernel/src/tty/mod.rs` (`try_read`,
+`canonical_try_read`, `raw_try_read`).
+
+---
+
+## TD-C-FOUR-DISPLAY-FEATURES-EXISTED-ONLY-IN-A-DEAD-SHELL-PANEL
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** nowhere any more. They were in `gui/desktop/src/display_settings.rs`,
+deleted under `design-decisions.md` §815 along with `appearance_settings.rs`
+and `mouse_settings.rs` — 4 814 lines between them, none of it reachable.
+
+**In short:** the shell had three settings panels nothing ever opened. §815
+says screens you open move to the Settings app and the shell's copies go, so
+they went. Almost everything they offered is in the Settings app already. Four
+display features are not, and this is the record of them.
+
+**The four.** None was working before — the panels were unreachable, so every
+one of these was a control nothing read. Nothing regressed.
+
+| feature | implemented anywhere? | note |
+|---|---|---|
+| **Gamma calibration** (`GammaSettings`, per-channel `GammaChannel`) | **No.** No `gamma_ramp`, `set_gamma` or `gamma_lut` anywhere in the tree; the `gamma` hits are sRGB colour maths and the DRM uapi's unused constants | Needs a real pipeline — a per-CRTC LUT pushed through KMS — before a slider means anything. |
+| **Colour profiles** (`ColorProfile`: sRGB / AdobeRGB / Native) | **No.** Zero matches outside the deleted file | ICC handling is a colour-management subsystem, not a dropdown. |
+| **Test patterns** (`TestPattern`: grayscale, colour bars, hue gradient, checkerboard) | **No.** Zero matches outside the deleted file | Cheap to rebuild when there is something to calibrate; pointless before that. |
+| **Night-light *schedule*** (`NightLightSchedule`: Off / AlwaysOn / SunsetToSunrise) | Partly. The Settings app has `night_light_enabled` and `night_light_temperature`, but no schedule — its only two `schedule` matches are unrelated comments about saving | The smallest of the four and the only one whose feature half already exists. Sunset/sunrise also needs a location or a manual time pair, which nothing currently supplies. |
+
+**Colour temperature is *not* on this list**, though the deleted panel had a
+`ColorTemperature` type: the Settings app carries it as
+`night_light_temperature`, which is the same control under the name a user
+would recognise.
+
+**Why they were not ported.** Adding four controls to a screen users can
+actually reach, that read nothing and change nothing, is worse than deleting
+four that nobody could reach. Three of them need a subsystem first.
+
+**Method note, because it nearly bit.** The sweep that found these panels
+counted `pub struct`, `pub enum` and `pub fn` and called a module unreachable
+at zero external references. It did **not** count `pub const` — and
+`appearance_settings.rs` re-exported a live `CONFIG_NAME` that the shell's
+config watcher used. The build caught it, but a sweep of this kind should
+enumerate *every* kind of public item, not the three that happened to come to
+mind. The constant now comes from `appearance::CONFIG_NAME`, which owns it.
+
+---
+
+## TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/desktop/src/` — `login_screen.rs` (2 417 lines), `blur.rs`
+(2 224), `input_method.rs` (1 279), `tray_dnd.rs` (1 185). 7 105 lines.
+
+**In short:** four features of the desktop shell are fully written, declared
+as modules, and constructed by nothing. Not one public item in any of them is
+referenced from anywhere else in the tree — including the shell's own
+`main.rs`. There is no login screen at runtime, no window blur, no
+input-method switching, and no drag-and-drop in the system tray, however much
+code there is for each.
+
+**These are not the settings panels, and must not be treated the same way.**
+Three unreachable `*_settings.rs` panels were deleted the same day under
+`design-decisions.md` §815 — but §815 draws its line precisely here: *"The
+volume overlay and the login screen are the desktop showing you something, so
+they stay in the shell and get wired up."* The login screen is named in the
+decision as a thing to **wire up**, not remove. The other three are the same
+kind of thing: chrome the desktop shows you, not screens you open. **Deleting
+any of these would be a misreading of §815.**
+
+**How they were found.** A sweep of all 56 shell modules counting external
+references to every public item — `struct`, `enum`, `trait`, `type`, `const`,
+`static`, `fn` and `mod`. `gui/desktop` is self-contained (its own `main.rs`,
+no other crate depends on it), so nothing outside the corpus could reach them.
+
+| module | what it holds | what is missing |
+|---|---|---|
+| `login_screen.rs` | `LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig` | Construction and a session hand-off. §815 says wire it up. *(Correction, 2026-09-08: an earlier version of this row said §818 has to take effect here. It does not — §818 is about the **lock** screen, `apps/lockscreen`, which is a separate program. See `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.)* |
+| `blur.rs` | `BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager` | A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
+| `input_method.rs` | `InputMethodManager`, `SwitchShortcut` | A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
+| `tray_dnd.rs` | `TrayDragSource`, `TrayDropTarget`, `TrayIconSlot`, `TrayIconArrangement`, `TraySlotConfig`, `TrayArrangementConfig`, `StartInTrayConfig` | A caller in the tray's event path. |
+
+**Order worth doing them in.** `login_screen` first: it is named in §815, it
+gates §818, and a machine with no login screen is a machine with no user
+accounts in any meaningful sense. Then `tray_dnd` (self-contained, one event
+path). Then `blur` (needs a compositing decision about where the pass runs —
+compare the colour-filter work, which had the same question). `input_method`
+last, because wiring is the small half of it.
+
+**Why this is being recorded rather than fixed here.** Each is a feature-sized
+job with a design question in it, and this was a dead-code sweep. What matters
+is that the sweep is written down: before it, nothing in the tree said these
+four were disconnected, and their size makes them look finished.
+
+---
+
+## TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `apps/lockscreen/src/main.rs`, `gui/desktop/src/hotkeys.rs`
+(`LOCK_COMMAND`), `gui/desktop/src/session.rs`.
+
+**In short:** the operator decided on 2026-09-07 (`design-decisions.md` §818)
+that an account with no password is never locked — the lock screen simply does
+not appear, instead of appearing and letting anyone dismiss it. That decision
+is **not implemented**, and it cannot be implemented where it naturally
+belongs, because nothing in the tree actually locks the screen.
+
+**What is true today.** Pressing the lock shortcut produces a *launch request*
+for `/usr/bin/lockscreen` and nothing executes it — the shell reports launches
+through `HotkeyOutcome::launches` / `ShellSession::take_launches` and has no
+connection to a process server. So the screen never appears at all, for any
+account. The bug §818 describes is therefore latent rather than live.
+
+**Why it cannot simply be done inside `apps/lockscreen`.** "Never lock" is a
+decision made by whatever *locks*, and that program only runs after the
+decision. It has no trustworthy way to learn whose session it is locking:
+there is no per-process user identity available to an application here, and
+the only identity mechanism (`authlib`) verifies a username the caller
+supplies. Deciding whether to lock from `$USER` would be worse than the
+original bug — an environment variable an attacker can set would decide
+whether the machine locks.
+
+**Where it does belong**, once there is a lock path at all: at the point that
+requests the lock, which knows the session. The shell already has the
+ingredients — `user_accounts::UserAccount` carries `is_current` and
+`login_options.has_password` — so the rule is one condition on a launch that
+something must first be executing.
+
+**What was done in the meantime.** `LockScreen::unlocks_for`'s doc comment
+said the passwordless case was *"an open question rather than a settled one"*
+and weighed two options. That has been false since §818, and a comment
+claiming a decision is unmade is worse than no comment: it invites the next
+reader to re-litigate a settled question, or to "fix" it by refusing the empty
+password, which is the option §818 explicitly rejected for stranding the user.
+The comment now records the decision, why accepting stays (it is the fallback
+for a state §818 says cannot arise, reachable only if a password is removed
+while the screen is already up), and why the real fix is elsewhere.
+
+**Order.** This is behind the same prerequisite as
+`TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED`: the session has no
+lock/login lifecycle. Build that, and §818 is one condition. Do not implement
+§818 by making the lock screen refuse empty passwords — that is option B,
+which the operator considered and rejected.
+
+---
+
+## TD-C-ALLOW-DEAD-CODE-IS-HIDING-WHOLE-UNWIRED-MODULES
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `apps/procexplorer/src/features.rs` (2 540 lines),
+`apps/sysinfo/src/hwquery.rs` (2 163), `apps/settings/src/remote.rs` (1 593).
+The pattern is wider: 23 files under `gui/` and `apps/` carry a crate- or
+module-level `#![allow(dead_code)]`.
+
+**In short:** three substantial modules are compiled, declared, and used by
+nothing — and the compiler already knew. Each begins with
+`#![allow(dead_code)]`, which switches off the one check that would have said
+so. Remove the line from `procexplorer/src/features.rs` and the build
+immediately reports **56** "never used / never constructed" warnings. The lint
+was not wrong; it was turned off.
+
+**Verified, not inferred.** All three crates are pure binaries — no `lib.rs`,
+no `[lib]` — so a public item that nothing references really is unreachable.
+That check matters: `apps/installer/src/grub.rs` looked identical to a
+reachability sweep and is **not** the same case, because `installer` *does*
+have a lib target, which makes its `pub` items API rather than dead code. It
+is excluded from this entry for that reason.
+
+| module | what it holds | note |
+|---|---|---|
+| `procexplorer/src/features.rs` | `WindowPicker` (crosshair "click a window to find its process"), `ProcessAction`, `BlockingInfo`/`BlockingLink` (which process is blocking which) | `mod features;` is declared in `main.rs` and never `use`d. |
+| `sysinfo/src/hwquery.rs` | hardware enumeration | same shape. |
+| `settings/src/remote.rs` | remote-settings surface | same shape. |
+
+**Why this is worth its own entry rather than three deletions.** The
+suppression is the bug. Today's sweeps found roughly 21 600 lines of
+unreachable code across the shell and the apps, and this is the mechanism that
+let a good part of it accumulate unnoticed: a module is written, the lint
+complains because nothing calls it yet, the lint is silenced *to get a clean
+build*, and the "yet" never arrives. Deleting these three without removing the
+suppression pattern leaves the trap armed for the next module.
+
+**Proper fix, in order:**
+
+1. **Remove `#![allow(dead_code)]` from these three files** and read what the
+   compiler says. That is a one-line change per file that produces an exact,
+   trustworthy inventory — far better than any sweep I can write, because it
+   is the compiler's own reachability analysis rather than an approximation of
+   it.
+2. For each item it names: wire it or delete it. `WindowPicker` and the
+   blocking analysis are real features a process explorer should have, so
+   these are probably wirings rather than deletions — unlike the settings
+   panels deleted today, which were duplicates of a working app.
+3. **Then look at the other 20 files.** Some uses of the attribute are
+   legitimate (a struct field kept for an ABI, a variant reserved by a spec);
+   each needs a reason next to it, and the ones without a reason are this bug
+   again.
+
+**A caution learned while writing this.** My first pass concluded these
+modules were unreachable and the compiler disagreed — zero warnings. The
+sweep was right and the *compiler* was silenced, but I only found that out by
+checking why they disagreed instead of trusting my own tool. A grep for the
+suppression had already run and shown eight hits, all in `alarmclock`, because
+it was piped through `head -8`. The answer was in the truncated part.
+
+---
+
+## TD-C-129-OF-135-APPLICATIONS-IGNORE-THE-THEME-ENTIRELY
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `apps/**` (135 crates that draw), and the gap that causes it:
+`gui/window` (`oswindow`), which does not depend on `appearance` at all.
+
+**In short:** pick the light theme, or an accent colour, or a high-contrast
+scheme, and it changes the desktop, the window decorations and the Settings
+window. It changes **nothing inside any other application**. 129 of the 135
+applications that draw never mention `appearance::Palette`; they each carry
+their own hardcoded Catppuccin Mocha constants. So a user who turns on high
+contrast for legibility gets it on the window borders and on the desktop
+behind, and then opens a text editor that is exactly as it was.
+
+**Why it is not just cosmetic.** High contrast is an accessibility setting,
+and `design-decisions.md` §816 made it reach every *surface* — the palette,
+the decorations, the shell. What §816 could not reach is application
+interiors, because there is no route to them. The setting therefore looks like
+it works and does not, which is the failure mode this project keeps finding.
+
+**The measurement.** Counting `Color::from_hex(0x…)` / `Color::rgb(…)` against
+mentions of `Palette`, per crate under `apps/`:
+
+| | count |
+|---|---|
+| applications that draw with colours | 135 |
+| of those, never mention `Palette` | **129** |
+| the six that do | `settings` (28 — converted 2026-09-08), `colorpicker` (3), `hearts`, `kanban`, `paint`, `stopwatch` (1 each) |
+
+Not every literal is a bug: `paint`'s 80 and `colorpicker`'s are largely
+*content* — the colours a user draws with, which must not follow the theme.
+The test is whether the **chrome** (background, panel, text, selection)
+follows it, and for the 129 it does not, because they have no palette to
+follow.
+
+**The cause is a missing route, not 129 independent oversights.** An
+application gets its window from `oswindow::app::launch` and implements
+`App::render(width, height) -> RenderTree`. Nothing in that trait, and nothing
+in `gui/window`, offers a `Palette` — the crate does not even depend on
+`appearance`. An application that wanted to follow the theme would have to
+load and parse `appearance.yaml` itself, which is why none of them does.
+
+**Correction, same day: less of the mechanism exists than I first wrote here.**
+The first version of this entry said the change-notification already reaches
+applications. It does not, and the direction is the opposite of what I
+assumed. `oswindow::app::Reloads` and `EventLoop::appearance_changed` are
+**outbound**: they are how the Settings application tells the *compositor*
+that it has rewritten `appearance.yaml`. `App::take_reloads`'s own doc says so
+— *"it exists for the handful — Settings, today exactly one — that edit files
+another process reads."*
+
+Inbound there is nothing. `guitk::event::Event` carries `Mouse`, `Key`,
+`Resize`, `Moved`, `FocusIn`, `FocusOut` and `CloseRequested`, and no variant
+about appearance at all. So an application is never told the theme changed,
+and there is no palette for it to be told about. **Both halves are missing**,
+which makes step 1 below larger than one dependency line.
+
+**Proper fix, in order.**
+
+1. **`gui/window` depends on `appearance`, resolves one `Palette`, and gains
+   a way to hand it to the application** — most likely a new `Event` variant
+   so a theme change arrives the same way a resize does, plus an accessor for
+   the current palette so an application can paint its first frame correctly
+   before any change has happened. Applications read it rather than each
+   loading a config file — one parse per process, not 135 implementations of
+   the same parse, and one place for the refresh edge to be right.
+2. **Convert applications to it**, deleting their private constants. The
+   Settings app is the worked example (2026-09-08): every role in those
+   constant blocks maps one-to-one onto `Palette`'s fields under the same
+   name, so the edit is mechanical once the route exists.
+3. **A test per converted app** on the pixels it emits, not on the palette
+   object — the Settings app's
+   `the_settings_pages_follow_the_theme_they_are_used_to_choose` asserts that
+   the same page draws different colours under two themes, which is the claim
+   that matters.
+
+**Progress, 2026-09-08.**
+
+- **Step 1 is done.** `gui/window` depends on `appearance`, resolves one
+  `Palette` per process from `appearance.yaml`, and hands it over through a
+  new defaulted `App::theme_changed` — before the first frame, and again on
+  every change. `design-decisions.md` §822 records why it is a trait method
+  and not an `Event`.
+- **Step 2: 23 done.** `calculator`, `diskcleanup`, `charmap`, `clipmanager`,
+  `fileassoc`, `startupmanager`, `magnifier`, `systemrestore`, `videoplayer`,
+  `qrcode`, `notes`, `rssreader`, `spreadsheet`, `paint`, `defrag`, `netscan`,
+  `photomanager`, `renamer`, `mediaconvert`, `radio`, `flashcards`, `calendar`
+  `finance`, `slides`, `worldclock`, `camera`, `compass`, `diskanalyzer`,
+  `jsonviewer`, `logviewer`, `passwordgen`, `podcast`, `regextester`,
+  `stickynotes`, `taskscheduler`, `contacts`, `habits`, `fontmanager` and
+  `automator`, `sysmonitor`, `undelete`, `ircclient`, `dictionary`,
+  `reminders`, `weather`, `alarmclock`, `diagram`, `partmanager` and
+  `credmanager`, `vpnmanager`, `dbviewer`, `whiteboard` and `mindmap`. Each has
+  a test on the rectangles it emits, and each was mutation-checked by making
+  `theme_changed` ignore its argument.
+
+**`whiteboard` and `mindmap` are the clearest content cases yet**, and both
+were deferred earlier for exactly the right reason. `whiteboard`'s constant is
+the default *ink*; `mindmap`'s `NODE_COLORS` is the eight colours a node cycles
+through. Both are saved with the document, so following the theme would mean a
+saved drawing or map changing colour when the user changed theme. Both keep
+fixed values, with the reasoning written where they are defined — and the rest
+of each application (56 and 40-odd chrome uses) converted normally.
+
+**The worst bug this conversion has produced: substitution inside string
+literals.** `dbviewer` names a colour constant `TEXT`. The word-boundary
+substitution therefore rewrote the *SQL type name* `"TEXT"` to
+`"self.palette.text"` in seven places, including inside longer statements like
+`"CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"`. The parser
+stopped recognising `TEXT` columns. It compiles, clippy is clean, and only one
+test — `test_parse_create_table`, which happens to cover `CREATE TABLE` —
+failed.
+
+Two things follow, both done:
+
+- **The converter now skips string literals** when substituting.
+- **The whole tree was audited** for a palette path inside any string literal,
+  not just the exact literal the first grep matched: `"…name TEXT NOT NULL)"`
+  contains the substring but is not equal to it, and a naive search missed two
+  of the seven. `dbviewer` was the only affected application, and it is clean.
+
+This is the argument for converting one application at a time and running its
+own suite: a batch pass would have buried a logic change in a diff of colour
+substitutions.
+
+**A `const` table of colours cannot hold a palette, and the fix is a role
+selector.** `vpnmanager`'s `TOOLBAR_BUTTONS` was
+`&[(&str, Color, Target)]` — a top-level constant, so no runtime palette can
+reach it. Changing the middle field to `fn(&Palette) -> Color` keeps the table
+declarative and picks the role out at draw time; function pointers are
+const-constructible and `|p| p.green` is one. Clippy then wants a `type` alias
+for the tuple. This is the shape behind every "`<top level>` use" the survey
+reports.
+
+**The shape-2 fixer must handle both spellings of the palette.** The constant
+substitution produces `self.palette.<role>`; the `.color()` call-site rewrites
+produce `&self.palette` passed on to another function. A fixer that rewrote
+only the first left 22 errors in `credmanager` that read as a new problem and
+were the same one. It now rewrites both.
+
+**Run the shape-2 fixer on every application, not just the ones the survey
+flags.** The survey lists functions needing a *parameter*; it does not list
+the ones that already take the app struct, because those need no signature
+change. Skipping that pass on `partmanager` produced 113 errors that looked
+like a catastrophe and were one missing step.
+
+**Two attributes on one item after a deletion.** `alarmclock` had
+`#[allow(dead_code)]` on `SKY`, a comment about `SKY`, then
+`#[allow(dead_code)]` on `MAROON`. Converting `SKY` left its attribute
+stranded *above a comment*, which the sweep deliberately skips — and the
+result is two attributes on `MAROON`, which is
+`clippy::duplicated_attributes`, an error. The general rule stands (an
+attribute followed by a comment is usually fine); this is the exception, and
+it is caught by clippy rather than by the sweep.
+
+**Adding a reference can make an elided lifetime ambiguous.**
+`reminders::detail_prose(text: &str, …) -> text::Paragraph<'_>` compiled while
+`&str` was its only reference; adding `pal: &Palette` made `'_` ambiguous and
+the signature needed a named lifetime. Rare, but it is a *signature* change
+rather than a call-site one, so it does not look like the others.
+
+**Several types per application share one colour method.** `undelete` has
+three (`FileSignatureKind`, `FileCategory`, `RecoveryConfidence`),
+`sysmonitor` two, `ircclient` two. The threader now handles every occurrence
+rather than the first. Its first version had a subtle bug worth avoiding: it
+located each rewritten signature with `s.index(new)`, and since the types
+share an identical signature string, `index` returned the *first* every time,
+so the body rewrite landed on the same method repeatedly while the others were
+left half-converted. Use the match position.
+
+**Wrapper methods propagate the requirement.** `sysmonitor`'s `cpu_color`,
+`mem_color` and `disk_color` do nothing but call `color_for_value`, so giving
+that one a palette gives all three one. Expect a small cascade whenever the
+colour method has callers of its own inside the same type.
+
+**A fourth content case, and the tell held again.** `contacts` sets a new
+group's colour in `Group::new` — the swatch that group is shown with, chosen
+by the user. Fixed colour, not the theme. As with `paint`, `whiteboard` and
+`stickynotes`, the constant was read where no window is in scope.
+
+**Where the remaining time actually goes.** Not the substitution, which is
+reliable, but four kinds of call site the scripts cannot rewrite safely:
+generic signatures (`fn f<T: PartialEq + Copy>(…)`, which the parameter regex
+does not match), calls whose first argument is an expression rather than an
+identifier, calls spanning several lines, and *argument order* — a parameter
+inserted second must be passed second, and the compiler reports that as a type
+error rather than an arity one. All are compiler-visible; none is automatable
+without the risk that produced 91 errors in one application earlier.
+
+**Content that only *looks* like chrome, a third time.** `stickynotes`'
+`note_palette` reads two constants — but only as the fallback for an
+out-of-range note colour, and a note's colour is the swatch the user picked,
+not chrome. It keeps fixed colours, like `paint`'s swatches and
+`whiteboard`'s default ink. The tell each time was the same: the constant is
+read somewhere that has no window in scope (a `Default` impl, a lookup table,
+a fallback arm), which is a hint that it is describing *content* rather than
+the surface the content sits on.
+
+**Closures rebind the window.** A call-site rewrite to `&self.palette` is
+wrong inside `|u, f, r|`, where the window is `u` — three sites in
+`taskscheduler`'s test helpers. The compiler names them, but it is worth
+knowing that "the window is always `self`" fails in closures as well as in
+other types' methods.
+
+**The one conversion bug that a test would not have caught.** A script that
+gives `#[test]` functions a local palette matched a *production* function too
+and inserted `let pal = Palette::from_settings(&default())` inside
+`jsonviewer::highlight_json_text` — **shadowing the parameter**. The function
+then ignored the palette it was handed and always drew in the defaults: it
+compiles, every test passes, and the only symptom is JSON syntax highlighting
+that does not follow the theme while everything around it does.
+
+It surfaced as `unused variable: pal` from clippy, not from any test. Two
+things follow. Any script that inserts a binding must check that the enclosing
+function does not already have one of that name. And the whole set is worth
+auditing for it: `grep` every converted application for a `let pal =` inside a
+function whose signature already says `pal: &Palette`. That audit found this
+one and no others.
+
+**One application refused conversion, correctly: `whiteboard`.** Its
+`MOCHA_TEXT` is read in a `Default::default()` — the default *pen* colour — and
+a `Default` impl cannot take a palette. The colour is also content rather than
+chrome: it is the ink the user draws with, like `paint`'s swatches. Reverted
+rather than forced. The general rule this makes concrete: a constant used in a
+`Default` impl is usually content, and the hex-value match cannot tell the two
+apart when the chrome and the ink happen to be the same colour.
+
+**Two more shapes met here.** A *recursive* free helper
+(`diskanalyzer::squarify_layout`) needs the palette threaded through its own
+recursive call as well as its callers, and the public entry point above it
+(`compute_treemap`) too. And a helper reached only from a constructor
+(`slides::SlideTheme::mocha`, called by `SlidesApp::new`) cannot take the live
+palette at all, because none exists yet — it takes the defaults, and
+`theme_changed` replaces the result before the first frame.
+
+**A nested case the blanket call-site rewrite gets wrong.** `.color()` becomes
+`.color(&self.palette)` everywhere, which is right in the window's methods and
+wrong *inside another palette-taking method*: `CalendarEvent::effective_color`
+calls `self.category.color(…)`, where `self` is the event, so the argument has
+to be its own `pal`. The compiler catches it (E0609 on the app's own type), but
+expect one per application that has a colour method calling another.
+
+**The single-helper case is now scripted too.** Every application that needs
+one function threaded needs the *same* one: a `color()` method on a domain
+enum (`BlockState`, `PortState`, `JobStatus`, `RenameOp`, `ColorLabel`). One
+script handles signature, body and call sites; only the calls inside `#[test]`
+functions need a hand, and the compiler names them.
+
+**The "129" in this entry's own table was wrong, and the real number is
+smaller.** That figure counted crates containing a hardcoded colour, which is
+not the same as crates that ignore the theme. Surveying all 140 applications
+that draw:
+
+| | count |
+|---|---|
+| applications with a `main.rs` | 140 |
+| **name no palette role at all** — nothing to convert | **48** |
+| games (deprioritised by the operator's standing instruction) | 23 |
+| converted | 14 |
+| **genuinely left** | **~55** |
+
+The 48 matter to the estimate and to correctness both. A crate full of
+`Color::rgb(…)` calls is usually naming *content*, not chrome — a paint
+program's swatches, a syntax highlighter's token colours, a disk map's
+category fills — and converting those would be a bug, not a fix. Matching on
+the *hex value* against the known Catppuccin roles is what separates the two
+automatically: `paint` had 16 chrome constants (converted) and 64
+`Color::rgb` swatches (untouched, and they must be).
+
+**Of the ~55 remaining, 11 need no hand-threading at all** and the rest average
+one to three helper functions each; the survey names them per application.
+
+**Survey before converting.** A script that groups every constant use by its
+enclosing `impl` block answers, in one pass and before any edit, the only
+question that decides the cost. The difference is large enough to choose work
+by: `magnifier` was 26 uses with nothing to hand-thread, `systemrestore` 152
+uses with one method, while `netmanager` (13 methods), `vpnmanager` (9) and
+`credmanager` (7) are several times the work for the same number of
+constants. Survey first, then take the cheap ones in batches.
+
+**Known remaining costs, from that survey:** `netmanager` 13 hand-threaded
+functions, `vpnmanager` 9, `credmanager` 7, `contacts` 3. Every one of them is
+a `color()`-style method on a *domain* enum — `ConnectionState`,
+`SecurityLevel`, `VpnProtocol`, `LogLevel`, `PasswordStrength` — which is the
+shape worth expecting: applications give their own types a colour method, and
+those types are never the window.
+
+**Batch conversion was tried and abandoned; do not retry it as written.** The
+substitution half automates well — mapping by *hex value* rather than by
+constant name is the trick, since the names vary
+(`COLOR_TEXT`/`COL_TEXT`/`MOCHA_TEXT`) while the values are the one palette.
+What does not automate is the part after it. Four applications were converted
+in one pass and three had to be reverted:
+
+| app | errors after the automated pass |
+|---|---|
+| `charmap` | 1 (a missing field initialiser) — kept |
+| `fileassoc` | 18 — reverted |
+| `startupmanager` | 28 — reverted |
+| `clipmanager` | 91 — reverted |
+
+The difference is not size, it is **where the drawing lives**. `charmap` and
+`calculator` draw from `&self` methods, so the substitution
+`CONST` → `self.palette.<role>` is the whole job. `clipmanager` draws from
+free functions that take `state: &AppState`, where the same substitution has
+to produce `state.palette.<role>` instead — and a script that rewrote call
+sites with a regex to thread a new parameter made 91 errors out of 13.
+
+**So: convert one application at a time, and look first at how it draws.**
+Three shapes, in increasing cost:
+
+1. **Colours used only in `&self` methods** — pure substitution, done in one
+   pass. `charmap`, `calculator` (nearly).
+2. **Free functions that already take the application struct** — substitute to
+   `<param>.palette` instead. No signature changes, still mechanical, but the
+   script has to know the parameter's name.
+3. **Free or associated helpers taking neither** — these need a
+   `pal: &Palette` parameter threaded through their call sites, and that is
+   the part to do by hand. The compiler names every one of them (E0424,
+   *"expected value, found module `self`"*), so the work is bounded and
+   visible; it is the *automatic rewriting of call sites* that is not safe,
+   particularly where a call spans several lines.
+
+**Shape 2 does automate, and now does.** `clipmanager` was the worked example:
+52 sites, of which **48** were shape 2 and were rewritten in one pass, leaving
+4 to thread by hand. The script that failed the first time was scanning for
+each function's body by counting braces — which is unreliable in Rust source,
+because `{}` inside a format string unbalances the count and the walk then
+skips the rest of the file in silence, reporting zero work to do. Scanning
+*backwards* from each line that mentions the palette to its enclosing `fn` has
+no such failure mode and is what works.
+
+**The shape test must be "which `impl` block is this in", not "does it take
+`self`".** "Has a `self` receiver, so `self.palette` is correct" is false
+whenever `self` is not the window, and every application converted so far has
+had at least one such method: `ClipType::badge_color`,
+`FileCategory::color`, `StartupImpact::color`, `StartupEntry::status_color`,
+`StartupStats::impact_color`. The compiler catches each (E0609, "no field
+`palette` on type …"), but the useful fix is to group palette uses by their
+enclosing `impl` before touching anything — a five-line scan that names the
+non-window impls up front instead of discovering them one build at a time.
+
+**A name collision to expect: `palette` may already mean something.**
+`paint` has a `palette: Vec<Color>` field — its forty-eight drawing swatches —
+so the theme went in as `theme` instead. Check the struct for an existing
+`palette` before adding one, and be careful that a blanket
+`self.palette.` → `self.theme.` rename does not catch the application's own
+uses: it caught `self.palette.iter()`, which iterates the swatches.
+
+**Three smaller things that recur:**
+
+- **Stranded attributes, and the sweep for them is the dangerous part.**
+  Deleting `const COLOR_X: Color = …;` lines leaves behind any attribute that
+  annotated them, which is `clippy::empty_line_after_outer_attr` — an *error*
+  in this workspace, and one `cargo test` does not catch, so a crate can test
+  green with a broken build. But a general "attribute followed by nothing"
+  regex is worse than the problem: mine matched an attribute followed by a
+  *comment* and deleted `#[cfg(test)]` from `magnifier`'s test module, which
+  compiled the whole module into the binary and produced 36 warnings. Two
+  rules that hold: an attribute followed by a comment is **not** stranded, and
+  after any such sweep check `git diff | grep '^-#\['` and read every
+  attribute it claims to have removed.
+- **Method references stop composing.** `map_or(default, ClipType::badge_color)`
+  cannot survive `badge_color` gaining a parameter; it has to become a
+  closure.
+- **Tests call these helpers too.** A blanket call-site rewrite to
+  `&self.palette` lands inside `#[test]` functions that have no `self`; those
+  want a locally built default palette instead.
+
+**The pattern, so the rest are mechanical.** Per application: add
+`appearance` to `Cargo.toml`; add a `palette: Palette` field seeded from
+`AppearanceSettings::default()` so it is never absent; implement
+`theme_changed` to store it; replace each `COLOR_*`/`MOCHA_*` constant with
+the `Palette` field of the same role; delete the constant block. Then a test
+that renders under two themes and asserts the same number of commands with
+different colours.
+
+**Two things that recur and are worth knowing in advance:**
+
+- **Associated functions with no `self`.** Most colour uses are in `&self`
+  methods and become `self.palette.<role>`, but every application has a few
+  free or associated helpers (`key_colors`, `render_key`,
+  `render_status_button` in `calculator`) that need a `pal: &Palette`
+  parameter threading through their call sites. The compiler finds them all;
+  they are the only part that is not a substitution.
+- **`clippy::field_reassign_with_default`.** The obvious way to write the test
+  — `let mut s = AppearanceSettings::default(); s.theme_mode = …;` — is a
+  clippy error in this workspace. Build the settings in one struct-update
+  expression instead.
+
+**Roles that are not in the shorter constant blocks.** `Palette` carries
+`blue`, `yellow`, `mauve`, `teal`, `peach`, `lavender`, `green` and `red` as
+well as the neutrals, so an application naming a hue by name converts
+one-to-one. Nothing so far has needed a colour the palette does not have.
+
+**Do not start at step 2 for an application before step 1 existed** — that is
+now moot, but the reason stands for any similar sweep: converting before the
+route exists means making each application load `appearance.yaml` on its own,
+which is 129 copies of a parse and 129 places for the reload edge to be got
+wrong.
+
+**Related and already done:** `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-
+COPY-OF-THE-PALETTE` did exactly this for the shell's 49 modules, and
+`design-decisions.md` §810 removed the toolkit's copy. `guitk::theme` even
+carries a test (`this_module_names_no_colours_of_its_own`) that fails if a
+colour literal returns to it, and its own comment names the remaining copy as
+being "in `apps/`". This entry is that copy.

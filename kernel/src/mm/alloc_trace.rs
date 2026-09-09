@@ -492,7 +492,7 @@ fn current_cpu_fast() -> u8 {
 // ---------------------------------------------------------------------------
 
 /// Self-test for allocation tracing.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[alloc_trace] Running self-test...");
 
     {
@@ -637,4 +637,5 @@ pub fn self_test() {
     disable();
 
     serial_println!("[alloc_trace] Self-test PASSED");
+    Ok(())
 }

@@ -283,7 +283,7 @@ pub fn totals_from(counts: &[u64]) -> IrqTotals {
 // Self-test
 // ---------------------------------------------------------------------------
 
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("irqstat::self_test() — running tests...");
 
     // 1: The vector→IRQ mapping is the exact inverse of the one the balancer
@@ -408,4 +408,5 @@ pub fn self_test() {
     crate::serial_println!("  [6/6] line table ({} live vectors): OK", lines.len());
 
     crate::serial_println!("irqstat::self_test() — all 6 tests passed");
+    Ok(())
 }

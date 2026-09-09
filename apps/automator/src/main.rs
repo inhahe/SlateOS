@@ -35,6 +35,7 @@
 // it that the four `cast_*` allows alone were covering every f32/usize
 // conversion in the layout. They are all gone.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
@@ -50,24 +51,6 @@ use std::process::ExitCode;
 // ============================================================================
 // Catppuccin Mocha theme
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
 
 // ============================================================================
 // Window and clock
@@ -561,15 +544,15 @@ impl MacroAction {
     }
 
     /// Badge color for the action type.
-    fn badge_color(&self) -> Color {
+    fn badge_color(&self, pal: &Palette) -> Color {
         match self {
-            Self::KeyPress { .. } | Self::KeyRelease { .. } => BLUE,
-            Self::MouseClick { .. } | Self::MouseDoubleClick { .. } => GREEN,
-            Self::MouseMove { .. } => TEAL,
-            Self::Scroll { .. } => PEACH,
-            Self::TypeText { .. } => LAVENDER,
-            Self::Delay { .. } => YELLOW,
-            Self::IfPixelColor { .. } => RED,
+            Self::KeyPress { .. } | Self::KeyRelease { .. } => pal.blue,
+            Self::MouseClick { .. } | Self::MouseDoubleClick { .. } => pal.green,
+            Self::MouseMove { .. } => pal.teal,
+            Self::Scroll { .. } => pal.peach,
+            Self::TypeText { .. } => pal.lavender,
+            Self::Delay { .. } => pal.yellow,
+            Self::IfPixelColor { .. } => pal.red,
         }
     }
 }
@@ -1362,11 +1345,18 @@ pub struct AutomatorApp {
     /// opened, which is not what a "created at" column means.
     wall_ms: u64,
     status_message: String,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl AutomatorApp {
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             library: MacroLibrary::new(),
             selected_macro_id: None,
             selected_action_idx: None,
@@ -1942,7 +1932,7 @@ impl AutomatorApp {
     fn frame(&self, width: f32, height: f32) -> Frame<Target> {
         let l = Layout::solve(width, height);
         let mut f = Frame::new(width, height);
-        fill(&mut f, l.window, BASE, CornerRadii::ZERO);
+        fill(&mut f, l.window, self.palette.base, CornerRadii::ZERO);
         self.draw_header(&mut f, &l);
         self.draw_toolbar(&mut f, &l);
         self.draw_sidebar(&mut f, &l);
@@ -1961,7 +1951,7 @@ impl AutomatorApp {
         if head.is_empty() {
             return;
         }
-        fill(f, head, CRUST, CornerRadii::ZERO);
+        fill(f, head, self.palette.crust, CornerRadii::ZERO);
 
         // The tabs are laid out from the right edge inwards, and the title and
         // the indicators get what is left. The old header did the reverse and
@@ -1994,7 +1984,11 @@ impl AutomatorApp {
                 fill(
                     f,
                     rect,
-                    if selected { SURFACE0 } else { CRUST },
+                    if selected {
+                        self.palette.surface0
+                    } else {
+                        self.palette.crust
+                    },
                     CornerRadii::all(CORNER_RADIUS),
                 );
                 if let Some(ty) = centre_line(rect, l.font) {
@@ -2004,7 +1998,11 @@ impl AutomatorApp {
                         rect.w,
                         ty,
                         tab.label(),
-                        if selected { BLUE } else { SUBTEXT0 },
+                        if selected {
+                            self.palette.blue
+                        } else {
+                            self.palette.subtext0
+                        },
                         l.font,
                         if selected {
                             FontWeightHint::Bold
@@ -2026,7 +2024,7 @@ impl AutomatorApp {
                 (cx, ty),
                 room_end - cx,
                 TITLE,
-                TEXT,
+                self.palette.text,
                 l.heading,
                 FontWeightHint::Bold,
             );
@@ -2054,7 +2052,12 @@ impl AutomatorApp {
                 fill(
                     f,
                     Rect::new(cx, head.y + (head.h - dot) / 2.0, dot, dot),
-                    Color::rgba(RED.r, RED.g, RED.b, alpha),
+                    Color::rgba(
+                        self.palette.red.r,
+                        self.palette.red.g,
+                        self.palette.red.b,
+                        alpha,
+                    ),
                     CornerRadii::all(dot / 2.0),
                 );
                 cx += dot + l.pad * 0.5;
@@ -2065,7 +2068,7 @@ impl AutomatorApp {
                     (cx, sy),
                     room_end - cx,
                     "REC",
-                    RED,
+                    self.palette.red,
                     l.font,
                     FontWeightHint::Bold,
                 );
@@ -2081,7 +2084,7 @@ impl AutomatorApp {
                 (cx, sy),
                 room_end - cx,
                 &label,
-                GREEN,
+                self.palette.green,
                 l.font,
                 FontWeightHint::Bold,
             );
@@ -2094,8 +2097,14 @@ impl AutomatorApp {
         if bar.is_empty() {
             return;
         }
-        fill(f, bar, MANTLE, CornerRadii::ZERO);
-        hline(f, bar.x, bar.right(), bar.bottom() - 1.0, SURFACE0);
+        fill(f, bar, self.palette.mantle, CornerRadii::ZERO);
+        hline(
+            f,
+            bar.x,
+            bar.right(),
+            bar.bottom() - 1.0,
+            self.palette.surface0,
+        );
 
         let btn_h = l.button.min(bar.h);
         let btn_y = bar.y + (bar.h - btn_h) / 2.0;
@@ -2136,35 +2145,45 @@ impl AutomatorApp {
         let speed = selected.map_or(PlaybackSpeed::Normal, |m| m.speed);
         let repeat = selected.map_or(RepeatMode::Once, |m| m.repeat_mode);
         let rec_bg = if self.recording_state.is_recording() {
-            RED
+            self.palette.red
         } else {
-            SURFACE1
+            self.palette.surface1
         };
         let play_bg = if self.playback_state.is_playing() {
-            GREEN
+            self.palette.green
         } else {
-            SURFACE1
+            self.palette.surface1
         };
         vec![
-            (Button::Record, faced(Button::Record), rec_bg, TEXT),
+            (
+                Button::Record,
+                faced(Button::Record),
+                rec_bg,
+                self.palette.text,
+            ),
             (
                 Button::StopRecording,
                 faced(Button::StopRecording),
-                SURFACE1,
-                TEXT,
+                self.palette.surface1,
+                self.palette.text,
             ),
-            (Button::Play, faced(Button::Play), play_bg, TEXT),
+            (
+                Button::Play,
+                faced(Button::Play),
+                play_bg,
+                self.palette.text,
+            ),
             (
                 Button::PausePlayback,
                 faced(Button::PausePlayback),
-                SURFACE1,
-                TEXT,
+                self.palette.surface1,
+                self.palette.text,
             ),
             (
                 Button::StopPlayback,
                 faced(Button::StopPlayback),
-                SURFACE1,
-                TEXT,
+                self.palette.surface1,
+                self.palette.text,
             ),
             (
                 Button::CycleSpeed,
@@ -2173,8 +2192,8 @@ impl AutomatorApp {
                     speed.label(),
                     Button::CycleSpeed.key_label()
                 ),
-                SURFACE1,
-                PEACH,
+                self.palette.surface1,
+                self.palette.peach,
             ),
             (
                 Button::CycleRepeat,
@@ -2183,10 +2202,15 @@ impl AutomatorApp {
                     repeat.label(),
                     Button::CycleRepeat.key_label()
                 ),
-                SURFACE1,
-                LAVENDER,
+                self.palette.surface1,
+                self.palette.lavender,
             ),
-            (Button::Help, faced(Button::Help), SURFACE1, TEAL),
+            (
+                Button::Help,
+                faced(Button::Help),
+                self.palette.surface1,
+                self.palette.teal,
+            ),
         ]
     }
 
@@ -2196,17 +2220,17 @@ impl AutomatorApp {
         if panel.is_empty() {
             return;
         }
-        fill(f, panel, MANTLE, CornerRadii::ZERO);
+        fill(f, panel, self.palette.mantle, CornerRadii::ZERO);
         let (head, body, foot) = l.sidebar_split();
 
-        fill(f, head, CRUST, CornerRadii::ZERO);
+        fill(f, head, self.palette.crust, CornerRadii::ZERO);
         if let Some(ty) = centre_line(head, l.font) {
             bounded(
                 f,
                 (head.x + l.pad, ty),
                 head.w - l.pad * 2.0,
                 &format!("Macros ({})", self.library.count()),
-                TEXT,
+                self.palette.text,
                 l.font,
                 FontWeightHint::Bold,
             );
@@ -2225,7 +2249,7 @@ impl AutomatorApp {
                 (body.w - l.pad * 2.0).max(0.0),
                 ty,
                 "No macros yet -- press New",
-                OVERLAY0,
+                self.palette.overlay0,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -2244,7 +2268,11 @@ impl AutomatorApp {
             fill(
                 f,
                 rect,
-                if selected { SURFACE0 } else { MANTLE },
+                if selected {
+                    self.palette.surface0
+                } else {
+                    self.palette.mantle
+                },
                 CornerRadii::all(CORNER_RADIUS),
             );
 
@@ -2261,7 +2289,7 @@ impl AutomatorApp {
                     (right - count_w, ty),
                     count_w,
                     &count,
-                    OVERLAY0,
+                    self.palette.overlay0,
                     l.small,
                     FontWeightHint::Regular,
                 );
@@ -2285,7 +2313,7 @@ impl AutomatorApp {
                 fill(
                     f,
                     Rect::new(right - dot, rect.y + (rect.h - dot) / 2.0, dot, dot),
-                    PEACH,
+                    self.palette.peach,
                     CornerRadii::all(dot / 2.0),
                 );
                 right -= dot + l.pad * 0.5;
@@ -2297,7 +2325,11 @@ impl AutomatorApp {
                     (name_x, ty),
                     right - name_x,
                     &mac.name,
-                    if selected { TEXT } else { SUBTEXT1 },
+                    if selected {
+                        self.palette.text
+                    } else {
+                        self.palette.subtext1
+                    },
                     l.font,
                     if selected {
                         FontWeightHint::Bold
@@ -2309,9 +2341,15 @@ impl AutomatorApp {
             f.hit(Target::Macro(i), rect);
         }
 
-        vline(f, panel.right(), panel.y, panel.bottom(), SURFACE0);
+        vline(
+            f,
+            panel.right(),
+            panel.y,
+            panel.bottom(),
+            self.palette.surface0,
+        );
 
-        fill(f, foot, CRUST, CornerRadii::ZERO);
+        fill(f, foot, self.palette.crust, CornerRadii::ZERO);
         self.draw_button_row(f, l, foot, &[Button::NewMacro, Button::DeleteMacro]);
     }
 
@@ -2339,9 +2377,11 @@ impl AutomatorApp {
                 h,
             );
             let (bg, fg) = match button {
-                Button::NewMacro | Button::ApplyScript => (BLUE, CRUST),
-                Button::DeleteMacro | Button::DeleteAction => (SURFACE1, RED),
-                _ => (SURFACE1, TEXT),
+                Button::NewMacro | Button::ApplyScript => (self.palette.blue, self.palette.crust),
+                Button::DeleteMacro | Button::DeleteAction => {
+                    (self.palette.surface1, self.palette.red)
+                }
+                _ => (self.palette.surface1, self.palette.text),
             };
             fill(f, rect, bg, CornerRadii::all(CORNER_RADIUS));
             if let Some(ty) = centre_line(rect, l.small) {
@@ -2366,10 +2406,10 @@ impl AutomatorApp {
         if panel.is_empty() {
             return;
         }
-        fill(f, panel, BASE, CornerRadii::ZERO);
+        fill(f, panel, self.palette.base, CornerRadii::ZERO);
         let (head, body, foot) = l.list_split();
 
-        fill(f, head, SURFACE0, CornerRadii::ZERO);
+        fill(f, head, self.palette.surface0, CornerRadii::ZERO);
         if let Some(ty) = centre_line(head, l.font) {
             bounded(
                 f,
@@ -2379,7 +2419,7 @@ impl AutomatorApp {
                     ActiveTab::Editor => "Actions",
                     ActiveTab::Script => "Script",
                 },
-                TEXT,
+                self.palette.text,
                 l.font,
                 FontWeightHint::Bold,
             );
@@ -2388,7 +2428,7 @@ impl AutomatorApp {
         match self.active_tab {
             ActiveTab::Editor => {
                 self.draw_actions(f, l, body);
-                fill(f, foot, SURFACE0, CornerRadii::ZERO);
+                fill(f, foot, self.palette.surface0, CornerRadii::ZERO);
                 self.draw_button_row(
                     f,
                     l,
@@ -2402,13 +2442,19 @@ impl AutomatorApp {
             }
             ActiveTab::Script => {
                 self.draw_script(f, l, body);
-                fill(f, foot, SURFACE0, CornerRadii::ZERO);
+                fill(f, foot, self.palette.surface0, CornerRadii::ZERO);
                 self.draw_button_row(f, l, foot, &[Button::ApplyScript]);
             }
         }
 
         if !l.props.is_empty() {
-            vline(f, panel.right(), panel.y, panel.bottom(), SURFACE0);
+            vline(
+                f,
+                panel.right(),
+                panel.y,
+                panel.bottom(),
+                self.palette.surface0,
+            );
         }
     }
 
@@ -2425,7 +2471,7 @@ impl AutomatorApp {
                     (body.w - l.pad * 2.0).max(0.0),
                     ty,
                     "Select a macro to edit",
-                    OVERLAY0,
+                    self.palette.overlay0,
                     l.font,
                     FontWeightHint::Regular,
                 );
@@ -2440,7 +2486,7 @@ impl AutomatorApp {
                     (body.w - l.pad * 2.0).max(0.0),
                     ty,
                     "No actions. Start recording or add manually.",
-                    OVERLAY0,
+                    self.palette.overlay0,
                     l.font,
                     FontWeightHint::Regular,
                 );
@@ -2459,7 +2505,11 @@ impl AutomatorApp {
             fill(
                 f,
                 rect,
-                if selected { SURFACE0 } else { BASE },
+                if selected {
+                    self.palette.surface0
+                } else {
+                    self.palette.base
+                },
                 CornerRadii::all(CORNER_RADIUS),
             );
 
@@ -2474,7 +2524,7 @@ impl AutomatorApp {
                 fill(
                     f,
                     Rect::new(rect.x, rect.y, 3.0_f32.min(rect.w), rect.h),
-                    GREEN,
+                    self.palette.green,
                     CornerRadii::ZERO,
                 );
             }
@@ -2507,7 +2557,7 @@ impl AutomatorApp {
                     (right - delay_w, ty),
                     delay_w,
                     &delay,
-                    YELLOW,
+                    self.palette.yellow,
                     l.small,
                     FontWeightHint::Regular,
                 );
@@ -2522,7 +2572,7 @@ impl AutomatorApp {
                 (cx, ty),
                 num_w,
                 &num,
-                OVERLAY0,
+                self.palette.overlay0,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -2538,14 +2588,19 @@ impl AutomatorApp {
             let badge_h = (rect.h - 4.0).max(0.0);
             if badge_w > 0.0 && badge_h > 0.0 {
                 let badge = Rect::new(cx, rect.y + 2.0, badge_w, badge_h);
-                fill(f, badge, timed.action.badge_color(), CornerRadii::all(3.0));
+                fill(
+                    f,
+                    badge,
+                    timed.action.badge_color(&self.palette),
+                    CornerRadii::all(3.0),
+                );
                 centred(
                     f,
                     badge.x,
                     badge.w,
                     ty,
                     timed.action.icon(),
-                    CRUST,
+                    self.palette.crust,
                     l.small,
                     FontWeightHint::Bold,
                 );
@@ -2558,7 +2613,11 @@ impl AutomatorApp {
                     (cx, ly),
                     right - cx,
                     &timed.action.label(),
-                    if selected { TEXT } else { SUBTEXT1 },
+                    if selected {
+                        self.palette.text
+                    } else {
+                        self.palette.subtext1
+                    },
                     l.font,
                     FontWeightHint::Regular,
                 );
@@ -2586,7 +2645,12 @@ impl AutomatorApp {
             (body.w - 4.0).max(0.0),
             (body.h - err_h - 4.0).max(0.0),
         );
-        fill(f, text_area, MANTLE, CornerRadii::all(CORNER_RADIUS));
+        fill(
+            f,
+            text_area,
+            self.palette.mantle,
+            CornerRadii::all(CORNER_RADIUS),
+        );
 
         let line_h = l.font * 1.35;
         // The gutter is bounded by the text area, not merely by how wide three
@@ -2605,15 +2669,15 @@ impl AutomatorApp {
                 (text_area.x + l.pad * 0.5, ly),
                 gutter,
                 &format!("{:>3}", i.saturating_add(1)),
-                OVERLAY0,
+                self.palette.overlay0,
                 l.small,
                 FontWeightHint::Regular,
             );
             let color = match line.as_bytes().first() {
-                Some(b'#') => OVERLAY0,
-                Some(b'$') => PEACH,
-                Some(b':') => YELLOW,
-                _ => TEXT,
+                Some(b'#') => self.palette.overlay0,
+                Some(b'$') => self.palette.peach,
+                Some(b':') => self.palette.yellow,
+                _ => self.palette.text,
             };
             let lx = text_area.x + l.pad * 0.5 + gutter;
             bounded(
@@ -2647,7 +2711,12 @@ impl AutomatorApp {
             fill(
                 f,
                 strip,
-                Color::rgba(RED.r, RED.g, RED.b, 40),
+                Color::rgba(
+                    self.palette.red.r,
+                    self.palette.red.g,
+                    self.palette.red.b,
+                    40,
+                ),
                 CornerRadii::all(CORNER_RADIUS),
             );
             // Centred in the strip, and only when the strip can hold a whole
@@ -2660,7 +2729,7 @@ impl AutomatorApp {
                     (strip.x + l.pad * 0.5, ty),
                     strip.w - l.pad,
                     err,
-                    RED,
+                    self.palette.red,
                     l.small,
                     FontWeightHint::Regular,
                 );
@@ -2674,7 +2743,7 @@ impl AutomatorApp {
         if panel.is_empty() {
             return;
         }
-        fill(f, panel, MANTLE, CornerRadii::ZERO);
+        fill(f, panel, self.palette.mantle, CornerRadii::ZERO);
         // The pads are a *reserved* strip, so the rows above cannot run into
         // them. The old panel put the speed section at
         // `content_y + content_h - 100.0` and grew the property rows downwards
@@ -2684,14 +2753,14 @@ impl AutomatorApp {
         // four pixels *below* the content area, in the status bar.
         let (head, body, pads) = l.props_split();
 
-        fill(f, head, CRUST, CornerRadii::ZERO);
+        fill(f, head, self.palette.crust, CornerRadii::ZERO);
         if let Some(ty) = centre_line(head, l.font) {
             bounded(
                 f,
                 (head.x + l.pad, ty),
                 head.w - l.pad * 2.0,
                 "Properties",
-                TEXT,
+                self.palette.text,
                 l.font,
                 FontWeightHint::Bold,
             );
@@ -2709,11 +2778,12 @@ impl AutomatorApp {
                 .trigger
                 .as_ref()
                 .map_or_else(|| "(none)".to_string(), Hotkey::label);
-            let mut more = prop_row(f, l, body, &mut cy, "Name", &mac.name);
-            more = more && prop_row(f, l, body, &mut cy, "Description", desc);
+            let mut more = prop_row(f, &self.palette, l, body, &mut cy, "Name", &mac.name);
+            more = more && prop_row(f, &self.palette, l, body, &mut cy, "Description", desc);
             more = more
                 && prop_row(
                     f,
+                    &self.palette,
                     l,
                     body,
                     &mut cy,
@@ -2723,19 +2793,44 @@ impl AutomatorApp {
             more = more
                 && prop_row(
                     f,
+                    &self.palette,
                     l,
                     body,
                     &mut cy,
                     "Duration",
                     &format_duration_ms(mac.total_duration_ms()),
                 );
-            more = more && prop_row(f, l, body, &mut cy, "Speed", mac.speed.label());
-            more = more && prop_row(f, l, body, &mut cy, "Repeat", &mac.repeat_mode.label());
-            more = more && prop_row(f, l, body, &mut cy, "Trigger", &trigger);
+            more = more
+                && prop_row(
+                    f,
+                    &self.palette,
+                    l,
+                    body,
+                    &mut cy,
+                    "Speed",
+                    mac.speed.label(),
+                );
+            more = more
+                && prop_row(
+                    f,
+                    &self.palette,
+                    l,
+                    body,
+                    &mut cy,
+                    "Repeat",
+                    &mac.repeat_mode.label(),
+                );
+            more = more && prop_row(f, &self.palette, l, body, &mut cy, "Trigger", &trigger);
 
             if more {
                 cy += l.pad * 0.5;
-                hline(f, body.x + l.pad, body.right() - l.pad, cy, SURFACE0);
+                hline(
+                    f,
+                    body.x + l.pad,
+                    body.right() - l.pad,
+                    cy,
+                    self.palette.surface0,
+                );
                 cy += l.pad * 0.5;
             }
             match self
@@ -2744,9 +2839,18 @@ impl AutomatorApp {
                 .filter(|_| more)
             {
                 Some(timed) => {
-                    if prop_row(f, l, body, &mut cy, "Action", timed.action.icon()) {
+                    if prop_row(
+                        f,
+                        &self.palette,
+                        l,
+                        body,
+                        &mut cy,
+                        "Action",
+                        timed.action.icon(),
+                    ) {
                         let mut ok = prop_row(
                             f,
+                            &self.palette,
                             l,
                             body,
                             &mut cy,
@@ -2754,17 +2858,33 @@ impl AutomatorApp {
                             &format!("{}ms", timed.delay_ms),
                         );
                         for (label, value) in action_rows(&timed.action) {
-                            ok = ok && prop_row(f, l, body, &mut cy, label, &value);
+                            ok = ok && prop_row(f, &self.palette, l, body, &mut cy, label, &value);
                         }
                     }
                 }
                 None if more => {
-                    prop_row(f, l, body, &mut cy, "Action", "(none selected)");
+                    prop_row(
+                        f,
+                        &self.palette,
+                        l,
+                        body,
+                        &mut cy,
+                        "Action",
+                        "(none selected)",
+                    );
                 }
                 None => {}
             }
         } else {
-            prop_row(f, l, body, &mut cy, "Macro", "(none selected)");
+            prop_row(
+                f,
+                &self.palette,
+                l,
+                body,
+                &mut cy,
+                "Macro",
+                "(none selected)",
+            );
         }
 
         self.draw_pads(f, l, pads);
@@ -2796,7 +2916,7 @@ impl AutomatorApp {
                 (speed_head.x + l.pad, ty),
                 speed_head.w - l.pad * 2.0,
                 "Playback Speed",
-                TEXT,
+                self.palette.text,
                 l.small,
                 FontWeightHint::Bold,
             );
@@ -2805,7 +2925,7 @@ impl AutomatorApp {
         pad_row(f, l, speed_row, speeds.len(), |f, i, rect| {
             let Some(&s) = speeds.get(i) else { return };
             let on = s == speed;
-            paint_pad(f, l, rect, s.label(), on, BLUE);
+            paint_pad(f, &self.palette, l, rect, s.label(), on, self.palette.blue);
             f.hit(Target::Speed(s), rect);
         });
 
@@ -2815,7 +2935,7 @@ impl AutomatorApp {
                 (repeat_head.x + l.pad, ty),
                 repeat_head.w - l.pad * 2.0,
                 "Repeat Mode",
-                TEXT,
+                self.palette.text,
                 l.small,
                 FontWeightHint::Bold,
             );
@@ -2824,7 +2944,15 @@ impl AutomatorApp {
         pad_row(f, l, repeat_row, modes.len(), |f, i, rect| {
             let Some(&m) = modes.get(i) else { return };
             let on = m == repeat;
-            paint_pad(f, l, rect, &m.label(), on, LAVENDER);
+            paint_pad(
+                f,
+                &self.palette,
+                l,
+                rect,
+                &m.label(),
+                on,
+                self.palette.lavender,
+            );
             f.hit(Target::Repeat(m), rect);
         });
     }
@@ -2835,7 +2963,7 @@ impl AutomatorApp {
         if bar.is_empty() {
             return;
         }
-        fill(f, bar, CRUST, CornerRadii::ZERO);
+        fill(f, bar, self.palette.crust, CornerRadii::ZERO);
         // A status bar too short for its own line paints the bar and nothing
         // else. It is the last band the layout takes, so it is the first one a
         // short window squeezes to a sliver.
@@ -2861,7 +2989,7 @@ impl AutomatorApp {
             (right - state_w, ty),
             state_w,
             &state,
-            OVERLAY0,
+            self.palette.overlay0,
             l.small,
             FontWeightHint::Regular,
         );
@@ -2871,7 +2999,7 @@ impl AutomatorApp {
             (mx, ty),
             right - state_w - l.pad - mx,
             &self.status_message,
-            SUBTEXT0,
+            self.palette.subtext0,
             l.small,
             FontWeightHint::Regular,
         );
@@ -2897,8 +3025,8 @@ impl AutomatorApp {
             card.w,
             card.h,
         );
-        fill(f, card, CRUST, CornerRadii::all(CORNER_RADIUS));
-        outline(f, card, SURFACE2);
+        fill(f, card, self.palette.crust, CornerRadii::all(CORNER_RADIUS));
+        outline(f, card, self.palette.surface2);
 
         let mut y = card.y + l.pad;
         // The heading is measured against the card, exactly as the rows below
@@ -2915,7 +3043,7 @@ impl AutomatorApp {
                 (card.w - l.pad * 2.0).max(0.0),
                 y,
                 "Keys",
-                TEAL,
+                self.palette.teal,
                 l.font,
                 FontWeightHint::Bold,
             );
@@ -2931,7 +3059,7 @@ impl AutomatorApp {
                 (card.x + l.pad, y),
                 key_w,
                 button.key_label(),
-                YELLOW,
+                self.palette.yellow,
                 l.font,
                 FontWeightHint::Bold,
             );
@@ -2941,7 +3069,7 @@ impl AutomatorApp {
                 (ax, y),
                 card.right() - l.pad - ax,
                 button.action_label(),
-                TEXT,
+                self.palette.text,
                 l.font,
                 FontWeightHint::Regular,
             );
@@ -3449,6 +3577,7 @@ fn centred(
 /// with a selected action wrote its last rows over that heading.
 fn prop_row(
     f: &mut Frame<Target>,
+    pal: &Palette,
     l: &Layout,
     body: Rect,
     cy: &mut f32,
@@ -3469,7 +3598,7 @@ fn prop_row(
         (body.x + l.pad, *cy),
         label_w,
         label,
-        SUBTEXT0,
+        pal.subtext0,
         l.small,
         FontWeightHint::Regular,
     );
@@ -3479,7 +3608,7 @@ fn prop_row(
         (vx, *cy),
         body.right() - l.pad - vx,
         value,
-        TEXT,
+        pal.text,
         l.small,
         FontWeightHint::Regular,
     );
@@ -3516,11 +3645,19 @@ where
 }
 
 /// One cell of a speed or repeat pad.
-fn paint_pad(f: &mut Frame<Target>, l: &Layout, rect: Rect, label: &str, on: bool, accent: Color) {
+fn paint_pad(
+    f: &mut Frame<Target>,
+    pal: &Palette,
+    l: &Layout,
+    rect: Rect,
+    label: &str,
+    on: bool,
+    accent: Color,
+) {
     fill(
         f,
         rect,
-        if on { accent } else { SURFACE1 },
+        if on { accent } else { pal.surface1 },
         CornerRadii::all(CORNER_RADIUS),
     );
     if let Some(ty) = centre_line(rect, l.small) {
@@ -3530,7 +3667,7 @@ fn paint_pad(f: &mut Frame<Target>, l: &Layout, rect: Rect, label: &str, on: boo
             rect.w,
             ty,
             label,
-            if on { CRUST } else { TEXT },
+            if on { pal.crust } else { pal.text },
             l.small,
             if on {
                 FontWeightHint::Bold
@@ -3700,6 +3837,10 @@ fn format_duration_ms(ms: u64) -> String {
 }
 
 impl App for AutomatorApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from(TITLE)
     }
@@ -4696,6 +4837,7 @@ mod tests {
 
     #[test]
     fn test_action_badge_colors_unique() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let actions: Vec<MacroAction> = vec![
             MacroAction::KeyPress {
                 key_name: "A".to_string(),
@@ -4725,7 +4867,7 @@ mod tests {
         ];
         // Just verify we get a color for each without panicking.
         for a in &actions {
-            let _ = a.badge_color();
+            let _ = a.badge_color(&pal);
         }
     }
 
@@ -6645,6 +6787,65 @@ mod tests {
                 .iter()
                 .any(|(t, _)| matches!(t, Target::Speed(_) | Target::Repeat(_))),
             "the dropped read-out's pads are still clickable"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut AutomatorApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = AutomatorApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

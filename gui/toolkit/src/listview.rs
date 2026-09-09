@@ -136,6 +136,16 @@ impl ListViewport {
         self.first_visible = scroll_window::shift(self.first_visible, delta).min(last_page);
     }
 
+    /// Scrolls so `first` is the top row, without moving the selection.
+    ///
+    /// The absolute companion to [`scroll_by`](Self::scroll_by), and the one a
+    /// dragged scrollbar thumb needs: a drag names a position outright rather
+    /// than a delta, and turning it into a delta would accumulate the rounding
+    /// of every intermediate frame.
+    pub fn scroll_to(&mut self, first: usize, len: usize) {
+        self.first_visible = first.min(len.saturating_sub(self.height));
+    }
+
     /// Picks `index`, clamped into the list, and scrolls to show it.
     ///
     /// `None` picks nothing but leaves the scroll position alone, which is what

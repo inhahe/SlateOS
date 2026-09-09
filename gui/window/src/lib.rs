@@ -569,7 +569,7 @@ impl<T: Transport> WindowHandle<'_, T> {
         height: u32,
         stride: u32,
         format: BufferFormat,
-        bytes: Vec<u8>,
+        bytes: guitk::canvas::WireBytes,
     ) -> Result<(), Error<T>> {
         self.events.confirm(RequestBody::UploadImage {
             window: self.id,
@@ -578,7 +578,10 @@ impl<T: Transport> WindowHandle<'_, T> {
             height,
             stride,
             format,
-            bytes,
+            // Unwrapped here and only here: this is the encoder, the last
+            // point before the bytes go on the wire, and past it there is no
+            // other order they could be mistaken for.
+            bytes: bytes.into_vec(),
         })
     }
 
@@ -971,6 +974,77 @@ impl<T: Transport> EventLoop<T> {
     /// As [`Connection::confirm`].
     pub fn move_window_to_desktop(&mut self, window: u64, desktop: u32) -> Result<(), Error<T>> {
         self.conn.set_window_workspace(window, desktop)
+    }
+
+    /// Set another client's window opacity, as a window rule does.
+    ///
+    /// A shell privilege, with [`control_window`](Self::control_window) and
+    /// the rest: the ordinary opacity request resolves against the sender's
+    /// own window, which is what stops any program fading everybody else's.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn shell_set_opacity(&mut self, window: u64, opacity: f32) -> Result<(), Error<T>> {
+        self.conn.shell_set_opacity(window, opacity)
+    }
+
+    /// Move another client's window, as a window rule does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn shell_move(&mut self, window: u64, x: i32, y: i32) -> Result<(), Error<T>> {
+        self.conn.shell_move(window, x, y)
+    }
+
+    /// Resize another client's window, as a window rule does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    /// Put another client's window in a stacking tier, as a window rule does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    /// Constrain another client's window size, as a window rule does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    /// Say what the user may not do to another client's window.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn shell_set_window_policy(
+        &mut self,
+        window: u64,
+        policy: guiremote::control::WindowPolicy,
+    ) -> Result<(), Error<T>> {
+        self.conn.shell_set_window_policy(window, policy)
+    }
+
+    pub fn shell_set_size_limits(
+        &mut self,
+        window: u64,
+        min: (u32, u32),
+        max: (u32, u32),
+    ) -> Result<(), Error<T>> {
+        self.conn.shell_set_size_limits(window, min, max)
+    }
+
+    pub fn shell_set_stack_tier(
+        &mut self,
+        window: u64,
+        tier: guiremote::control::StackTier,
+    ) -> Result<(), Error<T>> {
+        self.conn.shell_set_stack_tier(window, tier)
+    }
+
+    pub fn shell_resize(&mut self, window: u64, width: u32, height: u32) -> Result<(), Error<T>> {
+        self.conn.shell_resize(window, width, height)
     }
 
     /// Claim a keyboard chord, so that it arrives here wherever the focus is.
@@ -1777,6 +1851,12 @@ pub mod testing {
                 RequestBody::SetCursor { .. } => "SetCursor",
                 RequestBody::SetFullscreen { .. } => "SetFullscreen",
                 RequestBody::SetOpacity { .. } => "SetOpacity",
+                RequestBody::ShellSetOpacity { .. } => "ShellSetOpacity",
+                RequestBody::ShellMove { .. } => "ShellMove",
+                RequestBody::ShellResize { .. } => "ShellResize",
+                RequestBody::ShellSetStackTier { .. } => "ShellSetStackTier",
+                RequestBody::ShellSetSizeLimits { .. } => "ShellSetSizeLimits",
+                RequestBody::ShellSetWindowPolicy { .. } => "ShellSetWindowPolicy",
                 RequestBody::GetDisplayInfo => "GetDisplayInfo",
                 RequestBody::SubscribeWindowList { .. } => "SubscribeWindowList",
                 RequestBody::ReloadAppearance => "ReloadAppearance",

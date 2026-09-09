@@ -1395,7 +1395,7 @@ pub fn effective_mem_limit(id: CgroupId) -> u64 {
 ///
 /// The self-test is purely in-memory computation (no I/O waits), so
 /// completing with interrupts off takes well under 1 ms.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[cgroup] Running self-test...");
 
     // Disable interrupts for the duration of the test to prevent
@@ -1411,6 +1411,7 @@ pub fn self_test() {
     });
 
     serial_println!("[cgroup] Self-test PASSED (25 tests)");
+    Ok(())
 }
 
 /// Inner self-test body, called with interrupts disabled.

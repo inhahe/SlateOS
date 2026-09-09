@@ -179,7 +179,7 @@ pub fn measurement_count() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the fairness measurement module.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[sched_fairness] Running self-test...");
 
     // Test 1: Measure returns valid data.
@@ -231,4 +231,5 @@ pub fn self_test() {
     serial_println!("[sched_fairness]   Counter increment: OK");
 
     serial_println!("[sched_fairness] Self-test PASSED");
+    Ok(())
 }

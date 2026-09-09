@@ -36,6 +36,7 @@
 //! nothing in the test suite would catch, because each side is self-consistent.
 //! One source, read twice.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, MouseButton, MouseEvent, MouseEventKind};
 use guitk::modal::{AlertDialog, DialogResult};
@@ -52,18 +53,14 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 // ============================================================================
-// Catppuccin Mocha palette
+// Colours come from `appearance::Palette` -- see design-decisions 822.
 // ============================================================================
 
-const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
-const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
-const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
-const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COLOR_SUBTEXT: Color = Color::from_hex(0xA6ADC8);
-const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
-const COLOR_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COLOR_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COLOR_RED: Color = Color::from_hex(0xF38BA8);
+// There are no colours here. They come from `appearance::Palette`, handed
+// over by `App::theme_changed` (`design-decisions.md` §822), so this window
+// follows the light/dark switch, the accent and the high-contrast schemes.
+// See `known-issues.md`
+// `TD-C-129-OF-135-APPLICATIONS-IGNORE-THE-THEME-ENTIRELY`.
 
 // ============================================================================
 // Layout constants
@@ -1209,6 +1206,12 @@ pub struct CleanupUI {
     pub width: f32,
     /// Window height the compositor last reported.
     pub height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls [`App::theme_changed`] before the first frame, so nothing is
+    /// drawn with this initial value in a real window.
+    palette: Palette,
 }
 
 impl CleanupUI {
@@ -1220,6 +1223,7 @@ impl CleanupUI {
 
         Self {
             screen: UiScreen::CategoryList,
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             selected,
             category_sizes: BTreeMap::new(),
             scan_complete: false,
@@ -1573,7 +1577,7 @@ impl CleanupUI {
             y: 0.0,
             width,
             height,
-            color: COLOR_BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -1655,7 +1659,7 @@ impl CleanupUI {
                 y,
                 width,
                 height: ROW_HEIGHT,
-                color: COLOR_SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -1674,7 +1678,7 @@ impl CleanupUI {
             y: cy,
             width: CHECKBOX_SIZE,
             height: CHECKBOX_SIZE,
-            color: COLOR_SUBTEXT,
+            color: self.palette.subtext0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(3.0),
         });
@@ -1686,7 +1690,7 @@ impl CleanupUI {
                 y: cy + 3.0,
                 width: CHECKBOX_SIZE - 6.0,
                 height: CHECKBOX_SIZE - 6.0,
-                color: COLOR_BLUE,
+                color: self.palette.blue,
                 corner_radii: CornerRadii::all(2.0),
             });
         }
@@ -1696,7 +1700,7 @@ impl CleanupUI {
             x: cx + CHECKBOX_SIZE + 10.0,
             y: y + 6.0,
             text: cat.display_name().to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
@@ -1708,7 +1712,7 @@ impl CleanupUI {
             x: cx + CHECKBOX_SIZE + 10.0,
             y: y + 20.0,
             text: cat.description().to_string(),
-            color: COLOR_SUBTEXT,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width * 0.5),
@@ -1723,9 +1727,9 @@ impl CleanupUI {
                 y: y + 10.0,
                 text: size_text,
                 color: if size_bytes > 0 {
-                    COLOR_YELLOW
+                    self.palette.yellow
                 } else {
-                    COLOR_SUBTEXT
+                    self.palette.subtext0
                 },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -1743,7 +1747,7 @@ impl CleanupUI {
                 x: link.0,
                 y: link.1 + (link.3 - FONT_SIZE_SMALL) / 2.0,
                 text: String::from("View"),
-                color: COLOR_BLUE,
+                color: self.palette.blue,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1759,7 +1763,7 @@ impl CleanupUI {
             y: 0.0,
             width,
             height: HEADER_HEIGHT,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii {
                 top_left: CORNER_RADIUS,
                 top_right: CORNER_RADIUS,
@@ -1772,7 +1776,7 @@ impl CleanupUI {
             x: PADDING,
             y: (HEADER_HEIGHT - FONT_SIZE_HEADING) / 2.0,
             text: title.to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PADDING * 2.0),
@@ -1792,7 +1796,7 @@ impl CleanupUI {
             y,
             width,
             height,
-            color: COLOR_SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii {
                 top_left: 0.0,
                 top_right: 0.0,
@@ -1815,7 +1819,7 @@ impl CleanupUI {
                 x: PADDING,
                 y: y + (FOOTER_HEIGHT - FONT_SIZE) / 2.0,
                 text: label,
-                color: COLOR_GREEN,
+                color: self.palette.green,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.4),
@@ -1823,16 +1827,16 @@ impl CleanupUI {
             });
         }
 
-        self.render_button(tree, lay.scan_button(), "Scan", COLOR_BLUE);
+        self.render_button(tree, lay.scan_button(), "Scan", self.palette.blue);
 
         // `can_clean` decides both the colour and whether the click is
         // accepted, so the button cannot look disabled and act enabled. Two
         // predicates for one state is how that happens, and it is invisible to
         // a test that only ever asks one of them.
         let clean_color = if self.can_clean() {
-            COLOR_GREEN
+            self.palette.green
         } else {
-            COLOR_SURFACE1
+            self.palette.surface1
         };
         self.render_button(tree, lay.clean_button(), "Clean Up", clean_color);
     }
@@ -1861,7 +1865,7 @@ impl CleanupUI {
             x: text_x,
             y: text_y,
             text: label.to_string(),
-            color: COLOR_BASE,
+            color: self.palette.base,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w),
@@ -1893,7 +1897,7 @@ impl CleanupUI {
                 x: PADDING,
                 y: content_top,
                 text: String::from("No items found for this category."),
-                color: COLOR_SUBTEXT,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PADDING * 2.0),
@@ -1913,7 +1917,7 @@ impl CleanupUI {
                     x: PADDING,
                     y,
                     text: item.path.display().to_string(),
-                    color: COLOR_TEXT,
+                    color: self.palette.text,
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width * 0.6),
@@ -1925,7 +1929,7 @@ impl CleanupUI {
                     x: width - 120.0,
                     y,
                     text: format_size(item.estimated_size_bytes),
-                    color: COLOR_YELLOW,
+                    color: self.palette.yellow,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -1934,7 +1938,11 @@ impl CleanupUI {
 
                 // Safety indicator.
                 let safety_text = if item.is_safe { "Safe" } else { "Caution" };
-                let safety_color = if item.is_safe { COLOR_GREEN } else { COLOR_RED };
+                let safety_color = if item.is_safe {
+                    self.palette.green
+                } else {
+                    self.palette.red
+                };
                 tree.push(RenderCommand::Text {
                     x: width - PADDING - 50.0,
                     y,
@@ -1950,7 +1958,7 @@ impl CleanupUI {
 
         // Back button at bottom.
         self.render_footer_strip(tree, lay);
-        self.render_button(tree, lay.back_button(), "Back", COLOR_BLUE);
+        self.render_button(tree, lay.back_button(), "Back", self.palette.blue);
     }
 
     fn render_progress(&self, tree: &mut RenderTree, lay: &Layout) {
@@ -1966,7 +1974,7 @@ impl CleanupUI {
             x: PADDING,
             y: center_y,
             text: label,
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PADDING * 2.0),
@@ -1981,7 +1989,7 @@ impl CleanupUI {
             y: bar_y,
             width: bar_width,
             height: PROGRESS_HEIGHT,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(PROGRESS_HEIGHT / 2.0),
         });
 
@@ -1993,7 +2001,7 @@ impl CleanupUI {
                 y: bar_y,
                 width: fill_width,
                 height: PROGRESS_HEIGHT,
-                color: COLOR_GREEN,
+                color: self.palette.green,
                 corner_radii: CornerRadii::all(PROGRESS_HEIGHT / 2.0),
             });
         }
@@ -2022,7 +2030,7 @@ impl CleanupUI {
                 x: PADDING,
                 y,
                 text: String::from("Preview only -- no files were deleted."),
-                color: COLOR_YELLOW,
+                color: self.palette.yellow,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - PADDING * 2.0),
@@ -2040,7 +2048,7 @@ impl CleanupUI {
             } else {
                 format!("Files deleted: {}", result.files_deleted)
             },
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PADDING * 2.0),
@@ -2063,9 +2071,9 @@ impl CleanupUI {
             // Green means "done, and good". A preview is neither, so it gets
             // the same neutral colour as the count above it.
             color: if result.simulated {
-                COLOR_TEXT
+                self.palette.text
             } else {
-                COLOR_GREEN
+                self.palette.green
             },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
@@ -2080,7 +2088,7 @@ impl CleanupUI {
                 x: PADDING,
                 y,
                 text: format!("Errors: {}", result.error_count()),
-                color: COLOR_RED,
+                color: self.palette.red,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PADDING * 2.0),
@@ -2093,7 +2101,7 @@ impl CleanupUI {
                     x: PADDING * 2.0,
                     y,
                     text: format!("{}: {msg}", path.display()),
-                    color: COLOR_RED,
+                    color: self.palette.red,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - PADDING * 3.0),
@@ -2114,7 +2122,7 @@ impl CleanupUI {
                 self.history.count(),
                 format_size(total_freed)
             ),
-            color: COLOR_SUBTEXT,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PADDING * 2.0),
@@ -2123,7 +2131,7 @@ impl CleanupUI {
 
         // Done button.
         self.render_footer_strip(tree, lay);
-        self.render_button(tree, lay.done_button(), "Done", COLOR_BLUE);
+        self.render_button(tree, lay.done_button(), "Done", self.palette.blue);
     }
 }
 
@@ -2166,6 +2174,10 @@ fn format_size(bytes: u64) -> String {
 // ============================================================================
 
 impl oswindow::app::App for CleanupUI {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Disk Cleanup")
     }
@@ -3538,5 +3550,50 @@ mod tests {
     #[test]
     fn test_join_paths_empty_segments() {
         assert_eq!(join_paths("/home", &[]), "/home");
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours, not in nine constants.
+    ///
+    /// Asserted on the rectangles emitted rather than on the `palette` field,
+    /// which would only prove it was assigned.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        use oswindow::app::App as _;
+
+        fn fills(ui: &mut CleanupUI) -> Vec<Color> {
+            ui.render(900.0, 640.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn theme(mode: appearance::ThemeMode) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        let mut ui = CleanupUI::new();
+
+        ui.theme_changed(&theme(appearance::ThemeMode::Dark));
+        let dark = fills(&mut ui);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        ui.theme_changed(&theme(appearance::ThemeMode::Light));
+        let light = fills(&mut ui);
+
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on both themes, so it is still \
+             painting from constants"
+        );
     }
 }

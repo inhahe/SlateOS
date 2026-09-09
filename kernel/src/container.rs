@@ -4904,7 +4904,7 @@ pub fn cgroup(id: ContainerId) -> Option<u32> {
 // ---------------------------------------------------------------------------
 
 /// Comprehensive self-test for the container lifecycle manager.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[container] Running self-test...");
 
     // Test 1: No containers initially.
@@ -7293,4 +7293,5 @@ pub fn self_test() {
     serial_println!("[container]   exec cwd defaulting (WorkingDir inheritance): OK");
 
     serial_println!("[container] Self-test PASSED (61 tests)");
+    Ok(())
 }

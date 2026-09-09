@@ -842,7 +842,7 @@ pub fn verify_index(when: &str) {
 // ---------------------------------------------------------------------------
 
 /// Comprehensive self-test for syscall filtering.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[scfilter] Running self-test...");
 
     // Test 1: No filters initially.
@@ -1032,4 +1032,5 @@ pub fn self_test() {
     serial_println!("[scfilter]   Cleanup: OK");
 
     serial_println!("[scfilter] Self-test PASSED (16 tests)");
+    Ok(())
 }

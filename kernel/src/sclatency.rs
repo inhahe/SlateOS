@@ -522,7 +522,7 @@ pub fn is_enabled() -> bool {
 ///
 /// Checks each threshold at `-1`, exactly, and `+1` in nanoseconds, converting
 /// to cycles the same way a real sample arrives.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     let freq = crate::bench::tsc_freq();
@@ -533,7 +533,7 @@ pub fn self_test() {
             "[sclatency] Self-test SKIPPED: TSC uncalibrated (freq={freq}) — \
              cycle bucketing is UNVERIFIED this boot"
         );
-        return;
+        return Ok(());
     }
 
     let ns_to_cycles = |ns: u64| -> u64 {
@@ -552,7 +552,7 @@ pub fn self_test() {
             let want = find_bucket(probe_ns);
             let Some(got) = find_bucket_cycles(ns_to_cycles(probe_ns)) else {
                 serial_println!("[sclatency] Self-test FAILED: uncalibrated mid-test");
-                return;
+                return Ok(());
             };
             // One cycle of rounding slack: `ns * freq / 1e9` truncates, so a
             // probe exactly *on* a boundary can land one cycle below it. A
@@ -588,6 +588,7 @@ pub fn self_test() {
         "[sclatency] Self-test PASSED ({checked} boundary probes agree with the ns reference, \
          TSC {freq} Hz)"
     );
+    Ok(())
 }
 
 extern crate alloc;

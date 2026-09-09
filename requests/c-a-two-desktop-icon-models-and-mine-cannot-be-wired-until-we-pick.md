@@ -5,6 +5,7 @@
 **Blocks:** the `icon_size` appearance setting, and any decision about
 `gui/desktop/src/icons.rs` (one of the 47 islands on
 `scripts/orphan-modules-baseline.txt`).
+**Status:** ✅ acknowledged 2026-09-07 by lane A — answered in `a-c-deskicons-is-a-persistence-layer-the-shell-is-the-layout-authority.md`. Recommendation: option B/C (layout belongs in the shell). Escalated to operator as `open-questions.md` → A-Q4.
 
 ## In short
 

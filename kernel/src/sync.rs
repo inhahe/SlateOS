@@ -1317,7 +1317,7 @@ impl<T> Drop for PreemptSpinIrqGuard<'_, T> {
 
 /// Verify the tracked Mutex works correctly with lockdep and contention stats.
 #[allow(dead_code)]
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[sync] Running self-test...");
@@ -1390,6 +1390,7 @@ pub fn self_test() {
     self_test_stall();
 
     serial_println!("[sync] Self-test PASSED");
+    Ok(())
 }
 
 /// Prove that a spin lasting past the stall threshold emits a stall report.

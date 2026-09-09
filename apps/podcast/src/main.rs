@@ -17,6 +17,7 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+use appearance::Palette;
 use std::collections::HashMap;
 
 use guitk::color::Color;
@@ -34,24 +35,6 @@ use std::time::Duration;
 // ============================================================================
 // Catppuccin Mocha palette
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
 // Layout Constants
@@ -221,20 +204,20 @@ impl Category {
     }
 
     /// Category accent color.
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Technology => BLUE,
-            Self::Science => TEAL,
-            Self::Comedy => YELLOW,
-            Self::News => RED,
-            Self::Education => GREEN,
-            Self::Business => PEACH,
-            Self::Health => GREEN,
-            Self::Arts => MAUVE,
-            Self::Sports => PEACH,
-            Self::Music => LAVENDER,
-            Self::Society => TEAL,
-            Self::TrueCrime => RED,
+            Self::Technology => pal.blue,
+            Self::Science => pal.teal,
+            Self::Comedy => pal.yellow,
+            Self::News => pal.red,
+            Self::Education => pal.green,
+            Self::Business => pal.peach,
+            Self::Health => pal.green,
+            Self::Arts => pal.mauve,
+            Self::Sports => pal.peach,
+            Self::Music => pal.lavender,
+            Self::Society => pal.teal,
+            Self::TrueCrime => pal.red,
         }
     }
 
@@ -296,11 +279,11 @@ impl EpisodeStatus {
     }
 
     /// Color for the status indicator.
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Unplayed => BLUE,
-            Self::InProgress { .. } => YELLOW,
-            Self::Played => SURFACE2,
+            Self::Unplayed => pal.blue,
+            Self::InProgress { .. } => pal.yellow,
+            Self::Played => pal.surface2,
         }
     }
 }
@@ -971,11 +954,18 @@ pub struct PodcastApp {
 
     // Next ID counter
     next_id: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl PodcastApp {
     pub fn new(width: f32, height: f32) -> Self {
         let mut app = Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
             podcasts: Vec::new(),
@@ -2241,7 +2231,7 @@ impl PodcastApp {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2301,7 +2291,7 @@ impl PodcastApp {
             y: 0.0,
             width: SIDEBAR_WIDTH,
             height: self.height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2311,7 +2301,7 @@ impl PodcastApp {
             y: 0.0,
             width: 1.0,
             height: self.height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2323,7 +2313,7 @@ impl PodcastApp {
             x: indent,
             y: 12.0,
             text: "Podcasts".to_string(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 18.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - indent * 2.0),
@@ -2337,7 +2327,7 @@ impl PodcastApp {
                     x: indent,
                     y: item_y,
                     text: (*text).to_string(),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(SIDEBAR_WIDTH - indent * 2.0),
@@ -2348,7 +2338,7 @@ impl PodcastApp {
                     y: item_y + 12.0,
                     width: SIDEBAR_WIDTH - indent * 2.0,
                     height: 1.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::ZERO,
                 }),
                 SidebarRow::Item {
@@ -2376,7 +2366,7 @@ impl PodcastApp {
                 x: indent,
                 y: item_y,
                 text: format!("{hidden} more"),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - indent * 2.0),
@@ -2532,12 +2522,16 @@ impl PodcastApp {
         };
 
         let mut rows = vec![
-            item("Search", BLUE, SidebarTarget::Search),
-            item("All Episodes", LAVENDER, SidebarTarget::AllEpisodes),
-            item(&queue_label, GREEN, SidebarTarget::Queue),
-            item("Downloads", PEACH, SidebarTarget::Downloads),
-            item("History", MAUVE, SidebarTarget::History),
-            item("Statistics", TEAL, SidebarTarget::Statistics),
+            item("Search", self.palette.blue, SidebarTarget::Search),
+            item(
+                "All Episodes",
+                self.palette.lavender,
+                SidebarTarget::AllEpisodes,
+            ),
+            item(&queue_label, self.palette.green, SidebarTarget::Queue),
+            item("Downloads", self.palette.peach, SidebarTarget::Downloads),
+            item("History", self.palette.mauve, SidebarTarget::History),
+            item("Statistics", self.palette.teal, SidebarTarget::Statistics),
             SidebarRow::Divider,
             SidebarRow::Header("SUBSCRIPTIONS"),
         ];
@@ -2551,7 +2545,10 @@ impl PodcastApp {
             };
             rows.push(SidebarRow::Item {
                 label,
-                accent: podcast.categories.first().map_or(BLUE, |c| c.color()),
+                accent: podcast
+                    .categories
+                    .first()
+                    .map_or(self.palette.blue, |c| c.color(&self.palette)),
                 target: SidebarTarget::Podcast(podcast.id),
             });
         }
@@ -2561,7 +2558,7 @@ impl PodcastApp {
         for cat in Category::ALL {
             rows.push(SidebarRow::Item {
                 label: cat.name().to_string(),
-                accent: cat.color(),
+                accent: cat.color(&self.palette),
                 target: SidebarTarget::Category(*cat),
             });
         }
@@ -2587,7 +2584,7 @@ impl PodcastApp {
                 y,
                 width: item_w + 8.0,
                 height: item_h,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(6.0),
             });
             // Accent bar.
@@ -2605,7 +2602,11 @@ impl PodcastApp {
             x: x + 8.0,
             y: y + 5.0,
             text: label.to_string(),
-            color: if selected { TEXT } else { SUBTEXT0 },
+            color: if selected {
+                self.palette.text
+            } else {
+                self.palette.subtext0
+            },
             font_size: 13.0,
             font_weight: if selected {
                 FontWeightHint::Bold
@@ -2720,7 +2721,7 @@ impl PodcastApp {
             x: content_x + 16.0,
             y: count_y + 8.0,
             text: format!("{} episodes", episodes.len()),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w - 32.0),
@@ -2764,7 +2765,7 @@ impl PodcastApp {
                 x: content_x + 16.0,
                 y: start_y + window.count as f32 * EPISODE_ROW_HEIGHT,
                 text: format!("{hidden} more"),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 32.0),
@@ -2786,7 +2787,7 @@ impl PodcastApp {
             y: 0.0,
             width,
             height: HEADER_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2794,7 +2795,7 @@ impl PodcastApp {
             x: x + 16.0,
             y: 14.0,
             text: title.to_string(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 18.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 32.0),
@@ -2808,7 +2809,7 @@ impl PodcastApp {
             y,
             width,
             height: TOOLBAR_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2823,7 +2824,7 @@ impl PodcastApp {
                     y: pill_y,
                     width: label_width,
                     height: CATEGORY_PILL_HEIGHT,
-                    color: SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(14.0),
                 });
             }
@@ -2832,7 +2833,11 @@ impl PodcastApp {
                 x: pill_x + 8.0,
                 y: pill_y + 6.0,
                 text: label.to_string(),
-                color: if selected { TEXT } else { SUBTEXT0 },
+                color: if selected {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 12.0,
                 font_weight: if selected {
                     FontWeightHint::Bold
@@ -2865,13 +2870,13 @@ impl PodcastApp {
                 y,
                 width,
                 height: EPISODE_ROW_HEIGHT,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(8.0),
             });
         }
 
         // Status dot.
-        let dot_color = episode.status.color();
+        let dot_color = episode.status.color(&self.palette);
         cmds.push(RenderCommand::FillRect {
             x: x + 12.0,
             y: y + 12.0,
@@ -2886,7 +2891,7 @@ impl PodcastApp {
             x: x + 28.0,
             y: y + 8.0,
             text: episode.title.clone(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 160.0),
@@ -2898,7 +2903,7 @@ impl PodcastApp {
             x: x + 28.0,
             y: y + 28.0,
             text: format!("{} - {}", podcast_title, episode.date),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 160.0),
@@ -2911,7 +2916,7 @@ impl PodcastApp {
             x: x + width - 120.0,
             y: y + 8.0,
             text: dur_text,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
@@ -2924,7 +2929,7 @@ impl PodcastApp {
                 x: x + width - 40.0,
                 y: y + 8.0,
                 text: "DL".to_string(),
-                color: GREEN,
+                color: self.palette.green,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
@@ -2943,7 +2948,7 @@ impl PodcastApp {
                 y: bar_y,
                 width: bar_w,
                 height: 3.0,
-                color: SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::all(1.5),
             });
             cmds.push(RenderCommand::FillRect {
@@ -2951,7 +2956,7 @@ impl PodcastApp {
                 y: bar_y,
                 width: bar_w * progress,
                 height: 3.0,
-                color: BLUE,
+                color: self.palette.blue,
                 corner_radii: CornerRadii::all(1.5),
             });
         }
@@ -2961,7 +2966,7 @@ impl PodcastApp {
             x: x + width - 120.0,
             y: y + 28.0,
             text: episode.file_size_display(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
@@ -2974,7 +2979,7 @@ impl PodcastApp {
             y: y + EPISODE_ROW_HEIGHT - 1.0,
             width: width - 24.0,
             height: 1.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
     }
@@ -3021,7 +3026,7 @@ impl PodcastApp {
             x: pad,
             y: detail_y,
             text: episode.title.clone(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 20.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(text_w),
@@ -3034,7 +3039,7 @@ impl PodcastApp {
             x: pad,
             y: detail_y,
             text: format!("From: {}", podcast.title),
-            color: BLUE,
+            color: self.palette.blue,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(text_w),
@@ -3052,7 +3057,7 @@ impl PodcastApp {
                 episode.duration_display(),
                 episode.file_size_display()
             ),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(text_w),
@@ -3074,14 +3079,14 @@ impl PodcastApp {
             y: detail_y,
             width: status_w,
             height: 22.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(11.0),
         });
         cmds.push(RenderCommand::Text {
             x: pad + 8.0,
             y: detail_y + 4.0,
             text: status_label.to_string(),
-            color: episode.status.color(),
+            color: episode.status.color(&self.palette),
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
@@ -3093,14 +3098,14 @@ impl PodcastApp {
             y: detail_y,
             width: text::padded_width(dl_label, 8.0, 11.0, FontWeightHint::Bold),
             height: 22.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(11.0),
         });
         cmds.push(RenderCommand::Text {
             x: dl_badge_x + 8.0,
             y: detail_y + 4.0,
             text: dl_label.to_string(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
@@ -3114,7 +3119,7 @@ impl PodcastApp {
             y: detail_y,
             width: text_w,
             height: 1.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
         detail_y += 16.0;
@@ -3124,7 +3129,7 @@ impl PodcastApp {
             x: pad,
             y: detail_y,
             text: "Description".to_string(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(text_w),
@@ -3136,7 +3141,7 @@ impl PodcastApp {
         // an episode description used to be shown as its first line and no
         // more. `Paragraph::draw` returns the height it used, so the sections
         // below start under the description however long it turns out to be.
-        detail_y += text::Paragraph::new(&episode.description, SUBTEXT0)
+        detail_y += text::Paragraph::new(&episode.description, self.palette.subtext0)
             .at(pad, detail_y, text_w)
             .font(DESCRIPTION_FONT_SIZE, FontWeightHint::Regular)
             .line_height(PROSE_LINE_HEIGHT)
@@ -3150,7 +3155,7 @@ impl PodcastApp {
                 y: detail_y,
                 width: text_w,
                 height: 1.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::ZERO,
             });
             detail_y += 16.0;
@@ -3159,7 +3164,7 @@ impl PodcastApp {
                 x: pad,
                 y: detail_y,
                 text: "Notes".to_string(),
-                color: TEXT,
+                color: self.palette.text,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(text_w),
@@ -3172,7 +3177,7 @@ impl PodcastApp {
                 // drawing them as a single clipped line lost the most. The
                 // bookmark rows are stacked directly below, so the cursor has to
                 // advance over the lines actually drawn or they land on top.
-                detail_y += text::Paragraph::new(&episode.notes.text, SUBTEXT0)
+                detail_y += text::Paragraph::new(&episode.notes.text, self.palette.subtext0)
                     .at(pad, detail_y, text_w)
                     .font(NOTES_FONT_SIZE, FontWeightHint::Regular)
                     .line_height(PROSE_LINE_HEIGHT)
@@ -3187,14 +3192,14 @@ impl PodcastApp {
                     y: detail_y,
                     width: 60.0,
                     height: 20.0,
-                    color: SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(4.0),
                 });
                 cmds.push(RenderCommand::Text {
                     x: pad + 6.0,
                     y: detail_y + 3.0,
                     text: bm.timestamp_display(),
-                    color: BLUE,
+                    color: self.palette.blue,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(50.0),
@@ -3204,7 +3209,7 @@ impl PodcastApp {
                     x: pad + 68.0,
                     y: detail_y + 3.0,
                     text: bm.label.clone(),
-                    color: TEXT,
+                    color: self.palette.text,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(text_w - 80.0),
@@ -3230,7 +3235,7 @@ impl PodcastApp {
                 x: content_x + 16.0,
                 y: HEADER_HEIGHT + 40.0,
                 text: "Queue is empty. Add episodes to play next.".to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 32.0),
@@ -3247,7 +3252,11 @@ impl PodcastApp {
                 "Auto-play: {}",
                 if self.auto_play_next { "On" } else { "Off" }
             ),
-            color: if self.auto_play_next { GREEN } else { OVERLAY0 },
+            color: if self.auto_play_next {
+                self.palette.green
+            } else {
+                self.palette.overlay0
+            },
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w - 32.0),
@@ -3269,7 +3278,7 @@ impl PodcastApp {
                     y: row_y,
                     width: content_w - 16.0,
                     height: row_h,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(6.0),
                 });
             }
@@ -3279,7 +3288,7 @@ impl PodcastApp {
                 x: content_x + 16.0,
                 y: row_y + 10.0,
                 text: format!("{}.", idx.saturating_add(1)),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
@@ -3291,7 +3300,7 @@ impl PodcastApp {
                 x: content_x + 48.0,
                 y: row_y + 8.0,
                 text: item.episode_title.clone(),
-                color: TEXT,
+                color: self.palette.text,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 180.0),
@@ -3303,7 +3312,7 @@ impl PodcastApp {
                 x: content_x + 48.0,
                 y: row_y + 28.0,
                 text: item.podcast_title.clone(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 180.0),
@@ -3315,7 +3324,7 @@ impl PodcastApp {
                 x: content_x + content_w - 100.0,
                 y: row_y + 10.0,
                 text: format_duration(item.duration_secs),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
@@ -3348,7 +3357,7 @@ impl PodcastApp {
             y: info_y,
             width: bar_w,
             height: bar_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::FillRect {
@@ -3356,7 +3365,11 @@ impl PodcastApp {
             y: info_y,
             width: bar_w * usage_pct,
             height: bar_h,
-            color: if usage_pct > 0.9 { RED } else { BLUE },
+            color: if usage_pct > 0.9 {
+                self.palette.red
+            } else {
+                self.palette.blue
+            },
             corner_radii: CornerRadii::all(4.0),
         });
         info_y += bar_h + 4.0;
@@ -3370,7 +3383,7 @@ impl PodcastApp {
                 format_bytes(self.total_disk_bytes),
                 self.disk_usage_pct()
             ),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bar_w),
@@ -3384,7 +3397,7 @@ impl PodcastApp {
                 x: bar_x,
                 y: info_y,
                 text: "No active downloads.".to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bar_w),
@@ -3395,7 +3408,7 @@ impl PodcastApp {
                 x: bar_x,
                 y: info_y,
                 text: format!("Download Queue ({})", self.download_queue.len()),
-                color: TEXT,
+                color: self.palette.text,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(bar_w),
@@ -3412,7 +3425,7 @@ impl PodcastApp {
                     x: bar_x,
                     y: info_y,
                     text: item.episode_title.clone(),
-                    color: TEXT,
+                    color: self.palette.text,
                     font_size: 13.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(bar_w - 100.0),
@@ -3426,7 +3439,7 @@ impl PodcastApp {
                     y: prog_y,
                     width: bar_w - 80.0,
                     height: 6.0,
-                    color: SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(3.0),
                 });
                 cmds.push(RenderCommand::FillRect {
@@ -3434,7 +3447,7 @@ impl PodcastApp {
                     y: prog_y,
                     width: (bar_w - 80.0) * item.progress,
                     height: 6.0,
-                    color: PEACH,
+                    color: self.palette.peach,
                     corner_radii: CornerRadii::all(3.0),
                 });
 
@@ -3443,7 +3456,7 @@ impl PodcastApp {
                     x: bar_x + bar_w - 70.0,
                     y: info_y + 6.0,
                     text: format!("{:.0}%", item.progress * 100.0),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(60.0),
@@ -3462,7 +3475,7 @@ impl PodcastApp {
             y: info_y,
             width: bar_w,
             height: 1.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
         info_y += 12.0;
@@ -3471,7 +3484,7 @@ impl PodcastApp {
             x: bar_x,
             y: info_y,
             text: "Downloaded Episodes".to_string(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(bar_w),
@@ -3492,7 +3505,7 @@ impl PodcastApp {
                     x: bar_x,
                     y: info_y,
                     text: ep.title.clone(),
-                    color: TEXT,
+                    color: self.palette.text,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(bar_w - 100.0),
@@ -3502,7 +3515,7 @@ impl PodcastApp {
                     x: bar_x + bar_w - 90.0,
                     y: info_y,
                     text: ep.file_size_display(),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(80.0),
@@ -3528,7 +3541,7 @@ impl PodcastApp {
                 x: content_x + 16.0,
                 y: HEADER_HEIGHT + 40.0,
                 text: "No playback history yet.".to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 32.0),
@@ -3550,7 +3563,7 @@ impl PodcastApp {
                 x: content_x + 16.0,
                 y: row_y + 6.0,
                 text: entry.episode_title.clone(),
-                color: TEXT,
+                color: self.palette.text,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 160.0),
@@ -3565,7 +3578,7 @@ impl PodcastApp {
                     entry.podcast_title,
                     format_duration(entry.duration_listened_secs)
                 ),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 160.0),
@@ -3578,7 +3591,7 @@ impl PodcastApp {
                     x: content_x + content_w - 100.0,
                     y: row_y + 12.0,
                     text: "Completed".to_string(),
-                    color: GREEN,
+                    color: self.palette.green,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(80.0),
@@ -3591,7 +3604,7 @@ impl PodcastApp {
                 x: content_x + content_w - 130.0,
                 y: row_y + 30.0,
                 text: entry.listened_at.clone(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
@@ -3604,7 +3617,7 @@ impl PodcastApp {
                 y: row_y + row_h - 1.0,
                 width: content_w - 32.0,
                 height: 1.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::ZERO,
             });
 
@@ -3635,7 +3648,7 @@ impl PodcastApp {
             card_h,
             "Total Listening Time",
             &self.stats.total_time_display(),
-            BLUE,
+            self.palette.blue,
         );
 
         // Card 2: Episodes completed.
@@ -3647,7 +3660,7 @@ impl PodcastApp {
             card_h,
             "Episodes Completed",
             &self.stats.episodes_completed.to_string(),
-            GREEN,
+            self.palette.green,
         );
 
         card_y += card_h + 16.0;
@@ -3661,7 +3674,7 @@ impl PodcastApp {
             card_h,
             "Subscriptions",
             &self.stats.subscriptions_count.to_string(),
-            LAVENDER,
+            self.palette.lavender,
         );
 
         // Card 4: Most listened.
@@ -3678,7 +3691,7 @@ impl PodcastApp {
             card_h,
             "Most Listened",
             most_listened,
-            PEACH,
+            self.palette.peach,
         );
 
         card_y += card_h + 32.0;
@@ -3688,7 +3701,7 @@ impl PodcastApp {
             x: pad,
             y: card_y,
             text: "Per-Podcast Breakdown".to_string(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w - 48.0),
@@ -3710,7 +3723,7 @@ impl PodcastApp {
                 x: pad,
                 y: card_y,
                 text: podcast.title.clone(),
-                color: TEXT,
+                color: self.palette.text,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w - 200.0),
@@ -3720,7 +3733,7 @@ impl PodcastApp {
                 x: pad + content_w - 200.0,
                 y: card_y,
                 text: format!("{}h {}m", hours, mins),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
@@ -3749,7 +3762,7 @@ impl PodcastApp {
             y,
             width,
             height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(12.0),
         });
 
@@ -3768,7 +3781,7 @@ impl PodcastApp {
             x: x + 16.0,
             y: y + 24.0,
             text: label.to_string(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 32.0),
@@ -3780,7 +3793,7 @@ impl PodcastApp {
             x: x + 16.0,
             y: y + 48.0,
             text: value.to_string(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 32.0),
@@ -3807,7 +3820,7 @@ impl PodcastApp {
             y: input_y,
             width: text_w,
             height: SEARCH_BAR_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(8.0),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -3815,7 +3828,7 @@ impl PodcastApp {
             y: input_y,
             width: text_w,
             height: SEARCH_BAR_HEIGHT,
-            color: SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -3830,9 +3843,9 @@ impl PodcastApp {
             y: input_y + 10.0,
             text: display_text.to_string(),
             color: if self.search_query.is_empty() {
-                OVERLAY0
+                self.palette.overlay0
             } else {
-                TEXT
+                self.palette.text
             },
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
@@ -3847,7 +3860,7 @@ impl PodcastApp {
                 x: pad,
                 y: results_y,
                 text: "Type to search across all podcasts and episodes.".to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(text_w),
@@ -3858,7 +3871,7 @@ impl PodcastApp {
                 x: pad,
                 y: results_y,
                 text: format!("{} results", self.search_results.len()),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(text_w),
@@ -3995,7 +4008,7 @@ impl PodcastApp {
             y: bar_y,
             width: self.width,
             height: NOW_PLAYING_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4005,7 +4018,7 @@ impl PodcastApp {
             y: bar_y,
             width: self.width,
             height: 1.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4020,7 +4033,7 @@ impl PodcastApp {
             y: bar_y + 1.0,
             width: self.width * progress,
             height: 3.0,
-            color: BLUE,
+            color: self.palette.blue,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4048,7 +4061,7 @@ impl PodcastApp {
             x: info_x,
             y: info_y,
             text: ep_title,
-            color: TEXT,
+            color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(350.0),
@@ -4059,7 +4072,7 @@ impl PodcastApp {
             x: info_x,
             y: info_y + 20.0,
             text: pod_title,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(350.0),
@@ -4082,14 +4095,14 @@ impl PodcastApp {
             y: back.y,
             width: back.width,
             height: back.height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(18.0),
         });
         cmds.push(RenderCommand::Text {
             x: back.x + 6.0,
             y: back.y + 9.0,
             text: format!("-{SKIP_BACK_SECS}s"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(28.0),
@@ -4103,7 +4116,7 @@ impl PodcastApp {
             y: pp.y,
             width: pp.width,
             height: pp.height,
-            color: BLUE,
+            color: self.palette.blue,
             corner_radii: CornerRadii::all(20.0),
         });
         let pp_label = match self.player_state {
@@ -4115,7 +4128,7 @@ impl PodcastApp {
             x: pp.x + 12.0,
             y: pp.y + 10.0,
             text: pp_label.to_string(),
-            color: CRUST,
+            color: self.palette.crust,
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(20.0),
@@ -4129,14 +4142,14 @@ impl PodcastApp {
             y: fwd.y,
             width: fwd.width,
             height: fwd.height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(18.0),
         });
         cmds.push(RenderCommand::Text {
             x: fwd.x + 4.0,
             y: fwd.y + 9.0,
             text: format!("+{SKIP_FORWARD_SECS}s"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(32.0),
@@ -4153,7 +4166,7 @@ impl PodcastApp {
                 format_duration(self.playback_position_secs),
                 format_duration(self.playback_duration_secs)
             ),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(150.0),
@@ -4167,14 +4180,14 @@ impl PodcastApp {
             y: speed.y,
             width: speed.width,
             height: speed.height,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
             x: speed.x + 6.0,
             y: speed.y + 4.0,
             text: self.playback_speed.label(),
-            color: PEACH,
+            color: self.palette.peach,
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(38.0),
@@ -4188,6 +4201,10 @@ impl PodcastApp {
 // ============================================================================
 
 impl App for PodcastApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // What is playing, because that is what the window is for. A podcast
         // manager is left open in the background and found again by its title.
@@ -4365,9 +4382,10 @@ mod tests {
 
     #[test]
     fn test_category_color() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         // Each category should have a non-default color.
         for cat in Category::ALL {
-            let color = cat.color();
+            let color = cat.color(&pal);
             assert_ne!(color, Color::BLACK);
         }
     }
@@ -4405,8 +4423,9 @@ mod tests {
 
     #[test]
     fn test_episode_status_colors() {
-        let unplayed_color = EpisodeStatus::Unplayed.color();
-        let played_color = EpisodeStatus::Played.color();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let unplayed_color = EpisodeStatus::Unplayed.color(&pal);
+        let played_color = EpisodeStatus::Played.color(&pal);
         assert_ne!(unplayed_color, played_color);
     }
 
@@ -5749,6 +5768,7 @@ mod tests {
     /// The lines of one prose field: every text of that colour and size drawn
     /// below the named section heading, top to bottom.
     fn prose_under(cmds: &[RenderCommand], heading: &str, size: f32) -> Vec<(f32, String)> {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let heading_y = cmds
             .iter()
             .find_map(|c| match c {
@@ -5765,7 +5785,10 @@ mod tests {
                     color,
                     font_size,
                     ..
-                } if *color == SUBTEXT0 && (*font_size - size).abs() < 0.01 && *y > heading_y => {
+                } if *color == pal.subtext0
+                    && (*font_size - size).abs() < 0.01
+                    && *y > heading_y =>
+                {
                     Some((*y, text.clone()))
                 }
                 _ => None,
@@ -7182,5 +7205,65 @@ mod tests {
         assert_eq!(app.player_control_at(app.width + 50.0, bar_y + 2.0), None);
         app.handle_event(&click_at(app.width + 50.0, bar_y + 2.0));
         assert_eq!(app.playback_position_secs, 600);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        use oswindow::app::App as _;
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut PodcastApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = PodcastApp::new(1000.0, 700.0);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

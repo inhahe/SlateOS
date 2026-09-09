@@ -18,6 +18,7 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+use appearance::Palette;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -37,18 +38,6 @@ use oswindow::app::{self, App, Response};
 // ============================================================================
 // Catppuccin Mocha theme colors
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const MANTLE: Color = Color::from_hex(0x181825);
 
 // ============================================================================
 // Note color palettes — each has a light and dark variant
@@ -175,9 +164,15 @@ pub fn note_palette(index: NoteColorIndex) -> NoteColorPalette {
     NOTE_COLORS
         .get(index.as_usize())
         .copied()
+        // Fixed, and deliberately not from `appearance::Palette`: a note's
+        // colour is content -- the swatch the user chose -- not chrome, so it
+        // does not follow the desktop theme any more than `paint`'s swatches
+        // do. This arm is unreachable by construction anyway; it exists so a
+        // ninth colour added to the enum and not to the table is a wrong
+        // swatch rather than a panic in the renderer.
         .unwrap_or(NoteColorPalette {
-            light: YELLOW,
-            dark: SURFACE0,
+            light: Color::from_hex(0xF9E2AF),
+            dark: Color::from_hex(0x313244),
         })
 }
 
@@ -1692,7 +1687,7 @@ fn column_at(text_str: &str, origin: f32, x: f32, size: f32, weight: FontWeightH
 // ============================================================================
 
 /// Draw one sticky note, recording every part of it a click can land on.
-fn draw_note(frame: &mut Frame, note: &Note, is_active: bool, caret: Option<Caret>) {
+fn draw_note(frame: &mut Frame, pal: &Palette, note: &Note, is_active: bool, caret: Option<Caret>) {
     let palette = note.palette();
     let corner = CornerRadii::all(8.0);
     let font = note.font_size.size();
@@ -1753,7 +1748,7 @@ fn draw_note(frame: &mut Frame, note: &Note, is_active: bool, caret: Option<Care
         x: title_x,
         y: note.y + 6.0,
         text: title_display,
-        color: MANTLE,
+        color: pal.mantle,
         font_size: title_font,
         font_weight: FontWeightHint::Bold,
         max_width: Some(title_room),
@@ -1782,7 +1777,7 @@ fn draw_note(frame: &mut Frame, note: &Note, is_active: bool, caret: Option<Care
             y1: note.y + 5.0,
             x2: cx,
             y2: note.y + 5.0 + title_font * 1.2,
-            color: MANTLE,
+            color: pal.mantle,
             width: 1.5,
         });
     }
@@ -1822,7 +1817,7 @@ fn draw_note(frame: &mut Frame, note: &Note, is_active: bool, caret: Option<Care
                 x: note.x + NOTE_PAD,
                 y: ly,
                 text: prefix.to_string(),
-                color: SUBTEXT0,
+                color: pal.subtext0,
                 font_size: font,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1848,7 +1843,7 @@ fn draw_note(frame: &mut Frame, note: &Note, is_active: bool, caret: Option<Care
             x: text_x,
             y: ly,
             text: content.clone(),
-            color: TEXT_COLOR,
+            color: pal.text,
             font_size: font,
             font_weight: weight,
             max_width: Some((note.x + note.width - NOTE_PAD - text_x).max(0.0)),
@@ -1865,7 +1860,7 @@ fn draw_note(frame: &mut Frame, note: &Note, is_active: bool, caret: Option<Care
                 y1: ly,
                 x2: cx,
                 y2: ly + font * 1.2,
-                color: TEXT_COLOR,
+                color: pal.text,
                 width: 1.0,
             });
         }
@@ -1896,7 +1891,7 @@ fn draw_note(frame: &mut Frame, note: &Note, is_active: bool, caret: Option<Care
             y: note.y,
             width: note.width,
             height: note.height,
-            color: BLUE,
+            color: pal.blue,
             line_width: 2.0,
             corner_radii: corner,
         });
@@ -1971,6 +1966,12 @@ pub struct StickyNotesApp {
     /// silently is how a day of notes disappears.
     status: String,
     saves: u32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for StickyNotesApp {
@@ -1984,6 +1985,7 @@ impl StickyNotesApp {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             store: NoteStore::new(),
             autosave: AutoSave::new(AUTOSAVE_MS),
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
@@ -2164,7 +2166,7 @@ impl StickyNotesApp {
             y: 0.0,
             width,
             height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2183,7 +2185,7 @@ impl StickyNotesApp {
                 if note.pinned != pinned {
                     continue;
                 }
-                draw_note(&mut frame, note, active == Some(note.id), {
+                draw_note(&mut frame, &self.palette, note, active == Some(note.id), {
                     match self.focus {
                         Some(Focus::Title(id)) if id == note.id => Some(Caret::Title(self.caret.1)),
                         Some(Focus::Body(id)) if id == note.id => {
@@ -2212,7 +2214,7 @@ impl StickyNotesApp {
             y: 0.0,
             width: SIDEBAR_WIDTH,
             height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2223,7 +2225,7 @@ impl StickyNotesApp {
             y: 0.0,
             width: SIDEBAR_WIDTH,
             height: SEARCH_BAR_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         if searching {
@@ -2232,16 +2234,16 @@ impl StickyNotesApp {
                 y: 1.0,
                 width: SIDEBAR_WIDTH - 2.0,
                 height: SEARCH_BAR_HEIGHT - 2.0,
-                color: BLUE,
+                color: self.palette.blue,
                 line_width: 1.0,
                 corner_radii: CornerRadii::ZERO,
             });
         }
         let query = self.store.search_query();
         let (search_text, search_color) = if query.is_empty() && !searching {
-            (String::from("Search notes..."), OVERLAY0)
+            (String::from("Search notes..."), self.palette.overlay0)
         } else {
-            (query.to_string(), TEXT_COLOR)
+            (query.to_string(), self.palette.text)
         };
         frame.push(RenderCommand::Text {
             x: 10.0,
@@ -2266,7 +2268,7 @@ impl StickyNotesApp {
                 y1: 9.0,
                 x2: cx,
                 y2: 27.0,
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 width: 1.0,
             });
         }
@@ -2297,8 +2299,16 @@ impl StickyNotesApp {
                     frame,
                     Rect::new(x, SEARCH_BAR_HEIGHT + 3.0, w, TAG_STRIP_H - 6.0),
                     &label,
-                    if selected { MANTLE } else { SUBTEXT0 },
-                    Some(if selected { BLUE } else { SURFACE1 }),
+                    if selected {
+                        self.palette.mantle
+                    } else {
+                        self.palette.subtext0
+                    },
+                    Some(if selected {
+                        self.palette.blue
+                    } else {
+                        self.palette.surface1
+                    }),
                     Some(Target::TagChip(i)),
                 );
                 x += w + CHIP_GAP;
@@ -2320,7 +2330,11 @@ impl StickyNotesApp {
                 y: iy,
                 width: SIDEBAR_WIDTH,
                 height: SIDEBAR_ITEM_H,
-                color: if selected { BASE } else { SURFACE0 },
+                color: if selected {
+                    self.palette.base
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii::ZERO,
             });
             frame.push(RenderCommand::FillRect {
@@ -2348,7 +2362,7 @@ impl StickyNotesApp {
                     SIDEBAR_TITLE_SIZE,
                     FontWeightHint::Bold,
                 ),
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_size: SIDEBAR_TITLE_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(room),
@@ -2369,7 +2383,7 @@ impl StickyNotesApp {
                     SIDEBAR_PREVIEW_SIZE,
                     FontWeightHint::Regular,
                 ),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: SIDEBAR_PREVIEW_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(room),
@@ -2380,7 +2394,7 @@ impl StickyNotesApp {
                 y1: iy + SIDEBAR_ITEM_H - 1.0,
                 x2: SIDEBAR_WIDTH - 8.0,
                 y2: iy + SIDEBAR_ITEM_H - 1.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 width: 1.0,
             });
             frame.hit(
@@ -2397,7 +2411,7 @@ impl StickyNotesApp {
                 } else {
                     "No notes match"
                 }),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 24.0),
@@ -2415,7 +2429,7 @@ impl StickyNotesApp {
             y: bar_y,
             width,
             height: TOOLBAR_H,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         let chip_y = bar_y + (TOOLBAR_H - CHIP_H) / 2.0;
@@ -2451,8 +2465,12 @@ impl StickyNotesApp {
                 frame,
                 Rect::new(x, chip_y, w, CHIP_H),
                 label,
-                if *on { MANTLE } else { OVERLAY0 },
-                if *on { Some(BLUE) } else { None },
+                if *on {
+                    self.palette.mantle
+                } else {
+                    self.palette.overlay0
+                },
+                if *on { Some(self.palette.blue) } else { None },
                 Some(*target),
             );
             right = x - CHIP_GAP;
@@ -2475,7 +2493,13 @@ impl StickyNotesApp {
             cursor += w + CHIP_GAP;
         };
 
-        place(frame, "+ New", Some(Target::NewNote), MANTLE, Some(GREEN));
+        place(
+            frame,
+            "+ New",
+            Some(Target::NewNote),
+            self.palette.mantle,
+            Some(self.palette.green),
+        );
 
         if let Some(note) = self
             .store
@@ -2490,53 +2514,59 @@ impl StickyNotesApp {
                 frame,
                 &format!("Color: {}", note.color_index.name()),
                 Some(Target::CycleColor),
-                MANTLE,
+                self.palette.mantle,
                 Some(note.palette().light),
             );
             place(
                 frame,
                 &format!("Size: {}", note.font_size.name()),
                 Some(Target::CycleFontSize),
-                TEXT_COLOR,
-                Some(SURFACE1),
+                self.palette.text,
+                Some(self.palette.surface1),
             );
             place(
                 frame,
                 &format!("Line: {}", line_kind_name(&kind)),
                 Some(Target::CycleLineKind),
-                TEXT_COLOR,
-                Some(SURFACE1),
+                self.palette.text,
+                Some(self.palette.surface1),
             );
             place(
                 frame,
                 if note.pinned { "Unpin" } else { "Pin" },
                 Some(Target::TogglePin),
-                MANTLE,
-                Some(YELLOW),
+                self.palette.mantle,
+                Some(self.palette.yellow),
             );
             place(
                 frame,
                 "Undo",
                 Some(Target::Undo),
                 if note.undo_history.can_undo() {
-                    TEXT_COLOR
+                    self.palette.text
                 } else {
-                    OVERLAY0
+                    self.palette.overlay0
                 },
-                Some(SURFACE1),
+                Some(self.palette.surface1),
             );
             place(
                 frame,
                 "Redo",
                 Some(Target::Redo),
                 if note.undo_history.can_redo() {
-                    TEXT_COLOR
+                    self.palette.text
                 } else {
-                    OVERLAY0
+                    self.palette.overlay0
                 },
-                Some(SURFACE1),
+                Some(self.palette.surface1),
             );
-            place(frame, "Delete", Some(Target::DeleteNote), MANTLE, Some(RED));
+            place(
+                frame,
+                "Delete",
+                Some(Target::DeleteNote),
+                self.palette.mantle,
+                Some(self.palette.red),
+            );
         }
 
         // Status last, and only if it fits: it is the least important thing on
@@ -2550,7 +2580,7 @@ impl StickyNotesApp {
         } else {
             self.status.clone()
         };
-        place(frame, &status, None, SUBTEXT0, None);
+        place(frame, &status, None, self.palette.subtext0, None);
     }
 }
 
@@ -3504,6 +3534,10 @@ impl StickyNotesApp {
 // ============================================================================
 
 impl App for StickyNotesApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         let dirty = if self.store.is_dirty() { " *" } else { "" };
         format!("Sticky Notes{dirty}")
@@ -5529,6 +5563,65 @@ mod tests {
         assert!(
             drawn.contains(&"brief"),
             "short preview was altered: {drawn:?}"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut StickyNotesApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = StickyNotesApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

@@ -136,7 +136,7 @@ impl Thumbnail {
     /// would be a third statement of the same fact, free to drift from both.
     /// It also gets the length check for nothing.
     #[must_use]
-    pub fn to_wire_bytes(&self) -> Option<Vec<u8>> {
+    pub fn to_wire_bytes(&self) -> Option<guitk::canvas::WireBytes> {
         Canvas::from_argb(self.width, self.height, &self.pixels).map(|c| c.to_argb8888())
     }
 }
@@ -775,7 +775,16 @@ fn try_decoded_thumbnail(
         max_decompressed_bytes: usize::try_from(config.max_source_pixels.saturating_mul(16))
             .unwrap_or(usize::MAX),
     };
-    let image = imagecodec::decode(&data, limits).ok()?;
+    // Scaled on the way out, not decoded whole and shrunk afterwards. The
+    // full-size `Vec<u32>` between the two was the larger half of this
+    // function's peak -- 96 MB for a 24-megapixel photograph, to produce 64 KB
+    // of preview.
+    //
+    // A ceiling of `config.size` in both directions rather than the exact
+    // thumbnail box: `box_filter_downscale` below still does the final fit,
+    // and asking the decoder for the exact size would put the aspect-ratio
+    // decision in two places.
+    let image = imagecodec::decode_scaled(&data, limits, config.size, config.size).ok()?;
     // Dropped before the pixel buffer is converted: for a 24-megapixel PNG this
     // is tens of megabytes of compressed data with no further reader, and the
     // conversion below is the peak of this function.

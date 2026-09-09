@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 # The database browser had no way in. `main` built a sample database, drew one
 # frame into a `Vec` and dropped it, so every control below -- Execute, the

@@ -5646,6 +5646,10 @@ pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
                 super::linux::restart::ERESTARTSYS,
             ));
         }
+        // `tty::read` (blocking) never returns WouldBlock, but exhaustiveness
+        // requires the arm.  Treat it as zero bytes read — the caller can
+        // retry.
+        crate::tty::ConsoleRead::WouldBlock => 0,
     };
     if n == 0 {
         return TtyReadOutcome::Bytes(0);
@@ -5998,6 +6002,89 @@ pub fn sys_pty_slave_write(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
     tty_write_from_user(tty, args.arg1, args.arg2 as usize)
+}
+
+/// `SYS_PTY_SLAVE_READ` — read from a pty slave (blocking).
+///
+/// `arg0`: terminal, under the [`resolve_tty_arg`] convention (`0` = the
+/// caller's controlling terminal, `>= 2` = an owned pty handle).
+/// `arg1`: pointer to the output buffer.
+/// `arg2`: capacity in bytes.
+///
+/// This is the slave-side counterpart of [`sys_pty_master_read`].  Unlike
+/// [`tty_read_into_user`] (which hardcodes `current_tty()`), this resolves the
+/// terminal from `arg0`, so the read targets the correct pty even when the
+/// caller's controlling terminal is something else.
+///
+/// The read honours the slave's own termios (canonical line editing, raw
+/// `VMIN`/`VTIME`, `ISIG` signal generation).  Job control (`SIGTTIN`) is
+/// applied against the *named* terminal, not the caller's ctty.
+pub fn sys_pty_slave_read(args: &SyscallArgs) -> SyscallResult {
+    pty_slave_read_common(args, false)
+}
+
+/// `SYS_PTY_SLAVE_TRY_READ` — non-blocking [`sys_pty_slave_read`].
+///
+/// Same arguments.  Returns `WouldBlock` (`EAGAIN`) if no data is immediately
+/// available.
+pub fn sys_pty_slave_try_read(args: &SyscallArgs) -> SyscallResult {
+    pty_slave_read_common(args, true)
+}
+
+/// Body shared by the blocking and non-blocking slave reads.
+fn pty_slave_read_common(args: &SyscallArgs, non_blocking: bool) -> SyscallResult {
+    let tty = match resolve_tty_arg(args.arg0) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // Job control: a background process reading a terminal gets SIGTTIN.
+    // Use the terminal-targeted check rather than `tty_job_control_check`,
+    // because the named terminal may differ from the caller's ctty (a
+    // terminal emulator reading a pty it owns but has not joined).
+    match tty_job_control_check_for(tty, crate::proc::signal::SIGTTIN) {
+        TtyCtlOutcome::Done => {}
+        TtyCtlOutcome::Restart(r) => return r,
+        TtyCtlOutcome::Fail(e) => return SyscallResult::err(e),
+    }
+    let cap = args.arg2 as usize;
+    if cap == 0 {
+        return SyscallResult::ok(0);
+    }
+    if args.arg1 == 0 && cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let want = cap.min(crate::tty::MAX_CANON);
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, want) {
+        return SyscallResult::err(e);
+    }
+
+    let mut kbuf = [0u8; crate::tty::MAX_CANON];
+    let dst = kbuf.get_mut(..want).unwrap_or(&mut []);
+    let outcome = if non_blocking {
+        crate::tty::try_read(tty, dst)
+    } else {
+        crate::tty::read(tty, dst)
+    };
+    match outcome {
+        crate::tty::ConsoleRead::Data(n) => {
+            if n == 0 {
+                return SyscallResult::ok(0);
+            }
+            // SAFETY: `want` bytes at `arg1` were validated writable above and
+            // `n <= want`; copy_to_user re-validates and performs the SMAP
+            // dance.
+            match unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), args.arg1, n) } {
+                #[allow(clippy::cast_possible_wrap)]
+                Ok(()) => SyscallResult::ok(n as i64),
+                Err(e) => SyscallResult::err(e),
+            }
+        }
+        crate::tty::ConsoleRead::Signal(sig) => deliver_console_signal(tty, sig),
+        crate::tty::ConsoleRead::Interrupted => {
+            super::linux::restart::restart_result(super::linux::restart::ERESTARTSYS)
+        }
+        crate::tty::ConsoleRead::WouldBlock => SyscallResult::err(KernelError::WouldBlock),
+    }
 }
 
 /// `SYS_PTY_CLOSE` — drop one reference to one end.
@@ -15504,4 +15591,158 @@ pub fn sys_wait_multiple(args: &SyscallArgs) -> SyscallResult {
 
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(ready as i64)
+}
+
+// ---------------------------------------------------------------------------
+// Supplementary groups + chroot (1067–1068)
+// ---------------------------------------------------------------------------
+
+/// `SYS_PROCESS_SETGROUPS` (1067) — set the calling process's supplementary
+/// group list.
+///
+/// Native counterpart of the Linux `setgroups(2)`.  The capability gate uses
+/// our native system: the caller must hold `(Process, SET_CREDENTIALS)` to
+/// make any change, matching `SYS_PROCESS_SET_CREDENTIALS`.  `count == 0`
+/// drops all supplementary groups.
+///
+/// # Arguments
+///
+/// - `arg0` — `count: u64` — number of GIDs (0 = drop all).
+/// - `arg1` — `list_ptr: u64` — user-space `&[u32; count]` (ignored when
+///   `count == 0`).
+///
+/// # Errors
+///
+/// `NoSuchProcess`, `PermissionDenied`, `InvalidArgument`, `BadAddress`.
+pub fn sys_process_setgroups(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::Rights;
+    use crate::proc::thread;
+
+    /// Linux's NGROUPS_MAX (since 2.6.4).  We follow the same cap.
+    const NGROUPS_MAX: u64 = 65536;
+
+    let count = args.arg0;
+    let list_ptr = args.arg1;
+
+    // Identify the caller.
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+
+    // Capability gate: any mutation requires (Process, SET_CREDENTIALS).
+    if !pcb::has_capability_type(pid, ResourceType::Process, Rights::SET_CREDENTIALS) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+
+    // Validate count.
+    if count > NGROUPS_MAX {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Read the group list from userspace.
+    let new_groups: alloc::vec::Vec<u32> = if count == 0 {
+        alloc::vec::Vec::new()
+    } else {
+        if list_ptr == 0 {
+            return SyscallResult::err(KernelError::PageFault);
+        }
+        match crate::mm::user::read_user_items::<u32>(
+            list_ptr,
+            count as usize,
+            NGROUPS_MAX as usize,
+        ) {
+            Ok(v) => v,
+            Err(e) => return SyscallResult::err(e),
+        }
+    };
+
+    // Apply: read-modify-write the credentials atomically.
+    let Some(mut creds) = pcb::get_credentials(pid) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    creds.groups = new_groups;
+    match pcb::set_credentials(pid, creds) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_CHROOT` (1068) — change the calling process's filesystem
+/// root directory.
+///
+/// The capability gate is `(Process, SET_CREDENTIALS)` — the same right that
+/// governs uid/gid mutations.  The Linux-ABI handler terminally refuses
+/// (`EPERM`) because no Linux caller holds `CAP_SYS_CHROOT`; this native
+/// handler actually installs the root when the caller has the right.
+///
+/// # Arguments
+///
+/// - `arg0` — `path_ptr: u64` — user-space pointer to a NUL-terminated
+///   absolute path naming an existing directory.
+///
+/// # Errors
+///
+/// `NoSuchProcess`, `PermissionDenied`, `NotFound`, `InvalidArgument`,
+/// `BadAddress`.
+pub fn sys_process_chroot(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::Rights;
+    use crate::proc::thread;
+
+    let path_ptr = args.arg0;
+
+    // Identify the caller.
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+
+    // Capability gate.
+    if !pcb::has_capability_type(pid, ResourceType::Process, Rights::SET_CREDENTIALS) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+
+    // Read the path from userspace.
+    if path_ptr == 0 {
+        return SyscallResult::err(KernelError::PageFault);
+    }
+    let path_bytes = match read_user_cbytes(path_ptr, PATH_MAX) {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Validate: must be absolute.
+    if path_bytes.is_empty() || path_bytes[0] != b'/' {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Normalize away `.`/`..`/double-slash components.  The path is already
+    // absolute, so the cwd is irrelevant.
+    let norm = crate::fs::vfs::normalize_path(crate::fs::path::Path::new(&path_bytes));
+    let canon = norm.as_bytes().to_vec();
+
+    // Verify the path names an existing directory via the VFS.
+    let path_str = match core::str::from_utf8(&canon) {
+        Ok(s) => s,
+        Err(_) => {
+            // The VFS API takes &str; a non-UTF-8 path cannot be looked up.
+            // This is a known limitation (D-VFS-PATHS-ARE-STR-NOT-BYTES).
+            return SyscallResult::err(KernelError::InvalidArgument);
+        }
+    };
+    match crate::fs::Vfs::stat(path_str) {
+        Ok(entry) => {
+            if entry.entry_type != crate::fs::EntryType::Directory {
+                return SyscallResult::err(KernelError::InvalidArgument);
+            }
+        }
+        Err(KernelError::NotFound) => return SyscallResult::err(KernelError::NotFound),
+        Err(e) => return SyscallResult::err(e),
+    }
+
+    // Install the chroot.
+    match pcb::set_root_dir(pid, Some(canon)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
 }

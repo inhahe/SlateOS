@@ -36,6 +36,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 #[allow(unused_imports)]
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::RenderTree;
@@ -59,26 +60,6 @@ use guitk::text;
 // ============================================================================
 // Catppuccin Mocha palette
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const SKY: Color = Color::from_hex(0x89DCEB);
 
 // ============================================================================
 // Layout constants
@@ -107,8 +88,14 @@ const PROSE_FIELD_GAP: f32 = 6.0;
 ///
 /// Shared by the fields rather than written out at each, so that they cannot
 /// drift into laying their text out differently from one another.
-fn detail_prose(text: &str, x: f32, y: f32, width: f32) -> text::Paragraph<'_> {
-    text::Paragraph::new(text, SUBTEXT0)
+fn detail_prose<'a>(
+    text: &'a str,
+    pal: &Palette,
+    x: f32,
+    y: f32,
+    width: f32,
+) -> text::Paragraph<'a> {
+    text::Paragraph::new(text, pal.subtext0)
         .at(x, y, width)
         .font(PROSE_FONT_SIZE, FontWeightHint::Regular)
         .line_height(PROSE_LINE_HEIGHT)
@@ -373,12 +360,12 @@ impl Priority {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Low => OVERLAY0,
-            Self::Medium => BLUE,
-            Self::High => PEACH,
-            Self::Critical => RED,
+            Self::Low => pal.overlay0,
+            Self::Medium => pal.blue,
+            Self::High => pal.peach,
+            Self::Critical => pal.red,
         }
     }
 
@@ -450,16 +437,16 @@ impl TaskCategory {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Work => BLUE,
-            Self::Personal => GREEN,
-            Self::Health => RED,
-            Self::Finance => YELLOW,
-            Self::Shopping => PEACH,
-            Self::Education => SKY,
-            Self::Home => TEAL,
-            Self::Social => MAUVE,
+            Self::Work => pal.blue,
+            Self::Personal => pal.green,
+            Self::Health => pal.red,
+            Self::Finance => pal.yellow,
+            Self::Shopping => pal.peach,
+            Self::Education => pal.sky,
+            Self::Home => pal.teal,
+            Self::Social => pal.mauve,
         }
     }
 
@@ -1004,14 +991,14 @@ impl ViewFilter {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Today => BLUE,
-            Self::Upcoming => TEAL,
-            Self::All => LAVENDER,
-            Self::Overdue => RED,
-            Self::Completed => GREEN,
-            Self::ByCategory(cat) => cat.color(),
+            Self::Today => pal.blue,
+            Self::Upcoming => pal.teal,
+            Self::All => pal.lavender,
+            Self::Overdue => pal.red,
+            Self::Completed => pal.green,
+            Self::ByCategory(cat) => cat.color(pal),
         }
     }
 
@@ -1626,11 +1613,18 @@ pub struct RemindersApp {
     pub sidebar_visible: bool,
     pub detail_visible: bool,
     pub show_completed_subtasks: bool,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl RemindersApp {
     pub fn new(width: f32, height: f32, now: DateTime) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
             today: now.date,
@@ -1923,7 +1917,7 @@ impl RemindersApp {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1980,7 +1974,7 @@ impl RemindersApp {
             y: 0.0,
             width: self.width,
             height: total_h,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1993,7 +1987,7 @@ impl RemindersApp {
                 y,
                 width: 4.0,
                 height: NOTIFICATION_HEIGHT,
-                color: PEACH,
+                color: self.palette.peach,
                 corner_radii: CornerRadii::ZERO,
             });
 
@@ -2003,7 +1997,7 @@ impl RemindersApp {
                 y: y + 14.0,
                 text: "[!]".to_string(),
                 font_size: 16.0,
-                color: PEACH,
+                color: self.palette.peach,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2015,7 +2009,7 @@ impl RemindersApp {
                 y: y + 14.0,
                 text: notif.message.clone(),
                 font_size: 14.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(self.width - 200.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2027,7 +2021,7 @@ impl RemindersApp {
                 y: y + 10.0,
                 width: 80.0,
                 height: 28.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
             cmds.push(RenderCommand::Text {
@@ -2035,7 +2029,7 @@ impl RemindersApp {
                 y: y + 16.0,
                 text: "Dismiss".to_string(),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(70.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2047,7 +2041,7 @@ impl RemindersApp {
                 y: y + 10.0,
                 width: 80.0,
                 height: 28.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
             cmds.push(RenderCommand::Text {
@@ -2055,7 +2049,7 @@ impl RemindersApp {
                 y: y + 16.0,
                 text: "Snooze".to_string(),
                 font_size: 11.0,
-                color: BLUE,
+                color: self.palette.blue,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(70.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2073,7 +2067,7 @@ impl RemindersApp {
             y: y_offset,
             width: self.width,
             height: HEADER_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2083,7 +2077,7 @@ impl RemindersApp {
             y: y_offset + HEADER_HEIGHT - 1.0,
             width: self.width,
             height: 1.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2093,7 +2087,7 @@ impl RemindersApp {
             y: y_offset + 8.0,
             text: "Reminders".to_string(),
             font_size: 20.0,
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(150.0),
             overflow: TextOverflow::Ellipsis,
@@ -2105,7 +2099,7 @@ impl RemindersApp {
             y: y_offset + 34.0,
             text: self.view.label(),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -2119,7 +2113,7 @@ impl RemindersApp {
             y: y_offset + 12.0,
             width: search_w,
             height: 32.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -2127,7 +2121,7 @@ impl RemindersApp {
             y: y_offset + 12.0,
             width: search_w,
             height: 32.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
@@ -2137,9 +2131,9 @@ impl RemindersApp {
             self.search_query.clone()
         };
         let search_color = if self.search_query.is_empty() {
-            OVERLAY0
+            self.palette.overlay0
         } else {
-            TEXT
+            self.palette.text
         };
         cmds.push(RenderCommand::Text {
             x: search_x + 12.0,
@@ -2159,7 +2153,7 @@ impl RemindersApp {
             y: y_offset + 12.0,
             width: 100.0,
             height: 32.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         cmds.push(RenderCommand::Text {
@@ -2167,7 +2161,7 @@ impl RemindersApp {
             y: y_offset + 20.0,
             text: format!("Sort: {}", self.sort_mode.label()),
             font_size: 11.0,
-            color: SUBTEXT1,
+            color: self.palette.subtext1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(90.0),
             overflow: TextOverflow::Ellipsis,
@@ -2185,7 +2179,7 @@ impl RemindersApp {
             y: y_offset + 20.0,
             text: count_text,
             font_size: 13.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(110.0),
             overflow: TextOverflow::Ellipsis,
@@ -2200,7 +2194,7 @@ impl RemindersApp {
             y,
             width: w,
             height: h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2210,7 +2204,7 @@ impl RemindersApp {
             y,
             width: 1.0,
             height: h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2222,7 +2216,7 @@ impl RemindersApp {
             y: row_y,
             text: "VIEWS".to_string(),
             font_size: 10.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
@@ -2231,8 +2225,16 @@ impl RemindersApp {
 
         for view in ViewFilter::standard_views() {
             let is_active = self.view == *view;
-            let bg_color = if is_active { SURFACE0 } else { MANTLE };
-            let text_color = if is_active { view.color() } else { SUBTEXT1 };
+            let bg_color = if is_active {
+                self.palette.surface0
+            } else {
+                self.palette.mantle
+            };
+            let text_color = if is_active {
+                view.color(&self.palette)
+            } else {
+                self.palette.subtext1
+            };
 
             cmds.push(RenderCommand::FillRect {
                 x: x + 4.0,
@@ -2290,7 +2292,7 @@ impl RemindersApp {
                     y: row_y + 6.0,
                     width: badge_w,
                     height: 18.0,
-                    color: view.color(),
+                    color: view.color(&self.palette),
                     corner_radii: CornerRadii::all(9.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -2303,7 +2305,7 @@ impl RemindersApp {
                     y: row_y + 9.0,
                     text: badge_text,
                     font_size: 10.0,
-                    color: CRUST,
+                    color: self.palette.crust,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(badge_w),
                     overflow: TextOverflow::Ellipsis,
@@ -2320,7 +2322,7 @@ impl RemindersApp {
             y: row_y,
             width: w - PADDING * 2.0,
             height: 1.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
         row_y += 12.0;
@@ -2330,7 +2332,7 @@ impl RemindersApp {
             y: row_y,
             text: "CATEGORIES".to_string(),
             font_size: 10.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
@@ -2339,8 +2341,16 @@ impl RemindersApp {
 
         for cat in TaskCategory::all() {
             let is_active = self.view == ViewFilter::ByCategory(*cat);
-            let bg_color = if is_active { SURFACE0 } else { MANTLE };
-            let text_color = if is_active { cat.color() } else { SUBTEXT1 };
+            let bg_color = if is_active {
+                self.palette.surface0
+            } else {
+                self.palette.mantle
+            };
+            let text_color = if is_active {
+                cat.color(&self.palette)
+            } else {
+                self.palette.subtext1
+            };
 
             cmds.push(RenderCommand::FillRect {
                 x: x + 4.0,
@@ -2357,7 +2367,7 @@ impl RemindersApp {
                 y: row_y + 9.0,
                 width: 10.0,
                 height: 10.0,
-                color: cat.color(),
+                color: cat.color(&self.palette),
                 corner_radii: CornerRadii::all(5.0),
             });
 
@@ -2385,7 +2395,7 @@ impl RemindersApp {
                     y: row_y + 7.0,
                     text: format!("{count}"),
                     font_size: 11.0,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(25.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2416,7 +2426,7 @@ impl RemindersApp {
                 y: y + h / 2.0 - 30.0,
                 text: "No tasks".to_string(),
                 font_size: 18.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(200.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2426,7 +2436,7 @@ impl RemindersApp {
                 y: y + h / 2.0,
                 text: "Create a new task to get started".to_string(),
                 font_size: 13.0,
-                color: SURFACE2,
+                color: self.palette.surface2,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(250.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2465,7 +2475,11 @@ impl RemindersApp {
         w: f32,
         selected: bool,
     ) {
-        let card_color = if selected { SURFACE0 } else { MANTLE };
+        let card_color = if selected {
+            self.palette.surface0
+        } else {
+            self.palette.mantle
+        };
 
         // Card shadow (subtle)
         cmds.push(RenderCommand::BoxShadow {
@@ -2498,7 +2512,7 @@ impl RemindersApp {
                 y,
                 width: w,
                 height: ITEM_HEIGHT,
-                color: BLUE,
+                color: self.palette.blue,
                 line_width: 1.5,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
@@ -2510,7 +2524,7 @@ impl RemindersApp {
             y: y + 4.0,
             width: 4.0,
             height: ITEM_HEIGHT - 8.0,
-            color: task.priority.color(),
+            color: task.priority.color(&self.palette),
             corner_radii: CornerRadii::all(2.0),
         });
 
@@ -2522,7 +2536,11 @@ impl RemindersApp {
             y: checkbox_y,
             width: 20.0,
             height: 20.0,
-            color: if task.completed { GREEN } else { SURFACE2 },
+            color: if task.completed {
+                self.palette.green
+            } else {
+                self.palette.surface2
+            },
             line_width: 1.5,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -2532,7 +2550,7 @@ impl RemindersApp {
                 y: checkbox_y + 3.0,
                 width: 14.0,
                 height: 14.0,
-                color: GREEN,
+                color: self.palette.green,
                 corner_radii: CornerRadii::all(3.0),
             });
             // Checkmark text
@@ -2541,7 +2559,7 @@ impl RemindersApp {
                 y: checkbox_y + 3.0,
                 text: "v".to_string(),
                 font_size: 12.0,
-                color: CRUST,
+                color: self.palette.crust,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2550,7 +2568,11 @@ impl RemindersApp {
 
         // Title
         let text_x = checkbox_x + 30.0;
-        let title_color = if task.completed { OVERLAY0 } else { TEXT };
+        let title_color = if task.completed {
+            self.palette.overlay0
+        } else {
+            self.palette.text
+        };
         cmds.push(RenderCommand::Text {
             x: text_x,
             y: y + 12.0,
@@ -2565,9 +2587,9 @@ impl RemindersApp {
         // Due date label
         let due_text = task.due_label(self.today);
         let due_color = if task.is_overdue(self.now) {
-            RED
+            self.palette.red
         } else {
-            SUBTEXT0
+            self.palette.subtext0
         };
         cmds.push(RenderCommand::Text {
             x: text_x,
@@ -2589,9 +2611,9 @@ impl RemindersApp {
             width: 60.0,
             height: 18.0,
             color: Color::rgba(
-                task.category.color().r,
-                task.category.color().g,
-                task.category.color().b,
+                task.category.color(&self.palette).r,
+                task.category.color(&self.palette).g,
+                task.category.color(&self.palette).b,
                 40,
             ),
             corner_radii: CornerRadii::all(9.0),
@@ -2601,7 +2623,7 @@ impl RemindersApp {
             y: badge_y + 3.0,
             text: task.category.label().to_string(),
             font_size: 9.0,
-            color: task.category.color(),
+            color: task.category.color(&self.palette),
             font_weight: FontWeightHint::Bold,
             max_width: Some(55.0),
             overflow: TextOverflow::Ellipsis,
@@ -2615,9 +2637,9 @@ impl RemindersApp {
             width: 55.0,
             height: 18.0,
             color: Color::rgba(
-                task.priority.color().r,
-                task.priority.color().g,
-                task.priority.color().b,
+                task.priority.color(&self.palette).r,
+                task.priority.color(&self.palette).g,
+                task.priority.color(&self.palette).b,
                 40,
             ),
             corner_radii: CornerRadii::all(9.0),
@@ -2627,7 +2649,7 @@ impl RemindersApp {
             y: badge_y + 3.0,
             text: task.priority.label().to_string(),
             font_size: 9.0,
-            color: task.priority.color(),
+            color: task.priority.color(&self.palette),
             font_weight: FontWeightHint::Bold,
             max_width: Some(50.0),
             overflow: TextOverflow::Ellipsis,
@@ -2641,7 +2663,7 @@ impl RemindersApp {
                 y: badge_y + 3.0,
                 text: format!("[{}]", task.recurrence.label()),
                 font_size: 9.0,
-                color: TEAL,
+                color: self.palette.teal,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2662,7 +2684,7 @@ impl RemindersApp {
                 y: bar_y,
                 width: bar_w,
                 height: bar_h,
-                color: SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::all(3.0),
             });
 
@@ -2674,7 +2696,7 @@ impl RemindersApp {
                     y: bar_y,
                     width: fill_w,
                     height: bar_h,
-                    color: GREEN,
+                    color: self.palette.green,
                     corner_radii: CornerRadii::all(3.0),
                 });
             }
@@ -2685,7 +2707,7 @@ impl RemindersApp {
                 y: bar_y + 10.0,
                 text: format!("{pct}%"),
                 font_size: 9.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bar_w),
                 overflow: TextOverflow::Ellipsis,
@@ -2708,7 +2730,7 @@ impl RemindersApp {
             y,
             width: w,
             height: h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2718,7 +2740,7 @@ impl RemindersApp {
             y,
             width: 1.0,
             height: h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2732,7 +2754,7 @@ impl RemindersApp {
             y: row_y,
             text: task.title.clone(),
             font_size: 18.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w),
             overflow: TextOverflow::Ellipsis,
@@ -2745,7 +2767,11 @@ impl RemindersApp {
         } else {
             "Active"
         };
-        let status_color = if task.completed { GREEN } else { BLUE };
+        let status_color = if task.completed {
+            self.palette.green
+        } else {
+            self.palette.blue
+        };
         cmds.push(RenderCommand::FillRect {
             x: x + pad,
             y: row_y,
@@ -2772,14 +2798,14 @@ impl RemindersApp {
             y: row_y,
             width: content_w,
             height: 1.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
         row_y += 12.0;
 
         // Detail fields
-        let field_label_color = OVERLAY0;
-        let field_value_color = SUBTEXT1;
+        let field_label_color = self.palette.overlay0;
+        let field_value_color = self.palette.subtext1;
 
         // Due date
         cmds.push(RenderCommand::Text {
@@ -2799,7 +2825,7 @@ impl RemindersApp {
             "Not set".to_string()
         };
         let due_color = if task.is_overdue(self.now) {
-            RED
+            self.palette.red
         } else {
             field_value_color
         };
@@ -2832,7 +2858,7 @@ impl RemindersApp {
             y: row_y,
             width: 8.0,
             height: 8.0,
-            color: task.priority.color(),
+            color: task.priority.color(&self.palette),
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -2840,7 +2866,7 @@ impl RemindersApp {
             y: row_y - 2.0,
             text: task.priority.label().to_string(),
             font_size: 13.0,
-            color: task.priority.color(),
+            color: task.priority.color(&self.palette),
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w - 20.0),
             overflow: TextOverflow::Ellipsis,
@@ -2864,7 +2890,7 @@ impl RemindersApp {
             y: row_y,
             width: 8.0,
             height: 8.0,
-            color: task.category.color(),
+            color: task.category.color(&self.palette),
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -2872,7 +2898,7 @@ impl RemindersApp {
             y: row_y - 2.0,
             text: task.category.label().to_string(),
             font_size: 13.0,
-            color: task.category.color(),
+            color: task.category.color(&self.palette),
             font_weight: FontWeightHint::Bold,
             max_width: Some(content_w - 20.0),
             overflow: TextOverflow::Ellipsis,
@@ -2910,7 +2936,7 @@ impl RemindersApp {
                 y: row_y,
                 width: content_w,
                 height: 1.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::ZERO,
             });
             row_y += 12.0;
@@ -2931,7 +2957,8 @@ impl RemindersApp {
             // user as its first line and nothing else. `Paragraph::draw`
             // reports the height it used, so the cursor advances over what was
             // actually drawn and the fields below cannot land on top of it.
-            row_y += detail_prose(&task.description, x + pad, row_y, content_w).draw(cmds);
+            row_y += detail_prose(&task.description, &self.palette, x + pad, row_y, content_w)
+                .draw(cmds);
             row_y += PROSE_FIELD_GAP;
         }
 
@@ -2948,7 +2975,7 @@ impl RemindersApp {
                 overflow: TextOverflow::Ellipsis,
             });
             row_y += 14.0;
-            row_y += detail_prose(&task.notes, x + pad, row_y, content_w).draw(cmds);
+            row_y += detail_prose(&task.notes, &self.palette, x + pad, row_y, content_w).draw(cmds);
             row_y += PROSE_FIELD_GAP;
         }
 
@@ -2959,7 +2986,7 @@ impl RemindersApp {
                 y: row_y,
                 width: content_w,
                 height: 1.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::ZERO,
             });
             row_y += 12.0;
@@ -2984,7 +3011,7 @@ impl RemindersApp {
                 y: row_y,
                 width: content_w,
                 height: 6.0,
-                color: SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::all(3.0),
             });
             let fill_w = (content_w * pct as f32) / 100.0;
@@ -2994,7 +3021,7 @@ impl RemindersApp {
                     y: row_y,
                     width: fill_w,
                     height: 6.0,
-                    color: GREEN,
+                    color: self.palette.green,
                     corner_radii: CornerRadii::all(3.0),
                 });
             }
@@ -3004,7 +3031,11 @@ impl RemindersApp {
                 if !self.show_completed_subtasks && st.completed {
                     continue;
                 }
-                let st_color = if st.completed { OVERLAY0 } else { TEXT };
+                let st_color = if st.completed {
+                    self.palette.overlay0
+                } else {
+                    self.palette.text
+                };
 
                 // Mini checkbox
                 cmds.push(RenderCommand::StrokeRect {
@@ -3012,7 +3043,11 @@ impl RemindersApp {
                     y: row_y,
                     width: 14.0,
                     height: 14.0,
-                    color: if st.completed { GREEN } else { SURFACE2 },
+                    color: if st.completed {
+                        self.palette.green
+                    } else {
+                        self.palette.surface2
+                    },
                     line_width: 1.0,
                     corner_radii: CornerRadii::all(3.0),
                 });
@@ -3022,7 +3057,7 @@ impl RemindersApp {
                         y: row_y + 2.0,
                         width: 10.0,
                         height: 10.0,
-                        color: GREEN,
+                        color: self.palette.green,
                         corner_radii: CornerRadii::all(2.0),
                     });
                 }
@@ -3049,7 +3084,7 @@ impl RemindersApp {
                 y: row_y,
                 width: content_w,
                 height: 1.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::ZERO,
             });
             row_y += 12.0;
@@ -3078,7 +3113,7 @@ impl RemindersApp {
                     y: by,
                     width: btn_w,
                     height: 24.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(SMALL_RADIUS),
                 });
                 cmds.push(RenderCommand::Text {
@@ -3086,7 +3121,7 @@ impl RemindersApp {
                     y: by + 5.0,
                     text: preset.label(),
                     font_size: 11.0,
-                    color: SKY,
+                    color: self.palette.sky,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(btn_w - 16.0),
                     overflow: TextOverflow::Ellipsis,
@@ -3101,7 +3136,7 @@ impl RemindersApp {
             y: created_y,
             text: format!("Created: {}", task.created.format_short()),
             font_size: 10.0,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w),
             overflow: TextOverflow::Ellipsis,
@@ -3312,6 +3347,10 @@ fn sample_tasks(store: &mut TaskStore, now: DateTime) {
 }
 
 impl App for RemindersApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         let overdue = self.store.count_overdue(self.now);
         if overdue == 0 {
@@ -3989,10 +4028,11 @@ mod tests {
 
     #[test]
     fn test_priority_labels() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         for p in Priority::all() {
             let _ = p.label();
             let _ = p.icon();
-            let _ = p.color();
+            let _ = p.color(&pal);
         }
     }
 
@@ -4007,10 +4047,11 @@ mod tests {
 
     #[test]
     fn test_category_labels() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         for cat in TaskCategory::all() {
             let _ = cat.label();
             let _ = cat.icon();
-            let _ = cat.color();
+            let _ = cat.color(&pal);
         }
     }
 
@@ -5146,6 +5187,7 @@ mod tests {
 
     /// The `(y, text)` of every prose line drawn in the detail panel.
     fn prose_lines(app: &RemindersApp) -> Vec<(f32, String)> {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         app.render_commands()
             .into_iter()
             .filter_map(|c| match c {
@@ -5155,7 +5197,7 @@ mod tests {
                     font_size,
                     color,
                     ..
-                } if (font_size - PROSE_FONT_SIZE).abs() < 0.01 && color == SUBTEXT0 => {
+                } if (font_size - PROSE_FONT_SIZE).abs() < 0.01 && color == pal.subtext0 => {
                     Some((y, text))
                 }
                 _ => None,
@@ -5307,10 +5349,11 @@ mod tests {
 
     #[test]
     fn test_view_labels() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         for v in ViewFilter::standard_views() {
             let _ = v.label();
             let _ = v.icon();
-            let _ = v.color();
+            let _ = v.color(&pal);
         }
     }
 
@@ -5330,5 +5373,64 @@ mod tests {
         for m in SortMode::all() {
             let _ = m.label();
         }
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut RemindersApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = RemindersApp::new(1000.0, 700.0, make_now());
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

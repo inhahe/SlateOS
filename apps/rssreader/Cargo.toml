@@ -3,6 +3,8 @@ name = "rssreader"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 

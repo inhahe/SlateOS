@@ -78,9 +78,7 @@
 
 pub mod a11y;
 pub mod about;
-pub mod accessibility_settings;
 pub mod animations;
-pub mod appearance_settings;
 pub mod backup_settings;
 pub mod bluetooth;
 pub mod blur;
@@ -90,7 +88,6 @@ pub mod context_ext;
 pub mod datetime_settings;
 pub mod default_apps;
 pub mod device_settings;
-pub mod display_settings;
 /// The sweep that proves a module draws nothing that is immediately erased.
 ///
 /// Test-only, like [`palette_check`]: it exists to check the other modules'
@@ -105,7 +102,6 @@ pub mod input_method;
 pub mod language_settings;
 pub mod launcher;
 pub mod login_screen;
-pub mod mouse_settings;
 pub mod multimon;
 pub mod network_indicator;
 pub mod network_settings;
@@ -173,7 +169,7 @@ use appearance::{
 // below so a caller wiring the shell to a compositor need not name `guiremote`
 // itself. `Layer` arrives with them because the list carries the shell's own
 // surfaces too, and telling those apart is the whole reason the field exists.
-pub use guiremote::control::{Layer, ShellControlAction};
+pub use guiremote::control::{Layer, ShellControlAction, StackTier, WindowPolicy};
 // `WindowList` comes with it because a window's own desktop and the desktop
 // being shown arrive together, in one frame, and comparing them is the only way
 // to know what the user can see. Taking the windows without the header is what
@@ -736,6 +732,62 @@ pub enum ShellRequest {
         /// Where to file it, counting from zero.
         desktop: u32,
     },
+    /// Make a window translucent, as a window rule asks.
+    SetOpacity {
+        /// The window to fade.
+        window: WindowId,
+        /// 0 is invisible, 255 fully opaque.
+        ///
+        /// A byte rather than the `f32` the rule stores and the wire carries,
+        /// for two reasons. It keeps `Eq` on this enum -- `f32` is not `Eq`,
+        /// and dropping it here would cascade through `ShellAction` and
+        /// `HotkeyOutcome`, neither of which has any business losing it over
+        /// one field. And it is what survives anyway: the compositor blends
+        /// with an eight-bit alpha, so a finer opacity is discarded a layer
+        /// below this one.
+        alpha: u8,
+    },
+    /// Put a window at a place, as a window rule asks.
+    MoveWindow {
+        /// The window to move.
+        window: WindowId,
+        /// Top-left corner, in display coordinates.
+        x: i32,
+        /// Top-left corner, in display coordinates.
+        y: i32,
+    },
+    /// Say what the user may not do to a window, as a window rule asks.
+    SetWindowPolicy {
+        /// The window to restrain.
+        window: WindowId,
+        /// What the user may not do.
+        policy: WindowPolicy,
+    },
+    /// Constrain a window's size, as a window rule asks.
+    SetSizeLimits {
+        /// The window to constrain.
+        window: WindowId,
+        /// Smallest client area; `(0, 0)` for no minimum.
+        min: (u32, u32),
+        /// Largest client area; `(0, 0)` for no maximum.
+        max: (u32, u32),
+    },
+    /// Keep a window above or below its neighbours, as a window rule asks.
+    SetStackTier {
+        /// The window to re-file.
+        window: WindowId,
+        /// Where it goes within its layer.
+        tier: StackTier,
+    },
+    /// Give a window a size, as a window rule asks.
+    ResizeWindow {
+        /// The window to resize.
+        window: WindowId,
+        /// Client-area width.
+        width: u32,
+        /// Client-area height.
+        height: u32,
+    },
 }
 
 impl ShellRequest {
@@ -896,6 +948,24 @@ pub struct DesktopShell {
     /// registry says right now — a shortcut rebound while the card is up is
     /// redrawn under its new chord without anyone telling the card.
     pub shortcut_card_open: bool,
+    /// Which row of the shortcut card the keyboard is on.
+    ///
+    /// An index into `hotkeys.all_bindings()`, which is the order the card
+    /// draws. Kept even while the card is shut, so reopening it returns to the
+    /// row the user was looking at rather than to the top.
+    pub shortcut_selected: usize,
+    /// The row whose chord is being re-recorded, if any.
+    ///
+    /// While this is `Some`, the next chord the user presses is **data**: the
+    /// shell must not run it, and must not let it reach the global table --
+    /// including chords the shell holds globally, and including Escape, which
+    /// here means "cancel the rebind" rather than "close the card". That
+    /// inverts the shell's usual input rule, which is why the check sits at the
+    /// very top of `handle_hotkey_inner` rather than beside the other modal
+    /// surfaces.
+    shortcut_capture: Option<usize>,
+    /// What the last rebind attempt did, shown under the card.
+    shortcut_message: Option<String>,
     /// The programs this desktop can start, shared with the search launcher so
     /// that the two front ends cannot offer different applications.
     pub apps: Vec<AppEntry>,
@@ -1364,6 +1434,9 @@ impl DesktopShell {
             start_menu_wheel: wheel::Accumulator::default(),
             power_menu_open: false,
             shortcut_card_open: false,
+            shortcut_selected: 0,
+            shortcut_capture: None,
+            shortcut_message: None,
             apps: launcher::builtin_app_database(),
             alt_tab_active: false,
             alt_tab_index: 0,
@@ -1375,7 +1448,7 @@ impl DesktopShell {
             menu_widget: None,
             widget_drag: None,
             widgets_dirty: false,
-            appearance_watch: config::Watcher::new(appearance_settings::CONFIG_NAME),
+            appearance_watch: config::Watcher::new(appearance::CONFIG_NAME),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
@@ -2667,7 +2740,13 @@ impl DesktopShell {
                 let actions = self.rules.evaluate(&info.title, &info.app_id);
                 skip_taskbar = actions.skip_taskbar.unwrap_or(false);
                 skip_alt_tab = actions.skip_alt_tab.unwrap_or(false);
-                requests.extend(Self::rule_requests(id, info, &actions, self.num_desktops));
+                requests.extend(Self::rule_requests(
+                    id,
+                    info,
+                    &actions,
+                    self.num_desktops,
+                    (self.screen_width, self.screen_height),
+                ));
             }
 
             // Recorded on every list, not only on arrival: "remember last
@@ -2766,6 +2845,10 @@ impl DesktopShell {
         info: &WindowInfo,
         actions: &window_rules::RuleActions,
         num_desktops: u32,
+        // Passed rather than read off `self`, like `num_desktops` beside it:
+        // this stays an associated function so a test can drive one rule
+        // without standing a whole shell up around it.
+        screen: (u32, u32),
     ) -> Vec<ShellRequest> {
         let mut out = Vec::new();
 
@@ -2786,8 +2869,7 @@ impl DesktopShell {
         // `Normal` is not "restore it": a rule that says a window should start
         // normal is describing what a window already is, and sending `Restore`
         // to a window that opened maximized of its own accord would be the rule
-        // overriding the program rather than the default. `Fullscreen` has no
-        // request the shell may send about another client's window.
+        // overriding the program rather than the default.
         match actions.initial_state {
             Some(window_rules::InitialState::Minimized) => {
                 out.push(ShellRequest::window(id, ShellControlAction::Minimize));
@@ -2795,8 +2877,94 @@ impl DesktopShell {
             Some(window_rules::InitialState::Maximized) => {
                 out.push(ShellRequest::window(id, ShellControlAction::Maximize));
             }
-            Some(window_rules::InitialState::Normal | window_rules::InitialState::Fullscreen)
-            | None => {}
+            // Fullscreen is the display; Maximize is the work area. A rule
+            // asking for fullscreen wants the taskbar covered too, so this is
+            // not a synonym for the arm above.
+            Some(window_rules::InitialState::Fullscreen) => {
+                out.push(ShellRequest::window(id, ShellControlAction::Fullscreen));
+            }
+            Some(window_rules::InitialState::Normal) | None => {}
+        }
+
+        // What the user may not do. Sent whenever the rule names any of the
+        // three, and it names them as a set: a rule that stops saying
+        // `prevent_close` is taking it back, so the policy is replaced whole
+        // rather than merged into whatever was there.
+        let policy = WindowPolicy {
+            prevent_close: actions.prevent_close.unwrap_or(false),
+            prevent_move: actions.prevent_move.unwrap_or(false),
+            prevent_resize: actions.prevent_resize.unwrap_or(false),
+        };
+        if actions.prevent_close.is_some()
+            || actions.prevent_move.is_some()
+            || actions.prevent_resize.is_some()
+        {
+            out.push(ShellRequest::SetWindowPolicy { window: id, policy });
+        }
+
+        // Size limits before the size itself, so a rule that sets both does
+        // not resize to something its own maximum then claws back.
+        if actions.min_size.is_some() || actions.max_size.is_some() {
+            out.push(ShellRequest::SetSizeLimits {
+                window: id,
+                // `(0, 0)` is "this rule says nothing about that limit", which
+                // leaves whatever the program asked for in place. A rule that
+                // names only a maximum must not discard the program's own
+                // minimum.
+                min: actions.min_size.unwrap_or((0, 0)),
+                max: actions.max_size.unwrap_or((0, 0)),
+            });
+        }
+
+        // Size before position, and both before the state match below. A
+        // window resized after being placed keeps its top-left corner, so the
+        // order does not change where it lands -- but a *centred* placement is
+        // computed from the size, so the size has to be settled first.
+        if let Some(size) = actions.size {
+            if let Some((width, height)) = Self::rule_size_px(size, screen) {
+                out.push(ShellRequest::ResizeWindow {
+                    window: id,
+                    width,
+                    height,
+                });
+            }
+        }
+
+        if let Some(position) = actions.position {
+            if let Some((x, y)) = Self::rule_position_px(position, actions.size, screen) {
+                out.push(ShellRequest::MoveWindow { window: id, x, y });
+            }
+        }
+
+        // "Always on top" and "always on bottom" are one setting with three
+        // values, not two independent flags: a rule asking for both would be
+        // asking for a window to be above and below its neighbours at once.
+        // `always_on_top` wins that argument here rather than the compositor
+        // being handed a contradiction to resolve.
+        let tier = match (actions.always_on_top, actions.always_on_bottom) {
+            (Some(true), _) => Some(StackTier::Top),
+            (_, Some(true)) => Some(StackTier::Bottom),
+            // An explicit `false` is a rule saying "ordinary", which is a
+            // request: it undoes a tier a higher-priority rule set. `None` is
+            // a rule that says nothing, and says nothing here too.
+            (Some(false), _) | (_, Some(false)) => Some(StackTier::Normal),
+            (None, None) => None,
+        };
+        if let Some(tier) = tier {
+            out.push(ShellRequest::SetStackTier { window: id, tier });
+        }
+
+        // Opacity is independent of state and zone -- a window can be
+        // maximised *and* translucent -- so it is not part of the match above
+        // and does not compete with it for ordering.
+        if let Some(opacity) = actions.opacity {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "clamped to 0.0..=1.0 first, so the product is 0.0..=255.0                           and rounds into a u8 exactly"
+            )]
+            let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+            out.push(ShellRequest::SetOpacity { window: id, alpha });
         }
 
         // Last, so that a rule setting both a state and a zone lands in the
@@ -3034,6 +3202,26 @@ impl DesktopShell {
                 return HotkeyOutcome::ask(self.finish_alt_tab());
             }
             return HotkeyOutcome::ignored();
+        }
+
+        // Before everything, including the modal surfaces below. While a chord
+        // is being recorded the keystroke is data, and the one thing that must
+        // not happen is the shell running it -- a user rebinding "close window"
+        // would otherwise close a window while trying to say which keys mean
+        // it.
+        if self.shortcut_capture.is_some() {
+            self.capture_chord(key);
+            // Always consumed: while recording, every keystroke belongs to the
+            // recording, including the ones that are not part of a chord yet.
+            return HotkeyOutcome::ignored();
+        }
+
+        // The card, when it is open and not recording: arrows walk its rows,
+        // Enter starts recording, Escape shuts it.
+        if self.shortcut_card_open
+            && let Some(outcome) = self.shortcut_card_key(key)
+        {
+            return outcome;
         }
 
         // The desktop menu owns the keyboard while it is up, for the reason
@@ -3975,17 +4163,25 @@ impl DesktopShell {
             let bar_w = self.scale(START_MENU_SCROLLBAR_WIDTH);
             let track_top = self.start_menu_row_rect(0).y;
             let track_h = rows as f32 * row_h;
-            let thumb_h = (track_h * rows as f32 / total as f32).max(row_h / 2.0);
             let max_scroll = self.start_menu_max_scroll().max(1) as f32;
-            let progress = self.start_menu_scroll as f32 / max_scroll;
+            // `guitk::scrollbar`'s arithmetic, shared with the file dialog,
+            // the menus and `apps/dictionary`. The floor stays half a row --
+            // this bar is sized in rows of a start menu, not pixels of a
+            // dialog -- which is why the module takes it as an argument.
+            let thumb = guitk::scrollbar::thumb_of(
+                guitk::frame::Rect::new(
+                    menu.x + menu.w - bar_w - self.scale(2.0),
+                    track_top,
+                    bar_w,
+                    track_h,
+                ),
+                rows as f32 / total as f32,
+                self.start_menu_scroll as f32 / max_scroll,
+                row_h / 2.0,
+            );
             fill_round(
                 &mut tree,
-                Rect::new(
-                    menu.x + menu.w - bar_w - self.scale(2.0),
-                    track_top + (track_h - thumb_h) * progress,
-                    bar_w,
-                    thumb_h,
-                ),
+                Rect::new(thumb.x, thumb.y, thumb.w, thumb.h),
                 self.theme.accent_color,
                 CornerRadii::all(bar_w / 2.0),
             );
@@ -4360,6 +4556,140 @@ impl DesktopShell {
     /// are full-screen surfaces driven by their own chords, and a user who
     /// opens the card to find out what the overview's chord is should not have
     /// the overview shut in the act of looking it up.
+    /// How many rows the card has.
+    fn shortcut_row_count(&self) -> usize {
+        self.hotkeys.len()
+    }
+
+    /// Handle a key while the card is open and no chord is being recorded.
+    ///
+    /// `None` means "not one of the card's keys", which lets the global table
+    /// still run: the card is a sheet, not a mode, and a shortcut pressed with
+    /// it open should still work.
+    fn shortcut_card_key(&mut self, key: &KeyEvent) -> Option<HotkeyOutcome> {
+        let rows = self.shortcut_row_count();
+        match key.key {
+            Key::Up => {
+                self.shortcut_selected = self.shortcut_selected.saturating_sub(1);
+                self.shortcut_message = None;
+                Some(HotkeyOutcome::ignored())
+            }
+            Key::Down => {
+                // Clamped rather than wrapping, matching every other list in
+                // this shell: holding Down should stop at the last row.
+                let last = rows.saturating_sub(1);
+                self.shortcut_selected = self.shortcut_selected.saturating_add(1).min(last);
+                self.shortcut_message = None;
+                Some(HotkeyOutcome::ignored())
+            }
+            Key::Enter => {
+                if rows == 0 {
+                    return Some(HotkeyOutcome::ignored());
+                }
+                self.shortcut_capture = Some(self.shortcut_selected.min(rows.saturating_sub(1)));
+                self.shortcut_message = Some("Press the new keys, or Escape to cancel".to_string());
+                Some(HotkeyOutcome::ignored())
+            }
+            Key::Escape => {
+                self.shortcut_card_open = false;
+                self.shortcut_message = None;
+                Some(HotkeyOutcome::ignored())
+            }
+            _ => None,
+        }
+    }
+
+    /// Read one keystroke as the new chord for the row being recorded.
+    ///
+    /// Returns whether the keystroke was consumed. A bare modifier is *not*:
+    /// the user is still assembling the chord, and taking `Super` alone as an
+    /// answer would bind the shortcut the instant they reached for it.
+    fn capture_chord(&mut self, key: &KeyEvent) -> bool {
+        let Some(row) = self.shortcut_capture else {
+            return false;
+        };
+
+        if matches!(
+            key.key,
+            Key::LeftCtrl
+                | Key::RightCtrl
+                | Key::LeftAlt
+                | Key::RightAlt
+                | Key::LeftShift
+                | Key::RightShift
+                | Key::LeftSuper
+                | Key::RightSuper
+        ) {
+            return true;
+        }
+
+        if key.key == Key::Escape {
+            self.shortcut_capture = None;
+            self.shortcut_message = Some("Unchanged".to_string());
+            return true;
+        }
+
+        self.shortcut_capture = None;
+        self.rebind_row(row, hotkeys::Hotkey::new(key.key, key.modifiers));
+        true
+    }
+
+    /// Move row `row`'s action onto `chord`, or refuse and say why.
+    fn rebind_row(&mut self, row: usize, chord: hotkeys::Hotkey) {
+        let Some((old, action)) = self
+            .hotkeys
+            .all_bindings()
+            .nth(row)
+            .map(|(h, a)| (*h, a.clone()))
+        else {
+            self.shortcut_message = Some("That row is gone".to_string());
+            return;
+        };
+
+        if old == chord {
+            self.shortcut_message = Some("Unchanged".to_string());
+            return;
+        }
+
+        if let Some(taken) = self.hotkeys.conflicts_with(&chord) {
+            // Named, not merely refused: "already in use" leaves the user
+            // hunting for which one.
+            self.shortcut_message = Some(format!(
+                "{} is already {}",
+                chord.display_name(),
+                taken.display_label()
+            ));
+            return;
+        }
+
+        let label = action.display_label().to_string();
+        self.hotkeys.unregister(&old);
+        match self.hotkeys.register(chord, action.clone()) {
+            Ok(()) => {
+                // Written now rather than on shutdown: a desktop that lost
+                // power between the two would forget the rebind, and the user
+                // has no way to know saving was still pending.
+                let saved = self.save_shortcuts();
+                self.shortcut_message = Some(match saved {
+                    Ok(()) => format!("{} is now {label}", chord.display_name()),
+                    // The rebind *worked*; only keeping it did not. Saying so
+                    // is the difference between a shortcut that will be gone
+                    // tomorrow and one the user believes is set.
+                    Err(e) => format!(
+                        "{} is now {label}, but could not be saved: {e}",
+                        chord.display_name()
+                    ),
+                });
+            }
+            Err(e) => {
+                // Put the old one back rather than leaving the action with no
+                // chord at all: a failed rebind must not lose the binding.
+                drop(self.hotkeys.register(old, action));
+                self.shortcut_message = Some(format!("Could not rebind: {e}"));
+            }
+        }
+    }
+
     pub fn toggle_shortcut_card(&mut self) {
         if self.shortcut_card_open {
             self.shortcut_card_open = false;
@@ -4620,6 +4950,123 @@ impl DesktopShell {
     }
 
     /// The settings group the widget layout lives in.
+    /// A rule's size in pixels, or `None` if this build cannot work it out.
+    ///
+    /// `RememberLast` never reaches here -- `resolve_remembered` has already
+    /// turned it into `Exact` or dropped it.
+    fn rule_size_px(size: window_rules::SizeSpec, screen: (u32, u32)) -> Option<(u32, u32)> {
+        match size {
+            window_rules::SizeSpec::Exact { width, height } => Some((width, height)),
+            window_rules::SizeSpec::Percentage { w_pct, h_pct } => Some((
+                Self::fraction_of(screen.0, w_pct),
+                Self::fraction_of(screen.1, h_pct),
+            )),
+            // Already resolved away; reaching here means the resolution was
+            // skipped, and guessing a size would be worse than leaving the
+            // window where the program put it.
+            window_rules::SizeSpec::RememberLast => None,
+        }
+    }
+
+    /// A rule's position in pixels, or `None` if this build cannot work it out.
+    ///
+    /// `size` is the rule's own size, needed only to centre: centring is a
+    /// function of how big the window will be, and the rule's size is the size
+    /// it is about to be given. A rule that centres without setting a size
+    /// cannot be honoured here -- the shell is told window *positions* in the
+    /// window list but not the size a program is about to choose -- so it is
+    /// declined rather than centred against a guess.
+    fn rule_position_px(
+        position: window_rules::PositionSpec,
+        size: Option<window_rules::SizeSpec>,
+        screen: (u32, u32),
+    ) -> Option<(i32, i32)> {
+        match position {
+            window_rules::PositionSpec::Absolute { x, y } => Some((x, y)),
+            window_rules::PositionSpec::Percentage { x_pct, y_pct } => Some((
+                Self::fraction_of(screen.0, x_pct).cast_signed(),
+                Self::fraction_of(screen.1, y_pct).cast_signed(),
+            )),
+            // Monitor 0 is the display this shell was built for, which is the
+            // only one it has bounds for. A rule naming a second monitor is
+            // declined rather than centred on the first: putting a window on
+            // the wrong screen is a worse answer than leaving it alone, and
+            // multi-monitor placement is tracked separately.
+            window_rules::PositionSpec::CenterOnMonitor(0) => {
+                let (w, h) = Self::rule_size_px(size?, screen)?;
+                Some((
+                    screen.0.saturating_sub(w).cast_signed() / 2,
+                    screen.1.saturating_sub(h).cast_signed() / 2,
+                ))
+            }
+            window_rules::PositionSpec::CenterOnMonitor(_)
+            | window_rules::PositionSpec::RememberLast => None,
+        }
+    }
+
+    /// `pct` of `whole`, clamped to the display and rounded.
+    fn fraction_of(whole: u32, pct: f32) -> u32 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to 0.0..=1.0 first, so the product is within the \
+                      u32 it was taken from"
+        )]
+        let scaled = (f64::from(whole) * f64::from(pct.clamp(0.0, 1.0))).round() as u32;
+        scaled
+    }
+
+    /// The file the user's keyboard shortcuts live in.
+    pub const SHORTCUTS_CONFIG_NAME: &'static str = "shortcuts";
+
+    /// Read the saved shortcuts over the defaults.
+    ///
+    /// Kept out of [`new`](Self::new) for the reason
+    /// [`load_widgets`](Self::load_widgets) is: a constructor that reads the
+    /// user's home directory gives every test a machine-dependent result.
+    ///
+    /// **Applied over the default table, not in place of it.** A file written
+    /// by an older desktop names the shortcuts that existed then, and replacing
+    /// the table with it would silently drop every shortcut added since. The
+    /// defaults are the floor; the file moves what it mentions.
+    ///
+    /// Each saved binding *moves* its action rather than adding a second chord
+    /// for it -- otherwise a rebound shortcut would answer to both its old
+    /// chord and its new one after a restart, which is not what the user asked
+    /// for and is invisible until they press the old one.
+    pub fn load_shortcuts(&mut self) {
+        let doc = config::load(Self::SHORTCUTS_CONFIG_NAME);
+        let Ok(saved) = hotkeys::HotkeyConfig::read_from(&doc) else {
+            // An unparseable file is left alone rather than rewritten: the user
+            // still has whatever they typed, and the defaults still work.
+            return;
+        };
+
+        for (chord, action) in saved.bindings() {
+            let stale: Vec<_> = self
+                .hotkeys
+                .all_bindings()
+                .filter(|(h, a)| *a == action && *h != chord)
+                .map(|(h, _)| *h)
+                .collect();
+            for old in stale {
+                self.hotkeys.unregister(&old);
+            }
+            drop(self.hotkeys.register(*chord, action.clone()));
+        }
+    }
+
+    /// Write the shortcuts back.
+    ///
+    /// # Errors
+    ///
+    /// If there is no configuration directory, or the file cannot be written.
+    pub fn save_shortcuts(&self) -> std::io::Result<()> {
+        let mut doc = config::load(Self::SHORTCUTS_CONFIG_NAME);
+        hotkeys::HotkeyConfig::from_registry(&self.hotkeys).write_into(&mut doc);
+        config::store(Self::SHORTCUTS_CONFIG_NAME, &doc)
+    }
+
     pub const WIDGETS_CONFIG_NAME: &'static str = "widgets";
 
     /// Read the saved widget layout.
@@ -5044,7 +5491,14 @@ impl DesktopShell {
             &Palette::from_settings(&self.appearance),
             x,
             y,
-            None,
+            // The row the keyboard is on. Clamped rather than trusted: the
+            // registry can shrink under a stored index if an action is
+            // unregistered while the card is shut, and a highlight drawn past
+            // the last row is a highlight on nothing.
+            Some(
+                self.shortcut_selected
+                    .min(self.hotkeys.len().saturating_sub(1)),
+            ),
             budget,
         ));
         Some(tree)
@@ -6125,6 +6579,467 @@ mod window_manager_tests {
         again(&mut shell);
         again(&mut shell);
         assert!(shell.taskbar_windows().is_empty());
+    }
+
+    #[test]
+    fn a_rule_forbidding_something_says_so_once() {
+        let mut shell = shell();
+        rule(&mut shell, "kiosk", |a| {
+            a.prevent_close = Some(true);
+            a.prevent_resize = Some(true);
+        });
+
+        let asked = arrive(&mut shell, 1, "kiosk");
+        assert!(asked.contains(&ShellRequest::SetWindowPolicy {
+            window: WindowId(1),
+            policy: crate::WindowPolicy {
+                prevent_close: true,
+                prevent_move: false,
+                prevent_resize: true,
+            },
+        }));
+        assert_eq!(
+            asked
+                .iter()
+                .filter(|r| matches!(r, ShellRequest::SetWindowPolicy { .. }))
+                .count(),
+            1,
+            "the three flags are one rule's worth of answer, not three requests"
+        );
+    }
+
+    /// A rule that says nothing about restrictions imposes none.
+    #[test]
+    fn a_rule_silent_on_restrictions_asks_for_no_policy() {
+        let mut shell = shell();
+        rule(&mut shell, "kiosk", |a| {
+            a.opacity = Some(1.0);
+        });
+
+        assert!(
+            !arrive(&mut shell, 1, "kiosk")
+                .iter()
+                .any(|r| matches!(r, ShellRequest::SetWindowPolicy { .. })),
+            "silence must not be read as a restriction"
+        );
+    }
+
+    /// An explicit `false` takes a restriction back.
+    #[test]
+    fn a_rule_can_lift_a_restriction_it_previously_set() {
+        let mut shell = shell();
+        rule(&mut shell, "kiosk", |a| {
+            a.prevent_close = Some(false);
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "kiosk").contains(&ShellRequest::SetWindowPolicy {
+                window: WindowId(1),
+                policy: crate::WindowPolicy::default(),
+            }),
+            "an explicit false is a request to be unrestrained, not silence"
+        );
+    }
+
+    /// A rule naming only one limit sends zeroes for the other.
+    ///
+    /// The zeroes mean "say nothing about that one", which is what stops a
+    /// maximum-only rule from discarding the program's own minimum.
+    #[test]
+    fn a_rule_naming_one_size_limit_says_nothing_about_the_other() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.max_size = Some((900, 700));
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "chat").contains(&ShellRequest::SetSizeLimits {
+                window: WindowId(1),
+                min: (0, 0),
+                max: (900, 700),
+            })
+        );
+    }
+
+    #[test]
+    fn a_rule_naming_both_size_limits_sends_both() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.min_size = Some((300, 200));
+            a.max_size = Some((900, 700));
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "chat").contains(&ShellRequest::SetSizeLimits {
+                window: WindowId(1),
+                min: (300, 200),
+                max: (900, 700),
+            })
+        );
+    }
+
+    /// The limits are asked for before the size, so a sized-and-limited rule
+    /// clamps on the way in rather than being corrected afterwards.
+    #[test]
+    fn size_limits_are_asked_for_before_the_size() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.min_size = Some((300, 200));
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 100,
+                height: 100,
+            });
+        });
+
+        let asked = arrive(&mut shell, 1, "chat");
+        let limits = asked
+            .iter()
+            .position(|r| matches!(r, ShellRequest::SetSizeLimits { .. }))
+            .expect("limits");
+        let resize = asked
+            .iter()
+            .position(|r| matches!(r, ShellRequest::ResizeWindow { .. }))
+            .expect("resize");
+        assert!(limits < resize);
+    }
+
+    #[test]
+    fn a_rule_silent_on_size_limits_asks_for_none() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.opacity = Some(1.0);
+        });
+
+        assert!(
+            !arrive(&mut shell, 1, "chat")
+                .iter()
+                .any(|r| matches!(r, ShellRequest::SetSizeLimits { .. }))
+        );
+    }
+
+    #[test]
+    fn a_rule_can_pin_a_window_above_or_below_its_neighbours() {
+        for (top, bottom, expected) in [
+            (Some(true), None, crate::StackTier::Top),
+            (None, Some(true), crate::StackTier::Bottom),
+            (Some(false), None, crate::StackTier::Normal),
+        ] {
+            let mut shell = shell();
+            rule(&mut shell, "chat", |a| {
+                a.always_on_top = top;
+                a.always_on_bottom = bottom;
+            });
+            assert!(
+                arrive(&mut shell, 1, "chat").contains(&ShellRequest::SetStackTier {
+                    window: WindowId(1),
+                    tier: expected,
+                }),
+                "top={top:?} bottom={bottom:?}"
+            );
+        }
+    }
+
+    /// A rule asking for both is resolved here, not sent as a contradiction.
+    #[test]
+    fn a_rule_asking_for_both_top_and_bottom_picks_top() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.always_on_top = Some(true);
+            a.always_on_bottom = Some(true);
+        });
+
+        let asked = arrive(&mut shell, 1, "chat");
+        assert!(asked.contains(&ShellRequest::SetStackTier {
+            window: WindowId(1),
+            tier: crate::StackTier::Top,
+        }));
+        assert_eq!(
+            asked
+                .iter()
+                .filter(|r| matches!(r, ShellRequest::SetStackTier { .. }))
+                .count(),
+            1,
+            "the compositor must not be handed two tiers to choose between"
+        );
+    }
+
+    /// A rule that says nothing about stacking asks for nothing.
+    #[test]
+    fn a_rule_silent_on_stacking_leaves_the_window_alone() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.opacity = Some(1.0);
+        });
+
+        assert!(
+            !arrive(&mut shell, 1, "chat")
+                .iter()
+                .any(|r| matches!(r, ShellRequest::SetStackTier { .. })),
+            "silence is not an instruction"
+        );
+    }
+
+    /// A rule can place and size a window.
+    #[test]
+    fn a_rule_giving_a_position_and_a_size_is_carried_out() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::Absolute { x: 40, y: 60 });
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 800,
+                height: 600,
+            });
+        });
+
+        let asked = arrive(&mut shell, 1, "editor");
+        assert!(
+            asked.contains(&ShellRequest::ResizeWindow {
+                window: WindowId(1),
+                width: 800,
+                height: 600,
+            }),
+            "the size was lost: {asked:?}"
+        );
+        assert!(
+            asked.contains(&ShellRequest::MoveWindow {
+                window: WindowId(1),
+                x: 40,
+                y: 60,
+            }),
+            "the position was lost: {asked:?}"
+        );
+    }
+
+    /// The size is asked for before the position.
+    ///
+    /// Not cosmetic: a centred placement is computed *from* the size, so a
+    /// window sized after being centred would be centred for the size it used
+    /// to have.
+    #[test]
+    fn a_rule_sizes_before_it_places() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::Absolute { x: 0, y: 0 });
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 100,
+                height: 100,
+            });
+        });
+
+        let asked = arrive(&mut shell, 1, "editor");
+        let resize = asked
+            .iter()
+            .position(|r| matches!(r, ShellRequest::ResizeWindow { .. }))
+            .expect("a resize");
+        let mv = asked
+            .iter()
+            .position(|r| matches!(r, ShellRequest::MoveWindow { .. }))
+            .expect("a move");
+        assert!(resize < mv, "size must be settled before the placement");
+    }
+
+    /// A percentage rule is resolved against the display the shell knows.
+    #[test]
+    fn a_percentage_rule_is_resolved_against_the_screen() {
+        let mut shell = DesktopShell::new(1000, 800);
+        rule(&mut shell, "editor", |a| {
+            a.size = Some(window_rules::SizeSpec::Percentage {
+                w_pct: 0.5,
+                h_pct: 0.25,
+            });
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "editor").contains(&ShellRequest::ResizeWindow {
+                window: WindowId(1),
+                width: 500,
+                height: 200,
+            })
+        );
+    }
+
+    /// Centring needs a size, and says so by declining.
+    ///
+    /// The shell is told window positions in the window list but not the size
+    /// a program is about to choose, so a rule that centres without setting a
+    /// size cannot be honoured. Declining leaves the window where the program
+    /// put it; centring against a guess would move it somewhere wrong.
+    #[test]
+    fn centring_without_a_size_is_declined_rather_than_guessed() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::CenterOnMonitor(0));
+        });
+
+        let asked = arrive(&mut shell, 1, "editor");
+        assert!(
+            !asked
+                .iter()
+                .any(|r| matches!(r, ShellRequest::MoveWindow { .. })),
+            "centred against a size nobody knows: {asked:?}"
+        );
+    }
+
+    #[test]
+    fn centring_with_a_size_puts_the_window_in_the_middle() {
+        let mut shell = DesktopShell::new(1000, 800);
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::CenterOnMonitor(0));
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 400,
+                height: 200,
+            });
+        });
+
+        assert!(
+            arrive(&mut shell, 1, "editor").contains(&ShellRequest::MoveWindow {
+                window: WindowId(1),
+                x: 300,
+                y: 300,
+            })
+        );
+    }
+
+    /// A second monitor is declined, not centred on the first.
+    ///
+    /// Putting a window on the wrong screen is a worse answer than leaving it
+    /// alone, and this shell has bounds for one display.
+    #[test]
+    fn a_rule_naming_a_second_monitor_is_declined() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::CenterOnMonitor(1));
+            a.size = Some(window_rules::SizeSpec::Exact {
+                width: 100,
+                height: 100,
+            });
+        });
+
+        let asked = arrive(&mut shell, 1, "editor");
+        assert!(
+            !asked
+                .iter()
+                .any(|r| matches!(r, ShellRequest::MoveWindow { .. })),
+            "placed on a monitor this shell has no bounds for: {asked:?}"
+        );
+    }
+
+    /// An opacity rule now reaches the compositor.
+    ///
+    /// `opacity` was one of the twelve rule fields accepted, saved, listed and
+    /// then dropped -- the shell had no request it could send about another
+    /// client's window, because the ordinary `SetOpacity` resolves against the
+    /// sender's own.
+    #[test]
+    fn a_rule_asking_for_transparency_is_carried_out() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.opacity = Some(0.8);
+        });
+
+        assert_eq!(
+            arrive(&mut shell, 1, "chat"),
+            vec![ShellRequest::SetOpacity {
+                window: WindowId(1),
+                // 0.8 * 255 rounds to 204.
+                alpha: 204,
+            }]
+        );
+    }
+
+    /// The ends of the range survive the conversion exactly.
+    ///
+    /// A byte carries the opacity because the compositor blends with an
+    /// eight-bit alpha; what must not happen is 1.0 arriving as 254, which
+    /// would make "fully opaque" faintly transparent and be almost impossible
+    /// to see.
+    #[test]
+    fn a_fully_opaque_rule_is_fully_opaque() {
+        for (opacity, expected) in [(0.0_f32, 0_u8), (1.0, 255), (0.5, 128)] {
+            let mut shell = shell();
+            rule(&mut shell, "chat", |a| {
+                a.opacity = Some(opacity);
+            });
+            assert_eq!(
+                arrive(&mut shell, 1, "chat"),
+                vec![ShellRequest::SetOpacity {
+                    window: WindowId(1),
+                    alpha: expected,
+                }],
+                "opacity {opacity}"
+            );
+        }
+    }
+
+    /// A rule can ask for both a state and a transparency.
+    #[test]
+    fn opacity_does_not_displace_the_other_rule_actions() {
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| {
+            a.opacity = Some(1.0);
+            a.initial_state = Some(window_rules::InitialState::Maximized);
+        });
+
+        let asked = arrive(&mut shell, 1, "chat");
+        assert!(
+            asked.contains(&ShellRequest::window(
+                WindowId(1),
+                ShellControlAction::Maximize
+            )),
+            "the state was lost: {asked:?}"
+        );
+        assert!(
+            asked.contains(&ShellRequest::SetOpacity {
+                window: WindowId(1),
+                alpha: 255,
+            }),
+            "the opacity was lost: {asked:?}"
+        );
+    }
+
+    /// A fullscreen rule now reaches the compositor.
+    ///
+    /// It was accepted by the panel, saved to the file, shown in the rule
+    /// list, and then dropped on the floor: `Fullscreen` was the one
+    /// `InitialState` with no verb the shell could send about another client's
+    /// window. `Minimized` and `Maximized` worked, which made it the kind of
+    /// gap a user finds by writing a rule and watching nothing happen.
+    #[test]
+    fn a_rule_asking_for_a_fullscreen_start_is_carried_out() {
+        let mut shell = shell();
+        rule(&mut shell, "player", |a| {
+            a.initial_state = Some(window_rules::InitialState::Fullscreen);
+        });
+
+        assert_eq!(
+            arrive(&mut shell, 1, "player"),
+            vec![ShellRequest::window(
+                WindowId(1),
+                ShellControlAction::Fullscreen
+            )]
+        );
+    }
+
+    /// And it is not a synonym for maximise.
+    ///
+    /// Maximize fills the work area and leaves the taskbar showing; fullscreen
+    /// covers the display. A rule that asked for one and got the other would
+    /// look almost right, which is the hardest kind of wrong to notice.
+    #[test]
+    fn fullscreen_and_maximized_are_different_requests() {
+        let mut full = shell();
+        rule(&mut full, "player", |a| {
+            a.initial_state = Some(window_rules::InitialState::Fullscreen);
+        });
+        let mut max = shell();
+        rule(&mut max, "player", |a| {
+            a.initial_state = Some(window_rules::InitialState::Maximized);
+        });
+
+        assert_ne!(
+            arrive(&mut full, 1, "player"),
+            arrive(&mut max, 1, "player")
+        );
     }
 
     #[test]
@@ -9026,5 +9941,331 @@ mod run_box_wiring_tests {
         assert!(!s.any_popup_open());
         s.toggle_run_dialog();
         assert!(s.any_popup_open(), "the open box is not a popup");
+    }
+
+    // ------------------------------------------------------------------
+    // Rebinding a shortcut from the card
+    //
+    // The card could be opened and read and nothing else; the only way to
+    // move a shortcut was to edit a file by hand. These cover the two halves:
+    // walking the rows, and recording a chord -- where the hard part is that
+    // the keystroke must *not* do what it normally does.
+    // ------------------------------------------------------------------
+
+    fn card_shell() -> DesktopShell {
+        let mut shell = DesktopShell::new(1920, 1080);
+        shell.toggle_shortcut_card();
+        assert!(shell.shortcut_card_open, "the card must be open");
+        shell
+    }
+
+    fn tap(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    fn tap_with(key: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_arrow_keys_walk_the_card_and_stop_at_the_ends() {
+        let mut shell = card_shell();
+        assert_eq!(shell.shortcut_selected, 0);
+
+        drop(shell.handle_hotkey(&tap(Key::Down)));
+        assert_eq!(shell.shortcut_selected, 1);
+        drop(shell.handle_hotkey(&tap(Key::Up)));
+        assert_eq!(shell.shortcut_selected, 0);
+
+        // Clamped at the top, as every other list in this shell is.
+        drop(shell.handle_hotkey(&tap(Key::Up)));
+        assert_eq!(shell.shortcut_selected, 0, "no wrap to the last row");
+
+        let last = shell.hotkeys.len().saturating_sub(1);
+        for _ in 0..shell.hotkeys.len().saturating_add(5) {
+            drop(shell.handle_hotkey(&tap(Key::Down)));
+        }
+        assert_eq!(shell.shortcut_selected, last, "and none off the bottom");
+    }
+
+    /// The whole point: while recording, the keystroke is data.
+    ///
+    /// A user rebinding a shortcut presses chords that *are* shortcuts. If the
+    /// shell ran them, rebinding "show the desktop" would show the desktop.
+    #[test]
+    fn a_chord_pressed_while_recording_does_not_also_run() {
+        settingsfile::testing::with_scratch_config(
+            "hk-a-chord-pressed-while-recording-does-not",
+            |_root| {
+                let mut shell = card_shell();
+                drop(shell.handle_hotkey(&tap(Key::Enter)));
+                assert!(shell.shortcut_capture.is_some(), "recording");
+
+                // Super+D is Show Desktop by default: run, it asks the compositor to
+                // minimise every window on the glass. Pressed as data it must ask for
+                // nothing at all.
+                let outcome = shell.handle_hotkey(&tap_with(Key::D, Modifiers::super_key()));
+
+                assert!(
+                    outcome.requests.is_empty(),
+                    "the chord being recorded must not also be obeyed, got {:?}",
+                    outcome.requests
+                );
+                assert!(outcome.launches.is_empty(), "and must start nothing");
+                assert!(shell.shortcut_capture.is_none(), "and recording ends");
+            },
+        );
+    }
+
+    #[test]
+    fn recording_moves_the_action_onto_the_new_chord() {
+        settingsfile::testing::with_scratch_config(
+            "hk-recording-moves-the-action-onto-the-new-",
+            |_root| {
+                let mut shell = card_shell();
+                let (old, action) = shell
+                    .hotkeys
+                    .all_bindings()
+                    .next()
+                    .map(|(h, a)| (*h, a.clone()))
+                    .expect("a first binding");
+
+                drop(shell.handle_hotkey(&tap(Key::Enter)));
+                let chord = crate::hotkeys::Hotkey::new(Key::F9, Modifiers::ctrl());
+                drop(shell.handle_hotkey(&tap_with(Key::F9, Modifiers::ctrl())));
+
+                assert_eq!(
+                    shell.hotkeys.conflicts_with(&chord),
+                    Some(&action),
+                    "the new chord must run what the row named"
+                );
+                assert!(
+                    shell.hotkeys.conflicts_with(&old).is_none(),
+                    "and the old chord must stop doing it"
+                );
+            },
+        );
+    }
+
+    /// A chord already in use is refused, and the refusal names the holder.
+    #[test]
+    fn a_chord_that_is_taken_is_refused_and_says_by_what() {
+        settingsfile::testing::with_scratch_config(
+            "hk-a-chord-that-is-taken-is-refused-and-say",
+            |_root| {
+                let mut shell = card_shell();
+                let mut bindings = shell.hotkeys.all_bindings();
+                let (first, first_action) = bindings
+                    .next()
+                    .map(|(h, a)| (*h, a.clone()))
+                    .expect("first");
+                // Skips any binding on a bare modifier. There is no such binding in
+                // the default table -- the first two rows are Escape and PrintScreen --
+                // so this currently skips nothing; it is here because `capture_chord`
+                // ignores bare modifiers by design, and a future default bound to one
+                // would otherwise make this test assert on a rebind that never
+                // happened, and pass for the wrong reason.
+                let second = bindings
+                    .map(|(h, _)| *h)
+                    .find(|h| {
+                        !matches!(
+                            h.key,
+                            Key::LeftCtrl
+                                | Key::RightCtrl
+                                | Key::LeftAlt
+                                | Key::RightAlt
+                                | Key::LeftShift
+                                | Key::RightShift
+                                | Key::LeftSuper
+                                | Key::RightSuper
+                        )
+                    })
+                    .expect("a second binding on a real key");
+
+                // Row 0 is `first`; try to give it `second`'s chord.
+                drop(shell.handle_hotkey(&tap(Key::Enter)));
+                let ev = KeyEvent {
+                    key: second.key,
+                    pressed: true,
+                    modifiers: second.modifiers(),
+                    text: String::new(),
+                };
+                drop(shell.handle_hotkey(&ev));
+
+                assert_eq!(
+                    shell.hotkeys.conflicts_with(&first),
+                    Some(&first_action),
+                    "a refused rebind must leave the original binding alone"
+                );
+                let msg = shell.shortcut_message.clone().unwrap_or_default();
+                assert!(msg.contains("already"), "and must say so, got {msg:?}");
+            },
+        );
+    }
+
+    /// Escape cancels the recording rather than closing the card.
+    #[test]
+    fn escape_while_recording_cancels_the_rebind() {
+        settingsfile::testing::with_scratch_config(
+            "hk-escape-while-recording-cancels-the-rebin",
+            |_root| {
+                let mut shell = card_shell();
+                let before: Vec<_> = shell
+                    .hotkeys
+                    .all_bindings()
+                    .map(|(h, a)| (*h, a.clone()))
+                    .collect();
+
+                drop(shell.handle_hotkey(&tap(Key::Enter)));
+                drop(shell.handle_hotkey(&tap(Key::Escape)));
+
+                assert!(shell.shortcut_capture.is_none(), "recording stopped");
+                assert!(shell.shortcut_card_open, "but the card stays open");
+                let after: Vec<_> = shell
+                    .hotkeys
+                    .all_bindings()
+                    .map(|(h, a)| (*h, a.clone()))
+                    .collect();
+                assert_eq!(before, after, "and nothing was rebound");
+            },
+        );
+    }
+
+    /// A bare modifier is not a chord.
+    ///
+    /// Reaching for Ctrl on the way to Ctrl+F9 must not bind the shortcut to
+    /// Ctrl the instant the finger lands.
+    #[test]
+    fn a_modifier_on_its_own_does_not_end_the_recording() {
+        settingsfile::testing::with_scratch_config(
+            "hk-a-modifier-on-its-own-does-not-end-the-r",
+            |_root| {
+                let mut shell = card_shell();
+                drop(shell.handle_hotkey(&tap(Key::Enter)));
+
+                for key in [Key::LeftCtrl, Key::LeftAlt, Key::LeftShift, Key::LeftSuper] {
+                    drop(shell.handle_hotkey(&tap(key)));
+                    assert!(
+                        shell.shortcut_capture.is_some(),
+                        "{key:?} alone must not be taken as the answer"
+                    );
+                }
+            },
+        );
+    }
+
+    /// A rebind survives a restart.
+    #[test]
+    fn a_rebound_shortcut_is_still_bound_in_a_fresh_shell() {
+        settingsfile::testing::with_scratch_config("hk-persist", |_root| {
+            let mut shell = card_shell();
+            let (old, action) = shell
+                .hotkeys
+                .all_bindings()
+                .next()
+                .map(|(h, a)| (*h, a.clone()))
+                .expect("a binding");
+
+            drop(shell.handle_hotkey(&tap(Key::Enter)));
+            let chord = crate::hotkeys::Hotkey::new(Key::F12, Modifiers::ctrl());
+            drop(shell.handle_hotkey(&tap_with(Key::F12, Modifiers::ctrl())));
+            assert_eq!(shell.hotkeys.conflicts_with(&chord), Some(&action));
+
+            // A new shell starts from the defaults and then reads the file.
+            let mut fresh = DesktopShell::new(1920, 1080);
+            assert_eq!(
+                fresh.hotkeys.conflicts_with(&chord),
+                None,
+                "the defaults must not already have it, or this proves nothing"
+            );
+            fresh.load_shortcuts();
+
+            assert_eq!(
+                fresh.hotkeys.conflicts_with(&chord),
+                Some(&action),
+                "the rebind must survive a restart"
+            );
+            assert_eq!(
+                fresh.hotkeys.conflicts_with(&old),
+                None,
+                "and must have moved rather than been added beside the old chord"
+            );
+        });
+    }
+
+    /// A saved file names only what the user changed; everything else keeps
+    /// working. A file from an older desktop must not delete newer shortcuts.
+    #[test]
+    fn loading_shortcuts_keeps_the_defaults_it_does_not_mention() {
+        settingsfile::testing::with_scratch_config("hk-floor", |_root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            let before = shell.hotkeys.len();
+
+            // A file mentioning exactly one binding.
+            let mut doc = appearance::config::load(DesktopShell::SHORTCUTS_CONFIG_NAME);
+            doc.set_seq(&["shortcuts"], &["Ctrl+F12=show_desktop"]);
+            appearance::config::store(DesktopShell::SHORTCUTS_CONFIG_NAME, &doc).expect("store");
+
+            shell.load_shortcuts();
+
+            assert_eq!(
+                shell.hotkeys.len(),
+                before,
+                "one moved shortcut must not change how many there are"
+            );
+            assert!(
+                shell
+                    .hotkeys
+                    .conflicts_with(&crate::hotkeys::Hotkey::new(Key::F12, Modifiers::ctrl()))
+                    .is_some(),
+                "and the one it named must have moved"
+            );
+        });
+    }
+
+    /// An unreadable file leaves the defaults alone rather than clearing them.
+    #[test]
+    fn an_unparseable_shortcuts_file_is_ignored() {
+        settingsfile::testing::with_scratch_config("hk-bad", |_root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            let before: Vec<_> = shell
+                .hotkeys
+                .all_bindings()
+                .map(|(h, a)| (*h, a.clone()))
+                .collect();
+
+            let mut doc = appearance::config::load(DesktopShell::SHORTCUTS_CONFIG_NAME);
+            doc.set_seq(&["shortcuts"], &["this is not a binding"]);
+            appearance::config::store(DesktopShell::SHORTCUTS_CONFIG_NAME, &doc).expect("store");
+
+            shell.load_shortcuts();
+
+            let after: Vec<_> = shell
+                .hotkeys
+                .all_bindings()
+                .map(|(h, a)| (*h, a.clone()))
+                .collect();
+            assert_eq!(
+                before, after,
+                "a bad file must not cost the user the defaults"
+            );
+        });
+    }
+
+    #[test]
+    fn escape_with_the_card_open_shuts_it() {
+        let mut shell = card_shell();
+        drop(shell.handle_hotkey(&tap(Key::Escape)));
+        assert!(!shell.shortcut_card_open);
     }
 }

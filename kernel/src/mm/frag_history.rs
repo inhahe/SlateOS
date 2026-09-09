@@ -339,7 +339,7 @@ fn compute_frag(order_counts: &[usize; frame::BUDDY_MAX_ORDER + 1]) -> u8 {
 // ---------------------------------------------------------------------------
 
 /// Self-test for fragmentation history.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[frag_history] Running self-test...");
 
     // Test 1: Clear state.
@@ -411,4 +411,5 @@ pub fn self_test() {
     clear();
 
     serial_println!("[frag_history] Self-test PASSED");
+    Ok(())
 }

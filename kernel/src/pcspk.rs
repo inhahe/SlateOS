@@ -191,7 +191,7 @@ fn delay_ms(ms: u32) {
 ///
 /// Note: this won't produce audible output without QEMU's pcspk-audiodev,
 /// but verifies the port I/O path works without crashing.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[pcspk] Running self-test...");
 
     // Test 1: Enable and disable speaker gate.
@@ -224,4 +224,5 @@ pub fn self_test() {
     serial_println!("[pcspk]   Quick tone: OK");
 
     serial_println!("[pcspk] Self-test PASSED");
+    Ok(())
 }

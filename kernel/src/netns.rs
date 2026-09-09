@@ -612,7 +612,7 @@ pub fn active_count() -> usize {
 // ---------------------------------------------------------------------------
 
 /// Comprehensive self-test for network namespaces.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[netns] Running self-test...");
 
     // Test 1: Root namespace exists.
@@ -852,4 +852,5 @@ pub fn self_test() {
     serial_println!("[netns]   Cleanup: OK");
 
     serial_println!("[netns] Self-test PASSED (18 tests)");
+    Ok(())
 }

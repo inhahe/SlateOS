@@ -355,7 +355,7 @@ pub fn stats() -> PcidStats {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the PCID subsystem.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[pcid] Running self-test...");
     let mut skips = crate::fs::selftest::Skips::new();
 
@@ -414,4 +414,5 @@ pub fn self_test() {
 
     skips.report("[pcid]");
     serial_println!("[pcid] Self-test PASSED{}", skips.suffix());
+    Ok(())
 }

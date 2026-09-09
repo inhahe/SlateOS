@@ -29,6 +29,7 @@
 //! stopwatch needs a fast clock to show hundredths, and everything else is
 //! content with twice a second.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
 use guitk::frame::Rect;
@@ -44,54 +45,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // ============================================================================
 
 #[allow(dead_code)]
-const BASE: Color = Color::from_hex(0x1E1E2E);
-#[allow(dead_code)]
-const MANTLE: Color = Color::from_hex(0x181825);
-#[allow(dead_code)]
-const CRUST: Color = Color::from_hex(0x11111B);
-#[allow(dead_code)]
-const SURFACE0: Color = Color::from_hex(0x313244);
-#[allow(dead_code)]
-const SURFACE1: Color = Color::from_hex(0x45475A);
-#[allow(dead_code)]
-const SURFACE2: Color = Color::from_hex(0x585B70);
-#[allow(dead_code)]
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-#[allow(dead_code)]
 const OVERLAY1: Color = Color::from_hex(0x7F849C);
-#[allow(dead_code)]
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-#[allow(dead_code)]
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-#[allow(dead_code)]
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-#[allow(dead_code)]
-const BLUE: Color = Color::from_hex(0x89B4FA);
-#[allow(dead_code)]
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-#[allow(dead_code)]
-const RED: Color = Color::from_hex(0xF38BA8);
-#[allow(dead_code)]
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-#[allow(dead_code)]
-const PEACH: Color = Color::from_hex(0xFAB387);
-#[allow(dead_code)]
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-#[allow(dead_code)]
-const TEAL: Color = Color::from_hex(0x94E2D5);
-#[allow(dead_code)]
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
+
 #[allow(dead_code)]
 const ROSEWATER: Color = Color::from_hex(0xF5E0DC);
 #[allow(dead_code)]
 const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
-#[allow(dead_code)]
-const SAPPHIRE: Color = Color::from_hex(0x74C7EC);
-#[allow(dead_code)]
-// `0x89DCEB`. Was `0x89DCFE` — a transposed byte pair copied from
-// `gui/appearance`. Unused here today, but a wrong constant behind
-// `#[allow(dead_code)]` is a wrong constant the next caller inherits.
-const SKY: Color = Color::from_hex(0x89DCEB);
+
 #[allow(dead_code)]
 const MAROON: Color = Color::from_hex(0xEBA0AC);
 #[allow(dead_code)]
@@ -876,14 +836,22 @@ impl Alarm {
     }
 
     /// Draw this alarm's card into `f`, recording its controls.
-    pub fn draw(&self, f: &mut Frame, x: f32, y: f32, width: f32, format: TimeFormat) {
+    pub fn draw(
+        &self,
+        pal: &Palette,
+        f: &mut Frame,
+        x: f32,
+        y: f32,
+        width: f32,
+        format: TimeFormat,
+    ) {
         let height = self.card_height();
         let bg_color = if self.ringing {
-            Color::rgba(RED.r, RED.g, RED.b, 40)
+            Color::rgba(pal.red.r, pal.red.g, pal.red.b, 40)
         } else if self.snoozed_remaining.is_some() {
-            Color::rgba(YELLOW.r, YELLOW.g, YELLOW.b, 30)
+            Color::rgba(pal.yellow.r, pal.yellow.g, pal.yellow.b, 30)
         } else {
-            SURFACE0
+            pal.surface0
         };
 
         let card = Rect::new(x, y, width, height);
@@ -893,7 +861,7 @@ impl Alarm {
         f.hit(Target::AlarmRow(self.id), card);
 
         // Time display.
-        let time_color = if self.enabled { TEXT_COLOR } else { OVERLAY0 };
+        let time_color = if self.enabled { pal.text } else { pal.overlay0 };
         text(
             f,
             x + PADDING,
@@ -912,7 +880,7 @@ impl Alarm {
                 x + PADDING,
                 y + 46.0,
                 self.label.clone(),
-                SUBTEXT0,
+                pal.subtext0,
                 13.0,
                 FontWeightHint::Regular,
                 width * 0.5,
@@ -939,7 +907,7 @@ impl Alarm {
             delete.y + 4.0,
             delete.w,
             "\u{2715}",
-            OVERLAY0,
+            pal.overlay0,
             13.0,
             FontWeightHint::Regular,
         );
@@ -947,7 +915,7 @@ impl Alarm {
 
         // Enable/disable pill.
         let toggle = Rect::new(x + width - 62.0, y + 38.0, 44.0, 24.0);
-        let toggle_color = if self.enabled { BLUE } else { SURFACE2 };
+        let toggle_color = if self.enabled { pal.blue } else { pal.surface2 };
         fill(f, toggle, toggle_color, toggle.h / 2.0);
         let knob_d = toggle.h - 6.0;
         let knob_x = if self.enabled {
@@ -958,7 +926,7 @@ impl Alarm {
         fill(
             f,
             Rect::new(knob_x, toggle.y + 3.0, knob_d, knob_d),
-            TEXT_COLOR,
+            pal.text,
             knob_d / 2.0,
         );
         f.hit(Target::AlarmToggle(self.id), toggle);
@@ -978,7 +946,7 @@ impl Alarm {
                         "Snoozed — {} left",
                         format_duration_hms(clamp_u32(remaining))
                     ),
-                    YELLOW,
+                    pal.yellow,
                     12.0,
                     FontWeightHint::Regular,
                     width * 0.5,
@@ -991,8 +959,8 @@ impl Alarm {
                 f,
                 Rect::new(btn_x, strip_y + 2.0, btn_w, btn_h),
                 "Dismiss",
-                SURFACE1,
-                TEXT_COLOR,
+                pal.surface1,
+                pal.text,
                 Target::AlarmDismiss(self.id),
             );
             if self.ringing {
@@ -1001,8 +969,8 @@ impl Alarm {
                     f,
                     Rect::new(btn_x, strip_y + 2.0, btn_w, btn_h),
                     "Snooze",
-                    BLUE,
-                    CRUST,
+                    pal.blue,
+                    pal.crust,
                     Target::AlarmSnooze(self.id),
                 );
             }
@@ -1154,11 +1122,11 @@ impl Timer {
     }
 
     /// Draw this timer's card into `f`, recording its controls.
-    pub fn draw(&self, f: &mut Frame, x: f32, y: f32, width: f32) {
+    pub fn draw(&self, pal: &Palette, f: &mut Frame, x: f32, y: f32, width: f32) {
         let bg_color = match self.state {
-            TimerState::Finished => Color::rgba(RED.r, RED.g, RED.b, 40),
-            TimerState::Paused => Color::rgba(YELLOW.r, YELLOW.g, YELLOW.b, 20),
-            TimerState::Running | TimerState::Idle => SURFACE0,
+            TimerState::Finished => Color::rgba(pal.red.r, pal.red.g, pal.red.b, 40),
+            TimerState::Paused => Color::rgba(pal.yellow.r, pal.yellow.g, pal.yellow.b, 20),
+            TimerState::Running | TimerState::Idle => pal.surface0,
         };
 
         let card = Rect::new(x, y, width, TIMER_ROW_H);
@@ -1172,7 +1140,7 @@ impl Timer {
                 x + PADDING,
                 y + 8.0,
                 self.label.clone(),
-                SUBTEXT0,
+                pal.subtext0,
                 13.0,
                 FontWeightHint::Regular,
                 width - PADDING * 2.0,
@@ -1187,9 +1155,9 @@ impl Timer {
 
         // Remaining time.
         let time_color = match self.state {
-            TimerState::Finished => RED,
-            TimerState::Paused => YELLOW,
-            TimerState::Running | TimerState::Idle => TEXT_COLOR,
+            TimerState::Finished => pal.red,
+            TimerState::Paused => pal.yellow,
+            TimerState::Running | TimerState::Idle => pal.text,
         };
         text(
             f,
@@ -1208,7 +1176,7 @@ impl Timer {
             x + PADDING,
             text_y + 40.0,
             format!("of {}", self.format_total()),
-            OVERLAY0,
+            pal.overlay0,
             12.0,
             FontWeightHint::Regular,
             width * 0.4,
@@ -1216,12 +1184,12 @@ impl Timer {
 
         // Progress bar.
         let bar = Rect::new(x + PADDING, text_y + 60.0, width - PADDING * 2.0, 6.0);
-        fill(f, bar, SURFACE2, 3.0);
+        fill(f, bar, pal.surface2, 3.0);
         let fill_w = bar.w * self.progress();
         let fill_color = match self.state {
-            TimerState::Finished => RED,
-            TimerState::Paused => YELLOW,
-            TimerState::Running | TimerState::Idle => BLUE,
+            TimerState::Finished => pal.red,
+            TimerState::Paused => pal.yellow,
+            TimerState::Running | TimerState::Idle => pal.blue,
         };
         if fill_w > 0.0 {
             fill(f, Rect::new(bar.x, bar.y, fill_w, bar.h), fill_color, 3.0);
@@ -1235,10 +1203,10 @@ impl Timer {
             TimerState::Finished => "DONE",
         };
         let badge_color = match self.state {
-            TimerState::Idle => OVERLAY0,
-            TimerState::Running => GREEN,
-            TimerState::Paused => YELLOW,
-            TimerState::Finished => RED,
+            TimerState::Idle => pal.overlay0,
+            TimerState::Running => pal.green,
+            TimerState::Paused => pal.yellow,
+            TimerState::Finished => pal.red,
         };
         text(
             f,
@@ -1260,7 +1228,7 @@ impl Timer {
             delete.y + 4.0,
             delete.w,
             "\u{2715}",
-            OVERLAY0,
+            pal.overlay0,
             13.0,
             FontWeightHint::Regular,
         );
@@ -1272,16 +1240,16 @@ impl Timer {
             f,
             Rect::new(btn_x, y + 30.0, btn_w, 28.0),
             self.toggle_label(),
-            BLUE,
-            CRUST,
+            pal.blue,
+            pal.crust,
             Target::TimerToggle(self.id),
         );
         button(
             f,
             Rect::new(btn_x, y + 64.0, btn_w, 28.0),
             "Reset",
-            SURFACE1,
-            TEXT_COLOR,
+            pal.surface1,
+            pal.text,
             Target::TimerReset(self.id),
         );
     }
@@ -1510,12 +1478,21 @@ impl Stopwatch {
     /// scrolled and clipped: a lap that has scrolled out of the pane must not be
     /// drawn over the buttons above it, and — since the frame trims hit boxes to
     /// the clip — must not be clickable either.
-    pub fn draw(&self, f: &mut Frame, x: f32, y: f32, width: f32, height: f32, scroll: f32) {
+    pub fn draw(
+        &self,
+        pal: &Palette,
+        f: &mut Frame,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        scroll: f32,
+    ) {
         // Elapsed time — large display.
         let time_color = match self.state {
-            StopwatchState::Running => GREEN,
-            StopwatchState::Paused => YELLOW,
-            StopwatchState::Stopped => TEXT_COLOR,
+            StopwatchState::Running => pal.green,
+            StopwatchState::Paused => pal.yellow,
+            StopwatchState::Stopped => pal.text,
         };
         text_centred(
             f,
@@ -1540,7 +1517,7 @@ impl Stopwatch {
             y + 78.0,
             width,
             state_text,
-            OVERLAY0,
+            pal.overlay0,
             12.0,
             FontWeightHint::Regular,
         );
@@ -1554,8 +1531,8 @@ impl Stopwatch {
             f,
             Rect::new(x, btn_y, btn_w, btn_h),
             self.toggle_label(),
-            BLUE,
-            CRUST,
+            pal.blue,
+            pal.crust,
             Target::SwToggle,
         );
         // Lap is only meaningful while running — a lap of a stopped stopwatch
@@ -1566,16 +1543,16 @@ impl Stopwatch {
             f,
             Rect::new(x + btn_w + gap, btn_y, btn_w, btn_h),
             "Lap",
-            if lap_live { SURFACE1 } else { SURFACE0 },
-            if lap_live { TEXT_COLOR } else { OVERLAY0 },
+            if lap_live { pal.surface1 } else { pal.surface0 },
+            if lap_live { pal.text } else { pal.overlay0 },
             Target::SwLap,
         );
         button(
             f,
             Rect::new(x + (btn_w + gap) * 2.0, btn_y, btn_w, btn_h),
             "Reset",
-            SURFACE1,
-            TEXT_COLOR,
+            pal.surface1,
+            pal.text,
             Target::SwReset,
         );
 
@@ -1592,7 +1569,7 @@ impl Stopwatch {
                     format_duration_ms(stats.average_ms),
                     stats.count,
                 ),
-                SUBTEXT0,
+                pal.subtext0,
                 12.0,
                 FontWeightHint::Regular,
                 width,
@@ -1610,7 +1587,7 @@ impl Stopwatch {
             y1: table_y,
             x2: x + width,
             y2: table_y,
-            color: SURFACE2,
+            color: pal.surface2,
             width: 1.0,
         });
 
@@ -1667,16 +1644,16 @@ impl Stopwatch {
             // something to compare against; with one lap it is both, and
             // painting it green and red at once says nothing.
             let split_color = match stats {
-                Some(ref s) if self.laps.len() > 1 && lap.split_ms == s.best_ms => GREEN,
-                Some(ref s) if self.laps.len() > 1 && lap.split_ms == s.worst_ms => RED,
-                _ => TEXT_COLOR,
+                Some(ref s) if self.laps.len() > 1 && lap.split_ms == s.best_ms => pal.green,
+                Some(ref s) if self.laps.len() > 1 && lap.split_ms == s.worst_ms => pal.red,
+                _ => pal.text,
             };
             text(
                 f,
                 col_num_x,
                 row_y,
                 format!("#{}", lap.number),
-                SUBTEXT0,
+                pal.subtext0,
                 12.0,
                 FontWeightHint::Regular,
                 width * 0.26,
@@ -1696,7 +1673,7 @@ impl Stopwatch {
                 col_elapsed_x,
                 row_y,
                 lap.format_elapsed(),
-                SUBTEXT0,
+                pal.subtext0,
                 12.0,
                 FontWeightHint::Regular,
                 width * 0.36,
@@ -1873,11 +1850,18 @@ pub struct AlarmClockApp {
     /// handler that fired the per-second work on every tick would run a
     /// countdown ten times too fast whenever the stopwatch happened to be on.
     tick_accum_ms: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl AlarmClockApp {
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             active_tab: ActiveTab::default(),
             time_format: TimeFormat::default(),
             alarms: Vec::new(),
@@ -2352,7 +2336,12 @@ impl AlarmClockApp {
         let width = width.max(MIN_WIDTH);
         let height = height.max(MIN_HEIGHT);
         let mut f = Frame::new(width, height);
-        fill(&mut f, Rect::new(0.0, 0.0, width, height), BASE, 0.0);
+        fill(
+            &mut f,
+            Rect::new(0.0, 0.0, width, height),
+            self.palette.base,
+            0.0,
+        );
         self.draw_tab_bar(&mut f, width);
 
         let content = Self::content_rect(width, height);
@@ -2360,6 +2349,7 @@ impl AlarmClockApp {
             ActiveTab::Alarm => self.draw_alarm_tab(&mut f, content),
             ActiveTab::Timer => self.draw_timer_tab(&mut f, content),
             ActiveTab::Stopwatch => self.stopwatch.draw(
+                &self.palette,
                 &mut f,
                 content.x,
                 content.y,
@@ -2373,18 +2363,23 @@ impl AlarmClockApp {
 
     /// The three tabs across the top.
     fn draw_tab_bar(&self, f: &mut Frame, width: f32) {
-        fill(f, Rect::new(0.0, 0.0, width, TAB_BAR_HEIGHT), MANTLE, 0.0);
+        fill(
+            f,
+            Rect::new(0.0, 0.0, width, TAB_BAR_HEIGHT),
+            self.palette.mantle,
+            0.0,
+        );
         let tab_width = width / 3.0;
         for (i, tab) in ActiveTab::all().into_iter().enumerate() {
             let tx = i as f32 * tab_width;
             let rect = Rect::new(tx, 0.0, tab_width, TAB_BAR_HEIGHT);
             let active = tab == self.active_tab;
             if active {
-                fill(f, rect, SURFACE0, 0.0);
+                fill(f, rect, self.palette.surface0, 0.0);
                 fill(
                     f,
                     Rect::new(tx, TAB_BAR_HEIGHT - 3.0, tab_width, 3.0),
-                    BLUE,
+                    self.palette.blue,
                     0.0,
                 );
             }
@@ -2394,7 +2389,11 @@ impl AlarmClockApp {
                 TAB_BAR_HEIGHT / 2.0 - 8.0,
                 tab_width,
                 tab.label(),
-                if active { BLUE } else { SUBTEXT0 },
+                if active {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext0
+                },
                 15.0,
                 if active {
                     FontWeightHint::Bold
@@ -2419,7 +2418,7 @@ impl AlarmClockApp {
         // chip somewhere — is a second thing on screen saying what the clock
         // already says.
         let clock = Rect::new(content.x, content.y, content.w, CLOCK_H);
-        fill(f, clock, SURFACE0, 10.0);
+        fill(f, clock, self.palette.surface0, 10.0);
         let (hour, minute, second) = self.current_time;
         let (display_hour, period) = self.time_format.format_hour(hour);
         let now = match period {
@@ -2432,7 +2431,7 @@ impl AlarmClockApp {
             clock.y + 10.0,
             clock.w,
             &now,
-            TEXT_COLOR,
+            self.palette.text,
             34.0,
             FontWeightHint::Bold,
         );
@@ -2459,7 +2458,7 @@ impl AlarmClockApp {
             clock.y + 58.0,
             clock.w,
             &sub,
-            SUBTEXT0,
+            self.palette.subtext0,
             12.0,
             FontWeightHint::Regular,
         );
@@ -2474,8 +2473,8 @@ impl AlarmClockApp {
                 ADD_BUTTON_H,
             ),
             "+ Add Alarm",
-            BLUE,
-            CRUST,
+            self.palette.blue,
+            self.palette.crust,
             Target::AddAlarm,
         );
 
@@ -2487,7 +2486,7 @@ impl AlarmClockApp {
                 list.y + 24.0,
                 list.w,
                 "No alarms yet",
-                OVERLAY0,
+                self.palette.overlay0,
                 14.0,
                 FontWeightHint::Regular,
             );
@@ -2506,7 +2505,7 @@ impl AlarmClockApp {
                 break;
             }
             if y - self.alarm_scroll + card_h > list.y {
-                alarm.draw(f, list.x, y, list.w, self.time_format);
+                alarm.draw(&self.palette, f, list.x, y, list.w, self.time_format);
             }
             y += card_h + ALARM_ROW_GAP;
         }
@@ -2533,7 +2532,7 @@ impl AlarmClockApp {
     /// Widths are untouched: the window is clamped to [`MIN_WIDTH`], so the
     /// horizontal direction has the room the rows were written for.
     fn draw_editor(&self, f: &mut Frame, editor: &AlarmEditor, content: Rect) {
-        fill(f, content, SURFACE0, 10.0);
+        fill(f, content, self.palette.surface0, 10.0);
         f.clip(content);
 
         // Not `clamp` alone: `clamp` returns NaN for a NaN input, and a NaN
@@ -2565,7 +2564,7 @@ impl AlarmClockApp {
             } else {
                 "New alarm"
             },
-            TEXT_COLOR,
+            self.palette.text,
             15.0 * s,
             FontWeightHint::Bold,
             w,
@@ -2601,8 +2600,8 @@ impl AlarmClockApp {
                 f,
                 Rect::new(col_x, top, col_w, step_h),
                 "\u{25B2}",
-                SURFACE1,
-                TEXT_COLOR,
+                self.palette.surface1,
+                self.palette.text,
                 up,
             );
             text_centred(
@@ -2611,7 +2610,7 @@ impl AlarmClockApp {
                 top + step_h + inner,
                 col_w,
                 &format!("{:02}", value),
-                TEXT_COLOR,
+                self.palette.text,
                 num_size,
                 FontWeightHint::Bold,
             );
@@ -2619,8 +2618,8 @@ impl AlarmClockApp {
                 f,
                 Rect::new(col_x, top + spinner_h - step_h, col_w, step_h),
                 "\u{25BC}",
-                SURFACE1,
-                TEXT_COLOR,
+                self.palette.surface1,
+                self.palette.text,
                 down,
             );
         }
@@ -2631,7 +2630,7 @@ impl AlarmClockApp {
             top + step_h + inner + (num_size - colon_size) / 2.0,
             col_gap,
             ":",
-            SUBTEXT0,
+            self.palette.subtext0,
             colon_size,
             FontWeightHint::Bold,
         );
@@ -2643,7 +2642,11 @@ impl AlarmClockApp {
         fill(
             f,
             label_rect,
-            if focused { SURFACE2 } else { SURFACE1 },
+            if focused {
+                self.palette.surface2
+            } else {
+                self.palette.surface1
+            },
             6.0,
         );
         let body = if editor.label.is_empty() && !focused {
@@ -2660,9 +2663,9 @@ impl AlarmClockApp {
             row_y + (label_h - label_size) / 2.0,
             body,
             if editor.label.is_empty() && !focused {
-                OVERLAY0
+                self.palette.overlay0
             } else {
-                TEXT_COLOR
+                self.palette.text
             },
             label_size,
             FontWeightHint::Regular,
@@ -2684,8 +2687,16 @@ impl AlarmClockApp {
                 f,
                 Rect::new(cx, row_y, chip_w, chip_h),
                 day.single_letter(),
-                if on { BLUE } else { SURFACE1 },
-                if on { CRUST } else { SUBTEXT0 },
+                if on {
+                    self.palette.blue
+                } else {
+                    self.palette.surface1
+                },
+                if on {
+                    self.palette.crust
+                } else {
+                    self.palette.subtext0
+                },
                 Target::EditDay(day),
             );
         }
@@ -2697,16 +2708,16 @@ impl AlarmClockApp {
             f,
             Rect::new(x, row_y, half, chip_h),
             &format!("Sound: {}", editor.sound.label()),
-            SURFACE1,
-            SUBTEXT1,
+            self.palette.surface1,
+            self.palette.subtext1,
             Target::EditSound,
         );
         button(
             f,
             Rect::new(x + half + CHIP_GAP, row_y, half, chip_h),
             &format!("Snooze: {}", editor.snooze().label()),
-            SURFACE1,
-            SUBTEXT1,
+            self.palette.surface1,
+            self.palette.subtext1,
             Target::EditSnooze,
         );
 
@@ -2718,16 +2729,16 @@ impl AlarmClockApp {
             f,
             Rect::new(x, row_y, half, action_h),
             "Save",
-            GREEN,
-            CRUST,
+            self.palette.green,
+            self.palette.crust,
             Target::EditSave,
         );
         button(
             f,
             Rect::new(x + half + CHIP_GAP, row_y, half, action_h),
             "Cancel",
-            SURFACE2,
-            TEXT_COLOR,
+            self.palette.surface2,
+            self.palette.text,
             Target::EditCancel,
         );
         f.unclip();
@@ -2745,8 +2756,8 @@ impl AlarmClockApp {
                 f,
                 Rect::new(cx, cy, chip_w, PRESET_H),
                 &format!("{} min", minutes),
-                SURFACE1,
-                TEXT_COLOR,
+                self.palette.surface1,
+                self.palette.text,
                 Target::Preset(minutes),
             );
         }
@@ -2759,14 +2770,23 @@ impl AlarmClockApp {
             let fx = content.x + i as f32 * (field_w + CHIP_GAP);
             let rect = Rect::new(fx, custom_y, field_w, CUSTOM_H);
             let focused = self.focus == Some(Focus::Custom(hms));
-            fill(f, rect, if focused { SURFACE2 } else { SURFACE1 }, 6.0);
+            fill(
+                f,
+                rect,
+                if focused {
+                    self.palette.surface2
+                } else {
+                    self.palette.surface1
+                },
+                6.0,
+            );
             let entry = self.custom.get(hms.index()).map_or("", String::as_str);
             let (body, color) = if entry.is_empty() {
-                (hms.placeholder().to_string(), OVERLAY0)
+                (hms.placeholder().to_string(), self.palette.overlay0)
             } else if focused {
-                (format!("{}\u{2502}", entry), TEXT_COLOR)
+                (format!("{}\u{2502}", entry), self.palette.text)
             } else {
-                (entry.to_string(), TEXT_COLOR)
+                (entry.to_string(), self.palette.text)
             };
             text_centred(
                 f,
@@ -2784,8 +2804,8 @@ impl AlarmClockApp {
             f,
             Rect::new(content.x + content.w - start_w, custom_y, start_w, CUSTOM_H),
             "Start",
-            GREEN,
-            CRUST,
+            self.palette.green,
+            self.palette.crust,
             Target::CustomStart,
         );
 
@@ -2797,7 +2817,7 @@ impl AlarmClockApp {
                 list.y + 24.0,
                 list.w,
                 "No timers running",
-                OVERLAY0,
+                self.palette.overlay0,
                 14.0,
                 FontWeightHint::Regular,
             );
@@ -2814,7 +2834,7 @@ impl AlarmClockApp {
             if y - self.timer_scroll + TIMER_ROW_H <= list.y {
                 continue;
             }
-            timer.draw(f, list.x, y, list.w);
+            timer.draw(&self.palette, f, list.x, y, list.w);
         }
         f.untranslate();
         f.unclip();
@@ -3325,6 +3345,10 @@ pub fn parse_duration_hms(input: &str) -> Option<u32> {
 // ============================================================================
 
 impl App for AlarmClockApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Clock".to_string()
     }
@@ -3770,9 +3794,10 @@ mod tests {
 
     #[test]
     fn alarm_card_records_its_own_controls() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let alarm = Alarm::new(AlarmId(7), 8, 30);
         let mut f: Frame = Frame::new(400.0, 200.0);
-        alarm.draw(&mut f, 0.0, 0.0, 400.0, TimeFormat::TwelveHour);
+        alarm.draw(&pal, &mut f, 0.0, 0.0, 400.0, TimeFormat::TwelveHour);
         let targets: Vec<Target> = f.hits().iter().map(|(t, _)| *t).collect();
         assert!(targets.contains(&Target::AlarmRow(AlarmId(7))));
         assert!(targets.contains(&Target::AlarmToggle(AlarmId(7))));
@@ -3782,6 +3807,7 @@ mod tests {
 
     #[test]
     fn a_ringing_alarm_grows_snooze_and_dismiss() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut alarm = Alarm::new(AlarmId(7), 8, 30);
         let quiet = alarm.card_height();
         alarm.ringing = true;
@@ -3791,7 +3817,7 @@ mod tests {
         );
 
         let mut f: Frame = Frame::new(400.0, 200.0);
-        alarm.draw(&mut f, 0.0, 0.0, 400.0, TimeFormat::TwelveHour);
+        alarm.draw(&pal, &mut f, 0.0, 0.0, 400.0, TimeFormat::TwelveHour);
         let targets: Vec<Target> = f.hits().iter().map(|(t, _)| *t).collect();
         assert!(targets.contains(&Target::AlarmSnooze(AlarmId(7))));
         assert!(targets.contains(&Target::AlarmDismiss(AlarmId(7))));
@@ -3923,9 +3949,10 @@ mod tests {
 
     #[test]
     fn timer_card_records_its_own_controls() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let timer = Timer::new(TimerId(3), 300);
         let mut f: Frame = Frame::new(400.0, 200.0);
-        timer.draw(&mut f, 0.0, 0.0, 400.0);
+        timer.draw(&pal, &mut f, 0.0, 0.0, 400.0);
         let targets: Vec<Target> = f.hits().iter().map(|(t, _)| *t).collect();
         assert!(targets.contains(&Target::TimerRow(TimerId(3))));
         assert!(targets.contains(&Target::TimerToggle(TimerId(3))));
@@ -4107,9 +4134,10 @@ mod tests {
 
     #[test]
     fn stopwatch_records_its_three_buttons_and_closes_its_clip() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let sw = Stopwatch::new();
         let mut f: Frame = Frame::new(400.0, 500.0);
-        sw.draw(&mut f, 0.0, 0.0, 400.0, 500.0, 0.0);
+        sw.draw(&pal, &mut f, 0.0, 0.0, 400.0, 500.0, 0.0);
         let targets: Vec<Target> = f.hits().iter().map(|(t, _)| *t).collect();
         assert!(targets.contains(&Target::SwToggle));
         assert!(targets.contains(&Target::SwLap));
@@ -5224,34 +5252,39 @@ mod tests {
 
     #[test]
     fn test_progress_ring_empty() {
-        let cmds = render_progress_ring(100.0, 100.0, 40.0, 4.0, 0.0, SURFACE2, BLUE);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let cmds = render_progress_ring(100.0, 100.0, 40.0, 4.0, 0.0, pal.surface2, pal.blue);
         // Should have exactly the track segments (RING_SEGMENTS).
         assert_eq!(cmds.len(), RING_SEGMENTS);
     }
 
     #[test]
     fn test_progress_ring_full() {
-        let cmds = render_progress_ring(100.0, 100.0, 40.0, 4.0, 1.0, SURFACE2, BLUE);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let cmds = render_progress_ring(100.0, 100.0, 40.0, 4.0, 1.0, pal.surface2, pal.blue);
         // Track + all filled segments.
         assert_eq!(cmds.len(), RING_SEGMENTS * 2);
     }
 
     #[test]
     fn test_progress_ring_half() {
-        let cmds = render_progress_ring(100.0, 100.0, 40.0, 4.0, 0.5, SURFACE2, BLUE);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let cmds = render_progress_ring(100.0, 100.0, 40.0, 4.0, 0.5, pal.surface2, pal.blue);
         let filled = RING_SEGMENTS / 2;
         assert_eq!(cmds.len(), RING_SEGMENTS + filled);
     }
 
     #[test]
     fn test_progress_ring_clamp_over() {
-        let cmds = render_progress_ring(100.0, 100.0, 40.0, 4.0, 1.5, SURFACE2, BLUE);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let cmds = render_progress_ring(100.0, 100.0, 40.0, 4.0, 1.5, pal.surface2, pal.blue);
         assert_eq!(cmds.len(), RING_SEGMENTS * 2);
     }
 
     #[test]
     fn test_progress_ring_clamp_negative() {
-        let cmds = render_progress_ring(100.0, 100.0, 40.0, 4.0, -0.5, SURFACE2, BLUE);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let cmds = render_progress_ring(100.0, 100.0, 40.0, 4.0, -0.5, pal.surface2, pal.blue);
         assert_eq!(cmds.len(), RING_SEGMENTS);
     }
 
@@ -5648,8 +5681,9 @@ mod tests {
     /// The stopwatch draws from six loose numbers rather than a rect, so it
     /// needs a shim to sit in the table beside the other two.
     fn stopwatch_pass(app: &AlarmClockApp, f: &mut Frame, area: Rect) {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         app.stopwatch
-            .draw(f, area.x, area.y, area.w, area.h, app.lap_scroll);
+            .draw(&pal, f, area.x, area.y, area.w, area.h, app.lap_scroll);
     }
 
     fn passes() -> Vec<(&'static str, Pass)> {
@@ -5782,5 +5816,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut AlarmClockApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = AlarmClockApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

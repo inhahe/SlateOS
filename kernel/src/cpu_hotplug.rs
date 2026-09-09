@@ -498,7 +498,7 @@ fn notify_all(cpu: usize, event: HotplugEvent) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Self-test of the CPU hotplug framework.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[hotplug] Running self-test...");
     let mut skips = crate::fs::selftest::Skips::new();
 
@@ -662,4 +662,5 @@ pub fn self_test() {
 
     skips.report("[hotplug]");
     serial_println!("[hotplug] Self-test PASSED{}", skips.suffix());
+    Ok(())
 }

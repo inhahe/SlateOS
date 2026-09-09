@@ -1347,7 +1347,7 @@ fn detect_rdpid() -> bool {
 // ---------------------------------------------------------------------------
 
 /// Verify SMP infrastructure is working.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[smp] Running self-test...");
 
     let total = cpu_count();
@@ -1364,4 +1364,5 @@ pub fn self_test() {
     assert!(mapped_idx == 0, "BSP APIC ID should map to CPU 0");
 
     serial_println!("[smp] Self-test PASSED");
+    Ok(())
 }

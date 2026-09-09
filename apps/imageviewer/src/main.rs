@@ -684,7 +684,9 @@ impl ViewerState {
                 // double the viewer's footprint for a reader that does not
                 // exist. The compositor is where the pixels live once they are
                 // sent, and re-reading the file is how they would come back.
-                bytes: image.to_argb_bytes(),
+                // Typed rather than `Image::to_argb_bytes`'s bare `Vec<u8>`:
+                // the other ARGB byte order cannot reach an upload.
+                bytes: guitk::canvas::WireBytes::from_le_argb(&image.pixels),
             });
 
         self.image_info = info;
@@ -2396,7 +2398,7 @@ mod tests {
         let (x, y, width) = (2usize, 1usize, 4usize);
         let at = (y * width + x) * 4;
         assert_eq!(
-            &bytes[at..at + 4],
+            &bytes.as_slice()[at..at + 4],
             &[0x40, 1, 2, 0xFF],
             "b, g, r, a in memory order — the picture was not decoded"
         );

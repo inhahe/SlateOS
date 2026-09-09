@@ -54684,35 +54684,16 @@ Two things lane B may want to come back to me about, both noted in the request:
     so it can be backed by the same record rather than a parallel one; file the
     request when porting needs it.
 
-## Line-discipline erase does not model the column width of a tab (lane A, 2026-08-21)
+## ~~Line-discipline erase does not model the column width of a tab~~ (lane A, 2026-08-21) — DONE 2026-09-08
 
-Referenced by the doc comment on `feed` in `kernel/src/tty/mod.rs`.
-
-`ECHOE` rubs out an erased character by writing backspace-space-backspace once
-per column it occupied. `echo_width` answers "how many columns" with 1 for an
-ordinary byte and 2 for a control byte rendered as `^X`. A literal `\t` gets 1,
-which is wrong: a tab advanced the cursor to the next multiple-of-8 column, so
-erasing it should rub out between 1 and 8 columns. Backspacing over a tab
-therefore leaves stray blanks on screen. Cosmetic only — the *line buffer* is
-always correct, so the bytes the program receives are unaffected.
-
-Linux gets this right by tracking the real cursor column in the line discipline
-(`n_tty.c`'s `ldata->canon_column` / `eraser()`), recomputing the tab stop when
-it rubs one out.
-
-Why it is deferred rather than copied: for a **pty** the discipline cannot know
-the cursor column at all. The emulator on the master end owns the screen, and it
-may have applied its own wrapping, its own tab stops, or a `\r` from the program
-itself between the keystroke and the erase. Linux's tracking is an approximation
-that happens to be right for the common case; adopting it means adopting an
-approximation, which is a decision worth making deliberately rather than by
-default.
-
-The fix, when taken: give `LineBuf` a column counter advanced by the same
-`echo_width` rule plus a tab-stop rule (`col = (col | 7) + 1`), reset it on
-`\n`/`\r`, and have the `VERASE`/`VKILL` arms compute the rub-out width as the
-column delta rather than as a per-byte sum. Note this also fixes `VKILL`'s
-`ECHOKE` width, which sums the same per-byte widths and is wrong in the same way.
+**Fixed.** `LineBuf` now carries a `col` field tracking the cursor column.
+`advance_col()` advances it on push (tab → next 8-col stop, `^X` → +2,
+`\r` → 0, else +1); `compute_col()` replays the buffer on erase.
+`VERASE` emits the column *delta* instead of the old per-byte `echo_width`,
+and `VKILL`/`ECHOKE` uses `line.col` directly. Self-tests added for tab
+erase at column 0 (→ 8), at column 3 (→ 5), and ECHOKE of a line with a
+tab. The pty caveat (emulator owns the screen, so our column is an
+approximation) remains and is documented in the `feed` doc comment.
 
 --- env -S / --split-string not implemented (lane B, 2026-08-22) ---
 
@@ -55836,3 +55817,54 @@ opposite of, so a boot test is the first thing that would catch a mistake in it.
 **Operator decisions outstanding:** C-Q11 (lanes B and C both vote A,
 whole-workspace unscoped — on coverage, not cost: a scoped gate would have
 caught lane C's breakage and missed lane B's), and whether to retire `D:`.
+
+---
+
+## known-issues.md describes defects that were fixed and never marked (lane C, 2026-09-07)
+
+**Four entries closed in one session, none of which needed any code written.**
+`C-FILEDIALOG-IS-KEYBOARD-ONLY-SO-EVERY-PICKER-IN-THE-OS-IGNORES-CLICKS`,
+`C-ALARMCLOCK-SCROLLS-BY-CLIP-ALONE`,
+`TD-C-EXPLORER-DOES-ARITHMETIC-ON-UNCHECKED-VALUES` and
+`TD-C-EXPLORER-DOES-NOT-SCROLL` all described defects that had been repaired,
+in one case by me the day before. Three more entries in the same session --
+`TD-C-EXPLORER-HAS-NO-EDITING-KEYS`, the C-Q10 tool path,
+`TD-C-TWO-BYTE-ORDERS`' "touches every upload site at once" -- carried claims
+that were true when written and false when read.
+
+**What it costs.** Each one is a full investigation before any work can start:
+read the entry, find the code, establish that the claim is false, and only then
+decide what to do. That is most of a tick, repeatedly, and it falls on whoever
+picks the item -- which with three lanes is not necessarily the person who
+fixed it.
+
+**Why it happens, and it is not carelessness.** A fix and its entry live in
+different files, and the fix is the part with tests and a compiler behind it.
+Nothing fails when the entry is not updated. The rule in `CLAUDE.md` is to log
+bugs; there is no matching rule that closing one is part of finishing the work,
+and no gate that would notice.
+
+**Two things that would help, neither of which I have done:**
+
+1. **A checkable status line.** Every entry already opens `## <ID>` and most
+   carry a status somewhere in the first few lines, but the *form* varies --
+   `**Status:** FIXED`, `-- **CLOSED 2026-09-07**`, `-- **open**, missing
+   backend`, or nothing at all. A single required field would let a script
+   list the genuinely-open ones. I scanned for open items by filtering heading
+   lines this session and got a wrong list, because several entries carry
+   their status on a later line.
+2. **A closing convention in the finishing checklist.** `CLAUDE.md`'s "When You
+   Finish a Task" lists ten steps and none of them is "close the entry this
+   fixed". Adding it would catch the common case, which is the author of the
+   fix knowing exactly which entry it closes and having no prompt to say so.
+
+Both touch shared documents that all three lanes read, and (2) touches
+`CLAUDE.md`, which this lane may not edit on its own initiative. So this is a
+report, not a change. **Raised for the operator and the other lanes rather than
+acted on.**
+
+**What I did instead, for now:** each of the four closures records what was
+checked and how, so the next reader can see the evidence rather than repeat
+the investigation. That is a mitigation and not a fix -- it only helps entries
+somebody has already re-checked.
+

@@ -34,6 +34,7 @@
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::struct_excessive_bools)]
 
+use appearance::Palette;
 use core::num::NonZeroUsize;
 
 use guitk::Color;
@@ -48,24 +49,6 @@ use std::time::Duration;
 // ============================================================================
 // Catppuccin Mocha theme
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
 
 // ============================================================================
 // Layout constants
@@ -1520,6 +1503,12 @@ pub struct QrApp {
     pub window_width: f32,
     pub window_height: f32,
     timestamp: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for QrApp {
@@ -1531,6 +1520,7 @@ impl Default for QrApp {
 impl QrApp {
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             input_text: String::new(),
             input_mode: InputMode::Text,
             code_type: CodeType::QrCode,
@@ -1743,7 +1733,7 @@ impl QrApp {
             y: 0.0,
             width,
             height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1774,7 +1764,7 @@ impl QrApp {
             y: 0.0,
             width,
             height: TOOLBAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1783,7 +1773,7 @@ impl QrApp {
             x: 12.0,
             y: 12.0,
             text: "QR Code Generator".to_owned(),
-            color: BLUE,
+            color: self.palette.blue,
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
@@ -1801,14 +1791,22 @@ impl QrApp {
                 y: 8.0,
                 width: btn_w,
                 height: 24.0,
-                color: if is_active { SURFACE1 } else { SURFACE0 },
+                color: if is_active {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
             cmds.push(RenderCommand::Text {
                 x: tx + 10.0,
                 y: 14.0,
                 text: ct.label().to_owned(),
-                color: if is_active { BLUE } else { SUBTEXT0 },
+                color: if is_active {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 11.0,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -1829,14 +1827,14 @@ impl QrApp {
             y: 8.0,
             width: gen_btn_w,
             height: 24.0,
-            color: GREEN,
+            color: self.palette.green,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
             x: gen_btn_x + 16.0,
             y: 14.0,
             text: "Generate".to_owned(),
-            color: CRUST,
+            color: self.palette.crust,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(gen_btn_w - 24.0),
@@ -1849,7 +1847,7 @@ impl QrApp {
             y1: TOOLBAR_HEIGHT,
             x2: width,
             y2: TOOLBAR_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -1861,7 +1859,7 @@ impl QrApp {
             y: bar_y,
             width,
             height: STATUS_BAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1888,9 +1886,9 @@ impl QrApp {
         };
 
         let status_color = if self.error_message.is_some() {
-            RED
+            self.palette.red
         } else {
-            SUBTEXT0
+            self.palette.subtext0
         };
         cmds.push(RenderCommand::Text {
             x: 12.0,
@@ -1911,7 +1909,7 @@ impl QrApp {
             y,
             width: LEFT_PANEL_WIDTH,
             height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1921,7 +1919,7 @@ impl QrApp {
             y1: y,
             x2: LEFT_PANEL_WIDTH,
             y2: y + height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -1934,7 +1932,7 @@ impl QrApp {
             x: lx,
             y: cy,
             text: "INPUT MODE".to_owned(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
@@ -1955,14 +1953,22 @@ impl QrApp {
                 y: cy,
                 width: btn_w,
                 height: 22.0,
-                color: if is_active { SURFACE1 } else { SURFACE0 },
+                color: if is_active {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
             cmds.push(RenderCommand::Text {
                 x: mx + 8.0,
                 y: cy + 5.0,
                 text: mode.label().to_owned(),
-                color: if is_active { LAVENDER } else { SUBTEXT0 },
+                color: if is_active {
+                    self.palette.lavender
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 10.0,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -1981,7 +1987,7 @@ impl QrApp {
             x: lx,
             y: cy,
             text: "DATA".to_owned(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
@@ -1994,7 +2000,7 @@ impl QrApp {
             y: cy,
             width: max_w,
             height: 60.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -2002,7 +2008,7 @@ impl QrApp {
             y: cy,
             width: max_w,
             height: 60.0,
-            color: SURFACE2,
+            color: self.palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -2020,9 +2026,9 @@ impl QrApp {
             &self.input_text
         };
         let text_color = if self.input_text.is_empty() {
-            OVERLAY0
+            self.palette.overlay0
         } else {
-            TEXT_COLOR
+            self.palette.text
         };
         cmds.push(RenderCommand::Text {
             x: lx + 8.0,
@@ -2053,7 +2059,7 @@ impl QrApp {
             x: lx,
             y: cy,
             text: format!("HISTORY ({})", self.history.len()),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
@@ -2071,18 +2077,18 @@ impl QrApp {
                 y: cy,
                 width: max_w,
                 height: 24.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
 
             // Mode indicator
             let mode_color = match entry.mode {
-                InputMode::Text => TEXT_COLOR,
-                InputMode::Url => BLUE,
-                InputMode::Email => PEACH,
-                InputMode::Phone => GREEN,
-                InputMode::Wifi => TEAL,
-                InputMode::VCard => LAVENDER,
+                InputMode::Text => self.palette.text,
+                InputMode::Url => self.palette.blue,
+                InputMode::Email => self.palette.peach,
+                InputMode::Phone => self.palette.green,
+                InputMode::Wifi => self.palette.teal,
+                InputMode::VCard => self.palette.lavender,
             };
             cmds.push(RenderCommand::FillRect {
                 x: lx + 4.0,
@@ -2105,7 +2111,7 @@ impl QrApp {
                 x: lx + 18.0,
                 y: cy + 6.0,
                 text: display,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w - 26.0),
@@ -2126,7 +2132,7 @@ impl QrApp {
                 x: lx,
                 y: *cy,
                 text: (*label).to_owned(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
@@ -2139,7 +2145,7 @@ impl QrApp {
                 y: *cy,
                 width: max_w,
                 height: 24.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
             let disp = if value.is_empty() {
@@ -2148,9 +2154,9 @@ impl QrApp {
                 (*value).clone()
             };
             let color = if value.is_empty() {
-                OVERLAY0
+                self.palette.overlay0
             } else {
-                TEXT_COLOR
+                self.palette.text
             };
             cmds.push(RenderCommand::Text {
                 x: lx + 8.0,
@@ -2170,7 +2176,7 @@ impl QrApp {
             x: lx,
             y: *cy,
             text: format!("Encryption: {}", self.wifi_config.encryption.label()),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
@@ -2199,7 +2205,7 @@ impl QrApp {
                 x: lx,
                 y: *cy,
                 text: (*label).to_owned(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
@@ -2212,7 +2218,7 @@ impl QrApp {
                 y: *cy,
                 width: max_w,
                 height: 22.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
             let disp = if value.is_empty() {
@@ -2221,9 +2227,9 @@ impl QrApp {
                 (*value).clone()
             };
             let color = if value.is_empty() {
-                OVERLAY0
+                self.palette.overlay0
             } else {
-                TEXT_COLOR
+                self.palette.text
             };
             cmds.push(RenderCommand::Text {
                 x: lx + 8.0,
@@ -2255,7 +2261,7 @@ impl QrApp {
             x: lx,
             y: cy,
             text: "PREVIEW".to_owned(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
@@ -2279,7 +2285,7 @@ impl QrApp {
                 y: py,
                 width: placeholder_w,
                 height: placeholder_h,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(8.0),
             });
             cmds.push(RenderCommand::StrokeRect {
@@ -2287,7 +2293,7 @@ impl QrApp {
                 y: py,
                 width: placeholder_w,
                 height: placeholder_h,
-                color: SURFACE2,
+                color: self.palette.surface2,
                 line_width: 2.0,
                 corner_radii: CornerRadii::all(8.0),
             });
@@ -2296,7 +2302,7 @@ impl QrApp {
                 x: px + 30.0,
                 y: py + 85.0,
                 text: "No code generated".to_owned(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(placeholder_w - 20.0),
@@ -2306,7 +2312,7 @@ impl QrApp {
                 x: px + 20.0,
                 y: py + 105.0,
                 text: "Enter data and click Generate".to_owned(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(placeholder_w - 20.0),
@@ -2374,7 +2380,7 @@ impl QrApp {
                 qr_size,
                 qr_size,
             ),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_w),
@@ -2439,7 +2445,7 @@ impl QrApp {
             x: panel_x,
             y: info_y,
             text: format!("Code128 | {} modules wide", barcode.width()),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_w),
@@ -2461,7 +2467,7 @@ impl QrApp {
             y,
             width,
             height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2471,7 +2477,7 @@ impl QrApp {
             y1: y,
             x2: x,
             y2: y + height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2484,7 +2490,7 @@ impl QrApp {
             x: lx,
             y: cy,
             text: "ERROR CORRECTION".to_owned(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
@@ -2499,14 +2505,22 @@ impl QrApp {
                 y: cy,
                 width: max_w,
                 height: 22.0,
-                color: if is_active { SURFACE1 } else { SURFACE0 },
+                color: if is_active {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
             cmds.push(RenderCommand::Text {
                 x: lx + 8.0,
                 y: cy + 5.0,
                 text: ec.label().to_owned(),
-                color: if is_active { GREEN } else { SUBTEXT0 },
+                color: if is_active {
+                    self.palette.green
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 10.0,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -2525,7 +2539,7 @@ impl QrApp {
             x: lx,
             y: cy,
             text: "MODULE SIZE".to_owned(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
@@ -2540,14 +2554,22 @@ impl QrApp {
                 y: cy,
                 width: max_w,
                 height: 22.0,
-                color: if is_active { SURFACE1 } else { SURFACE0 },
+                color: if is_active {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
             cmds.push(RenderCommand::Text {
                 x: lx + 8.0,
                 y: cy + 5.0,
                 text: ms.label().to_owned(),
-                color: if is_active { YELLOW } else { SUBTEXT0 },
+                color: if is_active {
+                    self.palette.yellow
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 10.0,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -2566,7 +2588,7 @@ impl QrApp {
             x: lx,
             y: cy,
             text: "COLORS".to_owned(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
@@ -2579,7 +2601,7 @@ impl QrApp {
             x: lx,
             y: cy,
             text: "Foreground".to_owned(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w - 30.0),
@@ -2598,7 +2620,7 @@ impl QrApp {
             y: cy - 1.0,
             width: 20.0,
             height: 14.0,
-            color: SURFACE2,
+            color: self.palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(2.0),
         });
@@ -2609,7 +2631,7 @@ impl QrApp {
             x: lx,
             y: cy,
             text: "Background".to_owned(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w - 30.0),
@@ -2628,7 +2650,7 @@ impl QrApp {
             y: cy - 1.0,
             width: 20.0,
             height: 14.0,
-            color: SURFACE2,
+            color: self.palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(2.0),
         });
@@ -2640,7 +2662,7 @@ impl QrApp {
             x: lx,
             y: cy,
             text: "INFO".to_owned(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
@@ -2661,7 +2683,7 @@ impl QrApp {
                     x: lx,
                     y: cy,
                     text: line.clone(),
-                    color: TEXT_COLOR,
+                    color: self.palette.text,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(max_w),
@@ -2680,7 +2702,7 @@ impl QrApp {
                     x: lx,
                     y: cy,
                     text: line.clone(),
-                    color: TEXT_COLOR,
+                    color: self.palette.text,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(max_w),
@@ -2693,7 +2715,7 @@ impl QrApp {
                 x: lx,
                 y: cy,
                 text: "No code generated yet".to_owned(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
@@ -2708,6 +2730,10 @@ impl QrApp {
 // ============================================================================
 
 impl App for QrApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         match self.code_type {
             CodeType::QrCode => "QR Code".to_owned(),
@@ -3652,5 +3678,64 @@ mod tests {
         assert!(!Module::DataDark.is_function());
         assert!(!Module::DataLight.is_function());
         assert!(!Module::Empty.is_function());
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut QrApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = QrApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

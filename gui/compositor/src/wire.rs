@@ -424,6 +424,79 @@ fn to_compositor_request(
             window_id: link.resolve(window)?,
             opacity,
         },
+        // The same compositor operation as the arm above, reached by a
+        // different authorisation. `resolve` is what makes that one self-only;
+        // this one is gated on `require_shell` and names the window directly,
+        // as `ShellControl` does -- because a shell applying a window rule is
+        // acting on somebody else's window by definition.
+        //
+        // One `CompositorRequest` for both on purpose: the operation is
+        // identical and only the right to ask differs, so a second internal
+        // variant would be two copies of "set this window's opacity" that
+        // could drift.
+        RequestBody::ShellSetOpacity { window, opacity } => {
+            link.require_shell()?;
+            CompositorRequest::SetOpacity {
+                window_id: WindowId::from_raw(window),
+                opacity,
+            }
+        }
+        // `ShellMove` and `ShellResize` follow `ShellSetOpacity` exactly: the
+        // same compositor operation as the self-only arm above each of them,
+        // reached through `require_shell` and a direct id rather than
+        // `resolve`. A window rule that places or sizes a program's window is
+        // acting on somebody else's by definition.
+        RequestBody::ShellMove { window, x, y } => {
+            link.require_shell()?;
+            CompositorRequest::Move {
+                window_id: WindowId::from_raw(window),
+                x,
+                y,
+            }
+        }
+        RequestBody::ShellResize {
+            window,
+            width,
+            height,
+        } => {
+            link.require_shell()?;
+            CompositorRequest::Resize {
+                window_id: WindowId::from_raw(window),
+                width,
+                height,
+            }
+        }
+        RequestBody::ShellSetStackTier { window, tier } => {
+            link.require_shell()?;
+            CompositorRequest::SetStackTier {
+                window_id: WindowId::from_raw(window),
+                tier,
+            }
+        }
+        RequestBody::ShellSetWindowPolicy { window, policy } => {
+            link.require_shell()?;
+            CompositorRequest::SetWindowPolicy {
+                window_id: WindowId::from_raw(window),
+                policy,
+            }
+        }
+        RequestBody::ShellSetSizeLimits {
+            window,
+            min_width,
+            min_height,
+            max_width,
+            max_height,
+        } => {
+            link.require_shell()?;
+            // Zero means "leave this one alone" on the wire; it becomes
+            // `None` here so the sentinel does not travel further in.
+            let pair = |w: u32, h: u32| (w != 0 || h != 0).then_some((w, h));
+            CompositorRequest::SetSizeLimits {
+                window_id: WindowId::from_raw(window),
+                min_size: pair(min_width, min_height),
+                max_size: pair(max_width, max_height),
+            }
+        }
         RequestBody::GetDisplayInfo => CompositorRequest::GetDisplayInfo,
         // Unlike every window request above there is no `link.resolve` on
         // either of these, and nothing to resolve: a reload names no window and
@@ -1490,6 +1563,113 @@ mod tests {
         let lists = pump_lists(&mut comp, &mut shell);
         assert_eq!(lists.len(), 1);
         assert!(!lists[0][0].minimized);
+    }
+
+    /// The shell may place and size somebody else's window; an application
+    /// may not.
+    ///
+    /// Same shape as the opacity test below, and here for the same reason: two
+    /// more privileged tags were added at once, and a test that covered only
+    /// one of them would leave the other free to be wired through `resolve` by
+    /// mistake and never noticed.
+    #[test]
+    fn a_shell_can_place_a_window_it_does_not_own_and_an_application_still_cannot() {
+        let (mut comp, mut shell) = wired();
+        let mut app = ClientLink::new(99);
+        let theirs = open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+        assert!(!shell.owns(WindowId::from_raw(theirs)));
+
+        for privileged in [
+            RequestBody::ShellMove {
+                window: theirs,
+                x: 10,
+                y: 20,
+            },
+            RequestBody::ShellResize {
+                window: theirs,
+                width: 300,
+                height: 200,
+            },
+        ] {
+            let name = format!("{privileged:?}");
+            let responses = exchange(&mut comp, &mut shell, vec![privileged]);
+            assert!(
+                matches!(responses[0].body, ResponseBody::Ok),
+                "{name} was refused: {:?}",
+                responses[0].body
+            );
+        }
+
+        for ordinary in [
+            RequestBody::Move {
+                window: theirs,
+                x: 10,
+                y: 20,
+            },
+            RequestBody::Resize {
+                window: theirs,
+                width: 300,
+                height: 200,
+            },
+        ] {
+            let name = format!("{ordinary:?}");
+            let responses = exchange(&mut comp, &mut shell, vec![ordinary]);
+            assert!(
+                !matches!(responses[0].body, ResponseBody::Ok),
+                "{name} accepted a foreign window, which is what the shell                  variants exist to avoid"
+            );
+        }
+    }
+
+    /// The shell may fade somebody else's window; an application may not.
+    ///
+    /// Both halves in one test, for the reason the `ShellControl` test below
+    /// gives: `ShellSetOpacity` is only correct if it is the *privileged* path
+    /// and the ordinary `SetOpacity` still refuses a foreign window. Driving
+    /// the same foreign window through both is what tells the two apart -- a
+    /// `ShellSetOpacity` accidentally routed through `resolve` fails the first
+    /// assertion, and an ownership check loosened to let it through fails the
+    /// second.
+    #[test]
+    fn a_shell_can_fade_a_window_it_does_not_own_and_an_application_still_cannot() {
+        let (mut comp, mut shell) = wired();
+        let mut app = ClientLink::new(99);
+        let theirs = open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+        assert!(
+            !shell.owns(WindowId::from_raw(theirs)),
+            "the fixture is pointless if the shell owns the window"
+        );
+
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::ShellSetOpacity {
+                window: theirs,
+                opacity: 0.5,
+            }],
+        );
+        assert!(
+            matches!(responses[0].body, ResponseBody::Ok),
+            "a shell was refused a window it can see: {:?}",
+            responses[0].body
+        );
+
+        // The ordinary request, on the same foreign window, from the same
+        // link. It must be refused -- that refusal is the property that makes
+        // the privileged variant worth having as a separate tag.
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SetOpacity {
+                window: theirs,
+                opacity: 0.5,
+            }],
+        );
+        assert!(
+            !matches!(responses[0].body, ResponseBody::Ok),
+            "the self-only opacity request accepted a foreign window, which is \
+             the whole thing the shell variant exists to avoid"
+        );
     }
 
     #[test]

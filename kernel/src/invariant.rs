@@ -407,7 +407,7 @@ pub fn all_ok() -> bool {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the invariant checker.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[invariant] Running self-test...");
 
     // Test 1: Check all invariants pass (they should during boot).
@@ -445,4 +445,5 @@ pub fn self_test() {
     );
 
     serial_println!("[invariant] Self-test PASSED");
+    Ok(())
 }

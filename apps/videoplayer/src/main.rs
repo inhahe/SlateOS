@@ -5,6 +5,7 @@
 //! common container formats (MP4, MKV, AVI, WebM, MOV) and codecs
 //! (H.264, H.265, VP9, AV1, AAC, Opus, FLAC).
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -25,27 +26,8 @@ const FALLBACK_SEED: u64 = 0x5649_4445_4F50_4C52;
 // Catppuccin Mocha palette
 // ============================================================================
 
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 // Part of the complete Catppuccin Mocha palette; kept for completeness even
 // though no widget currently paints with it.
-#[allow(dead_code)]
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
 
 /// How long the controls stay up after the last sign of life.
 const CONTROLS_HIDE_MS: u64 = 3000;
@@ -2259,6 +2241,12 @@ pub struct VideoPlayerApp {
     /// has no wall clock and does not need one; the tick already knows how
     /// long it has been.
     pub osd_remaining_ms: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 /// UI tabs/panels.
@@ -2302,6 +2290,7 @@ impl PlayerTab {
 impl VideoPlayerApp {
     pub fn new(width: f32, height: f32) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
             fullscreen: false,
@@ -3017,7 +3006,7 @@ impl VideoPlayerApp {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3044,15 +3033,23 @@ impl VideoPlayerApp {
             y: 0.0,
             width: self.width,
             height: TAB_BAR_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Tab items, from the rectangles the hit test reads.
         for (tab, rect) in self.tab_rects() {
             let active = tab == self.active_tab;
-            let bg = if active { SURFACE0 } else { MANTLE };
-            let fg = if active { BLUE } else { SUBTEXT0 };
+            let bg = if active {
+                self.palette.surface0
+            } else {
+                self.palette.mantle
+            };
+            let fg = if active {
+                self.palette.blue
+            } else {
+                self.palette.subtext0
+            };
 
             cmds.push(RenderCommand::FillRect {
                 x: rect.x,
@@ -3084,7 +3081,7 @@ impl VideoPlayerApp {
                     y: TAB_BAR_HEIGHT - 3.0,
                     width: (rect.width - 4.0).max(1.0),
                     height: 2.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::all(1.0),
                 });
             }
@@ -3096,7 +3093,7 @@ impl VideoPlayerApp {
             y1: TAB_BAR_HEIGHT,
             x2: self.width,
             y2: TAB_BAR_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -3123,7 +3120,7 @@ impl VideoPlayerApp {
                 y: top + video_h / 2.0 - 20.0,
                 text: "No file loaded".to_string(),
                 font_size: 18.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3134,7 +3131,7 @@ impl VideoPlayerApp {
                 y: top + video_h / 2.0 + 10.0,
                 text: "Ctrl+O to open".to_string(),
                 font_size: 13.0,
-                color: SURFACE2,
+                color: self.palette.surface2,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3150,7 +3147,7 @@ impl VideoPlayerApp {
                     y: top + video_h / 2.0 - 8.0,
                     text: label,
                     font_size: 14.0,
-                    color: SURFACE2,
+                    color: self.palette.surface2,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(300.0),
                     overflow: TextOverflow::Ellipsis,
@@ -3242,7 +3239,7 @@ impl VideoPlayerApp {
             y,
             width: self.width,
             height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3260,7 +3257,7 @@ impl VideoPlayerApp {
             y: seek_y,
             width: seek_w,
             height: seek_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -3271,7 +3268,7 @@ impl VideoPlayerApp {
             y: seek_y,
             width: seek_w * buffer_frac as f32,
             height: seek_h,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -3282,7 +3279,7 @@ impl VideoPlayerApp {
             y: seek_y,
             width: seek_w * progress,
             height: seek_h,
-            color: BLUE,
+            color: self.palette.blue,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -3296,7 +3293,7 @@ impl VideoPlayerApp {
                     y: seek_y - 1.0,
                     width: 2.0,
                     height: seek_h + 2.0,
-                    color: YELLOW,
+                    color: self.palette.yellow,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -3309,7 +3306,7 @@ impl VideoPlayerApp {
             y: seek_y - 3.0,
             width: 12.0,
             height: 12.0,
-            color: BLUE,
+            color: self.palette.blue,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -3320,7 +3317,7 @@ impl VideoPlayerApp {
             y: time_y,
             text: self.time_display(),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -3332,7 +3329,7 @@ impl VideoPlayerApp {
             y: time_y,
             text: format!("-{}", self.remaining_duration().format()),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
@@ -3407,7 +3404,11 @@ impl VideoPlayerApp {
             y: btn_y + 6.0,
             text: self.volume.icon().to_string(),
             font_size: 13.0,
-            color: if self.volume.is_muted() { RED } else { TEXT },
+            color: if self.volume.is_muted() {
+                self.palette.red
+            } else {
+                self.palette.text
+            },
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3424,15 +3425,15 @@ impl VideoPlayerApp {
             y: vol_bar_y,
             width: vol_bar_w,
             height: vol_bar_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(2.0),
         });
 
         let vol_frac = self.volume.fraction() as f32;
         let vol_color = if self.volume.effective_level() > Volume::NORMAL {
-            PEACH
+            self.palette.peach
         } else {
-            GREEN
+            self.palette.green
         };
         cmds.push(RenderCommand::FillRect {
             x: vol_bar_x,
@@ -3448,7 +3449,7 @@ impl VideoPlayerApp {
             y: btn_y + 6.0,
             text: self.volume.label(),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(50.0),
             overflow: TextOverflow::Ellipsis,
@@ -3463,9 +3464,9 @@ impl VideoPlayerApp {
             text: self.speed.label(),
             font_size: 11.0,
             color: if self.speed != PlaybackSpeed::NORMAL {
-                PEACH
+                self.palette.peach
             } else {
-                SUBTEXT0
+                self.palette.subtext0
             },
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -3478,9 +3479,9 @@ impl VideoPlayerApp {
             text: self.repeat.icon().to_string(),
             font_size: 11.0,
             color: if self.repeat != RepeatMode::Off {
-                BLUE
+                self.palette.blue
             } else {
-                SUBTEXT0
+                self.palette.subtext0
             },
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3498,9 +3499,9 @@ impl VideoPlayerApp {
             .to_string(),
             font_size: 11.0,
             color: if self.playlist.is_shuffle() {
-                GREEN
+                self.palette.green
             } else {
-                SUBTEXT0
+                self.palette.subtext0
             },
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3512,7 +3513,7 @@ impl VideoPlayerApp {
             y: btn_y + 6.0,
             text: self.aspect_mode.label().to_string(),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
             overflow: TextOverflow::Ellipsis,
@@ -3525,7 +3526,7 @@ impl VideoPlayerApp {
                 y: btn_y + 6.0,
                 text: "CC".to_string(),
                 font_size: 11.0,
-                color: YELLOW,
+                color: self.palette.yellow,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3538,7 +3539,7 @@ impl VideoPlayerApp {
             y: btn_y + 6.0,
             text: if self.fullscreen { "[-]" } else { "[+]" }.to_string(),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3559,8 +3560,16 @@ impl VideoPlayerApp {
         label: &str,
         primary: bool,
     ) {
-        let bg = if primary { BLUE } else { SURFACE0 };
-        let fg = if primary { CRUST } else { TEXT };
+        let bg = if primary {
+            self.palette.blue
+        } else {
+            self.palette.surface0
+        };
+        let fg = if primary {
+            self.palette.crust
+        } else {
+            self.palette.text
+        };
 
         cmds.push(RenderCommand::FillRect {
             x,
@@ -3593,7 +3602,7 @@ impl VideoPlayerApp {
             y: top,
             width: panel_w,
             height: panel_h,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3607,7 +3616,7 @@ impl VideoPlayerApp {
                 self.playlist.total_duration().format()
             ),
             font_size: 14.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(panel_w - 32.0),
             overflow: TextOverflow::Ellipsis,
@@ -3627,7 +3636,7 @@ impl VideoPlayerApp {
                 self.repeat.label()
             ),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_w - 32.0),
             overflow: TextOverflow::Ellipsis,
@@ -3639,7 +3648,7 @@ impl VideoPlayerApp {
             y1: top + 52.0,
             x2: panel_w - 16.0,
             y2: top + 52.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -3673,7 +3682,7 @@ impl VideoPlayerApp {
                     y: ey,
                     width: panel_w - 16.0,
                     height: item_h - 2.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -3684,7 +3693,11 @@ impl VideoPlayerApp {
                 y: ey + 8.0,
                 text: format!("{}", i.saturating_add(1)),
                 font_size: 11.0,
-                color: if is_current { BLUE } else { OVERLAY0 },
+                color: if is_current {
+                    self.palette.blue
+                } else {
+                    self.palette.overlay0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3697,7 +3710,7 @@ impl VideoPlayerApp {
                     y: ey + 8.0,
                     text: ">".to_string(),
                     font_size: 12.0,
-                    color: GREEN,
+                    color: self.palette.green,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -3710,7 +3723,11 @@ impl VideoPlayerApp {
                 y: ey + 6.0,
                 text: entry.display_name().to_string(),
                 font_size: 13.0,
-                color: if is_current { TEXT } else { SUBTEXT1 },
+                color: if is_current {
+                    self.palette.text
+                } else {
+                    self.palette.subtext1
+                },
                 font_weight: if is_current {
                     FontWeightHint::Bold
                 } else {
@@ -3727,7 +3744,7 @@ impl VideoPlayerApp {
                     y: ey + 8.0,
                     text: dur.format(),
                     font_size: 11.0,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(60.0),
                     overflow: TextOverflow::Ellipsis,
@@ -3740,7 +3757,7 @@ impl VideoPlayerApp {
                 y: ey + 22.0,
                 text: entry.path.clone(),
                 font_size: 10.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_w - 100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3758,7 +3775,7 @@ impl VideoPlayerApp {
             y: top,
             width: self.width,
             height: self.height - top,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3775,7 +3792,7 @@ impl VideoPlayerApp {
                     y: *y,
                     text: title.to_string(),
                     font_size: 14.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(300.0),
                     overflow: TextOverflow::Ellipsis,
@@ -3790,7 +3807,7 @@ impl VideoPlayerApp {
                         y: *y,
                         text: label.to_string(),
                         font_size: 12.0,
-                        color: SUBTEXT0,
+                        color: self.palette.subtext0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(120.0),
                         overflow: TextOverflow::Ellipsis,
@@ -3800,7 +3817,7 @@ impl VideoPlayerApp {
                         y: *y,
                         text: value.to_string(),
                         font_size: 12.0,
-                        color: TEXT,
+                        color: self.palette.text,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(400.0),
                         overflow: TextOverflow::Ellipsis,
@@ -3959,7 +3976,7 @@ impl VideoPlayerApp {
                 y: top + 100.0,
                 text: "No file loaded".to_string(),
                 font_size: 16.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3975,7 +3992,7 @@ impl VideoPlayerApp {
             y: top,
             width: self.width,
             height: self.height - top,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3985,14 +4002,18 @@ impl VideoPlayerApp {
             y: top + 20.0,
             text: format!("Equalizer - {}", self.equalizer.preset.label()),
             font_size: 16.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
         });
 
         // Enabled indicator
-        let enabled_color = if self.equalizer.enabled { GREEN } else { RED };
+        let enabled_color = if self.equalizer.enabled {
+            self.palette.green
+        } else {
+            self.palette.red
+        };
         cmds.push(RenderCommand::FillRect {
             x: 280.0,
             y: top + 20.0,
@@ -4006,7 +4027,7 @@ impl VideoPlayerApp {
             y: top + 24.0,
             text: if self.equalizer.enabled { "ON" } else { "OFF" }.to_string(),
             font_size: 12.0,
-            color: CRUST,
+            color: self.palette.crust,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4018,7 +4039,7 @@ impl VideoPlayerApp {
             y: top + 52.0,
             text: format!("Preamp: {:.1} dB", self.equalizer.preamp),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(150.0),
             overflow: TextOverflow::Ellipsis,
@@ -4029,8 +4050,16 @@ impl VideoPlayerApp {
         let mut px = 180.0;
         for preset in EqPreset::all() {
             let active = *preset == self.equalizer.preset;
-            let bg = if active { BLUE } else { SURFACE0 };
-            let fg = if active { CRUST } else { SUBTEXT1 };
+            let bg = if active {
+                self.palette.blue
+            } else {
+                self.palette.surface0
+            };
+            let fg = if active {
+                self.palette.crust
+            } else {
+                self.palette.subtext1
+            };
 
             cmds.push(RenderCommand::FillRect {
                 x: px,
@@ -4071,7 +4100,7 @@ impl VideoPlayerApp {
                 y1: center_y,
                 x2: self.width - 20.0,
                 y2: center_y,
-                color: SURFACE1,
+                color: self.palette.surface1,
                 width: 1.0,
             });
 
@@ -4081,7 +4110,7 @@ impl VideoPlayerApp {
                 y: bands_y + 4.0,
                 text: "+12".to_string(),
                 font_size: 9.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -4091,7 +4120,7 @@ impl VideoPlayerApp {
                 y: center_y - 6.0,
                 text: "0".to_string(),
                 font_size: 9.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -4101,7 +4130,7 @@ impl VideoPlayerApp {
                 y: bands_y + bands_h - 12.0,
                 text: "-12".to_string(),
                 font_size: 9.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -4113,11 +4142,11 @@ impl VideoPlayerApp {
                 let bar_h = (band.gain / 12.0) * max_travel;
 
                 let color = if band.gain > 0.0 {
-                    GREEN
+                    self.palette.green
                 } else if band.gain < 0.0 {
-                    RED
+                    self.palette.red
                 } else {
-                    SURFACE2
+                    self.palette.surface2
                 };
 
                 if bar_h.abs() > 1.0 {
@@ -4149,7 +4178,7 @@ impl VideoPlayerApp {
                     y: handle_y - 3.0,
                     width: band_w * 0.7,
                     height: 6.0,
-                    color: LAVENDER,
+                    color: self.palette.lavender,
                     corner_radii: CornerRadii::all(3.0),
                 });
 
@@ -4159,7 +4188,7 @@ impl VideoPlayerApp {
                     y: bands_y + bands_h + 4.0,
                     text: band.label.clone(),
                     font_size: 9.0,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(band_w),
                     overflow: TextOverflow::Ellipsis,
@@ -4171,7 +4200,7 @@ impl VideoPlayerApp {
                     y: handle_y - 16.0,
                     text: format!("{:.0}", band.gain),
                     font_size: 9.0,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(band_w * 0.7),
                     overflow: TextOverflow::Ellipsis,
@@ -4188,7 +4217,7 @@ impl VideoPlayerApp {
             y: top,
             width: self.width,
             height: self.height - top,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4197,7 +4226,7 @@ impl VideoPlayerApp {
             y: top + 20.0,
             text: "Video Adjustments".to_string(),
             font_size: 16.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -4225,7 +4254,7 @@ impl VideoPlayerApp {
                 y: sy + 4.0,
                 text: name.to_string(),
                 font_size: 13.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(110.0),
                 overflow: TextOverflow::Ellipsis,
@@ -4237,7 +4266,7 @@ impl VideoPlayerApp {
                 y: sy + 8.0,
                 width: slider_w,
                 height: 6.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(3.0),
             });
 
@@ -4253,7 +4282,7 @@ impl VideoPlayerApp {
                 y: sy + 8.0,
                 width: slider_w * frac,
                 height: 6.0,
-                color: BLUE,
+                color: self.palette.blue,
                 corner_radii: CornerRadii::all(3.0),
             });
 
@@ -4264,7 +4293,7 @@ impl VideoPlayerApp {
                 y: sy + 4.0,
                 width: 10.0,
                 height: 14.0,
-                color: LAVENDER,
+                color: self.palette.lavender,
                 corner_radii: CornerRadii::all(5.0),
             });
 
@@ -4274,7 +4303,7 @@ impl VideoPlayerApp {
                 y: sy + 4.0,
                 text: format!("{value:.2}"),
                 font_size: 12.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(50.0),
                 overflow: TextOverflow::Ellipsis,
@@ -4284,8 +4313,16 @@ impl VideoPlayerApp {
         // Reset button
         let reset_y = top + 60.0 + sliders.len() as f32 * 50.0 + 10.0;
         let is_default = adj.is_default();
-        let reset_bg = if is_default { SURFACE0 } else { PEACH };
-        let reset_fg = if is_default { OVERLAY0 } else { CRUST };
+        let reset_bg = if is_default {
+            self.palette.surface0
+        } else {
+            self.palette.peach
+        };
+        let reset_fg = if is_default {
+            self.palette.overlay0
+        } else {
+            self.palette.crust
+        };
 
         cmds.push(RenderCommand::FillRect {
             x: bar_x,
@@ -4312,7 +4349,7 @@ impl VideoPlayerApp {
             y: reset_y + 50.0,
             text: format!("Deinterlace: {}", self.preferences.deinterlace.label()),
             font_size: 13.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -4327,7 +4364,7 @@ impl VideoPlayerApp {
             y: top,
             width: self.width,
             height: self.height - top,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4336,7 +4373,7 @@ impl VideoPlayerApp {
             y: top + 20.0,
             text: "Player Settings".to_string(),
             font_size: 16.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -4379,7 +4416,11 @@ impl VideoPlayerApp {
                 y: sy - 2.0,
                 width: self.width - 24.0,
                 height: 32.0,
-                color: if i % 2 == 0 { SURFACE0 } else { BASE },
+                color: if i % 2 == 0 {
+                    self.palette.surface0
+                } else {
+                    self.palette.base
+                },
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -4388,18 +4429,18 @@ impl VideoPlayerApp {
                 y: sy + 6.0,
                 text: name.to_string(),
                 font_size: 13.0,
-                color: TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(180.0),
                 overflow: TextOverflow::Ellipsis,
             });
 
             let value_color = if *value == "On" {
-                GREEN
+                self.palette.green
             } else if *value == "Off" {
-                RED
+                self.palette.red
             } else {
-                SUBTEXT1
+                self.palette.subtext1
             };
             cmds.push(RenderCommand::Text {
                 x: value_x,
@@ -4421,7 +4462,7 @@ impl VideoPlayerApp {
             y: extra_y,
             text: "Seek Steps".to_string(),
             font_size: 14.0,
-            color: BLUE,
+            color: self.palette.blue,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -4436,7 +4477,7 @@ impl VideoPlayerApp {
                 prefs.seek_large_step / 1000
             ),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -4447,7 +4488,7 @@ impl VideoPlayerApp {
             y: extra_y + 52.0,
             text: "Preferred Languages".to_string(),
             font_size: 14.0,
-            color: BLUE,
+            color: self.palette.blue,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -4462,7 +4503,7 @@ impl VideoPlayerApp {
                 prefs.audio_preferred_lang.as_deref().unwrap_or("Any")
             ),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(400.0),
             overflow: TextOverflow::Ellipsis,
@@ -4473,7 +4514,7 @@ impl VideoPlayerApp {
             y: extra_y + 104.0,
             text: "Screenshots".to_string(),
             font_size: 14.0,
-            color: BLUE,
+            color: self.palette.blue,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -4493,7 +4534,7 @@ impl VideoPlayerApp {
                 }
             ),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(500.0),
             overflow: TextOverflow::Ellipsis,
@@ -4508,7 +4549,7 @@ impl VideoPlayerApp {
             y: top,
             width: self.width,
             height: self.height - top,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4517,7 +4558,7 @@ impl VideoPlayerApp {
             y: top + 20.0,
             text: "Keyboard Shortcuts".to_string(),
             font_size: 16.0,
-            color: TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,
@@ -4546,7 +4587,7 @@ impl VideoPlayerApp {
                 y: sy - 1.0,
                 width: 80.0,
                 height: 20.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(3.0),
             });
             cmds.push(RenderCommand::Text {
@@ -4554,7 +4595,7 @@ impl VideoPlayerApp {
                 y: sy + 2.0,
                 text: shortcut.keys.to_string(),
                 font_size: 11.0,
-                color: MAUVE,
+                color: self.palette.mauve,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(74.0),
                 overflow: TextOverflow::Ellipsis,
@@ -4566,7 +4607,7 @@ impl VideoPlayerApp {
                 y: sy + 2.0,
                 text: shortcut.action.to_string(),
                 font_size: 11.0,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(180.0),
                 overflow: TextOverflow::Ellipsis,
@@ -4718,6 +4759,10 @@ fn sample_subtitle_srt() -> &'static str {
 }
 
 impl App for VideoPlayerApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // What is on screen, because that is what the window is. A player
         // behind three other windows is found again by its title.
@@ -6765,5 +6810,64 @@ mod tests {
         );
         app.handle_event(&mouse(bar.x - bar.width, y, MouseEventKind::Move));
         assert_eq!(app.seek_preview_position, Some(Duration::ZERO));
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut VideoPlayerApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = VideoPlayerApp::new(1000.0, 700.0);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

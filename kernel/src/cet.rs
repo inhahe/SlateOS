@@ -529,7 +529,7 @@ unsafe fn wrmsr(msr: u32, val: u64) {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the CET module.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[cet] Running self-test...");
 
     // Test 1: Status query works.
@@ -580,4 +580,5 @@ pub fn self_test() {
     serial_println!("[cet]   CR4 read: OK (CET bit clear as expected)");
 
     serial_println!("[cet] Self-test PASSED");
+    Ok(())
 }

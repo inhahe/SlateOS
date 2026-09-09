@@ -161,7 +161,7 @@ impl Barrier {
 ///
 /// Tests single-task barrier (count=1), construction, and generation
 /// counting.  Multi-task barrier testing requires spawning tasks.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[barrier] Running self-test...");
@@ -253,4 +253,5 @@ pub fn self_test() {
     serial_println!("[barrier]   Multi-task barrier (2 tasks): OK");
 
     serial_println!("[barrier] Self-test PASSED");
+    Ok(())
 }

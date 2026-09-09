@@ -499,7 +499,7 @@ unsafe fn write_cr4(val: u64) {
 // ---------------------------------------------------------------------------
 
 /// Self-test for SMEP/SMAP detection and status.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[smep_smap] Running self-test...");
     let mut skips = crate::fs::selftest::Skips::new();
 
@@ -628,4 +628,5 @@ pub fn self_test() {
 
     skips.report("[smep_smap]");
     serial_println!("[smep_smap] Self-test PASSED{}", skips.suffix());
+    Ok(())
 }

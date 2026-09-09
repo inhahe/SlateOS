@@ -307,7 +307,7 @@ pub fn blocked_list(buf: &mut [(u64, WaitChannel, u64)]) -> usize {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the wait channel tracker.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[wchan] Running self-test...");
 
     // Test 1: Initial state is None.
@@ -371,4 +371,5 @@ pub fn self_test() {
     clear(13);
 
     serial_println!("[wchan] Self-test PASSED");
+    Ok(())
 }

@@ -9,6 +9,12 @@ libc already calls them correctly.
 **Nothing is broken today.** This is a live trap for the next caller, not a
 current bug, and I say which is which below.
 
+**Status:** ✅ DONE — all three corrections landed in `4fe5ac9b9`
+(`number.rs: 539 takes a terminal, and two neighbouring entries expired`).
+The 539 entry now documents `arg0` as the terminal handle, lists all four
+error returns, carries the guessable-id history, and the 537/538 preamble
+and pty preamble cross-references are corrected.
+
 ## In short
 
 `kernel/src/syscall/number.rs` is the authoritative ABI reference — it is what

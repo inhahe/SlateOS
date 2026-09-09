@@ -9,6 +9,7 @@ use crate::color::Color;
 use crate::event::{Key, KeyEvent};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::row_strip::RowStrip;
+use crate::scrollbar;
 use crate::step;
 use crate::style::CornerRadii;
 
@@ -656,15 +657,22 @@ impl ContextMenu {
             } else {
                 1.0
             };
-            let thumb_height = (track_height * visible_fraction)
-                .max(SCROLLBAR_MIN_THUMB)
-                .min(track_height);
-            let thumb_y = view_top + (track_height - thumb_height) * (self.scroll / max_scroll);
+            // The arithmetic is `scrollbar`'s, shared with the file dialog,
+            // the shell and `apps/dictionary`. The 16 px floor stays this
+            // menu's own: a menu is smaller than a file dialog, and adopting
+            // the module's 20 px default would be a visual change dressed as a
+            // refactor.
+            let thumb = scrollbar::thumb_of(
+                crate::frame::Rect::new(track_x, view_top, SCROLLBAR_WIDTH, track_height),
+                visible_fraction,
+                self.scroll / max_scroll,
+                SCROLLBAR_MIN_THUMB,
+            );
             cmds.push(RenderCommand::FillRect {
-                x: track_x,
-                y: thumb_y,
-                width: SCROLLBAR_WIDTH,
-                height: thumb_height,
+                x: thumb.x,
+                y: thumb.y,
+                width: thumb.w,
+                height: thumb.h,
                 color: SCROLLBAR_THUMB_COLOR,
                 corner_radii: CornerRadii::all(SCROLLBAR_WIDTH / 2.0),
             });

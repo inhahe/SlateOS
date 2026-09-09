@@ -383,6 +383,184 @@ impl MouseConfig {
 }
 
 // ============================================================================
+// Keyboard accessibility
+// ============================================================================
+
+/// Sticky keys: press a modifier and release it, and it still applies to the
+/// next key.
+///
+/// For anyone who cannot hold two keys at once -- one-handed use, a mouth
+/// stick, limited grip. Standard on every desktop platform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StickyKeysConfig {
+    pub enabled: bool,
+    /// Pressing a modifier twice locks it until pressed a third time.
+    pub lock_on_double_press: bool,
+    /// Pressing two keys together at once turns the mode off.
+    ///
+    /// The standard escape hatch: someone who *can* hold a chord evidently did
+    /// not want sticky keys, so holding one says so without a trip to Settings.
+    pub release_on_two_keys: bool,
+    pub play_sound: bool,
+    pub show_indicator: bool,
+}
+
+impl Default for StickyKeysConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lock_on_double_press: true,
+            release_on_two_keys: true,
+            play_sound: true,
+            show_indicator: true,
+        }
+    }
+}
+
+/// Filter keys: ignore keystrokes that were too brief, or too soon after the
+/// last one.
+///
+/// For tremor, and for keys struck accidentally in passing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FilterKeysConfig {
+    pub enabled: bool,
+    /// Slow keys: how long a key must be held before it counts, in ms.
+    ///
+    /// Named for the feature rather than the mechanism (`acceptance_delay` was
+    /// the other spelling in the tree) because "Slow Keys" is what it is
+    /// called in every document a user might read, X11's included.
+    pub slow_keys_ms: u32,
+    /// Bounce keys: how long the *same* key is ignored after being accepted.
+    pub bounce_keys_ms: u32,
+    pub play_sound: bool,
+    pub show_indicator: bool,
+}
+
+impl Default for FilterKeysConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            slow_keys_ms: 300,
+            bounce_keys_ms: 200,
+            play_sound: true,
+            show_indicator: true,
+        }
+    }
+}
+
+impl FilterKeysConfig {
+    /// Longest delay either filter may impose, in milliseconds.
+    ///
+    /// Five seconds is already far past usable; this is a bound against a
+    /// hand-edited file, not a suggestion. There is deliberately no *lower*
+    /// bound: zero means "do not filter", which a user may well want for one
+    /// of the two filters while keeping the other.
+    pub const MAX_DELAY_MS: u32 = 5_000;
+
+    /// Force both delays back into range.
+    pub fn validate(&mut self) {
+        self.slow_keys_ms = self.slow_keys_ms.min(Self::MAX_DELAY_MS);
+        self.bounce_keys_ms = self.bounce_keys_ms.min(Self::MAX_DELAY_MS);
+    }
+}
+
+/// Mouse keys: drive the pointer from the numeric keypad.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MouseKeysConfig {
+    pub enabled: bool,
+    /// Pixels moved per key repeat before acceleration.
+    pub speed: f32,
+    /// How much a held direction key speeds up per repeat.
+    ///
+    /// A factor rather than an on/off switch -- the other model in the tree
+    /// had `acceleration: bool`, which cannot say *how much* and so cannot be
+    /// tuned by someone who finds the one fixed rate too fast or too slow.
+    /// `1.0` is the off switch.
+    pub acceleration: f32,
+    /// Ceiling the acceleration may reach, in pixels per repeat.
+    pub max_speed: f32,
+    /// Use the numeric keypad for this. Off means the keypad keeps typing
+    /// digits and the feature is reached some other way.
+    pub use_numpad: bool,
+}
+
+impl Default for MouseKeysConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            speed: 10.0,
+            acceleration: 2.0,
+            max_speed: 50.0,
+            use_numpad: true,
+        }
+    }
+}
+
+impl MouseKeysConfig {
+    /// Force every field back into its documented range.
+    ///
+    /// `max_speed` is raised to `speed` last of all: a ceiling below the
+    /// starting speed would mean the pointer *decelerates* the longer a key is
+    /// held, which is not a setting anyone means. Non-finite values are
+    /// replaced rather than clamped, because `clamp` panics on a NaN bound and
+    /// a NaN here comes from a hand-edited file, not from arithmetic.
+    pub fn validate(&mut self) {
+        if !self.speed.is_finite() {
+            self.speed = 10.0;
+        }
+        if !self.acceleration.is_finite() {
+            self.acceleration = 2.0;
+        }
+        if !self.max_speed.is_finite() {
+            self.max_speed = 50.0;
+        }
+        self.speed = self.speed.clamp(1.0, 100.0);
+        self.acceleration = self.acceleration.clamp(1.0, 10.0);
+        self.max_speed = self.max_speed.clamp(1.0, 500.0).max(self.speed);
+    }
+}
+
+/// The three keyboard-driven accessibility features, together.
+///
+/// These live here, beside the pointer and repeat-rate settings, for the
+/// reason given at the top of this file: the compositor *applies* them, the
+/// Settings application *edits* them, and the shell's panel *renders* them, so
+/// one definition has to serve all three. Before this they existed three times
+/// over -- as state machines in `desktop::a11y`, as differently named fields on
+/// `desktop::a11y::AccessibilityConfig`, and again as config structs in
+/// `desktop::accessibility_settings` -- and no two of the three were connected
+/// to each other or to the keyboard. See `known-issues.md`
+/// `TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING`.
+///
+/// What stays out, per this crate's boundary: the state machines. Whether a
+/// modifier is *currently* stuck is not a setting, it is live input state, and
+/// it belongs to whoever is holding the key events.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AccessibilityKeysConfig {
+    pub sticky: StickyKeysConfig,
+    pub filter: FilterKeysConfig,
+    pub mouse: MouseKeysConfig,
+}
+
+impl AccessibilityKeysConfig {
+    /// Force every field of all three back into range.
+    pub fn validate(&mut self) {
+        self.filter.validate();
+        self.mouse.validate();
+    }
+
+    /// Whether any of the three is on.
+    ///
+    /// The compositor's fast path: when this is false the key handler skips
+    /// the accessibility step entirely, which is what keeps the feature free
+    /// for the overwhelming majority who never turn it on.
+    #[must_use]
+    pub fn any_enabled(self) -> bool {
+        self.sticky.enabled || self.filter.enabled || self.mouse.enabled
+    }
+}
+
+// ============================================================================
 // Combined input settings
 // ============================================================================
 
@@ -393,6 +571,8 @@ pub struct InputSettings {
     pub mouse: MouseConfig,
     /// Everything about the keyboard: the layout, and how a held key repeats.
     pub keyboard: KeyboardConfig,
+    /// Sticky, filter and mouse keys.
+    pub accessibility: AccessibilityKeysConfig,
 }
 
 impl InputSettings {
@@ -417,10 +597,16 @@ impl InputSettings {
         *self = Self::default();
     }
 
-    /// Force every field of both halves back into range.
+    /// Restore the accessibility half to its defaults, leaving the rest alone.
+    pub fn reset_accessibility(&mut self) {
+        self.accessibility = AccessibilityKeysConfig::default();
+    }
+
+    /// Force every field of every half back into range.
     pub fn validate(&mut self) {
         self.mouse.validate();
         self.keyboard.validate();
+        self.accessibility.validate();
     }
 }
 
@@ -553,6 +739,79 @@ impl InputSettings {
                 .and_then(|v| u32::try_from(v).ok())
         );
 
+        // Sticky / filter / mouse keys. Under `accessibility` rather than
+        // `keyboard` because two of the three are not about the keyboard's
+        // own behaviour -- mouse keys moves the pointer -- and because a user
+        // looking for them in a hand-edited file will look for the word they
+        // saw in Settings.
+        read_into!(
+            s.accessibility.sticky.enabled,
+            doc.get_bool(&["accessibility", "sticky_keys"])
+        );
+        read_into!(
+            s.accessibility.sticky.lock_on_double_press,
+            doc.get_bool(&["accessibility", "sticky_lock_on_double_press"])
+        );
+        read_into!(
+            s.accessibility.sticky.release_on_two_keys,
+            doc.get_bool(&["accessibility", "sticky_release_on_two_keys"])
+        );
+        read_into!(
+            s.accessibility.sticky.play_sound,
+            doc.get_bool(&["accessibility", "sticky_sound"])
+        );
+        read_into!(
+            s.accessibility.sticky.show_indicator,
+            doc.get_bool(&["accessibility", "sticky_indicator"])
+        );
+
+        read_into!(
+            s.accessibility.filter.enabled,
+            doc.get_bool(&["accessibility", "filter_keys"])
+        );
+        read_into!(
+            s.accessibility.filter.slow_keys_ms,
+            doc.get_i64(&["accessibility", "slow_keys_ms"])
+                .and_then(|v| u32::try_from(v).ok())
+        );
+        read_into!(
+            s.accessibility.filter.bounce_keys_ms,
+            doc.get_i64(&["accessibility", "bounce_keys_ms"])
+                .and_then(|v| u32::try_from(v).ok())
+        );
+        read_into!(
+            s.accessibility.filter.play_sound,
+            doc.get_bool(&["accessibility", "filter_sound"])
+        );
+        read_into!(
+            s.accessibility.filter.show_indicator,
+            doc.get_bool(&["accessibility", "filter_indicator"])
+        );
+
+        read_into!(
+            s.accessibility.mouse.enabled,
+            doc.get_bool(&["accessibility", "mouse_keys"])
+        );
+        read_into!(
+            s.accessibility.mouse.speed,
+            doc.get_f64(&["accessibility", "mouse_keys_speed"])
+                .map(|v| v as f32)
+        );
+        read_into!(
+            s.accessibility.mouse.acceleration,
+            doc.get_f64(&["accessibility", "mouse_keys_acceleration"])
+                .map(|v| v as f32)
+        );
+        read_into!(
+            s.accessibility.mouse.max_speed,
+            doc.get_f64(&["accessibility", "mouse_keys_max_speed"])
+                .map(|v| v as f32)
+        );
+        read_into!(
+            s.accessibility.mouse.use_numpad,
+            doc.get_bool(&["accessibility", "mouse_keys_numpad"])
+        );
+
         s.validate();
         s
     }
@@ -607,6 +866,52 @@ impl InputSettings {
             &["keyboard", "interval_ms"],
             i64::from(self.keyboard.repeat_interval_ms),
         );
+
+        let a = &self.accessibility;
+        doc.set_bool(&["accessibility", "sticky_keys"], a.sticky.enabled);
+        doc.set_bool(
+            &["accessibility", "sticky_lock_on_double_press"],
+            a.sticky.lock_on_double_press,
+        );
+        doc.set_bool(
+            &["accessibility", "sticky_release_on_two_keys"],
+            a.sticky.release_on_two_keys,
+        );
+        doc.set_bool(&["accessibility", "sticky_sound"], a.sticky.play_sound);
+        doc.set_bool(
+            &["accessibility", "sticky_indicator"],
+            a.sticky.show_indicator,
+        );
+
+        doc.set_bool(&["accessibility", "filter_keys"], a.filter.enabled);
+        doc.set_i64(
+            &["accessibility", "slow_keys_ms"],
+            i64::from(a.filter.slow_keys_ms),
+        );
+        doc.set_i64(
+            &["accessibility", "bounce_keys_ms"],
+            i64::from(a.filter.bounce_keys_ms),
+        );
+        doc.set_bool(&["accessibility", "filter_sound"], a.filter.play_sound);
+        doc.set_bool(
+            &["accessibility", "filter_indicator"],
+            a.filter.show_indicator,
+        );
+
+        doc.set_bool(&["accessibility", "mouse_keys"], a.mouse.enabled);
+        doc.set_f64(
+            &["accessibility", "mouse_keys_speed"],
+            f64::from(a.mouse.speed),
+        );
+        doc.set_f64(
+            &["accessibility", "mouse_keys_acceleration"],
+            f64::from(a.mouse.acceleration),
+        );
+        doc.set_f64(
+            &["accessibility", "mouse_keys_max_speed"],
+            f64::from(a.mouse.max_speed),
+        );
+        doc.set_bool(&["accessibility", "mouse_keys_numpad"], a.mouse.use_numpad);
     }
 }
 
@@ -786,9 +1091,134 @@ mod tests {
         settings.keyboard.repeat_delay_ms = 250;
         settings.keyboard.repeat_interval_ms = 15;
 
+        // Every field, including the accessibility half -- the name of this
+        // test is a claim, and a field left at its default here would round
+        // trip whether or not it was written at all.
+        settings.accessibility.sticky.enabled = true;
+        settings.accessibility.sticky.lock_on_double_press = false;
+        settings.accessibility.sticky.release_on_two_keys = false;
+        settings.accessibility.sticky.play_sound = false;
+        settings.accessibility.sticky.show_indicator = false;
+        settings.accessibility.filter.enabled = true;
+        settings.accessibility.filter.slow_keys_ms = 450;
+        settings.accessibility.filter.bounce_keys_ms = 125;
+        settings.accessibility.filter.play_sound = false;
+        settings.accessibility.filter.show_indicator = false;
+        settings.accessibility.mouse.enabled = true;
+        settings.accessibility.mouse.speed = 22.0;
+        settings.accessibility.mouse.acceleration = 3.5;
+        settings.accessibility.mouse.max_speed = 88.0;
+        settings.accessibility.mouse.use_numpad = false;
+
         let mut doc = Document::new();
         settings.write_into(&mut doc);
         assert_eq!(InputSettings::read_from(&doc), settings);
+    }
+
+    // -- Keyboard accessibility -----------------------------------------------
+
+    /// Turning a feature on is the whole point, so the flags must survive a
+    /// file. This is the failure the crate exists to prevent: the settings it
+    /// replaced had no persistence at all.
+    #[test]
+    fn the_three_accessibility_switches_survive_a_file() {
+        let mut settings = InputSettings::default();
+        assert!(
+            !settings.accessibility.any_enabled(),
+            "nothing should be on by default"
+        );
+        settings.accessibility.sticky.enabled = true;
+        settings.accessibility.filter.enabled = true;
+        settings.accessibility.mouse.enabled = true;
+
+        let mut doc = Document::new();
+        settings.write_into(&mut doc);
+        let back = InputSettings::read_from(&doc);
+        assert!(back.accessibility.sticky.enabled);
+        assert!(back.accessibility.filter.enabled);
+        assert!(back.accessibility.mouse.enabled);
+        assert!(back.accessibility.any_enabled());
+    }
+
+    /// `any_enabled` is the compositor's fast path, so it must be false only
+    /// when all three really are off.
+    #[test]
+    fn any_enabled_is_true_for_each_feature_on_its_own() {
+        for (name, set) in [("sticky", 0usize), ("filter", 1), ("mouse", 2)] {
+            let mut a = AccessibilityKeysConfig::default();
+            match set {
+                0 => a.sticky.enabled = true,
+                1 => a.filter.enabled = true,
+                _ => a.mouse.enabled = true,
+            }
+            assert!(a.any_enabled(), "{name} alone did not count as enabled");
+        }
+        assert!(!AccessibilityKeysConfig::default().any_enabled());
+    }
+
+    /// A hand-edited file cannot ask for a delay long enough to look like a
+    /// hang, but zero stays legal -- it means "do not filter".
+    #[test]
+    fn filter_delays_are_capped_but_zero_is_kept() {
+        let mut f = FilterKeysConfig {
+            slow_keys_ms: 999_999,
+            bounce_keys_ms: 0,
+            ..FilterKeysConfig::default()
+        };
+        f.validate();
+        assert_eq!(f.slow_keys_ms, FilterKeysConfig::MAX_DELAY_MS);
+        assert_eq!(
+            f.bounce_keys_ms, 0,
+            "zero is a valid choice -- filter one way and not the other"
+        );
+    }
+
+    /// A ceiling below the starting speed would make the pointer slow down
+    /// the longer a key is held.
+    #[test]
+    fn a_mouse_key_ceiling_below_the_starting_speed_is_raised_to_it() {
+        let mut m = MouseKeysConfig {
+            speed: 40.0,
+            max_speed: 5.0,
+            ..MouseKeysConfig::default()
+        };
+        m.validate();
+        assert!(
+            m.max_speed >= m.speed,
+            "max_speed {} is below speed {}, so holding a key decelerates",
+            m.max_speed,
+            m.speed
+        );
+    }
+
+    /// `clamp` panics if a bound is NaN, and a NaN gets here from a
+    /// hand-edited file rather than from arithmetic.
+    #[test]
+    fn non_finite_mouse_key_values_are_replaced_rather_than_clamped() {
+        let mut m = MouseKeysConfig {
+            speed: f32::NAN,
+            acceleration: f32::INFINITY,
+            max_speed: f32::NEG_INFINITY,
+            ..MouseKeysConfig::default()
+        };
+        m.validate();
+        assert!(m.speed.is_finite() && m.acceleration.is_finite() && m.max_speed.is_finite());
+        assert!(m.max_speed >= m.speed);
+    }
+
+    /// Reading a file that predates these keys must not turn anything on.
+    #[test]
+    fn a_file_written_before_accessibility_existed_leaves_it_all_off() {
+        let mut doc = Document::new();
+        // A document carrying only the older sections.
+        doc.set_i64(&["pointer", "speed"], 3);
+        doc.set_str(&["keyboard", "layout"], "dvorak");
+        let s = InputSettings::read_from(&doc);
+        assert_eq!(s.keyboard.layout, "dvorak", "the old keys still read");
+        assert!(
+            !s.accessibility.any_enabled(),
+            "an absent section switched a feature on"
+        );
     }
 
     #[test]

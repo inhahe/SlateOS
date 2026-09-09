@@ -591,7 +591,7 @@ pub struct IoSchedStats {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the I/O scheduler.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[io_sched] Running self-test...");
 
     // Test 1: Submit and dispatch a single request.
@@ -616,6 +616,7 @@ pub fn self_test() {
     test_small_io_passthrough();
 
     serial_println!("[io_sched] Self-test PASSED");
+    Ok(())
 }
 
 fn test_single_request() {

@@ -28,6 +28,7 @@
 /// not about appearance, and `inputsettings` needs it without needing colours.
 pub use settingsfile as config;
 
+use core::num::NonZeroU32;
 use guitk::color::Color;
 use guitk::theme::with_alpha;
 use yamldoc::Document;
@@ -210,6 +211,356 @@ impl ThemeMode {
             Self::Light => true,
             Self::Dark | Self::System => false,
         }
+    }
+}
+
+// ============================================================================
+// Color filter (colour-vision simulation and correction)
+// ============================================================================
+
+/// The complement of an 8-bit channel — `255 - value`.
+///
+/// Written as a bitwise complement because for a `u8` the two are the same
+/// value, and unlike the subtraction it cannot underflow for any input.
+const fn invert_channel(value: u8) -> u8 {
+    !value
+}
+
+/// A 3x3 integer matrix that mixes a color's channels: output channel `i` is
+/// `(rows[i] . [r, g, b]) / denominator`.
+///
+/// This type exists so that "recombine the channels with these weights" is
+/// written once instead of once per filter. Integer weights over a shared
+/// denominator rather than floats because a filter runs once per pixel.
+///
+/// # Invariant
+///
+/// **Every row sums to exactly `denominator`.** That single property is what
+/// makes a mix well-behaved: it is then a weighted *average* of the inputs, so
+/// it maps black to black and white to white, and — since no input channel
+/// exceeds 255 — no output channel can either. [`ChannelMix::new`] is the only
+/// constructor and it rejects anything else, and because it is a `const fn`
+/// every mix in this module is checked when the crate is compiled rather than
+/// when a pixel is drawn. That is why [`ChannelMix::apply`] needs no clamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChannelMix {
+    /// One row of weights per output channel, in red-green-blue order.
+    rows: [[u32; 3]; 3],
+    /// The shared divisor every row sums to.
+    denominator: NonZeroU32,
+}
+
+/// Whether `row`'s three weights add up to exactly `denominator`.
+const fn row_sums_to(row: [u32; 3], denominator: u32) -> bool {
+    let [a, b, c] = row;
+    match a.checked_add(b) {
+        Some(ab) => match ab.checked_add(c) {
+            Some(sum) => sum == denominator,
+            None => false,
+        },
+        None => false,
+    }
+}
+
+/// Unwraps a [`ChannelMix`] that is built in a `const` initializer.
+///
+/// A `None` here means the weights written a few lines above do not sum to
+/// their denominator, which is a typo, not a runtime condition. Panicking in a
+/// const context is a *compile* error at the point of use, so this turns the
+/// row-sum invariant into something the build enforces at zero runtime cost.
+#[allow(
+    clippy::panic,
+    reason = "evaluated only in a const initializer, where a panic is a build failure"
+)]
+const fn checked_at_compile_time(mix: Option<ChannelMix>) -> ChannelMix {
+    match mix {
+        Some(mix) => mix,
+        None => panic!("channel mix rows must each sum to the denominator"),
+    }
+}
+
+impl ChannelMix {
+    /// Perceptual luminance weighting: every output channel is the same
+    /// weighted average of the input, which is exactly what makes it gray.
+    ///
+    /// The denominator is 256 rather than 100 so the division is a shift.
+    const GRAYSCALE: Self = checked_at_compile_time(Self::new([[77, 150, 29]; 3], 256));
+    /// Simplified simulation of red-weak vision.
+    const PROTANOPIA: Self =
+        checked_at_compile_time(Self::new([[56, 43, 1], [55, 44, 1], [0, 24, 76]], 100));
+    /// Simplified simulation of green-weak vision.
+    const DEUTERANOPIA: Self =
+        checked_at_compile_time(Self::new([[63, 37, 0], [70, 30, 0], [0, 30, 70]], 100));
+    /// Simplified simulation of blue-weak vision.
+    const TRITANOPIA: Self =
+        checked_at_compile_time(Self::new([[95, 5, 0], [0, 43, 57], [0, 47, 53]], 100));
+
+    /// Builds a mix, returning `None` unless the denominator is non-zero and
+    /// every row sums to exactly it — see the type's invariant.
+    const fn new(rows: [[u32; 3]; 3], denominator: u32) -> Option<Self> {
+        let Some(nonzero) = NonZeroU32::new(denominator) else {
+            return None;
+        };
+        let [first, second, third] = rows;
+        if row_sums_to(first, denominator)
+            && row_sums_to(second, denominator)
+            && row_sums_to(third, denominator)
+        {
+            Some(Self {
+                rows,
+                denominator: nonzero,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Recombines `color`'s channels through this matrix, leaving alpha alone.
+    fn apply(self, color: Color) -> Color {
+        let input = [u32::from(color.r), u32::from(color.g), u32::from(color.b)];
+        let mut out = [0u8; 3];
+        for (slot, row) in out.iter_mut().zip(&self.rows) {
+            let mut sum = 0u32;
+            for (weight, channel) in row.iter().zip(&input) {
+                sum = sum.saturating_add(weight.saturating_mul(*channel));
+            }
+            // The row invariant bounds `sum` by `255 * denominator`, so the
+            // quotient always fits in a `u8`. The fallback clamps to white
+            // instead of wrapping to black should that ever stop being true.
+            *slot = u8::try_from(sum / self.denominator).unwrap_or(u8::MAX);
+        }
+        let [r, g, b] = out;
+        Color::rgba(r, g, b, color.a)
+    }
+}
+
+/// Color vision deficiency filter mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorFilter {
+    /// No filter (default).
+    None,
+    /// Red-green deficiency (most common).
+    Protanopia,
+    /// Green-red deficiency.
+    Deuteranopia,
+    /// Blue-yellow deficiency.
+    Tritanopia,
+    /// Full grayscale.
+    Grayscale,
+    /// Inverted colors.
+    Inverted,
+}
+
+impl ColorFilter {
+    /// Every filter, in the order the settings pane offers them.
+    ///
+    /// Anything that iterates the filters must go through this rather than
+    /// write its own list, so that adding a variant cannot leave a stale copy
+    /// behind.
+    pub const ALL: [Self; 6] = [
+        Self::None,
+        Self::Protanopia,
+        Self::Deuteranopia,
+        Self::Tritanopia,
+        Self::Grayscale,
+        Self::Inverted,
+    ];
+
+    /// The channel-mixing matrix this filter applies, or `None` for the two
+    /// filters that are not a linear mix of the input channels: [`Self::None`]
+    /// changes nothing, and [`Self::Inverted`] is affine (`255 - c`), not
+    /// linear.
+    const fn channel_mix(&self) -> Option<ChannelMix> {
+        match self {
+            Self::None | Self::Inverted => None,
+            Self::Grayscale => Some(ChannelMix::GRAYSCALE),
+            Self::Protanopia => Some(ChannelMix::PROTANOPIA),
+            Self::Deuteranopia => Some(ChannelMix::DEUTERANOPIA),
+            Self::Tritanopia => Some(ChannelMix::TRITANOPIA),
+        }
+    }
+
+    /// Apply this filter to one packed ARGB8888 pixel.
+    ///
+    /// The form a framebuffer needs. It exists beside [`Self::apply`] rather
+    /// than at the call site because a second unpack/repack written in the
+    /// compositor would be a second definition of what this filter *is*, free
+    /// to drift from the first; `the_packed_filter_agrees_with_the_unpacked_one`
+    /// holds the two together over every channel value.
+    ///
+    /// Alpha is carried through untouched. A colour-vision filter answers "what
+    /// does this look like", and transparency is not something it can change.
+    #[must_use]
+    pub fn apply_argb(self, argb: u32) -> u32 {
+        // The identity case first and without unpacking: this runs once per
+        // pixel of a full frame, and for nearly every user the answer is the
+        // pixel it was handed.
+        if matches!(self, Self::None) {
+            return argb;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let (a, r, g, b) = (
+            (argb >> 24) as u8,
+            (argb >> 16) as u8,
+            (argb >> 8) as u8,
+            argb as u8,
+        );
+        let out = self.apply(Color::rgba(r, g, b, a));
+        (u32::from(out.a) << 24)
+            | (u32::from(out.r) << 16)
+            | (u32::from(out.g) << 8)
+            | u32::from(out.b)
+    }
+
+    /// Apply this filter to a color. Alpha is never touched.
+    pub fn apply(&self, color: Color) -> Color {
+        match self {
+            // Deliberately not routed through the identity matrix, which would
+            // give the same answer: this is the overwhelmingly common case and
+            // it runs per pixel, so it has to stay a no-op rather than nine
+            // multiplies.
+            Self::None => color,
+            Self::Inverted => Color::rgba(
+                invert_channel(color.r),
+                invert_channel(color.g),
+                invert_channel(color.b),
+                color.a,
+            ),
+            _ => self.channel_mix().map_or(color, |mix| mix.apply(color)),
+        }
+    }
+
+    /// Label for settings UI.
+    /// The name this filter is stored under.
+    ///
+    /// Separate from [`Self::label`] deliberately: the label is prose shown to
+    /// a user and may be reworded, and a stored file must not change meaning
+    /// because someone improved a caption.
+    #[must_use]
+    pub fn yaml_name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Protanopia => "protanopia",
+            Self::Deuteranopia => "deuteranopia",
+            Self::Tritanopia => "tritanopia",
+            Self::Grayscale => "grayscale",
+            Self::Inverted => "inverted",
+        }
+    }
+
+    /// Read a stored name back, or `None` if it names no filter.
+    #[must_use]
+    pub fn from_yaml_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.yaml_name() == name)
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Protanopia => "Protanopia (red-weak)",
+            Self::Deuteranopia => "Deuteranopia (green-weak)",
+            Self::Tritanopia => "Tritanopia (blue-weak)",
+            Self::Grayscale => "Grayscale",
+            Self::Inverted => "Inverted",
+        }
+    }
+}
+
+// ============================================================================
+// High contrast schemes
+// ============================================================================
+
+/// A high-contrast colour scheme: one background, one text colour, no scale
+/// between them.
+///
+/// For users who cannot read an ordinary theme. The whole point is the absence
+/// of gradation -- an ordinary palette ranks text by *fading* it, and the
+/// faded end is precisely what is unreadable here, so a scheme carries two
+/// colours and [`Palette::high_contrast`] paints every neutral role with one
+/// or the other.
+///
+/// The accent is deliberately **not** part of a scheme. It follows the user's
+/// Appearance setting, which `design-decisions.md` §816 requires; see
+/// [`Palette::high_contrast`] for how its value is chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HighContrastScheme {
+    /// Black background, white text. The standard high-contrast look.
+    WhiteOnBlack,
+    /// White background, black text. The inverse, for glare sensitivity.
+    BlackOnWhite,
+    /// Yellow on black, which several low-vision guides prefer to white: the
+    /// reduced blue component is easier on light sensitivity.
+    YellowOnBlack,
+    /// Green on black, the terminal look, for minimal eye strain.
+    GreenOnBlack,
+}
+
+impl HighContrastScheme {
+    /// Every scheme, for a settings page that has to offer all of them.
+    pub const ALL: [Self; 4] = [
+        Self::WhiteOnBlack,
+        Self::BlackOnWhite,
+        Self::YellowOnBlack,
+        Self::GreenOnBlack,
+    ];
+
+    /// The colour behind everything.
+    #[must_use]
+    pub fn background(self) -> Color {
+        match self {
+            Self::BlackOnWhite => Color::from_hex(0xFFFFFF),
+            Self::WhiteOnBlack | Self::YellowOnBlack | Self::GreenOnBlack => {
+                Color::from_hex(0x000000)
+            }
+        }
+    }
+
+    /// The colour of every piece of text, at every weight.
+    #[must_use]
+    pub fn text(self) -> Color {
+        match self {
+            Self::WhiteOnBlack => Color::from_hex(0xFFFFFF),
+            Self::BlackOnWhite => Color::from_hex(0x000000),
+            Self::YellowOnBlack => Color::from_hex(0xFFFF00),
+            Self::GreenOnBlack => Color::from_hex(0x00FF00),
+        }
+    }
+
+    /// What to display this scheme as.
+    ///
+    /// The variant names used to read backwards -- the one now called
+    /// `WhiteOnBlack` was `BlackOnWhite`, and drew white text on black. They
+    /// were swapped once a second consumer had to map onto them *by meaning*:
+    /// `apps/magnifier` has its own `WhiteOnBlack`, which is white-on-black,
+    /// so a mapping written by name would have silently picked the opposite
+    /// scheme. The stored `yaml_name` strings did not move, so existing
+    /// config files still mean what they meant.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WhiteOnBlack => "White on black",
+            Self::BlackOnWhite => "Black on white",
+            Self::YellowOnBlack => "Yellow on black",
+            Self::GreenOnBlack => "Green on black",
+        }
+    }
+
+    /// The name this scheme is stored under.
+    #[must_use]
+    pub fn yaml_name(self) -> &'static str {
+        match self {
+            Self::WhiteOnBlack => "white_on_black",
+            Self::BlackOnWhite => "black_on_white",
+            Self::YellowOnBlack => "yellow_on_black",
+            Self::GreenOnBlack => "green_on_black",
+        }
+    }
+
+    /// Read a stored name back, or `None` if it names no scheme.
+    #[must_use]
+    pub fn from_yaml_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.yaml_name() == name)
     }
 }
 
@@ -635,6 +986,21 @@ impl TaskbarStyle {
 pub struct AppearanceSettings {
     /// Light/dark/system theme mode.
     pub theme_mode: ThemeMode,
+    /// The colour-vision filter applied to the whole screen.
+    ///
+    /// Unlike every other field here this one is not consumed by the palette:
+    /// a filter transforms *finished pixels*, so it is applied by the
+    /// compositor when it hands a frame to the display. Filtering the
+    /// palette's colours instead would shift the window chrome and leave
+    /// photographs untouched, which is worse than not filtering at all.
+    pub color_filter: ColorFilter,
+    /// The high-contrast scheme in force, or `None` for an ordinary theme.
+    ///
+    /// When set it *replaces* [`theme_mode`](Self::theme_mode) rather than
+    /// modifying it -- a high-contrast palette has no light and dark variant,
+    /// it has a background colour. The mode is left untouched so that turning
+    /// high contrast off returns the user to the theme they had.
+    pub high_contrast: Option<HighContrastScheme>,
     /// Accent color selection.
     pub accent_color: AccentColor,
     /// Custom accent color (used when accent_color is Custom).
@@ -680,6 +1046,8 @@ impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
             theme_mode: ThemeMode::Dark,
+            color_filter: ColorFilter::None,
+            high_contrast: None,
             accent_color: AccentColor::Blue,
             custom_accent: BLUE,
             transparency: TransparencyLevel::Moderate,
@@ -1043,10 +1411,94 @@ impl Palette {
     /// Resolve the whole palette from what the user chose.
     #[must_use]
     pub fn from_settings(settings: &AppearanceSettings) -> Self {
+        // Before the mode, not after: a high-contrast palette replaces the
+        // theme rather than adjusting it, so there is nothing from the
+        // light/dark branch to keep. Transparency is dropped with it -- see
+        // `high_contrast`.
+        if let Some(scheme) = settings.high_contrast {
+            return Self::high_contrast(scheme, settings);
+        }
         let mut palette = Self::for_mode(settings.theme_mode.is_light());
         palette.accent = settings.effective_accent();
         palette.panel_alpha = settings.transparency.panel_alpha();
         palette
+    }
+
+    /// The palette for a high-contrast scheme.
+    ///
+    /// # What it does to the neutrals, and why
+    ///
+    /// Every background role -- `crust`, `mantle`, `base`, `surface0..2` --
+    /// becomes the scheme's background, and every text role becomes its text
+    /// colour. That is not laziness; it is the feature. An ordinary palette
+    /// ranks surfaces by *raising* them a shade and text by *fading* it, and
+    /// both gradients are invisible to a user who needs this mode. Structure
+    /// is carried by borders instead, which is how every high-contrast
+    /// implementation works.
+    ///
+    /// `overlay0` matters most and is the clearest case. It is documented as
+    /// "the faintest legible mark", measuring about 3.4:1 in dark mode -- a
+    /// role defined by being hard to see, which is exactly what this mode
+    /// exists to abolish. It becomes the text colour.
+    ///
+    /// # What it does not flatten
+    ///
+    /// The categorical hues -- `red`, `green`, `yellow` and the rest -- keep
+    /// their meanings. "Red means this failed" is information, not decoration,
+    /// and collapsing it into the text colour would delete it. They are taken
+    /// from whichever ordinary mode suits the scheme's background, so they
+    /// stay bright on a dark scheme and dark on a light one.
+    ///
+    /// # The accent
+    ///
+    /// Follows the user's Appearance setting, because `design-decisions.md`
+    /// §816 requires the highlight to be configurable and a scheme-fixed
+    /// accent would make it the one colour this mode does not let you change.
+    ///
+    /// For a *named* accent the hue is kept and the better-contrasting of its
+    /// two values is used. That is not an override: both values are the same
+    /// hue, and choosing between them by background is what `for_mode` already
+    /// does for every other role. A `Custom` accent is used exactly as given,
+    /// because there is no second value to choose and an exact colour is an
+    /// exact request.
+    #[must_use]
+    pub fn high_contrast(scheme: HighContrastScheme, settings: &AppearanceSettings) -> Self {
+        let bg = scheme.background();
+        let fg = scheme.text();
+        let light = relative_luminance(bg) > 0.5;
+
+        let accent = if settings.accent_color == AccentColor::Custom {
+            settings.custom_accent
+        } else {
+            let dark_value = settings.accent_color.color();
+            let light_value = settings.accent_color.color_light();
+            if contrast_ratio(dark_value, bg) >= contrast_ratio(light_value, bg) {
+                dark_value
+            } else {
+                light_value
+            }
+        };
+
+        Self {
+            crust: bg,
+            mantle: bg,
+            base: bg,
+            surface0: bg,
+            surface1: bg,
+            surface2: bg,
+            overlay0: fg,
+            subtext0: fg,
+            subtext1: fg,
+            text: fg,
+            accent,
+            // Transparency blends a surface with whatever is behind it, which
+            // lowers contrast by construction. A mode whose entire purpose is
+            // contrast does not get to be see-through.
+            panel_alpha: 255,
+            light,
+            // The categorical hues, from the mode that suits this background.
+            ..Self::for_mode(light)
+        }
     }
 
     /// This palette's value for one of the accent presets.
@@ -1605,6 +2057,21 @@ impl AppearanceSettings {
             doc.get_str(&["theme", "mode"])
                 .and_then(|v| ThemeMode::from_yaml_name(&v))
         );
+        // Absent and "off" both mean no high contrast, and an unrecognised
+        // name does too. A scheme this build does not know is not a reason to
+        // refuse to draw, and falling back to the ordinary theme is the safe
+        // direction: it is legible to everyone, which a half-applied
+        // high-contrast palette would not be.
+        s.high_contrast = doc
+            .get_str(&["theme", "high_contrast"])
+            .and_then(|v| HighContrastScheme::from_yaml_name(&v));
+
+        read_into!(
+            s.color_filter,
+            doc.get_str(&["theme", "color_filter"])
+                .and_then(|v| ColorFilter::from_yaml_name(&v))
+        );
+
         read_into!(
             s.accent_color,
             doc.get_str(&["theme", "accent"])
@@ -1697,6 +2164,12 @@ impl AppearanceSettings {
     /// comment, blank line and unrelated key in it exactly as it was.
     pub fn write_into(&self, doc: &mut Document) {
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
+        doc.set_str(&["theme", "color_filter"], self.color_filter.yaml_name());
+        doc.set_str(
+            &["theme", "high_contrast"],
+            self.high_contrast
+                .map_or("off", HighContrastScheme::yaml_name),
+        );
         doc.set_str(&["theme", "accent"], self.accent_color.yaml_name());
         doc.set_str(
             &["theme", "custom_accent"],
@@ -2066,6 +2539,8 @@ mod tests {
     fn all_non_default() -> AppearanceSettings {
         AppearanceSettings {
             theme_mode: ThemeMode::Light,
+            color_filter: ColorFilter::Tritanopia,
+            high_contrast: Some(HighContrastScheme::YellowOnBlack),
             accent_color: AccentColor::Custom,
             custom_accent: Color::rgba(1, 2, 3, 4),
             transparency: TransparencyLevel::Full,
@@ -3142,5 +3617,538 @@ mod tests {
             assert_eq!(f.maximize_button, plain.maximize_button, "{accent:?}");
             assert_eq!(f.minimize_button, plain.minimize_button, "{accent:?}");
         }
+    }
+
+    // ------------------------------------------------------------------
+    // High contrast
+    //
+    // The scheme's own two colours contrasting is necessary and not
+    // sufficient: what a user reads is the *palette*, and a palette that kept
+    // one graded grey surface would put text on it at whatever ratio that
+    // grey happens to give. So these assert the built palette, every text
+    // role against every background role.
+    // ------------------------------------------------------------------
+
+    /// Text roles, which must all be legible on any background role.
+    fn hc_text_roles(p: &Palette) -> [(&'static str, Color); 4] {
+        [
+            ("text", p.text),
+            ("subtext1", p.subtext1),
+            ("subtext0", p.subtext0),
+            ("overlay0", p.overlay0),
+        ]
+    }
+
+    /// Background roles, which in this mode must all be the same colour.
+    fn hc_bg_roles(p: &Palette) -> [(&'static str, Color); 6] {
+        [
+            ("crust", p.crust),
+            ("mantle", p.mantle),
+            ("base", p.base),
+            ("surface0", p.surface0),
+            ("surface1", p.surface1),
+            ("surface2", p.surface2),
+        ]
+    }
+
+    fn hc_settings(scheme: HighContrastScheme) -> AppearanceSettings {
+        AppearanceSettings {
+            high_contrast: Some(scheme),
+            ..AppearanceSettings::default()
+        }
+    }
+
+    #[test]
+    fn every_text_role_clears_seven_to_one_on_every_surface() {
+        for scheme in HighContrastScheme::ALL {
+            let p = Palette::from_settings(&hc_settings(scheme));
+            for (tname, text) in hc_text_roles(&p) {
+                for (bname, bg) in hc_bg_roles(&p) {
+                    let ratio = contrast_ratio(text, bg);
+                    assert!(
+                        ratio >= 7.0,
+                        "{}: {tname} on {bname} is {ratio:.2}:1, below the 7:1 \
+                         this mode exists to provide",
+                        scheme.label()
+                    );
+                }
+            }
+        }
+    }
+
+    /// `overlay0` is the one this mode is really about.
+    ///
+    /// It is documented as "the faintest legible mark" and measures about
+    /// 3.4:1 in ordinary dark mode -- a role defined by being hard to see. In
+    /// high contrast it must not still be the faintest thing on screen.
+    #[test]
+    fn the_faintest_role_is_no_longer_faint() {
+        let ordinary = Palette::for_mode(false);
+        assert!(
+            contrast_ratio(ordinary.overlay0, ordinary.base) < 4.5,
+            "the premise: in an ordinary palette this role is below body-text \
+             contrast, which is why it needs replacing here"
+        );
+
+        for scheme in HighContrastScheme::ALL {
+            let p = Palette::from_settings(&hc_settings(scheme));
+            assert_eq!(
+                p.overlay0,
+                p.text,
+                "{}: the faint role must become the text colour",
+                scheme.label()
+            );
+        }
+    }
+
+    /// The surfaces collapse, deliberately. A raised surface is a gradient,
+    /// and the gradient is the thing that cannot be seen.
+    #[test]
+    fn every_surface_is_the_same_colour_in_high_contrast() {
+        for scheme in HighContrastScheme::ALL {
+            let p = Palette::from_settings(&hc_settings(scheme));
+            for (name, bg) in hc_bg_roles(&p) {
+                assert_eq!(bg, scheme.background(), "{}: {name}", scheme.label());
+            }
+        }
+    }
+
+    /// "Red means this failed" is information and must survive the mode.
+    #[test]
+    fn the_categorical_hues_do_not_collapse_into_the_text_colour() {
+        for scheme in HighContrastScheme::ALL {
+            let p = Palette::from_settings(&hc_settings(scheme));
+            let hues = [p.red, p.green, p.yellow, p.blue];
+            for hue in hues {
+                assert_ne!(
+                    hue,
+                    p.text,
+                    "{}: a categorical hue was flattened away",
+                    scheme.label()
+                );
+            }
+            assert_ne!(p.red, p.green, "{}: red and green", scheme.label());
+        }
+    }
+
+    /// The accent follows the user, which §816 requires.
+    #[test]
+    fn the_accent_follows_the_users_setting_not_the_scheme() {
+        let mut a = hc_settings(HighContrastScheme::GreenOnBlack);
+        a.accent_color = AccentColor::Red;
+        let mut b = hc_settings(HighContrastScheme::GreenOnBlack);
+        b.accent_color = AccentColor::Blue;
+
+        assert_ne!(
+            Palette::from_settings(&a).accent,
+            Palette::from_settings(&b).accent,
+            "two different accent settings must give two different highlights"
+        );
+    }
+
+    /// Letting the accent follow the user must not let a dim highlight into
+    /// the mode where contrast matters most.
+    ///
+    /// This is the guarantee that replaced a per-scheme one. When the accent
+    /// was a property of a scheme there were four values to check and a fixed
+    /// bar; now there are fourteen presets against four backgrounds, and what
+    /// holds the line is picking the better-contrasting of each hue's two
+    /// values (see [`Palette::high_contrast`]).
+    ///
+    /// The bar is 4.5:1, WCAG AA for body text -- the same bar the old
+    /// per-scheme check used, so this is not a relaxation. It is deliberately
+    /// lower than the 7:1 the *text* roles must clear: the accent marks
+    /// things, it does not have paragraphs set in it.
+    #[test]
+    fn the_worst_accent_on_the_worst_scheme_is_still_legible() {
+        let mut worst = f32::INFINITY;
+        let mut worst_case = String::new();
+
+        for scheme in HighContrastScheme::ALL {
+            for accent in AccentColor::presets().iter().copied() {
+                let mut s = hc_settings(scheme);
+                s.accent_color = accent;
+                let p = Palette::from_settings(&s);
+                let ratio = contrast_ratio(p.accent, p.base);
+                if ratio < worst {
+                    worst = ratio;
+                    worst_case = format!("{} on {}", accent.label(), scheme.label());
+                }
+            }
+        }
+
+        assert!(
+            worst >= 4.5,
+            "the worst accent/scheme pairing is {worst_case} at {worst:.2}:1"
+        );
+    }
+
+    /// And the variant choice is what does it -- the same sweep against the
+    /// dark value alone finds a pairing that fails.
+    ///
+    /// Without this, the test above passes and says nothing about *why*: a
+    /// build that ignored the light/dark choice entirely might still clear
+    /// 4.5 by luck, and this is what distinguishes luck from the mechanism.
+    #[test]
+    fn choosing_the_better_variant_is_what_keeps_the_accent_legible() {
+        let mut worst_fixed = f32::INFINITY;
+        for scheme in HighContrastScheme::ALL {
+            for accent in AccentColor::presets().iter().copied() {
+                worst_fixed = worst_fixed.min(contrast_ratio(accent.color(), scheme.background()));
+            }
+        }
+        assert!(
+            worst_fixed < 4.5,
+            "if the fixed dark value already cleared the bar at {worst_fixed:.2}:1, \
+             the variant choice would be decoration rather than the mechanism"
+        );
+    }
+
+    /// A custom accent is used exactly as given: an exact colour is an exact
+    /// request, and there is no second value of it to choose between.
+    #[test]
+    fn a_custom_accent_is_used_verbatim() {
+        let mut s = hc_settings(HighContrastScheme::WhiteOnBlack);
+        s.accent_color = AccentColor::Custom;
+        s.custom_accent = Color::from_hex(0xAB12CD);
+
+        assert_eq!(Palette::from_settings(&s).accent, Color::from_hex(0xAB12CD));
+    }
+
+    /// Transparency is dropped, because blending lowers contrast by
+    /// construction.
+    #[test]
+    fn high_contrast_is_never_translucent() {
+        let mut s = hc_settings(HighContrastScheme::WhiteOnBlack);
+        s.transparency = TransparencyLevel::Full;
+        assert_eq!(Palette::from_settings(&s).panel_alpha, 255);
+    }
+
+    /// The scheme replaces the light/dark choice rather than modifying it, so
+    /// a user in the light theme who turns on a dark scheme gets the dark
+    /// scheme.
+    #[test]
+    fn the_scheme_overrides_the_theme_mode() {
+        let mut s = hc_settings(HighContrastScheme::WhiteOnBlack);
+        s.theme_mode = ThemeMode::Light;
+        let p = Palette::from_settings(&s);
+
+        assert_eq!(p.base, Color::from_hex(0x000000));
+        assert!(!p.light, "and the palette must say which it is");
+    }
+
+    #[test]
+    fn high_contrast_is_off_unless_asked_for() {
+        assert_eq!(AppearanceSettings::default().high_contrast, None);
+        let p = Palette::from_settings(&AppearanceSettings::default());
+        assert_ne!(p.overlay0, p.text, "an ordinary palette still grades");
+    }
+
+    #[test]
+    fn a_scheme_survives_being_written_and_read_back() {
+        for scheme in HighContrastScheme::ALL {
+            let mut doc = Document::new();
+            hc_settings(scheme).write_into(&mut doc);
+            assert_eq!(
+                AppearanceSettings::read_from(&doc).high_contrast,
+                Some(scheme),
+                "{}",
+                scheme.label()
+            );
+        }
+    }
+
+    #[test]
+    fn off_survives_the_round_trip_too() {
+        let mut doc = Document::new();
+        AppearanceSettings::default().write_into(&mut doc);
+        assert_eq!(AppearanceSettings::read_from(&doc).high_contrast, None);
+    }
+
+    /// An unknown scheme name reads as off rather than refusing to load.
+    #[test]
+    fn an_unrecognised_scheme_falls_back_to_the_ordinary_theme() {
+        let mut doc = Document::new();
+        AppearanceSettings::default().write_into(&mut doc);
+        doc.set_str(&["theme", "high_contrast"], "chartreuse_on_beige");
+        assert_eq!(AppearanceSettings::read_from(&doc).high_contrast, None);
+    }
+
+    // ------------------------------------------------------------------
+    // Colour filters
+    //
+    // Moved here with the code they cover. They were the only tests any of
+    // the four `ColorFilter` copies had, and they sat beside the only copy
+    // that could actually transform a colour.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_color_filter_inverted() {
+        let c = Color::rgba(100, 150, 200, 128);
+        let inv = ColorFilter::Inverted.apply(c);
+        assert_eq!(inv.r, 155);
+        assert_eq!(inv.g, 105);
+        assert_eq!(inv.b, 55);
+        assert_eq!(inv.a, 128); // Alpha preserved.
+    }
+
+    #[test]
+    fn test_color_filter_protanopia() {
+        let c = Color::rgba(200, 100, 50, 255);
+        let f = ColorFilter::Protanopia.apply(c);
+        // Should shift reds toward yellow/green.
+        assert_ne!(f, c);
+        assert_eq!(f.a, 255);
+    }
+
+    #[test]
+    fn test_color_filter_deuteranopia() {
+        let c = Color::rgba(100, 200, 50, 255);
+        let f = ColorFilter::Deuteranopia.apply(c);
+        assert_ne!(f, c);
+    }
+
+    #[test]
+    fn test_color_filter_tritanopia() {
+        let c = Color::rgba(50, 100, 200, 255);
+        let f = ColorFilter::Tritanopia.apply(c);
+        assert_ne!(f, c);
+    }
+
+    #[test]
+    fn test_color_filter_labels() {
+        for filter in &ColorFilter::ALL {
+            assert!(!filter.label().is_empty());
+        }
+    }
+
+    #[test]
+    fn every_filter_appears_in_all_exactly_once() {
+        // An exhaustive match, so a new variant fails to compile here rather
+        // than silently going missing from every loop that uses `ALL`.
+        let position = |filter: ColorFilter| match filter {
+            ColorFilter::None => 0,
+            ColorFilter::Protanopia => 1,
+            ColorFilter::Deuteranopia => 2,
+            ColorFilter::Tritanopia => 3,
+            ColorFilter::Grayscale => 4,
+            ColorFilter::Inverted => 5,
+        };
+        for (index, filter) in ColorFilter::ALL.into_iter().enumerate() {
+            assert_eq!(position(filter), index, "{filter:?} is out of place");
+        }
+    }
+
+    #[test]
+    fn no_two_filters_share_a_label() {
+        for (i, a) in ColorFilter::ALL.into_iter().enumerate() {
+            for b in ColorFilter::ALL.into_iter().skip(i + 1) {
+                assert_ne!(a.label(), b.label(), "{a:?} and {b:?} both say this");
+            }
+        }
+    }
+
+    #[test]
+    fn every_channel_mixing_filter_has_well_formed_weights() {
+        // `ChannelMix::new` is the thing that enforces "every row sums to the
+        // denominator", and it runs at compile time, so what is left to check
+        // here is that the filters that ought to mix actually do.
+        for filter in ColorFilter::ALL {
+            let mixes = filter.channel_mix().is_some();
+            let should_mix = match filter {
+                ColorFilter::None | ColorFilter::Inverted => false,
+                ColorFilter::Protanopia
+                | ColorFilter::Deuteranopia
+                | ColorFilter::Tritanopia
+                | ColorFilter::Grayscale => true,
+            };
+            assert_eq!(mixes, should_mix, "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn rows_that_do_not_sum_to_the_denominator_are_rejected() {
+        // Too dark, too bright, and a zero denominator.
+        assert!(ChannelMix::new([[50, 40, 9]; 3], 100).is_none());
+        assert!(ChannelMix::new([[50, 40, 11]; 3], 100).is_none());
+        assert!(ChannelMix::new([[1, 0, 0]; 3], 0).is_none());
+        // One bad row among three good ones is still rejected.
+        assert!(ChannelMix::new([[100, 0, 0], [0, 100, 0], [0, 0, 99]], 100).is_none());
+        assert!(ChannelMix::new([[100, 0, 0], [0, 100, 0], [0, 0, 100]], 100).is_some());
+    }
+
+    #[test]
+    fn black_and_white_survive_every_filter() {
+        // The point of the row-sum invariant: a weighted average of equal
+        // inputs is that input, so the extremes are fixed points of every mix.
+        // Only inversion moves them, and it swaps them.
+        let black = Color::rgba(0, 0, 0, 255);
+        let white = Color::rgba(255, 255, 255, 255);
+        for filter in ColorFilter::ALL {
+            let (want_black, want_white) = match filter {
+                ColorFilter::Inverted => (white, black),
+                ColorFilter::None
+                | ColorFilter::Protanopia
+                | ColorFilter::Deuteranopia
+                | ColorFilter::Tritanopia
+                | ColorFilter::Grayscale => (black, white),
+            };
+            assert_eq!(filter.apply(black), want_black, "{filter:?} on black");
+            assert_eq!(filter.apply(white), want_white, "{filter:?} on white");
+        }
+    }
+
+    #[test]
+    fn no_filter_touches_alpha() {
+        for filter in ColorFilter::ALL {
+            for alpha in [0u8, 1, 128, 254, 255] {
+                let out = filter.apply(Color::rgba(203, 17, 96, alpha));
+                assert_eq!(out.a, alpha, "{filter:?} at alpha {alpha}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_filter_accepts_every_channel_value() {
+        // Sweeps each channel across its whole range with the other two pinned
+        // at both extremes; the old hand-written sums were the kind of code
+        // where an out-of-range intermediate would only show up at one end.
+        for filter in ColorFilter::ALL {
+            for other in [0u8, 255] {
+                for value in 0..=255u8 {
+                    let _ = filter.apply(Color::rgba(value, other, other, 255));
+                    let _ = filter.apply(Color::rgba(other, value, other, 255));
+                    let _ = filter.apply(Color::rgba(other, other, value, 255));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inverting_twice_returns_the_original_color() {
+        for value in 0..=255u8 {
+            let c = Color::rgba(value, 255 - value, value / 2, 77);
+            assert_eq!(
+                ColorFilter::Inverted.apply(ColorFilter::Inverted.apply(c)),
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn the_filters_still_produce_the_weights_they_were_written_with() {
+        // Pins the numbers the matrices replaced, so the rewrite is provably
+        // the same filter and not merely a plausible one.
+        assert_eq!(
+            ColorFilter::Grayscale.apply(Color::rgba(255, 0, 0, 255)),
+            Color::rgba(76, 76, 76, 255)
+        );
+        assert_eq!(
+            ColorFilter::Protanopia.apply(Color::rgba(200, 100, 50, 255)),
+            Color::rgba(155, 154, 62, 255)
+        );
+        assert_eq!(
+            ColorFilter::Deuteranopia.apply(Color::rgba(100, 200, 50, 255)),
+            Color::rgba(137, 130, 95, 255)
+        );
+        assert_eq!(
+            ColorFilter::Tritanopia.apply(Color::rgba(50, 100, 200, 255)),
+            Color::rgba(52, 157, 153, 255)
+        );
+        assert_eq!(
+            ColorFilter::Inverted.apply(Color::rgba(100, 150, 200, 128)),
+            Color::rgba(155, 105, 55, 128)
+        );
+    }
+
+    // -- Magnifier --
+
+    /// The packed form and the unpacked one are the same law, so they must
+    /// give the same answer -- for every filter, over every channel value.
+    ///
+    /// This is what makes `apply_argb` an encoding of `apply` rather than a
+    /// second implementation free to drift from it.
+    #[test]
+    fn the_packed_filter_agrees_with_the_unpacked_one() {
+        for filter in ColorFilter::ALL {
+            for v in 0u16..=255 {
+                #[allow(clippy::cast_possible_truncation)]
+                let c = v as u8;
+                // A value in each channel position, and an alpha that is not
+                // opaque, so a filter that dropped alpha would be caught.
+                let color = Color::rgba(c, c.wrapping_add(85), c.wrapping_add(170), 0x7F);
+                let packed = (0x7F_u32 << 24)
+                    | (u32::from(color.r) << 16)
+                    | (u32::from(color.g) << 8)
+                    | u32::from(color.b);
+
+                let via_color = filter.apply(color);
+                let expected = (u32::from(via_color.a) << 24)
+                    | (u32::from(via_color.r) << 16)
+                    | (u32::from(via_color.g) << 8)
+                    | u32::from(via_color.b);
+
+                assert_eq!(
+                    filter.apply_argb(packed),
+                    expected,
+                    "{} disagrees at {packed:#010X}",
+                    filter.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_filter_changes_a_pixel_it_is_handed() {
+        for argb in [0x0000_0000, 0xFFFF_FFFF, 0x8012_3456, 0xFF00_FF00] {
+            assert_eq!(ColorFilter::None.apply_argb(argb), argb);
+        }
+    }
+
+    #[test]
+    fn every_filter_leaves_alpha_alone_when_packed() {
+        for filter in ColorFilter::ALL {
+            for alpha in [0x00_u32, 0x7F, 0xFF] {
+                let argb = (alpha << 24) | 0x0012_3456;
+                assert_eq!(
+                    filter.apply_argb(argb) >> 24,
+                    alpha,
+                    "{} touched alpha",
+                    filter.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_filter_survives_being_written_and_read_back() {
+        for filter in ColorFilter::ALL {
+            let mut doc = Document::new();
+            AppearanceSettings {
+                color_filter: filter,
+                ..AppearanceSettings::default()
+            }
+            .write_into(&mut doc);
+            assert_eq!(
+                AppearanceSettings::read_from(&doc).color_filter,
+                filter,
+                "{}",
+                filter.label()
+            );
+        }
+    }
+
+    /// A stored name is not a caption. Rewording a label must not silently
+    /// change what an existing config file means.
+    #[test]
+    fn stored_names_are_distinct_and_not_the_labels() {
+        let mut seen = Vec::new();
+        for filter in ColorFilter::ALL {
+            let name = filter.yaml_name();
+            assert!(!seen.contains(&name), "{name} is stored twice");
+            seen.push(name);
+            assert_eq!(ColorFilter::from_yaml_name(name), Some(filter));
+        }
+        assert_eq!(ColorFilter::from_yaml_name("sepia"), None);
     }
 }

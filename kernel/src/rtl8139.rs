@@ -744,7 +744,7 @@ fn find_rtl8139() -> Option<pci::PciDevice> {
 // ---------------------------------------------------------------------------
 
 /// Verify driver initialization and that the transmit datapath works.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     // Scoped so the device lock is released before the datapath test, which
     // re-acquires it: `Mutex` here is a spinlock, so holding it across the
     // second acquire would deadlock outright rather than merely block.
@@ -752,7 +752,7 @@ pub fn self_test() {
         let guard = DEVICE.lock_irqsave();
         let Some(dev) = guard.as_ref() else {
             crate::serial_println!("[rtl8139] Self-test: no device (skipped)");
-            return;
+            return Ok(());
         };
 
         // Verify MAC is not all-zeros or all-ones.
@@ -760,19 +760,19 @@ pub fn self_test() {
         let all_ones = dev.mac.iter().all(|&b| b == 0xFF);
         if all_zero || all_ones {
             crate::serial_println!("[rtl8139] Self-test FAILED: invalid MAC address");
-            return;
+            return Ok(());
         }
 
         // Verify TX/RX buffers are valid.
         if dev.rx_buf_phys == 0 || dev.tx_buf_phys[0] == 0 {
             crate::serial_println!("[rtl8139] Self-test FAILED: buffer addresses are zero");
-            return;
+            return Ok(());
         }
         dev.mac
     };
 
     if !tx_datapath_test(mac) {
-        return;
+        return Ok(());
     }
 
     crate::serial_println!(
@@ -784,6 +784,7 @@ pub fn self_test() {
         mac[4],
         mac[5]
     );
+    Ok(())
 }
 
 /// Transmit one inert frame and confirm the NIC reported it complete.

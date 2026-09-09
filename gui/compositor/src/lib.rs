@@ -66,6 +66,11 @@ use osfont::system::{Family, FontCache, Weight};
 
 mod buffer;
 pub use buffer::{BufferFormat, ImageAsset, SharedBuffer};
+// Sticky, filter and mouse keys. The state machines live here rather than
+// beside the settings because the compositor is the only place every
+// keystroke passes through; `inputsettings` owns what the user chose.
+pub mod a11ykeys;
+pub use a11ykeys::{AccessibilityKeys, MouseKeyAction, Rejected, StickyModifier, StickyModifiers};
 // The rendering-backend seam. Everything from `compose_frame` down to a
 // primitive is written against `RenderTarget`, so the CPU rasterizer below is a
 // *choice* rather than the only thing the compositor can do — which is what a
@@ -111,7 +116,7 @@ pub use guiremote::control::Layer;
 // Same reason: `CompositorRequest::ShellControl` carries one, so a caller
 // building that request must be able to name it.
 pub use guiremote::control::ShellControlAction;
-use guiremote::control::WindowSpec;
+use guiremote::control::{StackTier, WindowPolicy, WindowSpec};
 // Re-exported for the same reason as `WindowInfo` below: `Window::reserved_edge`
 // holds one and `reserve_edge` takes one, and a panel that has to reach past the
 // compositor to name the edge it is anchored to is naming a different type from
@@ -240,6 +245,12 @@ impl WindowId {
 pub enum CompositorError {
     /// The specified window does not exist.
     WindowNotFound(WindowId),
+    /// A window rule forbids the operation.
+    ///
+    /// A `&'static str` where the errors below carry `String`, and
+    /// deliberately: every refusal here is a fixed sentence about a policy,
+    /// not a report about a value, so there is nothing to format in.
+    Refused(&'static str),
     /// Invalid framebuffer dimensions.
     InvalidDimensions { width: u32, height: u32 },
     /// The framebuffer exceeds maximum supported size.
@@ -278,6 +289,7 @@ impl std::fmt::Display for CompositorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::WindowNotFound(id) => write!(f, "window not found: {}", id.raw()),
+            Self::Refused(why) => write!(f, "{why}"),
             Self::InvalidDimensions { width, height } => {
                 write!(f, "invalid dimensions: {}x{}", width, height)
             }
@@ -549,6 +561,28 @@ pub enum MouseButton {
     Middle,
     Back,
     Forward,
+}
+
+/// A keystroke waiting out the slow-keys threshold.
+///
+/// See `design-decisions.md` §821 for why it waits rather than being answered
+/// on release.
+#[derive(Debug, Clone, Copy)]
+struct DeferredKey {
+    scancode: u32,
+    character: Option<char>,
+    pressed_at_ms: u64,
+}
+
+/// Which mouse button a mouse-keys action presses, or `None` if it moves.
+const fn mouse_key_button(action: a11ykeys::MouseKeyAction) -> Option<MouseButton> {
+    match action {
+        a11ykeys::MouseKeyAction::Click | a11ykeys::MouseKeyAction::DoubleClick => {
+            Some(MouseButton::Left)
+        }
+        a11ykeys::MouseKeyAction::RightClick => Some(MouseButton::Right),
+        _ => None,
+    }
 }
 
 /// Input event received from the input subsystem.
@@ -860,6 +894,17 @@ pub struct Window {
     /// the band is a role rather than a starting z-order: a starting depth is
     /// something the first raise destroys.
     pub layer: Layer,
+    /// What the user may not do to this window, as a window rule says.
+    ///
+    /// Empty unless a shell has set it. See [`WindowPolicy`] -- it restrains
+    /// the user, never the program.
+    pub policy: WindowPolicy,
+    /// Where this window sits within its layer.
+    ///
+    /// Set by the shell from a window rule, never by the window's own client:
+    /// a program that could put itself in `Top` would be an "always on top"
+    /// nobody asked for. See [`StackTier`].
+    pub tier: StackTier,
     /// Window opacity (0.0 = fully transparent, 1.0 = fully opaque).
     pub opacity: f32,
     /// Process ID of the client that owns this window.
@@ -1035,6 +1080,11 @@ impl Window {
     fn from_spec(spec: &WindowSpec, x: i32, y: i32, client_pid: u64) -> Self {
         Self {
             id: WindowId::allocate(),
+            // Every window starts in the ordinary tier. Only a shell applying
+            // a user's rule moves it, which is the whole point of the field.
+            tier: StackTier::Normal,
+            // And unrestrained: a rule adds restrictions, never the default.
+            policy: WindowPolicy::default(),
             title: spec.title.clone(),
             app_id: spec.app_id.clone(),
             x,
@@ -1129,10 +1179,21 @@ impl Window {
     /// Nothing depended on it being one.
     pub fn frame_insets(&self) -> (u32, u32, u32) {
         if self.is_framed() {
+            let border = scale_dimension(BORDER_WIDTH, self.scale_factor);
             (
-                scale_dimension(TITLE_BAR_HEIGHT, self.scale_factor),
-                scale_dimension(BORDER_WIDTH, self.scale_factor),
-                scale_dimension(BORDER_WIDTH, self.scale_factor),
+                // Border *and* title bar. The top inset used to be the bar
+                // alone while `render_border` stroked a row above the frame to
+                // compensate, so the drawing and the measurement disagreed by
+                // a pixel and every derived quantity followed the measurement.
+                //
+                // Summed as two scaled values rather than scaling the sum:
+                // `scale_dimension` rounds, so `scale(a + b)` and
+                // `scale(a) + scale(b)` can differ by one, and `title_bar_rect`
+                // below subtracts the border back out to get the bar's own
+                // height. Doing it this way makes that subtraction exact.
+                scale_dimension(TITLE_BAR_HEIGHT, self.scale_factor).saturating_add(border),
+                border,
+                border,
             )
         } else {
             (0, 0, 0)
@@ -1251,9 +1312,19 @@ impl Window {
         if !self.is_framed() {
             return None;
         }
-        let top = self.frame_insets().0;
+        let (top, side, _) = self.frame_insets();
         let frame = self.frame_rect();
-        Some(Rect::new(frame.x, frame.y, frame.width, top))
+        // Below the top border, not filling the whole top inset: the inset is
+        // border + bar, and the border is drawn in the row above. A bar that
+        // started at `frame.y` would be painted over the outline, which is
+        // exactly what used to happen and why the border was stroked outside
+        // the frame to escape it.
+        Some(Rect::new(
+            frame.x,
+            frame.y.saturating_add(side as i32),
+            frame.width,
+            top.saturating_sub(side),
+        ))
     }
 
     /// The rectangle of the title-bar button in the given slot, counting from
@@ -2917,6 +2988,22 @@ pub enum CompositorRequest {
     },
     /// Set window opacity.
     SetOpacity { window_id: WindowId, opacity: f32 },
+    /// Put a window in a stacking tier within its layer.
+    SetStackTier {
+        window_id: WindowId,
+        tier: StackTier,
+    },
+    /// Say what the user may not do to a window.
+    SetWindowPolicy {
+        window_id: WindowId,
+        policy: WindowPolicy,
+    },
+    /// Constrain a window's size. `None` in either pair means "no limit".
+    SetSizeLimits {
+        window_id: WindowId,
+        min_size: Option<(u32, u32)>,
+        max_size: Option<(u32, u32)>,
+    },
     /// Query display information.
     GetDisplayInfo,
     /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
@@ -4612,6 +4699,11 @@ pub struct Compositor {
     /// Frame timing statistics.
     frame_stats: FrameStats,
     /// Current mouse cursor position.
+    /// When this compositor started, as the base for a monotonic millisecond
+    /// clock. Slow keys and bounce keys both measure intervals, and a wall
+    /// clock adjusted underneath them would silence a key for the length of
+    /// the adjustment.
+    started_at: Instant,
     cursor_x: i32,
     /// Current mouse cursor position.
     cursor_y: i32,
@@ -4708,6 +4800,20 @@ pub struct Compositor {
     /// state spanning two events, and one answer for the whole desktop is the
     /// point. See the [`deadkey`] module docs for the rules.
     dead_keys: deadkey::DeadKeys,
+    /// Sticky, filter and mouse keys: what is stuck down, what was accepted
+    /// when, how far a held keypad arrow has accelerated.
+    ///
+    /// Beside [`Self::modifiers`] for the same reason: it is keyboard state
+    /// spanning several events, and the compositor is the only place every
+    /// keystroke passes through.
+    a11y_keys: a11ykeys::AccessibilityKeys,
+    /// A keystroke held back while it serves out the slow-keys threshold.
+    ///
+    /// `design-decisions.md` §821: the key is delivered when the threshold
+    /// expires *while still held*, not when it is released, so it has to wait
+    /// somewhere. Released before then, it is dropped — that is precisely the
+    /// accidental tap the feature exists to discard.
+    deferred_key: Option<DeferredKey>,
     /// Whether a full recomposite is needed (e.g., after display resize).
     full_recomposite: bool,
     /// Whether [`render_all_windows`](Self::render_all_windows) may skip the
@@ -4802,6 +4908,7 @@ impl Compositor {
             display_manager,
             damage: DamageRegion::new(),
             frame_stats: FrameStats::new(frame_interval),
+            started_at: Instant::now(),
             cursor_x: width as i32 / 2,
             cursor_y: height as i32 / 2,
             cursor_shape: CursorShape::Arrow,
@@ -4825,6 +4932,8 @@ impl Compositor {
             window_list_scratch: Vec::new(),
             modifiers: ModifierState::new(),
             dead_keys: deadkey::DeadKeys::new(),
+            a11y_keys: a11ykeys::AccessibilityKeys::default(),
+            deferred_key: None,
             full_recomposite: true,
             occlusion_cull: true,
             scanout: Scanout::Composited,
@@ -4865,6 +4974,16 @@ impl Compositor {
         // on eleven colours, and they change only when this is called.
         self.theme = DecorationTheme::from_settings(&self.appearance);
         self.full_recomposite = true;
+    }
+
+    /// The colour-vision filter the user has asked for, if any.
+    ///
+    /// Read by [`Server::show`] once per frame. Exposed rather than applied
+    /// here because the compositor draws into a back buffer and this is a
+    /// transform of what finally reaches the display -- see that function.
+    #[must_use]
+    pub fn color_filter(&self) -> appearance::ColorFilter {
+        self.appearance.color_filter
     }
 
     /// How close together two title-bar clicks must be to maximize the window.
@@ -4983,6 +5102,12 @@ impl Compositor {
         if let Some(layout) = keylayout::by_id(&settings.keyboard.layout) {
             self.layout = layout;
         }
+        // Sticky, filter and mouse keys travel the same road as the pointer
+        // speed and the layout, and are applied here rather than by a second
+        // caller, so that `input.yaml` is the one source. Keeping the live
+        // state machines in step with `self.input` by hand is exactly how this
+        // subsystem came to have three copies of its own settings.
+        self.set_accessibility_keys(settings.accessibility);
         self.input = Some(settings);
     }
 
@@ -6123,6 +6248,19 @@ impl Compositor {
     /// check is what stops a notification being queued for an id nothing will
     /// ever deliver.
     pub fn request_close(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        // A window rule may refuse this. It refuses the *request* -- the thing
+        // a close button and a taskbar menu send -- and not the program's own
+        // exit, which goes through `destroy_window` and is none of a rule's
+        // business. A rule that could stop a process exiting would be a way to
+        // make one unkillable from a text file.
+        if self
+            .window_ref(window_id)
+            .is_some_and(|w| w.policy.prevent_close)
+        {
+            return Err(CompositorError::Refused(
+                "a window rule prevents this window from being closed",
+            ));
+        }
         if self.window_ref(window_id).is_none() {
             return Err(CompositorError::WindowNotFound(window_id));
         }
@@ -6751,7 +6889,16 @@ impl Compositor {
                         // record is a write to `self`, and `win` borrows it.
                         let start_window_pos = Point::new(win.x, win.y);
                         let start_window_size = (win.width, win.height);
+                        let pinned = win.policy.prevent_move;
                         self.last_title_press = Some((window_id, now));
+                        // The press is still *recorded* -- it focused and
+                        // raised the window above, and a double-click still
+                        // counts -- but no drag begins. Returning earlier
+                        // would make a pinned window unfocusable by its own
+                        // title bar, which is not what the rule asks for.
+                        if pinned {
+                            return;
+                        }
                         self.drag = Some(DragState {
                             window_id,
                             mode: DragMode::MoveWindow,
@@ -6763,6 +6910,9 @@ impl Compositor {
                     }
                     // Border resize?
                     if let Some(mode) = self.detect_border_drag(win, x, y) {
+                        if win.policy.prevent_resize {
+                            return;
+                        }
                         self.drag = Some(DragState {
                             window_id,
                             mode,
@@ -6815,7 +6965,215 @@ impl Compositor {
         }
     }
 
+    /// Every keystroke enters here.
+    ///
+    /// Split from [`Self::dispatch_key`] so that a keystroke held back by slow
+    /// keys can be delivered later without running the accessibility filters a
+    /// second time — it already passed them, and re-running the bounce check
+    /// on the way out would refuse the key for being too soon after itself.
     fn handle_key(&mut self, scancode: u32, pressed: bool, character: Option<char>) {
+        if self.a11y_keys.any_enabled()
+            && self.accessibility_intercept(scancode, pressed, character)
+        {
+            return;
+        }
+        self.dispatch_key(scancode, pressed, character);
+    }
+
+    /// Sticky, filter and mouse keys, before anything else looks at the key.
+    ///
+    /// Answers whether the keystroke was consumed. Runs above
+    /// `self.modifiers.update` on purpose: a keystroke these filters refuse
+    /// must not move the modifier state either, or a rejected Shift would
+    /// leave every later key shifted.
+    fn accessibility_intercept(
+        &mut self,
+        scancode: u32,
+        pressed: bool,
+        character: Option<char>,
+    ) -> bool {
+        // Mouse keys first: while it owns the keypad, those scancodes are
+        // pointer control and are not keystrokes at all, so none of the
+        // keyboard filtering below applies to them.
+        if self.a11y_keys.mouse.intercepts_keypad()
+            && let Some(action) = a11ykeys::MouseKeyAction::from_keypad_scancode(scancode)
+        {
+            self.apply_mouse_key(action, pressed);
+            return true;
+        }
+
+        if let Some(modifier) = a11ykeys::StickyModifier::from_scancode(scancode) {
+            if pressed {
+                self.a11y_keys.sticky.on_modifier_press(modifier);
+            }
+            // Not consumed: the modifier key is still physically down and
+            // every client is entitled to hear about it. Sticky keys adds a
+            // second, longer life to it rather than replacing the first.
+            return false;
+        }
+
+        if !pressed {
+            // A release cancels a keystroke still serving out its slow-keys
+            // threshold: it was a tap, which is what the threshold is for.
+            if self
+                .deferred_key
+                .as_ref()
+                .is_some_and(|d| d.scancode == scancode)
+            {
+                self.deferred_key = None;
+                return true;
+            }
+            return false;
+        }
+
+        // Two keys held at once is the standard way out of sticky keys for
+        // someone who turned it on by accident — checked here, where a
+        // non-modifier press is known to have arrived with a modifier
+        // physically down rather than merely stuck.
+        if self.modifiers.modifiers() != Modifiers::NONE && self.a11y_keys.sticky.on_chord_held() {
+            return false;
+        }
+
+        let filter = self.a11y_keys.filter.config();
+        if !filter.enabled {
+            return false;
+        }
+
+        let now = self.monotonic_ms();
+        if filter.slow_keys_ms > 0 {
+            // Held back until the threshold expires; `poll_deferred_key` is
+            // what finishes the job. Only one at a time: a second key pressed
+            // while the first is waiting replaces it, which matches what the
+            // hardware does to a user who cannot press two keys deliberately.
+            self.deferred_key = Some(DeferredKey {
+                scancode,
+                character,
+                pressed_at_ms: now,
+            });
+            return true;
+        }
+
+        // No slow-keys threshold, so the bounce check can answer immediately.
+        let key_code = u16::try_from(scancode & 0xFFFF).unwrap_or(u16::MAX);
+        self.a11y_keys.filter.on_press(key_code, 0, now).is_err()
+    }
+
+    /// Deliver a keystroke whose slow-keys threshold has now expired.
+    ///
+    /// Answers whether one was delivered. Called once per frame by the server
+    /// loop, which also keeps the idle backoff awake while one is pending —
+    /// see `design-decisions.md` §821.
+    pub fn poll_deferred_key(&mut self) -> bool {
+        let Some(deferred) = self.deferred_key.as_ref() else {
+            return false;
+        };
+        let (scancode, character, pressed_at) = (
+            deferred.scancode,
+            deferred.character,
+            deferred.pressed_at_ms,
+        );
+        let now = self.monotonic_ms();
+        let held = now.saturating_sub(pressed_at);
+        let Ok(held_ms) = u32::try_from(held) else {
+            // Held for over forty-nine days. Not a keystroke; drop it rather
+            // than saturate, which would deliver it.
+            self.deferred_key = None;
+            return false;
+        };
+        if held_ms < self.a11y_keys.filter.slow_keys_ms() {
+            return false;
+        }
+        self.deferred_key = None;
+
+        let key_code = u16::try_from(scancode & 0xFFFF).unwrap_or(u16::MAX);
+        if self
+            .a11y_keys
+            .filter
+            .on_press(key_code, held_ms, now)
+            .is_err()
+        {
+            return false;
+        }
+        self.dispatch_key(scancode, true, character);
+        true
+    }
+
+    /// Whether a keystroke is waiting out its slow-keys threshold.
+    ///
+    /// The server loop treats this as activity: to the idle backoff a waiting
+    /// key looks like perfect quiet, and backing off would deliver it late by
+    /// up to `IdleBackoff::IDLE_INTERVAL`, differently each time.
+    #[must_use]
+    pub fn has_deferred_key(&self) -> bool {
+        self.deferred_key.is_some()
+    }
+
+    /// Replace the accessibility settings.
+    ///
+    /// Normally reached through
+    /// [`set_input_settings`](Self::set_input_settings), which is what
+    /// `input.yaml` travels through; public for the tests that want to switch
+    /// one feature on without building a whole `InputSettings`.
+    pub fn set_accessibility_keys(&mut self, config: inputsettings::AccessibilityKeysConfig) {
+        self.a11y_keys.set_config(config);
+        if !self.a11y_keys.filter.config().enabled {
+            // A keystroke waiting on a threshold that no longer exists would
+            // otherwise wait for ever.
+            self.deferred_key = None;
+        }
+    }
+
+    /// The accessibility settings in force.
+    #[must_use]
+    pub fn accessibility_keys(&self) -> &a11ykeys::AccessibilityKeys {
+        &self.a11y_keys
+    }
+
+    /// Turn a keypad action into pointer movement or a click.
+    fn apply_mouse_key(&mut self, action: a11ykeys::MouseKeyAction, pressed: bool) {
+        if !pressed {
+            // Releasing a direction key drops the accumulated acceleration, so
+            // the next press starts from the configured speed again.
+            self.a11y_keys.mouse.release();
+            if let Some(button) = mouse_key_button(action) {
+                self.handle_mouse_button(button, false, self.cursor_x, self.cursor_y);
+            }
+            return;
+        }
+        if let Some(button) = mouse_key_button(action) {
+            let (x, y) = (self.cursor_x, self.cursor_y);
+            self.handle_mouse_button(button, true, x, y);
+            if action == a11ykeys::MouseKeyAction::DoubleClick {
+                // The second click of the pair, at the same place: a
+                // double-click is two presses, and the click detector times
+                // them, so sending one event with a flag would not be seen.
+                self.handle_mouse_button(button, false, x, y);
+                self.handle_mouse_button(button, true, x, y);
+            }
+            return;
+        }
+        let (dx, dy) = self.a11y_keys.mouse.move_delta(action);
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        // Rounded rather than truncated: truncation would make a speed below
+        // one pixel per repeat move nothing at all, and `validate` allows a
+        // speed of exactly 1.0.
+        let x = self.cursor_x.saturating_add(dx.round() as i32);
+        let y = self.cursor_y.saturating_add(dy.round() as i32);
+        self.handle_mouse_move(x, y);
+    }
+
+    /// Milliseconds since this compositor started.
+    ///
+    /// A monotonic clock, so it cannot run backwards when the wall clock is
+    /// adjusted — a bounce window measured against a clock that jumped would
+    /// silence a key for as long as the jump.
+    fn monotonic_ms(&self) -> u64 {
+        self.started_at.elapsed().as_millis() as u64
+    }
+
+    fn dispatch_key(&mut self, scancode: u32, pressed: bool, character: Option<char>) {
         // Folded *before* the notification is built, so a client told about
         // Shift+A sees `shift: true`. Folding afterwards would report the state
         // as it was before the chord completed, which for the modifier key's
@@ -6824,7 +7182,26 @@ impl Compositor {
         // event behind.
         self.modifiers.update(scancode, pressed);
 
-        let level = self.modifiers.level();
+        // Sticky keys are consumed *before* the layout is consulted, because a
+        // stuck Shift has to reach `Level`: reporting `shift: true` while
+        // handing the client a lowercase `a` would be a worse feature than not
+        // having one. Only on a non-modifier press -- a modifier key is what
+        // *sets* the sticky state, and consuming it here would clear it before
+        // the key it was meant for arrived.
+        let stuck = if pressed
+            && self.a11y_keys.sticky.config().enabled
+            && !ModifierState::is_modifier(scancode)
+        {
+            self.a11y_keys.sticky.on_key_press()
+        } else {
+            a11ykeys::StickyModifiers::default()
+        };
+
+        let mut level = self.modifiers.level();
+        // Shift only. A stuck Alt is a plain Alt chord, not AltGr: AltGr is
+        // specifically the right-hand key, and treating a stuck Alt as one
+        // would make sticky keys type `@` where the user meant Alt+Q.
+        level.shift |= stuck.shift;
         let (key, laid_out) = keymap::key_for_layout(self.layout, scancode, level);
         let mut modifiers = self.modifiers.modifiers();
         if keymap::resolves_through_alt_gr(self.layout, scancode, level) {
@@ -6836,6 +7213,16 @@ impl Compositor {
             // Alt+Q shortcut must keep working from either side.
             modifiers.alt = self.modifiers.left_alt();
         }
+
+        // Applied after the AltGr fold, which exists to undo AltGr's *physical*
+        // Alt and must not clear an Alt the user stuck deliberately. Grabs are
+        // consulted below with these merged in, so Alt+Tab works with Alt
+        // merely stuck -- someone who cannot hold two keys still needs the
+        // window switcher.
+        modifiers.ctrl |= stuck.ctrl;
+        modifiers.alt |= stuck.alt;
+        modifiers.shift |= stuck.shift;
+        modifiers.super_key |= stuck.super_key;
 
         // Grabs are consulted *here*: after the chord is known, before the
         // focused window is looked up. Both halves matter. After, because a grab
@@ -7964,12 +8351,11 @@ impl Compositor {
     /// `TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS`.
     fn render_border(&mut self, frame: Rect, scale: f32, color: u32, opacity: f32) {
         let width = scale_dimension(BORDER_WIDTH, scale);
-        let border = Rect::new(
-            frame.x,
-            frame.y.saturating_sub(width as i32),
-            frame.width,
-            frame.height.saturating_add(width),
-        );
+        // The frame as measured. `frame_insets` now reserves the border row
+        // above the title bar, so the outline has somewhere of its own to be
+        // drawn and no longer has to be pushed outside the frame to avoid
+        // being painted over.
+        let border = frame;
         // The border traces the outside of the frame, so it takes the frame's
         // radius as-is — the same curve the title bar's top corners are drawn
         // with, from the same call, which is what keeps the two from parting
@@ -8210,6 +8596,32 @@ impl Compositor {
                     },
                 }
             }
+            CompositorRequest::SetWindowPolicy { window_id, policy } => {
+                match self.set_window_policy(window_id, policy) {
+                    Ok(()) => CompositorResponse::Ok,
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+            CompositorRequest::SetSizeLimits {
+                window_id,
+                min_size,
+                max_size,
+            } => match self.set_size_limits(window_id, min_size, max_size) {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            CompositorRequest::SetStackTier { window_id, tier } => {
+                match self.set_stack_tier(window_id, tier) {
+                    Ok(()) => CompositorResponse::Ok,
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
             CompositorRequest::SetOpacity { window_id, opacity } => {
                 match self.set_opacity(window_id, opacity) {
                     Ok(()) => CompositorResponse::Ok,
@@ -8269,6 +8681,11 @@ impl Compositor {
                     ShellControlAction::SnapToZone(slot) => {
                         self.snap_window_to_zone(window_id, slot)
                     }
+                    // `true`, not a toggle. A window rule says "open this
+                    // fullscreen"; a verb that flipped the state would make
+                    // the result depend on what the window was already doing,
+                    // and the rule would undo itself if it ever ran twice.
+                    ShellControlAction::Fullscreen => self.set_fullscreen(window_id, true),
                 };
                 match result {
                     Ok(()) => CompositorResponse::Ok,
@@ -8910,6 +9327,19 @@ impl Compositor {
         self.window_ref(id).map_or(Layer::Normal, |w| w.layer)
     }
 
+    /// Where a window sorts in the stack: its layer first, then its tier.
+    ///
+    /// A pair rather than a single ordering because the two answer different
+    /// questions. The layer is the client's, chosen at creation, and separates
+    /// the desktop's furniture from applications. The tier is the *shell's*,
+    /// applied from a user's rule, and orders applications against each other
+    /// -- so an always-on-top window is above its neighbours and still below
+    /// the taskbar, which is what a user means by it.
+    fn stack_key(&self, id: WindowId) -> (Layer, StackTier) {
+        self.window_ref(id)
+            .map_or((Layer::Normal, StackTier::Normal), |w| (w.layer, w.tier))
+    }
+
     /// Where in `z_stack` a window of `layer` goes when it is raised to the top
     /// of its own band.
     ///
@@ -8918,20 +9348,112 @@ impl Compositor {
     /// of them, before the first window of any higher band. That partitioning
     /// is the invariant this whole layering rests on, and it is maintained by
     /// this function being the *only* way anything enters the stack.
-    fn stack_insertion_index(&self, layer: Layer) -> usize {
+    fn stack_insertion_index(&self, key: (Layer, StackTier)) -> usize {
         self.z_stack
             .iter()
-            .filter(|&&id| self.layer_of(id) <= layer)
+            .filter(|&&id| self.stack_key(id) <= key)
             .count()
     }
 
     /// Put `id` at the top of its own band, removing it from wherever it was.
     fn raise_within_layer(&mut self, id: WindowId) {
-        let layer = self.layer_of(id);
+        let key = self.stack_key(id);
         self.z_stack.retain(|&other| other != id);
-        let at = self.stack_insertion_index(layer);
+        let at = self.stack_insertion_index(key);
         self.z_stack.insert(at, id);
         self.update_z_orders();
+    }
+
+    /// Move a window into a stacking tier and restack it.
+    ///
+    /// Restacking through [`raise_within_layer`](Self::raise_within_layer)
+    /// rather than by editing `z_stack` here: a window that changed tier
+    /// without moving would be sorted into a band it is no longer in, and the
+    /// next raise would appear to teleport it.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window has gone.
+    /// Say what the user may not do to a window.
+    ///
+    /// Replaces the whole policy rather than merging: the three flags are one
+    /// rule's worth of answer, and a merge would make a rule that stops
+    /// naming `prevent_close` unable to take it back.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window has gone.
+    pub fn set_window_policy(
+        &mut self,
+        id: WindowId,
+        policy: WindowPolicy,
+    ) -> CompositorResult<()> {
+        let win = self
+            .windows
+            .iter_mut()
+            .find(|w| w.id == id)
+            .ok_or(CompositorError::WindowNotFound(id))?;
+        win.policy = policy;
+        Ok(())
+    }
+
+    /// Constrain a window's size, and bring it inside the new bounds now.
+    ///
+    /// `None` in either pair means "leave that limit as it is", not "clear
+    /// it" -- see [`RequestBody::ShellSetSizeLimits`] for why the distinction
+    /// matters.
+    ///
+    /// Applying the clamp immediately rather than waiting for the next resize
+    /// is the difference between a rule and a suggestion: a rule that says
+    /// "this window is at most 400 wide" and leaves a 900-wide window alone
+    /// until the user happens to drag its edge has not been applied.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window has gone.
+    pub fn set_size_limits(
+        &mut self,
+        id: WindowId,
+        min_size: Option<(u32, u32)>,
+        max_size: Option<(u32, u32)>,
+    ) -> CompositorResult<()> {
+        let win = self
+            .windows
+            .iter_mut()
+            .find(|w| w.id == id)
+            .ok_or(CompositorError::WindowNotFound(id))?;
+        // `None` is "the rule said nothing about this one", not "clear it".
+        // A rule naming only a maximum must not discard the minimum the
+        // program asked for -- nothing in the rule vocabulary can request
+        // that, so nothing here should perform it.
+        if min_size.is_some() {
+            win.min_size = min_size;
+        }
+        if max_size.is_some() {
+            win.max_size = max_size;
+        }
+        let (width, height) = win.clamp_size(win.width, win.height);
+        if (width, height) != (win.width, win.height) {
+            win.width = width;
+            win.height = height;
+            self.full_recomposite = true;
+        }
+        Ok(())
+    }
+
+    pub fn set_stack_tier(&mut self, id: WindowId, tier: StackTier) -> CompositorResult<()> {
+        let win = self
+            .windows
+            .iter_mut()
+            .find(|w| w.id == id)
+            .ok_or(CompositorError::WindowNotFound(id))?;
+        if win.tier == tier {
+            return Ok(());
+        }
+        win.tier = tier;
+        self.raise_within_layer(id);
+        self.full_recomposite = true;
+        Ok(())
     }
 
     /// The desktop's windows as a shell sees them, bottom-to-top.
@@ -9454,6 +9976,313 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Sticky, filter and mouse keys, through the real key path
+    //
+    // These are integration tests on purpose. The state machines had thorough
+    // unit tests for months while being wired to nothing at all, so a test
+    // that calls them directly proves the one thing already known. Everything
+    // below goes in through `handle_input`, as the input driver does.
+    //
+    // Scancodes, set 1: 0x2A left Shift, 0x1E A, 0x1F S, 0x4D keypad 6.
+    // -----------------------------------------------------------------------
+
+    /// One window, focused, so delivered keys have somewhere to go.
+    fn typing_compositor(cfg: inputsettings::AccessibilityKeysConfig) -> Compositor {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Editor".to_string(), 400, 300, 1);
+        comp.set_accessibility_keys(cfg);
+        comp.drain_notifications();
+        comp
+    }
+
+    /// Key events with their modifiers, which `key_events` drops.
+    fn key_events_with_mods(comp: &mut Compositor) -> Vec<(Key, bool, String, Modifiers)> {
+        comp.drain_notifications()
+            .into_iter()
+            .filter_map(|n| match n {
+                EventNotification::KeyEvent {
+                    key,
+                    pressed,
+                    text,
+                    modifiers,
+                    ..
+                } => Some((key, pressed, text, modifiers)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn sticky_enabled() -> inputsettings::AccessibilityKeysConfig {
+        inputsettings::AccessibilityKeysConfig {
+            sticky: inputsettings::StickyKeysConfig {
+                enabled: true,
+                ..inputsettings::StickyKeysConfig::default()
+            },
+            ..inputsettings::AccessibilityKeysConfig::default()
+        }
+    }
+
+    fn press(comp: &mut Compositor, scancode: u32) {
+        comp.handle_input(InputEvent::KeyDown {
+            scancode,
+            character: None,
+        });
+    }
+
+    fn release(comp: &mut Compositor, scancode: u32) {
+        comp.handle_input(InputEvent::KeyUp { scancode });
+    }
+
+    /// The whole feature, end to end: press Shift, let go, press A, get `A`.
+    ///
+    /// The capital letter is the part that matters. Reporting `shift: true`
+    /// while handing the client a lowercase `a` would be a worse feature than
+    /// none -- the modifier has to reach the *layout*, not just the event.
+    #[test]
+    fn a_stuck_shift_capitalises_the_next_letter() {
+        let mut comp = typing_compositor(sticky_enabled());
+        press(&mut comp, 0x2A);
+        release(&mut comp, 0x2A);
+        press(&mut comp, 0x1E);
+
+        let a = key_events_with_mods(&mut comp)
+            .into_iter()
+            .find(|(key, pressed, _, _)| *key == Key::A && *pressed)
+            .expect("the letter never reached the window");
+        assert!(a.3.shift, "the client was not told Shift applied");
+        assert_eq!(
+            a.2, "A",
+            "sticky Shift reported itself but still typed lowercase"
+        );
+    }
+
+    /// Sticky means one key, then gone.
+    #[test]
+    fn a_stuck_modifier_applies_to_one_key_only() {
+        let mut comp = typing_compositor(sticky_enabled());
+        press(&mut comp, 0x2A);
+        release(&mut comp, 0x2A);
+        press(&mut comp, 0x1E);
+        release(&mut comp, 0x1E);
+        press(&mut comp, 0x1F);
+
+        let events = key_events_with_mods(&mut comp);
+        let second = events
+            .iter()
+            .find(|(key, pressed, _, _)| *key == Key::S && *pressed)
+            .expect("the second letter never arrived");
+        assert!(
+            !second.3.shift,
+            "the stuck Shift applied to a second key as well"
+        );
+        assert_eq!(second.2, "s");
+    }
+
+    /// With nothing switched on, the key path must be exactly what it was.
+    #[test]
+    fn with_no_feature_enabled_typing_is_untouched() {
+        let mut comp = typing_compositor(inputsettings::AccessibilityKeysConfig::default());
+        press(&mut comp, 0x2A);
+        release(&mut comp, 0x2A);
+        press(&mut comp, 0x1E);
+
+        let a = key_events_with_mods(&mut comp)
+            .into_iter()
+            .find(|(key, pressed, _, _)| *key == Key::A && *pressed)
+            .expect("an ordinary keystroke went missing");
+        assert!(!a.3.shift, "a released Shift stuck without the feature on");
+        assert_eq!(a.2, "a");
+    }
+
+    fn filter_config(slow: u32, bounce: u32) -> inputsettings::AccessibilityKeysConfig {
+        inputsettings::AccessibilityKeysConfig {
+            filter: inputsettings::FilterKeysConfig {
+                enabled: true,
+                slow_keys_ms: slow,
+                bounce_keys_ms: bounce,
+                ..inputsettings::FilterKeysConfig::default()
+            },
+            ..inputsettings::AccessibilityKeysConfig::default()
+        }
+    }
+
+    /// Bounce keys needs no timer: it looks only backwards.
+    #[test]
+    fn bounce_keys_drops_an_immediate_repeat_of_the_same_key() {
+        let mut comp = typing_compositor(filter_config(0, 5_000));
+        press(&mut comp, 0x1E);
+        release(&mut comp, 0x1E);
+        press(&mut comp, 0x1E);
+
+        let presses = key_events_with_mods(&mut comp)
+            .into_iter()
+            .filter(|(key, pressed, _, _)| *key == Key::A && *pressed)
+            .count();
+        assert_eq!(presses, 1, "the bounced repeat was delivered anyway");
+    }
+
+    /// A different key is not blocked by the first one's window.
+    #[test]
+    fn bounce_keys_does_not_block_a_different_key() {
+        let mut comp = typing_compositor(filter_config(0, 5_000));
+        press(&mut comp, 0x1E);
+        press(&mut comp, 0x1F);
+
+        let events = key_events_with_mods(&mut comp);
+        assert!(events.iter().any(|(k, p, _, _)| *k == Key::A && *p));
+        assert!(
+            events.iter().any(|(k, p, _, _)| *k == Key::S && *p),
+            "a different key was swallowed by the first key's bounce window"
+        );
+    }
+
+    /// Move the compositor's clock forward by rewinding its epoch.
+    fn advance(comp: &mut Compositor, ms: u64) {
+        comp.started_at = comp
+            .started_at
+            .checked_sub(Duration::from_millis(ms))
+            .expect("clock rewind");
+    }
+
+    /// §821: the key appears when the threshold expires, still held.
+    #[test]
+    fn a_slow_key_arrives_when_its_threshold_expires_not_before() {
+        let mut comp = typing_compositor(filter_config(300, 0));
+        press(&mut comp, 0x1E);
+        assert!(
+            key_events_with_mods(&mut comp).is_empty(),
+            "the keystroke was delivered before its threshold"
+        );
+        assert!(comp.has_deferred_key(), "nothing is waiting");
+
+        advance(&mut comp, 100);
+        assert!(!comp.poll_deferred_key(), "delivered a third of the way in");
+
+        advance(&mut comp, 250);
+        assert!(
+            comp.poll_deferred_key(),
+            "the threshold passed and nothing came"
+        );
+        let a = key_events_with_mods(&mut comp)
+            .into_iter()
+            .find(|(key, pressed, _, _)| *key == Key::A && *pressed)
+            .expect("the held key never arrived");
+        assert_eq!(a.2, "a");
+        assert!(
+            !comp.has_deferred_key(),
+            "the key is still pending after delivery"
+        );
+    }
+
+    /// A tap -- exactly what slow keys exists to discard.
+    #[test]
+    fn a_slow_key_released_early_is_never_delivered() {
+        let mut comp = typing_compositor(filter_config(300, 0));
+        press(&mut comp, 0x1E);
+        advance(&mut comp, 50);
+        release(&mut comp, 0x1E);
+
+        assert!(!comp.has_deferred_key(), "the tap is still waiting to fire");
+        advance(&mut comp, 1_000);
+        assert!(!comp.poll_deferred_key());
+        assert!(
+            !key_events_with_mods(&mut comp)
+                .iter()
+                .any(|(key, pressed, _, _)| *key == Key::A && *pressed),
+            "a key tapped for 50 ms of a 300 ms threshold was typed anyway"
+        );
+    }
+
+    /// Turning the filter off must not strand a keystroke waiting on a
+    /// threshold that no longer exists.
+    #[test]
+    fn disabling_filter_keys_drops_what_was_waiting() {
+        let mut comp = typing_compositor(filter_config(300, 0));
+        press(&mut comp, 0x1E);
+        assert!(comp.has_deferred_key());
+        comp.set_accessibility_keys(inputsettings::AccessibilityKeysConfig::default());
+        assert!(
+            !comp.has_deferred_key(),
+            "a keystroke was left waiting for ever"
+        );
+    }
+
+    /// The whole road: a setting as it comes out of `input.yaml` changes what
+    /// typing does. `set_input_settings` is the one door, so that the live
+    /// state machines cannot drift from `self.input` -- drift between copies
+    /// of these settings is how the subsystem came to have three of them.
+    #[test]
+    fn sticky_keys_arrives_through_the_ordinary_input_settings_road() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Editor".to_string(), 400, 300, 1);
+
+        let mut settings = inputsettings::InputSettings::default();
+        settings.accessibility.sticky.enabled = true;
+        comp.set_input_settings(settings);
+        comp.drain_notifications();
+
+        press(&mut comp, 0x2A);
+        release(&mut comp, 0x2A);
+        press(&mut comp, 0x1E);
+
+        let a = key_events_with_mods(&mut comp)
+            .into_iter()
+            .find(|(key, pressed, _, _)| *key == Key::A && *pressed)
+            .expect("the letter never reached the window");
+        assert_eq!(
+            a.2, "A",
+            "a setting that reached `input_settings` did not reach the keyboard"
+        );
+    }
+
+    fn mouse_keys_config() -> inputsettings::AccessibilityKeysConfig {
+        inputsettings::AccessibilityKeysConfig {
+            mouse: inputsettings::MouseKeysConfig {
+                enabled: true,
+                speed: 10.0,
+                acceleration: 2.0,
+                max_speed: 40.0,
+                use_numpad: true,
+            },
+            ..inputsettings::AccessibilityKeysConfig::default()
+        }
+    }
+
+    /// Keypad 6 moves the pointer right, and is not typed as a `6`.
+    #[test]
+    fn mouse_keys_moves_the_pointer_and_swallows_the_keystroke() {
+        let mut comp = typing_compositor(mouse_keys_config());
+        let before = comp.cursor_x;
+        press(&mut comp, 0x4D);
+
+        assert!(
+            comp.cursor_x > before,
+            "keypad 6 did not move the pointer: {before} -> {}",
+            comp.cursor_x
+        );
+        assert!(
+            key_events_with_mods(&mut comp).is_empty(),
+            "the keypad key was also delivered as a keystroke"
+        );
+    }
+
+    /// With mouse keys off, the keypad types again.
+    #[test]
+    fn the_keypad_is_left_alone_when_mouse_keys_is_off() {
+        let mut comp = typing_compositor(inputsettings::AccessibilityKeysConfig::default());
+        let before = comp.cursor_x;
+        press(&mut comp, 0x4D);
+        assert_eq!(
+            comp.cursor_x, before,
+            "the pointer moved with the feature off"
+        );
+        assert!(
+            !key_events_with_mods(&mut comp).is_empty(),
+            "the keypad key was swallowed with the feature off"
+        );
     }
 
     /// The entire point of the mechanism, stated as the thing that was broken:
@@ -10645,6 +11474,75 @@ mod tests {
         }
     }
 
+    /// The row above the title bar resizes; the title bar moves.
+    ///
+    /// This boundary is what moved when `frame_insets` grew to include the
+    /// border above the title bar, and the known-issues entry warned that it
+    /// would. Before the change the two were the same row and the border had
+    /// nowhere of its own to be, so there was nothing to draw the line
+    /// between. Both sides are asserted because only the pair says where the
+    /// line is -- either alone passes if the whole top of the window does one
+    /// thing.
+    #[test]
+    fn the_border_row_resizes_and_the_title_bar_below_it_moves() {
+        let (mut comp, id) = with_one_window();
+        let frame = comp.window_ref(id).expect("w").frame_rect();
+        let bar = comp
+            .window_ref(id)
+            .expect("w")
+            .title_bar_rect()
+            .expect("framed");
+        assert_eq!(
+            bar.y - frame.y,
+            BORDER_WIDTH as i32,
+            "the fixture has no border row to test"
+        );
+
+        let mid_x = frame.x + (frame.width / 2) as i32;
+
+        // The border row: a resize drag begins.
+        let before = (
+            comp.window_ref(id).expect("w").width,
+            comp.window_ref(id).expect("w").height,
+        );
+        comp.handle_mouse_button(MouseButton::Left, true, mid_x, frame.y);
+        comp.handle_mouse_move(mid_x, frame.y - 20);
+        comp.handle_mouse_button(MouseButton::Left, false, mid_x, frame.y - 20);
+        let grew = comp.window_ref(id).expect("w").height;
+        assert!(
+            grew > before.1,
+            "dragging the top border did not resize: {before:?} -> {grew}"
+        );
+
+        // One row lower, in the title bar: a move drag begins instead.
+        let frame = comp.window_ref(id).expect("w").frame_rect();
+        let bar = comp
+            .window_ref(id)
+            .expect("w")
+            .title_bar_rect()
+            .expect("framed");
+        let size_before = (
+            comp.window_ref(id).expect("w").width,
+            comp.window_ref(id).expect("w").height,
+        );
+        let pos_before = (
+            comp.window_ref(id).expect("w").x,
+            comp.window_ref(id).expect("w").y,
+        );
+        let bar_y = bar.y + (bar.height / 2) as i32;
+        comp.handle_mouse_button(MouseButton::Left, true, frame.x + 40, bar_y);
+        comp.handle_mouse_move(frame.x + 60, bar_y + 15);
+        comp.handle_mouse_button(MouseButton::Left, false, frame.x + 60, bar_y + 15);
+
+        let win = comp.window_ref(id).expect("w");
+        assert_eq!(
+            (win.width, win.height),
+            size_before,
+            "dragging the title bar resized the window"
+        );
+        assert_ne!((win.x, win.y), pos_before, "and it did not move it either");
+    }
+
     #[test]
     fn the_outer_rect_is_the_frame_rect_plus_the_shadow() {
         // outer_rect is now defined as frame_rect().inflate(shadow_extent()).
@@ -10652,14 +11550,30 @@ mod tests {
         // out from the constants so a change to either helper has to be
         // deliberate rather than merely compile.
         let win = plain_window(100, 100, 200, 150);
-        assert_eq!(win.frame_rect(), Rect::new(99, 70, 202, 181));
-        assert_eq!(win.outer_rect(), Rect::new(91, 62, 218, 197));
+        // One row taller at the top than it used to be: `frame_insets` now
+        // reserves the border above the title bar, which is where the outline
+        // is drawn. The bottom edge and both sides are unchanged.
+        assert_eq!(win.frame_rect(), Rect::new(99, 69, 202, 182));
+        assert_eq!(win.outer_rect(), Rect::new(91, 61, 218, 198));
         assert_eq!(win.frame_rect().inflate(SHADOW_SIZE), win.outer_rect());
-        // The title bar occupies the top inset of the frame box exactly.
+
+        // The title bar sits *below* the top border rather than filling the
+        // top inset. The row above it is the border's, and a bar that took it
+        // would be painted over the outline -- which is what used to happen.
         let bar = win.title_bar_rect().expect("framed");
         assert_eq!(bar, Rect::new(99, 70, 202, TITLE_BAR_HEIGHT));
         assert_eq!(bar.x, win.frame_rect().x);
         assert_eq!(bar.width, win.frame_rect().width);
+        assert_eq!(
+            bar.y - win.frame_rect().y,
+            BORDER_WIDTH as i32,
+            "the gap above the title bar is exactly the border"
+        );
+        assert_eq!(
+            win.frame_insets().0,
+            TITLE_BAR_HEIGHT + BORDER_WIDTH,
+            "the top inset is border plus bar"
+        );
     }
 
     #[test]
@@ -11170,12 +12084,264 @@ mod tests {
         assert_eq!(comp.pending_notifications.len(), before);
     }
 
+    /// `prevent_close` refuses the *request*, not the program's own exit.
+    ///
+    /// The distinction is the whole safety argument for the field. A rule that
+    /// could stop a process exiting would be a way to make one unkillable from
+    /// a text file; what it stops is a close *button*.
+    #[test]
+    fn prevent_close_refuses_the_button_and_not_the_program() {
+        let (mut comp, id) = with_one_window();
+        comp.set_window_policy(
+            id,
+            WindowPolicy {
+                prevent_close: true,
+                ..WindowPolicy::default()
+            },
+        )
+        .expect("policy");
+
+        assert!(
+            matches!(comp.request_close(id), Err(CompositorError::Refused(_))),
+            "a close request must be refused while the rule is in force"
+        );
+        assert!(comp.window_ref(id).is_some(), "and the window must survive");
+
+        // The program's own exit is not a request and is not refused.
+        comp.destroy_window(id).expect("a program may always exit");
+        assert!(comp.window_ref(id).is_none());
+    }
+
+    /// `prevent_move` stops the drag without stopping the click.
+    ///
+    /// A pinned window must still focus and raise when its title bar is
+    /// pressed -- refusing the press outright would make it unfocusable by the
+    /// only part of it a user reliably aims at, which is not what the rule
+    /// asks for.
+    #[test]
+    fn prevent_move_stops_the_drag_but_not_the_focus() {
+        let (mut comp, id) = with_one_window();
+        // Placed clear of the pinned window: the fixture's window is at
+        // (100, 100), and a second one at the default position would sit on
+        // top of it, so the press below would land on the wrong window and
+        // the test would fail for a reason that has nothing to do with the
+        // policy.
+        let mut other_spec = WindowSpec::new("Other", 200, 150);
+        other_spec.position = Some((500, 400));
+        let other = comp.create_window_from_spec(&other_spec, 1);
+        comp.activate_window(other).expect("raise the other one");
+        comp.set_window_policy(
+            id,
+            WindowPolicy {
+                prevent_move: true,
+                ..WindowPolicy::default()
+            },
+        )
+        .expect("policy");
+
+        // Aimed at the title bar the window actually draws, not at an offset
+        // guessed from its client origin. The first version of this test
+        // pressed at `y + 5`, which is *inside* the client area -- no drag
+        // starts there, so the test passed with the guard removed. Mutation
+        // testing found it; the fix is to ask the window where its title bar
+        // is.
+        let bar = comp
+            .window_ref(id)
+            .expect("w")
+            .title_bar_rect()
+            .expect("a framed window has a title bar");
+        #[expect(clippy::cast_possible_wrap, reason = "test geometry is small")]
+        let (x, y) = (
+            bar.x + (bar.width / 2) as i32,
+            bar.y + (bar.height / 2) as i32,
+        );
+        let before = (
+            comp.window_ref(id).expect("w").x,
+            comp.window_ref(id).expect("w").y,
+        );
+        comp.handle_mouse_button(MouseButton::Left, true, x, y);
+        comp.handle_mouse_move(x + 100, y + 100);
+        comp.handle_mouse_button(MouseButton::Left, false, x + 100, y + 100);
+
+        let win = comp.window_ref(id).expect("w");
+        assert_eq!((win.x, win.y), before, "a pinned window was dragged");
+        assert_eq!(comp.focused_window, Some(id), "and it must still focus");
+    }
+
+    /// `prevent_resize` stops an edge drag.
+    #[test]
+    fn prevent_resize_stops_an_edge_drag() {
+        let (mut comp, id) = with_one_window();
+        comp.set_window_policy(
+            id,
+            WindowPolicy {
+                prevent_resize: true,
+                ..WindowPolicy::default()
+            },
+        )
+        .expect("policy");
+
+        let win = comp.window_ref(id).expect("w");
+        let before = (win.width, win.height);
+        #[expect(clippy::cast_possible_wrap, reason = "test geometry is small")]
+        let edge_x = win.x + win.width as i32;
+        let mid_y = win.y + 20;
+        comp.handle_mouse_button(MouseButton::Left, true, edge_x, mid_y);
+        comp.handle_mouse_move(edge_x + 120, mid_y);
+        comp.handle_mouse_button(MouseButton::Left, false, edge_x + 120, mid_y);
+
+        let win = comp.window_ref(id).expect("w");
+        assert_eq!(
+            (win.width, win.height),
+            before,
+            "a pinned window was resized"
+        );
+    }
+
+    /// An unrestricted policy leaves everything working.
+    #[test]
+    fn the_default_policy_restrains_nothing() {
+        let (mut comp, id) = with_one_window();
+        assert!(comp.window_ref(id).expect("w").policy.is_unrestricted());
+        assert!(comp.request_close(id).is_ok());
+    }
+
+    /// A rule naming only a maximum must not discard the program's minimum.
+    ///
+    /// The failure this prevents is quiet and nasty: a user writes "this
+    /// window is at most 400 wide", and the program's own "never below 300"
+    /// disappears with it, so the window can then be dragged down to nothing.
+    /// Nothing in the rule vocabulary asks for that.
+    #[test]
+    fn setting_one_size_limit_leaves_the_other_alone() {
+        let (mut comp, id) = with_one_window();
+        comp.set_size_limits(id, Some((300, 200)), None)
+            .expect("min");
+        comp.set_size_limits(id, None, Some((900, 700)))
+            .expect("max");
+
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!(win.min_size, Some((300, 200)), "the minimum was discarded");
+        assert_eq!(win.max_size, Some((900, 700)));
+    }
+
+    /// A new maximum takes effect at once, not at the next resize.
+    ///
+    /// A rule that leaves a too-large window alone until the user happens to
+    /// drag its edge has not been applied.
+    #[test]
+    fn a_new_maximum_shrinks_the_window_immediately() {
+        let (mut comp, id) = with_one_window();
+        comp.set_size_limits(id, None, Some((120, 90)))
+            .expect("max");
+
+        let win = comp.window_ref(id).expect("window");
+        assert!(
+            win.width <= 120 && win.height <= 90,
+            "the window is still {}x{} after being capped at 120x90",
+            win.width,
+            win.height
+        );
+    }
+
+    /// An always-on-top window sits above its neighbours and below the shell.
+    ///
+    /// Both halves matter and only the pair distinguishes the design from the
+    /// obvious wrong one. Reusing `Layer::Overlay` for "always on top" would
+    /// pass the first assertion and fail the second: the window would sit
+    /// above the taskbar, which is not what a user means and is not something
+    /// an application should be able to ask for at all.
+    #[test]
+    fn an_always_on_top_window_is_above_its_neighbours_and_below_the_shell() {
+        let (mut comp, first) = with_one_window();
+        let second = comp.create_window_from_spec(&WindowSpec::new("Second", 200, 150), 1);
+        let mut panel_spec = WindowSpec::new("Taskbar", 800, 40);
+        panel_spec.layer = Layer::Overlay;
+        let panel = comp.create_window_from_spec(&panel_spec, 1);
+
+        comp.set_stack_tier(first, StackTier::Top).expect("tier");
+
+        let above = |lower: WindowId, upper: WindowId| {
+            let l = comp.z_stack.iter().position(|&w| w == lower);
+            let u = comp.z_stack.iter().position(|&w| w == upper);
+            l < u
+        };
+        assert!(
+            above(second, first),
+            "an always-on-top window must be above an ordinary one"
+        );
+        assert!(
+            above(first, panel),
+            "and still below the shell's own overlay -- a window rule must not \
+             be able to cover the taskbar"
+        );
+    }
+
+    /// And raising an ordinary window does not lift it past one.
+    ///
+    /// This is what "always" means: clicking another window must not defeat
+    /// the rule. Without the tier in the sort key, `raise_within_layer` would
+    /// put the clicked window on top of everything in its layer.
+    #[test]
+    fn raising_an_ordinary_window_does_not_lift_it_over_an_always_on_top_one() {
+        let (mut comp, pinned) = with_one_window();
+        let other = comp.create_window_from_spec(&WindowSpec::new("Other", 200, 150), 1);
+        comp.set_stack_tier(pinned, StackTier::Top).expect("tier");
+
+        comp.activate_window(other).expect("raise");
+
+        let pos = |w: WindowId| comp.z_stack.iter().position(|&x| x == w);
+        assert!(
+            pos(other) < pos(pinned),
+            "raising an ordinary window put it over a pinned one"
+        );
+    }
+
+    /// Always-on-bottom is the same mechanism in the other direction.
+    #[test]
+    fn an_always_on_bottom_window_stays_under_its_neighbours() {
+        let (mut comp, sunk) = with_one_window();
+        let other = comp.create_window_from_spec(&WindowSpec::new("Other", 200, 150), 1);
+        comp.set_stack_tier(sunk, StackTier::Bottom).expect("tier");
+
+        comp.activate_window(sunk).expect("raise");
+
+        let pos = |w: WindowId| comp.z_stack.iter().position(|&x| x == w);
+        assert!(
+            pos(sunk) < pos(other),
+            "activating a pinned-to-bottom window lifted it out of its tier"
+        );
+    }
+
+    /// Returning a window to the ordinary tier releases it.
+    #[test]
+    fn clearing_the_tier_lets_a_window_raise_again() {
+        let (mut comp, pinned) = with_one_window();
+        let other = comp.create_window_from_spec(&WindowSpec::new("Other", 200, 150), 1);
+        comp.set_stack_tier(pinned, StackTier::Bottom)
+            .expect("down");
+        comp.set_stack_tier(pinned, StackTier::Normal).expect("up");
+
+        comp.activate_window(pinned).expect("raise");
+
+        let pos = |w: WindowId| comp.z_stack.iter().position(|&x| x == w);
+        assert!(
+            pos(other) < pos(pinned),
+            "a window returned to the ordinary tier must raise normally again"
+        );
+    }
+
     /// Every action reaches the operation it names.
     ///
-    /// Listed rather than sampled: the dispatch is a five-arm match and an arm
-    /// wired to the wrong method is invisible to a test that only sends one
-    /// action. Each assertion is chosen to distinguish that arm from the other
-    /// four.
+    /// Listed rather than sampled: the dispatch is a match, and an arm wired
+    /// to the wrong method is invisible to a test that only sends one action.
+    /// Each assertion is chosen to distinguish its arm from every other one --
+    /// which is not automatic, and `Fullscreen` is the example: wiring it to
+    /// `maximize_window` passed the whole suite until the assertion below was
+    /// written to tell the two apart.
+    ///
+    /// No count in this sentence on purpose. It said "five-arm" while the
+    /// match had seven.
     #[test]
     fn every_shell_control_action_reaches_its_own_operation() {
         let (mut comp, id) = with_one_window();
@@ -11198,6 +12364,28 @@ mod tests {
             CompositorResponse::Ok
         ));
         assert!(!maximized(&comp, id), "Restore");
+
+        // Fullscreen, and specifically *not* Maximize. The two look alike from
+        // a shell -- both make a window big -- but fullscreen covers the
+        // display and maximize leaves the work area, so an arm pointed at the
+        // wrong one is a taskbar that stays visible when the user asked for it
+        // gone. `maximized` is asserted false to make that difference the
+        // thing this checks.
+        assert!(!comp.is_fullscreen(id), "not fullscreen to begin with");
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Fullscreen),
+            CompositorResponse::Ok
+        ));
+        assert!(comp.is_fullscreen(id), "Fullscreen");
+        assert!(
+            !maximized(&comp, id),
+            "Fullscreen must not be routed to maximize_window"
+        );
+
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Restore),
+            CompositorResponse::Ok
+        ));
 
         assert!(matches!(
             send(&mut comp, ShellControlAction::Minimize),
@@ -14270,10 +15458,17 @@ mod tests {
         let (top, side, _) = win.frame_insets();
         assert_eq!(
             top,
-            TITLE_BAR_HEIGHT * 2,
+            (TITLE_BAR_HEIGHT + BORDER_WIDTH) * 2,
             "the title bar is still the 96dpi height"
         );
         assert_eq!(side, BORDER_WIDTH * 2);
+        // The bar itself, with the border taken back out, is what doubled.
+        let bar = win.title_bar_rect().expect("framed");
+        assert_eq!(
+            bar.height,
+            TITLE_BAR_HEIGHT * 2,
+            "the bar inside the inset is not the 2x height"
+        );
         assert_eq!(win.shadow_extent(), SHADOW_SIZE * 2);
 
         let close = win.close_button_rect().expect("a decorated window closes");
@@ -14461,7 +15656,7 @@ mod tests {
             (win.scale_factor - 1.0).abs() < f32::EPSILON,
             "off-screen windows are drawn at the primary display's scale"
         );
-        assert_eq!(win.frame_insets().0, TITLE_BAR_HEIGHT);
+        assert_eq!(win.frame_insets().0, TITLE_BAR_HEIGHT + BORDER_WIDTH);
     }
 
     #[test]
@@ -14614,7 +15809,7 @@ mod tests {
         );
         assert_eq!(
             comp.window_ref(id).expect("window").frame_insets().0,
-            TITLE_BAR_HEIGHT * 2
+            (TITLE_BAR_HEIGHT + BORDER_WIDTH) * 2
         );
     }
 
@@ -15381,18 +16576,16 @@ mod tests {
         let border_at_the_corner = |corners| {
             let (comp, id) = decorated(with_corners(corners));
             let frame = comp.window_ref(id).expect("window").frame_rect();
-            let width = scale_dimension(
-                BORDER_WIDTH,
-                comp.window_ref(id).expect("window").scale_factor,
-            );
-            // The border box starts one stroke above the frame; see
-            // `render_border`. Its own top-left is the pixel a square stroke
-            // paints and a rounded one leaves alone.
+            // The border box *is* the frame: `frame_insets` reserves the
+            // border row above the title bar, so the outline is drawn inside
+            // the measured frame rather than a stroke above it. The frame's
+            // own top-left is the pixel a square stroke paints and a rounded
+            // one leaves alone.
             #[allow(
                 clippy::cast_sign_loss,
                 reason = "the window is placed well inside the 400x300 buffer"
             )]
-            let probe = (frame.x as u32, (frame.y - width as i32) as u32);
+            let probe = (frame.x as u32, frame.y as u32);
             let focused = comp.window_ref(id).expect("window").focused;
             let expected = if focused {
                 comp.theme.border_focused
@@ -17654,7 +18847,8 @@ mod tests {
         // exactly its original size.
         assert_eq!(
             (frame.width, frame.height),
-            (302, 181),
+            // 182, not 181: the top inset gained the border row.
+            (302, 182),
             "the restored window was resized rather than moved"
         );
         assert_eq!(

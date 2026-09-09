@@ -2827,7 +2827,7 @@ _Port ext4 first. Don't write a custom filesystem._
   its owner most wants to read files off it (design-decisions §248));
   the write sides remain open
 
-- [ ] `[A]`+`[B]`+`[C]` **Deferred filesystem operations** — queue a delete or
+- [-] `[A]`+`[B]`+`[C]` **Deferred filesystem operations** — queue a delete or
   rename that cannot happen yet, and remember it across a reboot. Operator's
   request, 2026-09-07. See `roadmap-detailed.md` → "Deferred filesystem
   operations" for the full inventory, and **read its premise note first**: the
@@ -2836,18 +2836,24 @@ _Port ext4 first. Don't write a custom filesystem._
   is worth deferring is a *busy mount*, a *read-only mount*, an *absent
   removable/network volume*, and a full volume that cannot accept a trash
   rename. Three ends to build and one shared entry format, so it wants an agreed
-  design before any lane starts:
-  - `[A]` the persistent per-filesystem queue and the VFS hooks that enqueue and
-    replay it. **The security half is the hard half** — the capability must be
-    re-checked when the operation *runs*, not only when it is queued, or this
-    becomes SlateOS's version of `PendingFileRenameOperations`, a list written
-    by one user and executed early with more authority than they had.
+  design before any lane starts. **Design agreed 2026-09-07** in
+  `requests/a-cb-deferred-ops-format-agreed-with-notes.md`. The three ends:
+  - [x] `[A]` the persistent per-filesystem queue and the VFS hooks that enqueue
+    and replay it (2026-09-07). `fs::deferred_ops` — `enqueue()`, `replay()`,
+    `cancel()`, `list()`, `replay_on_mount()` hook in `Vfs::mount_with_options`.
+    Security: re-checks ACLs against stored UID/GID/groups at execution time;
+    drops entries on inode mismatch or permission revocation. 9 self-tests.
   - `[B]` `rm`/`mv` offering the deferral when a failure is deferrable —
     interactively only, with an explicit flag for scripts, and never silently:
     a batch job must not queue a deletion that happens an hour after it exits.
   - `[C]` the file manager asking in the same dialog that reports the failure,
     plus a visible, cancellable queue view and a report when a deferred
     operation finally runs or is dropped.
+    - [x] **Prerequisite done 2026-09-07:** there *is* now a dialog that
+      reports a failure. Until then every operation flattened success and
+      failure into one status-bar line, so there was nowhere for the deferral
+      prompt to be asked. See `design-decisions.md` §814. The deferral itself
+      still waits on the agreed entry format above.
 
 ### 2.4 Networking stack (userspace)
 - [-] `[A]` TCP/IP stack (kernel-resident prototype, will move to userspace)
@@ -3038,20 +3044,25 @@ _Port ext4 first. Don't write a custom filesystem._
     complete association, a group rekey, a deauthentication and a deliberate
     replay of message 3 — which re-sends message 4 and does *not* reinstall
     the key — with no hardware and no scheduler. See **§579**
-  - [ ] `impl Transceiver for HwsimRadio` — **lane A's**, over their
+  - [x] `impl Transceiver for HwsimRadio` — **lane A's**, over their
     `kernel::net::hwsim` simulated radio, plus one call site in the boot
     test. Agreed in
     `requests/c-a-option-2-the-transceiver-trait-is-mine-and-i-am-writing-it-now.md`;
     the landed signatures are in
-    `requests/c-a-the-transceiver-trait-has-landed-here-are-the-signatures.md`
-  - [ ] End-to-end association in the boot test — gated purely on the line
+    `requests/c-a-the-transceiver-trait-has-landed-here-are-the-signatures.md`.
+    **Done** — `kernel/src/net/hwsim.rs` line 847, landed with the hwsim
+    module (2026-09-02)
+  - [x] End-to-end association in the boot test — gated purely on the line
     above: scan → join → handshake → an ARP exchange over the encapsulated
     data path. **What a green run will prove, stated exactly:** the frame
     exchange and the key schedule — both ends derived the same PTK, the
     handshake reached `Complete`, both keys were handed to the radio. It will
     **not** prove confidentiality; `hwsim` does not encrypt, deliberately
     (lane A's §677), and `Association::is_established` is documented to make
-    only the narrower claim
+    only the narrower claim.
+    **Done** — `kernel/src/net/hwsim_ap::self_test()` runs at boot: 9
+    checks covering join, PTK derivation, key install, bidirectional data,
+    and group rekey (2026-09-02)
   - [ ] Real wireless driver — one more `impl Transceiver`, not a second copy
     of the association loop. Still hardware-gated: there is no radio in QEMU
 

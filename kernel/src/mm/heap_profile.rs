@@ -448,7 +448,7 @@ pub fn bucket_label(idx: usize) -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// Self-test for heap profiling.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[heap_profile] Running self-test...");
 
     // Test 1: Initial state after reset.
@@ -541,4 +541,5 @@ pub fn self_test() {
     reset();
 
     serial_println!("[heap_profile] Self-test PASSED");
+    Ok(())
 }

@@ -20,6 +20,7 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+use appearance::Palette;
 use guitk::canvas::Canvas;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -36,39 +37,6 @@ use std::collections::VecDeque;
 // ============================================================================
 // Catppuccin Mocha theme colors
 // ============================================================================
-
-/// Catppuccin Mocha base background.
-const MOCHA_BASE: Color = Color::from_hex(0x1E1E2E);
-/// Catppuccin Mocha mantle (darker surface).
-const MOCHA_MANTLE: Color = Color::from_hex(0x181825);
-/// Catppuccin Mocha crust (darkest surface).
-const MOCHA_CRUST: Color = Color::from_hex(0x11111B);
-/// Catppuccin Mocha surface 0.
-const MOCHA_SURFACE0: Color = Color::from_hex(0x313244);
-/// Catppuccin Mocha surface 1.
-const MOCHA_SURFACE1: Color = Color::from_hex(0x45475A);
-/// Catppuccin Mocha surface 2.
-const MOCHA_SURFACE2: Color = Color::from_hex(0x585B70);
-/// Catppuccin Mocha text.
-const MOCHA_TEXT: Color = Color::from_hex(0xCDD6F4);
-/// Catppuccin Mocha subtext 0.
-const MOCHA_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-/// Catppuccin Mocha subtext 1.
-const MOCHA_SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-/// Catppuccin Mocha blue accent.
-const MOCHA_BLUE: Color = Color::from_hex(0x89B4FA);
-/// Catppuccin Mocha green accent.
-const MOCHA_GREEN: Color = Color::from_hex(0xA6E3A1);
-/// Catppuccin Mocha red accent.
-const MOCHA_RED: Color = Color::from_hex(0xF38BA8);
-/// Catppuccin Mocha yellow accent.
-const MOCHA_YELLOW: Color = Color::from_hex(0xF9E2AF);
-/// Catppuccin Mocha peach accent.
-const MOCHA_PEACH: Color = Color::from_hex(0xFAB387);
-/// Catppuccin Mocha lavender accent.
-const MOCHA_LAVENDER: Color = Color::from_hex(0xB4BEFE);
-/// Catppuccin Mocha overlay 0.
-const MOCHA_OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
 // Layout constants
@@ -1644,6 +1612,12 @@ pub struct PaintApp {
     pub rounded_rect_radius: i32,
     /// Text tool font size.
     pub text_font_size: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Named `theme` rather than `palette` because in this application a
+    /// palette is the forty-eight swatches you paint with, which are the
+    /// user's content and must not follow the desktop theme.
+    theme: Palette,
 }
 
 impl PaintApp {
@@ -1661,6 +1635,7 @@ impl PaintApp {
         )];
 
         Self {
+            theme: Palette::from_settings(&appearance::AppearanceSettings::default()),
             window_width,
             window_height,
             canvas_width,
@@ -2840,7 +2815,7 @@ impl PaintApp {
             y: 0.0,
             width: self.window_width,
             height: self.window_height,
-            color: MOCHA_CRUST,
+            color: self.theme.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2865,7 +2840,7 @@ impl PaintApp {
             y: 0.0,
             width: self.window_width,
             height: OPTION_BAR_HEIGHT,
-            color: MOCHA_MANTLE,
+            color: self.theme.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2875,7 +2850,7 @@ impl PaintApp {
             y1: OPTION_BAR_HEIGHT,
             x2: self.window_width,
             y2: OPTION_BAR_HEIGHT,
-            color: MOCHA_SURFACE0,
+            color: self.theme.surface0,
             width: 1.0,
         });
 
@@ -2887,7 +2862,7 @@ impl PaintApp {
             y: 10.0,
             text: format!("Tool: {}", self.current_tool.label()),
             font_size: 13.0,
-            color: MOCHA_TEXT,
+            color: self.theme.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2900,7 +2875,7 @@ impl PaintApp {
             y: 10.0,
             text: format!("Size: {}px", self.brush.size),
             font_size: 12.0,
-            color: MOCHA_SUBTEXT1,
+            color: self.theme.subtext1,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2913,7 +2888,7 @@ impl PaintApp {
             y: 10.0,
             text: format!("Opacity: {}%", (self.brush.opacity * 100.0) as u32),
             font_size: 12.0,
-            color: MOCHA_SUBTEXT1,
+            color: self.theme.subtext1,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2926,7 +2901,7 @@ impl PaintApp {
             y: 10.0,
             text: format!("Hard: {}%", (self.brush.hardness * 100.0) as u32),
             font_size: 12.0,
-            color: MOCHA_YELLOW,
+            color: self.theme.yellow,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2948,7 +2923,7 @@ impl PaintApp {
                 y: 10.0,
                 text: format!("Mode: {}", mode_str),
                 font_size: 12.0,
-                color: MOCHA_LAVENDER,
+                color: self.theme.lavender,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2962,7 +2937,7 @@ impl PaintApp {
             y: 10.0,
             text: format!("Zoom: {}", self.zoom_percent_str()),
             font_size: 12.0,
-            color: MOCHA_SUBTEXT0,
+            color: self.theme.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2976,7 +2951,7 @@ impl PaintApp {
                 y: 10.0,
                 text: format!("Grid: {}px", self.grid.spacing),
                 font_size: 12.0,
-                color: MOCHA_GREEN,
+                color: self.theme.green,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2996,7 +2971,7 @@ impl PaintApp {
             y: tb_y,
             width: TOOLBAR_WIDTH,
             height: tb_h,
-            color: MOCHA_MANTLE,
+            color: self.theme.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3006,7 +2981,7 @@ impl PaintApp {
             y1: tb_y,
             x2: TOOLBAR_WIDTH,
             y2: tb_y + tb_h,
-            color: MOCHA_SURFACE0,
+            color: self.theme.surface0,
             width: 1.0,
         });
 
@@ -3020,11 +2995,15 @@ impl PaintApp {
 
             let is_active = tool == self.current_tool;
             let bg = if is_active {
-                MOCHA_BLUE
+                self.theme.blue
             } else {
-                MOCHA_SURFACE0
+                self.theme.surface0
             };
-            let fg = if is_active { MOCHA_CRUST } else { MOCHA_TEXT };
+            let fg = if is_active {
+                self.theme.crust
+            } else {
+                self.theme.text
+            };
 
             cmds.push(RenderCommand::FillRect {
                 x: btn_x,
@@ -3084,7 +3063,7 @@ impl PaintApp {
             y: y + 14.0,
             width: 22.0,
             height: 22.0,
-            color: MOCHA_OVERLAY0,
+            color: self.theme.overlay0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(2.0),
         });
@@ -3103,7 +3082,7 @@ impl PaintApp {
             y: y + 2.0,
             width: 22.0,
             height: 22.0,
-            color: MOCHA_TEXT,
+            color: self.theme.text,
             line_width: 1.0,
             corner_radii: CornerRadii::all(2.0),
         });
@@ -3114,7 +3093,7 @@ impl PaintApp {
             y,
             text: "X".to_string(),
             font_size: 9.0,
-            color: MOCHA_SUBTEXT0,
+            color: self.theme.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3153,7 +3132,7 @@ impl PaintApp {
             y: vy,
             width: vw,
             height: vh,
-            color: MOCHA_BASE,
+            color: self.theme.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3213,7 +3192,7 @@ impl PaintApp {
             y: cwy - 1.0,
             width: cw_scaled + 2.0,
             height: ch_scaled + 2.0,
-            color: MOCHA_SURFACE1,
+            color: self.theme.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::ZERO,
         });
@@ -3487,7 +3466,7 @@ impl PaintApp {
                     y: wy,
                     width: rw as f32 * self.zoom,
                     height: rh as f32 * self.zoom,
-                    color: MOCHA_BLUE,
+                    color: self.theme.blue,
                     line_width: 1.0,
                     corner_radii: CornerRadii::ZERO,
                 });
@@ -3510,7 +3489,7 @@ impl PaintApp {
                 y: wy - 3.0,
                 width: 6.0,
                 height: 6.0,
-                color: MOCHA_RED,
+                color: self.theme.red,
                 corner_radii: CornerRadii::all(3.0),
             });
 
@@ -3543,7 +3522,7 @@ impl PaintApp {
             y: py,
             width: LAYERS_PANEL_WIDTH,
             height: ph,
-            color: MOCHA_MANTLE,
+            color: self.theme.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3553,7 +3532,7 @@ impl PaintApp {
             y1: py,
             x2: px,
             y2: py + ph,
-            color: MOCHA_SURFACE0,
+            color: self.theme.surface0,
             width: 1.0,
         });
 
@@ -3563,7 +3542,7 @@ impl PaintApp {
             y: py + 8.0,
             text: "Layers".to_string(),
             font_size: 13.0,
-            color: MOCHA_TEXT,
+            color: self.theme.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3580,7 +3559,7 @@ impl PaintApp {
                 y: btn_y,
                 width: btn_w,
                 height: 20.0,
-                color: MOCHA_SURFACE0,
+                color: self.theme.surface0,
                 corner_radii: CornerRadii::all(3.0),
             });
             cmds.push(RenderCommand::Text {
@@ -3588,7 +3567,7 @@ impl PaintApp {
                 y: btn_y + 4.0,
                 text: label.to_string(),
                 font_size: 10.0,
-                color: MOCHA_SUBTEXT1,
+                color: self.theme.subtext1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(btn_w - 8.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3603,9 +3582,9 @@ impl PaintApp {
             let is_active = i == self.active_layer;
 
             let bg = if is_active {
-                MOCHA_SURFACE1
+                self.theme.surface1
             } else {
-                MOCHA_SURFACE0
+                self.theme.surface0
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -3624,7 +3603,7 @@ impl PaintApp {
                     y: ly,
                     width: 3.0,
                     height: LAYER_ROW_HEIGHT - 2.0,
-                    color: MOCHA_BLUE,
+                    color: self.theme.blue,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -3632,9 +3611,9 @@ impl PaintApp {
             // Visibility icon
             let vis_text = if layer.visible { "O" } else { "-" };
             let vis_color = if layer.visible {
-                MOCHA_GREEN
+                self.theme.green
             } else {
-                MOCHA_OVERLAY0
+                self.theme.overlay0
             };
             cmds.push(RenderCommand::Text {
                 x: px + 12.0,
@@ -3653,7 +3632,7 @@ impl PaintApp {
                 y: ly + 7.0,
                 text: layer.name.clone(),
                 font_size: 11.0,
-                color: MOCHA_TEXT,
+                color: self.theme.text,
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -3670,7 +3649,7 @@ impl PaintApp {
                 y: ly + 7.0,
                 text: opacity_text,
                 font_size: 10.0,
-                color: MOCHA_SUBTEXT0,
+                color: self.theme.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3688,7 +3667,7 @@ impl PaintApp {
             y: sy,
             width: self.window_width,
             height: STATUS_BAR_HEIGHT,
-            color: MOCHA_MANTLE,
+            color: self.theme.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3698,7 +3677,7 @@ impl PaintApp {
             y1: sy,
             x2: self.window_width,
             y2: sy,
-            color: MOCHA_SURFACE0,
+            color: self.theme.surface0,
             width: 1.0,
         });
 
@@ -3710,7 +3689,7 @@ impl PaintApp {
             y: sy + 5.0,
             text: format!("X: {} Y: {}", self.mouse_canvas_x, self.mouse_canvas_y),
             font_size: 11.0,
-            color: MOCHA_SUBTEXT1,
+            color: self.theme.subtext1,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3723,7 +3702,7 @@ impl PaintApp {
             y1: sy + 3.0,
             x2: sx,
             y2: sy + STATUS_BAR_HEIGHT - 3.0,
-            color: MOCHA_SURFACE0,
+            color: self.theme.surface0,
             width: 1.0,
         });
         sx += 8.0;
@@ -3734,7 +3713,7 @@ impl PaintApp {
             y: sy + 5.0,
             text: format!("{}x{}", self.canvas_width, self.canvas_height),
             font_size: 11.0,
-            color: MOCHA_SUBTEXT1,
+            color: self.theme.subtext1,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3747,7 +3726,7 @@ impl PaintApp {
             y1: sy + 3.0,
             x2: sx,
             y2: sy + STATUS_BAR_HEIGHT - 3.0,
-            color: MOCHA_SURFACE0,
+            color: self.theme.surface0,
             width: 1.0,
         });
         sx += 8.0;
@@ -3758,7 +3737,7 @@ impl PaintApp {
             y: sy + 5.0,
             text: self.zoom_percent_str(),
             font_size: 11.0,
-            color: MOCHA_SUBTEXT1,
+            color: self.theme.subtext1,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3771,7 +3750,7 @@ impl PaintApp {
             y1: sy + 3.0,
             x2: sx,
             y2: sy + STATUS_BAR_HEIGHT - 3.0,
-            color: MOCHA_SURFACE0,
+            color: self.theme.surface0,
             width: 1.0,
         });
         sx += 8.0;
@@ -3782,7 +3761,7 @@ impl PaintApp {
             y: sy + 5.0,
             text: format!("Tool: {}", self.current_tool.label()),
             font_size: 11.0,
-            color: MOCHA_BLUE,
+            color: self.theme.blue,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3796,7 +3775,7 @@ impl PaintApp {
                 y1: sy + 3.0,
                 x2: sx,
                 y2: sy + STATUS_BAR_HEIGHT - 3.0,
-                color: MOCHA_SURFACE0,
+                color: self.theme.surface0,
                 width: 1.0,
             });
             sx += 8.0;
@@ -3806,7 +3785,7 @@ impl PaintApp {
                 y: sy + 5.0,
                 text: format!("Sel: {}x{}", sel.width, sel.height),
                 font_size: 11.0,
-                color: MOCHA_PEACH,
+                color: self.theme.peach,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3820,7 +3799,7 @@ impl PaintApp {
             y1: sy + 3.0,
             x2: sx,
             y2: sy + STATUS_BAR_HEIGHT - 3.0,
-            color: MOCHA_SURFACE0,
+            color: self.theme.surface0,
             width: 1.0,
         });
         sx += 8.0;
@@ -3834,7 +3813,7 @@ impl PaintApp {
                 self.history.redo_count()
             ),
             font_size: 11.0,
-            color: MOCHA_SUBTEXT0,
+            color: self.theme.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3868,7 +3847,7 @@ impl PaintApp {
             y: dlg_y,
             width: dlg_w,
             height: dlg_h,
-            color: MOCHA_BASE,
+            color: self.theme.base,
             corner_radii: CornerRadii::all(8.0),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -3876,7 +3855,7 @@ impl PaintApp {
             y: dlg_y,
             width: dlg_w,
             height: dlg_h,
-            color: MOCHA_SURFACE1,
+            color: self.theme.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -3892,7 +3871,7 @@ impl PaintApp {
             y: dlg_y + 12.0,
             text: title.to_string(),
             font_size: 14.0,
-            color: MOCHA_TEXT,
+            color: self.theme.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3913,7 +3892,7 @@ impl PaintApp {
             y: preview_y,
             width: 60.0,
             height: 40.0,
-            color: MOCHA_OVERLAY0,
+            color: self.theme.overlay0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -3927,7 +3906,7 @@ impl PaintApp {
                 self.color_picker.red, self.color_picker.green, self.color_picker.blue
             ),
             font_size: 16.0,
-            color: MOCHA_TEXT,
+            color: self.theme.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3945,7 +3924,7 @@ impl PaintApp {
                 self.color_picker.alpha
             ),
             font_size: 11.0,
-            color: MOCHA_SUBTEXT0,
+            color: self.theme.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3975,7 +3954,7 @@ impl PaintApp {
                 y: sy,
                 text: format!("{label}: {value}"),
                 font_size: 12.0,
-                color: MOCHA_TEXT,
+                color: self.theme.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3988,7 +3967,7 @@ impl PaintApp {
                 y: track_y,
                 width: slider_w,
                 height: 8.0,
-                color: MOCHA_SURFACE0,
+                color: self.theme.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -4018,7 +3997,7 @@ impl PaintApp {
                 y: track_y - 2.0,
                 width: 12.0,
                 height: 12.0,
-                color: MOCHA_SURFACE2,
+                color: self.theme.surface2,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(6.0),
             });
@@ -4031,7 +4010,7 @@ impl PaintApp {
             y: hex_y,
             text: "Hex:".to_string(),
             font_size: 12.0,
-            color: MOCHA_TEXT,
+            color: self.theme.text,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4042,7 +4021,7 @@ impl PaintApp {
             y: hex_y - 2.0,
             width: 100.0,
             height: 20.0,
-            color: MOCHA_SURFACE0,
+            color: self.theme.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -4051,7 +4030,7 @@ impl PaintApp {
             y: hex_y + 2.0,
             text: format!("#{}", self.color_picker.hex_input.as_str()),
             font_size: 12.0,
-            color: MOCHA_TEXT,
+            color: self.theme.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(92.0),
             overflow: TextOverflow::Ellipsis,
@@ -4059,7 +4038,7 @@ impl PaintApp {
 
         // OK / Cancel buttons
         let btn_y = hex_y + 28.0;
-        let buttons = [("OK", MOCHA_GREEN), ("Cancel", MOCHA_RED)];
+        let buttons = [("OK", self.theme.green), ("Cancel", self.theme.red)];
         for (i, &(label, label_color)) in buttons.iter().enumerate() {
             let bx = slider_x + i as f32 * 80.0;
             cmds.push(RenderCommand::FillRect {
@@ -4067,7 +4046,7 @@ impl PaintApp {
                 y: btn_y,
                 width: 70.0,
                 height: 24.0,
-                color: MOCHA_SURFACE0,
+                color: self.theme.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -4378,6 +4357,10 @@ pub enum SpecialKey {
 // ============================================================================
 
 impl App for PaintApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.theme = *palette;
+    }
+
     fn title(&self) -> String {
         "Paint".to_string()
     }
@@ -6577,5 +6560,64 @@ mod tests {
         assert_eq!(app.active_layer, 2);
         assert!(app.move_layer_down());
         assert_eq!(app.active_layer, 1);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut PaintApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = PaintApp::new(1000.0, 700.0);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

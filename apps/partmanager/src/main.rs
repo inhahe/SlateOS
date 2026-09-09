@@ -15,6 +15,7 @@
 //! Slate OS syscalls; stubbed with representative data for initial development.
 
 #[allow(unused_imports)]
+use appearance::Palette;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
@@ -34,30 +35,11 @@ use std::time::Duration;
 // Catppuccin Mocha palette
 // ============================================================================
 
-const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
-const COLOR_MANTLE: Color = Color::from_hex(0x181825);
-const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
-const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
-const COLOR_SURFACE2: Color = Color::from_hex(0x585B70);
-const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COLOR_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COLOR_SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
-const COLOR_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COLOR_RED: Color = Color::from_hex(0xF38BA8);
-const COLOR_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COLOR_PEACH: Color = Color::from_hex(0xFAB387);
-const COLOR_LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const COLOR_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const COLOR_MAUVE: Color = Color::from_hex(0xCBA6F7);
 // Part of the complete Catppuccin Mocha palette, kept whole even though no
 // widget currently paints with these three: a named palette with a hole in it is
 // not the palette it is named after, and the next widget to want one would
 // otherwise re-derive the hex by hand.
-#[allow(dead_code, reason = "the palette is kept complete")]
-const COLOR_TEAL: Color = Color::from_hex(0x94E2D5);
-#[allow(dead_code, reason = "the palette is kept complete")]
-const COLOR_SAPPHIRE: Color = Color::from_hex(0x74C7EC);
+
 #[allow(dead_code, reason = "the palette is kept complete")]
 const COLOR_FLAMINGO: Color = Color::from_hex(0xF2CDCD);
 
@@ -214,15 +196,15 @@ impl FilesystemType {
     }
 
     /// Color for disk map visualization.
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Ext4 => COLOR_BLUE,
-            Self::Fat32 => COLOR_GREEN,
-            Self::Ntfs => COLOR_LAVENDER,
-            Self::Swap => COLOR_MAUVE,
-            Self::EfiSystem => COLOR_PEACH,
-            Self::Unformatted => COLOR_SURFACE2,
-            Self::Unknown => COLOR_OVERLAY0,
+            Self::Ext4 => pal.blue,
+            Self::Fat32 => pal.green,
+            Self::Ntfs => pal.lavender,
+            Self::Swap => pal.mauve,
+            Self::EfiSystem => pal.peach,
+            Self::Unformatted => pal.surface2,
+            Self::Unknown => pal.overlay0,
         }
     }
 
@@ -322,12 +304,12 @@ impl SmartHealth {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Healthy => COLOR_GREEN,
-            Self::Warning => COLOR_YELLOW,
-            Self::Failing => COLOR_RED,
-            Self::Unknown => COLOR_OVERLAY0,
+            Self::Healthy => pal.green,
+            Self::Warning => pal.yellow,
+            Self::Failing => pal.red,
+            Self::Unknown => pal.overlay0,
         }
     }
 }
@@ -1071,6 +1053,12 @@ pub struct PartitionManagerApp {
     pub queue_expanded: bool,
     /// Status bar message.
     pub status_message: String,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for PartitionManagerApp {
@@ -1083,6 +1071,7 @@ impl PartitionManagerApp {
     /// Create a new application with sample data.
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
             disks: sample_disks(),
@@ -1208,13 +1197,13 @@ impl PartitionManagerApp {
 // Rendering -- title bar
 // ============================================================================
 
-fn render_title_bar(tree: &mut RenderTree, width: f32) {
+fn render_title_bar(tree: &mut RenderTree, pal: &Palette, width: f32) {
     tree.push(RenderCommand::FillRect {
         x: 0.0,
         y: 0.0,
         width,
         height: TITLE_BAR_HEIGHT,
-        color: COLOR_MANTLE,
+        color: pal.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1222,7 +1211,7 @@ fn render_title_bar(tree: &mut RenderTree, width: f32) {
         x: 12.0,
         y: 10.0,
         text: String::from("Partition Manager"),
-        color: COLOR_TEXT,
+        color: pal.text,
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1235,7 +1224,7 @@ fn render_title_bar(tree: &mut RenderTree, width: f32) {
         y1: TITLE_BAR_HEIGHT,
         x2: width,
         y2: TITLE_BAR_HEIGHT,
-        color: COLOR_SURFACE1,
+        color: pal.surface1,
         width: 1.0,
     });
 }
@@ -1252,7 +1241,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y,
         width: app.width,
         height: TOOLBAR_HEIGHT,
-        color: COLOR_SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1263,13 +1252,17 @@ fn render_toolbar(tree: &mut RenderTree, app: &PartitionManagerApp) {
     for (i, (label, enabled)) in buttons.iter().enumerate() {
         let hovered = app.hovered_toolbar_btn == Some(i);
         let bg = if !enabled {
-            COLOR_SURFACE0
+            app.palette.surface0
         } else if hovered {
-            COLOR_SURFACE2
+            app.palette.surface2
         } else {
-            COLOR_SURFACE1
+            app.palette.surface1
         };
-        let fg = if *enabled { COLOR_TEXT } else { COLOR_OVERLAY0 };
+        let fg = if *enabled {
+            app.palette.text
+        } else {
+            app.palette.overlay0
+        };
 
         tree.push(RenderCommand::FillRect {
             x: bx,
@@ -1300,7 +1293,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y1: y + TOOLBAR_HEIGHT,
         x2: app.width,
         y2: y + TOOLBAR_HEIGHT,
-        color: COLOR_SURFACE1,
+        color: app.palette.surface1,
         width: 1.0,
     });
 }
@@ -1320,7 +1313,7 @@ fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y: top,
         width: geom.width,
         height: geom.height(),
-        color: COLOR_MANTLE,
+        color: app.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1329,7 +1322,7 @@ fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
         x: geom.text_x(),
         y: top + 8.0,
         text: String::from("Disks"),
-        color: COLOR_SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(geom.text_max_width()),
@@ -1353,11 +1346,11 @@ fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
         let hovered = app.hovered_sidebar_disk == Some(i);
 
         let bg = if selected {
-            COLOR_SURFACE1
+            app.palette.surface1
         } else if hovered {
-            COLOR_SURFACE0
+            app.palette.surface0
         } else {
-            COLOR_MANTLE
+            app.palette.mantle
         };
 
         tree.push(RenderCommand::FillRect {
@@ -1374,7 +1367,11 @@ fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
             x: geom.text_x(),
             y: ry + 6.0,
             text: disk.name.clone(),
-            color: if selected { COLOR_TEXT } else { COLOR_SUBTEXT1 },
+            color: if selected {
+                app.palette.text
+            } else {
+                app.palette.subtext1
+            },
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(geom.text_max_width()),
@@ -1387,7 +1384,7 @@ fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
             x: geom.text_x(),
             y: ry + 22.0,
             text: info,
-            color: COLOR_SUBTEXT0,
+            color: app.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(geom.text_max_width()),
@@ -1395,7 +1392,7 @@ fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
         });
 
         // Health indicator dot
-        let health_color = disk.smart_health.color();
+        let health_color = disk.smart_health.color(&app.palette);
         tree.push(RenderCommand::FillRect {
             x: geom.right() - 20.0,
             y: ry + 18.0,
@@ -1414,7 +1411,7 @@ fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y1: top,
         x2: geom.right(),
         y2: bottom,
-        color: COLOR_SURFACE1,
+        color: app.palette.surface1,
         width: 1.0,
     });
 }
@@ -1444,7 +1441,7 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
             disk.name,
             format_size(disk.total_size_bytes)
         ),
-        color: COLOR_TEXT,
+        color: app.palette.text,
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(available_width),
@@ -1457,7 +1454,7 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y: bar_y,
         width: available_width,
         height: DISK_MAP_BAR_HEIGHT,
-        color: COLOR_BASE,
+        color: app.palette.base,
         corner_radii: CornerRadii::all(4.0),
     });
 
@@ -1482,8 +1479,8 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
         let is_hovered = app.hovered_map_region == Some(i);
 
         let base_color = match region {
-            DiskRegion::Partition(p) => p.filesystem.color(),
-            DiskRegion::Unallocated(_) => COLOR_SURFACE0,
+            DiskRegion::Partition(p) => p.filesystem.color(&app.palette),
+            DiskRegion::Unallocated(_) => app.palette.surface0,
         };
 
         // Lighten on hover, highlight on select
@@ -1521,7 +1518,7 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 y: bar_y + 2.0,
                 width: (clamped_width - 2.0).max(1.0),
                 height: DISK_MAP_BAR_HEIGHT - 4.0,
-                color: COLOR_TEXT,
+                color: app.palette.text,
                 line_width: 2.0,
                 corner_radii: CornerRadii::all(2.0),
             });
@@ -1537,7 +1534,7 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 x: rx + 4.0,
                 y: bar_y + 6.0,
                 text: label_text,
-                color: COLOR_BASE,
+                color: app.palette.base,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(clamped_width - 8.0),
@@ -1549,7 +1546,7 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 x: rx + 4.0,
                 y: bar_y + 20.0,
                 text: size_text,
-                color: COLOR_BASE,
+                color: app.palette.base,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(clamped_width - 8.0),
@@ -1577,14 +1574,14 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
             y: legend_y,
             width: 10.0,
             height: 10.0,
-            color: fs.color(),
+            color: fs.color(&app.palette),
             corner_radii: CornerRadii::all(2.0),
         });
         tree.push(RenderCommand::Text {
             x: lx + 14.0,
             y: legend_y,
             text: String::from(*label),
-            color: COLOR_SUBTEXT0,
+            color: app.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1599,14 +1596,14 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y: legend_y,
         width: 10.0,
         height: 10.0,
-        color: COLOR_SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::all(2.0),
     });
     tree.push(RenderCommand::Text {
         x: lx + 14.0,
         y: legend_y,
         text: String::from("Free"),
-        color: COLOR_SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 10.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2032,7 +2029,7 @@ fn render_partition_list(tree: &mut RenderTree, app: &PartitionManagerApp) {
         x: left,
         y: top,
         text: String::from("Partitions"),
-        color: COLOR_TEXT,
+        color: app.palette.text,
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(list_width),
@@ -2046,7 +2043,7 @@ fn render_partition_list(tree: &mut RenderTree, app: &PartitionManagerApp) {
     table.header(
         &mut tree.commands,
         header_y + 4.0,
-        COLOR_SUBTEXT0,
+        app.palette.subtext0,
         PARTITION_HEADER_FONT,
     );
 
@@ -2057,7 +2054,7 @@ fn render_partition_list(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y1: data_top,
         x2: geom.right(),
         y2: data_top,
-        color: COLOR_SURFACE1,
+        color: app.palette.surface1,
         width: 1.0,
     });
 
@@ -2082,11 +2079,11 @@ fn render_partition_list(tree: &mut RenderTree, app: &PartitionManagerApp) {
         };
 
         let bg = if is_selected {
-            COLOR_SURFACE1
+            app.palette.surface1
         } else if i % 2 == 0 {
-            COLOR_BASE
+            app.palette.base
         } else {
-            COLOR_SURFACE0
+            app.palette.surface0
         };
 
         tree.push(RenderCommand::FillRect {
@@ -2137,9 +2134,9 @@ fn render_partition_list(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 );
                 for (j, (val, fit)) in values.iter().enumerate() {
                     let text_color = if p.is_system() && (j == PART_LABEL || j == PART_FLAGS) {
-                        COLOR_YELLOW
+                        app.palette.yellow
                     } else {
-                        COLOR_TEXT
+                        app.palette.text
                     };
                     table.cell(
                         &mut tree.commands,
@@ -2164,7 +2161,7 @@ fn render_partition_list(tree: &mut RenderTree, app: &PartitionManagerApp) {
                         index,
                         ry + 5.0,
                         &val,
-                        COLOR_OVERLAY0,
+                        app.palette.overlay0,
                         PARTITION_ROW_FONT,
                         Fit::Start,
                     );
@@ -2198,7 +2195,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y: top,
         width: DETAIL_PANEL_WIDTH,
         height: panel_height,
-        color: COLOR_MANTLE,
+        color: app.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -2208,7 +2205,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y1: top,
         x2: panel_x,
         y2: bottom,
-        color: COLOR_SURFACE1,
+        color: app.palette.surface1,
         width: 1.0,
     });
 
@@ -2222,7 +2219,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         x: px,
         y: py,
         text: String::from("Disk Information"),
-        color: COLOR_BLUE,
+        color: app.palette.blue,
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(text_w),
@@ -2250,16 +2247,16 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
             x: px,
             y: py,
             text: String::from(*label),
-            color: COLOR_SUBTEXT0,
+            color: app.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
         });
         let val_color = if *label == "SMART" {
-            disk.smart_health.color()
+            disk.smart_health.color(&app.palette)
         } else {
-            COLOR_TEXT
+            app.palette.text
         };
         tree.push(RenderCommand::Text {
             x: val_x,
@@ -2283,7 +2280,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
             y1: py,
             x2: panel_x + DETAIL_PANEL_WIDTH - 8.0,
             y2: py,
-            color: COLOR_SURFACE1,
+            color: app.palette.surface1,
             width: 1.0,
         });
         py += 8.0;
@@ -2292,7 +2289,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
             x: px,
             y: py,
             text: String::from("Partition Details"),
-            color: COLOR_BLUE,
+            color: app.palette.blue,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(text_w),
@@ -2307,14 +2304,19 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 y: py,
                 width: DETAIL_PANEL_WIDTH - 16.0,
                 height: 22.0,
-                color: Color::rgba(COLOR_YELLOW.r, COLOR_YELLOW.g, COLOR_YELLOW.b, 40),
+                color: Color::rgba(
+                    app.palette.yellow.r,
+                    app.palette.yellow.g,
+                    app.palette.yellow.b,
+                    40,
+                ),
                 corner_radii: CornerRadii::all(4.0),
             });
             tree.push(RenderCommand::Text {
                 x: px,
                 y: py + 4.0,
                 text: String::from("! System partition - modify with caution"),
-                color: COLOR_YELLOW,
+                color: app.palette.yellow,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(text_w),
@@ -2354,7 +2356,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 x: px,
                 y: py,
                 text: String::from(*label),
-                color: COLOR_SUBTEXT0,
+                color: app.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
@@ -2364,7 +2366,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 x: val_x,
                 y: py,
                 text: value.clone(),
-                color: COLOR_TEXT,
+                color: app.palette.text,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(DETAIL_PANEL_WIDTH - 132.0),
@@ -2384,17 +2386,17 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 y: py,
                 width: bar_w,
                 height: bar_h,
-                color: COLOR_SURFACE0,
+                color: app.palette.surface0,
                 corner_radii: CornerRadii::all(3.0),
             });
 
             let fill_w = (bar_w * pct as f32 / 100.0).max(0.0);
             let fill_color = if pct > 90 {
-                COLOR_RED
+                app.palette.red
             } else if pct > 70 {
-                COLOR_YELLOW
+                app.palette.yellow
             } else {
-                COLOR_GREEN
+                app.palette.green
             };
 
             tree.push(RenderCommand::FillRect {
@@ -2424,7 +2426,7 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y: geom.panel_top,
         width: panel_width,
         height: geom.height(),
-        color: COLOR_SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -2434,7 +2436,7 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y1: geom.panel_top,
         x2: geom.right(),
         y2: geom.panel_top,
-        color: COLOR_SURFACE1,
+        color: app.palette.surface1,
         width: 1.0,
     });
 
@@ -2450,7 +2452,7 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         x: left + 12.0,
         y: geom.panel_top + 7.0,
         text: format!("{expand_icon} {header_text}"),
-        color: COLOR_TEXT,
+        color: app.palette.text,
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(panel_width - 24.0),
@@ -2476,9 +2478,9 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         let hovered = app.hovered_queue_row == Some(i);
 
         let bg = if hovered {
-            COLOR_SURFACE1
+            app.palette.surface1
         } else {
-            COLOR_SURFACE0
+            app.palette.surface0
         };
         tree.push(RenderCommand::FillRect {
             x: left,
@@ -2494,7 +2496,7 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
             x: left + 12.0,
             y: ry + 4.0,
             text: format!("{}.", i.saturating_add(1)),
-            color: COLOR_SUBTEXT0,
+            color: app.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2503,9 +2505,9 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
 
         // Destructive indicator
         let desc_color = if op.is_destructive() {
-            COLOR_RED
+            app.palette.red
         } else {
-            COLOR_TEXT
+            app.palette.text
         };
 
         tree.push(RenderCommand::Text {
@@ -2535,7 +2537,7 @@ fn render_status_bar(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y,
         width: app.width,
         height: STATUS_BAR_HEIGHT,
-        color: COLOR_MANTLE,
+        color: app.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -2545,7 +2547,7 @@ fn render_status_bar(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y1: y,
         x2: app.width,
         y2: y,
-        color: COLOR_SURFACE1,
+        color: app.palette.surface1,
         width: 1.0,
     });
 
@@ -2554,7 +2556,7 @@ fn render_status_bar(tree: &mut RenderTree, app: &PartitionManagerApp) {
         x: 12.0,
         y: y + 6.0,
         text: app.status_message.clone(),
-        color: COLOR_SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(app.width * 0.6),
@@ -2568,7 +2570,7 @@ fn render_status_bar(tree: &mut RenderTree, app: &PartitionManagerApp) {
             x: app.width - 200.0,
             y: y + 6.0,
             text: count_text,
-            color: COLOR_YELLOW,
+            color: app.palette.yellow,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
@@ -2644,7 +2646,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         y: dy,
         width: dw,
         height: dh,
-        color: COLOR_SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::all(8.0),
     });
 
@@ -2653,7 +2655,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         y: dy,
         width: dw,
         height: dh,
-        color: COLOR_SURFACE2,
+        color: app.palette.surface2,
         line_width: 1.0,
         corner_radii: CornerRadii::all(8.0),
     });
@@ -2663,7 +2665,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         x: dx + 20.0,
         y: dy + 20.0,
         text: String::from("Create Partition"),
-        color: COLOR_TEXT,
+        color: app.palette.text,
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(dw - 40.0),
@@ -2675,7 +2677,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         x: dx + 20.0,
         y: dy + 45.0,
         text: format!("Available space: {}", format_size(dialog.available_bytes())),
-        color: COLOR_SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(dw - 40.0),
@@ -2688,7 +2690,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         x: dx + 20.0,
         y: fy,
         text: String::from("Filesystem:"),
-        color: COLOR_SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2700,8 +2702,16 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
     let mut fx = dx + 20.0;
     for (i, fs) in formattable.iter().enumerate() {
         let selected = i == dialog.filesystem_index;
-        let bg = if selected { fs.color() } else { COLOR_SURFACE1 };
-        let fg = if selected { COLOR_BASE } else { COLOR_TEXT };
+        let bg = if selected {
+            fs.color(&app.palette)
+        } else {
+            app.palette.surface1
+        };
+        let fg = if selected {
+            app.palette.base
+        } else {
+            app.palette.text
+        };
         let btn_w = 70.0;
 
         tree.push(RenderCommand::FillRect {
@@ -2735,7 +2745,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         x: dx + 20.0,
         y: fy,
         text: String::from("Label:"),
-        color: COLOR_SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2748,7 +2758,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         y: fy,
         width: dw - 40.0,
         height: 26.0,
-        color: COLOR_BASE,
+        color: app.palette.base,
         corner_radii: CornerRadii::all(4.0),
     });
     tree.push(RenderCommand::StrokeRect {
@@ -2756,7 +2766,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         y: fy,
         width: dw - 40.0,
         height: 26.0,
-        color: COLOR_SURFACE2,
+        color: app.palette.surface2,
         line_width: 1.0,
         corner_radii: CornerRadii::all(4.0),
     });
@@ -2766,9 +2776,9 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         dialog.label.clone()
     };
     let label_color = if dialog.label.is_empty() {
-        COLOR_OVERLAY0
+        app.palette.overlay0
     } else {
-        COLOR_TEXT
+        app.palette.text
     };
     tree.push(RenderCommand::Text {
         x: dx + 28.0,
@@ -2791,7 +2801,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
             format_size(dialog.selected_size_bytes()),
             dialog.size_percent
         ),
-        color: COLOR_SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(dw - 40.0),
@@ -2806,7 +2816,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         y: fy,
         width: bar_w,
         height: 10.0,
-        color: COLOR_SURFACE1,
+        color: app.palette.surface1,
         corner_radii: CornerRadii::all(3.0),
     });
     let fill_w = bar_w * dialog.size_percent as f32 / 100.0;
@@ -2815,7 +2825,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         y: fy,
         width: fill_w,
         height: 10.0,
-        color: COLOR_BLUE,
+        color: app.palette.blue,
         corner_radii: CornerRadii::all(3.0),
     });
 
@@ -2826,9 +2836,14 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
 
     let create_hovered = dialog.hovered_button == Some(0);
     let create_bg = if create_hovered {
-        COLOR_BLUE
+        app.palette.blue
     } else {
-        Color::rgba(COLOR_BLUE.r, COLOR_BLUE.g, COLOR_BLUE.b, 180)
+        Color::rgba(
+            app.palette.blue.r,
+            app.palette.blue.g,
+            app.palette.blue.b,
+            180,
+        )
     };
 
     tree.push(RenderCommand::FillRect {
@@ -2843,7 +2858,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         x: create_x + 18.0,
         y: btn_y + 8.0,
         text: String::from("Create"),
-        color: COLOR_BASE,
+        color: app.palette.base,
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(DIALOG_BTN_WIDTH - 20.0),
@@ -2852,9 +2867,9 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
 
     let cancel_hovered = dialog.hovered_button == Some(1);
     let cancel_bg = if cancel_hovered {
-        COLOR_SURFACE2
+        app.palette.surface2
     } else {
-        COLOR_SURFACE1
+        app.palette.surface1
     };
 
     tree.push(RenderCommand::FillRect {
@@ -2869,7 +2884,7 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
         x: cancel_x + 20.0,
         y: btn_y + 8.0,
         text: String::from("Cancel"),
-        color: COLOR_TEXT,
+        color: app.palette.text,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(DIALOG_BTN_WIDTH - 20.0),
@@ -2920,7 +2935,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y: dy,
         width: DIALOG_WIDTH,
         height: DIALOG_HEIGHT,
-        color: COLOR_SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::all(8.0),
     });
 
@@ -2929,7 +2944,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y: dy,
         width: DIALOG_WIDTH,
         height: DIALOG_HEIGHT,
-        color: COLOR_SURFACE2,
+        color: app.palette.surface2,
         line_width: 1.0,
         corner_radii: CornerRadii::all(8.0),
     });
@@ -2942,7 +2957,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
             "Format Partition {} (\"{}\")",
             dialog.partition_index, dialog.partition_label
         ),
-        color: COLOR_RED,
+        color: app.palette.red,
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(DIALOG_WIDTH - 40.0),
@@ -2955,14 +2970,14 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         y: dy + 50.0,
         width: DIALOG_WIDTH - 40.0,
         height: 36.0,
-        color: Color::rgba(COLOR_RED.r, COLOR_RED.g, COLOR_RED.b, 30),
+        color: Color::rgba(app.palette.red.r, app.palette.red.g, app.palette.red.b, 30),
         corner_radii: CornerRadii::all(4.0),
     });
     tree.push(RenderCommand::Text {
         x: dx + 32.0,
         y: dy + 60.0,
         text: String::from("All data on this partition will be erased!"),
-        color: COLOR_RED,
+        color: app.palette.red,
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(DIALOG_WIDTH - 64.0),
@@ -2974,7 +2989,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         x: dx + 20.0,
         y: dy + 100.0,
         text: String::from("New filesystem:"),
-        color: COLOR_SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2986,8 +3001,16 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
     let fs_y = dy + 120.0;
     for (i, fs) in formattable.iter().enumerate() {
         let selected = i == dialog.filesystem_index;
-        let bg = if selected { fs.color() } else { COLOR_SURFACE1 };
-        let fg = if selected { COLOR_BASE } else { COLOR_TEXT };
+        let bg = if selected {
+            fs.color(&app.palette)
+        } else {
+            app.palette.surface1
+        };
+        let fg = if selected {
+            app.palette.base
+        } else {
+            app.palette.text
+        };
         let btn_w = 70.0;
 
         tree.push(RenderCommand::FillRect {
@@ -3022,9 +3045,9 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
 
     let format_hovered = dialog.hovered_button == Some(0);
     let format_bg = if format_hovered {
-        COLOR_RED
+        app.palette.red
     } else {
-        Color::rgba(COLOR_RED.r, COLOR_RED.g, COLOR_RED.b, 180)
+        Color::rgba(app.palette.red.r, app.palette.red.g, app.palette.red.b, 180)
     };
 
     tree.push(RenderCommand::FillRect {
@@ -3039,7 +3062,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         x: format_x + 18.0,
         y: btn_y + 8.0,
         text: String::from("Format"),
-        color: COLOR_BASE,
+        color: app.palette.base,
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(DIALOG_BTN_WIDTH - 20.0),
@@ -3048,9 +3071,9 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
 
     let cancel_hovered = dialog.hovered_button == Some(1);
     let cancel_bg = if cancel_hovered {
-        COLOR_SURFACE2
+        app.palette.surface2
     } else {
-        COLOR_SURFACE1
+        app.palette.surface1
     };
 
     tree.push(RenderCommand::FillRect {
@@ -3065,7 +3088,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         x: cancel_x + 20.0,
         y: btn_y + 8.0,
         text: String::from("Cancel"),
-        color: COLOR_TEXT,
+        color: app.palette.text,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(DIALOG_BTN_WIDTH - 20.0),
@@ -3095,11 +3118,11 @@ pub fn render(app: &mut PartitionManagerApp) -> RenderTree {
         y: 0.0,
         width: app.width,
         height: app.height,
-        color: COLOR_BASE,
+        color: app.palette.base,
         corner_radii: CornerRadii::ZERO,
     });
 
-    render_title_bar(&mut tree, app.width);
+    render_title_bar(&mut tree, &app.palette, app.width);
     render_toolbar(&mut tree, app);
     render_sidebar(&mut tree, app);
     render_disk_map(&mut tree, app);
@@ -3880,6 +3903,10 @@ fn select_adjacent_region(app: &mut PartitionManagerApp, up: bool) {
 // ============================================================================
 
 impl oswindow::app::App for PartitionManagerApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Partition Manager")
     }
@@ -5060,7 +5087,11 @@ mod tests {
 
     #[test]
     fn test_filesystem_type_colors_are_distinct() {
-        let colors: Vec<Color> = FilesystemType::all().iter().map(|fs| fs.color()).collect();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let colors: Vec<Color> = FilesystemType::all()
+            .iter()
+            .map(|fs| fs.color(&pal))
+            .collect();
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {
                 assert_ne!(colors[i], colors[j], "Filesystem colors must be distinct");
@@ -5113,9 +5144,10 @@ mod tests {
 
     #[test]
     fn test_smart_health_colors_distinct() {
-        let h = SmartHealth::Healthy.color();
-        let w = SmartHealth::Warning.color();
-        let f = SmartHealth::Failing.color();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let h = SmartHealth::Healthy.color(&pal);
+        let w = SmartHealth::Warning.color(&pal);
+        let f = SmartHealth::Failing.color(&pal);
         assert_ne!(h, w);
         assert_ne!(h, f);
         assert_ne!(w, f);
@@ -6580,6 +6612,66 @@ mod tests {
             }),
             Response::Redraw,
             "a resize did not ask for a repaint"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        use oswindow::app::App as _;
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut PartitionManagerApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = PartitionManagerApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

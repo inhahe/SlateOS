@@ -17,6 +17,7 @@
 //! Network I/O is performed through Slate OS syscalls; simulated with
 //! representative data for initial development.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::dialog::{DialogAction, FileDialog, list_directory};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -36,20 +37,6 @@ use std::time::Duration;
 // ============================================================================
 // Catppuccin Mocha Theme Colors
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
 // Layout Constants
@@ -114,14 +101,14 @@ impl VpnProtocol {
     }
 
     /// Color for protocol indicator in the UI.
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::OpenVPN => GREEN,
-            Self::WireGuard => BLUE,
-            Self::IPSec => LAVENDER,
-            Self::L2TP => PEACH,
-            Self::PPTP => YELLOW,
-            Self::SSTP => SUBTEXT0,
+            Self::OpenVPN => pal.green,
+            Self::WireGuard => pal.blue,
+            Self::IPSec => pal.lavender,
+            Self::L2TP => pal.peach,
+            Self::PPTP => pal.yellow,
+            Self::SSTP => pal.subtext0,
         }
     }
 
@@ -256,12 +243,12 @@ impl ConnectionStatus {
     }
 
     /// Indicator color for the status.
-    pub fn color(&self) -> Color {
+    pub fn color(&self, pal: &Palette) -> Color {
         match self {
-            Self::Connected => GREEN,
-            Self::Connecting | Self::Reconnecting => YELLOW,
-            Self::Disconnected => OVERLAY0,
-            Self::Error(_) => RED,
+            Self::Connected => pal.green,
+            Self::Connecting | Self::Reconnecting => pal.yellow,
+            Self::Disconnected => pal.overlay0,
+            Self::Error(_) => pal.red,
         }
     }
 
@@ -489,11 +476,11 @@ impl LogLevel {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Info => BLUE,
-            Self::Warning => YELLOW,
-            Self::Error => RED,
+            Self::Info => pal.blue,
+            Self::Warning => pal.yellow,
+            Self::Error => pal.red,
         }
     }
 }
@@ -627,6 +614,12 @@ pub struct VpnManager {
     /// Milliseconds seen by [`Self::advance`] that did not yet make a whole
     /// second. Kept so a sub-second tick interval still moves the clock.
     uptime_carry_ms: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl VpnManager {
@@ -636,6 +629,7 @@ impl VpnManager {
         let connections = profiles.iter().map(|p| VpnConnection::new(p.id)).collect();
         let log = sample_log();
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             profiles,
             connections,
             log,
@@ -1673,7 +1667,7 @@ pub fn render_frame(app: &VpnManager, width: f32, height: f32) -> Frame {
         y: 0.0,
         width: frame.width,
         height: frame.height,
-        color: BASE,
+        color: app.palette.base,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1725,7 +1719,7 @@ fn render_title_bar(frame: &mut Frame, app: &VpnManager) {
         y: 0.0,
         width: frame.width,
         height: TITLE_BAR_HEIGHT,
-        color: MANTLE,
+        color: app.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1735,7 +1729,7 @@ fn render_title_bar(frame: &mut Frame, app: &VpnManager) {
         y: 12.0,
         text: String::from("VPN Manager"),
         font_size: 16.0,
-        color: TEXT_COLOR,
+        color: app.palette.text,
         font_weight: FontWeightHint::Bold,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -1748,7 +1742,11 @@ fn render_title_bar(frame: &mut Frame, app: &VpnManager) {
     } else {
         String::from("No connections")
     };
-    let indicator_color = if active > 0 { GREEN } else { OVERLAY0 };
+    let indicator_color = if active > 0 {
+        app.palette.green
+    } else {
+        app.palette.overlay0
+    };
 
     frame.push(RenderCommand::Text {
         x: frame.width - 160.0,
@@ -1775,9 +1773,9 @@ fn render_title_bar(frame: &mut Frame, app: &VpnManager) {
         width: badge.w,
         height: badge.h,
         color: if on {
-            RED
+            app.palette.red
         } else {
-            Color::rgba(RED.r, RED.g, RED.b, 40)
+            Color::rgba(app.palette.red.r, app.palette.red.g, app.palette.red.b, 40)
         },
         corner_radii: CornerRadii::all(4.0),
     });
@@ -1786,7 +1784,11 @@ fn render_title_bar(frame: &mut Frame, app: &VpnManager) {
         y: 13.0,
         text: String::from("KILL SW"),
         font_size: 11.0,
-        color: if on { MANTLE } else { OVERLAY0 },
+        color: if on {
+            app.palette.mantle
+        } else {
+            app.palette.overlay0
+        },
         font_weight: FontWeightHint::Bold,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -1799,7 +1801,7 @@ fn render_title_bar(frame: &mut Frame, app: &VpnManager) {
         y1: TITLE_BAR_HEIGHT,
         x2: frame.width,
         y2: TITLE_BAR_HEIGHT,
-        color: SURFACE0,
+        color: app.palette.surface0,
         width: 1.0,
     });
 }
@@ -1813,7 +1815,7 @@ fn render_toolbar(frame: &mut Frame, app: &VpnManager) {
         y,
         width: frame.width,
         height: TOOLBAR_HEIGHT,
-        color: SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1825,7 +1827,8 @@ fn render_toolbar(frame: &mut Frame, app: &VpnManager) {
     // exactly 550, where "Export" began, and any relabelling would have
     // silently overlapped them.
     let mut x = TOOLBAR_PADDING;
-    for &(label, color, target) in TOOLBAR_BUTTONS {
+    for &(label, role, target) in TOOLBAR_BUTTONS {
+        let color = role(&app.palette);
         let width = toolbar_button_width(label);
         render_toolbar_button(frame, label, x, btn_y, color);
         frame.hit(target, Rect::new(x, btn_y, width, TOOLBAR_BUTTON_HEIGHT));
@@ -1841,7 +1844,7 @@ fn render_toolbar(frame: &mut Frame, app: &VpnManager) {
         y: y + 10.0,
         text: sort_text,
         font_size: 12.0,
-        color: SUBTEXT0,
+        color: app.palette.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(sort_rect.w),
         overflow: TextOverflow::Ellipsis,
@@ -1854,20 +1857,31 @@ fn render_toolbar(frame: &mut Frame, app: &VpnManager) {
         y1: y + TOOLBAR_HEIGHT,
         x2: frame.width,
         y2: y + TOOLBAR_HEIGHT,
-        color: SURFACE1,
+        color: app.palette.surface1,
         width: 1.0,
     });
 }
 
-/// The toolbar, left to right: label, colour, and what pressing it means.
-const TOOLBAR_BUTTONS: &[(&str, Color, Target)] = &[
-    ("Add", GREEN, Target::AddProfile),
-    ("Remove", RED, Target::RemoveProfile),
-    ("Connect", BLUE, Target::ConnectSelected),
-    ("Disconnect", PEACH, Target::DisconnectSelected),
-    ("Quick Connect", LAVENDER, Target::QuickConnect),
-    ("Import", SUBTEXT0, Target::Import),
-    ("Export", SUBTEXT0, Target::Export),
+/// The toolbar, left to right: label, which palette role paints it, and what
+/// pressing it means.
+///
+/// The colour is a function of the palette rather than a colour, because this
+/// is a `const` and the palette is resolved at run time from the user's
+/// settings. A `fn(&Palette) -> Color` is const-constructible and picks the
+/// role out at draw time, which keeps the table declarative without pinning it
+/// to one theme.
+/// One toolbar button: its label, the palette role that paints it, and what
+/// pressing it means.
+type ToolbarButton = (&'static str, fn(&Palette) -> Color, Target);
+
+const TOOLBAR_BUTTONS: &[ToolbarButton] = &[
+    ("Add", |p| p.green, Target::AddProfile),
+    ("Remove", |p| p.red, Target::RemoveProfile),
+    ("Connect", |p| p.blue, Target::ConnectSelected),
+    ("Disconnect", |p| p.peach, Target::DisconnectSelected),
+    ("Quick Connect", |p| p.lavender, Target::QuickConnect),
+    ("Import", |p| p.subtext0, Target::Import),
+    ("Export", |p| p.subtext0, Target::Export),
 ];
 
 const TOOLBAR_PADDING: f32 = 8.0;
@@ -1921,7 +1935,7 @@ fn render_sidebar(frame: &mut Frame, app: &VpnManager, content_y: f32, content_h
         y: content_y,
         width: SIDEBAR_WIDTH,
         height: content_h,
-        color: MANTLE,
+        color: app.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1934,7 +1948,7 @@ fn render_sidebar(frame: &mut Frame, app: &VpnManager, content_y: f32, content_h
         y: search_rect.y,
         width: search_rect.w,
         height: search_rect.h,
-        color: SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::all(4.0),
     });
     if focused {
@@ -1943,7 +1957,7 @@ fn render_sidebar(frame: &mut Frame, app: &VpnManager, content_y: f32, content_h
             y: search_rect.y,
             width: search_rect.w,
             height: search_rect.h,
-            color: BLUE,
+            color: app.palette.blue,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -1957,9 +1971,9 @@ fn render_sidebar(frame: &mut Frame, app: &VpnManager, content_y: f32, content_h
         text: caret_text(&app.search_query, focused, "Search profiles..."),
         font_size: 12.0,
         color: if empty && !focused {
-            OVERLAY0
+            app.palette.overlay0
         } else {
-            TEXT_COLOR
+            app.palette.text
         },
         font_weight: FontWeightHint::Regular,
         max_width: Some(SIDEBAR_WIDTH - 32.0),
@@ -1988,7 +2002,7 @@ fn render_sidebar(frame: &mut Frame, app: &VpnManager, content_y: f32, content_h
         if let Some(profile) = app.profiles.get(prof_idx) {
             let is_selected = app.selected_profile == Some(prof_idx);
             let conn = app.connection_for(profile.id);
-            render_sidebar_item(frame, profile, conn, item_y, is_selected);
+            render_sidebar_item(frame, &app.palette, profile, conn, item_y, is_selected);
             // By id, not by index: `sort_profiles` runs whenever the sort order
             // changes or a connection changes state, and it reorders `profiles`
             // under whatever the pointer was over.
@@ -2007,13 +2021,14 @@ fn render_sidebar(frame: &mut Frame, app: &VpnManager, content_y: f32, content_h
         y1: content_y,
         x2: SIDEBAR_WIDTH,
         y2: content_y + content_h,
-        color: SURFACE0,
+        color: app.palette.surface0,
         width: 1.0,
     });
 }
 
 fn render_sidebar_item(
     frame: &mut Frame,
+    pal: &Palette,
     profile: &VpnProfile,
     connection: Option<&VpnConnection>,
     y: f32,
@@ -2026,13 +2041,15 @@ fn render_sidebar_item(
             y,
             width: SIDEBAR_WIDTH - 8.0,
             height: SIDEBAR_ITEM_HEIGHT - 4.0,
-            color: SURFACE0,
+            color: pal.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
     }
 
     // Status indicator dot
-    let status_color = connection.map(|c| c.status.color()).unwrap_or(OVERLAY0);
+    let status_color = connection
+        .map(|c| c.status.color(pal))
+        .unwrap_or(pal.overlay0);
     frame.push(RenderCommand::FillRect {
         x: 16.0,
         y: y + 12.0,
@@ -2044,9 +2061,9 @@ fn render_sidebar_item(
 
     // Profile name
     let name_color = if profile.enabled {
-        TEXT_COLOR
+        pal.text
     } else {
-        OVERLAY0
+        pal.overlay0
     };
     frame.push(RenderCommand::Text {
         x: 34.0,
@@ -2065,7 +2082,7 @@ fn render_sidebar_item(
         y: y + 26.0,
         text: format!("{} - {}", profile.server_address, profile.protocol.label()),
         font_size: 11.0,
-        color: SUBTEXT0,
+        color: pal.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(SIDEBAR_WIDTH - 50.0),
         overflow: TextOverflow::Ellipsis,
@@ -2093,7 +2110,7 @@ fn render_sidebar_item(
             y: y + 8.0,
             width: 32.0,
             height: 16.0,
-            color: Color::rgba(RED.r, RED.g, RED.b, 60),
+            color: Color::rgba(pal.red.r, pal.red.g, pal.red.b, 60),
             corner_radii: CornerRadii::all(3.0),
         });
         frame.push(RenderCommand::Text {
@@ -2101,7 +2118,7 @@ fn render_sidebar_item(
             y: y + 10.0,
             text: String::from("KS"),
             font_size: 10.0,
-            color: RED,
+            color: pal.red,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2119,12 +2136,12 @@ fn render_detail_panel(frame: &mut Frame, app: &VpnManager, content_y: f32, cont
         y: content_y,
         width: pw,
         height: content_h,
-        color: BASE,
+        color: app.palette.base,
         corner_radii: CornerRadii::ZERO,
     });
 
     if app.selected_profile.is_none() || app.profiles.is_empty() {
-        render_no_selection(frame, px, content_y, pw, content_h);
+        render_no_selection(frame, &app.palette, px, content_y, pw, content_h);
         return;
     }
 
@@ -2160,7 +2177,7 @@ fn render_tab_bar(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
         y: py,
         width: pw,
         height: TAB_HEIGHT,
-        color: SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -2177,7 +2194,7 @@ fn render_tab_bar(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
                 y: py,
                 width: tab_w,
                 height: TAB_HEIGHT,
-                color: BASE,
+                color: app.palette.base,
                 corner_radii: CornerRadii::ZERO,
             });
             // Active indicator line
@@ -2186,7 +2203,7 @@ fn render_tab_bar(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
                 y: py + TAB_HEIGHT - 2.0,
                 width: tab_w,
                 height: 2.0,
-                color: BLUE,
+                color: app.palette.blue,
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -2196,7 +2213,11 @@ fn render_tab_bar(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
             y: py + 9.0,
             text: tab.label().to_string(),
             font_size: 12.0,
-            color: if active { TEXT_COLOR } else { SUBTEXT0 },
+            color: if active {
+                app.palette.text
+            } else {
+                app.palette.subtext0
+            },
             font_weight: if active {
                 FontWeightHint::Bold
             } else {
@@ -2210,13 +2231,13 @@ fn render_tab_bar(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
     }
 }
 
-fn render_no_selection(frame: &mut Frame, px: f32, py: f32, pw: f32, ph: f32) {
+fn render_no_selection(frame: &mut Frame, pal: &Palette, px: f32, py: f32, pw: f32, ph: f32) {
     frame.push(RenderCommand::Text {
         x: px + pw / 2.0 - 80.0,
         y: py + ph / 2.0 - 10.0,
         text: String::from("Select a VPN profile"),
         font_size: 16.0,
-        color: OVERLAY0,
+        color: pal.overlay0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -2232,11 +2253,26 @@ fn render_tab_overview(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
     let mut y = py + SECTION_PADDING;
 
     // Section: Profile Info
-    y = render_section_title(frame, "Profile Information", px + SECTION_PADDING, y);
+    y = render_section_title(
+        frame,
+        &app.palette,
+        "Profile Information",
+        px + SECTION_PADDING,
+        y,
+    );
 
-    y = render_field_row(frame, "Name:", &profile.name, px + SECTION_PADDING, y, pw);
     y = render_field_row(
         frame,
+        &app.palette,
+        "Name:",
+        &profile.name,
+        px + SECTION_PADDING,
+        y,
+        pw,
+    );
+    y = render_field_row(
+        frame,
+        &app.palette,
         "Server:",
         &profile.server_address,
         px + SECTION_PADDING,
@@ -2245,6 +2281,7 @@ fn render_tab_overview(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
     );
     y = render_field_row(
         frame,
+        &app.palette,
         "Port:",
         &profile.port.to_string(),
         px + SECTION_PADDING,
@@ -2253,6 +2290,7 @@ fn render_tab_overview(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
     );
     y = render_field_row(
         frame,
+        &app.palette,
         "Protocol:",
         profile.protocol.label(),
         px + SECTION_PADDING,
@@ -2261,6 +2299,7 @@ fn render_tab_overview(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
     );
     y = render_field_row(
         frame,
+        &app.palette,
         "Auth:",
         profile.auth_method.label(),
         px + SECTION_PADDING,
@@ -2269,6 +2308,7 @@ fn render_tab_overview(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
     );
     y = render_field_row(
         frame,
+        &app.palette,
         "MTU:",
         &profile.mtu.to_string(),
         px + SECTION_PADDING,
@@ -2299,7 +2339,15 @@ fn render_tab_overview(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
         ),
     ];
     for (label, on, target) in toggles {
-        y = render_toggle_row(frame, label, on, px + SECTION_PADDING, y, target);
+        y = render_toggle_row(
+            frame,
+            &app.palette,
+            label,
+            on,
+            px + SECTION_PADDING,
+            y,
+            target,
+        );
     }
 
     y += 12.0;
@@ -2312,28 +2360,36 @@ fn render_tab_overview(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
         "Edit...",
         px + SECTION_PADDING,
         y,
-        BLUE,
+        app.palette.blue,
         Target::EditProfile,
     );
     y += BUTTON_HEIGHT + 12.0;
 
     // DNS overrides
     if !profile.dns_override.is_empty() {
-        y = render_section_title(frame, "DNS Override", px + SECTION_PADDING, y);
+        y = render_section_title(frame, &app.palette, "DNS Override", px + SECTION_PADDING, y);
         for dns in &profile.dns_override {
-            y = render_field_row(frame, "", dns, px + SECTION_PADDING + 8.0, y, pw);
+            y = render_field_row(
+                frame,
+                &app.palette,
+                "",
+                dns,
+                px + SECTION_PADDING + 8.0,
+                y,
+                pw,
+            );
         }
         y += 4.0;
     }
 
     // Notes
     if !profile.notes.is_empty() {
-        y = render_section_title(frame, "Notes", px + SECTION_PADDING, y);
+        y = render_section_title(frame, &app.palette, "Notes", px + SECTION_PADDING, y);
         // `RenderCommand::Text` clips at `max_width` rather than wrapping, so
         // notes longer than the panel is wide used to be shown as their first
         // line and no more. Nothing is drawn under them and the whole tab is
         // clipped to the panel, so they can simply run as long as they are.
-        text::Paragraph::new(&profile.notes, SUBTEXT0)
+        text::Paragraph::new(&profile.notes, app.palette.subtext0)
             .at(
                 px + SECTION_PADDING + 8.0,
                 y,
@@ -2356,7 +2412,12 @@ fn render_tab_overview(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
             y: summary_y - 4.0,
             width: 170.0,
             height: 80.0,
-            color: Color::rgba(GREEN.r, GREEN.g, GREEN.b, 20),
+            color: Color::rgba(
+                app.palette.green.r,
+                app.palette.green.g,
+                app.palette.green.b,
+                20,
+            ),
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -2365,7 +2426,7 @@ fn render_tab_overview(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
             y: summary_y,
             text: String::from("Connected"),
             font_size: 14.0,
-            color: GREEN,
+            color: app.palette.green,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2375,7 +2436,7 @@ fn render_tab_overview(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
             y: summary_y + 20.0,
             text: format!("IP: {}", c.local_ip),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: app.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2385,7 +2446,7 @@ fn render_tab_overview(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
             y: summary_y + 36.0,
             text: format!("Latency: {}ms", c.latency_ms),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: app.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2395,7 +2456,7 @@ fn render_tab_overview(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
             y: summary_y + 52.0,
             text: format!("Uptime: {}", c.format_uptime()),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: app.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2411,12 +2472,18 @@ fn render_tab_connection(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, 
     let conn = app.connection_for(profile.id);
     let mut y = py + SECTION_PADDING;
 
-    y = render_section_title(frame, "Connection Details", px + SECTION_PADDING, y);
+    y = render_section_title(
+        frame,
+        &app.palette,
+        "Connection Details",
+        px + SECTION_PADDING,
+        y,
+    );
 
     if let Some(c) = conn {
         // Status with colored indicator
         let status_label = c.status.label();
-        let status_color = c.status.color();
+        let status_color = c.status.color(&app.palette);
 
         frame.push(RenderCommand::FillRect {
             x: px + SECTION_PADDING,
@@ -2439,9 +2506,18 @@ fn render_tab_connection(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, 
         y += FIELD_HEIGHT;
 
         if c.status == ConnectionStatus::Connected {
-            y = render_field_row(frame, "Local IP:", &c.local_ip, px + SECTION_PADDING, y, pw);
             y = render_field_row(
                 frame,
+                &app.palette,
+                "Local IP:",
+                &c.local_ip,
+                px + SECTION_PADDING,
+                y,
+                pw,
+            );
+            y = render_field_row(
+                frame,
+                &app.palette,
                 "Remote IP:",
                 &c.remote_ip,
                 px + SECTION_PADDING,
@@ -2450,6 +2526,7 @@ fn render_tab_connection(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, 
             );
             y = render_field_row(
                 frame,
+                &app.palette,
                 "Latency:",
                 &format!("{}ms", c.latency_ms),
                 px + SECTION_PADDING,
@@ -2458,6 +2535,7 @@ fn render_tab_connection(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, 
             );
             y = render_field_row(
                 frame,
+                &app.palette,
                 "Uptime:",
                 &c.format_uptime(),
                 px + SECTION_PADDING,
@@ -2466,9 +2544,16 @@ fn render_tab_connection(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, 
             );
 
             y += 8.0;
-            y = render_section_title(frame, "Data Transfer", px + SECTION_PADDING, y);
+            y = render_section_title(
+                frame,
+                &app.palette,
+                "Data Transfer",
+                px + SECTION_PADDING,
+                y,
+            );
             y = render_field_row(
                 frame,
+                &app.palette,
                 "Sent:",
                 &format_bytes(c.bytes_sent),
                 px + SECTION_PADDING,
@@ -2477,6 +2562,7 @@ fn render_tab_connection(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, 
             );
             y = render_field_row(
                 frame,
+                &app.palette,
                 "Received:",
                 &format_bytes(c.bytes_received),
                 px + SECTION_PADDING,
@@ -2495,7 +2581,7 @@ fn render_tab_connection(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, 
                 "Disconnect",
                 btn_x,
                 y,
-                PEACH,
+                app.palette.peach,
                 Target::DisconnectSelected,
             );
             render_action_button(
@@ -2503,11 +2589,18 @@ fn render_tab_connection(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, 
                 "Reconnect",
                 btn_x + BUTTON_WIDTH + 8.0,
                 y,
-                YELLOW,
+                app.palette.yellow,
                 Target::ReconnectSelected,
             );
         } else {
-            render_action_button(frame, "Connect", btn_x, y, GREEN, Target::ConnectSelected);
+            render_action_button(
+                frame,
+                "Connect",
+                btn_x,
+                y,
+                app.palette.green,
+                Target::ConnectSelected,
+            );
         }
     } else {
         frame.push(RenderCommand::Text {
@@ -2515,7 +2608,7 @@ fn render_tab_connection(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, 
             y,
             text: String::from("No connection data available"),
             font_size: 13.0,
-            color: OVERLAY0,
+            color: app.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2532,11 +2625,18 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
     };
     let mut y = py + SECTION_PADDING;
 
-    y = render_section_title(frame, "Split Tunneling", px + SECTION_PADDING, y);
+    y = render_section_title(
+        frame,
+        &app.palette,
+        "Split Tunneling",
+        px + SECTION_PADDING,
+        y,
+    );
 
     // Toggle
     y = render_toggle_row(
         frame,
+        &app.palette,
         "Enable Split Tunneling",
         profile.split_tunnel,
         px + SECTION_PADDING,
@@ -2551,7 +2651,7 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
         y,
         text: String::from("When enabled, only traffic to the allowed IP ranges"),
         font_size: 11.0,
-        color: SUBTEXT0,
+        color: app.palette.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(pw - SECTION_PADDING * 2.0),
         overflow: TextOverflow::Ellipsis,
@@ -2562,7 +2662,7 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
         y,
         text: String::from("goes through the VPN tunnel."),
         font_size: 11.0,
-        color: SUBTEXT0,
+        color: app.palette.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(pw - SECTION_PADDING * 2.0),
         overflow: TextOverflow::Ellipsis,
@@ -2570,7 +2670,13 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
     y += 24.0;
 
     // Allowed IPs list
-    y = render_section_title(frame, "Allowed IP Ranges", px + SECTION_PADDING, y);
+    y = render_section_title(
+        frame,
+        &app.palette,
+        "Allowed IP Ranges",
+        px + SECTION_PADDING,
+        y,
+    );
 
     if profile.allowed_ips.is_empty() {
         frame.push(RenderCommand::Text {
@@ -2578,7 +2684,7 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
             y,
             text: String::from("No IP ranges configured"),
             font_size: 12.0,
-            color: OVERLAY0,
+            color: app.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2587,7 +2693,11 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
     } else {
         for (i, ip) in profile.allowed_ips.iter().enumerate() {
             // Row background
-            let row_bg = if i % 2 == 0 { SURFACE0 } else { BASE };
+            let row_bg = if i % 2 == 0 {
+                app.palette.surface0
+            } else {
+                app.palette.base
+            };
             frame.push(RenderCommand::FillRect {
                 x: px + SECTION_PADDING,
                 y,
@@ -2601,7 +2711,7 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
                 y: y + 6.0,
                 text: ip.clone(),
                 font_size: 12.0,
-                color: TEXT_COLOR,
+                color: app.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(pw - SECTION_PADDING * 2.0 - 80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2614,7 +2724,7 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
                 y: y + 6.0,
                 text: String::from("Remove"),
                 font_size: 11.0,
-                color: RED,
+                color: app.palette.red,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2642,7 +2752,7 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
         y: input.y,
         width: input.w,
         height: input.h,
-        color: MANTLE,
+        color: app.palette.mantle,
         corner_radii: CornerRadii::all(4.0),
     });
     frame.push(RenderCommand::StrokeRect {
@@ -2650,7 +2760,11 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
         y: input.y,
         width: input.w,
         height: input.h,
-        color: if focused { BLUE } else { SURFACE1 },
+        color: if focused {
+            app.palette.blue
+        } else {
+            app.palette.surface1
+        },
         line_width: 1.0,
         corner_radii: CornerRadii::all(4.0),
     });
@@ -2660,9 +2774,9 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
         text: caret_text(&app.allowed_ip_input, focused, "10.0.0.0/8"),
         font_size: 12.0,
         color: if app.allowed_ip_input.is_empty() && !focused {
-            OVERLAY0
+            app.palette.overlay0
         } else {
-            TEXT_COLOR
+            app.palette.text
         },
         font_weight: FontWeightHint::Regular,
         max_width: Some(input.w - 16.0),
@@ -2675,7 +2789,7 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
         "Add Range",
         input.right() + 8.0,
         y - 2.0,
-        BLUE,
+        app.palette.blue,
         Target::AddAllowedIp,
     );
 
@@ -2691,6 +2805,7 @@ fn render_tab_protocol(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
 
     y = render_section_title(
         frame,
+        &app.palette,
         &format!("{} Settings", profile.protocol.label()),
         px + SECTION_PADDING,
         y,
@@ -2704,15 +2819,25 @@ fn render_tab_protocol(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
         } => {
             y = render_field_row(
                 frame,
+                &app.palette,
                 "Config File:",
                 config_file,
                 px + SECTION_PADDING,
                 y,
                 pw,
             );
-            y = render_field_row(frame, "Cipher:", cipher, px + SECTION_PADDING, y, pw);
+            y = render_field_row(
+                frame,
+                &app.palette,
+                "Cipher:",
+                cipher,
+                px + SECTION_PADDING,
+                y,
+                pw,
+            );
             y = render_toggle_row(
                 frame,
+                &app.palette,
                 "Compression",
                 *compression,
                 px + SECTION_PADDING,
@@ -2727,15 +2852,25 @@ fn render_tab_protocol(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
         } => {
             y = render_field_row(
                 frame,
+                &app.palette,
                 "Peer Key:",
                 peer_public_key,
                 px + SECTION_PADDING,
                 y,
                 pw,
             );
-            y = render_field_row(frame, "Endpoint:", endpoint, px + SECTION_PADDING, y, pw);
             y = render_field_row(
                 frame,
+                &app.palette,
+                "Endpoint:",
+                endpoint,
+                px + SECTION_PADDING,
+                y,
+                pw,
+            );
+            y = render_field_row(
+                frame,
+                &app.palette,
                 "Keepalive:",
                 &format!("{persistent_keepalive}s"),
                 px + SECTION_PADDING,
@@ -2750,14 +2885,31 @@ fn render_tab_protocol(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
         } => {
             y = render_field_row(
                 frame,
+                &app.palette,
                 "IKE Version:",
                 &format!("v{ike_version}"),
                 px + SECTION_PADDING,
                 y,
                 pw,
             );
-            y = render_field_row(frame, "Phase 1:", phase1_algo, px + SECTION_PADDING, y, pw);
-            y = render_field_row(frame, "Phase 2:", phase2_algo, px + SECTION_PADDING, y, pw);
+            y = render_field_row(
+                frame,
+                &app.palette,
+                "Phase 1:",
+                phase1_algo,
+                px + SECTION_PADDING,
+                y,
+                pw,
+            );
+            y = render_field_row(
+                frame,
+                &app.palette,
+                "Phase 2:",
+                phase2_algo,
+                px + SECTION_PADDING,
+                y,
+                pw,
+            );
         }
         ProtocolSettings::Generic => {
             frame.push(RenderCommand::Text {
@@ -2765,7 +2917,7 @@ fn render_tab_protocol(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
                 y,
                 text: String::from("No protocol-specific settings for this protocol."),
                 font_size: 12.0,
-                color: SUBTEXT0,
+                color: app.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(pw - SECTION_PADDING * 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2780,7 +2932,13 @@ fn render_tab_protocol(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
 fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32, ph: f32) {
     let mut y = py + SECTION_PADDING;
 
-    y = render_section_title(frame, "Connection Log", px + SECTION_PADDING, y);
+    y = render_section_title(
+        frame,
+        &app.palette,
+        "Connection Log",
+        px + SECTION_PADDING,
+        y,
+    );
 
     // Clear log button
     render_action_button(
@@ -2788,7 +2946,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
         "Clear Log",
         px + pw - SECTION_PADDING - BUTTON_WIDTH,
         y - 24.0,
-        RED,
+        app.palette.red,
         Target::ClearLog,
     );
 
@@ -2798,7 +2956,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
             y,
             text: String::from("No log entries"),
             font_size: 12.0,
-            color: OVERLAY0,
+            color: app.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2812,7 +2970,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
         y,
         width: pw - SECTION_PADDING * 2.0,
         height: LOG_ENTRY_HEIGHT,
-        color: SURFACE1,
+        color: app.palette.surface1,
         corner_radii: CornerRadii::all(3.0),
     });
     frame.push(RenderCommand::Text {
@@ -2820,7 +2978,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
         y: y + 4.0,
         text: String::from("Time"),
         font_size: 11.0,
-        color: TEXT_COLOR,
+        color: app.palette.text,
         font_weight: FontWeightHint::Bold,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -2830,7 +2988,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
         y: y + 4.0,
         text: String::from("Level"),
         font_size: 11.0,
-        color: TEXT_COLOR,
+        color: app.palette.text,
         font_weight: FontWeightHint::Bold,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -2840,7 +2998,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
         y: y + 4.0,
         text: String::from("Profile"),
         font_size: 11.0,
-        color: TEXT_COLOR,
+        color: app.palette.text,
         font_weight: FontWeightHint::Bold,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -2850,7 +3008,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
         y: y + 4.0,
         text: String::from("Message"),
         font_size: 11.0,
-        color: TEXT_COLOR,
+        color: app.palette.text,
         font_weight: FontWeightHint::Bold,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -2885,7 +3043,12 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
         let i = window.start.saturating_add(drawn);
         let row_y = rows_top + (drawn as f32) * LOG_ENTRY_HEIGHT;
         let row_bg = if i % 2 == 0 {
-            Color::rgba(SURFACE0.r, SURFACE0.g, SURFACE0.b, 80)
+            Color::rgba(
+                app.palette.surface0.r,
+                app.palette.surface0.g,
+                app.palette.surface0.b,
+                80,
+            )
         } else {
             Color::TRANSPARENT
         };
@@ -2904,7 +3067,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
             y: row_y + 4.0,
             text: format_timestamp(entry.timestamp),
             font_size: 10.0,
-            color: SUBTEXT0,
+            color: app.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2915,7 +3078,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
             y: row_y + 4.0,
             text: entry.level.label().to_string(),
             font_size: 10.0,
-            color: entry.level.color(),
+            color: entry.level.color(&app.palette),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2926,7 +3089,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
             y: row_y + 4.0,
             text: entry.profile_name.clone(),
             font_size: 10.0,
-            color: TEXT_COLOR,
+            color: app.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(110.0),
             overflow: TextOverflow::Ellipsis,
@@ -2937,7 +3100,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
             y: row_y + 4.0,
             text: entry.message.clone(),
             font_size: 10.0,
-            color: SUBTEXT0,
+            color: app.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(pw - SECTION_PADDING * 2.0 - 260.0),
             overflow: TextOverflow::Ellipsis,
@@ -2952,7 +3115,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
             y: rows_top + (window.count as f32) * LOG_ENTRY_HEIGHT,
             text: format!("{hidden} more"),
             font_size: 10.0,
-            color: OVERLAY0,
+            color: app.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2967,11 +3130,18 @@ fn render_tab_stats(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f
     };
     let mut y = py + SECTION_PADDING;
 
-    y = render_section_title(frame, "Usage Statistics", px + SECTION_PADDING, y);
+    y = render_section_title(
+        frame,
+        &app.palette,
+        "Usage Statistics",
+        px + SECTION_PADDING,
+        y,
+    );
 
     // Cumulative stats
     y = render_field_row(
         frame,
+        &app.palette,
         "Total Sent:",
         &format_bytes(profile.total_bytes_sent),
         px + SECTION_PADDING,
@@ -2980,6 +3150,7 @@ fn render_tab_stats(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f
     );
     y = render_field_row(
         frame,
+        &app.palette,
         "Total Received:",
         &format_bytes(profile.total_bytes_received),
         px + SECTION_PADDING,
@@ -2988,6 +3159,7 @@ fn render_tab_stats(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f
     );
     y = render_field_row(
         frame,
+        &app.palette,
         "Total Time:",
         &format_duration_long(profile.total_connection_time_secs),
         px + SECTION_PADDING,
@@ -3001,9 +3173,16 @@ fn render_tab_stats(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f
     if let Some(conn) = app.connection_for(profile.id)
         && conn.status == ConnectionStatus::Connected
     {
-        y = render_section_title(frame, "Current Session", px + SECTION_PADDING, y);
+        y = render_section_title(
+            frame,
+            &app.palette,
+            "Current Session",
+            px + SECTION_PADDING,
+            y,
+        );
         y = render_field_row(
             frame,
+            &app.palette,
             "Session Sent:",
             &format_bytes(conn.bytes_sent),
             px + SECTION_PADDING,
@@ -3012,6 +3191,7 @@ fn render_tab_stats(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f
         );
         y = render_field_row(
             frame,
+            &app.palette,
             "Session Recv:",
             &format_bytes(conn.bytes_received),
             px + SECTION_PADDING,
@@ -3020,6 +3200,7 @@ fn render_tab_stats(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f
         );
         y = render_field_row(
             frame,
+            &app.palette,
             "Uptime:",
             &conn.format_uptime(),
             px + SECTION_PADDING,
@@ -3028,6 +3209,7 @@ fn render_tab_stats(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f
         );
         y = render_field_row(
             frame,
+            &app.palette,
             "Latency:",
             &format!("{}ms", conn.latency_ms),
             px + SECTION_PADDING,
@@ -3039,7 +3221,13 @@ fn render_tab_stats(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f
     y += 16.0;
 
     // Data usage bar chart
-    y = render_section_title(frame, "Data Usage Comparison", px + SECTION_PADDING, y);
+    y = render_section_title(
+        frame,
+        &app.palette,
+        "Data Usage Comparison",
+        px + SECTION_PADDING,
+        y,
+    );
 
     let chart_x = px + SECTION_PADDING;
     let chart_w = pw - SECTION_PADDING * 2.0;
@@ -3067,7 +3255,7 @@ fn render_tab_stats(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f
             y: y + 5.0,
             text: profile.name.clone(),
             font_size: 11.0,
-            color: TEXT_COLOR,
+            color: app.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(120.0),
             overflow: TextOverflow::Ellipsis,
@@ -3079,7 +3267,7 @@ fn render_tab_stats(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f
             y: y + 2.0,
             width: bar_w.max(2.0),
             height: bar_h - 4.0,
-            color: BLUE,
+            color: app.palette.blue,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -3089,7 +3277,7 @@ fn render_tab_stats(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f
             y: y + 5.0,
             text: format_bytes(total),
             font_size: 10.0,
-            color: SUBTEXT0,
+            color: app.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3123,7 +3311,7 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
         y: dy,
         width: dialog_w,
         height: dialog_h,
-        color: SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::all(12.0),
     });
     frame.push(RenderCommand::StrokeRect {
@@ -3131,7 +3319,7 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
         y: dy,
         width: dialog_w,
         height: dialog_h,
-        color: SURFACE1,
+        color: app.palette.surface1,
         line_width: 1.0,
         corner_radii: CornerRadii::all(12.0),
     });
@@ -3146,7 +3334,7 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
             String::from("Add VPN Profile")
         },
         font_size: 16.0,
-        color: TEXT_COLOR,
+        color: app.palette.text,
         font_weight: FontWeightHint::Bold,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -3169,6 +3357,7 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
         for (label, value, field) in typed {
             y = render_dialog_field(
                 frame,
+                &app.palette,
                 label,
                 &value,
                 dx + 20.0,
@@ -3181,6 +3370,7 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
 
         y = render_dialog_field(
             frame,
+            &app.palette,
             "Protocol:",
             profile.protocol.label(),
             dx + 20.0,
@@ -3191,6 +3381,7 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
         );
         y = render_dialog_field(
             frame,
+            &app.palette,
             "Auth:",
             profile.auth_method.label(),
             dx + 20.0,
@@ -3219,7 +3410,7 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
             ),
         ];
         for (label, on, target) in toggles {
-            y = render_toggle_row(frame, label, on, dx + 20.0, y, target);
+            y = render_toggle_row(frame, &app.palette, label, on, dx + 20.0, y, target);
         }
 
         let _ = y; // suppress unused
@@ -3234,7 +3425,7 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
             y: dy + dialog_h - 74.0,
             text: app.dialog_error.clone(),
             font_size: 12.0,
-            color: RED,
+            color: app.palette.red,
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - 40.0),
             overflow: TextOverflow::Ellipsis,
@@ -3248,7 +3439,7 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
         "Cancel",
         dx + dialog_w - 240.0,
         btn_y,
-        RED,
+        app.palette.red,
         Target::DialogCancel,
     );
     render_action_button(
@@ -3256,7 +3447,7 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
         "Save",
         dx + dialog_w - 130.0,
         btn_y,
-        GREEN,
+        app.palette.green,
         Target::DialogSave,
     );
 }
@@ -3270,7 +3461,7 @@ fn render_status_bar(frame: &mut Frame, app: &VpnManager) {
         y,
         width: frame.width,
         height: STATUS_BAR_HEIGHT,
-        color: MANTLE,
+        color: app.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -3280,7 +3471,7 @@ fn render_status_bar(frame: &mut Frame, app: &VpnManager) {
         y1: y,
         x2: frame.width,
         y2: y,
-        color: SURFACE0,
+        color: app.palette.surface0,
         width: 1.0,
     });
 
@@ -3290,7 +3481,7 @@ fn render_status_bar(frame: &mut Frame, app: &VpnManager) {
         y: y + 8.0,
         text: format!("{} profiles", app.profiles.len()),
         font_size: 11.0,
-        color: SUBTEXT0,
+        color: app.palette.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -3303,7 +3494,11 @@ fn render_status_bar(frame: &mut Frame, app: &VpnManager) {
         y: y + 8.0,
         text: format!("{active} connected"),
         font_size: 11.0,
-        color: if active > 0 { GREEN } else { OVERLAY0 },
+        color: if active > 0 {
+            app.palette.green
+        } else {
+            app.palette.overlay0
+        },
         font_weight: FontWeightHint::Regular,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -3317,7 +3512,7 @@ fn render_status_bar(frame: &mut Frame, app: &VpnManager) {
             y: y + 8.0,
             text: format!("TX: {}  RX: {}", format_bytes(sent), format_bytes(recv)),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: app.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3331,7 +3526,7 @@ fn render_status_bar(frame: &mut Frame, app: &VpnManager) {
             y: y + 8.0,
             text: String::from("Kill Switch: ON"),
             font_size: 11.0,
-            color: RED,
+            color: app.palette.red,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3352,7 +3547,7 @@ fn render_status_bar(frame: &mut Frame, app: &VpnManager) {
             y: y + 8.0,
             text: app.status_message.clone(),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: app.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some((right - left).max(0.0)),
             overflow: TextOverflow::Ellipsis,
@@ -3364,13 +3559,13 @@ fn render_status_bar(frame: &mut Frame, app: &VpnManager) {
 // Render Helpers
 // ============================================================================
 
-fn render_section_title(frame: &mut Frame, title: &str, x: f32, y: f32) -> f32 {
+fn render_section_title(frame: &mut Frame, pal: &Palette, title: &str, x: f32, y: f32) -> f32 {
     frame.push(RenderCommand::Text {
         x,
         y,
         text: title.to_string(),
         font_size: 14.0,
-        color: LAVENDER,
+        color: pal.lavender,
         font_weight: FontWeightHint::Bold,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -3381,20 +3576,28 @@ fn render_section_title(frame: &mut Frame, title: &str, x: f32, y: f32) -> f32 {
         y1: y + 18.0,
         x2: x + 200.0,
         y2: y + 18.0,
-        color: Color::rgba(LAVENDER.r, LAVENDER.g, LAVENDER.b, 60),
+        color: Color::rgba(pal.lavender.r, pal.lavender.g, pal.lavender.b, 60),
         width: 1.0,
     });
     y + 26.0
 }
 
-fn render_field_row(frame: &mut Frame, label: &str, value: &str, x: f32, y: f32, _pw: f32) -> f32 {
+fn render_field_row(
+    frame: &mut Frame,
+    pal: &Palette,
+    label: &str,
+    value: &str,
+    x: f32,
+    y: f32,
+    _pw: f32,
+) -> f32 {
     if !label.is_empty() {
         frame.push(RenderCommand::Text {
             x,
             y: y + 4.0,
             text: label.to_string(),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: pal.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(FIELD_LABEL_WIDTH),
             overflow: TextOverflow::Ellipsis,
@@ -3405,7 +3608,7 @@ fn render_field_row(frame: &mut Frame, label: &str, value: &str, x: f32, y: f32,
         y: y + 4.0,
         text: value.to_string(),
         font_size: 12.0,
-        color: TEXT_COLOR,
+        color: pal.text,
         font_weight: FontWeightHint::Regular,
         max_width: Some(400.0),
         overflow: TextOverflow::Ellipsis,
@@ -3420,13 +3623,14 @@ fn render_field_row(frame: &mut Frame, label: &str, value: &str, x: f32, y: f32,
 /// on the row to hit by accident.
 fn render_toggle_row(
     frame: &mut Frame,
+    pal: &Palette,
     label: &str,
     enabled: bool,
     x: f32,
     y: f32,
     target: Target,
 ) -> f32 {
-    let bottom = render_toggle_row_ink(frame, label, enabled, x, y);
+    let bottom = render_toggle_row_ink(frame, pal, label, enabled, x, y);
     frame.hit(
         target,
         Rect::new(x, y, FIELD_LABEL_WIDTH + 36.0, FIELD_HEIGHT),
@@ -3434,13 +3638,20 @@ fn render_toggle_row(
     bottom
 }
 
-fn render_toggle_row_ink(frame: &mut Frame, label: &str, enabled: bool, x: f32, y: f32) -> f32 {
+fn render_toggle_row_ink(
+    frame: &mut Frame,
+    pal: &Palette,
+    label: &str,
+    enabled: bool,
+    x: f32,
+    y: f32,
+) -> f32 {
     frame.push(RenderCommand::Text {
         x,
         y: y + 4.0,
         text: label.to_string(),
         font_size: 12.0,
-        color: SUBTEXT0,
+        color: pal.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(FIELD_LABEL_WIDTH),
         overflow: TextOverflow::Ellipsis,
@@ -3449,9 +3660,9 @@ fn render_toggle_row_ink(frame: &mut Frame, label: &str, enabled: bool, x: f32, 
     // Toggle track
     let track_x = x + FIELD_LABEL_WIDTH;
     let track_color = if enabled {
-        Color::rgba(GREEN.r, GREEN.g, GREEN.b, 120)
+        Color::rgba(pal.green.r, pal.green.g, pal.green.b, 120)
     } else {
-        SURFACE1
+        pal.surface1
     };
     frame.push(RenderCommand::FillRect {
         x: track_x,
@@ -3473,7 +3684,7 @@ fn render_toggle_row_ink(frame: &mut Frame, label: &str, enabled: bool, x: f32, 
         y: y + 6.0,
         width: 14.0,
         height: 14.0,
-        color: if enabled { GREEN } else { OVERLAY0 },
+        color: if enabled { pal.green } else { pal.overlay0 },
         corner_radii: CornerRadii::all(7.0),
     });
 
@@ -3528,6 +3739,7 @@ fn render_action_button_ink(frame: &mut Frame, label: &str, x: f32, y: f32, colo
 /// that are typed into, a cycle for the two that are chosen from a fixed set.
 fn render_dialog_field(
     frame: &mut Frame,
+    pal: &Palette,
     label: &str,
     value: &str,
     x: f32,
@@ -3541,7 +3753,7 @@ fn render_dialog_field(
         y: y + 4.0,
         text: label.to_string(),
         font_size: 12.0,
-        color: SUBTEXT0,
+        color: pal.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(100.0),
         overflow: TextOverflow::Ellipsis,
@@ -3554,7 +3766,7 @@ fn render_dialog_field(
         y: box_rect.y,
         width: box_rect.w,
         height: box_rect.h,
-        color: MANTLE,
+        color: pal.mantle,
         corner_radii: CornerRadii::all(4.0),
     });
     frame.push(RenderCommand::StrokeRect {
@@ -3562,7 +3774,7 @@ fn render_dialog_field(
         y: box_rect.y,
         width: box_rect.w,
         height: box_rect.h,
-        color: if focused { BLUE } else { SURFACE1 },
+        color: if focused { pal.blue } else { pal.surface1 },
         line_width: 1.0,
         corner_radii: CornerRadii::all(4.0),
     });
@@ -3572,9 +3784,9 @@ fn render_dialog_field(
         text: caret_text(value, focused, "..."),
         font_size: 12.0,
         color: if value.is_empty() && !focused {
-            OVERLAY0
+            pal.overlay0
         } else {
-            TEXT_COLOR
+            pal.text
         },
         font_weight: FontWeightHint::Regular,
         max_width: Some(fw - 120.0),
@@ -4526,6 +4738,10 @@ impl VpnManager {
 // ============================================================================
 
 impl App for VpnManager {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("VPN Manager")
     }
@@ -4630,10 +4846,15 @@ mod tests {
 
     #[test]
     fn test_protocol_colors_distinct() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let protos = VpnProtocol::all();
         for (i, a) in protos.iter().enumerate() {
             for b in &protos[i + 1..] {
-                assert_ne!(a.color(), b.color(), "{a:?} and {b:?} share a color");
+                assert_ne!(
+                    a.color(&pal),
+                    b.color(&pal),
+                    "{a:?} and {b:?} share a color"
+                );
             }
         }
     }
@@ -4730,17 +4951,18 @@ mod tests {
 
     #[test]
     fn test_connection_status_colors_differ() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         assert_ne!(
-            ConnectionStatus::Connected.color(),
-            ConnectionStatus::Disconnected.color()
+            ConnectionStatus::Connected.color(&pal),
+            ConnectionStatus::Disconnected.color(&pal)
         );
         assert_ne!(
-            ConnectionStatus::Connected.color(),
-            ConnectionStatus::Error(String::new()).color()
+            ConnectionStatus::Connected.color(&pal),
+            ConnectionStatus::Error(String::new()).color(&pal)
         );
         assert_ne!(
-            ConnectionStatus::Disconnected.color(),
-            ConnectionStatus::Connecting.color()
+            ConnectionStatus::Disconnected.color(&pal),
+            ConnectionStatus::Connecting.color(&pal)
         );
     }
 
@@ -4945,9 +5167,10 @@ mod tests {
 
     #[test]
     fn test_log_level_colors_distinct() {
-        assert_ne!(LogLevel::Info.color(), LogLevel::Warning.color());
-        assert_ne!(LogLevel::Warning.color(), LogLevel::Error.color());
-        assert_ne!(LogLevel::Info.color(), LogLevel::Error.color());
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_ne!(LogLevel::Info.color(&pal), LogLevel::Warning.color(&pal));
+        assert_ne!(LogLevel::Warning.color(&pal), LogLevel::Error.color(&pal));
+        assert_ne!(LogLevel::Info.color(&pal), LogLevel::Error.color(&pal));
     }
 
     // --- SortOrder tests ---
@@ -5134,7 +5357,7 @@ mod tests {
                     color,
                     font_size,
                     ..
-                } if *color == SUBTEXT0
+                } if *color == mgr.palette.subtext0
                     && (*font_size - NOTES_FONT_SIZE).abs() < 0.01
                     && *y > heading_y =>
                 {
@@ -7790,6 +8013,65 @@ mod tests {
         assert!(
             frame.rect_of(|t| *t == Target::AddProfile).is_some(),
             "the toolbar has to survive a small window"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut VpnManager) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = VpnManager::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

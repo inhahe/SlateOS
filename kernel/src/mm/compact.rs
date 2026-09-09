@@ -553,7 +553,7 @@ pub unsafe fn try_migrate_one(old_phys: u64) -> bool {
 /// Exercises the analysis, statistics, and rmap iteration APIs.
 /// Does NOT perform actual page migration (that requires live page tables
 /// with user-space mappings).
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[compact] Running self-test...");
     let mut skips = crate::fs::selftest::Skips::new();
 
@@ -658,4 +658,5 @@ pub fn self_test() {
 
     skips.report("[compact]");
     serial_println!("[compact] Self-test PASSED{}", skips.suffix());
+    Ok(())
 }

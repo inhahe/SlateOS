@@ -73,493 +73,6 @@ and on two entries sharing an identifier while one is still open. It only
 duplicate numbers in the archive, both of which are another lane's text to fix
 or history's to keep. Reasoning: `design-decisions.md` §903.
 
-## Q46 — [A] Every benchmark ever recorded measured an `opt-level = 0` kernel. Should the *non-bench* boot test also switch to release, or only the bench path? — Status: OPEN (costs now measured 2026-08-21; recommendation moved A → C)
-
-**Background.** `scripts/boot-test.sh:602` runs a bare `cargo build` and stages
-`target/x86_64-unknown-none/debug/kernel`. The bench suite is compiled in
-unconditionally — `--bench` only changes which serial marker is awaited — and
-`[profile.dev]` has no kernel `opt-level` override, so all 5 records and all 63
-benchmarks in `bench/history.jsonl` were measured unoptimised and scored
-against `baselines.toml` targets drawn from optimised Linux/Fuchsia/L4
-implementations. Full write-up:
-`known-issues.md` → `B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL`.
-
-**What is not in question.** That `--bench` must build `--release` is not a
-tradeoff — a benchmark that does not measure the shipped build is not a
-benchmark, and `[profile.release.package.kernel]` (`opt-level = 3`,
-`codegen-units = 1`) already exists for exactly this. Claude is proceeding with
-that plus an append-only `profile` field in each history record, so debug
-records are never diffed against release ones. **The question is only about the
-default, non-bench boot test.**
-
-**Option A — leave the default boot test on debug (Claude's lean).**
-- *For:* fast iteration on the ~405 s TCG cycle; readable panics and intact
-  frame pointers when a boot fails; `--bench` already roughly doubles the cycle
-  so the slow path is opt-in.
-- *Against:* two kernel builds live in the tree, and release-only behaviour —
-  miscompiles, UB that only manifests optimised, different timing and stack
-  layout — is then exercised *only* on bench runs, which are the runs nobody
-  reads for correctness. That is a real correctness gap, not just a tidiness
-  one.
-
-**Option B — build release everywhere; the boot test always tests what ships.**
-- *For:* one binary, and the boot test's PASS then means the shipped kernel
-  boots. Any release-only bug surfaces on every run rather than on bench runs.
-- *Against:* slower rebuilds on every iteration, and degraded diagnostics
-  exactly when a boot fails, which is when they matter most. `opt-level = 3`
-  with `codegen-units = 1` on this kernel is not a cheap build.
-
-**Option C — debug by default, plus a periodic release boot test.**
-- *For:* keeps fast iteration and still exercises the release binary on a
-  schedule.
-- *Against:* another mode to maintain, and "periodic" needs a trigger nobody
-  has defined; in practice it tends to mean "never".
-
-**Recommendation: A, with the gap named rather than ignored** — the bench path
-becomes the release path, and if a release-only defect ever shows up there it
-promotes this to B immediately. Claude will not decide between A and B
-unilaterally because B changes the default cost and diagnostics of every boot
-test the other two lanes run, which is theirs to feel as much as Lane A's.
-
-**Update 2026-08-15 — the common work is done, and it moved the tradeoff.**
-The `--bench` → release change and the `profile` history field are in
-(`880c3bfe5`, `c1806720b`). Two things changed since the options were written:
-
-1. **`scripts/boot-test.sh --profile=debug|release` now exists**, decoupling the
-   build profile from the serial marker being awaited. So "run a release boot
-   test" is one flag, on any run, by any lane. **Option C's only real objection
-   — "another mode to maintain" — is gone; the mode is already built and
-   tested.** What C still lacks is a *trigger*, which remains the honest
-   objection to it.
-2. **Release is not the slow build the options assumed it would be at the boot
-   level.** Measured this session on the full bench suite: release QEMU window
-   142 s vs debug 615 s. The release *build* is slower, but the release *boot*
-   is ~4× faster because the kernel executes ~40× fewer instructions under TCG.
-   Option B's "*Against: slower rebuilds on every iteration*" is real, but its
-   implied "slower boot tests" is backwards — B would make the run-time half of
-   every cycle substantially quicker.
-
-Neither point decides A vs B; both are still cost claims and B still changes
-what the other two lanes feel on every boot. But the question is now cheaper to
-answer either way, and if the answer is C, it is already implemented and needs
-only a trigger (Claude's suggestion for one, if C is chosen: a release boot test
-before any lane merges to `main`, since that is already the moment a lane runs
-the slow verification anyway).
-
-**Update 2026-08-21 — the cost was finally measured, and it reverses the
-2026-08-15 reading.** Until today the "slower build" half of this tradeoff had
-never been measured anywhere: build time was not recorded, so the entry argued
-from one measured half (the boot) and one asserted half (the build). Build
-timing now exists (`build_seconds` in `bench/boot-history.jsonl`), and four
-matched runs on one commit (`8b481b0f2`, QEMU TCG, no sanitizer) fill the 2×2:
-
-| what was edited | debug build | debug boot | **debug cycle** | release build | release boot | **release cycle** |
-|---|---|---|---|---|---|---|
-| `posix` + `kernel` | 224 s | 401 s | **625 s** | 714 s | 130 s | **844 s** |
-| `kernel` only | 42 s | 359 s | **401 s** | 594 s | 105 s | **699 s** |
-
-The boot half is 3.1–3.4× faster under release, exactly as claimed on
-2026-08-15. **But the cycle — which is what a person actually waits through —
-is 1.35× *worse* on a two-crate edit and 1.74× worse on a kernel-only one.**
-So this sentence from the 2026-08-15 update, while literally true, argued the
-wrong way and is hereby withdrawn as an argument for B:
-
-> "Option B's '*Against: slower rebuilds on every iteration*' is real, but its
-> implied 'slower boot tests' is backwards — B would make the run-time half of
-> every cycle substantially quicker."
-
-It does speed up the run-time half. The run-time half is the *smaller* half
-under release, and the half it slows down is slowed by more.
-
-**The number that decides it is 42 s → 594 s.** The two-crate row understates
-the penalty at 3.2×; the kernel-only row — the common case, since almost every
-iteration edits the kernel and nothing else — is **14×**. A release cycle after
-a one-line kernel edit is ~11½ minutes against debug's ~6½, and the extra five
-minutes are all compiler, with nothing on screen.
-
-**The obvious escape route was tried and is closed.** That 14× is mostly
-`codegen-units = 1` in `[profile.release.package.kernel]`: one codegen unit
-means a one-line edit recompiles the whole crate as a single non-parallelisable
-unit. "Build release, but with 16 units" would have bought release-only bug
-coverage at a fraction of the cost — except the kernel **does not assemble** at
-`codegen-units = 16`; it fails after 174 s in `alternative_site!`'s
-assembly-time guard (`error: expected absolute expression`). Same tree, same
-toolchain, same command, only the unit count differs. Written up as
-`known-issues.md` → *The release kernel does not assemble at `codegen-units` >
-1*. Until that is understood, "cheap release" is not on the menu, and the
-choice really is between the two columns above.
-
-*What changes, restated as observable differences:*
-- **A:** `./scripts/boot-test.sh` keeps taking ~400 s after a kernel edit and
-  keeps printing readable panics; the shipped (optimised) kernel is only ever
-  booted on `--bench` runs.
-- **B:** every boot test after a kernel edit takes ~700 s instead of ~400 s —
-  five extra minutes of silent compiling per iteration, for every lane, not
-  just A — and a panic prints optimised, harder-to-read frames. In exchange,
-  every run tests the binary that ships.
-- **C:** as A day-to-day, plus one ~700 s release boot at merge time.
-
-*Recommendation after measuring: **C**, which the 2026-08-21 numbers promote
-above A.* The measurement did not change what the options *are*, but it changed
-which one is cheapest for what it buys. B now has a price tag nobody would pay
-per-iteration — five silent extra minutes on every kernel edit, for all three
-lanes. C pays that same price **once per merge**, at the moment a lane is
-already running slow verification and already waiting, and buys exactly the
-thing A gives up: a release-only defect surfaces on a run somebody reads for
-correctness. The 2026-08-15 objection to C ("another mode to maintain") was
-already gone — `--profile=release` exists and is now exercised — and its
-remaining objection, the missing trigger, has an obvious answer: **a release
-boot test before a lane merges to `main`.** Claude still will not choose
-unilaterally, because B and C both change what the other two lanes must run.
-
-*If never answered:* current behaviour (A) is safe and nothing is blocked — the
-gap is that release-only defects surface only on bench runs. It does not get
-worse with time, but it does get *more* likely to matter as more kernel code
-lands unexercised in optimised form. One thing did get slightly worse today:
-release boots are now known to be cheap to *run* (105–130 s) and expensive to
-*build*, so the temptation to reach for B on the strength of the boot figure
-alone is real, and this entry exists partly to stop that.
-
----
-
-## Q47 — [A] The `D:` drive filled to 0 bytes free and destroyed a source file. Should the three lanes share one build-output directory? — Status: OPEN (narrowed — C is done; the question is now only A vs B)
-
-**In short:** The drive the project lives on ran completely out of space today.
-An edit that was half-written when the space ran out left one kernel source
-file **empty** — 18 KB of code replaced by nothing. It was recovered from git in
-under a minute because it happened to be already committed, but five other files
-being edited at the same moment were *not* committed and would have been gone
-for good. The space is going to compiler output: three parallel agents each keep
-their own copy of every compiled artefact, and deleting just one agent's copy
-freed **13 GB**. The question is whether the three should share one output
-directory (much less disk, but they would have to take turns compiling) or keep
-their own (fast, independent, and this happens again).
-
-**Terms:** a *build-output directory* (`target/`) is where the compiler puts
-everything it produces — object files, libraries, the kernel image. It is
-entirely regenerable: deleting it costs a rebuild, never source. Rust's build
-tool locks that directory, so two builds sharing one **queue** rather than run
-at once.
-
-| Option | *What changes:* | Cost |
-|---|---|---|
-| **A — Share one directory** (`CARGO_TARGET_DIR` set to a single path for all three lanes) | Roughly a quarter of the disk footprint; a lane that starts a build while another is compiling **waits** instead of proceeding | Lanes serialise on the build lock. Wall-clock per lane goes up whenever two build at once |
-| **B — Keep separate directories, add pruning** | Nothing changes day to day, except a scheduled/opportunistic `cargo clean` on lanes that have been idle | Keeps parallel builds, but the pruning has to be remembered, and "idle" is a guess |
-| **C — Keep separate, and add a free-space floor to the tooling** | `boot-test.sh` and the test runner refuse to start below (say) 20 GB free and say why | Does not free anything; converts a corrupting failure into an honest refusal |
-| **D — Move the build output off `D:` entirely** | Compiler output goes to another volume; `D:` holds only source and the operator's data | Needs a volume with tens of GB free — operator knows whether one exists; also slower if that volume is slower |
-
-**Measured 2026-08-15, a few hours after the incident** (so you can size the
-options rather than guess at them):
-
-| Where | Build output |
-|---|---|
-| `os` (the integration checkout) | 59.1 GB |
-| `os-lane-b` | 40.4 GB |
-| `os-lane-c` | 35.0 GB |
-| `os-lane-a` | 3.5 GB — small only because it was deleted today to recover |
-| **total** | **138 GB** |
-| free on `D:` right now | **41 GB (2% of a 1.9 TB drive)** |
-
-Two things this makes concrete. First, the footprint is dominated by the
-**integration checkout**, which nobody actively builds in — it is the largest
-single consumer at 59 GB and the cheapest to reclaim, which makes B better than
-it looks on paper. Second, 41 GB free is *less* than a single full rebuild of
-all four trees would need, so the current margin is one careless afternoon wide.
-
-**Claude's recommendation: C now (it is Lane A's to do unilaterally and is
-strictly protective), plus A if you are willing to trade build parallelism.**
-A's serialisation is arguably a *bonus* rather than a cost here: concurrent lane
-builds are already the single largest source of the benchmark contamination
-documented throughout `known-issues.md`, so forcing the lanes to take turns
-would make the performance numbers more trustworthy, not less. But that is a
-real change to how all three agents work, which is why it is not being made
-unilaterally.
-
-**Option C is DONE (2026-08-15, lane A) — you are no longer choosing whether to
-have a safety net, only how to pay for the space.** `scripts/boot-test.sh` now
-refuses to build or stage below **20 GiB** free, naming the incident and telling
-you which worktree to prune. Override per run with `--min-free-gb=N`, or
-`BOOT_TEST_MIN_FREE_GB=N` (0 disables). It is checked twice — before the build
-and again before staging — because the build is itself what consumes the margin,
-and it is staging a partial ~200 MiB kernel image that produces the
-boots-a-stale-kernel failure. If `df` cannot produce a number it prints a warning
-saying the floor is *not* being enforced, rather than skipping silently: a check
-that cannot run must not look like a check that passed.
-
-This does not free a single byte — it converts a corrupting failure into an
-honest refusal, which is why it did not need your decision. **A vs B still does.**
-
-**Also worth re-measuring before you decide:** free space on `D:` is **91 GiB**
-as of this update, up from the 41 GiB in the table above, because the other lanes
-pruned during the day. So the immediate emergency is over and the choice can be
-made on its merits rather than under pressure.
-
-### 2026-08-18 — the floor fired for real, and we now know the refill rate
-
-Lane B's boot test was refused at 13 GiB free
-(`requests/b-a-q47-floor-fired-for-real-and-here-is-the-refill-rate.md`). That is
-option C working as designed, for the first time: it cost one command instead of
-a truncated file. **Nothing is broken; this is the safety net doing its job.**
-
-What it adds to the decision is a *rate*, which the question was missing:
-
-| Date | Free on `D:` |
-|---|---|
-| 2026-08-15 | 0 GiB — the incident |
-| 2026-08-15 (later) | 41 GiB — after the emergency prune |
-| ~2026-08-16 | 91 GiB — "the emergency is over" |
-| **2026-08-18** | **13 GiB** — floor fires |
-
-**~78 GiB consumed in about two days.** So the margin a prune buys is roughly a
-**two-to-three-day** margin at three-lane pace — the same order as one
-rate-limit window.
-
-That is the number that prices option B. B's cost was written above as "the
-pruning has to be remembered"; it can now be stated concretely as **a chore that
-recurs every two to three days, with no owner, landing on whichever lane happens
-to trip the floor first while it is in the middle of something else.** That is
-what happened to Lane B today.
-
-One thing does move in B's favour, though, and it is worth weighing against the
-above: the reclaim is **cheap, safe and well-targeted**. `cargo clean` on the
-integration checkout freed 13 GiB → 32 GiB in a single command, and that tree is
-regenerable output that nobody develops in. So B is not "prune something you
-might still need"; it is "prune the merge tree", which is a rule that can be
-written down rather than remembered. Re-measured sizes, which also update the
-table above:
-
-| Where | `target/` |
-|---|---|
-| `os` (integration checkout) | 21.4 GiB |
-| `os-lane-a` | 27.0 GiB |
-
-The shape from 2026-08-15 holds: the checkout nobody develops in is a large
-share of the footprint and the cheapest thing to reclaim.
-
-**This does not change the recommendation, and it does not decide A vs B.** It
-means that if you pick B, it should be picked *with* an automated trigger rather
-than as a habit — see the `--prune-integration-target` note under "If never
-answered" below.
-
-**If never answered:** the disk fills again every two to three days — but it now
-announces itself as a refused boot test rather than as a truncated source file,
-and the 2026-08-18 firing shows the refusal costs about one command to clear.
-Note the floor protects the *harness* only: a `cargo build` you run by hand, or
-an editor writing a file, is still unguarded, so this reduces the blast radius
-without removing it.
-
-So the honest answer to "what if you never decide" is now: **it keeps working,
-at a cost of one interruption per lane per few days.** That is a real tax but
-not a rising one, which is why this question is not urgent even though it fires
-regularly.
-
-Lane A has since closed the gap that made that interruption expensive. The
-remedy already existed — `scripts/reclaim-space.py`, which frees space by
-*renaming* a directory before deleting it (Windows refuses to rename a
-directory with an open file inside, so a successful rename is proof nothing was
-using it, rather than a timestamp guess) — but `boot-test.sh` did not name it.
-It advised a manual `cargo clean`, which is why Lane B cleaned by hand. The
-floor now names the tool and accepts `--reclaim-space` to run it and retry.
-That reduces B's cost but deliberately does **not** pick B: it is opt-in per
-run and changes nothing unless asked for.
-
-### 2026-08-18, later — what option B *actually* costs a lane, and why it is now smaller
-
-Lane B ran the tool for real and measured the thing this entry had been pricing
-by assumption
-(`requests/b-a-reclaim-space-crashes-on-every-real-run-and-strands-the-tree.md`).
-Their finding, which is the more consequential half of that file:
-
-> With `os/target` already cleaned and the other two lanes' trees off-limits at
-> the defaults, **the only candidate the script can offer this lane is its own
-> `target/`.**
-
-That is worth stating plainly, because it changes B's price. Above, B's cost is
-written as "a chore that recurs every two to three days" — a chore being an
-*interruption*. But if the only tree a lane may reclaim is its own, the recurring
-cost is not one command; it is **a full cold rebuild for whichever lane trips the
-floor**, every two or three days. That is a materially worse number than this
-entry has been carrying, and it was a structural property of the defaults, not an
-accident: the ordering was `[integration checkout, our own]`, with *every* other
-worktree — live lane tree and dead scratch checkout alike — behind
-`--allow-lane-targets`.
-
-**Lane A has since fixed the part of that which was ours to fix.** Lumping those
-two together was wrong: `CLAUDE.md` blesses exactly four worktrees (`os`,
-`os-lane-a/b/c`), so a checkout on any other branch — or on none, which is what
-`git worktree add <path> <commit>` produces and therefore what every bisect tree
-here is — belongs to nobody, and its `target/` costs no one a rebuild they were
-going to run. `reclaim-space.py` now classifies worktrees **by branch** and
-attacks unowned scratch trees *first*, ahead of the integration checkout and well
-ahead of our own. Live lane trees stay exactly where they were, behind the flag.
-A tree that is mid-build is still protected by the existing rename veto.
-
-Measured in this worktree today, in precisely lane B's situation (`os/target`
-already clean):
-
-```
-Step 2: target/ directories, unowned scratch trees first
-  candidate  …\os-bisect-a\target            [no lane owns it]
-  candidate  …\os-straddle-scratch\target    [no lane owns it]
-  candidate  …\os-lane-a\target              [this lane -- ours to pay]
-```
-
-Two candidates now precede the lane's own tree where before there were none.
-
-**Honesty about the size of that win: today it is small.** Those two scratch
-trees hold 76 MB and 75 MB — they have been pruned since they were built, so they
-would not have saved lane B this morning. What changed is structural, not
-numeric: the class exists, it is taken by default, and it is where a dead bisect
-checkout's build output lands (`os-bisect-a` held a full kernel build when it was
-created). The next lane to trip the floor with a live scratch tree around pays
-nothing instead of paying a rebuild.
-
-**Net effect on the decision: B is cheaper than the paragraph above priced it,
-but not free, and the residual cost is exactly what lane B named.** Once scratch
-trees are exhausted, a lane still faces its own `target/` and nobody else's. That
-is deliberate — spending our own before a neighbour's is the only ordering that
-cannot be read as helping ourselves at their expense — but it means B's
-steady-state cost, in the worst case, remains one cold rebuild per floor-trip.
-Option A (one shared `target/`) does not have that cost at all, because there is
-only one tree to prune and no question of whose it is. **That is the sharpest
-argument for A that has been made in this entry, and it came from a measurement
-rather than from reasoning.**
-
-### 2026-08-21 — the operator asked "why not b *and* c?"
-
-Recorded here because it was answered in conversation and would otherwise exist
-only in a transcript, and because the question exposes a defect in how this entry
-was written rather than a gap in the reasoning.
-
-**The answer is: you can have both, and you already do.** The four options were
-laid out as a table, which reads as a menu you pick *one* row from — but only A
-and B are mutually exclusive. C is not an alternative to either; it is a guard
-that sits in front of whichever of them you choose:
-
-| | A — one shared `target/` | B — separate + pruning |
-|---|---|---|
-| **without C** | disk can still reach 0 via a hand-run `cargo build` | same, plus the recurring pruning chore |
-| **with C** (shipped) | harness refuses below 20 GiB and names the tree to prune | harness refuses below 20 GiB and names the tree to prune |
-
-C was implemented unilaterally on 2026-08-15 precisely *because* it composes with
-everything: it frees no space and changes no workflow, it only converts a
-corrupting failure into an honest refusal. So **B+C is what is running today**,
-and has been since that date. Choosing A would leave C exactly as it is.
-
-**What this changes about the question:** nothing about the tradeoff — but the
-framing was misleading, which is what invited the question. The status line
-already said "C is done; the question is now only A vs B," while the option table
-went on presenting all four as peers. The live choice is one row: **share one
-build directory, or keep three and keep pruning.** C stays either way, and D is
-orthogonal too — it asks *where* the output lives, not *how many copies* there
-are, so it composes with A and B just as C does.
-
-### 2026-09-02 — option A's only stated cost has now been measured, and it is much smaller than the table implies
-
-Nothing about the disk-space side has changed (**93 GiB free of 1.9 TB, 95%
-used**, measured today — the margin the August updates left is holding). This
-update is about the *other* column. Option A's cost is stated as "Lanes
-serialise on the build lock. Wall-clock per lane goes up whenever two build at
-once." That sentence assumes the thing worth checking: that two lanes building
-at once today are actually getting two lanes' worth of work done.
-
-**They are not.** Measured today with lane A and lane B each running a boot
-test:
-
-| | uncontended | with a second lane building | ratio |
-|---|---|---|---|
-| read 6441 `.rs` files (`check-variant-lists.py`'s scan) | ~3 s | **368.5 s** | ~120× |
-| mean per file | <1 ms | 57 ms | — |
-| slowest single file | — | 0.86 s | — |
-
-There is no outlier and no pathological input: *every* read is uniformly two
-orders of magnitude slower. The disk is saturated, so the second lane is not
-running alongside the first so much as taking turns with it at a much worse
-exchange rate than a lock would give.
-
-**And it now destroys runs, not just measurements.** The August argument for A
-was that concurrency contaminates benchmark numbers. Today it killed a lane-A
-boot test outright: the run hit its 1800s budget having **never reached QEMU**,
-because the pre-build static gates alone consumed all of it. No fork failed, the
-commit-limit floor never tripped, and every gate that ran passed. Both lanes now
-have to budget 7200s for a job that takes ~8 minutes alone.
-
-*What changes if you pick A:* lanes queue explicitly and each build runs at full
-speed, instead of overlapping and each running at a fraction of it. The wall
-clock the table lists as A's cost is largely already being paid under B — just
-without the queue, the predictability, or the ~100 GiB.
-
-**This does not settle the question,** because it measures the *disk*, not the
-build lock: cargo's lock serialises at a coarser grain than the disk contention
-does, so A could still idle a lane that would otherwise be doing non-disk work.
-It does mean the table's cost column overstates what A gives up, and the
-recommendation above ("A's serialisation is arguably a bonus rather than a
-cost") now has a number behind it rather than only an argument.
-
-**If it is never answered:** B+C keeps running and stays safe on disk — C's
-floor is what makes that true and it is not going away. What continues to
-degrade is throughput and trust in timings: every boot test either takes 4-8×
-longer than it should or has to be re-run with a bigger budget, and no benchmark
-taken while another lane builds is worth recording.
-
-## Q56 — [A] A program compiled for Linux is exempt from the file-permission checks our own programs must pass. Close the gap, or write it down as the price of running Linux software? — Status: OPEN
-
-**In short:** When a program asks this system a question about a file — "how big
-is it?", "when was it changed?" — our own programs are required to hold a
-*permission token* for that, and are refused if they don't. Programs built for
-Linux, which we also run, are never asked: the same question through the Linux
-door is answered without any check at all. So the same program, doing the same
-thing to the same file, is policed or not policed depending on which door it
-came in by. The question is whether to start policing the Linux door too, or to
-accept that it is unpoliced and say so plainly somewhere.
-
-**How this surfaced:** it is not theoretical. A test that runs GNU `make` was
-written when `make` came in by the Linux door, and was given the tokens a Linux
-program needs. The build later switched to a `make` compiled for *our* system,
-which comes in by the other door — and the very same test started failing,
-because now the checks applied and one token was missing. It is fixed (the test
-grants the token now), but the fact that recompiling a program changed what it
-was allowed to do is the thing worth deciding about.
-
-**Glossary:** *capability / permission token* — a thing a process must be handed
-in order to do something, rather than being allowed because of who it is.
-*ambient authority* — permission you get by *being* you, with no token to hold
-or hand over; what Linux uses, and what this project's design says it does not
-want. *ABI* — the convention a compiled program uses to call the system; we
-support two, ours and Linux's, and a program picks one when it is compiled.
-*`stat`* — the call that asks a file's size, times and mode.
-
-**The two doors, concretely:** our own `stat` requires a `File` capability
-carrying the `METADATA` right (8 call sites in `handlers.rs`). The Linux
-translation layer checks a `File` capability for `open` and for the mutating
-`*at` calls, and for nothing else — `stat`, `lstat`, `statx`, `readlink`,
-`statvfs` and the xattr readers all go straight through to the VFS (2
-`require_cap_type` sites in the whole of `linux.rs`).
-
-| Option | *What changes* |
-|---|---|
-| **A. Enforce parity** — the Linux layer checks the same rights ours does | A ported Linux program not given a `METADATA` token can no longer `stat`. Every launch site must grant it, and any we miss fails with "permission denied" on a call the program has no reason to expect can fail. Blast radius today: ~50 Path-Z tests, plus dash, tcc, python and `ld.so` |
-| **B. Leave it, and document it** — declare the Linux ABI a lower-assurance compatibility surface | No behaviour changes. We write down, in `design.txt` and the Linux layer's module doc, that a Linux-ABI process holds ambient filesystem authority — so "capability-based security from day one" is true of native programs only |
-| **C. Draw the boundary deliberately** — keep today's behaviour, but state it as a rule and test it | Same behaviour as B, except the line is explicit and checkable: a newly added Linux syscall that only *reads* metadata is documented as needing no check, so nobody adds one inconsistently and nobody re-investigates this from scratch |
-
-**My recommendation: C, and keep A available.** A is what the design spec's "no
-ambient authority" line implies, and I do not think it can be paid for today —
-the entire value of the Linux ABI is running binaries nobody built for us, and
-those binaries assume ambient authority by construction. B is honest but leaves
-the boundary undrawn, which is how it drifts. C costs a paragraph and a test.
-
-**If this is never answered:** nothing breaks and nothing degrades on its own —
-but the inconsistency is a trap that has already cost one cross-lane
-investigation (lane B correctly ruled out the capability grant, because for the
-ABI they had in mind it genuinely was not checked), and it will cost another
-the next time a binary is rebuilt for the other ABI. Meanwhile the design spec
-claims something about this system that is true of only half of it.
-
-**Where it bites:** `kernel/src/syscall/linux.rs` (the two `require_cap_type`
-sites), `kernel/src/syscall/handlers.rs:8365+` (the native gates),
-`kernel/src/cap/rights.rs` (`Rights::METADATA`).
-
-
 ## B-Q8 — [B] Two of the programs we copy disagree about how wide 626 characters are. Which one do we copy? — Status: OPEN
 
 **In short:** Text on a terminal is laid out in fixed cells, and every program
@@ -706,376 +219,6 @@ that says the tables were measured against bash);
 
 ---
 
-## Q57 — [A] Should a program be able to pop up a prompt asking you for permission to read the keyboard, the microphone or the camera? — Status: OPEN
-
-**In short:** SlateOS has a mechanism where a program that lacks permission for
-something can ask *you* for it — the system shows the program's stated reason and
-you say yes or no. This is the familiar "SomeApp would like to use your
-microphone" prompt. Right now that mechanism only covers fifteen kinds of
-permission, all of them internal plumbing (pipes, timers, processes), and it
-covers **none** of the ones a user would actually recognise: keyboard input,
-sound recording, the graphics card, raw network access, setting the clock. Those
-were all added later and the list was never extended. So today the answer is
-accidentally "no prompts for anything you'd care about" — permission for those
-has to be handed out when a program is launched, by whoever launches it, with no
-way to ask later. The question is whether that accident should become the rule,
-or be fixed.
-
-**How this surfaced:** the keyboard and mouse became readable devices today
-(`/dev/input/event0`, `event1`), gated on a new permission type. Checking whether
-a program could obtain that permission at run time turned up the fifteen-entry
-list, which stops at 15; the keyboard is 30, so the request is refused with
-"invalid argument" — not "denied", which would at least be an honest answer.
-
-**Glossary:** *capability / permission token* — a thing a process must hold to do
-something, rather than being allowed because of who it is. *resource type* — the
-kind of thing a token is about (a file, a pipe, the keyboard); each has a number.
-*grant at spawn* — the launcher hands the token over at start-up; the only route
-that works today for the newer types. *instance type* vs *class type* — some
-tokens name one specific already-open thing (this pipe, this socket), others name
-a whole capability (any keyboard, raw networking). Only the second kind makes
-sense to ask a human about — "may I have a pipe?" is not a question a person can
-answer.
-
-**The list, concretely:** `sys_cap_request` (`kernel/src/syscall/handlers.rs:6181`)
-matches resource types 1–15 by hand and returns `InvalidArgument` for anything
-else. Types 16–30 exist. Most of 16–21 and 25–26 are instance types and belong
-out of the list on the merits. But **23 `Drm` (the graphics card), 22 `AlsaPcm`
-(sound), 24 `NetRaw` (raw network), 27 `SystemClock` (setting the time), 28
-`PrivilegedPort`, 29 `ResourceLimit` and 30 `InputDevice` (the keyboard)** are
-exactly the human-recognisable ones, and all seven are unreachable.
-
-| Option | *What changes* |
-|---|---|
-| **A. Extend the list to every class type** | A program with no keyboard permission can put a prompt on your screen saying why it wants one, and you decide. The seven types above become requestable. Also means a hostile program can *ask* for keylogging — the defence is that you see the request and the reason, which is exactly what the mechanism is for |
-| **B. Extend it to the tame ones only** — sound, clock, ports, limits — and keep keyboard/graphics/raw-network grant-only | Prompts appear for the things where a wrong yes is recoverable; the three where a wrong yes is a total compromise stay launcher-only, so no program can ever ask you for them |
-| **C. Leave it, and say so** — the request mechanism is for the original fifteen; everything newer is grant-at-launch | No behaviour changes. We write down that the newer permissions are deliberately not requestable, and fix the error so a refused request says "not requestable" instead of "invalid argument" |
-
-**My recommendation: A, with the error message fixed regardless.** The whole
-point of a consent prompt is that it covers the things worth consenting to; a
-prompt system that can ask about pipes but not about the microphone has it
-exactly backwards. The "hostile program can ask" objection applies equally to
-every phone and desktop OS and is answered the same way — you are shown who is
-asking and what for, and saying no is free. B's line looks principled but is hard
-to hold: the moment a screen reader legitimately needs keyboard access, B has no
-route for it either.
-
-Independently of which option wins, `InvalidArgument` for a well-formed request
-about a real resource type is wrong and misleading, and lane A will fix that to a
-distinct error either way.
-
-**If this is never answered:** nothing breaks. Every newer permission continues
-to be handed out at launch by init, which works — this is how the compositor will
-get keyboard access. The cost is that the consent-prompt machinery stays
-decorative, and it gets quietly more wrong with each new resource type added
-(three were added this month, none of them requestable). It is also the kind of
-thing that is much cheaper to decide now than after applications have been
-written assuming one answer.
-
-**Where it bites:** `kernel/src/syscall/handlers.rs:6181` (the fifteen-entry
-match), `kernel/src/cap/mod.rs:194-360` (types 16–30), `kernel/src/cap/request.rs`
-(the broker itself).
-
-
-## C-Q6 — [C] We have written the Settings screens twice, in two different places, and neither copy is finished. Which one is the real one? — Status: OPEN
-
-**In short:** There are two separate, independently-written sets of Settings
-pages in this tree — one inside the desktop shell, one inside a standalone
-Settings application — covering mostly the same ground (sound, display, mouse,
-power, network, wallpaper, accounts, updates…). Neither knows the other exists.
-The shell's copy is better tested but **nothing can display it**; the app's copy
-is the one that would actually open if a user clicked "Settings". I need to know
-which one to keep, because everything I do to one I currently have to do twice.
-
-**Glossary:** the *shell* is the always-on desktop furniture — taskbar, start
-menu, wallpaper, the volume popup. An *application* is a separate program the
-user launches. A *panel* or *page* here means one screen of settings.
-
-**Where:**
-
-| | |
-|---|---|
-| Copy 1 | `gui/desktop/src/*_settings.rs` and friends — about 50 modules |
-| Copy 2 | `apps/settings/src/main.rs` — 8,227 lines, its own page list and its own data types |
-| What connects them | nothing (`apps/settings` does not depend on the `desktop` crate at all) |
-
-Copy 1 has one further problem on its own: the shell paints exactly **four** of
-its fifty-seven modules (`wallpaper`, `calendar`, `snap`, `overview`). Every
-other panel it contains — including a few with no counterpart in copy 2, such as
-the on-screen volume overlay, the print manager and the login screen — is drawn
-only by its own unit tests. Full detail is in `known-issues.md` →
-`TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`.
-
-**Measured 2026-08-25, and it is worse than "two copies".** A new scan
-(`scripts/scan-orphan-modules.py`) asks, for every module in my tree, whether
-*any* other file in the repository so much as names one of the things it
-defines. **Fifty-seven modules — 113,132 lines — are named by nothing, and
-thirty-nine of them are in the shell**, a crate that declares fifty-nine. (The
-scan first reported 21; three separate ways of accidentally crediting a module
-with a caller it does not have were found and fixed the same day, each by
-hand-checking a module the scan had cleared. 57 is the corrected figure.)
-
-That the shell has 39 modules with no caller, arrived at mechanically, and
-"the shell paints four of its fifty-seven modules", arrived at by hand two
-days earlier, are the same fact counted two ways.
-
-Three findings in that list change what this question is asking:
-
-- **The shell duplicates itself, not just the app.**
-  `gui/desktop/src/a11y.rs` (2,292 lines: a screen magnifier, four
-  high-contrast schemes, sticky/filter/mouse keys, a colourblind filter) and
-  `gui/desktop/src/accessibility_settings.rs` are two models of the same
-  settings, six type names apart, in the same crate. `a11y.rs` is the copy
-  nobody calls. Same shape for notifications: `notif_pane.rs` and
-  `focus_assist.rs` share two types, and `gui/notifications/src/main.rs` says
-  in its own comment that it shows the same notifications — a **third** copy.
-  *(Update 2026-08-26: the first two are no longer unreached — the shell now
-  owns and drives both, and they were reconciled to each other in the process:
-  `design-decisions.md` §563–§564. That removes them from the island list but
-  **not** from this question: the third copy, `gui/notifications`, is still a
-  separate program modelling the same notifications on a third priority scale,
-  and nothing has decided which of the two is the one a user gets.)*
-- **Option A does not by itself de-duplicate.** File-type associations are
-  modelled in `gui/desktop/src/default_apps.rs` (2,314 lines) *and*
-  `apps/settings/src/associations.rs` (1,748) — and **neither is reachable**.
-  Deleting the shell's copy would leave an unreachable one behind.
-- **Only the app copy has ever been connected to storage.** `gui/desktop`
-  contains no file write of any kind; it reads `appearance.yaml` and stops.
-  `apps/settings` already saves two settings families through
-  `gui/settingsfile`. Meanwhile six shell modules (`a11y`, `power`,
-  `display_settings`, `input_method`, `tray_dnd`, `user_accounts`) hand-write
-  their settings into a string — four of them with a matching parser and a
-  passing round-trip test, two with no parser at all — and nothing calls any
-  of it. What they emit is **`key=value` and pipe-delimited text, not YAML**,
-  which `design.txt` requires for configuration.
-
-None of this decides the question, and it does not change my recommendation.
-It sharpens two things: whichever copy survives, **de-duplication has to
-happen inside the survivor too**; and if the deciding factor is "which copy is
-closer to working for a user", that is the app, on the evidence that it is the
-only one that has ever written a settings file.
-
-### The options
-
-**A. The standalone app is the real one; delete the shell's settings panels.**
-*What changes:* the desktop crate loses tens of thousands of lines; nothing a
-user can see changes today. Cheapest, and it deletes the copy nobody can open.
-Against: it throws away the better-tested implementation, and it does not
-account for the shell-only surfaces (volume overlay, login screen, print
-manager, security dialog) that are not settings pages at all and have nowhere
-else to go.
-
-**B. The shell's panels are the real ones; the app becomes a thin window that
-displays them.**
-*What changes:* the Settings app starts showing the shell's pages instead of its
-own; the duplicate data types in `apps/settings/src/main.rs` go. Keeps the
-tested code. Against: a Settings *application* that has to link the desktop
-shell to draw itself is a backwards dependency, and the shell crate is already
-sixty files.
-
-**C. Split by kind — shell surfaces stay in the shell and get wired up; settings
-pages move to the app and the shell copies are deleted.**
-*What changes:* the volume overlay and the login screen actually appear on
-screen for the first time; the Settings app gains the shell's better-tested
-pages; each page exists once. Most work, and I think it is right — the dividing
-line ("is this something the desktop shows you, or a screen you open?") is a
-real one rather than a compromise.
-
-**If it is never answered:** nothing breaks and nothing gets worse on its own.
-The concrete cost is that every crate-wide change is paid for twice. The one in
-flight is the palette conversion — 549 hardcoded colours in the shell's copy,
-2,258 in the app's — and I am partway through the shell's. I will keep going
-either way, because a converted module is converted once and leaving a module
-frozen guarantees the bug comes back when it is finally wired up. But I would
-rather not start the app's 2,258 without knowing whether half of them are about
-to be deleted.
-
-**Recommendation:** C. B is the tempting middle and I would push back on it: the
-dependency direction is wrong and it papers over the fact that four modules of
-fifty-seven are reachable. A is defensible if the answer is simply "the shell's
-settings pages were a mistake" — and if that is the answer, say so plainly and I
-will delete them rather than convert them.
-
-
-## C-Q7 — [C] In the "green on black" high-contrast scheme, the highlight colour is three times dimmer than in the other three. Change it? — Status: OPEN
-
-**In short:** SlateOS has a "high contrast" setting for people who cannot read
-the normal theme. It offers four fixed colour schemes. In three of them the
-highlight colour — the one used to show which thing is selected — is bright and
-jumps off the background. In the fourth, "green on black", the highlight is
-magenta, which is much darker than the others: about a third as visible. So the
-one scheme aimed at the most strain-sensitive users is the one where "this is
-selected" is hardest to see. The question is whether to change that colour, and
-if so to what — because the current choice is dim *on purpose*, for a reason
-that is also good.
-
-Glossary, once:
-
-- **Contrast ratio** — a single number for "how different in brightness are
-  these two colours", from 1:1 (identical, invisible) to 21:1 (black on white).
-  The web accessibility standard (**WCAG**) asks for at least 4.5:1 for normal
-  text and 7:1 for its strictest level.
-- **Highlight / accent colour** — the colour used for the selected item, the
-  focus ring, the progress bar: not the words themselves, but the marker
-  showing where you are.
-- **Hue** — which colour it is (red, green, blue), as opposed to how bright it
-  is. Two colours can be equally bright and still easy to tell apart by hue —
-  unless the viewer is red-green colour blind, in which case they may not be.
-
-### What is actually there
-
-The four schemes, measured against their own background:
-
-| Scheme | Background | Text | Text contrast | Highlight | Highlight contrast |
-|---|---|---|---|---|---|
-| Black background | black | white | 21.00:1 | yellow `#FFFF00` | **19.56:1** |
-| White background | white | black | 21.00:1 | blue `#0000FF` | **8.59:1** |
-| Yellow on black | black | yellow | 19.56:1 | cyan `#00FFFF` | **16.75:1** |
-| Green on black | black | green | 15.30:1 | magenta `#FF00FF` | **6.70:1** |
-
-Magenta is the outlier, and it cannot simply be "turned up": `#FF00FF` is
-already the brightest magenta that exists. 6.70:1 clears the ordinary WCAG bar
-(4.5:1) and misses the strict one (7:1) — in the mode whose entire purpose is
-to be easier to see than the default.
-
-### Why the dim colour is not obviously wrong
-
-Magenta is the *opposite* of green. That makes it the one highlight in the list
-that stays distinguishable from this scheme's green text under red-green colour
-blindness, and it is the most different in hue from the text of any candidate.
-The brighter alternatives are brighter precisely because they are closer to
-green:
-
-| Candidate highlight | Contrast vs black | Contrast vs the green text |
-|---|---|---|
-| magenta `#FF00FF` (today) | 6.70:1 | 2.29:1 |
-| pale magenta `#FF80FF` | 9.78:1 | 1.56:1 |
-| cyan `#00FFFF` | 16.75:1 | 1.09:1 |
-| white `#FFFFFF` | 21.00:1 | 1.37:1 |
-
-So the trade is real: *visible against the background* and *distinguishable
-from the text* pull in opposite directions here, and today's colour is at one
-end of it.
-
-### Options
-
-**A — Leave it at magenta `#FF00FF`.**
-*What changes:* nothing; the selection marker in "green on black" stays about a
-third as bright as in the other three schemes, and is documented as deliberate.
-
-**B — Pale magenta `#FF80FF`.**
-*What changes:* the selection marker in "green on black" becomes noticeably
-brighter (6.70:1 → 9.78:1, clearing the strict 7:1 bar) while staying pink /
-magenta, so it remains the colour furthest from green.
-
-**C — Cyan `#00FFFF`.**
-*What changes:* the selection marker becomes as bright as in the other schemes
-(16.75:1), but it is now nearly the same brightness as the green text (1.09:1),
-so text and highlight are told apart *only* by hue — which is exactly what a
-red-green colour blind user cannot do. It would also make two of the four
-schemes use the same highlight colour.
-
-**D — White `#FFFFFF`.**
-*What changes:* the selection marker becomes the brightest thing on screen
-(21.00:1) and the scheme becomes two-colour-plus-white. Simple and maximally
-visible; loses the idea that the highlight is a *colour* at all.
-
-### My recommendation
-
-**B.** It is the only option that fixes the thing being complained about
-without giving up the reason the current colour was chosen: it stays a magenta,
-so it stays the hue furthest from the text, and it stops being the dim one. C
-and D are brighter still, but each pays for it — C by collapsing under the
-colour blindness this mode exists to accommodate, D by dropping the colour.
-
-### If this is never answered
-
-Safe, and it does not get worse with time. The current colour is usable and
-above the ordinary accessibility bar; nothing is blocked on this. The one live
-consequence is that the regression test which pins these twelve colours
-(`every_high_contrast_scheme_is_legible_with_itself` in
-`gui/desktop/src/a11y.rs`) has its highlight floor set to **4.5:1** rather than
-7:1, specifically so this scheme passes — so the floor is currently set by the
-outlier rather than by the standard. Answering B, C or D would let that floor
-rise to 7:1 and hold every future scheme to it.
-
-## C-Q8 — [C] You decided in June that we ship the world's timezone data. Nobody can write it, because the lane map hands the job to a directory that does not exist. Who does it? — Status: OPEN
-
-**In short:** if you set your clock to New York, SlateOS quietly gives you
-London's time instead — and says nothing. The fix needs a *package* (a bundle of
-files the system installs, like an app-store download) containing the world's
-timezone rules, which you already approved shipping back in June. It cannot be
-written, because the rule saying which of the three AI sessions owns the package
-manager points at a folder that was never created; the real package manager
-lives in a folder that session is forbidden to touch. This has been stuck since
-2026-08-16 and needs you to say which session writes it.
-
-**Where it bites:** `requests/b-c-tzdata-package.md` (lane B's ask, lane C's
-answer at the foot), `userspace/pkg/src/main.rs` (the real package manager,
-5 004 lines), `roadmap.md`'s ownership map and `scripts/which-lane.py` (both of
-which grant lane C `pkg/**`).
-
-### What is actually wrong
-
-You answered B-Q1 on 2026-08-15 (`design-decisions.md` §311): ship the **full**
-IANA timezone database, vendored as prebuilt binaries, distributed as a package.
-Everything that *reads* that data is already written and tested — the C library
-and the shell both resolve `TZ` through real binary zoneinfo files, matching
-glibc's search order exactly.
-
-There is nothing on disk for them to read. So `TZ=America/New_York` resolves to
-nothing and falls back to **UTC**, with no error. The user believes they picked
-Eastern and gets UTC. Two tests currently *assert* that wrong answer, on purpose,
-and are named to say so — they go red the day the data lands, which is the
-signal that it worked.
-
-The ownership map says lane C owns "the package manager (`pkg/**`)". **There is
-no top-level `pkg/` directory.** The package manager is `userspace/pkg/` — and
-`userspace/**` is on lane C's never-write list. So the lane assigned the work is
-the one lane forbidden to do it, and the lane that owns the files was never
-assigned the work.
-
-### The options
-
-**A — Move the package manager to a top-level `pkg/`, and lane C writes it.**
-*What changes:* nothing user-visible on its own; the ownership map becomes true
-as written, and lane C can start immediately. Costs a tree-wide move of 5 134
-lines plus every path that cites it — exactly the sort of change that conflicts
-across three lanes working in parallel.
-
-**B — Give the tzdata package to lane B, where the package manager already
-lives.** *What changes:* nothing user-visible on its own; the work starts in the
-lane that owns the code, with no move. Costs a standing inconsistency — the map
-keeps saying lane C owns `pkg/**` while lane B owns the package manager — unless
-the map is corrected in the same breath.
-
-**C — Correct the map to say `userspace/pkg/` belongs to lane C, and leave the
-files where they are.** *What changes:* nothing user-visible; lane C gains write
-access to two directories inside lane B's tree. Costs a hole in the otherwise
-clean "lane C never writes `userspace/`" rule, which is the rule that makes the
-three-lane split safe to reason about.
-
-**D — Leave it. Write down that the clock lies.** *What changes:* nothing;
-`TZ=America/New_York` keeps meaning UTC indefinitely.
-
-### My recommendation
-
-**B, with the map corrected in the same change.** The package manager is 5 004
-lines of lane B's code that lane C has never touched; the tzdata package is a
-small addition to it, and asking the lane that wrote it to add one package is far
-cheaper than moving the whole thing or carving an exception. A is the tidiest end
-state and the most expensive to reach — and its cost is paid in merge conflicts
-across three parallel lanes, which is the one currency this project is short of.
-C is the smallest edit and the worst rule.
-
-### If this is never answered
-
-It does not get worse, and nothing else is blocked on it — but it does not get
-better either, and the failure it leaves in place is the quiet kind: a clock that
-is confidently wrong. It has already been stuck nine days for want of one
-sentence from you. Everything else about the feature is finished.
-
-
 ## C-Q9 — [C] The backup tool and the search tools read the same-looking patterns by different rules. Should they be made the same? — Status: OPEN
 
 **In short:** when you tell the backup program which folders to skip, you type a
@@ -1137,18 +280,82 @@ that means two different things depending on its age, which is the kind of thing
 that is impossible to explain and impossible to remove later. Listed for
 completeness; I do not recommend it.
 
-### My recommendation
+### Your two questions, answered — 2026-09-07
 
-**A.** The two search tools had to be unified because they are one feature with
-two implementations — a disagreement with no upside. Backup is not that: its
-dialect is the right one for its job and matches what every developer already
-knows from `.gitignore`, where `[` is likewise not special in the common case.
-The gain from B is small (a shorter way to write a few exclude patterns) and the
-cost lands on data that already exists and that nobody will re-read to check.
+You asked (A) what is normal, and (B) how likely a user is to really benefit.
 
-If you prefer B, the change itself is small — `apps/backup` would call
-`globmatch`'s class parser for the segment-matching step — and the real work is
-deciding whether to warn about existing patterns containing a `[`.
+**(A) What is normal: character classes are standard in *both* families.** This
+is the answer I got wrong the first time round, and it reverses my
+recommendation, so it is worth being blunt about.
+
+| tool | family | `[a-z]` means |
+|---|---|---|
+| `.gitignore` | the exclude-list family | a character class |
+| `rsync --exclude` | same | a character class |
+| `tar --exclude` | same | a character class |
+| POSIX `fnmatch`, every shell glob | the search family | a character class |
+| **our `apps/backup`** | exclude-list | **five literal characters** |
+
+My original recommendation said backup's dialect "matches what every developer
+already knows from `.gitignore`, where `[` is likewise not special in the
+common case". **That is simply false.** Git matches with `fnmatch(3)` and
+`FNM_PATHNAME`, and `[a-z]` is a class there exactly as it is in a shell. I
+asserted it without checking, and the whole case for option A rested on it.
+
+So "no character classes" is normal for **neither** family. It is not a
+deliberate dialect we chose for good reasons; it is a feature the backup
+matcher never grew. The first three rows of the difference table *are* a real
+dialect and are right as they stand — `*` stopping at `/`, `**` spanning
+directories, matching on raw bytes. The fourth row is not a dialect; it is a
+gap.
+
+**This also inverts the direction you were leaning.** Removing classes from
+search and indexing to match backup would make SlateOS the only system a user
+has ever met in which `[a-z]` in a pattern means five literal characters —
+including different from its own shell. It would mean deleting a working,
+carefully-tested feature (`apps/globmatch` handles the awkward POSIX corners:
+`[]]` as the one-element class containing `]`, a trailing `-` as a literal)
+in order to match the one tool that is the outlier.
+
+**(B) Would a user really benefit: rarely — but that is the wrong axis.**
+Direct benefit is small and I will not overstate it. Real exclude lists are
+overwhelmingly `*.tmp`, `node_modules/`, `build/`, `.cache/`. A pattern with a
+bracket in it is uncommon.
+
+The asymmetry is in what happens when one *does* appear, because **both
+behaviours are silent**:
+
+- A user pastes a `.gitignore` into the backup exclude list — far and away the
+  most likely way a `[` arrives, since that is where such lists come from.
+- `[Tt]humbs.db` then excludes a file literally named `[Tt]humbs.db`, which
+  does not exist, so it excludes **nothing**.
+- The backup silently contains files the user believed they had excluded. No
+  error, no warning, and nothing they would ever think to check.
+
+So the question is not "how often is a class useful" but "what does it cost
+when the two languages differ" — and that cost is a wrong backup that looks
+right.
+
+**Your remark that decides it.** You said you have no rules using `[]`. Option
+B's only real cost was the one in its own Cost line: *"a silent change of
+meaning in data users already wrote"*. If that data does not exist, B costs
+nothing and the objection is gone. (One clarification in case it changes your
+answer: this question is about **SlateOS's own `apps/backup`**, not your
+backup program on `D:` — so the installed base is whatever exclude lists exist
+inside this OS, which is currently none.)
+
+### My recommendation, revised: **B**
+
+Teach `apps/backup` character classes, by calling `apps/globmatch`'s existing
+class parser for the segment-matching step. It is one matcher changed rather
+than two, it moves toward both traditions instead of away from both, it turns
+a silent-wrong-answer case into a correct one, and the migration cost that was
+the sole argument against it does not apply.
+
+If you would rather not add the feature, the fallback is **not** option A but
+"make backup **reject** a pattern containing an unescaped `[`" — that keeps
+the languages apart while making the disagreement loud instead of silent,
+which is the only genuinely bad property of the current state.
 
 ### If this is never answered
 
@@ -1156,793 +363,6 @@ Nothing is blocked and nothing degrades. The two dialects are documented in
 `design-decisions.md` §555 and in `apps/globmatch`'s module docs, so the split is
 a recorded decision rather than an accident. The only ongoing cost is that a user
 who learns one pattern language may assume the other works the same way.
-
-## A-Q1 — [A] `find . -size 100` finds 100-byte files here and 50 KiB files everywhere else. Match the rest of the world, or refuse the ambiguous spelling? — Status: OPEN
-
-**In short:** `find` is the command that searches a folder for files matching
-some description. One of the things you can ask about is size. If you write
-`find . -size 100`, our shell reads that as "100 bytes"; the `find` on Linux and
-macOS reads the same line as "100 *blocks*", where a block is 512 bytes — so it
-looks for files around 51 200 bytes instead. Both then print a perfectly
-plausible list of files and neither says anything about having interpreted the
-number differently. The choice is between matching everyone else, keeping our
-(more intuitive) reading, or refusing to accept a bare number at all.
-
-### Why this is a decision and not just a bug to fix
-
-The other `find`'s behaviour is a genuine historical wart — nobody expects a
-bare number to mean 512-byte units, and it surprises every person who meets it
-once. So "bytes" is the reading a human actually intends, and copying the wart
-makes our command worse in isolation.
-
-But the disagreement is *invisible*. A wrong `-type` argument gets you an error
-message; a wrong `-size` unit gets you a tidy list of the wrong files. Anyone
-who brings a command line from a tutorial, a Stack Overflow answer, or their own
-muscle memory gets a different answer here and has no way to notice.
-
-### What each `find` accepts today
-
-| Suffix | Elsewhere (GNU) | Here |
-|---|---|---|
-| *(none)* | 512-byte blocks, rounded up | **bytes** |
-| `c` | bytes | bytes |
-| `k` / `M` / `G` | KiB / MiB / GiB | same |
-| `b` | 512-byte blocks, explicitly | **not accepted** — errors |
-| `w` | 2-byte words | **not accepted** — errors |
-
-Note the last two rows: a suffix we do not implement is already *refused* rather
-than guessed at, which is the behaviour the third option below would extend to
-the bare number.
-
-### The options
-
-**A — match GNU: a bare number means 512-byte blocks.** Also requires adding
-`b` and `w`, so the whole vocabulary lines up.
-*What changes:* `find . -size 100` starts listing ~50 KiB files instead of
-100-byte ones. Commands copied from anywhere else become correct. Any local
-script already written against our reading silently starts selecting different
-files.
-
-**B — keep bytes, and add `b` (and `w`) so blocks can be asked for explicitly.**
-*What changes:* nothing about today's behaviour; `find . -size 100b` becomes a
-new, working way to say "100 blocks". A bare number still means something
-different here than elsewhere, still silently.
-
-**C — keep bytes as the *meaning*, but require the unit to be written.**
-*What changes:* `find . -size 100` becomes an error — `find: -size 100: write
-100c for bytes or 100b for 512-byte blocks` — and `100c`, `100k`, `100b` etc. all
-work. Nobody is ever silently wrong in either direction. Every existing bare-
-number use has to be edited (there are, today, none outside the shell's own help
-text and tests).
-
-### Claude's recommendation
-
-**C.** It is the same principle this lane has been applying everywhere else in
-the shell all month: where two readings are both plausible and the difference
-does not show up in the output, *refuse* rather than pick a side. It is also the
-only option under which a command line copied from outside cannot quietly mean
-something else — A fixes that for GNU users while breaking it for anyone who
-learned our version, and B fixes it for nobody.
-
-`-size` is new enough here that the cost of C is close to zero, which will not
-stay true.
-
-### If this is never answered
-
-Today's behaviour is safe and is documented in the function's own doc comment;
-nothing is blocked. The cost is quiet and grows slowly: every script written
-against a bare `-size` number is one more thing that has to be checked if the
-answer later turns out to be A or C.
-
-### Where it bites
-
-`kernel/src/kshell.rs` — `parse_size_predicate` (the final `else` arm,
-`(rest, 1i64) // default: bytes`) and its one caller, the `-size` arm of `find`.
-Tracked in `known-issues.md` as
-`A-KSHELL-FIND-SIZE-DEFAULT-UNIT-IS-BYTES-NOT-BLOCKS`.
-
----
-
-## A-Q2 — [A] Our C-test programs are built against a library nobody can identify, because the compiler that builds them cannot see the folder it is run from. The fix is in a different project. Who changes it? — Status: OPEN
-
-**In short:** part of our test suite compiles small C programs and runs them
-inside the OS. To build them, the compiler (**fastpy** — a separate project of
-yours, in `D:\visual studio projects\fastpy`) has to find our C library. It
-looks for a folder next to itself named exactly `os`. But we stopped working in
-a folder named `os` — each of the three parallel workers now has its own
-checkout named `os-lane-a`, `os-lane-b`, `os-lane-c` — so the compiler finds
-nothing, every time, for all three. The library it wants is sitting right there
-in the folder it was launched from; it just never looks there. The question is
-who is allowed to change fastpy to fix it, since that is not this project's code.
-
-### What this actually costs
-
-Nothing is broken or wrong — the OS builds and boots fine, and this has no
-effect on the kernel. What is lost is *attribution*: when one of those C
-programs passes or fails, we cannot say which version of our C library it was
-built against, so the result proves less than it appears to. Every boot test
-prints a warning saying so.
-
-I already fixed the half that was in our tree (commit `1367f04ac`): the warning
-used to claim the library could not be *found*, which sent the reader off to
-rebuild something that was never missing. It now names the real cause and gives
-a repair line that works. **So this is not urgent** — it is a known, clearly
-labelled gap rather than a silent one.
-
-### Why I did not just fix fastpy myself
-
-Two reasons, and the second is the one I want your call on.
-
-1. **It needs a judgement, not just an edit.** With four checkouts side by side
-   (`os`, `os-lane-a`, `os-lane-b`, `os-lane-c`), "find the OS folder" no longer
-   has one answer. The sensible rule is "walk up from wherever you were launched
-   and use the checkout you are inside of" — but that is a behaviour change for
-   anything else using fastpy, not a typo fix.
-2. **It is a different repository, and three of us share it.** All three lanes'
-   builds call fastpy. Our own rules say I file a request rather than edit
-   another owner's tree, and fastpy has no lane — so there is nobody to file it
-   with. It also has its own version-bump-and-release discipline that a drive-by
-   commit from the OS project would sit oddly inside.
-
-### The options
-
-**A — I fix fastpy directly** (walk up from the launch directory; keep the old
-`os` lookup as a fallback so nothing that works today stops working), bump its
-version per its own rules, and commit there but do not push.
-*What changes:* the warning stops appearing on all three lanes and the C-test
-results become attributable again. You get a commit in the fastpy repo from OS
-work.
-
-**B — Each lane sets the location explicitly when it builds the fixtures**, and
-fastpy is left alone.
-*What changes:* nothing visible until someone re-builds the C fixtures; the
-warning stays until then. Keeps fastpy untouched, but the same blind spot bites
-anything else that calls it.
-
-**C — Leave it. Keep the accurate warning and treat those C-test results as
-unattributed.**
-*What changes:* nothing. The warning keeps printing on every boot on every lane.
-
-**My recommendation: A.** The hard-coded folder name is a plain bug — it broke
-the moment the project adopted `git worktree`, which is now policy — and B fixes
-the symptom for one caller while leaving the cause. I am flagging it rather than
-doing it only because it is your other repository.
-
-### If this is never answered
-
-Nothing degrades and nothing is blocked. The warning keeps printing on every
-boot for all three lanes, and C-test results stay unattributable. The one real
-risk is the ordinary one for a permanent warning: people stop reading it, so the
-day it has something new to say, it looks like the noise it has been all along.
-
-The index is split by lane so three lanes adding a line at once land at three
-different offsets and the merge is automatic. Newest first within each lane.
-`(§n)` cites `design-decisions.md`.
-
----
-
-## A-Q3 — [A] Should the kernel run its own test suite on a user's boot, and stop the machine when one fails? — Status: OPEN (raised 2026-08-22)
-
-**In short:** Right now, every time this OS starts, the kernel runs several
-hundred of its own built-in tests before handing the machine to the user —
-checking things like "is the backspace key still character 127". Most of those
-checks are written so that a failure **stops the machine dead** rather than
-printing a complaint and moving on. Nothing is failing today. The question is
-what *should* happen on a user's computer the first time one of them is wrong:
-refuse to boot, boot with a warning, or not run the checks there at all.
-
-Glossary, once: a **self-test** here is ordinary kernel code that checks some
-other kernel code and prints the result to the serial console. An **assertion**
-is a check written so that failing it panics — the kernel prints a message and
-halts. A **boot test** is what the developer runs in an emulator; a **production
-boot** is a user starting a real machine. Today these run the *same* code.
-
-### Why it is worth deciding
-
-The two audiences want opposite things and currently get the same behaviour:
-
-- On a **boot test**, halting is *good*. The panic names the file, the line and
-  the values that disagreed, which is better diagnostics than a log line, and
-  the run should fail loudly anyway.
-- On a **production boot**, halting is close to the worst option. A wrong
-  assertion about a terminal flag becomes a computer that will not start, and
-  the user has no way to skip it.
-
-Scale, for a sense of the exposure: 567 files under `kernel/src/` contain both a
-`self_test` function and assertions, 12 674 assertion sites in total. Only ~299
-sites use the alternative style that logs a failure and returns an error instead
-of panicking.
-
-### Options
-
-**A — Gate self-tests behind a boot flag; production boots skip them.**
-*What changes:* a user's machine starts faster and never halts over a self-test;
-the developer adds `selftest=1` (or the boot test does) to get today's
-behaviour.
-Cheapest by far — roughly one conditional around the self-test block in
-`kernel_main`. The cost is that a corrupted or mis-built kernel that a self-test
-would have caught now boots and misbehaves later instead.
-
-**B — Always run them, but never panic: convert assertions to logged failures.**
-*What changes:* a failing check prints `FAIL: ...` and the machine keeps
-booting, on developer and user machines alike.
-Keeps the coverage on real hardware, where it is arguably most valuable, since
-a production boot exercises drivers an emulator does not. The cost is 12 674
-edit sites, and each one *loses* information — an assertion reports the compared
-values and its own line number for free, whereas the replacement reports only
-what its author remembered to include. Realistically a slow migration, not a
-single change.
-
-**C — Run them on production boots and keep halting.** *What changes:* nothing;
-this is today's behaviour, made deliberate.
-Defensible on the "fail fast, never run a kernel that fails its own checks"
-argument. The objection is that the checks are not all equally load-bearing —
-halting the machine because `VERASE` is not 127 is not obviously better than
-booting with a warning.
-
-**D — Split the difference: keep assertions for checks about kernel integrity,
-log-and-continue for the rest.** *What changes:* a bad memory-manager invariant
-still halts; a cosmetic terminal-flag mismatch prints a warning and boots.
-Probably the right end state and the most work to get to, since it needs a
-judgement per self-test rather than a blanket rule.
-
-### My recommendation
-
-**A now, D eventually.** A is a one-line change that removes the user-facing
-risk immediately and costs nothing we are currently getting — the boot test,
-which is where these checks actually earn their keep, would still run them with
-the flag set. It also makes B-versus-D a much less urgent question, because
-after A the assertion style only affects developer boots, where panicking is the
-better behaviour anyway.
-
-### If this is never answered
-
-Safe for now — no self-test is failing, and the streak is 11 consecutive clean
-boots. It does not get worse on its own, but it gets *bigger*: the count grows
-every time someone adds a self-test, and A stays a one-line change forever while
-B and D get more expensive. Meanwhile new self-test code (`pathutil`, `net::raw`,
-`net::frag`) is being written in the log-and-continue style, which is the safe
-side of the question whichever way it goes.
-
-Background: `known-issues.md` →
-`TD-A-MOST-BOOT-SELF-TESTS-PANIC-THE-KERNEL-INSTEAD-OF-REPORTING`.
-
----
-
-## An account with no password: should the lock screen let it through, or refuse forever? (lane C, 2026-08-24)
-
-**In short:** Some accounts have no password set at all. Today, if such an
-account's screen locks, pressing Enter dismisses it — no password is asked for,
-because there is none to ask for. That means anyone who walks up to that
-machine while it is locked gets straight into the session. The obvious fix is to
-refuse: a lock screen with nothing to check should let nobody in. But then the
-*real* user is locked out too, permanently, with no way back to their own
-desktop short of a reboot. I need you to pick which of those two you would
-rather ship.
-
-### Where it bites
-
-`apps/lockscreen/src/main.rs`, `LockScreen::unlocks_for` — one function, written
-specifically so that this is a one-line change once you decide. It is called by
-`submit_password` on every attempt.
-
-The verdict now comes back as one of six values borrowed from lane B's
-`userspace/authlib` (`Accepted`, `Rejected`, `Locked`, `NoPassword`, `Unusable`,
-`RateLimited`). Five of them decide themselves. `NoPassword` — meaning "the
-stored entry for this account is empty" — deliberately does not, because lane B
-made it the *caller's* policy: a console login may reasonably let an empty entry
-through, and a lock screen may not. So each caller must state its own rule, and
-this is ours to state.
-
-### Why it is not obvious
-
-The security argument is clean and lane B makes it: an empty-password account
-means anyone who closes the lid owns the machine.
-
-The counter-argument is that the hole was already open. If the account has no
-password, an attacker standing at that machine can log in as that user from the
-*login* screen without typing anything. Refusing at the lock screen protects an
-already-running session and nothing else — while creating a failure mode that
-is arguably worse than the hole: a desktop that cannot be got back into by the
-person it belongs to.
-
-### Options
-
-**A — accept it (what it does today).**
-*What changes:* nothing. A passwordless account's lock screen is dismissed by
-pressing Enter, as now.
-
-**B — refuse it.**
-*What changes:* a passwordless account that locks can never be unlocked. The
-screen says "This account has no password" and stays up until the machine is
-restarted.
-
-**C — never lock a passwordless account in the first place.**
-*What changes:* auto-lock is suppressed and the manual lock command is refused
-for an account with no password, so the trap in B cannot be entered. If the
-screen is somehow reached anyway it dismisses on any key, as in A. Costs a
-little more code: the suppression has to live wherever locking is triggered,
-not only in the screen.
-
-**D — accept it, but require the account to have been passwordless *before* the
-session started**, so that clearing a password while locked cannot open the
-screen.
-*What changes:* nothing a user would notice; closes a narrow race that only
-matters once `passwd` can be run by something other than the session owner.
-
-### My recommendation
-
-**C.** It is the only one of the four that is neither a hole nor a trap: it
-declines to offer a security boundary that does not exist, rather than
-pretending to enforce one (B) or pretending to have enforced one (A). B's
-failure mode is the one I would least like to explain to a user, because it
-takes a working desktop and makes it unusable through no action of theirs.
-
-If C is more machinery than you want here, **A** — the status quo — is the safer
-of the two remaining, for the reason above: it does not create a new way to lose
-a session, and the exposure it leaves is one the login screen already has.
-
-### If this is never answered
-
-Safe, and it does not get worse. The screen keeps behaving as it always has
-(option A) and the policy is isolated in one function, so answering later costs
-one line plus a test. Nothing is blocked on it. The reason it is worth asking at
-all is that the *refactor that surfaced it* deliberately did not change it —
-altering who can unlock a machine is not something to slip into a commit about
-interface shape.
-
----
-
-## A-Q4 — [A] Should `oci run` refuse to start when an option cannot be applied? — Status: OPEN
-
-**In short:** `oci run` starts a container. If you ask it for something extra —
-a shared folder (`-v`), a published port (`-p`), a file of labels or
-environment variables — and it cannot do that one thing, it currently prints a
-warning, starts the container anyway, and reports success. So you can ask for a
-container with your data folder attached, get one *without* it, and be told
-everything worked. Docker refuses to start at all in this situation. The
-question is which of those two behaviours we want.
-
-**Where:** `kernel/src/kshell.rs`, the `oci run` argument loop — eleven sites,
-all reading `[oci] Warning: could not …` or `[oci] Could not read …-file`.
-Raised during the exit-status sweep (`known-issues.md` →
-`A-KSHELL-3676-FAILING-COMMANDS-REPORTED-SUCCESS`), which deliberately left all
-eleven alone because changing the *status* without deciding the *contract*
-would be the dangerous half of the change on its own.
-
-### Why the sweep did not just fix it
-
-Every other failing command in the shell got a non-zero exit status. These
-eleven did not, because here a non-zero status is worse than the bug. The
-idiom `oci run … || cleanup` exists, and `cleanup` tears down a container.
-Flipping the status would make it tear down a container that is **up and
-running** — turning a wrong exit code into destroyed work. The rule the sweep
-used for this command instead was "did the container start?", and the one site
-that answers no (`Cannot allocate IP from network`) already sets a status and
-returns.
-
-That leaves the real question untouched: should asking for an option that
-cannot be applied mean the container should not have started?
-
-### Options
-
-**A — refuse to start (Docker's behaviour).** Validate every requested option
-before launching; if any cannot be applied, print the reason, start nothing,
-exit non-zero.
-*What changes:* `oci run -v /data:/data img` on an unmountable `/data` prints
-the error and you get **no container**, instead of a running container with no
-`/data`. `|| cleanup` becomes correct, because there is nothing to clean up.
-
-**B — start anyway, but exit non-zero** (today's behaviour plus a status).
-*What changes:* the container still starts without `/data`, but the command
-reports failure — so `|| cleanup` fires **against a live container** and
-destroys it. This is the option that looks like a small fix and is not.
-
-**C — leave exactly as is: warn, start, exit 0.**
-*What changes:* nothing. A script cannot tell that an option was dropped, and
-must inspect the container afterwards to find out.
-
-**D — split by option kind.** Treat options that change what the container *is*
-(`-v`, `-p`, `--label-file`, `--env-file`) as A, and options that are advisory
-(`--read-only` best-effort, tmpfs) as C.
-*What changes:* the dangerous ones fail closed, the cosmetic ones stay
-warnings. More faithful, and more code, and the boundary needs writing down or
-it will drift.
-
-### My recommendation
-
-**A**, matching Docker. The reason is that a container is not a partial
-artifact: you cannot inspect one to discover which options were silently
-dropped, so "started, but not as requested" is a state no caller can act on. A
-is also the only option under which the existing `|| cleanup` idiom is safe,
-because it guarantees there is nothing running to clean up. **D** is defensible
-if refusing to start over an unapplied tmpfs feels too strict — but it needs an
-explicit list, not a judgement call per site.
-
-**Not B.** It is the smallest diff and it is actively harmful.
-
-### If this is never answered
-
-Safe, and stable — today's behaviour destroys nothing and the sweep left it
-untouched on purpose. It does not degrade with time. What it costs is that
-`oci run` cannot be scripted reliably: any script that cares whether its
-options took effect has to verify them itself afterwards, and every such script
-is a place that would need revisiting if the contract later changes.
-
----
-
-## A-Q5 — [A] The shell's `grep` ignores case and numbers lines by default, unlike every other Unix — Status: OPEN (raised 2026-08-24)
-
-**In short:** In our shell, typing `grep Error mylog.txt` also finds `error`
-and `ERROR`, and prints each result with a line number in front of it, like
-`42:error: disk full`. Real `grep` on Linux/macOS does neither: it matches
-`Error` exactly, and prints just the line. Our version behaves as though you
-had typed `grep -i -n`. This is very likely a deliberate choice made early on
-for interactive convenience, but it was never written down, and it means
-commands copied from any Unix documentation or tutorial quietly do something
-different here. The question is whether to keep it.
-
-Where it lives: `GrepFlags::new()` in `kernel/src/kshell.rs` (~94901), which
-sets `case_insensitive: true` with the comment *"default: case-insensitive
-(like original)"*, and `show_line_numbers: true`:
-
-```rust
-impl GrepFlags {
-    fn new() -> Self {
-        Self {
-            case_insensitive: true, // default: case-insensitive (like original)
-            show_line_numbers: true,
-            ...
-```
-
-`-i` and `-n` both exist, and both only *set* these to `true` — the value they
-already hold. So there is no spelling of `grep` in this shell that turns either
-off: the two flags a user would reach for to control this are no-ops.
-
-Why it surfaced when it did: the shell had just gained working exit statuses
-and working `$(…)` capture through pipelines, so `grep` output became something
-*programs* consume rather than something a human reads. `$(grep p f)` returns
-`1:match`, and stripping that prefix requires knowing it is there.
-
-### Why it is worth asking rather than just fixing
-
-Two things push this out of "obviously a bug":
-
-1. **The comment says it is intentional** — "like original" reads as
-   *preserve the behaviour kshell already had*, not as an oversight.
-2. **There is already an opt-out for the case half, and it is a made-up one.**
-   The shell accepts `-I` to mean "be case-sensitive after all". In GNU grep,
-   `-I` means something completely different (ignore binary files). So this is
-   not merely a changed default; a real flag has been re-purposed to undo it.
-   Restoring the GNU default would also have to decide what `-I` then means.
-
-The line-number half has no opt-out at all: there is no way to turn `-n` off.
-
-### What it costs today
-
-Copy-pasted commands silently mean something else. Two examples of the shape:
-
-| Written | Means elsewhere | Means here |
-|---|---|---|
-| `grep Error log` | lines containing `Error` | also `error`, `ERROR` |
-| `grep -c pat f` | a count | a count (unaffected — `-c` overrides output) |
-| `grep pat f \| cut -d: -f2` | the second `:`-field of the line | the *line*, because field 1 is now the line number |
-
-The last one is the sharp edge: `-n` on by default changes the *shape* of the
-output, so any pipeline that splits a grep result on `:` is reading one field
-off. Nothing errors; it just quietly reads the wrong column.
-
-It is also now load-bearing in a test. Self-test rung 25 asserts `1:alpha`
-rather than `alpha`, with a comment pointing here — so a change of default is a
-one-line test update, not a hunt.
-
-### The options
-
-**A — restore GNU defaults: case-sensitive, no line numbers.**
-*What changes:* `grep Error log` stops matching `error`; `grep pat f` prints
-`the matched line` instead of `42:the matched line`. `-i` and `-n` turn each
-back on. `-I` needs a new meaning (either drop it, or make it GNU's
-ignore-binary — which this shell already does implicitly under `-r`).
-
-**B — keep both defaults, and document them.**
-*What changes:* nothing in behaviour. `grep --help` and the shell's docs gain
-an explicit note that `-i -n` are implied, plus a way to switch them off.
-
-**C — split the two.** Restore GNU's case-sensitivity (the one that changes
-*which lines* you get, and can therefore hide a result you needed), keep `-n`
-(which only changes how they are printed).
-*What changes:* `grep Error log` stops matching `error`; output still carries
-line numbers.
-
-**D — keep case-insensitivity, drop the default `-n`.** The inverse of C.
-*What changes:* output shape matches GNU, so `:`-splitting pipelines work;
-matching stays lenient.
-
-### My recommendation
-
-**A**, with `-I` dropped rather than redefined. The value of matching the rest
-of Unix here is not aesthetic — it is that every piece of grep knowledge a user
-already has, and every command in every tutorial, becomes correct instead of
-subtly wrong. Convenience defaults are cheap to type back (`-i`, `-n`) and
-expensive to discover you were getting.
-
-If A feels too disruptive, the safer half-step is **D**, not C — and this
-paragraph is a correction of what an earlier copy of this entry said. The
-earlier text argued for C on the grounds that a wrong *set of lines* is a wrong
-answer whereas a prefix is visible on sight. The first half is true in general
-and **false here**: case-insensitive matching returns a *superset*, so it can
-show you a line you did not want but can never hide one you did. The half that
-can actually corrupt an answer is the line-number prefix, because it changes
-the bytes of every line and silently shifts every `:`-splitting pipeline by one
-field. So if only one default moves, move `-n`.
-
-*(Filed twice, on the same day, by the same lane: once as "kshell's `grep`
-defaults differ from POSIX" and once as this entry, with opposite
-recommendations — C there, A here. The two have been merged into this one. Two
-contradictory recommendations from one lane on one question is worse than a
-plain duplicate: it makes the queue unanswerable, because there is no way for a
-reader to tell which of them is the lane's actual position. It is also what
-prompted `scripts/check-open-questions.py`.)*
-
-### If this is never answered
-
-Safe and stable; nothing degrades. The cost is ongoing and quiet: every
-`grep` command a user brings from outside behaves differently than they expect,
-and any pipeline that splits on `:` reads the wrong field. It also gets
-*slightly* more expensive to change over time, since each new script written
-against the current defaults is one more thing to check.
-
----
-
-## SlateOS has no way to encrypt anything. Which cipher do we add, and who owns it? (lane C, 2026-08-26)
-
-**In short:** The whole operating system can *scramble* data so it can be
-checked (SHA-256, MD5, SHA-1, CRC32 — those are all one-way fingerprints), but
-it cannot **encrypt** anything: there is no code anywhere in the tree that turns
-readable data into unreadable data and back again with a key. So the password
-manager I just wired to a real window cannot save your passwords — not because
-nobody has written the save code, but because there is nothing to lock the file
-with. Adding a cipher is a few hours' work, but *which* one is a decision that
-sticks, because every file written under it has to stay readable forever.
-
-### Where it bites
-
-Anything that needs to store a secret on disk, which is at least:
-
-| Wants it | For | Status |
-|---|---|---|
-| `apps/credmanager` | the password vault | wired to a window, stores nothing — `known-issues.md` → `C-CREDMANAGER-HAS-NO-VAULT-ON-DISK` |
-| `gui/credentials` | saved Wi-Fi and site logins | same gap |
-| `apps/archivemanager` | encrypted zip members | can't read them either — `C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT` |
-| whole-disk encryption | the roadmap's storage section | not started |
-
-`pwkdf` already turns a master password into a 256-bit key correctly, with salt
-and a tunable cost. That half is done and tested. The missing half is what to
-*do* with the key.
-
-### The terms, since two of them do the work
-
-- **AEAD** — "authenticated encryption": a cipher that both hides the data and
-  detects tampering. The alternative (encrypt-only) lets an attacker flip bits
-  in your vault and have it decrypt to different, valid-looking garbage. Nobody
-  should ship encrypt-only in 2026; treat AEAD as settled and read the options
-  below as "which AEAD".
-- **AES-NI** — a CPU instruction that makes AES fast. Without it, a careful
-  software AES is ~5-10× slower *and* much harder to write without leaking the
-  key through timing. Every x86-64 chip since ~2010 has it, but we would be
-  choosing to depend on it.
-
-### Options
-
-**A — ChaCha20-Poly1305, written here.**
-*What changes:* one new `no_std` crate at the workspace root, ~400 lines, no CPU
-feature required. Fast and constant-time in plain Rust on any machine.
-This is what WireGuard and TLS 1.3 use on hardware without AES-NI.
-
-**B — AES-256-GCM, written here.**
-*What changes:* the same shape, but the software fallback is the part that is
-easy to get subtly wrong (timing leaks through table lookups), and doing it
-*properly* means writing the AES-NI path too — so it is really two
-implementations, and the interesting one is x86-only.
-
-**C — port a vetted C implementation instead of writing Rust.**
-*What changes:* no new hand-written crypto, but a C dependency in the build for
-every app that stores a secret, and `design.txt` already says C is for porting
-existing code — which this would be. Slower to land, harder to audit in-tree.
-
-**D — decide later; ship the apps without persistence.**
-*What changes:* nothing. credmanager keeps opening an empty vault every launch,
-`gui/credentials` keeps forgetting Wi-Fi passwords, and the gap spreads to
-whatever gets built next.
-
-### The part that is not mine to decide
-
-Even given a choice, **which lane owns it** is open. The hash crates (`sha2`,
-`sha1`, `md5`) live at the workspace root and are shared by all three lanes, so
-a cipher belongs there too — but that is outside every lane's write glob. If
-you pick A or B, say whether lane C should write it at the root, or whether I
-should file a request to lane A and pick up something else.
-
-### My recommendation
-
-**A, written by whichever lane you say.** ChaCha20-Poly1305 has no CPU
-dependency, so there is one implementation rather than a fast path and a
-dangerous fallback; it is the easiest of the three to write correctly and the
-easiest to test against published vectors. The reason I am asking rather than
-doing it is not the cipher — it is that hand-written crypto in an OS is exactly
-the kind of thing you may want to overrule on principle, and the file format it
-implies is permanent.
-
-### If this is never answered
-
-Nothing breaks and nothing gets worse on its own — but a growing number of
-finished, tested applications stay unable to do the one thing they exist for.
-credmanager is the third app now waiting on this. It is not blocking my current
-work; I am carrying on down the roadmap.
-
----
-
-## A-Q6 — [A] Two commits that appear to delete the whole OS, and 33 commits signed by a fake name, are permanently in the published history. Leave them, or rewrite? — Status: OPEN (raised 2026-08-29)
-
-**In short:** on 2026-08-29 a safety check that runs just before uploading code
-accidentally committed to the real project instead of to the scratch copy it
-meant to use, and those commits got uploaded. As far as those two commits are
-concerned, every file in the operating system was deleted. **The current files
-are completely fine** — I repaired that within minutes, and nothing is missing.
-What
-remains is only the *record*: anyone scrolling back through the project's
-history will see two commits that look like a catastrophe. Removing them from
-the record is possible but requires an operation I am forbidden to perform
-without you saying so, because it can destroy other people's work.
-
-**Updated later the same day — the record is wrong in a second way.** The same
-accident also wrote a fake author name into the project's shared settings, so
-**33 commits are signed `selftest <selftest@example.invalid>` instead of your
-name**. That covers every commit all three sessions made over about an hour,
-including the ones that fixed the accident. The settings are repaired, so no
-*new* commit is affected; the 33 already made cannot be corrected except by the
-same forbidden operation. This does not change the question, but it does change
-what is at stake in it, so both are decided together.
-
-**Question.** Should the published history be rewritten — to remove the two
-commits (`7f6a6b446` "base" and `71f164f7e` "delete one, sweep another"), to
-re-sign the 33 misattributed ones, or neither?
-
-Two terms, glossed:
-
-- **Published history** — the copy on GitHub that all three lanes (the three
-  parallel Claude sessions) pull from. Everyone's work is built on top of it.
-- **Force-push** (the operation in question) — replacing that shared history
-  with a different one. It is the only way to remove a commit that is already
-  published. It is dangerous because any lane whose work sits on top of the
-  removed commits has its history invalidated, and anything not yet uploaded
-  can be lost outright. Standing project policy forbids it without your
-  explicit say-so, which is why this is a question and not something I did.
-
-**What the current state actually is.** The repair used a merge whose *content*
-is the correct tree, so the files are right and both branches moved forward
-normally — no rewriting was needed. The two bad commits survive as *ancestry*
-(steps in the chain) but not as *content* (no file reflects them). `git log`
-shows them; `git status` and every checkout are clean.
-
-**The misattributed commits, by branch.** All are pushed:
-
-| Branch | Commits signed `selftest` |
-|---|---|
-| `lane-a` | 16 |
-| `lane-b` | 9 |
-| `lane-c` | 3 |
-| `main` | 5 |
-
-Two facts that make this less bad than it sounds, and are the reason it is
-folded into an existing question rather than raised as an urgent one. First,
-**there is no attribution dispute to get wrong**: you are the sole author of
-record for this entire project, so a wrong name credits nobody else and steals
-credit from nobody. Second, **the commit messages are intact** — the *content*
-of the record is right, and only the signature is wrong. What it actually costs
-is that `git log --author` and any per-author statistic silently omit an hour
-of work, and anyone reading the log cold sees a contributor who does not exist.
-
-### Options
-
-**A. Leave both, documented.** *What changes:* nothing observable; `git log`
-keeps showing two alarming-looking commits and an hour of work signed by a
-name that is not yours, and `known-issues.md` explains why. *Pros:* zero risk;
-no force-push; the incident stays legible, which has value — the commits are
-the evidence for the post-mortem that produced the fix. *Cons:* anyone reading
-history cold gets a scare and has to go find the explanation; a future
-automated tool that audits history for mass deletions will flag them forever;
-per-author statistics stay wrong for those 33 commits.
-
-**B. Rewrite history to remove and re-sign them.** *What changes:* `git log`
-no longer shows the two commits, and the 33 carry your name. *Pros:* a clean
-and correctly-signed record. *Cons:* requires a force-push to `main` and all
-three lane branches — note that the authorship half touches **all four**,
-where removing the two commits alone would have touched two, so the blast
-radius is larger than it was when this question was first written. The other
-two lanes must re-sync, and any uncommitted or unpushed work of theirs is at
-risk; ~40 commits now sit on top of the bad ones, all of which get new
-identities, invalidating every commit hash cited in `known-issues.md`,
-`design-decisions.md` and the request files — including the citations *in the
-entry that explains this incident*.
-
-**C. Re-sign the 33, but leave the two commits.** *What changes:* the log
-still shows the two commits, but every commit carries your name.
-*Pros:* fixes the half that is factually wrong (a signature naming someone who
-does not exist) while leaving the half that is merely ugly-but-true (the
-commits really did happen). *Cons:* this is not actually cheaper than B —
-re-signing rewrites the same commits a removal would, needs the same
-force-push to the same four branches, and invalidates the same hashes. It buys
-less for the same risk, which is why I list it only to note that it is not the
-compromise it looks like.
-
-### If never answered
-
-Option A is the current state and it is safe. Nothing is blocked and nothing
-degrades functionally — but it does get *more* expensive to change with time,
-since every commit added on top is one more that a rewrite would have to
-rewrite. If you are ever going to pick B, sooner costs less.
-
-### Claude's recommendation
-
-**A, still, and the new evidence does not move me.** The content is correct,
-the incident is documented at length in `known-issues.md`
-(`A-A-PUSH-GATE-DELETED-THE-REPOSITORY-IT-WAS-GATING`), and trading a cosmetic
-blemish in the log for a force-push across three active lanes is a bad
-exchange — the cure has a real chance of destroying work, which is precisely
-the failure the original bug caused.
-
-The authorship damage is the kind of finding that *feels* like it should tip
-the balance, and I do not think it does: it makes the record uglier without
-making it wrong in any way that costs anyone anything, since you are the only
-author this project has. Meanwhile it makes option B strictly more dangerous
-than it was, because it drags the third lane's branch into a rewrite that
-previously did not need to touch it. The case for A got stronger, not weaker.
-
-I raise it only because it is your history, force-push authority is yours
-alone, and the cost of choosing B rises with every commit.
-
-**Where it bites.** Git history only: `7f6a6b446` and `71f164f7e`, repaired by
-`f0534726e`; plus 33 commits between 22:43 and 23:54 on 2026-08-29 whose author
-field reads `selftest <selftest@example.invalid>`. No file in the tree is
-affected, and the shared config that caused the misattribution is repaired, so
-the count cannot grow.
-
-**Update from lane B, 2026-09-04 — it grew. Two more, on `lane-b`.**
-
-*In short:* the same kind of accident happened again, in a different safety
-check, six days later. Two more commits that appear to delete the whole
-operating system are now in the published record — `7bb82cee5` "introduce the
-violation" and `6b1d2a7ae` "the repair, committed this time", both signed
-`selftest <selftest@invalid>`. **The files are fine again**; as before only the
-record is affected. This does not change the options above, but it does correct
-the sentence directly above it: the count *can* grow, and did.
-
-It was not a recurrence of the same bug. 2026-08-29 was a self-test whose
-commands were aimed at the real repository by a *setting*; this one was aimed
-there by an *environment variable* (`GIT_DIR`) that git hands to every hook and
-that outranks the "work in this directory" argument the self-test was relying
-on. Different mechanism, same shape: a check that verifies a scratch copy, run
-somewhere that silently redirects it onto the real thing. Fixed at the shared
-layer this time rather than in the one script — `scripts/gittree.py`, which all
-six commit-reading checks go through, now strips those variables — so the
-remaining scripts of this kind were repaired in the same change rather than one
-incident at a time.
-
-Handled identically to the first: an `ours` merge that keeps the correct tree
-and records the two commits as ancestry only, so no force-push was needed and
-nothing was blocked. Contamination is confined to `lane-b`; `main` and the
-other two lanes never saw them.
-
-*What it changes for the decision:* option B's blast radius grows again — a
-removal would now have to take these two out of `lane-b` as well, and every
-commit since. The cost-rises-with-time note above therefore applies more
-sharply than when it was written. Lane B's own recommendation is unchanged and
-matches lane A's: **A**.
-
-**Status:** OPEN
-
----
 
 ## C-Q10 — [C] In the light theme, small grey text on a shaded card is too faint to meet the readability standard, in about 850 places. Fixing it changes how the whole light theme looks. Which way? — Status: OPEN
 
@@ -1981,6 +401,53 @@ it. The real table (light theme only; bold = below the 4.5 standard):
 Main text is mostly fine. Secondary text passes *only* on the bare page, at
 4.64 — because that is the one place it was ever checked when it was chosen.
 Put it on any card and it fails.
+
+### Correction, 2026-09-07 — the table is missing an ink, and option A is flatter than stated
+
+Two measured findings, both of which change the choice. Ratios recomputed
+independently here; the three numbers above are confirmed exactly.
+
+**1. There is a fourth text ink, and it fails too.** The table's "secondary
+text" is `LIGHT_SUBTEXT0` (`#686B80`). The palette has a *second* grey below
+main text, `LIGHT_SUBTEXT1` (`#5C5F77`) — and `gui/appearance`'s own struct
+documents that one, not the other, as "Secondary text: the second line of a
+list row, a caption, a hint". It draws text in **58 places** and was never
+measured. On the page it is fine (5.53); on the greyest card it is **2.89**,
+which fails exactly like the others.
+
+So option A is **four constants, not three**. Darkening `LIGHT_SUBTEXT1`
+until it clears 4.5 on the greyest card puts it at about `#414354`.
+
+**2. Option A makes the three inks the same colour.** The cost column says the
+hierarchy goes "a little flatter". Measured, it goes completely flat:
+
+| separation between two inks | today | under option A |
+|---|---|---|
+| main text vs secondary text | 1.52 | **1.00** |
+| main text vs the accent blue | 1.53 | **1.00** |
+
+1.00 means *identical luminance*. Body text, captions and links would all
+weigh the same; a link would stop looking like a link to anyone reading by
+brightness, which is precisely the reader option A is meant to help — hue is
+the channel colour-blind vision cannot use, and it would be the only channel
+left. Everything is squeezed into the narrow band the greyest card allows:
+that card gives only 9.71:1 even against pure black, so any ink clearing 4.5
+on it must be nearly black, and four nearly-black inks are one ink.
+
+**What this does to the options.** It is an argument against A as drawn, not
+against fixing the problem. Worth considering instead:
+
+- **A′ — darken the greys, but not the accent.** Keeps the accent readable as
+  a *different* thing by leaving it lighter, and accepts that the accent needs
+  the card restriction (C) rather than a colour change. Splits the problem by
+  ink instead of solving it with one hammer.
+- **A+C — darken the greys, and stop putting text on the two greyest cards.**
+  The greyest card is what forces near-black. Remove that constraint and the
+  inks have room to stay distinct while still passing on the cards that remain.
+
+**If you would rather not decide:** my earlier note said I would take A. I
+withdraw that. A as measured trades one accessibility defect for another, and
+I would not ship it without you seeing these numbers.
 
 ### The options
 
@@ -2022,182 +489,6 @@ light theme gets accent text at about 1:1, i.e. invisible. Should a custom
 accent be (i) adjusted for the mode like the presets are, (ii) accepted but
 warned about in the picker, or (iii) left exactly as chosen on the grounds that
 the user asked for it? I lean (i), matching what the presets already do.
-
-## A-Q7 — [A] Every build and check on this machine is paying about 70 milliseconds per file opened, and the likely cause is the antivirus. Should the project folder be excluded from real-time scanning? — Status: OPEN (raised 2026-09-03)
-
-**In short:** opening a file on the `D:` drive on this machine costs roughly 70
-milliseconds — about five times what the same file costs on `C:`, and about a
-hundred times what it should cost once the file has already been read once.
-Nothing we write is slow; the cost is paid by the act of opening the file at
-all, before a single byte is looked at. Because compiling and checking this
-project means opening tens of thousands of files, this is being paid over and
-over, by every build and by several of the automated checks. Everything about
-the measurement points at Windows Defender's real-time scanning, which inspects
-each file as it is opened. Excluding the project folder from that scanning
-would very likely make everything here substantially faster — but it is a
-security setting, it needs administrator access, and turning off scanning for a
-folder is not a decision to make on someone's behalf.
-
-**How we know it is not the disk, the cache, or our code.** Four measurements,
-all taken on 2026-09-03 on this machine:
-
-| measurement | result | what it rules out |
-|---|---|---|
-| A checker that reads 805 source files, timed internally | 98.7 s total, of which **98%** was inside the read call and **0.46 s** was all of its actual pattern-matching combined | our code — there is nothing left to optimise |
-| Reading **one** file 200 times | 0.10 s | nothing is inherently slow about a read |
-| Reading **200 different** files on `D:` | 13.9 s (~70 ms each) | — this is the effect |
-| The same 200 files copied to `C:` and read there | 2.55 s (~13 ms each) | the files themselves, and their size |
-| A second full pass over all 805 files, immediately | still 61.8 s | the disk, and the operating system's file cache — a warm cache changes nothing |
-
-Fast when repeated on one file, slow once per *distinct* file, five times worse
-on `D:` than on `C:`, and completely indifferent to whether the data is already
-in memory. That is the signature of something inspecting each file the first
-time it is opened, per drive. Defender's real-time protection is on; its
-exclusion list cannot even be *read* without an administrator prompt, so
-whether `D:` already has exclusions is unknown.
-
-**What this is costing.** Directly measured: one automated check takes 98.7 s
-where the work in it accounts for under half a second, and two more (lane C's)
-take 92 s and 95 s for the same reason. Not measured but following from the
-same cause: every `cargo build` and `cargo check` in all three lanes opens far
-more files than that, so the compiler is paying it too. This is the larger
-prize and also the less certain one — a compiler's time is not all file opens,
-and I have not isolated the fraction.
-
-**The options.**
-
-1. **Exclude the project tree from real-time scanning** (`D:\visual studio
-   projects`, or the individual worktrees). *What changes:* builds and checks
-   here get faster, probably substantially; files inside that folder are no
-   longer scanned as they are opened. Everything else on the machine is
-   unaffected.
-2. **Exclude only the build output** (`target` folders). *What changes:* most
-   of the win, since compiler output is the bulk of the file traffic, while
-   source files and anything downloaded into the tree stay scanned.
-3. **Exclude nothing; move the work to `C:`.** *What changes:* the ~5×
-   difference suggests `C:` is already faster for this, so the cost drops
-   without weakening any setting — but the tree is large, `C:` may not have
-   room, and it is a disruptive move for an uncertain gain.
-4. **Leave it.** *What changes:* nothing; the cost stays.
-
-**What I would do, and why it is still your call:** option 2. The build output
-is generated by our own compiler from sources that were themselves scanned,
-which is the weakest case for scanning it, and it is where nearly all the file
-traffic is. Option 1 is meaningfully faster still but covers source files and
-anything a dependency downloads into the tree, which is a real reduction in
-coverage. I am not making that trade unasked — it is a security setting, it is
-system-wide, and it needs an administrator either way.
-
-**What happens if this is never answered:** nothing breaks; everything just
-stays slower than it needs to be, and gets slightly worse as the tree grows. It
-also keeps distorting decisions — a gate that costs 90 s gets placed, deferred
-or argued about differently than one costing 10 s, and three such arguments
-have already happened on the assumption that the checkers were the problem.
-
-**Where it bites:** `scripts/check-selftest-reinit.py` (98.7 s, wired
-2026-09-03 after every cheap gate for exactly this reason),
-`scripts/check-key-release-wiring.py` (92 s) and
-`scripts/check-window-wiring.py` (95 s), both lane C's; and every `cargo`
-invocation in all three worktrees. The profiling is written up in
-`requests/a-b-wiring-check-selftest-reinit-and-a-correction-it-runs-nowhere.md`
-§5 and `requests/a-c-i-wired-three-of-your-gates-fixtures-not-their-checks.md`.
-
-### 2026-09-04 — a second symptom, and this one is not just slowness
-
-The case above rests entirely on *time*: everything is slower than it should
-be. There is now a second, independent symptom of the same suspected cause, and
-it leaves visible debris rather than merely costing seconds.
-
-`build/` in the lane-A worktree holds **fourteen empty directories** — leftover
-test fixtures, seven from each of two runs of `scripts/test-boot-test.py` on
-2026-09-04. Empty is the whole point: the cleanup code deleted everything
-*inside* each directory successfully and then failed to delete the now-empty
-directory itself. On Windows that failure has essentially one cause — something
-else still had the directory open for the fraction of a second after its last
-file went away. A file scanner inspecting each file as it is touched is exactly
-such a something, and it is the same drive, the same tree, and the same
-suspected program as the 70 ms-per-open measurement above.
-
-Why this matters for *this* decision rather than being a separate bug: it moves
-the cost of leaving the setting alone out of the "everything is a bit slower"
-column. The slowness is invisible and uniform; this is a concrete, accumulating
-mess in the directory people look in first when a boot test misbehaves, growing
-seven entries per suite run with no upper bound. It also raises the prior on
-option 1 or 2 actually working, because it is a *behavioural* fingerprint
-(a held handle) rather than a timing one, and timing arguments always leave
-room for "maybe the disk is just slow".
-
-It does **not** change the recommendation, and it must not be read as a reason
-to rush the setting. The retry loop that makes the cleanup robust is correct
-whether or not an exclusion is ever added — code that assumes no scanner is
-running is wrong on any Windows machine, and that fix is filed separately as
-`A-FIXTURE-CLEANUP-LEAVES-EMPTY-DIRECTORIES-IN-BUILD-AND-CANNOT-TELL-YOU` in
-`known-issues.md`. The point here is only that the evidence for the diagnosis is
-now of two different kinds instead of one.
-
-### Addendum 2026-09-05 (lane B) — the disk *is* just slow, and there are two empty SSDs in the machine
-
-The paragraph above closes with "timing arguments always leave room for 'maybe
-the disk is just slow'". It turns out the disk is just slow — literally, as
-hardware — and that was never checked. This does not overturn the Defender case,
-but it changes option 3 from a vague suggestion into the concrete one, and it
-means the two causes are adding rather than competing.
-
-**`D:` is a mechanical hard disk. `C:` is a solid-state disk. So is a third
-drive that is nearly empty.** From `Get-PhysicalDisk` and `Get-Volume` on
-2026-09-05:
-
-| drive | device | kind | free |
-|---|---|---|---|
-| **`D:`** — the entire project, all three worktrees | WDC WD2004FBYZ, SATA | **spinning disk** | 333 GB |
-| `C:` — Windows | Samsung 980 PRO, NVMe | solid state | 129 GB |
-| **`E:`** | Samsung 960 EVO, NVMe | solid state | **325 GB, essentially unused** |
-
-A spinning disk moves a physical arm for every piece of data that is not next to
-the last piece; a solid-state disk does not. That difference is the whole story
-below.
-
-**Measured, same day, on an otherwise idle machine:** average time to service one
-read is **27.5 ms on `D:` against 0.13 ms on `C:`** — a factor of **200**, not
-the factor of 5 the file-open experiment saw. (The experiment above measured
-whole file opens, where a fixed per-open cost is mixed in with the seek; this
-counter measures the disk alone.) `D:` also sat at a queue length of 8, i.e.
-saturated, while nothing in the project was building.
-
-**What that does to a build.** I lost most of a working session to this before
-diagnosing it, so the numbers are unhappily concrete:
-
-- One `cargo build -p sshd` ran for **9 minutes while using 0.6 seconds of CPU**.
-  I attached a debugger rather than guess: every sample was in
-  `rustc` → `SearchPath::new` → `FindNextFileW` — it was *listing a directory*,
-  not compiling. The directory is `target/x86_64-pc-windows-gnu/debug/deps`,
-  which holds 69,161 files, and `rustc` lists it once per invocation before it
-  compiles anything.
-- Deleting that 64 GB directory with `rd /s /q` ran **45 minutes and freed no
-  measurable space**.
-- *Renaming* a directory — one metadata write, instant on any healthy volume —
-  did not complete in six minutes.
-
-**Why this belongs to your Defender question rather than being a separate one:**
-options 1 and 2 buy back the per-open scan; they do not buy back the seek. On
-this hardware the seek is the larger of the two, and option 3 — which the entry
-above rates "disruptive, uncertain gain, `C:` may not have room" — turns out to
-need neither `C:` nor an administrator, because `E:` is a solid-state disk with
-325 GB free and nothing on it. *What changes if the tree moves there:* every
-build, check and gate in all three lanes gets faster by something in the region
-of the 200× per-read gap, no security setting is weakened, and no admin prompt
-appears. The counter-argument is that I do not know what `E:` is *for* — it is
-your machine, and an empty disk may be empty on purpose.
-
-A cheaper half-step, if the tree itself should stay put: move only the three
-`target/` directories to `E:` (cargo's `build.target-dir`, or a directory
-junction). That is where nearly all of the file traffic and all of the 64 GB
-is, it is regenerable so nothing is at risk, and it is one line of config to
-undo.
-
-**If this is never answered:** the same as before, plus the specific knowledge
-that a single-crate compile can block for nine minutes on directory listing
-alone. I have not changed any setting or moved anything.
 
 ## Which group is a user in? Two files answer, and nothing keeps them agreeing. (lane B, 2026-09-06)
 
@@ -2627,6 +918,47 @@ that let them through is untouched.
 
 The cost grows with the number of app crates, which is growing.
 
+## A-Q8 — [A]+[C] Desktop icon layout exists in two places: `fs::deskicons` (kernel) and `gui/desktop/src/icons.rs` (shell). Which is the authority? — Status: OPEN
+
+**In short:** A user's desktop icons have positions on screen. Two independent
+modules model that layout: `kernel/src/fs/deskicons.rs` (Lane A, marked done in
+the roadmap, exports via `/proc/deskicons`) and `gui/desktop/src/icons.rs`
+(Lane C, never wired, a pinned island). Lane C cannot wire its module without
+duplicating the kernel's state, and cannot delete it because it is marked done
+and in Lane A's tree. Nothing is broken — the `icon_size` appearance setting is
+inert, exactly as it has always been.
+
+**Options:**
+
+- **(A) The kernel one is the model; the shell consumes it.** `icons.rs` is a
+  duplicate to delete. The shell reads icon positions from `/proc/deskicons`.
+  *What changes:* the shell becomes a renderer for state the kernel owns.
+- **(B) Layout belongs to the shell; the kernel one is persistence only.** Wire
+  `gui/desktop/src/icons.rs` as the layout authority. `fs::deskicons` is either
+  demoted to a read-only persistence layer or marked as tech debt to remove.
+  *What changes:* icon layout moves to userspace where the microkernel rule says
+  it belongs; `icon_size` becomes a live setting.
+- **(C) `fs::deskicons` predates the microkernel split and should not be in the
+  kernel at all.** Delete it, wire the shell module, persist positions in a
+  dotfile or YAML. *What changes:* one fewer kernel module, one fewer `/proc`
+  entry, icon state lives in userspace end to end.
+
+**Claude's recommendation:** B or C. The microkernel rule is unambiguous — icon
+layout is a userspace concern, not a scheduler/MM/IPC/cap/interrupt concern.
+B is the minimum viable move; C is the clean one.
+
+**If never answered:** the `icon_size` setting stays inert, Lane C does not wire
+`icons.rs`, and both modules continue to exist without either being used. No
+degradation, but the duplicate grows harder to resolve over time as either side
+accumulates callers.
+
+**Filed by:** Lane A (2026-09-07), prompted by Lane C's
+`c-a-two-desktop-icon-models-and-mine-cannot-be-wired-until-we-pick.md`.
+Response at
+`a-c-deskicons-is-a-persistence-layer-the-shell-is-the-layout-authority.md`.
+
+---
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,
@@ -2665,6 +997,34 @@ answered question left in the body is pure cost — and, being older, it sorts
   2026-08-21 (§267): **E then C.** Measure whether the fast accelerator removes
   the noise; if so split — benchmarks fast, correctness gate stays on TCG where
   SMEP/SMAP/UMIP are actually exercised.
+- Q46 [opt-level=0 benchmarks: release default or bench-only?] — resolved
+  2026-09-07 (§922): **C + commit-count gate trigger;** implemented as
+  pre-push gate 15.
+- Q47 [D: drive full — shared vs separate target directory?] — operator input
+  received 2026-09-07: tree now on E: with ~300 GB free; serialisation cost
+  may be near zero; needs re-evaluation on E: before deciding.
+- Q56 [Linux ABI exempt from native file-permission checks] — answered A
+  2026-09-07: suspend-and-prompt or ahead-of-time grant; per-account
+  default-grant policy. Operator follow-up pending lane A response.
+- Q57 [capability-request prompt for keyboard/mic/camera?] — resolved
+  2026-09-07 (§918): **A, yes,** and fix the error message.
+- A-Q1 [`find -size` bare number: bytes here, blocks elsewhere] — resolved
+  2026-09-07 (§916): **C, match POSIX** — bare number means 512-byte blocks.
+- A-Q2 [C-test programs link unknown library; fix in fastpy] — resolved
+  2026-09-07 (§915): **A, fix fastpy directly.**
+- A-Q3 [kernel self-tests halt machine on production boot] — resolved
+  2026-09-07 (§914): **D, halt on integrity failures, log-and-continue for
+  the rest.**
+- A-Q4 [`oci run` continues when option unapplied] — resolved 2026-09-07
+  (§917): **A, refuse to start.**
+- A-Q5 [shell `grep`: case-insensitive + line numbers by default] — resolved
+  2026-09-07 (§919): **A, match standard defaults;** also integrate
+  operator’s custom grep features.
+- A-Q6 [deletion commits + fake-name commits in published history] — resolved
+  2026-09-07 (§920): **A, leave history as-is.**
+- A-Q7 [70 ms/file-open on D: — antivirus or disk?] — resolved 2026-09-07
+  (§921): D: already excluded; likely CPU saturation + backup jobs; re-measure
+  on E:.
 
 ## Resolved — lane B
 
@@ -2772,6 +1132,45 @@ answered question left in the body is pure cost — and, being older, it sorts
   not also remember which side of a direction boundary the caret is on will
   **skip a whole right-to-left word** in one press — worse than the old
   behaviour, so a half-switched widget is a regression, not a partial win.
+
+- C-Q6 We have written the Settings screens twice — which copy is the real
+  one? — answered 2026-09-07 by the operator, **C**; written up §815: split by
+  kind. What the desktop *shows* you (volume overlay, login screen) stays in
+  the shell and gets wired up; screens you *open* move to the Settings app and
+  the shell's copies go. The operator added a styling mandate that was not part
+  of the question: both follow `Aero Desktop (offline).html`, themeable parts
+  read from current settings, and the demo's look is the default theme —
+  recorded in `roadmap-detailed.md` as instructed.
+
+- C-Q7 The high-contrast scheme's highlight is three times dimmer than the
+  others — change it? — answered 2026-09-07; written up §816: **white**, and
+  the highlight colour becomes user-configurable in every scheme. The
+  configurability is the operator's requirement and binding; the white-over-cyan
+  default was delegated to lane C. The operator's colour-vision reasoning was
+  correct, but the stronger point was their own first sentence — a highlight
+  need not carry meaning in hue at all, and luminance contrast is read
+  identically by every form of colour vision.
+
+- C-Q8 The world's timezone data cannot be written because the lane map hands
+  the job to a directory that does not exist — who does it? — answered
+  2026-09-07 by the operator, **B**; written up §817: lane B, which already
+  owns the package manager, with the map corrected in the same change. The
+  map's error was the cause of the stall, not a missing decision.
+
+- An account with no password: should the lock screen let it through? —
+  answered 2026-09-07 by the operator, **C**; written up §818: such an account
+  is never locked at all, so nothing appears that pretends to be protecting
+  anything. Setting a password is what turns locking on.
+
+- Which cipher, and who owns it? — answered 2026-09-07; written up §819:
+  **ChaCha20-Poly1305**. The operator's rule was "fastest with AES-NI unless
+  the bottleneck is the disk anyway"; for a kilobyte vault dominated by key
+  derivation, neither cipher is measurable, so the exception applies. The one
+  condition that would have flipped it — this becoming the full-disk cipher —
+  does not hold: disk encryption already exists in `kernel/src/fs/diskencrypt.rs`
+  with AES-256-XTS, a mode not interchangeable with an authenticated-message
+  cipher. The entry's unglossed jargon, which the operator called out, is
+  glossed in §819.
 
 ## Resolved — pre-split (unprefixed `Q<n>`, single-agent era)
 
@@ -3048,4 +1447,3 @@ These numbers are not to be extended; new questions use `A-Q<n>` / `B-Q<n>` /
   option C** (Claude recommended C): keep `nft`/`iptables` as an explicit
   parser/pretty-printer only, fix the docs, steer users to `fw`; defer full/minimal
   kernel wiring (§62).
-

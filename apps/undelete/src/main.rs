@@ -51,6 +51,7 @@
 #![allow(clippy::cognitive_complexity)]
 
 #[allow(unused_imports)]
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -69,25 +70,6 @@ use std::collections::BTreeMap;
 // ============================================================================
 // Catppuccin Mocha palette
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
 
 // ============================================================================
 // Layout constants
@@ -378,15 +360,15 @@ impl FileSignatureKind {
     }
 
     /// Color for display in the UI.
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self.category() {
-            FileCategory::Image => TEAL,
-            FileCategory::Document => BLUE,
-            FileCategory::Archive => PEACH,
-            FileCategory::Audio => MAUVE,
-            FileCategory::Video => LAVENDER,
-            FileCategory::Application => GREEN,
-            FileCategory::Other => SUBTEXT0,
+            FileCategory::Image => pal.teal,
+            FileCategory::Document => pal.blue,
+            FileCategory::Archive => pal.peach,
+            FileCategory::Audio => pal.mauve,
+            FileCategory::Video => pal.lavender,
+            FileCategory::Application => pal.green,
+            FileCategory::Other => pal.subtext0,
         }
     }
 }
@@ -563,15 +545,15 @@ impl FileCategory {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Image => TEAL,
-            Self::Document => BLUE,
-            Self::Archive => PEACH,
-            Self::Audio => MAUVE,
-            Self::Video => LAVENDER,
-            Self::Application => GREEN,
-            Self::Other => SUBTEXT0,
+            Self::Image => pal.teal,
+            Self::Document => pal.blue,
+            Self::Archive => pal.peach,
+            Self::Audio => pal.mauve,
+            Self::Video => pal.lavender,
+            Self::Application => pal.green,
+            Self::Other => pal.subtext0,
         }
     }
 }
@@ -602,12 +584,12 @@ impl RecoveryConfidence {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::High => GREEN,
-            Self::Medium => YELLOW,
-            Self::Low => PEACH,
-            Self::Unlikely => RED,
+            Self::High => pal.green,
+            Self::Medium => pal.yellow,
+            Self::Low => pal.peach,
+            Self::Unlikely => pal.red,
         }
     }
 
@@ -2124,11 +2106,18 @@ pub struct UndeleteApp {
     pub recovery_results: Vec<RecoveryResult>,
     pub show_filter_panel: bool,
     pub active_category_filter: Option<usize>,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl UndeleteApp {
     pub fn new(width: f32, height: f32) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
             screen: UiScreen::ScanSetup,
@@ -2733,7 +2722,7 @@ impl UndeleteApp {
             y: 0.0,
             width: self.width,
             height: self.height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -2760,7 +2749,7 @@ impl UndeleteApp {
             x: PADDING,
             y: content_y,
             text: String::from("Select Partition"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - PADDING * 2.0),
@@ -2780,7 +2769,7 @@ impl UndeleteApp {
             x: PADDING,
             y: mode_y,
             text: String::from("Scan Mode"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - PADDING * 2.0),
@@ -2816,7 +2805,7 @@ impl UndeleteApp {
             BUTTON_WIDTH,
             BUTTON_HEIGHT,
             "Start Scan",
-            BLUE,
+            self.palette.blue,
         );
     }
 
@@ -2828,7 +2817,11 @@ impl UndeleteApp {
         selected: bool,
     ) {
         let card_w = self.width - PADDING * 2.0;
-        let card_color = if selected { SURFACE1 } else { SURFACE0 };
+        let card_color = if selected {
+            self.palette.surface1
+        } else {
+            self.palette.surface0
+        };
 
         // Card background
         cmds.push(RenderCommand::FillRect {
@@ -2846,7 +2839,7 @@ impl UndeleteApp {
                 y,
                 width: card_w,
                 height: 56.0,
-                color: BLUE,
+                color: self.palette.blue,
                 line_width: 2.0,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
@@ -2857,7 +2850,7 @@ impl UndeleteApp {
             x: PADDING + 12.0,
             y: y + 8.0,
             text: format!("{} ({})", part.name, part.mount_point),
-            color: TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(card_w * 0.5),
@@ -2875,7 +2868,7 @@ impl UndeleteApp {
                 format_size(part.total_bytes),
                 part.usage_percent(),
             ),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(card_w - 24.0),
@@ -2891,16 +2884,16 @@ impl UndeleteApp {
             y: bar_y,
             width: bar_w,
             height: PROGRESS_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::all(PROGRESS_HEIGHT / 2.0),
         });
         let fill_w = bar_w * (part.usage_percent() / 100.0);
         let bar_color = if part.usage_percent() > 90.0 {
-            RED
+            self.palette.red
         } else if part.usage_percent() > 70.0 {
-            YELLOW
+            self.palette.yellow
         } else {
-            BLUE
+            self.palette.blue
         };
         if fill_w > 0.0 {
             cmds.push(RenderCommand::FillRect {
@@ -2932,7 +2925,11 @@ impl UndeleteApp {
             y,
             width: radio_size,
             height: radio_size,
-            color: if selected { BLUE } else { OVERLAY0 },
+            color: if selected {
+                self.palette.blue
+            } else {
+                self.palette.overlay0
+            },
             line_width: 1.5,
             corner_radii: CornerRadii::all(radio_size / 2.0),
         });
@@ -2944,7 +2941,7 @@ impl UndeleteApp {
                 y: cy - 4.0,
                 width: 8.0,
                 height: 8.0,
-                color: BLUE,
+                color: self.palette.blue,
                 corner_radii: CornerRadii::all(4.0),
             });
         }
@@ -2953,7 +2950,11 @@ impl UndeleteApp {
             x: x + radio_size + 8.0,
             y: y + 1.0,
             text: label.to_string(),
-            color: if selected { TEXT } else { SUBTEXT0 },
+            color: if selected {
+                self.palette.text
+            } else {
+                self.palette.subtext0
+            },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - x - radio_size - PADDING - 8.0),
@@ -2973,7 +2974,7 @@ impl UndeleteApp {
             x: PADDING,
             y: center_y,
             text: self.engine.progress.phase.display_name().to_string(),
-            color: BLUE,
+            color: self.palette.blue,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - PADDING * 2.0),
@@ -2988,7 +2989,7 @@ impl UndeleteApp {
             y: bar_y,
             width: bar_w,
             height: 12.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
         let fill = bar_w * self.engine.progress.overall_progress;
@@ -2998,7 +2999,7 @@ impl UndeleteApp {
                 y: bar_y,
                 width: fill,
                 height: 12.0,
-                color: BLUE,
+                color: self.palette.blue,
                 corner_radii: CornerRadii::all(6.0),
             });
         }
@@ -3012,7 +3013,7 @@ impl UndeleteApp {
                 self.engine.progress.overall_progress * 100.0,
                 self.engine.progress.files_found,
             ),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bar_w),
@@ -3028,7 +3029,7 @@ impl UndeleteApp {
                 format_size(self.engine.progress.bytes_scanned),
                 format_size(self.engine.progress.total_bytes),
             ),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bar_w),
@@ -3041,7 +3042,7 @@ impl UndeleteApp {
                 x: PADDING * 2.0,
                 y: bar_y + 58.0,
                 text: format!("Estimated time remaining: {remaining}s"),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bar_w),
@@ -3084,7 +3085,7 @@ impl UndeleteApp {
             y,
             width: SIDEBAR_WIDTH,
             height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3093,7 +3094,7 @@ impl UndeleteApp {
             x: PADDING,
             y: y + PADDING,
             text: String::from("Categories"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
@@ -3109,7 +3110,7 @@ impl UndeleteApp {
                 y: all_y,
                 width: SIDEBAR_WIDTH - 8.0,
                 height: 28.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
         }
@@ -3117,7 +3118,11 @@ impl UndeleteApp {
             x: PADDING,
             y: all_y + 6.0,
             text: format!("All Files ({})", self.engine.files.len()),
-            color: if all_selected { BLUE } else { SUBTEXT1 },
+            color: if all_selected {
+                self.palette.blue
+            } else {
+                self.palette.subtext1
+            },
             font_size: FONT_SIZE,
             font_weight: if all_selected {
                 FontWeightHint::Bold
@@ -3141,7 +3146,7 @@ impl UndeleteApp {
                     y: item_y,
                     width: SIDEBAR_WIDTH - 8.0,
                     height: 28.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(SMALL_RADIUS),
                 });
             }
@@ -3152,7 +3157,7 @@ impl UndeleteApp {
                 y: item_y + 8.0,
                 width: 10.0,
                 height: 10.0,
-                color: cat.color(),
+                color: cat.color(&self.palette),
                 corner_radii: CornerRadii::all(2.0),
             });
 
@@ -3160,7 +3165,11 @@ impl UndeleteApp {
                 x: PADDING + 16.0,
                 y: item_y + 6.0,
                 text: format!("{} ({})", cat.display_name(), count),
-                color: if is_selected { BLUE } else { SUBTEXT1 },
+                color: if is_selected {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext1
+                },
                 font_size: FONT_SIZE,
                 font_weight: if is_selected {
                     FontWeightHint::Bold
@@ -3179,7 +3188,7 @@ impl UndeleteApp {
             y: conf_y,
             width: SIDEBAR_WIDTH - PADDING * 2.0,
             height: 1.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3187,7 +3196,7 @@ impl UndeleteApp {
             x: PADDING,
             y: conf_y + 8.0,
             text: String::from("By Confidence"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
@@ -3209,7 +3218,7 @@ impl UndeleteApp {
                 y: cy + 4.0,
                 width: 8.0,
                 height: 8.0,
-                color: conf.color(),
+                color: conf.color(&self.palette),
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -3217,7 +3226,7 @@ impl UndeleteApp {
                 x: PADDING + 14.0,
                 y: cy + 1.0,
                 text: format!("{}: {}", conf.display_name(), count),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 14.0),
@@ -3240,7 +3249,7 @@ impl UndeleteApp {
             y,
             width,
             height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3251,7 +3260,7 @@ impl UndeleteApp {
             y: header_y,
             width,
             height: 28.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3278,7 +3287,11 @@ impl UndeleteApp {
                 i,
                 header_y + 7.0,
                 &label,
-                if sorted { BLUE } else { SUBTEXT0 },
+                if sorted {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext0
+                },
                 FONT_SIZE_SMALL,
                 Fit::Start,
                 FontWeightHint::Bold,
@@ -3322,7 +3335,11 @@ impl UndeleteApp {
         selected: bool,
     ) {
         // Row background
-        let bg_color = if selected { SURFACE1 } else { BASE };
+        let bg_color = if selected {
+            self.palette.surface1
+        } else {
+            self.palette.base
+        };
         cmds.push(RenderCommand::FillRect {
             x,
             y,
@@ -3340,7 +3357,7 @@ impl UndeleteApp {
             y: cb_y,
             width: CHECKBOX_SIZE,
             height: CHECKBOX_SIZE,
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(3.0),
         });
@@ -3350,7 +3367,7 @@ impl UndeleteApp {
                 y: cb_y + 3.0,
                 width: CHECKBOX_SIZE - 6.0,
                 height: CHECKBOX_SIZE - 6.0,
-                color: BLUE,
+                color: self.palette.blue,
                 corner_radii: CornerRadii::all(2.0),
             });
         }
@@ -3375,7 +3392,7 @@ impl UndeleteApp {
             FILE_NAME,
             y + 8.0,
             &file.filename,
-            TEXT,
+            self.palette.text,
             FONT_SIZE,
             Fit::End,
         );
@@ -3385,7 +3402,7 @@ impl UndeleteApp {
                 FILE_NAME,
                 y + 26.0,
                 path,
-                OVERLAY0,
+                self.palette.overlay0,
                 FONT_SIZE_SMALL,
                 Fit::End,
             );
@@ -3397,7 +3414,7 @@ impl UndeleteApp {
             FILE_SIZE,
             y + 18.0,
             &file.size_display(),
-            SUBTEXT0,
+            self.palette.subtext0,
             FONT_SIZE,
             Fit::Start,
         );
@@ -3410,7 +3427,7 @@ impl UndeleteApp {
             y: y + 20.0,
             width: TYPE_SWATCH,
             height: TYPE_SWATCH,
-            color: file.file_type.color(),
+            color: file.file_type.color(&self.palette),
             corner_radii: CornerRadii::all(TYPE_SWATCH / 2.0),
         });
         let swatch = TYPE_SWATCH + TYPE_SWATCH_GAP;
@@ -3420,7 +3437,7 @@ impl UndeleteApp {
             table.width(FILE_TYPE) - swatch,
             y + 18.0,
             file.file_type.display_name(),
-            SUBTEXT0,
+            self.palette.subtext0,
             FONT_SIZE_SMALL,
             Fit::Start,
             FontWeightHint::Regular,
@@ -3432,7 +3449,7 @@ impl UndeleteApp {
             FILE_DELETED,
             y + 18.0,
             &file.delete_time_display(),
-            SUBTEXT0,
+            self.palette.subtext0,
             FONT_SIZE_SMALL,
             Fit::Start,
         );
@@ -3450,9 +3467,9 @@ impl UndeleteApp {
             width: badge_w,
             height: 20.0,
             color: Color::rgba(
-                file.confidence.color().r,
-                file.confidence.color().g,
-                file.confidence.color().b,
+                file.confidence.color(&self.palette).r,
+                file.confidence.color(&self.palette).g,
+                file.confidence.color(&self.palette).b,
                 40,
             ),
             corner_radii: CornerRadii::all(10.0),
@@ -3463,7 +3480,7 @@ impl UndeleteApp {
             badge_w - CONF_BADGE_PAD * 2.0,
             y + 19.0,
             file.confidence.display_name(),
-            file.confidence.color(),
+            file.confidence.color(&self.palette),
             FONT_SIZE_SMALL,
             Fit::Start,
             FontWeightHint::Bold,
@@ -3475,7 +3492,7 @@ impl UndeleteApp {
             y: y + ITEM_HEIGHT - 1.0,
             width,
             height: 1.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
     }
@@ -3494,7 +3511,7 @@ impl UndeleteApp {
             y,
             width,
             height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3504,7 +3521,7 @@ impl UndeleteApp {
             y,
             width: 1.0,
             height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3516,7 +3533,7 @@ impl UndeleteApp {
                 x: x + PADDING,
                 y: y + height / 2.0 - 10.0,
                 text: String::from("Select a file to preview"),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PADDING * 2.0),
@@ -3543,14 +3560,14 @@ impl UndeleteApp {
             y: cy,
             width: 48.0,
             height: 48.0,
-            color: file.file_type.color(),
+            color: file.file_type.color(&self.palette),
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
             x: inner_x + 8.0,
             y: cy + 16.0,
             text: file.file_type.extension().to_uppercase(),
-            color: CRUST,
+            color: self.palette.crust,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(32.0),
@@ -3562,7 +3579,7 @@ impl UndeleteApp {
             x: inner_x + 60.0,
             y: cy + 4.0,
             text: file.filename.clone(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner_w - 64.0),
@@ -3572,7 +3589,7 @@ impl UndeleteApp {
             x: inner_x + 60.0,
             y: cy + 26.0,
             text: file.file_type.display_name().to_string(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner_w - 64.0),
@@ -3587,7 +3604,7 @@ impl UndeleteApp {
             y: cy,
             width: inner_w,
             height: 1.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
         cy += 12.0;
@@ -3627,7 +3644,7 @@ impl UndeleteApp {
                 x: inner_x,
                 y: cy,
                 text: (*label).to_string(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(inner_w - value_w),
@@ -3658,7 +3675,7 @@ impl UndeleteApp {
                 x: inner_x + inner_w - value_w,
                 y: cy,
                 text: fitted,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(value_w),
@@ -3674,7 +3691,7 @@ impl UndeleteApp {
             x: inner_x,
             y: cy,
             text: String::from("Recovery Estimate"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner_w),
@@ -3687,7 +3704,7 @@ impl UndeleteApp {
             y: cy,
             width: inner_w,
             height: PROGRESS_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(PROGRESS_HEIGHT / 2.0),
         });
         let pct = f32::from(file.recovery_percent) / 100.0;
@@ -3698,7 +3715,7 @@ impl UndeleteApp {
                 y: cy,
                 width: fill_w,
                 height: PROGRESS_HEIGHT,
-                color: file.confidence.color(),
+                color: file.confidence.color(&self.palette),
                 corner_radii: CornerRadii::all(PROGRESS_HEIGHT / 2.0),
             });
         }
@@ -3708,7 +3725,7 @@ impl UndeleteApp {
             x: inner_x,
             y: cy,
             text: format!("{}% data likely recoverable", file.recovery_percent),
-            color: file.confidence.color(),
+            color: file.confidence.color(&self.palette),
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner_w),
@@ -3722,7 +3739,7 @@ impl UndeleteApp {
             y: cy,
             width: inner_w,
             height: 1.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
         cy += 12.0;
@@ -3731,7 +3748,7 @@ impl UndeleteApp {
             x: inner_x,
             y: cy,
             text: String::from("Detection Method"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(inner_w),
@@ -3742,7 +3759,7 @@ impl UndeleteApp {
         // A full sentence in a 296px column, so it wraps rather than being cut
         // at whatever word the column edge lands on, and the cursor advances by
         // the height the paragraph reports rather than a guess.
-        cy += text::Paragraph::new(file.source.description(), SUBTEXT0)
+        cy += text::Paragraph::new(file.source.description(), self.palette.subtext0)
             .at(inner_x, cy, inner_w)
             .font(FONT_SIZE_SMALL, FontWeightHint::Regular)
             .draw(cmds)
@@ -3754,7 +3771,7 @@ impl UndeleteApp {
                 x: inner_x,
                 y: cy,
                 text: String::from("Data Preview (hex)"),
-                color: TEXT,
+                color: self.palette.text,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(inner_w),
@@ -3768,14 +3785,14 @@ impl UndeleteApp {
                 y: cy,
                 width: inner_w,
                 height: 60.0,
-                color: CRUST,
+                color: self.palette.crust,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
             cmds.push(RenderCommand::Text {
                 x: inner_x + 6.0,
                 y: cy + 6.0,
                 text: hex_str,
-                color: GREEN,
+                color: self.palette.green,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(inner_w - 12.0),
@@ -3792,7 +3809,7 @@ impl UndeleteApp {
             y,
             width: self.width,
             height: FOOTER_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3802,7 +3819,7 @@ impl UndeleteApp {
             y,
             width: self.width,
             height: 1.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3818,7 +3835,7 @@ impl UndeleteApp {
                 if selected == 1 { "" } else { "s" },
                 format_size(total_size),
             ),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width * 0.4),
@@ -3830,7 +3847,7 @@ impl UndeleteApp {
             x: self.width * 0.4,
             y: y + 14.0,
             text: format!("Recover to: {}", self.recovery_target),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width * 0.3),
@@ -3847,7 +3864,7 @@ impl UndeleteApp {
                 BUTTON_WIDTH,
                 BUTTON_HEIGHT,
                 "Recover",
-                GREEN,
+                self.palette.green,
             );
         }
 
@@ -3859,7 +3876,7 @@ impl UndeleteApp {
             BUTTON_WIDTH,
             BUTTON_HEIGHT,
             "Select All",
-            SURFACE2,
+            self.palette.surface2,
         );
 
         // New Scan button
@@ -3870,7 +3887,7 @@ impl UndeleteApp {
             BUTTON_WIDTH,
             BUTTON_HEIGHT,
             "New Scan",
-            SURFACE2,
+            self.palette.surface2,
         );
     }
 
@@ -3882,7 +3899,7 @@ impl UndeleteApp {
             y,
             width: self.width,
             height: STATUS_BAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3901,7 +3918,7 @@ impl UndeleteApp {
                 files.len(),
                 stats.total_files,
             ),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - PADDING * 2.0),
@@ -3931,7 +3948,7 @@ impl UndeleteApp {
             y: content_y,
             width: self.width - PADDING * 2.0,
             height: 80.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -3939,7 +3956,7 @@ impl UndeleteApp {
             x: PADDING * 2.0,
             y: content_y + 12.0,
             text: String::from("Recovery Complete"),
-            color: TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - PADDING * 4.0),
@@ -3955,7 +3972,7 @@ impl UndeleteApp {
                 fail_count,
                 format_size(total_recovered),
             ),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - PADDING * 4.0),
@@ -3966,7 +3983,7 @@ impl UndeleteApp {
             x: PADDING * 2.0,
             y: content_y + 54.0,
             text: format!("Target: {}", self.recovery_target),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.width - PADDING * 4.0),
@@ -3997,7 +4014,7 @@ impl UndeleteApp {
             BUTTON_WIDTH,
             BUTTON_HEIGHT,
             "Done",
-            BLUE,
+            self.palette.blue,
         );
     }
 
@@ -4015,12 +4032,16 @@ impl UndeleteApp {
             y,
             width: row_w,
             height: 40.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
 
         // Status indicator
-        let status_color = if result.success { GREEN } else { RED };
+        let status_color = if result.success {
+            self.palette.green
+        } else {
+            self.palette.red
+        };
         cmds.push(RenderCommand::FillRect {
             x: PADDING + 8.0,
             y: y + 14.0,
@@ -4035,7 +4056,7 @@ impl UndeleteApp {
             x: PADDING + 28.0,
             y: y + 4.0,
             text: result.filename.clone(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(row_w * 0.4),
@@ -4047,7 +4068,7 @@ impl UndeleteApp {
             x: PADDING + 28.0,
             y: y + 22.0,
             text: result.destination.clone(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(row_w * 0.4),
@@ -4063,7 +4084,7 @@ impl UndeleteApp {
                 format_size(result.bytes_recovered),
                 format_size(result.original_size),
             ),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(row_w * 0.25),
@@ -4093,7 +4114,7 @@ impl UndeleteApp {
                 x: PADDING + row_w * 0.8,
                 y: y + 24.0,
                 text: msg.clone(),
-                color: RED,
+                color: self.palette.red,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(row_w * 0.18),
@@ -4111,7 +4132,7 @@ impl UndeleteApp {
             y: 0.0,
             width: self.width,
             height: HEADER_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -4135,14 +4156,14 @@ impl UndeleteApp {
             y: (HEADER_HEIGHT - 32.0) / 2.0,
             width: 32.0,
             height: 32.0,
-            color: BLUE,
+            color: self.palette.blue,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         cmds.push(RenderCommand::Text {
             x: PADDING + 6.0,
             y: (HEADER_HEIGHT - 32.0) / 2.0 + 8.0,
             text: String::from("UD"),
-            color: CRUST,
+            color: self.palette.crust,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(20.0),
@@ -4154,7 +4175,7 @@ impl UndeleteApp {
             x: PADDING + 44.0,
             y: (HEADER_HEIGHT - FONT_SIZE_TITLE) / 2.0,
             text: title.to_string(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - PADDING * 2.0 - 44.0),
@@ -4167,7 +4188,7 @@ impl UndeleteApp {
             y: HEADER_HEIGHT - 1.0,
             width: self.width,
             height: 1.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
     }
@@ -4195,9 +4216,9 @@ impl UndeleteApp {
             y: y + (height - FONT_SIZE) / 2.0,
             text: label.to_string(),
             color: if color.r > 100 || color.g > 100 || color.b > 100 {
-                CRUST
+                self.palette.crust
             } else {
-                TEXT
+                self.palette.text
             },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
@@ -4283,6 +4304,10 @@ pub fn format_hex_preview(data: &[u8], bytes_per_line: usize) -> String {
 // ============================================================================
 
 impl App for UndeleteApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // What the window is doing, because these four screens are four
         // different jobs and a taskbar entry saying only "Undelete" cannot tell
@@ -5890,11 +5915,12 @@ mod tests {
 
     #[test]
     fn test_file_category_all_covered() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         for kind in FileSignatureKind::ALL {
             let _cat = kind.category();
             let _name = kind.display_name();
             let _ext = kind.extension();
-            let _color = kind.color();
+            let _color = kind.color(&pal);
         }
     }
 
@@ -5982,9 +6008,10 @@ mod tests {
 
     #[test]
     fn test_file_category_display() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         for cat in FileCategory::ALL {
             assert!(!cat.display_name().is_empty());
-            let _c = cat.color();
+            let _c = cat.color(&pal);
         }
     }
 
@@ -6235,6 +6262,65 @@ mod tests {
         assert!(
             drawn.iter().any(|(_, t, ..)| t == "notes.txt"),
             "a name that fits was altered: {drawn:?}"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut UndeleteApp) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = UndeleteApp::new(1000.0, 700.0);
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

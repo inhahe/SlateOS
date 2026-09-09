@@ -5,6 +5,7 @@ already doing — this is evidence for the work you started at 03:28, not a new
 ask. Read it before you finish `scripts/test-selftests-are-repo-safe.py`, because
 it bounds *which* self-test to prove safe and shows the blast radius is
 cross-lane.
+**Status:** ✅ acknowledged 2026-09-07 by lane A — noted as evidence for the repo-safety gate work. No separate action needed.
 
 ## In short
 

@@ -1745,6 +1745,12 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
   - [ ] **Search dialog** — Aero-styled modal: glassy chrome, accent-color focus ring, result rows with the same row styling as file explorer
   - [ ] **File/folder select (open/save) dialog** — same chrome and styling as file explorer (it IS the file explorer component per §4.1), Aero-styled OK/Cancel buttons in the footer
   - [ ] **Indexing Options dialog** — Aero-styled settings modal for the file-indexer (which paths are indexed, which content types, ML/OCR opt-ins, status of current indexing pass): glassy chrome, two-column layout (indexed locations list on the left, configuration controls on the right) matching the Windows Indexing Options dialog visible in the reference file, Aero-styled action buttons in the footer
+  - [ ] **Settings app and the shell's settings surfaces** — Aero-styled chrome and page layout, matching the rest of the shell. Added 2026-09-07 on the operator's instruction (see `design-decisions.md` §815); the rest of this list predates it and did not cover the settings screens.
+- [ ] **The themeable / demo split, stated as a principle** (operator, 2026-09-07 — `design-decisions.md` §815 and §816). The shell and the settings pages follow `Aero Desktop (offline).html`, but not by hardcoding it:
+  - [ ] whatever is *themeable* reads from the current settings, so the OS can carry different themes and a user can change one without the screens fighting it;
+  - [ ] everything that is not themeable follows the demo;
+  - [ ] and the demo's look **is** the default theme, rather than a separate "Aero mode".
+  - [ ] The practical test: changing a theme axis must visibly change the settings pages too. A settings page that stays Aero-coloured when the user picks a dark theme has hardcoded what should have been a token.
 - [ ] The default theme is a normal YAML theme file — it uses the same axis system as third-party themes, so users can swap it out wholesale or override any single axis (e.g., keep Aero window decorations but switch icons to a flat-modern pack). No hard-coded "Aero mode" path in the compositor.
 - [ ] Aero blur and transparency are theme axes (window-decorations, taskbar-panel-styling), so users who want a flat/opaque look can disable them without losing the rest of the default visual identity.
 

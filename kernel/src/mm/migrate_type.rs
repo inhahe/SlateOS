@@ -368,7 +368,7 @@ pub fn stats() -> MigrateStats {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the migration type system.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[migrate_type] Running self-test...");
 
     // Test 1: Default type is Unmovable.
@@ -456,4 +456,5 @@ pub fn self_test() {
     }
 
     serial_println!("[migrate_type] Self-test PASSED");
+    Ok(())
 }

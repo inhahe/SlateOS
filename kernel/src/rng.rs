@@ -938,7 +938,7 @@ pub fn wait_until_ready(timeout_ns: u64) -> bool {
 /// 2. Consecutive outputs differ (not stuck).
 /// 3. Distribution is roughly uniform (chi-squared test on byte values).
 /// 4. RDRAND detection works (informational).
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[rng] Running self-test...");
 
     // --- 1. Non-zero output ---
@@ -1048,4 +1048,5 @@ pub fn self_test() {
     }
 
     serial_println!("[rng] Self-test PASSED");
+    Ok(())
 }

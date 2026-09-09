@@ -460,7 +460,7 @@ impl AddressSpace {
 // ---------------------------------------------------------------------------
 
 /// Self-test for VMA management (no hardware interaction — pure data structure).
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[vma] Running self-test...");
 
     // Use a fake PML4 address (we only test data structure operations,
@@ -636,4 +636,5 @@ pub fn self_test() {
     serial_println!("[vma]   find_gap: OK");
 
     serial_println!("[vma] Self-test PASSED");
+    Ok(())
 }

@@ -86,6 +86,7 @@
 //! like it does, and the clip cuts that row's hit box off at the pane's edge,
 //! so the half that was never drawn cannot be clicked.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -97,22 +98,6 @@ use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 /// The size the window asks for. Everything is derived from the size the
 /// compositor actually gives, which is not required to be this one.
@@ -169,18 +154,18 @@ impl PartOfSpeech {
     }
 
     #[must_use]
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Noun => BLUE,
-            Self::Verb => GREEN,
-            Self::Adjective => PEACH,
-            Self::Adverb => YELLOW,
-            Self::Pronoun => TEAL,
-            Self::Preposition => MAUVE,
-            Self::Conjunction => LAVENDER,
-            Self::Interjection => RED,
-            Self::Determiner => SUBTEXT0,
-            Self::Abbreviation => OVERLAY0,
+            Self::Noun => pal.blue,
+            Self::Verb => pal.green,
+            Self::Adjective => pal.peach,
+            Self::Adverb => pal.yellow,
+            Self::Pronoun => pal.teal,
+            Self::Preposition => pal.mauve,
+            Self::Conjunction => pal.lavender,
+            Self::Interjection => pal.red,
+            Self::Determiner => pal.subtext0,
+            Self::Abbreviation => pal.overlay0,
         }
     }
 }
@@ -1306,6 +1291,12 @@ pub struct Dictionary {
     wheel: guitk::wheel::Accumulator,
     status: String,
     size: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 /// The longest history the program keeps.
@@ -1315,6 +1306,7 @@ impl Dictionary {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             entries: build_dictionary(),
             query: String::new(),
             results: Vec::new(),
@@ -1808,7 +1800,7 @@ impl Dictionary {
         out.push(Block::Line {
             text: entry.word.clone(),
             size: l.big,
-            color: MAUVE,
+            color: self.palette.mauve,
             weight: FontWeightHint::Bold,
             indent: 0.0,
             space: 0.0,
@@ -1817,7 +1809,7 @@ impl Dictionary {
             out.push(Block::Line {
                 text: entry.pronunciation.clone(),
                 size: l.font,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 weight: FontWeightHint::Regular,
                 indent: 0.0,
                 space: l.small * 0.2,
@@ -1828,7 +1820,7 @@ impl Dictionary {
             out.push(Block::Line {
                 text: format!("{}. {}", i.saturating_add(1), def.part_of_speech.label()),
                 size: l.small,
-                color: def.part_of_speech.color(),
+                color: def.part_of_speech.color(&self.palette),
                 weight: FontWeightHint::Bold,
                 indent: 0.0,
                 space: l.font * 0.8,
@@ -1846,7 +1838,7 @@ impl Dictionary {
                 out.push(Block::Line {
                     text: line,
                     size: l.font,
-                    color: TEXT_COLOR,
+                    color: self.palette.text,
                     weight: FontWeightHint::Regular,
                     indent,
                     space: if n == 0 { l.small * 0.25 } else { 0.0 },
@@ -1867,7 +1859,7 @@ impl Dictionary {
                     out.push(Block::Line {
                         text: line,
                         size: l.small,
-                        color: OVERLAY0,
+                        color: self.palette.overlay0,
                         weight: FontWeightHint::Regular,
                         indent,
                         space: if n == 0 { l.small * 0.3 } else { 0.0 },
@@ -1881,9 +1873,9 @@ impl Dictionary {
         // on every entry, and reached by nothing at all — which is precisely
         // what the blanket `#![allow(dead_code)]` on line 1 was hiding.
         for (title, words, color) in [
-            ("Synonyms", &entry.synonyms, GREEN),
-            ("Antonyms", &entry.antonyms, RED),
-            ("See also", &entry.related, BLUE),
+            ("Synonyms", &entry.synonyms, self.palette.green),
+            ("Antonyms", &entry.antonyms, self.palette.red),
+            ("See also", &entry.related, self.palette.blue),
         ] {
             if words.is_empty() {
                 continue;
@@ -1891,7 +1883,7 @@ impl Dictionary {
             out.push(Block::Line {
                 text: title.to_string(),
                 size: l.small,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 weight: FontWeightHint::Bold,
                 indent: 0.0,
                 space: l.font * 0.9,
@@ -1903,7 +1895,7 @@ impl Dictionary {
             out.push(Block::Line {
                 text: "Origin".to_string(),
                 size: l.small,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 weight: FontWeightHint::Bold,
                 indent: 0.0,
                 space: l.font * 0.9,
@@ -1920,7 +1912,7 @@ impl Dictionary {
                 out.push(Block::Line {
                     text: line,
                     size: l.small,
-                    color: YELLOW,
+                    color: self.palette.yellow,
                     weight: FontWeightHint::Regular,
                     indent: l.font,
                     space: if n == 0 { l.small * 0.3 } else { 0.0 },
@@ -2047,14 +2039,22 @@ fn centred_in(
 }
 
 /// One button: a filled pill with a centred caption, and its hit box.
-fn button(f: &mut Frame, r: Rect, body: &str, size: f32, live: bool, target: Target) {
+fn button(
+    f: &mut Frame,
+    pal: &Palette,
+    r: Rect,
+    body: &str,
+    size: f32,
+    live: bool,
+    target: Target,
+) {
     if r.w <= 0.0 || r.h <= 0.0 {
         return;
     }
     fill(
         f,
         r,
-        if live { SURFACE1 } else { CRUST },
+        if live { pal.surface1 } else { pal.crust },
         (r.h * 0.3).min(8.0),
     );
     centred_in(
@@ -2064,7 +2064,7 @@ fn button(f: &mut Frame, r: Rect, body: &str, size: f32, live: bool, target: Tar
         r.y + r.h / 2.0,
         body,
         size,
-        if live { TEXT_COLOR } else { OVERLAY0 },
+        if live { pal.text } else { pal.overlay0 },
         FontWeightHint::Bold,
     );
     f.hit(target, r);
@@ -2072,28 +2072,21 @@ fn button(f: &mut Frame, r: Rect, body: &str, size: f32, live: bool, target: Tar
 
 /// The thin bar down the right-hand edge of a pane that says how much of it
 /// you are looking at. Not clickable: it reports, it does not drive.
-fn scrollbar(f: &mut Frame, pane: Rect, fraction: f32, offset: f32) {
+fn scrollbar(f: &mut Frame, pal: &Palette, pane: Rect, fraction: f32, offset: f32) {
     if pane.h <= 0.0 || pane.w <= 6.0 || fraction >= 1.0 {
         return;
     }
     let w = (pane.w * 0.012).clamp(2.0, 5.0);
     let track = Rect::new(pane.right() - w, pane.y, w, pane.h);
-    fill(f, track, CRUST, w / 2.0);
-    let thumb_h = (pane.h * fraction.clamp(0.05, 1.0))
-        .max(w * 3.0)
-        .min(pane.h);
-    let travel = (pane.h - thumb_h).max(0.0);
-    fill(
-        f,
-        Rect::new(
-            track.x,
-            pane.y + travel * offset.clamp(0.0, 1.0),
-            w,
-            thumb_h,
-        ),
-        SURFACE1,
-        w / 2.0,
-    );
+    fill(f, track, pal.crust, w / 2.0);
+    // `guitk::scrollbar`'s arithmetic, shared with the file dialog, the menus
+    // and the desktop shell. Two things stay this pane's own and are passed in
+    // rather than adopted: the floor is three times the bar's own width, so it
+    // scales with a bar that is itself a fraction of the pane; and `fraction`
+    // keeps its 0.05 lower clamp, which stops a very long article's thumb
+    // collapsing before the width-derived floor catches it.
+    let thumb = guitk::scrollbar::thumb_of(track, fraction.clamp(0.05, 1.0), offset, w * 3.0);
+    fill(f, thumb, pal.surface1, w / 2.0);
 }
 
 impl Dictionary {
@@ -2108,7 +2101,7 @@ impl Dictionary {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height);
         let mut f = Frame::new(l.window.w, l.window.h);
-        fill(&mut f, l.window, BASE, 0.0);
+        fill(&mut f, l.window, self.palette.base, 0.0);
 
         if l.shows_tabs() {
             self.draw_tabs(&mut f, &l);
@@ -2126,7 +2119,7 @@ impl Dictionary {
     }
 
     fn draw_tabs(&self, f: &mut Frame, l: &Layout) {
-        fill(f, l.tabs, CRUST, 0.0);
+        fill(f, l.tabs, self.palette.crust, 0.0);
         for (i, screen) in Screen::ALL.into_iter().enumerate() {
             let cell = l.tab(i);
             if cell.w <= 0.0 || cell.h <= 0.0 {
@@ -2138,20 +2131,20 @@ impl Dictionary {
                 f,
                 cell,
                 if active {
-                    SURFACE1
+                    self.palette.surface1
                 } else if live {
-                    SURFACE0
+                    self.palette.surface0
                 } else {
-                    CRUST
+                    self.palette.crust
                 },
                 (cell.h * 0.25).min(7.0),
             );
             let colour = if active {
-                LAVENDER
+                self.palette.lavender
             } else if live {
-                SUBTEXT1
+                self.palette.subtext1
             } else {
-                OVERLAY0
+                self.palette.overlay0
             };
             centred_in(
                 f,
@@ -2173,7 +2166,7 @@ impl Dictionary {
     fn draw_search(&self, f: &mut Frame, l: &Layout) {
         let field = l.search_box();
         if field.h > 0.0 {
-            fill(f, field, SURFACE0, (field.h * 0.22).min(8.0));
+            fill(f, field, self.palette.surface0, (field.h * 0.22).min(8.0));
             f.hit(Target::SearchBox, field);
             let inner = l.pad;
             let clear_w = (l.small * 4.0).min(field.w * 0.25);
@@ -2192,7 +2185,7 @@ impl Dictionary {
                     baseline,
                     &format!("{}\u{2502}", self.query),
                     l.font,
-                    TEXT_COLOR,
+                    self.palette.text,
                     FontWeightHint::Regular,
                     Some(text_span),
                 );
@@ -2202,7 +2195,15 @@ impl Dictionary {
                     clear_w,
                     field.h * 0.7,
                 );
-                button(f, clear, "Clear", l.small, true, Target::ClearQuery);
+                button(
+                    f,
+                    &self.palette,
+                    clear,
+                    "Clear",
+                    l.small,
+                    true,
+                    Target::ClearQuery,
+                );
             } else {
                 label(
                     f,
@@ -2210,7 +2211,7 @@ impl Dictionary {
                     baseline,
                     "Search a word\u{2026}",
                     l.font,
-                    OVERLAY0,
+                    self.palette.overlay0,
                     FontWeightHint::Regular,
                     Some(text_span),
                 );
@@ -2233,7 +2234,7 @@ impl Dictionary {
                 band.y + band.h / 2.0 - text::line_height(l.font, FontWeightHint::Bold) / 2.0,
                 title,
                 l.font,
-                LAVENDER,
+                self.palette.lavender,
                 FontWeightHint::Bold,
                 Some(band.w * 0.6),
             );
@@ -2241,6 +2242,7 @@ impl Dictionary {
                 let w = (l.small * 5.0).min(band.w * 0.3);
                 button(
                     f,
+                    &self.palette,
                     l.trailing_button(band, 0, w),
                     "Clear",
                     l.small,
@@ -2278,7 +2280,7 @@ impl Dictionary {
                 pane.y + l.pad,
                 empty,
                 l.font,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
                 Some((pane.w - l.pad * 2.0).max(0.0)),
             );
@@ -2309,7 +2311,7 @@ impl Dictionary {
             let r = l.row(pane, slot);
             let chosen = top.saturating_add(slot) == sel;
             if chosen {
-                fill(f, r, SURFACE0, (r.h * 0.2).min(7.0));
+                fill(f, r, self.palette.surface0, (r.h * 0.2).min(7.0));
             }
             self.draw_row(f, l, r, index, chosen);
             f.hit(Target::Row(top.saturating_add(slot)), r);
@@ -2319,7 +2321,7 @@ impl Dictionary {
         if rows.len() > visible && visible > 0 {
             let fraction = visible as f32 / rows.len() as f32;
             let travel = rows.len().saturating_sub(visible).max(1) as f32;
-            scrollbar(f, pane, fraction, top as f32 / travel);
+            scrollbar(f, &self.palette, pane, fraction, top as f32 / travel);
         }
     }
 
@@ -2341,7 +2343,11 @@ impl Dictionary {
             r.y + r.h * 0.5 - text::line_height(l.font, FontWeightHint::Bold),
             &head,
             l.font,
-            if chosen { LAVENDER } else { TEXT_COLOR },
+            if chosen {
+                self.palette.lavender
+            } else {
+                self.palette.text
+            },
             FontWeightHint::Bold,
             Some(word_w),
         );
@@ -2366,7 +2372,7 @@ impl Dictionary {
                 r.y + r.h * 0.5 - text::line_height(l.small, FontWeightHint::Regular),
                 short.short(),
                 l.small,
-                short.color(),
+                short.color(&self.palette),
                 FontWeightHint::Regular,
                 Some(w),
             );
@@ -2381,7 +2387,7 @@ impl Dictionary {
                 r.y + r.h * 0.5 + text::line_height(l.small, FontWeightHint::Regular) * 0.1,
                 &first.text,
                 l.small,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
                 Some((r.w - inner * 2.0).max(0.0)),
             );
@@ -2396,7 +2402,7 @@ impl Dictionary {
                 l.content.y + l.pad,
                 "No word open \u{2014} search for one first",
                 l.font,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
                 Some(l.content.w),
             );
@@ -2407,6 +2413,7 @@ impl Dictionary {
             let back_w = (l.small * 5.0).min(bar.w * 0.3);
             button(
                 f,
+                &self.palette,
                 Rect::new(
                     bar.x,
                     bar.y + (bar.h - (bar.h - l.pad * 0.5).clamp(0.0, l.font * 2.0)) / 2.0,
@@ -2426,6 +2433,7 @@ impl Dictionary {
             };
             button(
                 f,
+                &self.palette,
                 l.trailing_button(bar, 0, fav_w),
                 caption,
                 l.small,
@@ -2446,7 +2454,7 @@ impl Dictionary {
             y += block.space();
             let h = block.height();
             if y + h >= pane.y && y <= pane.bottom() {
-                draw_block(f, l, block, pane, y);
+                draw_block(f, &self.palette, l, block, pane, y);
             }
             y += h;
         }
@@ -2454,7 +2462,13 @@ impl Dictionary {
 
         if total > pane.h {
             let travel = (total - pane.h).max(1.0);
-            scrollbar(f, pane, pane.h / total, self.entry_scroll / travel);
+            scrollbar(
+                f,
+                &self.palette,
+                pane,
+                pane.h / total,
+                self.entry_scroll / travel,
+            );
         }
     }
 
@@ -2463,7 +2477,7 @@ impl Dictionary {
         if card.w <= 0.0 || card.h <= 0.0 {
             return;
         }
-        fill(f, card, CRUST, (card.h * 0.04).min(12.0));
+        fill(f, card, self.palette.crust, (card.h * 0.04).min(12.0));
         let inner = l.pad * 1.5;
         let mut y = card.y + inner;
         label(
@@ -2472,7 +2486,7 @@ impl Dictionary {
             y,
             "Featured word",
             l.small,
-            TEAL,
+            self.palette.teal,
             FontWeightHint::Bold,
             Some((card.w - inner * 2.0).max(0.0)),
         );
@@ -2487,7 +2501,7 @@ impl Dictionary {
             y,
             &entry.word,
             l.big,
-            MAUVE,
+            self.palette.mauve,
             FontWeightHint::Bold,
             Some((card.w - inner * 2.0).max(0.0)),
         );
@@ -2498,7 +2512,7 @@ impl Dictionary {
             y,
             &entry.pronunciation,
             l.small,
-            SUBTEXT0,
+            self.palette.subtext0,
             FontWeightHint::Regular,
             Some((card.w - inner * 2.0).max(0.0)),
         );
@@ -2512,6 +2526,7 @@ impl Dictionary {
         let gap = l.pad * 0.6;
         button(
             f,
+            &self.palette,
             Rect::new(card.x + inner, by, bw, bh),
             "Previous",
             l.small,
@@ -2520,6 +2535,7 @@ impl Dictionary {
         );
         button(
             f,
+            &self.palette,
             Rect::new(card.x + inner + bw + gap, by, bw, bh),
             "Next",
             l.small,
@@ -2528,6 +2544,7 @@ impl Dictionary {
         );
         button(
             f,
+            &self.palette,
             Rect::new(card.right() - inner - bw, by, bw, bh),
             "Read entry",
             l.small,
@@ -2558,7 +2575,7 @@ impl Dictionary {
                     y,
                     &row,
                     l.font,
-                    TEXT_COLOR,
+                    self.palette.text,
                     FontWeightHint::Regular,
                     Some((card.w - inner * 2.0).max(0.0)),
                 );
@@ -2568,7 +2585,7 @@ impl Dictionary {
     }
 
     fn draw_status(&self, f: &mut Frame, l: &Layout) {
-        fill(f, l.status, CRUST, 0.0);
+        fill(f, l.status, self.palette.crust, 0.0);
         let baseline = l.status.y + l.status.h / 2.0
             - text::line_height(l.small, FontWeightHint::Regular) / 2.0;
         let hint = self.hint();
@@ -2583,7 +2600,7 @@ impl Dictionary {
             baseline,
             self.status(),
             l.small,
-            SUBTEXT1,
+            self.palette.subtext1,
             FontWeightHint::Regular,
             Some(if show_hint {
                 (room - hint_w - l.pad * 2.0).max(0.0)
@@ -2598,7 +2615,7 @@ impl Dictionary {
                 baseline,
                 hint,
                 l.small,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
                 Some(hint_w),
             );
@@ -2617,7 +2634,7 @@ impl Dictionary {
     }
 }
 
-fn draw_block(f: &mut Frame, l: &Layout, block: &Block, pane: Rect, y: f32) {
+fn draw_block(f: &mut Frame, pal: &Palette, l: &Layout, block: &Block, pane: Rect, y: f32) {
     match block {
         Block::Line {
             text: body,
@@ -2648,7 +2665,7 @@ fn draw_block(f: &mut Frame, l: &Layout, block: &Block, pane: Rect, y: f32) {
             for (word, link) in words {
                 let w = chip_w(word, *size, inner);
                 let chip = Rect::new(x, y, w, h);
-                fill(f, chip, SURFACE0, (h * 0.35).min(9.0));
+                fill(f, chip, pal.surface0, (h * 0.35).min(9.0));
                 centred_in(
                     f,
                     chip.x,
@@ -2656,7 +2673,7 @@ fn draw_block(f: &mut Frame, l: &Layout, block: &Block, pane: Rect, y: f32) {
                     chip.y + chip.h / 2.0,
                     word,
                     *size,
-                    if link.is_some() { *color } else { SUBTEXT0 },
+                    if link.is_some() { *color } else { pal.subtext0 },
                     FontWeightHint::Regular,
                 );
                 // Only a chip the dictionary can actually open is clickable, so
@@ -2859,6 +2876,10 @@ pub fn handle_event(app: &mut Dictionary, event: &Event) -> EventResult {
 }
 
 impl App for Dictionary {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Dictionary".to_string()
     }
@@ -4495,5 +4516,64 @@ mod tests {
             },
         );
         assert_eq!(d.layout().window, Rect::new(0.0, 0.0, 640.0, 480.0));
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut Dictionary) -> Vec<Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = Dictionary::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

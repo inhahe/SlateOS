@@ -246,7 +246,7 @@ pub fn stats() -> InjectStats {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the fault injection system.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[fault_inject] Running self-test...");
 
     // Test 1: Default state is inactive.
@@ -292,4 +292,5 @@ pub fn self_test() {
     );
 
     serial_println!("[fault_inject] Self-test PASSED");
+    Ok(())
 }

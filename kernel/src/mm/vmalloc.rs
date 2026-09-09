@@ -425,7 +425,7 @@ pub fn stats() -> VmallocStats {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the vmalloc subsystem.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[vmalloc] Running self-test...");
 
     // Test 1: Basic allocation.
@@ -516,4 +516,5 @@ pub fn self_test() {
     );
 
     serial_println!("[vmalloc] Self-test PASSED");
+    Ok(())
 }

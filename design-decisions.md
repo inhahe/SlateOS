@@ -65794,6 +65794,196 @@ which is the audit this decision avoids needing.
 
 ---
 
+## §914 — Boot self-tests: halt on kernel-integrity failures, log-and-continue for everything else
+
+**Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+
+**In short:** the kernel runs several hundred self-tests at boot. Until now,
+every failure panicked the machine dead. The operator was asked whether a
+user's computer should refuse to start because a cosmetic terminal flag
+(`VERASE`) is wrong, and answered: **option D — split by severity.** A bad
+memory-manager invariant still halts; a cosmetic mismatch prints a warning
+and boots. Option A (gate all self-tests behind a boot flag, skip in
+production) was explicitly not taken as an interim step — the operator went
+straight to the end state.
+
+**The question (A-Q3 in `open-questions.md`):** 567 kernel files contain
+self-test functions with a total of ~12 674 assertion sites. Only ~299 use the
+log-and-continue style. The four options were: (A) skip self-tests on
+production boots via a boot flag; (B) always run but never panic; (C) keep
+today's halt-everything behaviour as deliberate policy; (D) classify each
+test — halt for structural integrity, log-and-continue for the rest.
+
+**Operator's answer (verbatim):** "D" — keep assertions for checks about
+kernel integrity, log-and-continue for the rest.
+
+**Background the operator also received (and which shaped D-straight-away over
+A-now-D-later):** (1) the OS has zero real-world users — it has never been
+booted on hardware, so A's urgency is hypothetical; (2) A creates a
+configuration divergence — the tested path (with self-tests) differs from the
+shipped path (without), and the first hardware boot is exactly when you least
+want them to differ; (3) D's real cost is one macro-level change (a
+`#[severity]` attribute or classification table) plus incremental per-test
+judgement, not 12 674 individual site edits.
+
+**Implementation plan:** introduce a per-self-test severity classification
+(e.g. `Integrity` vs `Diagnostic`). `Integrity` tests (memory manager, page
+table, scheduler invariants, capability enforcement) keep the panic-on-failure
+behaviour. `Diagnostic` tests (terminal flags, cosmetic checks, informational
+self-tests) switch to log-and-continue. Migration is incremental — each
+self-test is classified as it is touched, with the default being
+halt-on-failure (the safe side) until classified.
+
+**How to reverse.** Reclassify individual tests or revert to a blanket halt
+policy by setting the default severity back to `Integrity`.
+
+**Where it lives.** The classification will be per-test-function metadata;
+the enforcement in `kernel/src/main.rs`'s self-test dispatch. See
+`known-issues.md` → `TD-A-MOST-BOOT-SELF-TESTS-PANIC-THE-KERNEL-INSTEAD-OF-REPORTING`.
+
+---
+
+## §915 — Fix fastpy's sysroot lookup directly rather than working around it per-lane
+
+**Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+
+**In short:** the C-test fixtures are compiled by fastpy (a separate project).
+Fastpy hard-codes a sibling folder named `os` to find the C library, but the
+project now lives in `os-lane-a`/`b`/`c` worktrees. The compiler never finds
+the library, so every boot test prints a warning and the C-test results are
+unattributable. The operator chose **option A**: fix fastpy directly (walk up
+from launch directory, keep old `os` as fallback), bump its version, and
+commit without pushing.
+
+**Alternatives rejected:** (B) set the location explicitly per-lane — fixes
+the symptom for one caller; (C) leave the warning — nothing degrades but the
+gap persists.
+
+**Implementation note:** this is a change to `D:\visual studio projects\fastpy`,
+not to this tree. The fix is "walk up from the current working directory to
+find the sysroot" with the old hard-coded `os` path as fallback.
+
+---
+
+## §916 — `find -size 100` means 512-byte blocks (POSIX), not bytes
+
+**Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+
+**In short:** our `find -size 100` treated a bare number as bytes; every
+other `find` treats it as 512-byte blocks (POSIX). The operator chose
+**option C**: match POSIX, acknowledging that `b` for blocks is unintuitive
+(most users expect bytes) but any deviation bites people familiar with the
+tool, and there's no way to be both intuitive and compliant.
+
+**Where it lives.** `userspace/shell/` — the `find` implementation's
+`-size` parser.
+
+---
+
+## §917 — `oci run` refuses to start when an option cannot be applied
+
+**Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+
+**In short:** when a user asks `oci run` to apply an option (e.g. a
+resource limit, a namespace flag) that the runtime cannot honour, should it
+start the container anyway or refuse? The operator chose **option A**:
+refuse to start. A container running with fewer restrictions than requested
+is a security gap; a clear error at launch is preferable.
+
+**Where it lives.** `kernel/src/container/` — the OCI runtime's option
+validation path.
+
+---
+
+## §918 — A program may prompt for keyboard/microphone/camera permission
+
+**Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+
+**In short:** should a program be able to pop up a prompt asking the user
+for permission to read the keyboard, microphone, or camera? The operator
+chose **option A: yes**, and also instructed to fix the error message
+(which currently does not explain what happened when permission is denied).
+
+**Where it lives.** The capability prompt system and the error path for
+denied device access.
+
+---
+
+## §919 — The shell's `grep` uses standard defaults; operator's custom features to be integrated
+
+**Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+
+**In short:** our shell `grep` defaulted to case-insensitive search with
+line numbers, unlike every other Unix `grep`. The operator chose **option A**:
+match standard defaults (case-sensitive, no line numbers unless `-n`). The
+operator also noted a custom grep implementation at
+`D:\visual studio projects\grep` (Python and C++) with additional features
+beyond GNU grep, and wants those integrated into SlateOS's grep so it
+becomes a superset. The grep implementation is in `userspace/` (lane B's
+territory), so lane B handles the actual port.
+
+---
+
+## §920 — Leave the destructive-looking commits and fake-signed history as-is
+
+**Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+
+**In short:** two commits that appear to delete the whole OS and 33 commits
+signed by a name the operator did not authorise are permanently in the
+published git history. The operator chose **option A**: leave the history
+as-is. The commits are harmless (the "deletions" were artifacts of the
+migration, and the signatures were from a misconfigured account), and
+rewriting published history would break all three lanes' worktrees and
+require force-pushes on shared branches.
+
+---
+
+## §921 — The 70ms per-file-open was not the antivirus; re-measure on E:
+
+**Date:** 2026-09-07. **Decided by:** Operator (factual correction). **Lane:** A.
+
+**In short:** every build and check was paying ~70ms per file opened. The
+entry hypothesised Defender real-time scanning. The operator reported that
+`D:\visual studio projects` was already excluded from scanning, so the
+antivirus was not the cause. More likely explanations: CPU saturation from
+concurrent work, filesystem I/O contention from four continuous backup jobs
+(two local, two cloud), and HDD latency (the tree has since moved to SSD).
+The question is effectively closed — re-measure on E: if the latency
+persists, but the leading hypothesis is invalidated.
+
+---
+
+## §922 — Release boot test staleness gate: commit-count trigger that cannot mean "never"
+
+**Date:** 2026-09-07. **Decided by:** Operator (chose C; implementation design
+by Claude). **Lane:** A.
+
+**In short:** the operator chose option C for Q46 (debug build by default, with
+a periodic release boot test) and instructed: "make a solution that will not
+result in 'never' in practice." The trigger is a **commit-count gate in the
+pre-push hook**: `scripts/check-release-staleness.py` counts kernel-touching
+commits (`kernel/`, `bench/`) since the last release boot test (recorded in
+`bench/last-release-boot.json`), and refuses the push when the count exceeds
+100 (roughly a day or two of active work at this project's measured rate).
+
+The mechanism is attached to an event the tree already produces (commits past
+a threshold), not to a human's intention to remember, so a quiet month costs
+nothing and a busy week triggers it. The only way past it is to run the
+measurement (`./scripts/boot-test.sh --profile=release` and update the
+baseline) or to consciously raise the threshold — and raising it is a visible
+diff. This is the shape lane B proposed (ratchet attached to change, not
+calendar) and is the same pattern as `scripts/scan-orphan-modules.py`.
+
+**Escape hatch:** `ALLOW_STALE_RELEASE=1 git push ...` for cases where the
+release test is about to be run.
+
+**Where it lives.** `scripts/check-release-staleness.py` (the gate),
+`bench/last-release-boot.json` (the baseline), wired into
+`scripts/hooks/pre-push` (gate 15) and `scripts/boot-test.sh` (informational
+line before build).
+
+---
+
 ## 758. `/proc` gets a crate of its own, and its readers return "not exported" and "could not read" as two different answers
 
 **Lane:** B
@@ -68400,3 +68590,542 @@ handshake can be made deterministic for a test without weakening it in
 production. That is a better design regardless and it is what un-redded the
 four SSH tests; this decision is about whether the rest of the tree gets the
 same honest platform.
+
+## 814. A file operation that fails raises a dialog; one that succeeds does not
+
+**Date:** 2026-09-07
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** when the file manager could not do something you asked -- a
+rename onto a name already taken, a folder it could not create, three of five
+files it could not delete -- it used to mention that in the small grey line at
+the bottom of the window, in exactly the same place and style as "Deleted 5
+items". That line is replaced by the next thing you do, so the usual way to
+find out an operation half-failed was to notice later that a file was still
+there. Failures now also raise a dialog you have to dismiss. Successes still
+just update the line at the bottom.
+
+**What was there before.** Every operation ended by building one formatted
+`String` and assigning it to `status_message`. `describe_outcome` produced
+`"Deleted 5 item(s)"` and `"Deleted 3 item(s), 2 failed -- /etc/x: permission
+denied"` through the same code path, and no caller could tell the two apart
+without parsing the sentence back.
+
+**The decision.** Operations return an `Outcome { message, failure: Option }`.
+`report` puts `message` in the status bar always, and raises an
+`AlertDialog::error` when `failure` is set. Every operation goes through it,
+successes included -- see the note on why below.
+
+**The tradeoff, which is real.** A dialog interrupts. A file manager that
+raised one on every hiccup would train the user to dismiss dialogs without
+reading them, which costs more than it saves and is the failure mode of every
+program that over-warns.
+
+Against that: the operations in question are *destructive and asked for
+explicitly*. The user pressed Delete, confirmed a dialog, and then some of it
+did not happen. There is no sensible reading in which that should be as quiet
+as success. The asymmetry is the whole point -- it is not "important messages
+get dialogs", which is a slope, but "you asked me to do something and I did
+not do it", which is a small, checkable class.
+
+**Why successes go through `report` too, when they raise nothing.** They were
+originally left assigning `status_message` directly, since they have nothing
+to raise. That made the rule have two implementations, and it showed up as a
+test: `a_rename_that_works_raises_no_dialog` did not fail when `report` was
+mutated to raise a dialog on *every* outcome, because the path it exercised
+never called `report`. Routing successes through it turned that test from
+decorative into load-bearing, and it now catches the mutation along with four
+others. A rule with one implementation can be tested; a rule with two can only
+be tested where it happens to be called.
+
+**What was rejected.**
+
+- *Colour the status line red.* Cheaper, and it does not interrupt. Rejected
+  because the problem is not that the line is hard to read but that it is
+  transient -- it is gone at the next click whatever colour it was.
+- *A notification/toast.* Better than a status line, worse than a dialog for
+  this specific case, and there is no notification service in the tree yet.
+  Worth revisiting when there is; a dialog is the right answer for "the thing
+  you just asked for did not happen" either way.
+- *List every failure in the dialog.* A batch of two hundred failures makes an
+  unreadable dialog. It names the first and gives the count; the full list
+  belongs in a queue or log view, which does not exist yet.
+
+**Where it bites.** `apps/explorer/src/main.rs` -- `Outcome`, `report`,
+`describe_outcome`, and `Modal::Notice`.
+
+**It is also a prerequisite.** The operator's deferred-filesystem-operations
+request (roadmap 2.3) specifies for lane C "the file manager asking in the same
+dialog that reports the failure". There was no such dialog. There is now, and
+the deferral prompt has somewhere to go.
+
+## 815. The Settings screens split by kind: what the desktop shows you stays in the shell, what you open lives in the app -- and both follow the Aero demo's look
+
+**Date:** 2026-09-07
+**Lane:** C
+**Decided by:** Operator (Claude recommended C; the operator chose C and added the styling mandate, which was not part of the question)
+
+**In short:** the settings screens exist twice -- once inside the desktop
+shell, once in a standalone Settings app -- and neither copy was finished, so
+every change had to be made in two places. From now on the dividing line is
+"is this something the desktop shows you, or a screen you open?". The volume
+overlay and the login screen are the desktop showing you something, so they
+stay in the shell and get wired up. Everything you open from a menu moves to
+the Settings app, and the shell's copies are deleted. Separately, the operator
+wants both to *look* like the `Aero Desktop (offline).html` demo.
+
+**The question.** `open-questions.md` -> C-Q6. Four options: delete the
+shell's panels, delete the app's, split by kind, or leave it.
+
+**The answer: C, split by kind.** The dividing line is a real one rather than
+a compromise between two half-finished copies. It is also the most work, which
+is why it was worth asking rather than assuming.
+
+**The styling mandate, which the operator added unprompted.** The shell and
+the settings pages are to follow `.\Aero Desktop (offline).html`. The split
+the operator specified:
+
+- whatever is *themeable* reads from the current settings, so the OS can carry
+  different themes;
+- everything else follows the demo;
+- and the demo's look is the **default theme**.
+
+The operator's closing sentence -- "If this isn't already in
+roadmap-detailed.md, it should be" -- is an instruction, carried out in the
+same change as this entry.
+
+**What this settles that was in flight.** The palette conversion. The shell's
+549 hardcoded colours are worth converting because those modules survive; the
+app's 2,258 are worth converting because the app is where the settings pages
+are going. Neither half is wasted, which was the thing C-Q6 was blocking.
+
+## 816. The high-contrast scheme's highlight is white by default, and every scheme's highlight is user-configurable
+
+**Date:** 2026-09-07
+**Lane:** C
+**Decided by:** Operator for the configurability requirement, which was theirs and is binding; Claude for the white-over-cyan default, on the operator's explicit invitation to decide it
+
+**In short:** in the "green on black" high-contrast scheme the highlight was
+about three times dimmer than in the other schemes, so the selected item was
+hard to pick out. It becomes white. Separately, and regardless of that pick,
+the highlight colour becomes something the user can change in any scheme.
+
+**The question.** `open-questions.md` -> C-Q7. Whether to brighten it, and to
+what.
+
+**What the operator said.** That they have no problem with a white highlight
+and asked why it has to be a colour at all; that cyan should survive red-green
+colour-blindness because its blue component is the distinguishing one, as it
+is for magenta; that another option might be equally good; that this is
+theory and I may know the practice better; and -- the part that is a
+requirement rather than a preference -- that whatever the default is, **the
+user should be able to configure it.**
+
+**The operator's colour-vision reasoning is correct.** Protanopia and
+deuteranopia (jointly around 8% of men) confuse red against green while the
+blue channel stays intact, which is exactly why cyan and magenta remain
+distinguishable from both. Nothing to correct.
+
+**But the first sentence is the stronger argument, and it decides it.** A
+highlight does not have to carry its meaning in hue at all. *Luminance*
+contrast is read identically by every form of colour vision including
+monochromacy, and by anyone on a failing panel or in direct sunlight. White on
+black is the maximum available and is hue-free. Cyan is defensible; white is
+unimprovable -- and "high contrast" is what the scheme is called.
+
+**Amended the same day, on trying to implement it.** Both halves of this
+decision meant something other than they appear to, and the entry would be
+misleading without saying so.
+
+The **configurability requirement is already satisfied** for everything on
+screen: the live highlight is `Palette::highlight_fill`, which is the user's
+accent with an alpha applied, and the accent is already an Appearance setting.
+Nothing had to be built for it.
+
+The **white** half lands in a module nothing calls. `HighContrastTheme` in
+`gui/desktop/src/a11y.rs` is a pinned orphan island, and there is a second,
+equally unreferenced accessibility module beside it modelling the same feature
+differently. So high contrast cannot be switched on at all, and this entry
+changes no pixel until that is fixed. The colour was changed regardless -- the
+decision stands and the value should be right when the feature is wired -- and
+the gap is written up as `TD-C-HIGH-CONTRAST-MODE-IS-NOT-CONNECTED-TO-ANYTHING`,
+which also carried the one design point this decision did *not* settle:
+whether, in high contrast, the accent follows the user's setting or the
+scheme's.
+
+**Settled later the same day, and the mode is now wired.** The accent
+**follows the user's setting**, because a scheme-fixed accent would make the
+highlight the one colour this mode does not let you change -- which
+contradicts the requirement above. The contrast risk that argued the other way
+is handled without overriding anyone: for a named accent the *hue* is kept and
+the better-contrasting of its two existing values is used, which is exactly
+what `for_mode` already does for every other role, so it is a choice between
+two spellings of the user's colour rather than a substitution of it. A
+`Custom` accent is used verbatim -- an exact colour is an exact request, and
+there is no second value to choose between.
+
+The scheme now lives in `gui/appearance` as `HighContrastScheme`, and
+`Palette::from_settings` branches on an `AppearanceSettings` field, so the mode
+applies to every surface at once.
+
+**Complete as of 2026-09-07; this entry said otherwise until then.** It used to
+end "What remains is that no Settings control sets it yet", which stopped being
+true and was not updated. The chain is whole and checked end to end:
+Settings → Accessibility → High Contrast (`DropdownId::HighContrast`, offering
+"Off" plus every scheme) writes `appearance.settings.high_contrast`, which
+`AppearanceFile` persists under `theme.high_contrast`, which
+`Palette::from_settings` and the compositor's `DecorationTheme::from_settings`
+both read. `apps/settings` covers the control with
+`the_list_offers_off_and_every_scheme` and
+`choosing_a_scheme_sets_it_and_choosing_off_clears_it`; its 213 tests pass.
+
+Recorded because a stale "what remains" line is worse than no line: it is the
+same failure as the seven stale `known-issues.md` entries closed on 2026-09-07,
+and it invites someone to build a control that already exists.
+
+**The one real argument against white**, and the reason the configurability
+requirement matters more than the default: a user who picks "green on black"
+may want it to *look* like a green terminal, and a white highlight breaks that
+identity. That is a taste the system should not be legislating, which is
+precisely what a setting is for. Cyan stays available.
+
+## 817. The timezone database is packaged by lane B, and the lane map is corrected to say where the package manager actually lives
+
+**Date:** 2026-09-07
+**Lane:** C
+**Decided by:** Operator (Claude recommended B)
+
+**In short:** set your clock to New York and SlateOS quietly gives you UTC,
+because the world's timezone rules were never packaged. Nobody had written
+them because the document saying who owns that job pointed at a directory that
+does not exist. Lane B, which already has the package manager, does the work,
+and the map is corrected in the same change so the next reader is not sent to
+the same empty directory.
+
+**The question.** `open-questions.md` -> C-Q8. Four options: move the package
+manager to a top-level `pkg/` and have lane C write it; give the job to lane
+B; correct the map to point at `userspace/pkg/` and leave ownership with lane
+C; or leave it and write down that the clock lies.
+
+**The answer: B**, which was also the recommendation. The package manager is
+already lane B's and already exists; moving 5,004 lines across a lane boundary
+to make an ownership document true is the tail wagging the dog.
+
+**The correction travels with it.** The map's error is the actual cause of the
+stall -- not a missing decision but a document that named a path nobody could
+find. Fixing the ownership without fixing the map would leave the trap set for
+the next question.
+
+## 818. A passwordless account is never locked, rather than being lockable and then let through
+
+**Date:** 2026-09-07
+**Lane:** C
+**Decided by:** Operator (Claude recommended C)
+
+**In short:** if an account has no password, the lock screen had nothing to
+check, so locking the screen produced a screen that anybody could dismiss --
+security theatre, and worse than none, because it looks locked. From now on an
+account with no password is simply never locked in the first place. The screen
+does not appear, so nothing pretends to be protecting anything.
+
+**The question.** `open-questions.md` -> the lock-screen entry of 2026-08-24.
+Four options: accept the empty password (today's behaviour), refuse it (which
+locks the user out of their own machine forever), never lock such an account
+at all, or accept it only if the account was passwordless before the lock.
+
+**The answer: C**, which was also the recommendation. It is the only one of
+the four that is neither a hole nor a trap. Refusing strands the user;
+accepting is a lock that does not lock; the fourth option is the third with a
+race condition attached.
+
+**What a user sees.** Setting a password on the account is what turns locking
+on. That is a discoverable relationship and a true one, which the previous
+behaviour was not.
+
+## 819. The vault cipher is ChaCha20-Poly1305, and it will not become the disk cipher because that one already exists
+
+**Date:** 2026-09-07
+**Lane:** C
+**Decided by:** Operator (the criterion and its exception were the operator's; lane B established that the exception applies, and Claude confirmed the one condition that would have overridden it does not hold)
+
+**In short:** SlateOS had no way to encrypt a saved password. The choice was
+between two standard ciphers: AES-256-GCM, which is far faster on any modern
+processor because the hardware implements it directly, and ChaCha20-Poly1305,
+which is uniformly fast everywhere without hardware help. The operator's rule
+was "pick whichever is fastest with the hardware acceleration, unless the real
+bottleneck is the disk anyway". For what is actually being encrypted here, the
+speed of neither is measurable -- so the rule's own exception applies, and the
+choice falls to the simpler one to get right: ChaCha20-Poly1305.
+
+**Glossary, because the original question did not gloss these and the operator
+said so.** *AES-NI* -- instructions built into the processor that do AES
+directly, making it several times faster than software. *In-tree* -- the code
+lives in this repository and is compiled with it, as opposed to being fetched
+from an external package registry. *Audit* -- someone reading the code
+deliberately looking for flaws.
+
+**Why crypto needs auditing at all**, which the operator also asked. Because
+it fails silently. A bug in a renderer is a wrong pixel; a bug in a cipher
+produces output that still decrypts correctly with your own code and still
+passes a round-trip test, and is simply readable by someone else. Two classes
+are invisible to ordinary testing: a construction error (a reused nonce, a
+truncated tag, a counter that wraps), and a **timing side-channel**, where the
+code takes measurably longer depending on the secret. The second is invisible
+to *every* functional test by definition, because all the outputs are correct.
+The only defence is someone reading it with intent.
+
+**Why in-tree C is harder to audit**, the third thing asked. Not because C is
+unreadable. Because of who reads it here: this tree is Rust with a strict
+unsafe policy, so the reviewer reads Rust constantly and C rarely, and a
+subtle change lands with less scrutiny. A port also carries provenance to
+track by hand -- which upstream version, which local patches, what changed on
+a re-sync. The claim is about the review pipeline, not the language.
+
+**Why the speed argument does not decide it.** With AES-NI plus PCLMULQDQ,
+AES-256-GCM is decisively faster -- around a cycle per byte, typically two to
+three times a portable ChaCha20. But what is being encrypted is credmanager's
+vault and saved Wi-Fi passwords: kilobytes, written when something changes. At
+that size the cipher is not measurable next to the syscalls, and both are
+dwarfed by the password-to-key derivation, which is *deliberately* slow --
+tens to hundreds of milliseconds. The operator's exception was written for
+exactly this shape of case.
+
+**The one thing that would have flipped it, and why it does not.** Lane B
+noted that if this cipher were to become the basis for full-disk encryption
+later, throughput would be the whole point and AES-NI the reason it is
+feasible. It will not: disk encryption **already exists** in this tree --
+`kernel/src/fs/diskencrypt.rs`, with AES-256-XTS, key slots, TPM sealing and
+LUKS tooling on top. XTS is a mode for block devices and is not
+interchangeable with an authenticated-message cipher in either direction, so
+the vault cipher and the disk cipher are separate choices and always were.
+Checking that was cheaper than asking, and it removes the condition.
+
+**What this means in practice.** One implementation rather than a fast path
+plus a portable fallback, which is the correctness argument the size of the
+data leaves standing on its own.
+
+## 820. A freeze that would fill the window is refused, not quietly shrunk
+
+**Date:** 2026-09-07
+**Lane:** C
+**Decided by:** Claude (autonomous) -- and revisitable; the alternatives are
+below and the operator may prefer one of them
+
+**In short:** in the spreadsheet you can pin rows and columns so they stay put
+while the rest scrolls. If you picked a cell far enough right or far enough
+down, the pinned band filled the whole window: nothing was left that could
+scroll, and the only way out was to use the same command again to unpin. Now
+the spreadsheet refuses that and says why, instead of doing it.
+
+**Why this was decided rather than asked.** `known-issues.md` deferred it as
+"a user-visible policy call". It is one, but it has a dominant convention
+(Excel refuses the same operation), the current behaviour is a trap rather
+than merely imperfect, and the operator's queue already has several unanswered
+questions. Leaving a trap in place to protect a small decision is the wrong
+trade. It is recorded here so it can be overruled cheaply.
+
+**What was rejected.**
+
+- *Cap silently at the largest band that would fit.* You ask to freeze at
+  column T, you get column H, and nothing says so -- the result tells you a
+  lie about what you asked for. This is the same shape as every other defect
+  found in this tree this week: an operation that quietly does something
+  other than what it was told.
+- *Scroll the sheet so the requested split fits.* Clever, and surprising: the
+  view jumps somewhere the user did not ask to look, to satisfy a command
+  about pinning.
+
+**Where it bites.** `apps/spreadsheet/src/main.rs` --
+`toggle_freeze_panes`, and a new `notice` field the status bar prefers over
+its sum.
+
+**The status bar had nowhere to say it.** It was derived entirely from the
+selection, so an operation that declined to act had no channel at all. The
+notice is cleared by any keystroke rather than by a timer: a message that
+vanishes on its own is one the user can miss, and one that never vanishes is
+one they stop reading.
+
+**Unfreezing is never refused.** The rule is about *entering* a state with
+nothing to scroll; leaving one must always work, or a sheet frozen by an older
+build could not be recovered.
+
+## 821. A slow key is delivered when its threshold expires, not when the key is released
+
+**Date:** 2026-09-07. **Lane:** C.
+**Decided by:** Claude (autonomous). Mechanism rather than policy, but it
+changes how typing feels for the people who turn the feature on, so it is
+recorded rather than just written.
+
+**In short:** "Slow keys" is an accessibility setting that ignores keys tapped
+by accident: a key only counts if you hold it for a moment first. The question
+is *when the letter appears*. It can appear the instant you have held the key
+long enough — while you are still holding it — or it can wait until you let
+go. The first is what every other system does and what this will do. The
+second is much easier to build here and feels wrong: nothing happens while you
+hold the key, and the letter arrives on release.
+
+**The problem.** `Compositor::handle_key` is called on key *down*, and at that
+moment nobody knows how long the key will be held. The state machine
+(`a11ykeys::FilterKeys::on_press`) answers "should this count, given a hold
+duration", and deliberately does not say where that duration comes from.
+
+**Option A — deliver on release.** Measure the hold when the key comes up; if
+it met the threshold, deliver the press then.
+*What changes:* letters appear when you lift your finger rather than when you
+press. Cost: it is not really slow keys. Key repeat becomes impossible (a
+repeat is by definition something that happens while the key is still down),
+and every keystroke is delayed by however long the user happens to hold it,
+which for this user is a long time. Free to implement — no timer, no
+scheduling.
+
+**Option B — deliver when the threshold expires, key still held (chosen).**
+On press, hold the keystroke back and note the deadline. When the deadline
+passes with the key still down, deliver it and let normal repeat follow. If
+the key comes up first, drop it — which is exactly the accidental tap the
+feature exists to discard.
+*What changes:* the letter appears a fixed moment after you press, and then
+behaves like any other key. Cost: the compositor has to wake at the deadline.
+
+**Why B, given A is free.** A is not a cheaper version of the feature, it is a
+different and worse one. X11's AccessX, Windows and macOS all do B, so a user
+who has used slow keys anywhere else would find A broken. And A silently
+removes key repeat from anyone who enables it, which is a second accessibility
+regression handed to the group least able to work around it.
+
+**The part that made this worth writing down: the idle backoff.** §-numbered
+work earlier added `IdleBackoff` to `compositor::server`, which stops the
+compositor spinning when nothing is happening: after `SETTLE_TICKS` of quiet
+it polls every `IDLE_INTERVAL` = **100 ms**. A key waiting out a slow-keys
+threshold is, to that mechanism, perfect quiet — no input, no damage, nothing
+to draw. So the naive version of B delivers the key up to 100 ms late, and by
+a different amount each time, on top of a threshold that defaults to 300 ms.
+
+The fix is to count a pending keystroke as activity, so the backoff cannot
+engage while one is outstanding. Jitter then falls to one frame. It is a small
+change and the alternative — teaching the backoff to wake at a specific
+deadline — is more machinery for the same result, since a keystroke is
+pending for at most a few hundred milliseconds and the compositor was about to
+be busy anyway the moment it lands.
+
+**What this does not decide.** Bounce keys needs none of this: it looks only
+at the past, so it can answer on the key-down that arrives. It is implemented
+in the same state machine and is not waiting on any of the above.
+
+## 822. Applications receive the palette through a trait method, not an event
+
+**Date:** 2026-09-08. **Lane:** C.
+**Decided by:** Claude (autonomous). An internal API shape with no
+user-visible fork in it; recorded because it is the seam 135 applications will
+be converted against, and because the rejected option is the one that looks
+more obvious.
+
+**In short:** applications draw their own insides, so until now the user's
+theme reached the window frame and stopped. Applications are now handed the
+colours by the framework that runs them. The question was *how* — as an event
+alongside mouse clicks and key presses, or as a method on the application
+trait. It is a method.
+
+**The problem.** 129 of the 135 applications that draw never mention
+`appearance::Palette`; each carries its own hardcoded Catppuccin Mocha
+(`known-issues.md`
+`TD-C-129-OF-135-APPLICATIONS-IGNORE-THE-THEME-ENTIRELY`). That is not 129
+oversights: `gui/window` did not depend on `appearance`, so an application
+that wanted to follow the theme had to find and parse `appearance.yaml`
+itself, and none did. Both halves of the route were missing — no palette, and
+no notification that one had changed.
+
+**Option A — a new `Event` variant.** *What changes:* a theme change arrives
+the way a resize does, through `on_event`.
+- **For:** applications already have exactly one place where things happen to
+  them, and this is a thing that happens to them.
+- **Against, and decisive:** `Event` lives in `guitk`, which deliberately owns
+  no palette. §810 deleted that crate's theme system and left a test
+  (`this_module_names_no_colours_of_its_own`) that fails if a colour literal
+  returns to it, because a colour written there is beyond the reach of the
+  light/dark switch and the contrast sweeps. Putting a `Palette` in
+  `guitk::Event` gives `guitk` the dependency §810 removed.
+- Also against: it is not an input event. Nothing about it is the user acting
+  on this window, and every application that matches exhaustively on `Event`
+  would grow an arm for something that is not one.
+
+**Option B — a defaulted method on `App` (chosen).** `fn theme_changed(&mut
+self, palette: &Palette)`, called once before the first frame and again
+whenever `appearance.yaml` changes.
+*What changes:* an application that wants the theme stores the palette and
+draws from it; one that does not is untouched.
+- **For:** only `gui/window` gains the `appearance` dependency, which is the
+  crate that already owns the application's lifecycle. Defaulting to nothing
+  is what allows 129 conversions one at a time rather than one commit
+  touching every application in the tree.
+- **Against:** two ways for something to reach an application — events and
+  this. Accepted: the alternative is one way that drags a palette into the
+  toolkit.
+
+**Two details that are easy to get wrong, both now tested.**
+
+- **Before the first frame, not after.** The other order is a visible flash of
+  the wrong theme every time a window opens: one frame in the application's
+  default, corrected on the next.
+- **A rewrite that changes nothing is not a change.** `Watcher` reports that
+  the file was written; whether it *says* anything different is this layer's
+  question. Saving a settings window with nothing altered would otherwise
+  repaint every window on the desktop.
+
+**Where the poll happens.** At the batch boundary, not per event: a theme
+change is not something the user did to this window, and re-reading a file
+once per mouse move to answer "no" is the cost `Watcher` exists to avoid. A
+change marks the frame dirty itself, because an application that repaints only
+on input would otherwise keep the old colours until something was clicked.
+
+## 823. The deferred-filesystem-operations entry format, agreed between lanes C and A
+
+**Date:** 2026-09-08. **Lane:** C.
+**Decided by:** Claude (autonomous, two lanes). Lane C proposed the format in
+`requests/c-ab-a-concrete-entry-format-for-deferred-filesystem-operations.md`;
+lane A agreed it in `requests/a-cb-deferred-ops-format-agreed-with-notes.md`
+and settled the three questions C had left open. Recorded here because a
+format two lanes will build against should not live only in a dropbox file
+that either lane can miss until it merges.
+
+**In short:** deleting or renaming a file can fail for a reason that is
+temporary — the device is busy, the volume is read-only, the drive is not
+plugged in. `roadmap.md` §2.3 asks for a queue that retries such an operation
+later. This is the on-disk shape of one queued entry, and all three ends
+(kernel, shell, command line) now agree on it.
+
+**The shape.** One queue per filesystem at `/.deferred-ops/`, on the
+filesystem the operation targets — an operation against a drive travels with
+that drive. One file per entry, named by a monotonic id. Key=value records,
+one per line, `version=1` first, paths escaped as the recycle bin already
+escapes them. The three rules that are not negotiable: act on **identity**
+(`fs_uuid` + `target_inode`) and never on the path; **re-authorise at
+execution**, not at enqueue; and **never queue a denial** — `reason` is a
+closed set of temporary obstacles with no `permission-denied` value, because
+a queue that can hold a refused operation turns "no" into "not yet".
+
+**The three questions lane C left open, and lane A's answers:**
+
+| question | answer | why |
+|---|---|---|
+| one file per entry, or one append-only journal? | **file per entry** | cancel-is-delete is atomic; a journal risks a torn write leaving orphan entries the replay hook must skip. Entry counts are tens, not millions, so `readdir` costs nothing against actually running the operation. |
+| what about a filesystem with no stable inode? | **refuse to queue** | such a filesystem cannot satisfy rule 1, and falling back to path matching would reintroduce exactly what rule 1 forbids. Lane A will add `supports_deferred_ops()` to the filesystem trait; only filesystems returning true accept an enqueue. |
+| is `reason` advisory or load-bearing? | **advisory** | the replay hook retries everything on every mount and idle event; success deletes the entry, failure leaves it. A load-bearing reason would make the hook classify the current state, which is fragile and can strand an operation for ever on a wrong classification. |
+
+**The capability field is lane A's**, by agreement: a serialised token or a
+reference into the capability table, checked at replay for validity and for
+still granting the operation on that inode. A failed check **drops** the
+entry with a log line rather than retrying it — a revoked capability is
+authority withdrawn, and retrying would be the escalation rule 3 forbids.
+
+**What each lane owns.** A: the queue directory, the entry parser/writer, the
+replay hook, the capability field. B: `rm`/`mv` asking when stdin is a
+terminal, `--defer` for scripts, never defaulting to defer in a pipe, the
+list/cancel command. C: the deferral prompt in the file manager's failure
+dialog (which already exists — §814), a queue view, and the report when an
+entry runs or is dropped.
+
+**Nothing is built yet, and lane C's half is behind lane A's.** There is no
+`/.deferred-ops/` to write to, so the file manager cannot offer to defer
+anything. Lane A has said the format does not block it from starting.
+

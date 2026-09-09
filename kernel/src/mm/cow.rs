@@ -725,7 +725,7 @@ pub unsafe fn clone_address_space_cow(parent_pml4: u64) -> KernelResult<u64> {
 /// Tests the refcount API, COW flag manipulation, and (where possible)
 /// the CoW fault resolution logic.  Full end-to-end testing (actual
 /// page faults) requires a user-space test process.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[cow] Running self-test...");
 
     // Test 1: Refcount API.
@@ -744,6 +744,7 @@ pub fn self_test() {
     test_clone_address_space_cow();
 
     serial_println!("[cow] Self-test PASSED");
+    Ok(())
 }
 
 /// Test [`clone_address_space_cow`]: fork-style address-space duplication.

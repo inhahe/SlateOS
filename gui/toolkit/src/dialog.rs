@@ -58,6 +58,7 @@ use crate::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::frame::{Frame, Rect};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::scroll_window;
+use crate::scrollbar;
 use crate::style::CornerRadii;
 use crate::wheel;
 use core::ops::Range;
@@ -101,15 +102,7 @@ const BUTTON_WIDTH: f32 = 80.0;
 const BUTTON_HEIGHT: f32 = 30.0;
 const CORNER_RADIUS: f32 = 4.0;
 /// Width of the file list's scrollbar, when the list is long enough to have one.
-const SCROLLBAR_WIDTH: f32 = 10.0;
-/// Shortest the scrollbar thumb may get.
-///
-/// A thumb sized strictly in proportion to the visible fraction of a very long
-/// listing shrinks to a couple of pixels, which is both invisible and too small
-/// to grab. Every real scrollbar imposes a floor for the same reason; the cost
-/// is that the thumb's *size* stops being a faithful proportion once the list is
-/// long, which nobody reads it for, while its *position* stays exact.
-const MIN_THUMB_HEIGHT: f32 = 20.0;
+const SCROLLBAR_WIDTH: f32 = scrollbar::WIDTH;
 
 // --- Public types ---
 
@@ -867,16 +860,16 @@ impl FileDialog {
             self.thumb_grab = None;
             return;
         };
-        let span = track.h - thumb.h;
-        let hidden = self
-            .entries
-            .len()
-            .saturating_sub(Self::row_capacity(height));
-        if span <= 0.0 || hidden == 0 {
-            return;
+        if let Some(first) = scrollbar::first_from_drag(
+            track,
+            thumb.h,
+            grab,
+            y,
+            self.entries.len(),
+            Self::row_capacity(height),
+        ) {
+            self.scroll_top = first;
         }
-        let fraction = ((y - grab - track.y) / span).clamp(0.0, 1.0);
-        self.scroll_top = (fraction * hidden as f32).round() as usize;
     }
 
     // --- Queries ---
@@ -1582,7 +1575,7 @@ impl FileDialog {
         });
         frame.hit(DialogTarget::ScrollTrack, track);
 
-        let thumb = thumb_rect(
+        let thumb = scrollbar::thumb(
             track,
             total,
             capacity,
@@ -1749,32 +1742,6 @@ impl FileDialog {
 /// the smallest movement that is still movement.
 fn page_step(height: f32) -> isize {
     isize::try_from(FileDialog::row_capacity(height).max(1)).unwrap_or(isize::MAX)
-}
-
-/// Where the scrollbar thumb sits in `track` for a listing of `total` rows
-/// showing `capacity` of them starting at row `first`.
-///
-/// Size shows how much of the listing is on screen; position shows where in it.
-/// The two are computed separately because [`MIN_THUMB_HEIGHT`] makes the size
-/// stop being proportional for a long listing while the position must stay
-/// exact — a thumb that reached the bottom of its track only when the last row
-/// was reached, but sat at 90% when the listing was at its end, would be worse
-/// than no thumb at all.
-fn thumb_rect(track: Rect, total: usize, capacity: usize, first: usize) -> Rect {
-    let shown = (capacity as f32 / total as f32).clamp(0.0, 1.0);
-    let thumb_h = (track.h * shown).clamp(MIN_THUMB_HEIGHT.min(track.h), track.h);
-    let hidden = total.saturating_sub(capacity);
-    let position = if hidden == 0 {
-        0.0
-    } else {
-        (first as f32 / hidden as f32).clamp(0.0, 1.0)
-    };
-    Rect::new(
-        track.x,
-        track.y + (track.h - thumb_h) * position,
-        track.w,
-        thumb_h,
-    )
 }
 
 /// Default quick-access sidebar entries.

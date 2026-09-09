@@ -537,7 +537,7 @@ pub fn procfs_content() -> String {
 // ---------------------------------------------------------------------------
 
 /// Self-test for PCI ID database.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("[pciids] Running self-test...");
 
     // Test 1: Known class lookups.
@@ -685,4 +685,5 @@ pub fn self_test() {
     crate::serial_println!("[pciids]   procfs: OK ({} bytes)", content.len());
 
     crate::serial_println!("[pciids] Self-test PASSED (11 tests)");
+    Ok(())
 }

@@ -608,6 +608,12 @@ pub enum LineStep {
 struct LineBuf {
     buf: [u8; MAX_CANON],
     len: usize,
+    /// Current cursor column, tracked so that `ECHOE` can rub out the correct
+    /// number of columns for a tab (1–8 depending on the tab stop the cursor
+    /// was at when the tab was echoed).  Updated by [`feed`], not by the
+    /// push/pop/clear methods, because the column depends on the `Termios`
+    /// (control bytes are 2 columns under `ECHOCTL`, 1 otherwise).
+    col: usize,
 }
 
 impl LineBuf {
@@ -615,6 +621,7 @@ impl LineBuf {
         Self {
             buf: [0u8; MAX_CANON],
             len: 0,
+            col: 0,
         }
     }
 
@@ -706,9 +713,9 @@ fn render_echo(ch: u8, t: &Termios) -> Echo {
 /// How wide `ch` is on screen once echoed, so an erase can rub out the right
 /// number of columns.
 ///
-/// A control byte echoed as `^X` under `ECHOCTL` occupies two columns; `\t`
-/// would occupy up to eight, which this deliberately does not model — see the
-/// note in [`feed`].
+/// A control byte echoed as `^X` under `ECHOCTL` occupies two columns; a tab
+/// advances to the next 8-column tab stop (1–8 columns).  Ordinary bytes are
+/// one column each.
 ///
 /// Deliberately independent of the `ECHO` bit: this answers "how wide is it",
 /// not "is it shown", and the callers already gate on `ECHO` themselves.
@@ -718,6 +725,37 @@ fn echo_width(ch: u8, t: &Termios) -> usize {
     } else {
         1
     }
+}
+
+/// Advance a cursor column after echoing one byte.
+///
+/// This models what the terminal actually shows — a tab jumps to the next
+/// 8-column tab stop (`(col | 7) + 1`), a control byte echoed as `^X` takes
+/// two columns, `\r` resets to 0, and everything else takes one.
+fn advance_col(col: usize, ch: u8, t: &Termios) -> usize {
+    if ch == b'\t' {
+        // Next 8-column tab stop: 0→8, 1→8, 7→8, 8→16, etc.
+        (col | 7).wrapping_add(1)
+    } else if ch == b'\r' {
+        0
+    } else if is_ctrl_echo(ch) && (t.c_lflag & lflag::ECHOCTL != 0) {
+        col.wrapping_add(2) // ^X
+    } else {
+        col.wrapping_add(1)
+    }
+}
+
+/// Recompute the cursor column by replaying the echo width of every byte in
+/// the buffer from the start.  Called after an erase (`pop`) so the column
+/// reflects the state *without* the erased character.  O(len) but `MAX_CANON`
+/// is small (~256 bytes), and this only runs on erase — which is interactive,
+/// so latency is negligible.
+fn compute_col(buf: &[u8], t: &Termios) -> usize {
+    let mut c = 0usize;
+    for &ch in buf {
+        c = advance_col(c, ch, t);
+    }
+    c
 }
 
 /// [`feed`], discarding the echo half of the answer.
@@ -739,12 +777,13 @@ fn step(line: &mut LineBuf, raw: u8, t: &Termios) -> LineStep {
 /// performing that echo is the caller's job (the keyboard driver for the
 /// console, a write to the master end for a pty).
 ///
-/// **Not modelled:** the column width of a literal tab. `ECHOE` rubs out one
-/// column per erased character (two for a `^X`-echoed control byte), which is
-/// wrong for a `\t` that expanded to a tab stop. Linux tracks the real column
-/// to get this right. Doing so needs the discipline to know the cursor
-/// position, which for a pty it cannot know at all — the emulator on the far
-/// end owns the screen. Recorded in `todo.txt`.
+/// **Column tracking:** the line buffer carries a cursor column (`LineBuf.col`)
+/// advanced by [`advance_col`] on every push, reset on clear/newline, and
+/// recomputed from scratch on erase.  `ECHOE` rubs out the column *delta*
+/// between the current position and the position before the erased byte, so a
+/// tab at column 5 that advanced to column 8 produces three backspace-space-
+/// backspace sequences.  For a pty the emulator on the far end owns the real
+/// screen, so our column is an approximation — see `todo.txt` for the caveat.
 fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
     // Input translation: ICRNL maps a received CR to NL (the common case so
     // that the Enter key — which the keyboard delivers as '\n' already, but a
@@ -777,6 +816,7 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
         let mut signal = |sig: u8| -> (LineStep, Echo) {
             if flush {
                 line.clear();
+                line.col = 0;
             }
             (LineStep::Signal(sig), render(ch))
         };
@@ -803,13 +843,17 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
     if ch == verase {
         // Erase echoes only if something was actually erased — rubbing out a
         // character that is not there would eat the prompt.
-        let last = line.last();
+        let old_col = line.col;
         let erased = line.pop();
-        let echo = match (erased, last) {
-            (true, Some(c)) if echo_on && (t.c_lflag & lflag::ECHOE != 0) => {
-                Echo::Erase(echo_width(c, t))
-            }
-            _ => Echo::None,
+        if erased {
+            line.col = compute_col(line.as_slice(), t);
+        }
+        let echo = if erased && echo_on && (t.c_lflag & lflag::ECHOE != 0) {
+            // Rub out the column delta — correct for tabs (1–8 columns)
+            // and control bytes (2 columns under ECHOCTL).
+            Echo::Erase(old_col.saturating_sub(line.col))
+        } else {
+            Echo::None
         };
         return (LineStep::Pending, echo);
     }
@@ -817,12 +861,9 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
         // ECHOKE rubs the whole line out in place; ECHOK (the older, weaker
         // behaviour) just starts a fresh line. ECHOKE wins when both are set,
         // matching Linux.
-        let width: usize = line
-            .as_slice()
-            .iter()
-            .map(|c| echo_width(*c, t))
-            .fold(0usize, |a, b| a.saturating_add(b));
+        let width = line.col;
         line.clear();
+        line.col = 0;
         let echo = if !echo_on {
             Echo::None
         } else if t.c_lflag & lflag::ECHOKE != 0 {
@@ -839,6 +880,7 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
         // ECHONL echoes it even with ECHO off — that is the bit's whole
         // purpose, so a password prompt still moves to the next line.
         let _ = line.push(b'\n');
+        line.col = 0; // newline resets the cursor column
         let echo = if echo_on || (t.c_lflag & lflag::ECHONL != 0) {
             Echo::Newline
         } else {
@@ -849,6 +891,9 @@ fn feed(line: &mut LineBuf, raw: u8, t: &Termios) -> (LineStep, Echo) {
 
     // Ordinary byte: append (silently dropped if the line is full).
     let pushed = line.push(ch);
+    if pushed {
+        line.col = advance_col(line.col, ch, t);
+    }
     let echo = if pushed { render(ch) } else { Echo::None };
     (LineStep::Pending, echo)
 }
@@ -961,13 +1006,12 @@ pub(crate) enum Input {
 /// Block until an input byte is available for `id`.
 ///
 /// The console never reports [`Input::Hangup`] — a program cannot unplug the
-/// keyboard. It *does* now report [`Input::Interrupted`]: the console read is a
-/// `HLT` poll that re-checks the calling process's pending-signal mask on every
-/// wake, so a task blocked reading the console can be killed without a key
-/// being pressed. (The wake still costs up to one timer tick of latency,
-/// because nothing signals the poll directly; making the reader genuinely park
-/// is stage 2 of `known-issues.md` → `BUG-CONSOLE-READ-UNINTERRUPTIBLE`, and
-/// is blocked on moving USB HID polling out of the read path.)
+/// keyboard. It *does* report [`Input::Interrupted`]: the console reader parks
+/// via `park_interruptible` and is woken by `keyboard::push_char_raw` (ISR-safe
+/// wake from the lock-free waiter array), by signal delivery, or by a deadline
+/// timer. A task blocked reading the console is promptly interruptible — no
+/// HLT-spin latency. See `known-issues.md` → `BUG-CONSOLE-READ-UNINTERRUPTIBLE`
+/// (FIXED, both stages).
 fn backend_read_char(id: TtyId, backend: Backend) -> Input {
     match backend {
         Backend::Console => {
@@ -1095,6 +1139,9 @@ pub enum ConsoleRead {
     /// typed so far is still in the device's editor and will be there when the
     /// read restarts.
     Interrupted,
+    /// No data is immediately available and the caller requested a non-blocking
+    /// read ([`try_read`]).  The POSIX layer maps this to `EAGAIN`.
+    WouldBlock,
 }
 
 /// Read from the console into `out` per the current line discipline.
@@ -1148,6 +1195,132 @@ pub fn read(id: TtyId, out: &mut [u8]) -> ConsoleRead {
         canonical_read(id, backend, &t, out)
     } else {
         raw_read(id, backend, &t, out)
+    }
+}
+
+/// Non-blocking terminal read — returns [`ConsoleRead::WouldBlock`] instead
+/// of parking the caller when no data is immediately available.
+///
+/// This is the `O_NONBLOCK` counterpart of [`read`]:
+///
+/// * **Canonical mode:** feed any immediately-available characters into the
+///   line editor.  If a complete line results, deliver it; otherwise return
+///   `WouldBlock`.  Characters read are *not* lost — they stay in the editor
+///   for the next call.
+/// * **Raw mode:** behaves as `VMIN=0, VTIME=0` regardless of the actual
+///   termios settings — a pure poll that returns whatever bytes are buffered
+///   right now (possibly zero).
+///
+/// The `pending` buffer (leftover from a previous line that was larger than
+/// the caller's buffer) is drained first, identically to [`read`].
+pub fn try_read(id: TtyId, out: &mut [u8]) -> ConsoleRead {
+    if out.is_empty() {
+        return ConsoleRead::Data(0);
+    }
+    let Some((t, backend, leftover)) = with_device(id, |d| {
+        let leftover = if d.pending.has_data() {
+            Some(d.pending.drain_into(out))
+        } else {
+            None
+        };
+        (d.termios, d.backend, leftover)
+    }) else {
+        return ConsoleRead::Data(0);
+    };
+    if let Some(n) = leftover {
+        return ConsoleRead::Data(n);
+    }
+
+    if t.is_canonical() {
+        canonical_try_read(id, backend, &t, out)
+    } else {
+        raw_try_read(id, backend, &t, out)
+    }
+}
+
+/// Non-blocking canonical read: feed any immediately-available characters
+/// into the line editor.  If a complete line results, deliver it; otherwise
+/// return `WouldBlock`.
+fn canonical_try_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> ConsoleRead {
+    loop {
+        let raw = match backend_try_read_char(id, backend) {
+            Input::Byte(b) => b,
+            // Hangup: deliver whatever partial line exists (matching
+            // `canonical_read`'s hangup behaviour).
+            Input::Hangup => return deliver_line(id, out),
+            // No more characters available right now and no hangup.  The
+            // partial line (if any) stays in the device's editor for the
+            // next call.
+            Input::Empty => return ConsoleRead::WouldBlock,
+            Input::Interrupted => return ConsoleRead::Interrupted,
+        };
+        let Some((step, echo)) = with_device(id, |d| feed(&mut d.line, raw, t)) else {
+            return ConsoleRead::Data(0);
+        };
+        echo_step(id, backend, t, echo);
+        match step {
+            LineStep::Pending => {}
+            LineStep::Line | LineStep::Eof => return deliver_line(id, out),
+            LineStep::Signal(sig) => return ConsoleRead::Signal(sig),
+        }
+    }
+}
+
+/// Non-blocking raw read: pure poll regardless of `VMIN`/`VTIME`.
+fn raw_try_read(id: TtyId, backend: Backend, t: &Termios, out: &mut [u8]) -> ConsoleRead {
+    let cap = out.len();
+    if cap == 0 {
+        return ConsoleRead::Data(0);
+    }
+    let mut n = 0usize;
+
+    // Signal-character classification (same as `raw_read`).
+    let isig = t.c_lflag & lflag::ISIG != 0;
+    let g = |idx: usize, dflt: u8| t.c_cc.get(idx).copied().unwrap_or(dflt);
+    let vintr = g(cc::VINTR, 3);
+    let vquit = g(cc::VQUIT, 28);
+    let vsusp = g(cc::VSUSP, 26);
+    let sig_for = |ch: u8| -> Option<u8> {
+        if !isig {
+            return None;
+        }
+        match ch {
+            c if c == vintr => Some(2),
+            c if c == vquit => Some(3),
+            c if c == vsusp => Some(20),
+            _ => None,
+        }
+    };
+
+    macro_rules! accept {
+        ($c:expr) => {{
+            let c: u8 = $c;
+            echo_step(id, backend, t, render_echo(c, t));
+            if let Some(s) = sig_for(c) {
+                return ConsoleRead::Signal(s);
+            }
+            if let Some(slot) = out.get_mut(n) {
+                *slot = c;
+            }
+            n = n.saturating_add(1);
+        }};
+    }
+
+    // Pure poll: drain whatever is immediately available.
+    while n < cap {
+        match backend_try_read_char(id, backend) {
+            Input::Byte(c) => accept!(c),
+            Input::Empty | Input::Hangup | Input::Interrupted => break,
+        }
+    }
+    if n == 0 {
+        // Nothing was available.  For the non-blocking variant we return
+        // WouldBlock so the caller can distinguish "zero bytes because
+        // VMIN=0 poll" from "zero bytes because O_NONBLOCK and nothing
+        // ready".  The POSIX layer maps this to EAGAIN.
+        ConsoleRead::WouldBlock
+    } else {
+        ConsoleRead::Data(n)
     }
 }
 
@@ -1441,37 +1614,38 @@ fn console_write_bytes(bytes: &[u8]) {
 /// (`known-issues.md` → `A-KERNEL-UNIT-TESTS-NEVER-RUN`), and every property
 /// each one asserted is in fact checked here — verified case by case rather
 /// than taken from the comment's word.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use crate::selftest;
     crate::serial_println!("[tty] Running self-test...");
 
     // Wire-format sizes must match the Linux kernel structs exactly.
-    assert_eq!(TERMIOS_BYTES, 36, "termios wire size");
-    assert_eq!(WINSIZE_BYTES, 8, "winsize wire size");
+    selftest::check_eq!(TERMIOS_BYTES, 36, "termios wire size");
+    selftest::check_eq!(WINSIZE_BYTES, 8, "winsize wire size");
 
     // Defaults: canonical line mode with echo, VMIN=1/VTIME=0.
     let t = Termios::sane_default();
-    assert!(t.is_canonical(), "default should be canonical");
-    assert!(t.echo_enabled(), "default should echo");
-    assert_eq!(t.vmin(), 1, "default VMIN");
-    assert_eq!(t.vtime(), 0, "default VTIME");
+    selftest::check!(t.is_canonical(), "default should be canonical");
+    selftest::check!(t.echo_enabled(), "default should echo");
+    selftest::check_eq!(t.vmin(), 1, "default VMIN");
+    selftest::check_eq!(t.vtime(), 0, "default VTIME");
 
     // Control characters mirror Linux INIT_C_CC.
-    assert_eq!(t.c_cc.get(cc::VINTR).copied(), Some(3), "VINTR=^C");
-    assert_eq!(t.c_cc.get(cc::VEOF).copied(), Some(4), "VEOF=^D");
-    assert_eq!(t.c_cc.get(cc::VERASE).copied(), Some(127), "VERASE=DEL");
-    assert_eq!(t.c_cc.get(cc::VKILL).copied(), Some(21), "VKILL=^U");
+    selftest::check_eq!(t.c_cc.get(cc::VINTR).copied(), Some(3), "VINTR=^C");
+    selftest::check_eq!(t.c_cc.get(cc::VEOF).copied(), Some(4), "VEOF=^D");
+    selftest::check_eq!(t.c_cc.get(cc::VERASE).copied(), Some(127), "VERASE=DEL");
+    selftest::check_eq!(t.c_cc.get(cc::VKILL).copied(), Some(21), "VKILL=^U");
 
     // termios round-trips losslessly through the 36-byte wire format.
     let back = Termios::from_bytes(&t.to_bytes());
-    assert_eq!(t, back, "termios round-trip");
+    selftest::check_eq!(t, back, "termios round-trip");
     crate::serial_println!("[tty]   termios round-trip + defaults: OK");
 
     // Raw mode: clearing ICANON|ECHO survives serialisation.
     let mut raw = Termios::sane_default();
     raw.c_lflag &= !(lflag::ICANON | lflag::ECHO);
     let raw_back = Termios::from_bytes(&raw.to_bytes());
-    assert!(!raw_back.is_canonical(), "raw clears ICANON");
-    assert!(!raw_back.echo_enabled(), "raw clears ECHO");
+    selftest::check!(!raw_back.is_canonical(), "raw clears ICANON");
+    selftest::check!(!raw_back.echo_enabled(), "raw clears ECHO");
     crate::serial_println!("[tty]   raw-mode flag clearing: OK");
 
     // winsize round-trips, and TIOCGWINSZ reports a live non-zero size.
@@ -1481,9 +1655,9 @@ pub fn self_test() {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    assert_eq!(WinSize::from_bytes(&w.to_bytes()), w, "winsize round-trip");
+    selftest::check_eq!(WinSize::from_bytes(&w.to_bytes()), w, "winsize round-trip");
     let live = get_winsize(CONSOLE);
-    assert!(
+    selftest::check!(
         live.ws_row != 0 && live.ws_col != 0,
         "TIOCGWINSZ should report a live console size"
     );
@@ -1499,49 +1673,49 @@ pub fn self_test() {
 
         // "hi\n" → a complete line of exactly "hi\n".
         let mut line = LineBuf::new();
-        assert_eq!(step(&mut line, b'h', &t), LineStep::Pending);
-        assert_eq!(step(&mut line, b'i', &t), LineStep::Pending);
-        assert_eq!(step(&mut line, b'\n', &t), LineStep::Line);
-        assert_eq!(line.as_slice(), b"hi\n", "canonical line content");
+        selftest::check_eq!(step(&mut line, b'h', &t), LineStep::Pending);
+        selftest::check_eq!(step(&mut line, b'i', &t), LineStep::Pending);
+        selftest::check_eq!(step(&mut line, b'\n', &t), LineStep::Line);
+        selftest::check_eq!(line.as_slice(), b"hi\n", "canonical line content");
 
         // VERASE (DEL) erases the last byte: "ax\x7fb\n" → "ab\n".
         let mut e = LineBuf::new();
         let _ = step(&mut e, b'a', &t);
         let _ = step(&mut e, b'x', &t);
-        assert_eq!(step(&mut e, 127, &t), LineStep::Pending); // erase 'x'
+        selftest::check_eq!(step(&mut e, 127, &t), LineStep::Pending); // erase 'x'
         let _ = step(&mut e, b'b', &t);
-        assert_eq!(step(&mut e, b'\n', &t), LineStep::Line);
-        assert_eq!(e.as_slice(), b"ab\n", "VERASE erases prior byte");
+        selftest::check_eq!(step(&mut e, b'\n', &t), LineStep::Line);
+        selftest::check_eq!(e.as_slice(), b"ab\n", "VERASE erases prior byte");
 
         // VKILL (^U) clears the whole line.
         let mut k = LineBuf::new();
         let _ = step(&mut k, b'j', &t);
         let _ = step(&mut k, b'u', &t);
-        assert_eq!(step(&mut k, 21, &t), LineStep::Pending); // ^U
-        assert_eq!(k.as_slice(), b"", "VKILL clears the line");
+        selftest::check_eq!(step(&mut k, 21, &t), LineStep::Pending); // ^U
+        selftest::check_eq!(k.as_slice(), b"", "VKILL clears the line");
 
         // VEOF (^D) on an empty line signals end-of-file.
         let mut eof = LineBuf::new();
-        assert_eq!(step(&mut eof, 4, &t), LineStep::Eof);
-        assert_eq!(eof.len, 0, "VEOF on empty line ⇒ EOF");
+        selftest::check_eq!(step(&mut eof, 4, &t), LineStep::Eof);
+        selftest::check_eq!(eof.len, 0, "VEOF on empty line ⇒ EOF");
 
         // VINTR (^C) under ISIG flushes the line and reports SIGINT.
         let mut sig = LineBuf::new();
         let _ = step(&mut sig, b'z', &t);
-        assert_eq!(step(&mut sig, 3, &t), LineStep::Signal(2));
-        assert_eq!(sig.as_slice(), b"", "VINTR flushes the line");
+        selftest::check_eq!(step(&mut sig, 3, &t), LineStep::Signal(2));
+        selftest::check_eq!(sig.as_slice(), b"", "VINTR flushes the line");
 
         // VQUIT (^\) under ISIG flushes the line and reports SIGQUIT.
         let mut q = LineBuf::new();
         let _ = step(&mut q, b'q', &t);
-        assert_eq!(step(&mut q, 28, &t), LineStep::Signal(3));
-        assert_eq!(q.as_slice(), b"", "VQUIT flushes the line");
+        selftest::check_eq!(step(&mut q, 28, &t), LineStep::Signal(3));
+        selftest::check_eq!(q.as_slice(), b"", "VQUIT flushes the line");
 
         // VSUSP (^Z) under ISIG flushes the line and reports SIGTSTP.
         let mut z = LineBuf::new();
         let _ = step(&mut z, b's', &t);
-        assert_eq!(step(&mut z, 26, &t), LineStep::Signal(20));
-        assert_eq!(z.as_slice(), b"", "VSUSP flushes the line");
+        selftest::check_eq!(step(&mut z, 26, &t), LineStep::Signal(20));
+        selftest::check_eq!(z.as_slice(), b"", "VSUSP flushes the line");
 
         // With NOFLSH set, a signal char generates the signal but preserves
         // the in-progress line (no input flush).
@@ -1550,19 +1724,19 @@ pub fn self_test() {
         let mut nf = LineBuf::new();
         let _ = step(&mut nf, b'a', &noflsh);
         let _ = step(&mut nf, b'b', &noflsh);
-        assert_eq!(step(&mut nf, 3, &noflsh), LineStep::Signal(2)); // ^C
-        assert_eq!(nf.as_slice(), b"ab", "NOFLSH preserves the line on ^C");
+        selftest::check_eq!(step(&mut nf, 3, &noflsh), LineStep::Signal(2)); // ^C
+        selftest::check_eq!(nf.as_slice(), b"ab", "NOFLSH preserves the line on ^C");
         // ...and the preserved line still completes normally afterwards.
-        assert_eq!(step(&mut nf, b'\n', &noflsh), LineStep::Line);
-        assert_eq!(nf.as_slice(), b"ab\n", "NOFLSH line completes after signal");
+        selftest::check_eq!(step(&mut nf, b'\n', &noflsh), LineStep::Line);
+        selftest::check_eq!(nf.as_slice(), b"ab\n", "NOFLSH line completes after signal");
 
         // With ISIG cleared, a ^C is just an ordinary byte in the line.
         let mut noisig = Termios::sane_default();
         noisig.c_lflag &= !lflag::ISIG;
         let mut n = LineBuf::new();
-        assert_eq!(step(&mut n, 3, &noisig), LineStep::Pending);
-        assert_eq!(step(&mut n, b'\n', &noisig), LineStep::Line);
-        assert_eq!(n.as_slice(), &[3u8, b'\n'], "ISIG off ⇒ ^C is literal");
+        selftest::check_eq!(step(&mut n, 3, &noisig), LineStep::Pending);
+        selftest::check_eq!(step(&mut n, b'\n', &noisig), LineStep::Line);
+        selftest::check_eq!(n.as_slice(), &[3u8, b'\n'], "ISIG off ⇒ ^C is literal");
 
         crate::serial_println!(
             "[tty]   line discipline (canon/erase/kill/eof/intr/quit/susp/noflsh): OK"
@@ -1579,27 +1753,27 @@ pub fn self_test() {
         // A printable byte echoes as itself; a newline is its own case so
         // ONLCR can turn it into CRLF at the backend.
         let mut l = LineBuf::new();
-        assert_eq!(feed(&mut l, b'a', &t).1, Echo::Byte(b'a'), "printable echo");
-        assert_eq!(feed(&mut l, b'\n', &t).1, Echo::Newline, "newline echo");
+        selftest::check_eq!(feed(&mut l, b'a', &t).1, Echo::Byte(b'a'), "printable echo");
+        selftest::check_eq!(feed(&mut l, b'\n', &t).1, Echo::Newline, "newline echo");
 
         // ECHOCTL renders a control byte as `^X`, and the caret letter comes
         // from `caret_letter` — the XOR mapping, so DEL shows as `^?` rather
         // than as the out-of-range byte an addition would produce.
         let mut c = LineBuf::new();
-        assert_eq!(feed(&mut c, 1, &t).1, Echo::Ctrl(1), "^A renders as Ctrl");
-        assert_eq!(caret_letter(1), b'A', "caret letter for ^A");
-        assert_eq!(caret_letter(3), b'C', "caret letter for ^C");
-        assert_eq!(caret_letter(127), b'?', "caret letter for DEL is '?'");
+        selftest::check_eq!(feed(&mut c, 1, &t).1, Echo::Ctrl(1), "^A renders as Ctrl");
+        selftest::check_eq!(caret_letter(1), b'A', "caret letter for ^A");
+        selftest::check_eq!(caret_letter(3), b'C', "caret letter for ^C");
+        selftest::check_eq!(caret_letter(127), b'?', "caret letter for DEL is '?'");
 
         // A tab is exempt from ECHOCTL: it must be echoed literally or it
         // would never reach the next tab stop.
         let mut tab = LineBuf::new();
-        assert_eq!(feed(&mut tab, b'\t', &t).1, Echo::Byte(b'\t'), "tab echo");
+        selftest::check_eq!(feed(&mut tab, b'\t', &t).1, Echo::Byte(b'\t'), "tab echo");
 
         // ECHOE rubs out the erased character, two columns for a `^X`.
         let mut e = LineBuf::new();
         let _ = step(&mut e, b'a', &t);
-        assert_eq!(
+        selftest::check_eq!(
             feed(&mut e, 127, &t).1,
             Echo::Erase(1),
             "erase a plain byte"
@@ -1610,19 +1784,56 @@ pub fn self_test() {
         ctrl.c_lflag &= !lflag::ISIG;
         let mut e2 = LineBuf::new();
         let _ = step(&mut e2, 1, &ctrl);
-        assert_eq!(
+        selftest::check_eq!(
             feed(&mut e2, 127, &ctrl).1,
             Echo::Erase(2),
             "erasing a ^X-echoed byte rubs out two columns"
+        );
+
+        // Tab erase: a tab at column 0 advances to column 8, so erasing
+        // it should rub out 8 columns, not 1 as the old code did.
+        let mut et = LineBuf::new();
+        let _ = step(&mut et, b'\t', &t);
+        selftest::check_eq!(et.col, 8, "tab at col 0 advances to col 8");
+        selftest::check_eq!(
+            feed(&mut et, 127, &t).1,
+            Echo::Erase(8),
+            "erasing a tab at col 0 rubs out 8 columns"
+        );
+
+        // Tab after 3 characters: col 3 → col 8, so the tab is 5 wide.
+        let mut et2 = LineBuf::new();
+        let _ = step(&mut et2, b'a', &t); // col 1
+        let _ = step(&mut et2, b'b', &t); // col 2
+        let _ = step(&mut et2, b'c', &t); // col 3
+        selftest::check_eq!(et2.col, 3, "three chars at col 3");
+        let _ = step(&mut et2, b'\t', &t); // col 8
+        selftest::check_eq!(et2.col, 8, "tab from col 3 advances to col 8");
+        selftest::check_eq!(
+            feed(&mut et2, 127, &t).1,
+            Echo::Erase(5),
+            "erasing a tab from col 3 rubs out 5 columns"
+        );
+
+        // ECHOKE (line kill) with a tab: "ab\t" at col 8 → erase 8.
+        let mut ek = LineBuf::new();
+        let _ = step(&mut ek, b'a', &t); // col 1
+        let _ = step(&mut ek, b'b', &t); // col 2
+        let _ = step(&mut ek, b'\t', &t); // col 8
+        selftest::check_eq!(ek.col, 8, "line col before kill");
+        selftest::check_eq!(
+            feed(&mut ek, 21, &t).1, // ^U = VKILL
+            Echo::Erase(8),
+            "ECHOKE of a line with a tab rubs out 8 columns total"
         );
 
         // Clearing ECHO silences everything the editor would have drawn.
         let mut off = Termios::sane_default();
         off.c_lflag &= !lflag::ECHO;
         let mut q = LineBuf::new();
-        assert_eq!(feed(&mut q, b'a', &off).1, Echo::None, "ECHO off ⇒ silent");
+        selftest::check_eq!(feed(&mut q, b'a', &off).1, Echo::None, "ECHO off ⇒ silent");
 
-        crate::serial_println!("[tty]   echo rendering (printable/^X/tab/erase/off): OK");
+        crate::serial_println!("[tty]   echo rendering (printable/^X/tab/erase/tab-erase/off): OK");
     }
 
     // PendingLine: a line longer than the reader buffer is delivered in pieces.
@@ -1630,12 +1841,12 @@ pub fn self_test() {
         let mut p = PendingLine::new();
         p.fill(b"abcdef\n");
         let mut small = [0u8; 3];
-        assert_eq!(p.drain_into(&mut small), 3);
-        assert_eq!(&small, b"abc");
+        selftest::check_eq!(p.drain_into(&mut small), 3);
+        selftest::check_eq!(&small, b"abc");
         let mut rest = [0u8; 16];
-        assert_eq!(p.drain_into(&mut rest), 4);
-        assert_eq!(rest.get(..4), Some(&b"def\n"[..]));
-        assert!(!p.has_data(), "pending fully drained");
+        selftest::check_eq!(p.drain_into(&mut rest), 4);
+        selftest::check_eq!(rest.get(..4), Some(&b"def\n"[..]));
+        selftest::check!(!p.has_data(), "pending fully drained");
         crate::serial_println!("[tty]   pending-line chunked delivery: OK");
     }
 
@@ -1646,7 +1857,7 @@ pub fn self_test() {
     // rather than caching — if this module ever reacquires storage of its
     // own, the two would drift and `^C` would go to the wrong job.
     {
-        assert_eq!(
+        selftest::check_eq!(
             foreground_pgid(CONSOLE),
             crate::proc::pcb::ctty_fg_pgrp(CONSOLE).unwrap_or(0),
             "console foreground pgrp must be a derived read of the ctty table"
@@ -1655,4 +1866,5 @@ pub fn self_test() {
     }
 
     crate::serial_println!("[tty] Self-test passed.");
+    Ok(())
 }

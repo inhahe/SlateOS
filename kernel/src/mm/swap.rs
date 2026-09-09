@@ -1515,7 +1515,7 @@ pub unsafe fn is_swapped(pml4_phys: u64, virt: VirtAddr) -> bool {
 /// 1. Swap entry encoding/decoding roundtrip.
 /// 2. Slot allocator: alloc, free, double-alloc, capacity exhaustion.
 /// 3. In-memory backend: write, read, data integrity.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[swap] Running self-test...");
 
     // --- Swap entry encoding/decoding ---
@@ -1883,6 +1883,7 @@ pub fn self_test() {
     // after the disk device is registered.
 
     serial_println!("[swap] Self-test PASSED");
+    Ok(())
 }
 
 /// Run self-test for the disk-backed swap backend.

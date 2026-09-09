@@ -98,7 +98,7 @@ pub fn unescape_octal(s: &[u8]) -> Option<Vec<u8>> {
 /// kernel binary sets `test = false` and so has no host `cargo test` to run
 /// these under.
 #[allow(clippy::unwrap_used, clippy::panic)]
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[escape] Running self-test...");
@@ -150,4 +150,5 @@ pub fn self_test() {
     assert_eq!(unescape_octal(b"\\377"), Some(alloc::vec![0xff]));
 
     serial_println!("[escape] Self-test PASSED");
+    Ok(())
 }

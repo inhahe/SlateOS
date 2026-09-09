@@ -426,7 +426,7 @@ fn write_sequence(
 // ---------------------------------------------------------------------------
 
 /// Run self-test for the compression module.
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
     serial_println!("[compress] Running self-test...");
 
@@ -528,4 +528,5 @@ pub fn self_test() {
     }
 
     serial_println!("[compress] Self-test PASSED");
+    Ok(())
 }

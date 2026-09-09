@@ -66,38 +66,39 @@ use super::number::{
     SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ,
     SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE,
     SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE,
-    SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS,
-    SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID,
-    SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID, SYS_PROCESS_IS_READY,
-    SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_EXEC_FDS,
-    SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID, SYS_PROCESS_SPAWN,
-    SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
-    SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_PGRP,
-    SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ,
-    SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL, SYS_PTY_READABLE_BYTES,
-    SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID,
-    SYS_PTY_SLAVE_WRITE, SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_PROFILE,
-    SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE,
-    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT,
-    SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT,
-    SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
-    SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
-    SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_REGISTER,
-    SYS_SIGNAL_SEND, SYS_SIGNAL_STOP_SELF, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE,
-    SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV,
-    SYS_SOCKETPAIR_RECV_TIMEOUT, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT,
-    SYS_SOCKETPAIR_SHUTDOWN, SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET,
-    SYS_SYSCTL_SET, SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT,
-    SYS_TCP_BIND, SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO,
-    SYS_TCP_LAST_ERROR, SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY,
-    SYS_TCP_LOCAL_PORT, SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND,
-    SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN,
-    SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_RESUME,
-    SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
-    SYS_TTY_ACQUIRE_CTTY, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
-    SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE,
-    SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_RECV,
-    SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE, SYS_YIELD,
+    SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS,
+    SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE,
+    SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID,
+    SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS,
+    SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID,
+    SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2,
+    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE,
+    SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ,
+    SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
+    SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE,
+    SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ, SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE,
+    SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE,
+    SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE, SYS_SEM_CLOSE,
+    SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT,
+    SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER,
+    SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE,
+    SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_MASK,
+    SYS_SIGNAL_PENDING, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND, SYS_SIGNAL_STOP_SELF, SYS_SLEEP,
+    SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL,
+    SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV, SYS_SOCKETPAIR_RECV_TIMEOUT,
+    SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT, SYS_SOCKETPAIR_SHUTDOWN,
+    SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET, SYS_SYSCTL_SET,
+    SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT, SYS_TCP_BIND,
+    SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO, SYS_TCP_LAST_ERROR,
+    SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY, SYS_TCP_LOCAL_PORT,
+    SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND, SYS_TCP_SET_KEEPALIVE,
+    SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN, SYS_THREAD_CREATE,
+    SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY,
+    SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL, SYS_TIMER_CREATE, SYS_TTY_ACQUIRE_CTTY, SYS_TTY_GET_PGRP,
+    SYS_TTY_GET_TERMIOS, SYS_TTY_READ, SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS,
+    SYS_UDP_BIND, SYS_UDP_CLOSE, SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN,
+    SYS_UDP_MCAST_LEAVE, SYS_UDP_RECV, SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND,
+    SYS_WAIT_MULTIPLE, SYS_YIELD,
 };
 use crate::drm::syscall as drm_handlers;
 
@@ -377,6 +378,11 @@ const fn build_v1_table() -> SyscallTable {
     // timerfd waits on both without first building a port.
     handlers[SYS_WAIT_MULTIPLE as usize] = Some(handlers::sys_wait_multiple);
 
+    // Supplementary groups + chroot (1067–1068). Native entry points onto
+    // the same PCB state the Linux shim uses, so both ABIs share one truth.
+    handlers[SYS_PROCESS_SETGROUPS as usize] = Some(handlers::sys_process_setgroups);
+    handlers[SYS_PROCESS_CHROOT as usize] = Some(handlers::sys_process_chroot);
+
     // io_ring (260–269).
     handlers[SYS_IO_RING_SETUP as usize] = Some(handlers::sys_io_ring_setup);
     handlers[SYS_IO_RING_ENTER as usize] = Some(handlers::sys_io_ring_enter);
@@ -502,6 +508,12 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PTY_READABLE_BYTES as usize] = Some(handlers::sys_pty_readable_bytes);
     handlers[SYS_PTY_GET_PGRP as usize] = Some(handlers::sys_pty_get_pgrp);
     handlers[SYS_PTY_SET_PGRP as usize] = Some(handlers::sys_pty_set_pgrp);
+    // 872/873: slave-side reads, mirroring 546/547 for the master. The slave
+    // *write* (548) has always taken a terminal argument; the slave *read* went
+    // through SYS_TTY_READ (543) which hardcodes current_tty(), misdirecting
+    // reads to the console when the caller's ctty differs from the pty slave.
+    handlers[SYS_PTY_SLAVE_READ as usize] = Some(handlers::sys_pty_slave_read);
+    handlers[SYS_PTY_SLAVE_TRY_READ as usize] = Some(handlers::sys_pty_slave_try_read);
 
     // Resource limits (557–558). The native counterpart of the Linux shim's
     // `prlimit64`, sharing `pcb::get_rlimit`/`pcb::set_rlimit` with it so the
@@ -981,6 +993,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_wait_info_layout()?;
     test_dispatch_rusage_info_layout()?;
     test_dispatch_set_credentials_gate()?;
+    test_dispatch_setgroups()?;
 
     serial_println!("[syscall] Dispatch self-test PASSED");
     Ok(())
@@ -1012,6 +1025,7 @@ pub fn self_test_fs() -> KernelResult<()> {
 
     test_dispatch_fs_roundtrip()?;
     test_dispatch_openat2_native()?;
+    test_dispatch_chroot()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())
@@ -2083,6 +2097,8 @@ fn test_dispatch_pty_syscalls() -> KernelResult<()> {
         (SYS_PTY_SLAVE_ID, "SYS_PTY_SLAVE_ID"),
         (SYS_PTY_POLL, "SYS_PTY_POLL"),
         (SYS_PTY_READABLE_BYTES, "SYS_PTY_READABLE_BYTES"),
+        (SYS_PTY_SLAVE_READ, "SYS_PTY_SLAVE_READ"),
+        (SYS_PTY_SLAVE_TRY_READ, "SYS_PTY_SLAVE_TRY_READ"),
     ] {
         let got = dispatch(nr, &args_for(m.raw())).value;
         if got != invalid && got != no_proc {
@@ -4274,5 +4290,133 @@ fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
     serial_println!(
         "[syscall]   Dispatch FS roundtrip: OK (write/read/stat/delete/mkdir/listdir/rmdir)"
     );
+    Ok(())
+}
+
+/// Test `SYS_PROCESS_SETGROUPS` (1067): drop-all, set, and re-read via PCB.
+fn test_dispatch_setgroups() -> KernelResult<()> {
+    use crate::proc::{pcb, thread};
+    use crate::sched;
+
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        // Kernel-mode task with no owning process — skip this test
+        // rather than fail on a path the handler itself handles.
+        serial_println!("[syscall]   Dispatch setgroups: SKIP (no owning process)");
+        return Ok(());
+    };
+
+    // 1. Drop all supplementary groups: count=0, ptr=0.
+    let args_drop = SyscallArgs {
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let r = dispatch(SYS_PROCESS_SETGROUPS, &args_drop);
+    if r.value != 0 {
+        serial_println!("[syscall]   FAIL: setgroups(0) returned {}", r.value);
+        return Err(KernelError::InternalError);
+    }
+
+    // Confirm the group list is now empty.
+    let creds = pcb::get_credentials(pid).ok_or(KernelError::NoSuchProcess)?;
+    if !creds.groups.is_empty() {
+        serial_println!(
+            "[syscall]   FAIL: groups should be empty after drop, got {}",
+            creds.groups.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 2. Install two supplementary groups [100, 200].
+    let groups: [u32; 2] = [100, 200];
+    let args_set = SyscallArgs {
+        arg0: 2,
+        arg1: groups.as_ptr() as u64,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let r = dispatch(SYS_PROCESS_SETGROUPS, &args_set);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall]   FAIL: setgroups(2, [100,200]) returned {}",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Confirm the groups were written.
+    let creds = pcb::get_credentials(pid).ok_or(KernelError::NoSuchProcess)?;
+    if creds.groups.len() != 2 || creds.groups[0] != 100 || creds.groups[1] != 200 {
+        serial_println!(
+            "[syscall]   FAIL: expected groups [100,200], got {:?}",
+            creds.groups
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 3. Drop again to leave the process clean.
+    let _ = dispatch(SYS_PROCESS_SETGROUPS, &args_drop);
+
+    serial_println!("[syscall]   Dispatch setgroups: OK (drop, set, verify, clean)");
+    Ok(())
+}
+
+/// Test `SYS_PROCESS_CHROOT` (1068): set a chroot to `/`, verify it sticks.
+///
+/// This runs post-mount so `/` is a valid directory.  We don't test a
+/// deeper path because this test runs in kernel context where `read_user_cstr`
+/// works on kernel addresses, and `/` is the simplest target that the VFS
+/// can always stat.
+fn test_dispatch_chroot() -> KernelResult<()> {
+    use crate::proc::{pcb, thread};
+    use crate::sched;
+
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        serial_println!("[syscall]   Dispatch chroot: SKIP (no owning process)");
+        return Ok(());
+    };
+
+    // Chroot to "/".
+    let path: &[u8] = b"/\0";
+    let args = SyscallArgs {
+        arg0: path.as_ptr() as u64,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let r = dispatch(SYS_PROCESS_CHROOT, &args);
+    if r.value != 0 {
+        serial_println!("[syscall]   FAIL: chroot('/') returned {}", r.value);
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify the root_dir was set.
+    let root = pcb::get_root_dir(pid).ok_or(KernelError::NoSuchProcess)?;
+    match root {
+        Some(ref dir) if dir == b"/" => {}
+        _ => {
+            serial_println!(
+                "[syscall]   FAIL: expected root_dir=Some('/'), got {:?}",
+                root
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Clean up: restore the real root.  Setting root_dir back to None
+    // is not exposed via the syscall (there's no "unchroot"), so we use
+    // the pcb accessor directly.
+    pcb::set_root_dir(pid, None)?;
+
+    serial_println!("[syscall]   Dispatch chroot: OK (set '/', verify, clean)");
     Ok(())
 }

@@ -31,7 +31,7 @@
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::missing_errors_doc)]
 
-use guitk::Color;
+use appearance::Palette;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -45,23 +45,6 @@ use std::collections::HashMap;
 // ============================================================================
 // Catppuccin Mocha theme constants
 // ============================================================================
-
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 
 // ============================================================================
 // Layout constants
@@ -1293,6 +1276,12 @@ pub struct NotesApp {
     note_id_gen: IdGen,
     notebook_id_gen: IdGen,
     timestamp_counter: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for NotesApp {
@@ -1305,6 +1294,7 @@ impl NotesApp {
     /// Create a new empty application.
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             notebooks: Vec::new(),
             notes: Vec::new(),
             selected_notebook: None,
@@ -2010,7 +2000,7 @@ impl NotesApp {
             y: 0.0,
             width,
             height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2046,7 +2036,7 @@ impl NotesApp {
             y: 0.0,
             width,
             height: TOOLBAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2055,7 +2045,7 @@ impl NotesApp {
             x: 12.0,
             y: 10.0,
             text: "Notes & Wiki".to_owned(),
-            color: BLUE,
+            color: self.palette.blue,
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(140.0),
@@ -2069,14 +2059,14 @@ impl NotesApp {
             y: 6.0,
             width: 100.0,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
             x: 168.0,
             y: 12.0,
             text: sort_label,
-            color: TEXT,
+            color: self.palette.text,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(90.0),
@@ -2085,9 +2075,9 @@ impl NotesApp {
 
         // Favorites toggle
         let fav_color = if self.show_favorites_only {
-            YELLOW
+            self.palette.yellow
         } else {
-            OVERLAY0
+            self.palette.overlay0
         };
         cmds.push(RenderCommand::FillRect {
             x: 270.0,
@@ -2095,9 +2085,9 @@ impl NotesApp {
             width: 24.0,
             height: 24.0,
             color: if self.show_favorites_only {
-                SURFACE1
+                self.palette.surface1
             } else {
-                SURFACE0
+                self.palette.surface0
             },
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -2120,7 +2110,7 @@ impl NotesApp {
             y: 6.0,
             width: search_w,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         let search_text = if self.search_query.is_empty() {
@@ -2129,9 +2119,9 @@ impl NotesApp {
             self.search_query.clone()
         };
         let search_color = if self.search_query.is_empty() {
-            OVERLAY0
+            self.palette.overlay0
         } else {
-            TEXT
+            self.palette.text
         };
         cmds.push(RenderCommand::Text {
             x: search_x + 8.0,
@@ -2150,7 +2140,7 @@ impl NotesApp {
             x: tmpl_x,
             y: 12.0,
             text: "New:".to_owned(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2159,17 +2149,25 @@ impl NotesApp {
 
         // Show a few template buttons
         let template_labels = ["Blank", "Meeting", "Todo", "Journal"];
-        let template_colors = [OVERLAY0, TEAL, GREEN, MAUVE];
+        let template_colors = [
+            self.palette.overlay0,
+            self.palette.teal,
+            self.palette.green,
+            self.palette.mauve,
+        ];
         let mut tx = tmpl_x + 35.0;
         for (i, label) in template_labels.iter().enumerate() {
             let btn_w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
-            let color = template_colors.get(i).copied().unwrap_or(OVERLAY0);
+            let color = template_colors
+                .get(i)
+                .copied()
+                .unwrap_or(self.palette.overlay0);
             cmds.push(RenderCommand::FillRect {
                 x: tx,
                 y: 6.0,
                 width: btn_w,
                 height: 24.0,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
             cmds.push(RenderCommand::Text {
@@ -2191,7 +2189,7 @@ impl NotesApp {
             y1: TOOLBAR_HEIGHT,
             x2: width,
             y2: TOOLBAR_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -2205,7 +2203,7 @@ impl NotesApp {
             y: bar_y,
             width,
             height: STATUS_BAR_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2215,7 +2213,7 @@ impl NotesApp {
             y1: bar_y,
             x2: width,
             y2: bar_y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2229,7 +2227,7 @@ impl NotesApp {
             x: 12.0,
             y: bar_y + 6.0,
             text: count_text,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
@@ -2251,7 +2249,7 @@ impl NotesApp {
                 x: 250.0,
                 y: bar_y + 6.0,
                 text: stats_text,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 270.0),
@@ -2264,7 +2262,7 @@ impl NotesApp {
             x: width - 120.0,
             y: bar_y + 6.0,
             text: format!("Sort: {}", self.sort_order.label()),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(110.0),
@@ -2284,7 +2282,7 @@ impl NotesApp {
             y: content_y,
             width: SIDEBAR_WIDTH,
             height: content_h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2294,14 +2292,14 @@ impl NotesApp {
             y: content_y,
             width: SIDEBAR_WIDTH,
             height: HEADER_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
             x: 12.0,
             y: content_y + 9.0,
             text: "Notebooks".to_owned(),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 20.0),
@@ -2314,7 +2312,7 @@ impl NotesApp {
             y1: content_y + HEADER_HEIGHT,
             x2: SIDEBAR_WIDTH,
             y2: content_y + HEADER_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2334,7 +2332,7 @@ impl NotesApp {
                 y1: y,
                 x2: SIDEBAR_WIDTH - 8.0,
                 y2: y,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 width: 1.0,
             });
             y += 8.0;
@@ -2342,7 +2340,7 @@ impl NotesApp {
                 x: 12.0,
                 y,
                 text: "Tags".to_owned(),
-                color: LAVENDER,
+                color: self.palette.lavender,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(SIDEBAR_WIDTH - 20.0),
@@ -2358,8 +2356,16 @@ impl NotesApp {
                     y += TAG_HEIGHT + 4.0;
                 }
                 let is_active = self.active_tag_filter.as_deref() == Some(tag.as_str());
-                let bg = if is_active { BLUE } else { SURFACE0 };
-                let fg = if is_active { CRUST } else { SUBTEXT1 };
+                let bg = if is_active {
+                    self.palette.blue
+                } else {
+                    self.palette.surface0
+                };
+                let fg = if is_active {
+                    self.palette.crust
+                } else {
+                    self.palette.subtext1
+                };
                 cmds.push(RenderCommand::FillRect {
                     x: tag_x,
                     y,
@@ -2388,7 +2394,7 @@ impl NotesApp {
             y1: content_y,
             x2: SIDEBAR_WIDTH,
             y2: content_y + content_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -2410,7 +2416,7 @@ impl NotesApp {
                 y: *y,
                 width: SIDEBAR_WIDTH,
                 height: ITEM_HEIGHT,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -2423,7 +2429,7 @@ impl NotesApp {
                 x: 4.0 + indent,
                 y: *y + 7.0,
                 text: arrow.to_owned(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2432,7 +2438,11 @@ impl NotesApp {
         }
 
         // Notebook name
-        let name_color = if is_selected { TEXT } else { SUBTEXT1 };
+        let name_color = if is_selected {
+            self.palette.text
+        } else {
+            self.palette.subtext1
+        };
         let note_count = self.notes.iter().filter(|n| n.notebook_id == nb.id).count();
         cmds.push(RenderCommand::Text {
             x: 18.0 + indent,
@@ -2473,7 +2483,7 @@ impl NotesApp {
             y: content_y,
             width: NOTE_LIST_WIDTH,
             height: content_h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2483,14 +2493,14 @@ impl NotesApp {
             y: content_y,
             width: NOTE_LIST_WIDTH,
             height: HEADER_HEIGHT,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
             x: x + 12.0,
             y: content_y + 9.0,
             text: "Notes".to_owned(),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(NOTE_LIST_WIDTH - 20.0),
@@ -2502,7 +2512,7 @@ impl NotesApp {
             y1: content_y + HEADER_HEIGHT,
             x2: x + NOTE_LIST_WIDTH,
             y2: content_y + HEADER_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2525,7 +2535,7 @@ impl NotesApp {
                         y: iy,
                         width: NOTE_LIST_WIDTH,
                         height: item_h,
-                        color: SURFACE0,
+                        color: self.palette.surface0,
                         corner_radii: CornerRadii::ZERO,
                     });
                     // Blue accent bar
@@ -2534,7 +2544,7 @@ impl NotesApp {
                         y: iy,
                         width: 3.0,
                         height: item_h,
-                        color: BLUE,
+                        color: self.palette.blue,
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
@@ -2545,7 +2555,7 @@ impl NotesApp {
                         x: x + NOTE_LIST_WIDTH - 20.0,
                         y: iy + 6.0,
                         text: "P".to_owned(),
-                        color: PEACH,
+                        color: self.palette.peach,
                         font_size: 10.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
@@ -2559,7 +2569,7 @@ impl NotesApp {
                         x: x + NOTE_LIST_WIDTH - 34.0,
                         y: iy + 6.0,
                         text: "*".to_owned(),
-                        color: YELLOW,
+                        color: self.palette.yellow,
                         font_size: 12.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
@@ -2568,7 +2578,11 @@ impl NotesApp {
                 }
 
                 // Title
-                let title_color = if is_selected { TEXT } else { SUBTEXT1 };
+                let title_color = if is_selected {
+                    self.palette.text
+                } else {
+                    self.palette.subtext1
+                };
                 cmds.push(RenderCommand::Text {
                     x: x + 12.0,
                     y: iy + 6.0,
@@ -2582,10 +2596,10 @@ impl NotesApp {
 
                 // Kind badge
                 let kind_color = match &note.kind {
-                    NoteKind::PlainText => OVERLAY0,
-                    NoteKind::Markdown => BLUE,
-                    NoteKind::Checklist => GREEN,
-                    NoteKind::Table => TEAL,
+                    NoteKind::PlainText => self.palette.overlay0,
+                    NoteKind::Markdown => self.palette.blue,
+                    NoteKind::Checklist => self.palette.green,
+                    NoteKind::Table => self.palette.teal,
                 };
                 cmds.push(RenderCommand::Text {
                     x: x + 12.0,
@@ -2611,7 +2625,7 @@ impl NotesApp {
                     x: x + 80.0,
                     y: iy + 22.0,
                     text: snippet,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(NOTE_LIST_WIDTH - 92.0),
@@ -2625,7 +2639,7 @@ impl NotesApp {
                         x: x + 12.0,
                         y: iy + 36.0,
                         text: tags_str,
-                        color: MAUVE,
+                        color: self.palette.mauve,
                         font_size: 9.0,
                         font_weight: FontWeightHint::Light,
                         max_width: Some(NOTE_LIST_WIDTH - 24.0),
@@ -2639,7 +2653,7 @@ impl NotesApp {
                     y1: iy + item_h,
                     x2: x + NOTE_LIST_WIDTH - 8.0,
                     y2: iy + item_h,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     width: 1.0,
                 });
 
@@ -2653,7 +2667,7 @@ impl NotesApp {
             y1: content_y,
             x2: x + NOTE_LIST_WIDTH,
             y2: content_y + content_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -2672,7 +2686,7 @@ impl NotesApp {
             y,
             width,
             height,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2684,7 +2698,7 @@ impl NotesApp {
                 x: x + width / 2.0 - 80.0,
                 y: y + height / 2.0 - 10.0,
                 text: "Select a note to edit".to_owned(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 16.0,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(200.0),
@@ -2700,14 +2714,14 @@ impl NotesApp {
             y: title_y,
             width,
             height: HEADER_HEIGHT + 8.0,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
             x: x + EDITOR_PADDING,
             y: title_y + 10.0,
             text: note.title.clone(),
-            color: TEXT,
+            color: self.palette.text,
             font_size: 18.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - EDITOR_PADDING * 2.0),
@@ -2721,7 +2735,7 @@ impl NotesApp {
             y: meta_y,
             width,
             height: 20.0,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2738,7 +2752,7 @@ impl NotesApp {
             x: x + EDITOR_PADDING,
             y: meta_y + 4.0,
             text: meta_text,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - EDITOR_PADDING * 2.0),
@@ -2756,14 +2770,14 @@ impl NotesApp {
                     y: tags_y + 2.0,
                     width: tw,
                     height: 18.0,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(9.0),
                 });
                 cmds.push(RenderCommand::Text {
                     x: tx + 8.0,
                     y: tags_y + 5.0,
                     text: tag.clone(),
-                    color: MAUVE,
+                    color: self.palette.mauve,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(tw - 10.0),
@@ -2780,7 +2794,7 @@ impl NotesApp {
             y1: sep_y,
             x2: x + width,
             y2: sep_y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2824,7 +2838,7 @@ impl NotesApp {
                 x: x + EDITOR_PADDING,
                 y: ly,
                 text: line.to_owned(),
-                color: TEXT,
+                color: self.palette.text,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - EDITOR_PADDING * 2.0),
@@ -2846,7 +2860,11 @@ impl NotesApp {
         let mut iy = y + EDITOR_PADDING;
         for item in &note.checklist {
             // Checkbox box
-            let box_color = if item.checked { GREEN } else { SURFACE1 };
+            let box_color = if item.checked {
+                self.palette.green
+            } else {
+                self.palette.surface1
+            };
             cmds.push(RenderCommand::StrokeRect {
                 x: x + EDITOR_PADDING,
                 y: iy,
@@ -2863,12 +2881,16 @@ impl NotesApp {
                     y: iy + 3.0,
                     width: 10.0,
                     height: 10.0,
-                    color: GREEN,
+                    color: self.palette.green,
                     corner_radii: CornerRadii::all(2.0),
                 });
             }
             // Text
-            let text_color = if item.checked { OVERLAY0 } else { TEXT };
+            let text_color = if item.checked {
+                self.palette.overlay0
+            } else {
+                self.palette.text
+            };
             cmds.push(RenderCommand::Text {
                 x: x + EDITOR_PADDING + 24.0,
                 y: iy + 1.0,
@@ -2911,7 +2933,7 @@ impl NotesApp {
             y: header_y,
             width: usable_w,
             height: LINE_HEIGHT + 4.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         for (ci, header) in table.headers.iter().enumerate() {
@@ -2919,7 +2941,7 @@ impl NotesApp {
                 x: x + EDITOR_PADDING + ci as f32 * col_w + 8.0,
                 y: header_y + 4.0,
                 text: header.clone(),
-                color: BLUE,
+                color: self.palette.blue,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(col_w - 16.0),
@@ -2930,7 +2952,11 @@ impl NotesApp {
         // Data rows
         let mut ry = header_y + LINE_HEIGHT + 8.0;
         for (ri, row) in table.rows.iter().enumerate() {
-            let row_bg = if ri % 2 == 0 { BASE } else { MANTLE };
+            let row_bg = if ri % 2 == 0 {
+                self.palette.base
+            } else {
+                self.palette.mantle
+            };
             cmds.push(RenderCommand::FillRect {
                 x: x + EDITOR_PADDING,
                 y: ry,
@@ -2945,7 +2971,7 @@ impl NotesApp {
                     x: x + EDITOR_PADDING + ci as f32 * col_w + 8.0,
                     y: ry + 4.0,
                     text: cell.to_owned(),
-                    color: TEXT,
+                    color: self.palette.text,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(col_w - 16.0),
@@ -2963,7 +2989,7 @@ impl NotesApp {
                 y1: header_y,
                 x2: lx,
                 y2: ry,
-                color: SURFACE1,
+                color: self.palette.surface1,
                 width: 1.0,
             });
         }
@@ -2986,10 +3012,10 @@ impl NotesApp {
             match block {
                 MdBlock::Heading { level, text } => {
                     let (font_size, color) = match level {
-                        1 => (22.0, BLUE),
-                        2 => (18.0, LAVENDER),
-                        3 => (16.0, MAUVE),
-                        _ => (14.0, TEAL),
+                        1 => (22.0, self.palette.blue),
+                        2 => (18.0, self.palette.lavender),
+                        3 => (16.0, self.palette.mauve),
+                        _ => (14.0, self.palette.teal),
                     };
                     cmds.push(RenderCommand::Text {
                         x: x + EDITOR_PADDING,
@@ -3006,14 +3032,24 @@ impl NotesApp {
                 MdBlock::Paragraph { spans } => {
                     for span in spans {
                         let (text, color, weight) = match span {
-                            MdSpan::Plain(t) => (t.clone(), TEXT, FontWeightHint::Regular),
-                            MdSpan::Bold(t) => (t.clone(), TEXT, FontWeightHint::Bold),
-                            MdSpan::Italic(t) => (t.clone(), SUBTEXT1, FontWeightHint::Light),
-                            MdSpan::BoldItalic(t) => (t.clone(), TEXT, FontWeightHint::Bold),
-                            MdSpan::InlineCode(t) => (t.clone(), GREEN, FontWeightHint::Regular),
-                            MdSpan::WikiLink(t) => {
-                                (format!("[[{t}]]"), BLUE, FontWeightHint::Regular)
+                            MdSpan::Plain(t) => {
+                                (t.clone(), self.palette.text, FontWeightHint::Regular)
                             }
+                            MdSpan::Bold(t) => (t.clone(), self.palette.text, FontWeightHint::Bold),
+                            MdSpan::Italic(t) => {
+                                (t.clone(), self.palette.subtext1, FontWeightHint::Light)
+                            }
+                            MdSpan::BoldItalic(t) => {
+                                (t.clone(), self.palette.text, FontWeightHint::Bold)
+                            }
+                            MdSpan::InlineCode(t) => {
+                                (t.clone(), self.palette.green, FontWeightHint::Regular)
+                            }
+                            MdSpan::WikiLink(t) => (
+                                format!("[[{t}]]"),
+                                self.palette.blue,
+                                FontWeightHint::Regular,
+                            ),
                         };
                         cmds.push(RenderCommand::Text {
                             x: x + EDITOR_PADDING,
@@ -3035,7 +3071,7 @@ impl NotesApp {
                             x: x + EDITOR_PADDING + 16.0,
                             y: ly,
                             text: format!("* {item}"),
-                            color: TEXT,
+                            color: self.palette.text,
                             font_size: 14.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(max_w - 16.0),
@@ -3051,7 +3087,7 @@ impl NotesApp {
                             x: x + EDITOR_PADDING + 16.0,
                             y: ly,
                             text: format!("{}. {item}", i.saturating_add(1)),
-                            color: TEXT,
+                            color: self.palette.text,
                             font_size: 14.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(max_w - 16.0),
@@ -3068,7 +3104,7 @@ impl NotesApp {
                         y: ly,
                         width: max_w,
                         height: block_h,
-                        color: SURFACE0,
+                        color: self.palette.surface0,
                         corner_radii: CornerRadii::all(6.0),
                     });
                     if !language.is_empty() {
@@ -3076,7 +3112,7 @@ impl NotesApp {
                             x: x + EDITOR_PADDING + 8.0,
                             y: ly + 4.0,
                             text: language.clone(),
-                            color: OVERLAY0,
+                            color: self.palette.overlay0,
                             font_size: 10.0,
                             font_weight: FontWeightHint::Light,
                             max_width: Some(max_w - 16.0),
@@ -3093,7 +3129,7 @@ impl NotesApp {
                             x: x + EDITOR_PADDING + 12.0,
                             y: code_y_start + li as f32 * LINE_HEIGHT,
                             text: cl.to_owned(),
-                            color: GREEN,
+                            color: self.palette.green,
                             font_size: 13.0,
                             font_weight: FontWeightHint::Regular,
                             max_width: Some(max_w - 24.0),
@@ -3109,14 +3145,14 @@ impl NotesApp {
                         y: ly,
                         width: 4.0,
                         height: LINE_HEIGHT,
-                        color: BLUE,
+                        color: self.palette.blue,
                         corner_radii: CornerRadii::all(2.0),
                     });
                     cmds.push(RenderCommand::Text {
                         x: x + EDITOR_PADDING + 12.0,
                         y: ly,
                         text: text.clone(),
-                        color: SUBTEXT0,
+                        color: self.palette.subtext0,
                         font_size: 14.0,
                         font_weight: FontWeightHint::Light,
                         max_width: Some(max_w - 16.0),
@@ -3130,7 +3166,7 @@ impl NotesApp {
                         y1: ly + 8.0,
                         x2: x + EDITOR_PADDING + max_w,
                         y2: ly + 8.0,
-                        color: SURFACE1,
+                        color: self.palette.surface1,
                         width: 1.0,
                     });
                     ly += 20.0;
@@ -3154,7 +3190,7 @@ impl NotesApp {
             y,
             width,
             height,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3164,7 +3200,7 @@ impl NotesApp {
             y1: y,
             x2: x,
             y2: y + height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -3173,7 +3209,7 @@ impl NotesApp {
             x: x + 8.0,
             y: y + 8.0,
             text: "History".to_owned(),
-            color: LAVENDER,
+            color: self.palette.lavender,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 16.0),
@@ -3189,7 +3225,7 @@ impl NotesApp {
                 x: x + 8.0,
                 y: vy,
                 text: label,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 16.0),
@@ -3201,7 +3237,7 @@ impl NotesApp {
                 x: x + 8.0,
                 y: vy + 12.0,
                 text: snippet,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(width - 16.0),
@@ -3232,6 +3268,10 @@ pub struct NoteStats {
 // ============================================================================
 
 impl App for NotesApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         self.selected_note
             .and_then(|id| self.notes.iter().find(|n| n.id == id))
@@ -4456,5 +4496,64 @@ mod tests {
 
         let ids = app.notebook_descendant_ids(root);
         assert_eq!(ids.len(), 3);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        fn fills(app: &mut NotesApp) -> Vec<guitk::Color> {
+            app.render(1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = NotesApp::new();
+
+        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        app.theme_changed(&theme(
+            appearance::ThemeMode::Dark,
+            Some(appearance::HighContrastScheme::WhiteOnBlack),
+        ));
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

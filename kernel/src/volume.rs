@@ -294,7 +294,7 @@ fn dir_tree_bytes(root: &Path) -> u64 {
 /// Exercises name validation, create/idempotency, list/exists/path_of, remove,
 /// and prune against real backing directories under a throwaway prefix, then
 /// cleans up. Panics on any invariant violation (the boot self-test convention).
-pub fn self_test() {
+pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
     serial_println!("[volume] Running self-test...");
 
@@ -414,4 +414,5 @@ pub fn self_test() {
     serial_println!("[volume]   cleanup to baseline: OK");
 
     serial_println!("[volume] Self-test PASSED");
+    Ok(())
 }

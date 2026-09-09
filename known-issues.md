@@ -125335,11 +125335,18 @@ These are ours, not a packaging question.
   been here all along. Built on `strtold`'s proven pattern — an `f64` core
   named `__wcstold_f64` plus an `%st(0)` assembly thunk, because Rust cannot
   express a `long double` return.
-* **`swprintf` / `vswprintf`** — still missing, and not a one-liner: `posix`
-  has **no wide-character `printf` family at all**. libc++'s `<locale>` uses
-  `swprintf` for numeric formatting, so it is on the path for any C++ port,
-  and a correct implementation is a whole `printf` engine over `wchar_t`
-  rather than a wrapper.
+* **`swprintf` / `vswprintf`** — **FIXED 2026-09-09.** Not a second engine:
+  the format is narrowed, the existing `format_core` runs exactly as it does
+  for `snprintf`, and the result is widened. No translation of conversion
+  specifiers is needed, because C gives `%s` a `char *` and `%ls` a
+  `wchar_t *` in *both* families. The intermediate needs no buffer of its own
+  — the narrow text is formatted into the caller's own buffer and expanded in
+  place, back to front, which is safe rather than lucky: character `i` starts
+  at byte `s_i` with `i <= s_i <= 4i`, and its destination slot is exactly
+  `[4i, 4i+4)`, so the write never reaches below the byte it was decoded
+  from. Truncation follows `swprintf`'s rule (negative) and not
+  `snprintf`'s (the would-be length), which is why the two share an engine
+  and not a return path.
 
 **Why this matters more than its size.** §73 defers YSH until a C++/slateos
 toolchain exists, and that prerequisite has now fired. The entry moves YSH
@@ -125352,3 +125359,43 @@ it with `rust-lld -static --no-dynamic-linker` against
 `toolchain/sysroot/lib/libc.a` and zig's `libc++.a`, and read the undefined
 and duplicate lists. Zig's archives are built on demand into its global cache
 by any `zig c++ -static` build.
+
+
+## B-THE-TWO-MULTIBYTE-COUNTING-CALLS-DOCUMENTED-A-BEHAVIOUR-NEITHER-HAD (lane B, 2026-09-09) — FIXED same day
+
+**In short:** the two functions that convert between ordinary and wide strings
+both offer a "just tell me how big the answer would be" mode, used by passing
+a null destination. Both documented it. Neither did it: asked to measure, they
+answered zero, for every input.
+
+**Where.** `posix/src/wchar.rs`, `mbstowcs` and `wcstombs`.
+
+**What was wrong.** `mbstowcs`'s loop was `while dst_count < n`, and
+`wcstombs`'s capacity check `if dst_off + enc_len > n` ran unconditionally.
+Both bound the *writing*, which is right, and both also bound the *counting*,
+which is not: C says `n` is ignored when `dst` is null. So the idiomatic
+measurement — `f(NULL, src, 0)` — exited immediately and returned 0. Passing a
+large `n` with a null `dst` worked, which is why the doc comments could look
+true to anyone who tried it that way.
+
+**How it was found, which is the part worth keeping.** Not by a test and not
+by review: by writing `vswprintf`, whose first act is to measure the format
+string. Its symptom was not an error but an **empty output** — a formatted
+string with nothing in it and a return of 0, which is a perfectly plausible
+answer for a caller to receive. Three of its seven tests failed and the
+smallest one, `swprintf(buf, 4, L"abc")`, returned 0 instead of 3, which is
+what made it findable at all.
+
+**Both doc comments were already correct.** They said "if `dst` is null,
+counts the total bytes needed" and "if `dst` is null, just counts characters"
+— written when the functions were, and never true. This is the same shape as
+the week's other findings, with one difference worth noting: the usual case is
+a comment that *became* stale when the code moved beneath it. This one never
+matched at all, and nothing in the tree called these functions the documented
+way, so there was nothing to notice it until something did.
+
+**Fixed** by making both checks conditional on `dst` being non-null, with
+regression tests covering the counting form, the mirror-image asymmetry
+(`mbstowcs` counts characters and so counts *short* on multibyte input;
+`wcstombs` counts bytes and counts *long*), and a guard that the bounded
+writing form still respects `n`.

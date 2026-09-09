@@ -164,6 +164,10 @@ va_trampoline!("dprintf", "vdprintf", "16", "rdx");
 va_trampoline!("snprintf", "vsnprintf", "24", "rcx");
 #[cfg(target_os = "none")]
 va_trampoline!("sprintf", "vsprintf", "16", "rdx");
+// `swprintf(ws, n, fmt, ...)` has the same three named parameters as
+// `snprintf`, so it takes the same `gp_offset` and the same register.
+#[cfg(target_os = "none")]
+va_trampoline!("swprintf", "vswprintf", "24", "rcx");
 
 /// `asprintf` gets its own inline module, and therefore its own object file
 /// inside `libc.a`, because gnulib ships a replacement for it and every GNU
@@ -690,6 +694,154 @@ pub unsafe extern "C" fn vsprintf(buf: *mut u8, fmt: *const u8, ap: *mut VaList)
     // SAFETY: as for `vprintf`.
     let mut args = unsafe { Args::new(Some(&mut *ap)) };
     _sprintf_impl(buf, fmt, &mut args)
+}
+
+/// `vswprintf(ws, n, fmt, ap)` — `swprintf` with a `va_list`.
+///
+/// The wide-character `snprintf`. It exists because libc++'s `<locale>` calls
+/// it for numeric formatting, and `posix` had no wide `printf` family at all
+/// (`known-issues.md` →
+/// `B-THE-C-PLUS-PLUS-LINK-LINE-NEEDS-TWO-DECISIONS-AND-ONE-MISSING-FAMILY`).
+///
+/// # It is the narrow engine, not a second one
+///
+/// A wide `printf` engine would be a second copy of the 3,000 lines below,
+/// and the module header already records what happens when one format path
+/// exists twice: "a fix to one silently missed the other". So the format is
+/// narrowed, [`format_core`] runs exactly as it does for `snprintf`, and the
+/// result is widened. Conversion specifiers need no translation — C gives
+/// `%s` a `char *` and `%ls` a `wchar_t *` in *both* families, so the
+/// argument list is identical.
+///
+/// # Why the intermediate needs no buffer of its own
+///
+/// The narrow text is formatted **into the caller's own buffer** and then
+/// expanded in place, back to front. That is safe rather than merely lucky:
+/// character `i` starts at byte offset `s_i`, and since each of the `i`
+/// characters before it takes at least one byte and at most four,
+/// `i <= s_i <= 4i`. The destination slot for character `i` is exactly
+/// `[4i, 4i+4)`, so `4i >= s_i` always — the write never reaches below the
+/// byte the character was decoded from, and going back to front means every
+/// source byte above `s_i` has already been consumed.
+///
+/// # Truncation is `swprintf`'s, not `snprintf`'s
+///
+/// `snprintf` returns the length it *would* have written. `swprintf` returns
+/// a negative value instead, and C is explicit about it. A caller that read
+/// the would-be length here and resized would be acting on a number this
+/// function is not allowed to give it, so the two must not share a return
+/// path — they only share an engine.
+///
+/// # Safety
+///
+/// `ws` must be writable for `n` wide characters, `fmt` a valid
+/// null-terminated wide string, and `ap` a valid `va_list`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn vswprintf(
+    ws: *mut crate::wchar::WcharT,
+    n: usize,
+    fmt: *const crate::wchar::WcharT,
+    ap: *mut VaList,
+) -> i32 {
+    if ws.is_null() || fmt.is_null() || ap.is_null() || n == 0 {
+        return -1;
+    }
+    let Some(capacity) = n.checked_mul(core::mem::size_of::<crate::wchar::WcharT>()) else {
+        crate::errno::set_errno(crate::errno::EOVERFLOW);
+        return -1;
+    };
+
+    // 1. Narrow the format. Sized exactly, then freed on every exit below --
+    //    this is the one allocation, and `dirent.rs` sets the precedent for
+    //    libc internals owning a short-lived one.
+    // SAFETY: `fmt` is a valid wide string (caller contract); a null
+    // destination with size 0 asks `wcstombs` only to measure.
+    let fmt_len = unsafe { crate::wchar::wcstombs(core::ptr::null_mut(), fmt, 0) };
+    if fmt_len == usize::MAX {
+        crate::errno::set_errno(crate::errno::EILSEQ);
+        return -1;
+    }
+    // One name for the size, so the allocation and the conversion cannot
+    // disagree about it.
+    let fmt_cap = fmt_len.saturating_add(1);
+    let narrow_fmt = crate::malloc::malloc(fmt_cap);
+    if narrow_fmt.is_null() {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+        return -1;
+    }
+    // SAFETY: `narrow_fmt` has `fmt_cap` bytes, which is what `wcstombs` was
+    // just told the conversion needs.
+    unsafe { crate::wchar::wcstombs(narrow_fmt, fmt, fmt_cap) };
+
+    // 2. Format narrow, into the caller's buffer viewed as bytes.
+    let base = ws.cast::<u8>();
+    // SAFETY: `ap` is a valid `va_list` (caller contract).
+    let mut args = unsafe { Args::new(Some(&mut *ap)) };
+    let needed = format_core(base, capacity, narrow_fmt, &mut args);
+    // SAFETY: `narrow_fmt` came from `malloc` above and is not used again.
+    unsafe { crate::malloc::free(narrow_fmt) };
+    if needed < 0 {
+        return -1;
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let byte_len = needed as usize;
+    if byte_len >= capacity {
+        // The narrow form did not fit, so it was truncated and cannot be
+        // recovered. `swprintf` says negative rather than a length.
+        return -1;
+    }
+
+    // 3. How many wide characters is that?
+    // SAFETY: `base` now holds a null-terminated narrow string that
+    // `format_core` wrote; a null destination asks only for the count.
+    let wide_len = unsafe { crate::wchar::mbstowcs(core::ptr::null_mut(), base, 0) };
+    if wide_len == usize::MAX {
+        crate::errno::set_errno(crate::errno::EILSEQ);
+        return -1;
+    }
+    if wide_len >= n {
+        // No room for the terminating null.
+        return -1;
+    }
+
+    // 4. Expand in place, back to front. See the note above for why this
+    //    cannot overwrite a byte it has not already consumed.
+    let mut read = byte_len;
+    let mut i = wide_len;
+    while i > 0 {
+        // Saturating throughout this loop: every subtraction below is already
+        // guarded by the condition above it, so the saturating form is exact
+        // and says so, rather than relying on a reader to re-derive it.
+        i = i.saturating_sub(1);
+        let mut start = read;
+        // Walk back over UTF-8 continuation bytes to this character's first.
+        while start > 0 {
+            start = start.saturating_sub(1);
+            // SAFETY: `start` is within the formatted bytes.
+            if unsafe { *base.add(start) } & 0xC0 != 0x80 {
+                break;
+            }
+        }
+        let mut wc: crate::wchar::WcharT = 0;
+        // SAFETY: `[start, read)` is a complete character's bytes, still
+        // untouched: the previous iteration wrote at or above `4*(i+1)`,
+        // which is at or above `read`.
+        let used = unsafe {
+            crate::wchar::mbtowc(&raw mut wc, base.add(start), read.saturating_sub(start))
+        };
+        if used <= 0 {
+            crate::errno::set_errno(crate::errno::EILSEQ);
+            return -1;
+        }
+        // SAFETY: `i < wide_len < n`, so this slot is inside the caller's
+        // buffer, and `4*i >= start` keeps it clear of unread bytes.
+        unsafe { *ws.add(i) = wc };
+        read = start;
+    }
+    // SAFETY: `wide_len < n`, so the terminator is in bounds.
+    unsafe { *ws.add(wide_len) = 0 };
+
+    i32::try_from(wide_len).unwrap_or(-1)
 }
 
 /// Own archive member — gnulib replaces `vasprintf`. See `gnu_asprintf` above.
@@ -2124,6 +2276,22 @@ mod tests {
     /// interface cannot express.  The assertion below pins that limit rather
     /// than letting such a test silently read the wrong slots.
     fn with_args<R>(ints: &[u64], floats: &[u64], f: impl FnOnce(&mut Args) -> R) -> R {
+        with_valist(ints, floats, |ap| {
+            // SAFETY: `with_valist` hands out a pointer to a `VaList` that
+            // lives for the duration of this closure.
+            let mut args = unsafe { Args::new(Some(&mut *ap)) };
+            f(&mut args)
+        })
+    }
+
+    /// The same synthetic `va_list`, handed out as the raw pointer the `v*`
+    /// entry points take.
+    ///
+    /// [`with_args`] is written in terms of this rather than beside it: the
+    /// register-save layout is the one thing in this file that must match the
+    /// ABI exactly, and a second copy of it is the shape the module header
+    /// warns about -- "a fix to one silently missed the other".
+    fn with_valist<R>(ints: &[u64], floats: &[u64], f: impl FnOnce(*mut VaList) -> R) -> R {
         assert!(
             ints.len() <= 6 || floats.len() <= 8,
             "with_args cannot lay out overflowing integers and floats together; \
@@ -2161,8 +2329,7 @@ mod tests {
         };
         // SAFETY: `va` describes the scratch buffers above, which outlive the
         // call and are laid out exactly as the ABI specifies.
-        let mut args = unsafe { Args::new(Some(&mut va)) };
-        f(&mut args)
+        f(&raw mut va)
     }
 
     /// Format via `_snprintf_impl` and return the output as a `String`.
@@ -4020,5 +4187,113 @@ mod tests {
                 core::str::from_utf8(&text[..text.len() - 1]).unwrap()
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // vswprintf -- the wide `snprintf`
+    // -----------------------------------------------------------------------
+
+    /// A wide string from an ASCII/UTF-8 `&str`, null-terminated.
+    fn wide(text: &str) -> Vec<crate::wchar::WcharT> {
+        let mut v: Vec<crate::wchar::WcharT> = text
+            .chars()
+            .map(|c| c as u32 as crate::wchar::WcharT)
+            .collect();
+        v.push(0);
+        v
+    }
+
+    /// Read a null-terminated wide buffer back as a `String`.
+    fn from_wide(buf: &[crate::wchar::WcharT]) -> String {
+        buf.iter()
+            .take_while(|c| **c != 0)
+            .filter_map(|c| u32::try_from(*c).ok().and_then(char::from_u32))
+            .collect()
+    }
+
+    fn swprintf_str(cap: usize, fmt: &str, ints: &[u64], floats: &[u64]) -> (String, i32) {
+        let f = wide(fmt);
+        let mut buf = vec![0 as crate::wchar::WcharT; cap.max(1)];
+        let n = with_valist(ints, floats, |ap| unsafe {
+            vswprintf(buf.as_mut_ptr(), cap, f.as_ptr(), ap)
+        });
+        (from_wide(&buf), n)
+    }
+
+    #[test]
+    fn vswprintf_formats_like_its_narrow_twin() {
+        let (out, n) = swprintf_str(
+            64,
+            "%d-%s|%05.2f",
+            &[42, b"hi\0".as_ptr() as u64],
+            &[f64::to_bits(3.5)],
+        );
+        assert_eq!(out, "42-hi|03.50");
+        assert_eq!(n, 11);
+    }
+
+    /// The count and the terminator are both in *wide characters*.
+    #[test]
+    fn vswprintf_counts_wide_characters_not_bytes() {
+        // Three characters, seven UTF-8 bytes.
+        let (out, n) = swprintf_str(
+            16,
+            "%s",
+            &[b"\xc3\xa9\xe2\x82\xac\xf0\x9f\x99\x82\0".as_ptr() as u64],
+            &[],
+        );
+        assert_eq!(out, "\u{e9}\u{20ac}\u{1f642}");
+        assert_eq!(n, 3, "three characters, not seven bytes");
+    }
+
+    /// Truncation is `swprintf`'s rule, not `snprintf`'s: negative, never the
+    /// would-be length. A caller that resized on the returned number would be
+    /// acting on something this function is not allowed to hand it.
+    #[test]
+    fn vswprintf_returns_negative_when_it_does_not_fit() {
+        let (_, n) = swprintf_str(4, "%s", &[b"abcdefgh\0".as_ptr() as u64], &[]);
+        assert!(n < 0, "expected negative, got {n}");
+    }
+
+    /// The boundary either side: `n` must hold the text *and* the null.
+    #[test]
+    fn vswprintf_needs_room_for_the_terminator() {
+        let (out, fits) = swprintf_str(4, "abc", &[], &[]);
+        assert_eq!(fits, 3);
+        assert_eq!(out, "abc");
+
+        let (_, exact) = swprintf_str(3, "abc", &[], &[]);
+        assert!(exact < 0, "three characters do not fit in three slots");
+    }
+
+    #[test]
+    fn vswprintf_rejects_a_zero_capacity() {
+        let f = wide("x");
+        let mut buf = [0 as crate::wchar::WcharT; 4];
+        let n = with_valist(&[], &[], |ap| unsafe {
+            vswprintf(buf.as_mut_ptr(), 0, f.as_ptr(), ap)
+        });
+        assert!(n < 0);
+    }
+
+    #[test]
+    fn vswprintf_rejects_null_pointers() {
+        let f = wide("x");
+        let mut buf = [0 as crate::wchar::WcharT; 4];
+        let a = with_valist(&[], &[], |ap| unsafe {
+            vswprintf(core::ptr::null_mut(), 4, f.as_ptr(), ap)
+        });
+        let b = with_valist(&[], &[], |ap| unsafe {
+            vswprintf(buf.as_mut_ptr(), 4, core::ptr::null(), ap)
+        });
+        assert!(a < 0 && b < 0);
+    }
+
+    /// An empty result is still a well-formed one.
+    #[test]
+    fn vswprintf_handles_an_empty_format() {
+        let (out, n) = swprintf_str(8, "", &[], &[]);
+        assert_eq!(n, 0);
+        assert_eq!(out, "");
     }
 }

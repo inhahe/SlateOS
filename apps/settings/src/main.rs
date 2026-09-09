@@ -2325,7 +2325,7 @@ trait PageSink {
                 self.draw(|tree, x, y| render_button(tree, pal, x + dx, y + dy, label, color));
             }
             None => {
-                self.draw(|tree, x, y| render_disabled_button(tree, pal, x + dx, y + dy, label))
+                self.draw(|tree, x, y| render_disabled_button(tree, pal, x + dx, y + dy, label));
             }
         }
     }

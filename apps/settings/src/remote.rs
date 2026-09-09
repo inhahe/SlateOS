@@ -6,6 +6,7 @@
 
 #![allow(dead_code)]
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -16,21 +17,6 @@ use core::fmt;
 // ============================================================================
 // Theme colors (same Catppuccin Mocha palette as main settings)
 // ============================================================================
-
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_SURFACE2: Color = Color::from_hex(0x585B70);
-const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-#[allow(dead_code)]
-const COL_SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const COL_ACCENT: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
-const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
 
 // ============================================================================
 // Layout constants
@@ -152,12 +138,12 @@ impl DynDnsStatus {
         }
     }
 
-    fn color(&self) -> Color {
+    fn color(&self, pal: &Palette) -> Color {
         match self {
-            Self::Idle => COL_OVERLAY0,
-            Self::Updating => COL_ACCENT,
-            Self::Success => COL_GREEN,
-            Self::Error(_) => COL_RED,
+            Self::Idle => pal.overlay0,
+            Self::Updating => pal.blue,
+            Self::Success => pal.green,
+            Self::Error(_) => pal.red,
         }
     }
 }
@@ -657,30 +643,37 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
 }
 
 /// Draw a section header with underline.
-fn render_section_header(tree: &mut RenderTree, x: f32, y: f32, title: &str) -> f32 {
-    text_bold(tree, x, y, title, COL_TEXT, 16.0);
+fn render_section_header(pal: &Palette, tree: &mut RenderTree, x: f32, y: f32, title: &str) -> f32 {
+    text_bold(tree, x, y, title, pal.text, 16.0);
     tree.push(RenderCommand::FillRect {
         x,
         y: y + 24.0,
         width: CONTENT_WIDTH,
         height: 1.0,
-        color: COL_SURFACE1,
+        color: pal.surface1,
         corner_radii: CornerRadii::ZERO,
     });
     y + 36.0
 }
 
 /// Draw a clickable button.
-fn render_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) -> f32 {
+fn render_button(
+    pal: &Palette,
+    tree: &mut RenderTree,
+    x: f32,
+    y: f32,
+    label: &str,
+    color: Color,
+) -> f32 {
     let width = text::padded_width(label, 12.0, 13.0, FontWeightHint::Regular);
     fill_rounded(tree, x, y, width, BUTTON_HEIGHT, color, 6.0);
-    tree.text(x + 12.0, y + 8.0, label, COL_BASE, 13.0);
+    tree.text(x + 12.0, y + 8.0, label, pal.base, 13.0);
     width
 }
 
 /// Draw a toggle switch (on/off).
-fn render_toggle(tree: &mut RenderTree, x: f32, y: f32, enabled: bool) {
-    let bg = if enabled { COL_GREEN } else { COL_SURFACE2 };
+fn render_toggle(pal: &Palette, tree: &mut RenderTree, x: f32, y: f32, enabled: bool) {
+    let bg = if enabled { pal.green } else { pal.surface2 };
     fill_rounded(
         tree,
         x,
@@ -703,13 +696,14 @@ fn render_toggle(tree: &mut RenderTree, x: f32, y: f32, enabled: bool) {
         y + 2.0,
         TOGGLE_HEIGHT - 4.0,
         TOGGLE_HEIGHT - 4.0,
-        COL_TEXT,
+        pal.text,
         (TOGGLE_HEIGHT - 4.0) / 2.0,
     );
 }
 
 /// Draw a labeled text field (label on the left, value box on the right).
 fn render_text_field(
+    pal: &Palette,
     tree: &mut RenderTree,
     x: f32,
     y: f32,
@@ -718,7 +712,7 @@ fn render_text_field(
     is_password: bool,
 ) -> f32 {
     // Label
-    tree.text(x, y + 10.0, label, COL_SUBTEXT0, 13.0);
+    tree.text(x, y + 10.0, label, pal.subtext0, 13.0);
 
     // Input box
     let input_x = x + FIELD_LABEL_WIDTH;
@@ -728,7 +722,7 @@ fn render_text_field(
         y,
         FIELD_INPUT_WIDTH,
         FIELD_HEIGHT,
-        COL_SURFACE0,
+        pal.surface0,
         6.0,
     );
     tree.push(RenderCommand::StrokeRect {
@@ -736,7 +730,7 @@ fn render_text_field(
         y,
         width: FIELD_INPUT_WIDTH,
         height: FIELD_HEIGHT,
-        color: COL_SURFACE2,
+        color: pal.surface2,
         line_width: 1.0,
         corner_radii: CornerRadii::all(6.0),
     });
@@ -750,9 +744,9 @@ fn render_text_field(
         value.to_string()
     };
     let text_color = if value.is_empty() {
-        COL_OVERLAY0
+        pal.overlay0
     } else {
-        COL_TEXT
+        pal.text
     };
     tree.push(RenderCommand::Text {
         x: input_x + 10.0,
@@ -769,15 +763,29 @@ fn render_text_field(
 }
 
 /// Draw a label + toggle row.
-fn render_toggle_row(tree: &mut RenderTree, x: f32, y: f32, label: &str, enabled: bool) -> f32 {
-    tree.text(x, y + 2.0, label, COL_SUBTEXT0, 13.0);
-    render_toggle(tree, x + FIELD_LABEL_WIDTH, y, enabled);
+fn render_toggle_row(
+    pal: &Palette,
+    tree: &mut RenderTree,
+    x: f32,
+    y: f32,
+    label: &str,
+    enabled: bool,
+) -> f32 {
+    tree.text(x, y + 2.0, label, pal.subtext0, 13.0);
+    render_toggle(pal, tree, x + FIELD_LABEL_WIDTH, y, enabled);
     y + TOGGLE_HEIGHT + 12.0
 }
 
 /// Draw a label + dropdown-style display.
-fn render_dropdown_row(tree: &mut RenderTree, x: f32, y: f32, label: &str, value: &str) -> f32 {
-    tree.text(x, y + 10.0, label, COL_SUBTEXT0, 13.0);
+fn render_dropdown_row(
+    pal: &Palette,
+    tree: &mut RenderTree,
+    x: f32,
+    y: f32,
+    label: &str,
+    value: &str,
+) -> f32 {
+    tree.text(x, y + 10.0, label, pal.subtext0, 13.0);
 
     let dd_x = x + FIELD_LABEL_WIDTH;
     fill_rounded(
@@ -786,7 +794,7 @@ fn render_dropdown_row(tree: &mut RenderTree, x: f32, y: f32, label: &str, value
         y,
         FIELD_INPUT_WIDTH,
         FIELD_HEIGHT,
-        COL_SURFACE0,
+        pal.surface0,
         6.0,
     );
     tree.push(RenderCommand::StrokeRect {
@@ -794,7 +802,7 @@ fn render_dropdown_row(tree: &mut RenderTree, x: f32, y: f32, label: &str, value
         y,
         width: FIELD_INPUT_WIDTH,
         height: FIELD_HEIGHT,
-        color: COL_SURFACE2,
+        color: pal.surface2,
         line_width: 1.0,
         corner_radii: CornerRadii::all(6.0),
     });
@@ -803,7 +811,7 @@ fn render_dropdown_row(tree: &mut RenderTree, x: f32, y: f32, label: &str, value
         x: dd_x + 10.0,
         y: y + 10.0,
         text: value.to_string(),
-        color: COL_TEXT,
+        color: pal.text,
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(FIELD_INPUT_WIDTH - 36.0),
@@ -815,7 +823,7 @@ fn render_dropdown_row(tree: &mut RenderTree, x: f32, y: f32, label: &str, value
         dd_x + FIELD_INPUT_WIDTH - 24.0,
         y + 10.0,
         "\u{25BC}",
-        COL_OVERLAY0,
+        pal.overlay0,
         11.0,
     );
 
@@ -823,22 +831,22 @@ fn render_dropdown_row(tree: &mut RenderTree, x: f32, y: f32, label: &str, value
 }
 
 /// Draw a warning banner.
-fn render_warning(tree: &mut RenderTree, x: f32, y: f32, message: &str) -> f32 {
-    fill_rounded(tree, x, y, CONTENT_WIDTH, 36.0, COL_SURFACE0, 6.0);
+fn render_warning(pal: &Palette, tree: &mut RenderTree, x: f32, y: f32, message: &str) -> f32 {
+    fill_rounded(tree, x, y, CONTENT_WIDTH, 36.0, pal.surface0, 6.0);
     tree.push(RenderCommand::FillRect {
         x,
         y,
         width: 4.0,
         height: 36.0,
-        color: COL_PEACH,
+        color: pal.peach,
         corner_radii: CornerRadii::ZERO,
     });
-    tree.text(x + 14.0, y + 10.0, "\u{26A0}", COL_PEACH, 14.0);
+    tree.text(x + 14.0, y + 10.0, "\u{26A0}", pal.peach, 14.0);
     tree.push(RenderCommand::Text {
         x: x + 34.0,
         y: y + 10.0,
         text: message.to_string(),
-        color: COL_PEACH,
+        color: pal.peach,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(CONTENT_WIDTH - 48.0),
@@ -867,33 +875,34 @@ fn render_status_indicator(
 
 /// Render the DynDNS settings section.
 fn render_dyndns_section(
+    pal: &Palette,
     tree: &mut RenderTree,
     x: f32,
     start_y: f32,
     manager: &DynDnsManager,
 ) -> f32 {
     let cfg = manager.config();
-    let mut y = render_section_header(tree, x, start_y, "Dynamic DNS (DynDNS)");
+    let mut y = render_section_header(pal, tree, x, start_y, "Dynamic DNS (DynDNS)");
 
     tree.text(
         x,
         y + 4.0,
         "Keep a hostname pointing to your changing IP address:",
-        COL_SUBTEXT0,
+        pal.subtext0,
         13.0,
     );
     y += 28.0;
 
     // Enable toggle
-    y = render_toggle_row(tree, x, y, "Enable DynDNS", cfg.enabled);
+    y = render_toggle_row(pal, tree, x, y, "Enable DynDNS", cfg.enabled);
 
     if !cfg.enabled {
-        tree.text(x + 16.0, y, "DynDNS is disabled.", COL_OVERLAY0, 12.0);
+        tree.text(x + 16.0, y, "DynDNS is disabled.", pal.overlay0, 12.0);
         return y + 24.0;
     }
 
     // Provider dropdown
-    y = render_dropdown_row(tree, x, y, "Provider", cfg.provider.label());
+    y = render_dropdown_row(pal, tree, x, y, "Provider", cfg.provider.label());
 
     // Provider-specific credential fields
     match &cfg.provider_settings {
@@ -902,44 +911,44 @@ fn render_dyndns_section(
             email,
             password,
         } => {
-            y = render_text_field(tree, x, y, "Hostname", hostname, false);
-            y = render_text_field(tree, x, y, "Email", email, false);
-            y = render_text_field(tree, x, y, "Password", password, true);
+            y = render_text_field(pal, tree, x, y, "Hostname", hostname, false);
+            y = render_text_field(pal, tree, x, y, "Email", email, false);
+            y = render_text_field(pal, tree, x, y, "Password", password, true);
         }
         ProviderSettings::DuckDNS { domain, token } => {
-            y = render_text_field(tree, x, y, "Domain", domain, false);
-            y = render_text_field(tree, x, y, "Token", token, true);
+            y = render_text_field(pal, tree, x, y, "Domain", domain, false);
+            y = render_text_field(pal, tree, x, y, "Token", token, true);
         }
         ProviderSettings::Dynu {
             hostname,
             username,
             password,
         } => {
-            y = render_text_field(tree, x, y, "Hostname", hostname, false);
-            y = render_text_field(tree, x, y, "Username", username, false);
-            y = render_text_field(tree, x, y, "Password", password, true);
+            y = render_text_field(pal, tree, x, y, "Hostname", hostname, false);
+            y = render_text_field(pal, tree, x, y, "Username", username, false);
+            y = render_text_field(pal, tree, x, y, "Password", password, true);
         }
         ProviderSettings::FreeDNS { domain, auth_token } => {
-            y = render_text_field(tree, x, y, "Domain", domain, false);
-            y = render_text_field(tree, x, y, "Auth Token", auth_token, true);
+            y = render_text_field(pal, tree, x, y, "Domain", domain, false);
+            y = render_text_field(pal, tree, x, y, "Auth Token", auth_token, true);
         }
         ProviderSettings::Custom { update_url, method } => {
-            y = render_text_field(tree, x, y, "Update URL", update_url, false);
-            y = render_dropdown_row(tree, x, y, "HTTP Method", method.label());
+            y = render_text_field(pal, tree, x, y, "Update URL", update_url, false);
+            y = render_dropdown_row(pal, tree, x, y, "HTTP Method", method.label());
         }
     }
 
     // Update interval
     let interval_str = format!("{} min", cfg.update_interval_minutes);
-    y = render_dropdown_row(tree, x, y, "Update Interval", &interval_str);
+    y = render_dropdown_row(pal, tree, x, y, "Update Interval", &interval_str);
 
     y += 8.0;
 
     // Status display
-    y = render_section_header(tree, x, y, "Status");
+    y = render_section_header(pal, tree, x, y, "Status");
 
     // Status indicator
-    y = render_status_indicator(tree, x, y, cfg.status.label(), cfg.status.color());
+    y = render_status_indicator(tree, x, y, cfg.status.label(), cfg.status.color(pal));
 
     // Error detail
     if let DynDnsStatus::Error(ref msg) = cfg.status {
@@ -947,7 +956,7 @@ fn render_dyndns_section(
             x: x + 16.0,
             y,
             text: msg.clone(),
-            color: COL_RED,
+            color: pal.red,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(CONTENT_WIDTH - 32.0),
@@ -959,26 +968,26 @@ fn render_dyndns_section(
     // Last update info
     if let Some(timestamp) = cfg.last_update {
         let info = format!("Last update: {} (epoch)", timestamp);
-        tree.text(x, y + 4.0, &info, COL_SUBTEXT0, 12.0);
+        tree.text(x, y + 4.0, &info, pal.subtext0, 12.0);
         y += 20.0;
     }
     if let Some(ref ip) = cfg.last_ip {
         let info = format!("Current IP: {ip}");
-        tree.text(x, y + 4.0, &info, COL_SUBTEXT0, 12.0);
+        tree.text(x, y + 4.0, &info, pal.subtext0, 12.0);
         y += 20.0;
     }
 
     // External IP display
     let ext_ip = manager.get_external_ip();
     let ext_label = format!("Detected external IP: {ext_ip}");
-    tree.text(x, y + 4.0, &ext_label, COL_SUBTEXT0, 12.0);
+    tree.text(x, y + 4.0, &ext_label, pal.subtext0, 12.0);
     y += 28.0;
 
     // Action buttons
     let mut btn_x = x;
-    let w = render_button(tree, btn_x, y, "Update Now", COL_ACCENT);
+    let w = render_button(pal, tree, btn_x, y, "Update Now", pal.blue);
     btn_x += w + 12.0;
-    render_button(tree, btn_x, y, "Test Connection", COL_GREEN);
+    render_button(pal, tree, btn_x, y, "Test Connection", pal.green);
     y += BUTTON_HEIGHT + 8.0;
 
     y
@@ -990,17 +999,19 @@ fn render_dyndns_section(
 
 /// Render the remote desktop settings section.
 fn render_remote_desktop_section(
+    pal: &Palette,
     tree: &mut RenderTree,
     x: f32,
     start_y: f32,
     config: &RemoteDesktopConfig,
     hostname: &str,
 ) -> f32 {
-    let mut y = render_section_header(tree, x, start_y, "Remote Desktop");
+    let mut y = render_section_header(pal, tree, x, start_y, "Remote Desktop");
 
     // Security warning when enabled
     if config.enabled {
         y = render_warning(
+            pal,
             tree,
             x,
             y,
@@ -1009,14 +1020,14 @@ fn render_remote_desktop_section(
     }
 
     // Enable toggle
-    y = render_toggle_row(tree, x, y, "Enable Remote Desktop", config.enabled);
+    y = render_toggle_row(pal, tree, x, y, "Enable Remote Desktop", config.enabled);
 
     if !config.enabled {
         tree.text(
             x + 16.0,
             y,
             "Remote Desktop is disabled.",
-            COL_OVERLAY0,
+            pal.overlay0,
             12.0,
         );
         return y + 24.0;
@@ -1024,10 +1035,11 @@ fn render_remote_desktop_section(
 
     // Port
     let port_str = config.port.to_string();
-    y = render_text_field(tree, x, y, "Port", &port_str, false);
+    y = render_text_field(pal, tree, x, y, "Port", &port_str, false);
 
     if config.is_well_known_port() {
         y = render_warning(
+            pal,
             tree,
             x,
             y,
@@ -1037,6 +1049,7 @@ fn render_remote_desktop_section(
 
     // Authentication
     y = render_toggle_row(
+        pal,
         tree,
         x,
         y,
@@ -1045,47 +1058,54 @@ fn render_remote_desktop_section(
     );
 
     // Encryption level
-    y = render_dropdown_row(tree, x, y, "Encryption", config.encryption_level.label());
+    y = render_dropdown_row(
+        pal,
+        tree,
+        x,
+        y,
+        "Encryption",
+        config.encryption_level.label(),
+    );
     tree.text(
         x + FIELD_LABEL_WIDTH,
         y - 4.0,
         config.encryption_level.description(),
-        COL_OVERLAY0,
+        pal.overlay0,
         11.0,
     );
     y += 12.0;
 
     // Max sessions
     let sessions_str = config.max_sessions.to_string();
-    y = render_text_field(tree, x, y, "Max Sessions", &sessions_str, false);
+    y = render_text_field(pal, tree, x, y, "Max Sessions", &sessions_str, false);
 
     // Idle timeout
     let timeout_str = format!("{} min", config.idle_timeout_minutes);
-    y = render_dropdown_row(tree, x, y, "Idle Timeout", &timeout_str);
+    y = render_dropdown_row(pal, tree, x, y, "Idle Timeout", &timeout_str);
 
     y += 8.0;
 
     // Allowed users section
-    y = render_section_header(tree, x, y, "Allowed Users");
+    y = render_section_header(pal, tree, x, y, "Allowed Users");
     if config.allowed_users.is_empty() {
         tree.text(
             x + 16.0,
             y + 4.0,
             "No users configured (all authenticated users can connect).",
-            COL_OVERLAY0,
+            pal.overlay0,
             12.0,
         );
         y += 28.0;
     } else {
         for user in &config.allowed_users {
-            fill_rounded(tree, x, y, CONTENT_WIDTH, 36.0, COL_SURFACE0, 6.0);
-            tree.text(x + 12.0, y + 10.0, user, COL_TEXT, 13.0);
+            fill_rounded(tree, x, y, CONTENT_WIDTH, 36.0, pal.surface0, 6.0);
+            tree.text(x + 12.0, y + 10.0, user, pal.text, 13.0);
             // Remove button (rendered as red "X")
             tree.text(
                 x + CONTENT_WIDTH - 28.0,
                 y + 10.0,
                 "\u{2715}",
-                COL_RED,
+                pal.red,
                 13.0,
             );
             y += 40.0;
@@ -1093,13 +1113,14 @@ fn render_remote_desktop_section(
     }
 
     // Add user button
-    render_button(tree, x, y, "Add User", COL_ACCENT);
+    render_button(pal, tree, x, y, "Add User", pal.blue);
     y += BUTTON_HEIGHT + 16.0;
 
     // Firewall settings
-    y = render_section_header(tree, x, y, "Firewall & Network");
+    y = render_section_header(pal, tree, x, y, "Firewall & Network");
 
     y = render_toggle_row(
+        pal,
         tree,
         x,
         y,
@@ -1107,6 +1128,7 @@ fn render_remote_desktop_section(
         config.firewall.auto_open_port,
     );
     y = render_toggle_row(
+        pal,
         tree,
         x,
         y,
@@ -1117,6 +1139,7 @@ fn render_remote_desktop_section(
     // Firewall status indicators
     if config.firewall.port_blocked {
         y = render_warning(
+            pal,
             tree,
             x,
             y,
@@ -1127,21 +1150,21 @@ fn render_remote_desktop_section(
         );
     }
     if config.firewall.upnp_forwarding && !config.firewall.upnp_available {
-        y = render_warning(tree, x, y, "UPnP is not available on this network.");
+        y = render_warning(pal, tree, x, y, "UPnP is not available on this network.");
     }
 
     y += 8.0;
 
     // Connection info display
-    y = render_section_header(tree, x, y, "Connection Info");
+    y = render_section_header(pal, tree, x, y, "Connection Info");
     let conn_str = config.connection_string(hostname);
     let connect_label = format!("Connect to: {conn_str}");
-    fill_rounded(tree, x, y, CONTENT_WIDTH, 40.0, COL_SURFACE0, 6.0);
+    fill_rounded(tree, x, y, CONTENT_WIDTH, 40.0, pal.surface0, 6.0);
     tree.push(RenderCommand::Text {
         x: x + 16.0,
         y: y + 12.0,
         text: connect_label,
-        color: COL_ACCENT,
+        color: pal.blue,
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(CONTENT_WIDTH - 32.0),
@@ -1158,6 +1181,7 @@ fn render_remote_desktop_section(
 
 /// Render the full Remote Access settings page (DynDNS + Remote Desktop).
 pub fn render_remote_access_page(
+    pal: &Palette,
     tree: &mut RenderTree,
     x: f32,
     start_y: f32,
@@ -1170,7 +1194,7 @@ pub fn render_remote_access_page(
         x,
         y,
         text: "Remote Access".into(),
-        color: COL_TEXT,
+        color: pal.text,
         font_size: 20.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1180,7 +1204,7 @@ pub fn render_remote_access_page(
         x,
         y: y + 28.0,
         text: "Configure dynamic DNS and remote desktop access".into(),
-        color: COL_SUBTEXT0,
+        color: pal.subtext0,
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1189,7 +1213,7 @@ pub fn render_remote_access_page(
     y += 56.0;
 
     // DynDNS section
-    y = render_dyndns_section(tree, x, y, &settings.dns);
+    y = render_dyndns_section(pal, tree, x, y, &settings.dns);
     y += SECTION_SPACING;
 
     // Remote Desktop section
@@ -1202,7 +1226,7 @@ pub fn render_remote_access_page(
     } else {
         "this-pc"
     };
-    render_remote_desktop_section(tree, x, y, &settings.remote_desktop, hostname);
+    render_remote_desktop_section(pal, tree, x, y, &settings.remote_desktop, hostname);
 }
 
 // ============================================================================
@@ -1543,15 +1567,17 @@ mod tests {
 
     #[test]
     fn render_page_does_not_panic() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let settings = RemoteAccessSettings::new();
         let mut tree = RenderTree::new();
-        render_remote_access_page(&mut tree, 0.0, 0.0, &settings);
+        render_remote_access_page(&pal, &mut tree, 0.0, 0.0, &settings);
         // The tree should have some commands in it.
         assert!(!tree.commands.is_empty());
     }
 
     #[test]
     fn render_page_enabled_with_data() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut settings = RemoteAccessSettings::new();
         settings.dns.config_mut().enabled = true;
         settings.dns.config_mut().hostname = "mypc.ddns.net".to_string();
@@ -1568,21 +1594,22 @@ mod tests {
         settings.remote_desktop.firewall.port_blocked = true;
 
         let mut tree = RenderTree::new();
-        render_remote_access_page(&mut tree, 10.0, 20.0, &settings);
+        render_remote_access_page(&pal, &mut tree, 10.0, 20.0, &settings);
         assert!(!tree.commands.is_empty());
     }
 
     #[test]
     fn render_dyndns_disabled_is_short() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let manager = DynDnsManager::new();
         let mut tree = RenderTree::new();
-        render_dyndns_section(&mut tree, 0.0, 0.0, &manager);
+        render_dyndns_section(&pal, &mut tree, 0.0, 0.0, &manager);
         let disabled_count = tree.commands.len();
 
         let mut manager2 = DynDnsManager::new();
         manager2.config_mut().enabled = true;
         let mut tree2 = RenderTree::new();
-        render_dyndns_section(&mut tree2, 0.0, 0.0, &manager2);
+        render_dyndns_section(&pal, &mut tree2, 0.0, 0.0, &manager2);
 
         assert!(
             tree2.commands.len() > disabled_count,

@@ -20,12 +20,13 @@ mod highlight;
 mod input;
 mod syntree;
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::Event;
 use guitk::render::{FontWeightHint, RenderTree, TextSpan};
 use guitk::tabs::Tabs;
 use guitk::text;
-use highlight::{DEFAULT_THEME, HighlightState, StyledToken, Token};
+use highlight::{HighlightState, StyledToken, Theme, Token};
 use input::FindField;
 use oswindow::app::Response;
 use syntree::{Pos, SyntaxTree};
@@ -1590,6 +1591,12 @@ pub struct EditorState {
     pub clipboard: String,
     /// Which of the find bar's two fields the keyboard is typing into.
     pub find_field: FindField,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 /// A pending prompt shown when the active document's file changed on disk.
@@ -1629,6 +1636,7 @@ impl EditorState {
     pub fn new() -> Self {
         let font_size = 14.0;
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             tabs: Tabs::new(),
             find: FindState::new(),
             find_visible: false,
@@ -1851,7 +1859,7 @@ impl EditorState {
         let h = self.window_height as f32;
 
         // Background
-        tree.fill_rect(0.0, 0.0, w, h, Color::from_hex(0x1E1E2E));
+        tree.fill_rect(0.0, 0.0, w, h, self.palette.base);
 
         // Tab bar
         self.render_tabs(&mut tree);
@@ -1882,7 +1890,7 @@ impl EditorState {
             0.0,
             self.window_width as f32,
             tab_h,
-            Color::from_hex(0x181825),
+            self.palette.mantle,
         );
 
         let mut x = 0.0;
@@ -1891,9 +1899,9 @@ impl EditorState {
             // looks like it landed on.
             let tab_w = input::TAB_WIDTH;
             let bg = if i == self.tabs.active_index() {
-                Color::from_hex(0x1E1E2E)
+                self.palette.base
             } else {
-                Color::from_hex(0x11111B)
+                self.palette.crust
             };
 
             tree.fill_rect(x, 0.0, tab_w, tab_h, bg);
@@ -1904,7 +1912,7 @@ impl EditorState {
             } else {
                 doc.name.clone()
             };
-            tree.text(x + 12.0, 9.0, &title, Color::from_hex(0xCDD6F4), 12.0);
+            tree.text(x + 12.0, 9.0, &title, self.palette.text, 12.0);
 
             // Close button, drawn inside the box `tab_at` reports as the close
             // box so that the glyph and the clickable area coincide.
@@ -1912,7 +1920,7 @@ impl EditorState {
                 x + tab_w - input::TAB_CLOSE_WIDTH + 4.0,
                 9.0,
                 "x",
-                Color::from_hex(0x6C7086),
+                self.palette.overlay0,
                 11.0,
             );
 
@@ -1969,6 +1977,7 @@ impl EditorState {
     #[allow(clippy::too_many_arguments)]
     fn draw_tokens(
         tree: &mut RenderTree,
+        syntax: &Theme,
         line: &str,
         tokens: &[StyledToken],
         scroll_px: f32,
@@ -1981,7 +1990,7 @@ impl EditorState {
         if line.is_empty() || right <= left {
             return;
         }
-        let plain = DEFAULT_THEME.color_for(Token::Plain);
+        let plain = syntax.color_for(Token::Plain);
 
         // Spans are cumulative — each runs from where the last ended — so a gap
         // the tokenizer left is not silently dropped but explicitly filled with
@@ -2002,7 +2011,7 @@ impl EditorState {
             }
             spans.push(TextSpan {
                 end: span_end(token.end),
-                color: DEFAULT_THEME.color_for(token.kind),
+                color: syntax.color_for(token.kind),
             });
             covered = token.end;
         }
@@ -2036,7 +2045,7 @@ impl EditorState {
             editor_y,
             self.gutter_width,
             editor_h,
-            Color::from_hex(0x181825),
+            self.palette.mantle,
         );
 
         let visible_lines = self.visible_lines();
@@ -2058,9 +2067,9 @@ impl EditorState {
             // Line number
             let ln = format!("{:>4}", i.saturating_add(1));
             let ln_color = if i == doc.cursor_line {
-                Color::from_hex(0xCDD6F4)
+                self.palette.text
             } else {
-                Color::from_hex(0x585B70)
+                self.palette.surface2
             };
             tree.text(4.0, y + 3.0, &ln, ln_color, self.font_size - 2.0);
 
@@ -2071,7 +2080,7 @@ impl EditorState {
                     y,
                     w - self.gutter_width,
                     self.line_height,
-                    Color::from_hex(0x313244),
+                    self.palette.surface0,
                 );
             }
 
@@ -2115,7 +2124,7 @@ impl EditorState {
                             y,
                             clipped_w,
                             self.line_height,
-                            Color::from_hex(0x45475A),
+                            self.palette.surface1,
                         );
                     }
                 }
@@ -2124,6 +2133,7 @@ impl EditorState {
             let tokens = highlight::highlight_line(line, doc.language, &mut state);
             Self::draw_tokens(
                 tree,
+                &Theme::from_palette(&self.palette),
                 line,
                 &tokens,
                 doc.scroll_px,
@@ -2158,7 +2168,7 @@ impl EditorState {
                 cursor_y + 2.0,
                 2.0,
                 self.line_height - 4.0,
-                Color::from_hex(0x89B4FA),
+                self.palette.blue,
             );
             tree.unclip();
         }
@@ -2300,13 +2310,13 @@ impl EditorState {
         let bar_y = self.window_height as f32 - STATUS_BAR_HEIGHT;
         let w = self.window_width as f32;
 
-        tree.fill_rect(0.0, bar_y, w, STATUS_BAR_HEIGHT, Color::from_hex(0x181825));
+        tree.fill_rect(0.0, bar_y, w, STATUS_BAR_HEIGHT, self.palette.mantle);
 
         // A message takes the bar over. It is there because something the user
         // asked for did not happen, which matters more for the moment than the
         // line number they can also see in the caret's position.
         if let Some(message) = self.status.as_deref() {
-            tree.text(8.0, bar_y + 5.0, message, Color::from_hex(0xF9E2AF), 11.0);
+            tree.text(8.0, bar_y + 5.0, message, self.palette.yellow, 11.0);
             return;
         }
 
@@ -2316,14 +2326,14 @@ impl EditorState {
             doc.cursor_line.saturating_add(1),
             doc.cursor_col.saturating_add(1)
         );
-        tree.text(8.0, bar_y + 5.0, &pos_text, Color::from_hex(0x6C7086), 11.0);
+        tree.text(8.0, bar_y + 5.0, &pos_text, self.palette.overlay0, 11.0);
 
         // Language
         tree.text(
             200.0,
             bar_y + 5.0,
             doc.language.name(),
-            Color::from_hex(0x6C7086),
+            self.palette.overlay0,
             11.0,
         );
 
@@ -2332,13 +2342,13 @@ impl EditorState {
             350.0,
             bar_y + 5.0,
             doc.line_ending.as_str(),
-            Color::from_hex(0x6C7086),
+            self.palette.overlay0,
             11.0,
         );
 
         // Line count
         let lc = format!("{} lines", doc.line_count());
-        tree.text(w - 100.0, bar_y + 5.0, &lc, Color::from_hex(0x6C7086), 11.0);
+        tree.text(w - 100.0, bar_y + 5.0, &lc, self.palette.overlay0, 11.0);
     }
 
     fn render_find_panel(&self, tree: &mut RenderTree) {
@@ -2347,19 +2357,13 @@ impl EditorState {
         let panel_h = 80.0;
         let panel_x = self.window_width as f32 - panel_w - 16.0;
 
-        tree.fill_rect(
-            panel_x,
-            panel_y,
-            panel_w,
-            panel_h,
-            Color::from_hex(0x313244),
-        );
+        tree.fill_rect(panel_x, panel_y, panel_w, panel_h, self.palette.surface0);
         tree.stroke_rect(
             panel_x,
             panel_y,
             panel_w,
             panel_h,
-            Color::from_hex(0x585B70),
+            self.palette.surface2,
             1.0,
         );
 
@@ -2368,7 +2372,7 @@ impl EditorState {
             panel_x + 8.0,
             panel_y + 10.0,
             "Find:",
-            Color::from_hex(0xA6ADC8),
+            self.palette.subtext0,
             11.0,
         );
         tree.fill_rect(
@@ -2376,13 +2380,13 @@ impl EditorState {
             panel_y + 6.0,
             panel_w - 60.0,
             22.0,
-            Color::from_hex(0x1E1E2E),
+            self.palette.base,
         );
         tree.text(
             panel_x + 54.0,
             panel_y + 10.0,
             &self.find.query,
-            Color::from_hex(0xCDD6F4),
+            self.palette.text,
             12.0,
         );
 
@@ -2391,7 +2395,7 @@ impl EditorState {
             panel_x + 8.0,
             panel_y + 40.0,
             "Repl:",
-            Color::from_hex(0xA6ADC8),
+            self.palette.subtext0,
             11.0,
         );
         tree.fill_rect(
@@ -2399,13 +2403,13 @@ impl EditorState {
             panel_y + 36.0,
             panel_w - 60.0,
             22.0,
-            Color::from_hex(0x1E1E2E),
+            self.palette.base,
         );
         tree.text(
             panel_x + 54.0,
             panel_y + 40.0,
             &self.find.replace_text,
-            Color::from_hex(0xCDD6F4),
+            self.palette.text,
             12.0,
         );
 
@@ -2415,7 +2419,7 @@ impl EditorState {
             panel_x + 8.0,
             panel_y + 64.0,
             &match_info,
-            Color::from_hex(0x6C7086),
+            self.palette.overlay0,
             10.0,
         );
     }
@@ -2439,8 +2443,8 @@ impl EditorState {
         let dh = 220.0_f32;
         let dx = (w - dw) / 2.0;
         let dy = (h - dh) / 2.0;
-        tree.fill_rect(dx, dy, dw, dh, Color::from_hex(0x1E1E2E));
-        tree.fill_rect(dx, dy, dw, 32.0, Color::from_hex(0x313244));
+        tree.fill_rect(dx, dy, dw, dh, self.palette.base);
+        tree.fill_rect(dx, dy, dw, 32.0, self.palette.surface0);
 
         let name = self
             .tabs
@@ -2460,8 +2464,8 @@ impl EditorState {
             ),
         };
 
-        tree.text(dx + 12.0, dy + 9.0, title, Color::from_hex(0xF9E2AF), 13.0);
-        tree.text(dx + 12.0, dy + 44.0, &body, Color::from_hex(0xCDD6F4), 11.0);
+        tree.text(dx + 12.0, dy + 9.0, title, self.palette.yellow, 13.0);
+        tree.text(dx + 12.0, dy + 44.0, &body, self.palette.text, 11.0);
 
         // Option buttons, stacked. For a deletion, merge/review don't apply.
         let deleted = matches!(prompt.change, DiskChange::Deleted);
@@ -2476,8 +2480,8 @@ impl EditorState {
 
         let mut by = dy + 74.0;
         for (label, hint) in options {
-            tree.fill_rect(dx + 12.0, by, dw - 24.0, 30.0, Color::from_hex(0x45475A));
-            tree.text(dx + 20.0, by + 6.0, label, Color::from_hex(0xCDD6F4), 12.0);
+            tree.fill_rect(dx + 12.0, by, dw - 24.0, 30.0, self.palette.surface1);
+            tree.text(dx + 20.0, by + 6.0, label, self.palette.text, 12.0);
             tree.text(dx + 160.0, by + 8.0, hint, Color::from_hex(0x9399B2), 10.0);
             by += 34.0;
         }
@@ -2499,8 +2503,8 @@ impl EditorState {
         let dw = w - margin * 2.0;
         let dh = h - margin * 2.0;
 
-        tree.fill_rect(dx, dy, dw, dh, Color::from_hex(0x1E1E2E));
-        tree.fill_rect(dx, dy, dw, 32.0, Color::from_hex(0x313244));
+        tree.fill_rect(dx, dy, dw, dh, self.palette.base);
+        tree.fill_rect(dx, dy, dw, 32.0, self.palette.surface0);
 
         let name = self
             .tabs
@@ -2510,20 +2514,14 @@ impl EditorState {
             "Review merge — {name}  ({} conflict(s))",
             review.conflict_count()
         );
-        tree.text(
-            dx + 12.0,
-            dy + 9.0,
-            &header,
-            Color::from_hex(0xF9E2AF),
-            13.0,
-        );
+        tree.text(dx + 12.0, dy + 9.0, &header, self.palette.yellow, 13.0);
 
         // Column headers.
         let col_w = (dw - 24.0) / 2.0;
         let ours_x = dx + 12.0;
         let theirs_x = dx + 12.0 + col_w;
-        tree.text(ours_x, dy + 40.0, name, Color::from_hex(0xA6E3A1), 11.0);
-        tree.text(theirs_x, dy + 40.0, "disk", Color::from_hex(0xF38BA8), 11.0);
+        tree.text(ours_x, dy + 40.0, name, self.palette.green, 11.0);
+        tree.text(theirs_x, dy + 40.0, "disk", self.palette.red, 11.0);
 
         // Each conflict as a row block.
         let mut y = dy + 60.0;
@@ -2545,14 +2543,14 @@ impl EditorState {
             }
 
             let label = format!("#{}", i.saturating_add(1));
-            tree.text(dx + 2.0, y, &label, Color::from_hex(0x6C7086), 9.0);
+            tree.text(dx + 2.0, y, &label, self.palette.overlay0, 9.0);
 
             for (li, line) in ours.iter().enumerate() {
                 tree.text(
                     ours_x,
                     y + li as f32 * line_h,
                     line,
-                    Color::from_hex(0xCDD6F4),
+                    self.palette.text,
                     11.0,
                 );
             }
@@ -2561,7 +2559,7 @@ impl EditorState {
                     theirs_x,
                     y + li as f32 * line_h,
                     line,
-                    Color::from_hex(0xCDD6F4),
+                    self.palette.text,
                     11.0,
                 );
             }
@@ -2592,6 +2590,10 @@ impl EditorState {
 /// used to sit here doing what every other application in the tree would have
 /// had to do identically. See `gui/window/src/app.rs` for what those lines were.
 impl oswindow::app::App for EditorState {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         format!("{} — Editor", self.active_document().name)
     }
@@ -4005,8 +4007,14 @@ mod highlight_render_tests {
     fn a_rust_line_is_drawn_as_several_coloured_runs() {
         let editor = editor_showing("fn main() {}", Language::Rust);
         let runs = drawn(&editor);
-        let keyword = DEFAULT_THEME.color_for(Token::Keyword);
-        let function = DEFAULT_THEME.color_for(Token::Function);
+        let keyword = Theme::from_palette(&Palette::from_settings(
+            &appearance::AppearanceSettings::default(),
+        ))
+        .color_for(Token::Keyword);
+        let function = Theme::from_palette(&Palette::from_settings(
+            &appearance::AppearanceSettings::default(),
+        ))
+        .color_for(Token::Function);
         assert!(
             runs.iter().any(|(t, c)| t == "fn" && *c == keyword),
             "`fn` was not drawn in the keyword colour; runs were {runs:?}"
@@ -4022,7 +4030,10 @@ mod highlight_render_tests {
     #[test]
     fn a_block_comment_keeps_its_colour_onto_the_next_line() {
         let editor = editor_showing("/* opens here\nstill a comment\n*/ code", Language::Rust);
-        let comment = DEFAULT_THEME.color_for(Token::Comment);
+        let comment = Theme::from_palette(&Palette::from_settings(
+            &appearance::AppearanceSettings::default(),
+        ))
+        .color_for(Token::Comment);
         let runs = drawn(&editor);
         assert!(
             runs.iter()
@@ -4042,7 +4053,10 @@ mod highlight_render_tests {
         src.push_str("*/");
         let mut editor = editor_showing(&src, Language::Rust);
         editor.active_document_mut().scroll_line = 150;
-        let comment = DEFAULT_THEME.color_for(Token::Comment);
+        let comment = Theme::from_palette(&Palette::from_settings(
+            &appearance::AppearanceSettings::default(),
+        ))
+        .color_for(Token::Comment);
         let runs = drawn(&editor);
         assert!(
             runs.iter()
@@ -4174,7 +4188,18 @@ mod highlight_render_tests {
         let mut state = HighlightState::Normal;
         let tokens = highlight::highlight_line(line, language, &mut state);
         EditorState::draw_tokens(
-            &mut tree, line, &tokens, scroll_px, TEST_LEFT, 0.0, right, 18.0, 14.0,
+            &mut tree,
+            &Theme::from_palette(&Palette::from_settings(
+                &appearance::AppearanceSettings::default(),
+            )),
+            line,
+            &tokens,
+            scroll_px,
+            TEST_LEFT,
+            0.0,
+            right,
+            18.0,
+            14.0,
         );
         first_rich(&tree)
     }
@@ -4224,7 +4249,18 @@ mod highlight_render_tests {
             "this line should tokenize into several runs"
         );
         EditorState::draw_tokens(
-            &mut tree, line, &tokens, 0.0, TEST_LEFT, 0.0, 800.0, 18.0, 14.0,
+            &mut tree,
+            &Theme::from_palette(&Palette::from_settings(
+                &appearance::AppearanceSettings::default(),
+            )),
+            line,
+            &tokens,
+            0.0,
+            TEST_LEFT,
+            0.0,
+            800.0,
+            18.0,
+            14.0,
         );
 
         let texts = tree
@@ -4265,7 +4301,12 @@ mod highlight_render_tests {
             for byte in token.start..token.end {
                 assert_eq!(
                     TextSpan::color_at(&spans, byte),
-                    Some(DEFAULT_THEME.color_for(token.kind)),
+                    Some(
+                        Theme::from_palette(&Palette::from_settings(
+                            &appearance::AppearanceSettings::default()
+                        ))
+                        .color_for(token.kind)
+                    ),
                     "byte {byte} of {line:?} is in {token:?} but resolved elsewhere",
                 );
             }
@@ -4302,7 +4343,12 @@ mod highlight_render_tests {
             for byte in token.start..token.end {
                 assert_eq!(
                     TextSpan::color_at(&scrolled.spans, byte),
-                    Some(DEFAULT_THEME.color_for(token.kind)),
+                    Some(
+                        Theme::from_palette(&Palette::from_settings(
+                            &appearance::AppearanceSettings::default()
+                        ))
+                        .color_for(token.kind)
+                    ),
                     "byte {byte} of {line:?} resolved wrongly while scrolled",
                 );
             }
@@ -4354,13 +4400,39 @@ mod highlight_render_tests {
     #[test]
     fn an_empty_line_or_viewport_draws_nothing() {
         let mut tree = RenderTree::new();
-        EditorState::draw_tokens(&mut tree, "", &[], 0.0, TEST_LEFT, 0.0, 800.0, 18.0, 14.0);
+        EditorState::draw_tokens(
+            &mut tree,
+            &Theme::from_palette(&Palette::from_settings(
+                &appearance::AppearanceSettings::default(),
+            )),
+            "",
+            &[],
+            0.0,
+            TEST_LEFT,
+            0.0,
+            800.0,
+            18.0,
+            14.0,
+        );
         assert_eq!(tree.len(), 0, "an empty line drew {:?}", tree.commands);
 
         let mut tree = RenderTree::new();
         let mut state = HighlightState::Normal;
         let tokens = highlight::highlight_line("x", Language::Rust, &mut state);
-        EditorState::draw_tokens(&mut tree, "x", &tokens, 0.0, 800.0, 0.0, 800.0, 18.0, 14.0);
+        EditorState::draw_tokens(
+            &mut tree,
+            &Theme::from_palette(&Palette::from_settings(
+                &appearance::AppearanceSettings::default(),
+            )),
+            "x",
+            &tokens,
+            0.0,
+            800.0,
+            0.0,
+            800.0,
+            18.0,
+            14.0,
+        );
         assert_eq!(
             tree.len(),
             0,
@@ -4407,19 +4479,43 @@ mod highlight_render_tests {
         ];
         let mut tree = RenderTree::new();
         EditorState::draw_tokens(
-            &mut tree, line, &tokens, 0.0, TEST_LEFT, 0.0, 800.0, 18.0, 14.0,
+            &mut tree,
+            &Theme::from_palette(&Palette::from_settings(
+                &appearance::AppearanceSettings::default(),
+            )),
+            line,
+            &tokens,
+            0.0,
+            TEST_LEFT,
+            0.0,
+            800.0,
+            18.0,
+            14.0,
         );
         let spans = &first_rich(&tree).spans;
-        let plain = DEFAULT_THEME.color_for(Token::Plain);
+        let plain = Theme::from_palette(&Palette::from_settings(
+            &appearance::AppearanceSettings::default(),
+        ))
+        .color_for(Token::Plain);
         assert_eq!(
             TextSpan::color_at(spans, 0),
-            Some(DEFAULT_THEME.color_for(Token::Keyword))
+            Some(
+                Theme::from_palette(&Palette::from_settings(
+                    &appearance::AppearanceSettings::default()
+                ))
+                .color_for(Token::Keyword)
+            )
         );
         assert_eq!(TextSpan::color_at(spans, 2), Some(plain));
         assert_eq!(TextSpan::color_at(spans, 3), Some(plain));
         assert_eq!(
             TextSpan::color_at(spans, 4),
-            Some(DEFAULT_THEME.color_for(Token::Number))
+            Some(
+                Theme::from_palette(&Palette::from_settings(
+                    &appearance::AppearanceSettings::default()
+                ))
+                .color_for(Token::Number)
+            )
         );
     }
 
@@ -4436,7 +4532,18 @@ mod highlight_render_tests {
         }];
         let mut tree = RenderTree::new();
         EditorState::draw_tokens(
-            &mut tree, line, &tokens, 0.0, TEST_LEFT, 0.0, 800.0, 18.0, 14.0,
+            &mut tree,
+            &Theme::from_palette(&Palette::from_settings(
+                &appearance::AppearanceSettings::default(),
+            )),
+            line,
+            &tokens,
+            0.0,
+            TEST_LEFT,
+            0.0,
+            800.0,
+            18.0,
+            14.0,
         );
         let d = first_rich(&tree);
         assert_eq!(d.text, line);
@@ -5031,7 +5138,9 @@ mod tab_tests {
         clippy::arithmetic_side_effects
     )]
 
-    use super::{Document, FindState, Tabs};
+    use super::{Document, EditorState, FindState, Tabs};
+    use appearance::Palette;
+    use guitk::render::RenderCommand;
 
     fn named(name: &str) -> Document {
         let mut d = Document::new();
@@ -5204,5 +5313,79 @@ mod tab_tests {
         find.query = "日本".to_string();
         find.find_all(&doc);
         assert_eq!(find.matches, [(0, 0, 6), (0, 6, 12)]);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut EditorState) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = EditorState::new();
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        oswindow::app::App::theme_changed(
+            &mut app,
+            &theme(
+                appearance::ThemeMode::Dark,
+                Some(appearance::HighContrastScheme::WhiteOnBlack),
+            ),
+        );
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

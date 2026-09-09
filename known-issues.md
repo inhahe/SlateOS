@@ -124480,7 +124480,33 @@ been fooled is grepping for the twenty hex values themselves and subtracting
 the sites deliberately kept fixed. That is the check to run before saying
 "done", and the survey is only a work queue.
 
-Corrected counts: **74 converted, 5 outstanding**, 42 games.
+**And a sixth: submodules.** Every audit and every converter run named
+`apps/{app}/src/main.rs`. An application with more than one source file could
+therefore hold a second palette in a file nobody ever looked at, and
+`apps/settings` held three -- 38 constants across `snapshots.rs`, `remote.rs`
+and `associations.rs`, each headed with the comment *"Theme colors (same
+Catppuccin Mocha palette as main settings)"*, saying plainly what it was. The
+declaration shape there is the **original** file-scope one, so nothing about
+it was hard to find. It was simply never looked at.
+
+**The audit that finally holds** is over every `.rs` under `apps/*/src`, not
+`main.rs`, counting the twenty hex values and subtracting the sites
+deliberately kept fixed:
+
+```
+for d in apps/*/src; do
+  a=$(basename $(dirname $d))
+  n=$(cat $d/*.rs 2>/dev/null | grep -ciE "0x(1E1E2E|181825|…)")
+  [ "$n" -gt 0 ] && printf "%-16s %3d" "$a" "$n"
+done
+```
+
+Final counts: **79 applications converted**, 42 games, and the only
+non-game hex values left in `apps/` are ones deliberately kept:
+`tmux` 52 (ANSI cells), `whiteboard` 22 (ink), `mindmap` 12, `stickynotes` 9,
+`kanban` 7 (labels), `hexeditor` 7 (bookmarks), `snippets` 5 (folders),
+`soundrecorder` 4 (markers), `screenrecorder` 3 (annotations), `settings` 2
+(the theme-preview mockup), `editor` 2 (merge-conflict tints).
 
 The earlier fix to `survey_all.py` still stands: it used to overlap its buckets
 and report "0 already converted", because a converted application has no

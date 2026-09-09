@@ -9,6 +9,7 @@
 //! next during rendering.
 
 use crate::Language;
+use appearance::Palette;
 use guitk::color::Color;
 
 // ============================================================================
@@ -134,28 +135,41 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Catppuccin Mocha dark theme.
-    pub const fn catppuccin_mocha() -> Self {
+    /// The syntax colours, taken from the desktop's theme.
+    ///
+    /// Was `catppuccin_mocha()`, a fixed table. Syntax highlighting is
+    /// resolved per token *at draw time* -- `color_for` is called once per
+    /// token per frame -- so unlike a colour stored on the user's data it can
+    /// follow the theme, and there is a concrete bug in its not doing so: on a
+    /// light desktop, Mocha's light-grey `plain` was drawn on a light
+    /// background and the code became unreadable.
+    ///
+    /// Four colours stay fixed because `Palette` has no role for them: pink
+    /// (preprocessor, attribute, italic) and overlay2 (punctuation) are
+    /// Catppuccin hues the desktop palette does not carry. Mapping them to the
+    /// nearest role would silently change the colour of two token kinds, which
+    /// is worse than leaving two hues that read acceptably on both themes.
+    pub const fn from_palette(pal: &Palette) -> Self {
         Self {
-            keyword: Color::from_hex(0xCBA6F7),      // mauve
-            type_name: Color::from_hex(0xF9E2AF),    // yellow
-            string: Color::from_hex(0xA6E3A1),       // green
-            number: Color::from_hex(0xFAB387),       // peach
-            comment: Color::from_hex(0x6C7086),      // overlay0
-            operator: Color::from_hex(0x89DCEB),     // sky
+            keyword: pal.mauve,                      // mauve
+            type_name: pal.yellow,                   // yellow
+            string: pal.green,                       // green
+            number: pal.peach,                       // peach
+            comment: pal.overlay0,                   // overlay0
+            operator: pal.sky,                       // sky
             punctuation: Color::from_hex(0x9399B2),  // overlay2
             preprocessor: Color::from_hex(0xF5C2E7), // pink
             attribute: Color::from_hex(0xF5C2E7),    // pink
-            macro_name: Color::from_hex(0x94E2D5),   // teal
-            builtin: Color::from_hex(0xFAB387),      // peach
-            variable: Color::from_hex(0xCDD6F4),     // text
-            function: Color::from_hex(0x89B4FA),     // blue
-            heading: Color::from_hex(0xF38BA8),      // red
-            bold: Color::from_hex(0xFAB387),         // peach
+            macro_name: pal.teal,                    // teal
+            builtin: pal.peach,                      // peach
+            variable: pal.text,                      // text
+            function: pal.blue,                      // blue
+            heading: pal.red,                        // red
+            bold: pal.peach,                         // peach
             italic: Color::from_hex(0xF5C2E7),       // pink
-            link: Color::from_hex(0x89B4FA),         // blue
-            code_block: Color::from_hex(0xA6E3A1),   // green
-            plain: Color::from_hex(0xCDD6F4),        // text
+            link: pal.blue,                          // blue
+            code_block: pal.green,                   // green
+            plain: pal.text,                         // text
         }
     }
 
@@ -185,8 +199,12 @@ impl Theme {
     }
 }
 
-/// Default theme.
-pub static DEFAULT_THEME: Theme = Theme::catppuccin_mocha();
+// `DEFAULT_THEME` stood here as a `static`, under the doc comment "Default
+// theme.". It cannot: the colours now come
+// from the user's palette, which is not known until the program is running,
+// and a `static` is fixed at compile time. Callers build a `Theme` from the
+// palette they are already drawing with -- which is what makes a theme change
+// repaint the code rather than only the chrome around it.
 
 // ============================================================================
 // Language detection
@@ -2865,11 +2883,16 @@ mod tests {
 
     #[test]
     fn theme_color_mapping() {
-        let theme = Theme::catppuccin_mocha();
-        assert_eq!(theme.color_for(Token::Keyword), Color::from_hex(0xCBA6F7));
-        assert_eq!(theme.color_for(Token::String), Color::from_hex(0xA6E3A1));
-        assert_eq!(theme.color_for(Token::Comment), Color::from_hex(0x6C7086));
-        assert_eq!(theme.color_for(Token::Function), Color::from_hex(0x89B4FA));
+        // Against the palette, not against hex literals. The old test pinned
+        // each token to a Mocha constant, which is exactly what this file
+        // stopped having -- and a test written that way passes whether or not
+        // the theme is ever consulted.
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let theme = Theme::from_palette(&pal);
+        assert_eq!(theme.color_for(Token::Keyword), pal.mauve);
+        assert_eq!(theme.color_for(Token::String), pal.green);
+        assert_eq!(theme.color_for(Token::Comment), pal.overlay0);
+        assert_eq!(theme.color_for(Token::Function), pal.blue);
         assert_eq!(theme.color_for(Token::Plain), Color::from_hex(0xCDD6F4));
     }
 

@@ -104,7 +104,20 @@ pub const SAPPHIRE: Color = Color::from_hex(0x74C7EC);
 // The dark palette needs no such treatment — every Mocha accent is already
 // between 7:1 and 13:1 on the Mocha base.
 
-pub const LIGHT_BLUE: Color = Color::from_hex(0x1D62EC);
+/// The default accent, chosen by the operator on 2026-09-09 (C-Q10, §826).
+///
+/// `#1D62EC` before, which measured 4.63:1 on the page and **2.42:1 on the
+/// greyest card** — the same page-only tuning as the greys above. This clears
+/// the floor on every surface (9.03 on the page, 4.72 on `surface2`).
+///
+/// **The other thirteen accents have not been touched and all still fail on
+/// every card**, between 2.33:1 and 3.52:1. They were each tuned to land just
+/// over 4.5 on the page and nowhere else, so a user who picks any accent but
+/// blue still gets unreadable accent text on a card. Logged as
+/// `TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS`; the fix wants one rule
+/// applied to all fourteen rather than thirteen more hand-picked values, and
+/// that is the operator's call.
+pub const LIGHT_BLUE: Color = Color::from_hex(0x0036A3);
 pub const LIGHT_LAVENDER: Color = Color::from_hex(0x5565BE);
 pub const LIGHT_TEAL: Color = Color::from_hex(0x13787E);
 pub const LIGHT_GREEN: Color = Color::from_hex(0x317B21);
@@ -145,23 +158,64 @@ pub const LIGHT_SURFACE1: Color = Color::from_hex(0xBCC0CC);
 pub const LIGHT_SURFACE2: Color = Color::from_hex(0xACB0BE);
 pub const LIGHT_OVERLAY0: Color = Color::from_hex(0x9CA0B0);
 
-/// Latte `subtext0`, darkened by the same rule as the light accents above.
-///
-/// Catppuccin's own value is `#6C6F85`, which measures 4.37:1 on the Latte
-/// base — under the 4.5:1 that body text needs, and this role *is* body text:
-/// it is the secondary line in every list row the shell draws. The Mocha
-/// counterpart is 7.37:1, so the shortfall belongs to the light palette alone
-/// and fixing it there costs nothing elsewhere.
-///
-/// Scaled to 96.5% of each channel, which holds the hue and reaches 4.64:1.
-/// The difference is not visible side by side; what it buys is that the
-/// contrast invariant in this crate's tests can be stated as a flat rule for
-/// both modes instead of carrying an exception, and an exception in a
-/// legibility floor is how the floor stops being one.
-pub const LIGHT_SUBTEXT0: Color = Color::from_hex(0x686B80);
+// The light theme's three text inks, chosen by the operator on 2026-09-09 in
+// answer to `open-questions.md` C-Q10. Recorded in `design-decisions.md` §826.
+//
+// The problem they solve: every ink here was picked against the *page* and
+// never against a card, so all three failed the 4.5:1 floor the moment they
+// were drawn on one — secondary text measured 2.42:1 on the greyest card, in
+// roughly 850 places. The four options this crate's own notes offered all had
+// a cost; the operator supplied values instead, and they are better than any
+// of them, because they clear the floor on *every* surface in the theme while
+// keeping the three inks distinguishable by weight.
+//
+// Measured here rather than asserted — `light_inks_clear_the_contrast_floor`
+// checks every ink against every surface, so these numbers cannot rot:
+//
+//              page     surface0  surface1  surface2
+//   text       18.57    13.60     11.55      9.71
+//   subtext0   10.50     7.69      6.53      5.49
+//   accent      9.03     6.61      5.62      4.72
+//
+// Separation between inks is what the earlier candidate fix would have
+// destroyed: darkening the old greys far enough to clear the greyest card put
+// all three at *identical* luminance (1.00), so body text, captions and links
+// would have weighed the same and a link would have stopped looking like one
+// to anyone reading by brightness. These keep 1.77 between text and subtext0.
 
-pub const LIGHT_SUBTEXT1: Color = Color::from_hex(0x5C5F77);
-pub const LIGHT_TEXT: Color = Color::from_hex(0x4C4F69);
+/// The third grey, below [`LIGHT_SUBTEXT1`].
+///
+/// **Not one of the operator's three values, and derived under protest.** The
+/// palette names two greys and this theme has three roles, so a value had to
+/// be found for the third — and on a surface as dark as the cards, there is
+/// almost nowhere for it to go. Walking this hue lighter one step at a time,
+/// the *last* value that still clears 4.5:1 on `surface2` is `#3D3D3F`, one
+/// step further fails at 4.42. So the third grey is 1.10 away from the second
+/// — the same luminance to any eye.
+///
+/// That is a property of the surface, not of the choice: `surface2` gives only
+/// 9.71:1 against pure black, so every ink clearing 4.5 on it is crowded into
+/// the top of that range. A three-level grey hierarchy cannot exist on a card
+/// that dark; what exists here is two levels and a formality. Raised with the
+/// operator alongside the card question.
+///
+/// Was `#686B80`, which cleared the floor on the bare page (4.64) and nothing
+/// else — measured once, against the one surface it happened to be tried on.
+pub const LIGHT_SUBTEXT0: Color = Color::from_hex(0x3D3D3F);
+
+/// Secondary text: the second line of a list row, a caption, a hint.
+///
+/// The operator's "Secondary text". This role, not [`LIGHT_SUBTEXT0`], is the
+/// one this crate's own struct documents with those words — a distinction the
+/// first draft of this change got backwards, and which the surface-ladder
+/// invariant caught.
+///
+/// Was `#5C5F77`: 5.53:1 on the page, **2.89:1** on the greyest card, drawn in
+/// 58 places and never measured against anything but the page.
+pub const LIGHT_SUBTEXT1: Color = Color::from_hex(0x373739);
+
+/// Main text.
+pub const LIGHT_TEXT: Color = Color::from_hex(0x000000);
 
 // ============================================================================
 // Configuration-file spellings
@@ -4161,5 +4215,78 @@ mod tests {
             assert_eq!(ColorFilter::from_yaml_name(name), Some(filter));
         }
         assert_eq!(ColorFilter::from_yaml_name("sepia"), None);
+    }
+
+    /// Every light-theme text ink clears 4.5:1 on every surface it can be
+    /// drawn on.
+    ///
+    /// The defect this exists to prevent is not hypothetical and was not
+    /// caught for months: each of these inks was chosen against the *page*,
+    /// measured once, and never checked against a card. Secondary text
+    /// measured 2.42:1 on the greyest card, in roughly 850 places, while a
+    /// test asserting it cleared the floor *on the page* passed the whole
+    /// time. A per-role check is not enough; the pairing is the thing.
+    ///
+    /// Deliberately does **not** cover the fourteen accents. Thirteen of them
+    /// still fail here, between 2.33:1 and 3.52:1, and asserting that would
+    /// mean either a red build or a muted test. The gap is recorded instead —
+    /// `known-issues.md` `TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS` —
+    /// and this test grows to cover them when they are fixed.
+    #[test]
+    fn light_inks_clear_the_contrast_floor_on_every_surface() {
+        const FLOOR: f32 = 4.5;
+        let inks: [(&str, Color); 4] = [
+            ("text", LIGHT_TEXT),
+            ("subtext0", LIGHT_SUBTEXT0),
+            ("subtext1", LIGHT_SUBTEXT1),
+            ("accent (blue)", LIGHT_BLUE),
+        ];
+        // Every surface an ink can land on, palest first. `mantle` and `crust`
+        // are lighter than the base, so they are easier than it and included
+        // for completeness rather than doubt.
+        let surfaces: [(&str, Color); 6] = [
+            ("base", LIGHT_BASE),
+            ("mantle", LIGHT_MANTLE),
+            ("crust", LIGHT_CRUST),
+            ("surface0", LIGHT_SURFACE0),
+            ("surface1", LIGHT_SURFACE1),
+            ("surface2", LIGHT_SURFACE2),
+        ];
+
+        let mut failures = Vec::new();
+        for (ink_name, ink) in inks {
+            for (surface_name, surface) in surfaces {
+                let ratio = contrast_ratio(ink, surface);
+                if ratio < FLOOR {
+                    failures.push(format!("{ink_name} on {surface_name}: {ratio:.2}"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "light-theme text below the {FLOOR}:1 floor:
+  {}",
+            failures.join(
+                "
+  "
+            )
+        );
+    }
+
+    /// The inks stay distinguishable by *weight*, not only by hue.
+    ///
+    /// The candidate fix this crate's notes recommended before the operator
+    /// supplied values would have darkened the greys until they cleared the
+    /// greyest card, which put all three inks at identical luminance — body
+    /// text, captions and links weighing exactly the same. Hue is the one
+    /// channel colour-blind vision cannot rely on, so that traded one
+    /// accessibility defect for another. This asserts the trade was not made.
+    #[test]
+    fn the_light_inks_are_not_all_the_same_weight() {
+        let separation = contrast_ratio(LIGHT_TEXT, LIGHT_SUBTEXT0);
+        assert!(
+            separation > 1.3,
+            "main and secondary text are within {separation:.2} of each other,              so the hierarchy reads as flat"
+        );
     }
 }

@@ -54,6 +54,13 @@
       <button data-p="b">B — lighten cards</button>
     </div>
 
+    <h2>Operator&rsquo;s palette (2026-09-09) &mdash; which way should the card ladder go?</h2>
+    <div class="presets">
+      <button data-p="op1">1 &mdash; surface0 only</button>
+      <button data-p="op2">2 &mdash; page + one card</button>
+      <button data-p="op3">3 &mdash; deepest card, ladder ascends</button>
+    </div>
+
     <h2>Colours</h2>
     <div class="row"><label>Main text</label><input type="color" id="c_main"><input type="text" id="t_main"></div>
     <div class="row"><label>Secondary (subtext0)</label><input type="color" id="c_sec"><input type="text" id="t_sec"></div>
@@ -88,6 +95,17 @@
         </div>
       </div>
     </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>Every surface, with the three inks on it</h2>
+      <p class="note" style="margin-top:0">The question the presets above ask you to answer. The desktop draws
+         text on <b>five</b> shaded surfaces, not one &mdash; <code>surface0</code> is the ordinary card
+         (1012 sites), <code>surface1</code> (542) and <code>surface2</code> (159) are the deeper ones, and
+         <code>mantle</code> (353) and <code>crust</code> (285) are <em>lighter</em> than the page. A palette
+         naming one card colour has to say what becomes of the other four. Anything below 4.5 is marked.</p>
+      <div id="allsurf"></div>
+    </div>
+
 
     <div class="panel" style="margin-top:18px">
       <h2>Contrast ratio — live</h2>
@@ -150,7 +168,51 @@ const PRESETS = {
   //     they would need a card lighter than the page itself to clear 4.5. B cannot fix them
   //     alone; it only helps main text.
   b:   { main:'#4C4F69', sec:'#686B80', sec1:'#5C5F77', acc:'#1D62EC', page:'#EFF1F5', card:'#E6E9EF' },
+
+  // ---- the operator's palette, 2026-09-09 (answers C-Q10) -------------------------------------
+  //
+  //   Main text  #000000   Secondary text  #373739   Accent text  #0036A3
+  //   Page       #EFF1F5   Card            #A0AECA
+  //
+  // The inks are as given and are now shipped (gui/appearance/src/lib.rs). They clear 4.5 on every
+  // surface in the theme, including today's greyest -- which is why the ink half needed no choice.
+  //
+  // subtext0 is NOT one of the operator's values. The palette names two greys and the theme has
+  // three roles, so a third had to be found, and there is nowhere for it to go: walking the hue
+  // lighter one step at a time, #3D3D3F is the last value clearing 4.5 on SURFACE2 and the next
+  // fails at 4.42. It sits 1.10 from #373739 -- the same colour to any eye. That is the card's
+  // doing, not the choice's: SURFACE2 gives 9.71 against pure black, so everything clearing 4.5 on
+  // it is crowded into the top of that range. Switch between options 1-3 and watch that number.
+  //
+  // The three options differ ONLY in what happens to the four cards the operator did not name.
+  op1: { main:'#000000', sec:'#3D3D3F', sec1:'#373739', acc:'#0036A3', page:'#EFF1F5', card:'#A0AECA',
+         // 1 -- the operator's colour lands on surface0, the ordinary card. The other two keep
+         //      today's values, which are LIGHTER than it, so the ladder inverts: "deeper" cards
+         //      become paler than the shallow one. Look at the strip below; that is the cost.
+         ladder: { mantle:'#E6E9EF', crust:'#DCE0E8', s0:'#A0AECA', s1:'#BCC0CC', s2:'#ACB0BE' } },
+
+  op2: { main:'#000000', sec:'#3D3D3F', sec1:'#373739', acc:'#0036A3', page:'#EFF1F5', card:'#A0AECA',
+         // 2 -- one page, one card, taken literally: surface0/1/2 all become #A0AECA (1713 sites).
+         //      The ladder stops existing, so a card inside a card is invisible without a border.
+         //      mantle and crust are left alone -- they are lighter than the page and are not cards.
+         ladder: { mantle:'#E6E9EF', crust:'#DCE0E8', s0:'#A0AECA', s1:'#A0AECA', s2:'#A0AECA' } },
+
+  // 3 -- as first offered ("re-derive the ladder around it", darkening the deeper cards) this is
+  //      IMPOSSIBLE, and the sampler is what showed it. Darkening a card *reduces* its contrast
+  //      with dark ink, and #A0AECA is already the darkest card these inks survive: one step to
+  //      #9CAAC6 puts the accent at 4.37. The first draft used #94A1BC and #8894AE, which fail
+  //      three inks of four -- run the harness in this directory's history to see it.
+  //
+  //      So the ladder cannot descend from the operator's colour; it can only ASCEND toward the
+  //      page. #A0AECA becomes surface2, the DEEPEST card, and the shallower two are mixed toward
+  //      the page from it. Every ink passes automatically, because a lighter card can only raise
+  //      contrast with dark ink -- there is nothing left to check by hand.
+  op3: { main:'#000000', sec:'#3D3D3F', sec1:'#373739', acc:'#0036A3', page:'#EFF1F5', card:'#A0AECA',
+         ladder: { mantle:'#E6E9EF', crust:'#DCE0E8', s0:'#CFD6E4', s1:'#BAC4D8', s2:'#A0AECA' } },
 };
+
+// The shipped ladder, used by any preset that does not override it.
+const SHIPPED_LADDER = { mantle:'#E6E9EF', crust:'#DCE0E8', s0:'#CCD0DA', s1:'#BCC0CC', s2:'#ACB0BE' };
 
 const $ = id => document.getElementById(id);
 const KEYS = ['main','sec','sec1','acc','page','card'];
@@ -170,6 +232,61 @@ const badge = (r, lim) => r >= 7 && lim === 4.5
   ? '<span class="badge aaa">AAA</span>'
   : (r >= lim ? '<span class="badge pass">AA</span>' : '<span class="badge fail">fail</span>');
 
+// Every surface the desktop draws text on, with the three inks on each and the
+// ratio under every one. This is the panel the ladder options are for: a
+// preset that names one card colour is answered here, where you can see what
+// the other four become.
+function renderAllSurfaces() {
+  const L = (cur.ladder || SHIPPED_LADDER);
+  const surfaces = [
+    ['page (unshaded)',    cur.page, ''],
+    ['mantle  (353 uses)', L.mantle, 'lighter than the page'],
+    ['crust   (285 uses)', L.crust,  'lighter than the page'],
+    ['surface0 (1012)',    L.s0,     'the ordinary card'],
+    ['surface1 (542)',     L.s1,     ''],
+    ['surface2 (159)',     L.s2,     'the deepest card'],
+  ];
+  const inks = [['main', cur.main], ['subtext1', cur.sec1], ['subtext0', cur.sec], ['accent', cur.acc]];
+
+  // Flag a ladder that does not descend -- option 1 inverts it, and that is
+  // easy to miss by eye when the colours are close.
+  const lum0 = lum(L.s0), lum1 = lum(L.s1), lum2 = lum(L.s2);
+  const inverted = !(lum0 >= lum1 && lum1 >= lum2);
+  const collapsed = (L.s0 === L.s1 && L.s1 === L.s2);
+
+  let html = '';
+  for (const [name, bg, note] of surfaces) {
+    let cells = '';
+    for (const [inkName, ink] of inks) {
+      const r = ratio(ink, bg);
+      const bad = r < 4.5;
+      cells += `<div style="flex:1 1 0;padding:8px 10px;color:${ink};` +
+               `border-left:1px solid rgba(0,0,0,.08)">` +
+               `<div style="font-size:13px">${inkName}</div>` +
+               `<div style="font-size:11px;opacity:.9;font-variant-numeric:tabular-nums">` +
+               `${r.toFixed(2)}${bad ? ' &#9888;' : ''}</div></div>`;
+    }
+    html += `<div style="display:flex;align-items:stretch;background:${bg};border-radius:7px;` +
+            `margin-bottom:6px;overflow:hidden;border:1px solid rgba(0,0,0,.10)">` +
+            `<div style="width:190px;padding:8px 10px;font-size:12px;color:#111;` +
+            `background:rgba(255,255,255,.35)"><b>${name}</b>` +
+            `<div style="opacity:.7">${bg.toUpperCase()}${note ? ' &mdash; ' + note : ''}</div></div>` +
+            cells + `</div>`;
+  }
+  if (inverted) {
+    html += `<p class="note" style="color:#8a1c1c"><b>The ladder is inverted.</b> surface1 and/or ` +
+            `surface2 are <em>lighter</em> than surface0, so a card nested in a card looks shallower ` +
+            `than its parent rather than deeper.</p>`;
+  } else if (collapsed) {
+    html += `<p class="note"><b>The ladder is gone</b> &mdash; all three card shades are one colour. ` +
+            `A card inside a card cannot be told apart by shade and would need a border.</p>`;
+  }
+  const worst = Math.min(...surfaces.flatMap(([, bg]) => inks.map(([, ink]) => ratio(ink, bg))));
+  html += `<p class="note">Worst pairing anywhere above: <b>${worst.toFixed(2)}</b>` +
+          `${worst < 4.5 ? ' &mdash; below the 4.5 floor.' : ' &mdash; every ink clears 4.5 on every surface.'}</p>`;
+  $('allsurf').innerHTML = html;
+}
+
 function render() {
   for (const k of KEYS) { $('c_'+k).value = cur[k]; $('t_'+k).value = cur[k].toUpperCase(); }
   $('stage').style.background = cur.page;
@@ -187,6 +304,7 @@ function render() {
                 `<td>${badge(r,4.5)}</td><td>${badge(r,3.0)}</td></tr>`);
     }
   $('tbl').innerHTML = rows.join('');
+  renderAllSurfaces();
 
   // Ink against ink. Six pairs, because four inks have six.
   const NAME = { main:'main', sec:'subtext0', sec1:'subtext1', acc:'accent' };

@@ -125489,8 +125489,29 @@ either way.
      claim.**
 2. **Decide the two application modules.** `imageviewer/video.rs` and
    `procexplorer/features.rs` are unreachable inside their own binaries, where
-   `pub` buys nothing. Each is either wired or deleted; neither should stay as
-   it is.
+   `pub` buys nothing.
+
+   **Checked 2026-09-08, and "wire it" is wrong for both** — which is worth
+   recording, because it was written above as if the only question were
+   plumbing.
+
+   * `procexplorer/features.rs` holds six *finished* widgets — window picker,
+     blocking analyser, affinity mask, priority selector, environment viewer,
+     memory map — each with its own `render() -> Vec<RenderCommand>`. Wiring
+     them into the Details tab really is a few lines. But
+     `ProcessExplorer::refresh()` is a **placeholder that calls nothing**: its
+     own comment says "in production, call kernel syscalls here", and the data
+     comes from `load_demo_data()`. So the whole application displays invented
+     processes, and wiring `features.rs` would connect one pile of demo data to
+     another — a *more elaborate* display of things that are not true, which is
+     worse than a plain one. The unwired module is a symptom; the missing data
+     source is the disease. See
+     `TD-C-THE-GUI-PROCESS-EXPLORER-HAS-NO-DATA-SOURCE-AND-ONE-EXISTS`.
+   * `imageviewer/video.rs` says plainly in its own module doc that "actual
+     codec decoding is deferred to a future hardware-accelerated decoder
+     service". Wired today it would parse containers, show transport controls,
+     and display no frames. That is the same trap: a feature that appears to
+     exist and does nothing. Its trigger is a decoder service, not a caller.
 3. **Route `apps/colorpicker` through `guitk::colorpicker`,** or delete the
    toolkit's copy. One of the two, not both.
 
@@ -125498,3 +125519,55 @@ either way.
 the same mechanism with 5,628 more lines, found the same way and logged
 separately because it also has a *duplicate wired page*, which is a worse
 problem than being unreachable. Together they are about 30,000 lines.
+
+---
+
+## TD-C-THE-GUI-PROCESS-EXPLORER-HAS-NO-DATA-SOURCE-AND-ONE-EXISTS
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `apps/procexplorer/src/main.rs` — `ProcessExplorer::refresh`.
+
+**In short:** the graphical process explorer does not show you the processes
+running on the machine. It shows a fixed list of made-up ones. Everything else
+about it works — sorting, filtering, the tabs, the graphs — but the step that
+would ask the system what is actually running was never written, and the
+placeholder that stands in its place says so in a comment nobody sees.
+
+**The evidence, in its own words:**
+
+```rust
+pub fn refresh(&mut self) {
+    // Placeholder: in production, call kernel syscalls here:
+    //   - sys_process_list() -> Vec<ProcessInfo>
+    //   ...
+    // For now, the data vectors are populated externally or via
+    // `load_demo_data()` for development/testing.
+```
+
+**And the data source exists.** `userspace/htop` reads `/proc/<pid>/` for the
+same facts — per-process stats, `/proc/stat`, `/proc/meminfo` — and has done
+for some time. So this is not blocked on the kernel; the GUI explorer simply
+never learned to read what the terminal one already reads.
+
+**Why this outranks wiring `features.rs`.** That module (2,539 lines, six
+finished widgets) is unreachable, and connecting it looks like the obvious next
+job. It is not: pointed at `load_demo_data()`, an affinity editor and a memory
+map would render invented numbers with the same confidence as real ones. **A
+richer display of false data is worse than a plain one**, because it invites
+the user to act on it — the affinity and priority widgets exist precisely to
+*change* things.
+
+**The proper fix, and the part that needs a decision.** Read `/proc`. The
+question is *whose* reader:
+
+| | |
+|---|---|
+| Copy htop's into `apps/procexplorer` | A third copy of `/proc` parsing in the tree, free to drift from htop's — and the two would then disagree about what a process's state letter means. |
+| Extract htop's readers into a shared crate | The right shape, but `userspace/**` is **lane B's**, so this needs a `requests/` note rather than an edit. |
+| A `sysinfo`-style crate in lane C | Avoids the lane boundary and creates the second copy anyway. |
+
+Extracting is the one to ask for. Filed as a request when this is picked up;
+recorded here so the finding is not lost in the meantime.
+
+**Do not wire `features.rs` first.** It would make the wrong data more
+convincing.

@@ -20,6 +20,7 @@
 
 #![allow(dead_code, clippy::too_many_arguments)]
 
+use appearance::Palette;
 #[allow(unused_imports)]
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -37,25 +38,7 @@ use std::path::PathBuf;
 // Catppuccin Mocha color palette
 // ============================================================================
 
-mod colors {
-    use guitk::color::Color;
-
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const CRUST: Color = Color::from_hex(0x11111B);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const SURFACE2: Color = Color::from_hex(0x585B70);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-}
+mod colors {}
 
 // ============================================================================
 // UI layout constants
@@ -243,13 +226,13 @@ impl RecordingState {
     }
 
     /// Color associated with this state for UI display.
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Idle => colors::SUBTEXT0,
-            Self::Countdown => colors::YELLOW,
-            Self::Recording => colors::RED,
-            Self::Paused => colors::PEACH,
-            Self::Stopped => colors::GREEN,
+            Self::Idle => pal.subtext0,
+            Self::Countdown => pal.yellow,
+            Self::Recording => pal.red,
+            Self::Paused => pal.peach,
+            Self::Stopped => pal.green,
         }
     }
 
@@ -464,11 +447,18 @@ impl AnnotationTool {
     }
 
     /// Color used by default for this tool type.
+    ///
+    /// Fixed values, not theme roles. This feeds `Annotation::color`, which is
+    /// *stored on the annotation*, so it is the user's mark rather than
+    /// chrome: nothing rewrites it when the theme changes, and a themed value
+    /// would leave a drawing made last week in the old scheme and one made
+    /// today in the new. Same rule as `hexeditor`'s bookmarks and `snippets`'
+    /// folder colours.
     pub fn default_color(self) -> Color {
         match self {
-            Self::Rectangle => colors::RED,
-            Self::Arrow => colors::BLUE,
-            Self::Text => colors::TEXT,
+            Self::Rectangle => Color::from_hex(0xF38BA8),
+            Self::Arrow => Color::from_hex(0x89B4FA),
+            Self::Text => Color::from_hex(0xCDD6F4),
             Self::Highlight => Color::rgba(249, 226, 175, 80), // semi-transparent yellow
         }
     }
@@ -1332,7 +1322,7 @@ impl RegionSelector {
     }
 
     /// Render the region selection overlay.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render(&self, pal: &Palette) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         if !self.active {
             return cmds;
@@ -1365,7 +1355,7 @@ impl RegionSelector {
                 y: ry,
                 width: rw,
                 height: rh,
-                color: colors::BLUE,
+                color: pal.blue,
                 line_width: 2.0,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -1376,7 +1366,7 @@ impl RegionSelector {
                 y: ry + rh + 4.0,
                 text: label,
                 font_size: 12.0,
-                color: colors::TEXT,
+                color: pal.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1535,7 +1525,7 @@ impl RecordingIndicator {
     }
 
     /// Render the indicator overlay.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render(&self, pal: &Palette) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         if !self.visible {
             return cmds;
@@ -1562,7 +1552,7 @@ impl RecordingIndicator {
             y: self.y,
             width: indicator_width,
             height: indicator_height,
-            color: colors::CRUST,
+            color: pal.crust,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
 
@@ -1573,7 +1563,7 @@ impl RecordingIndicator {
                 y: self.y + 12.0,
                 width: 12.0,
                 height: 12.0,
-                color: colors::RED,
+                color: pal.red,
                 corner_radii: CornerRadii::all(6.0),
             });
         }
@@ -1584,7 +1574,7 @@ impl RecordingIndicator {
             y: self.y + 10.0,
             text: format_duration(self.elapsed_secs),
             font_size: 14.0,
-            color: colors::TEXT,
+            color: pal.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1596,7 +1586,7 @@ impl RecordingIndicator {
             y: self.y + 10.0,
             text: format_file_size(self.file_size),
             font_size: 12.0,
-            color: colors::SUBTEXT0,
+            color: pal.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1608,7 +1598,7 @@ impl RecordingIndicator {
             y: self.y + 10.0,
             text: format!("{} fps", self.current_fps),
             font_size: 12.0,
-            color: colors::OVERLAY0,
+            color: pal.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1735,6 +1725,12 @@ pub struct ScreenRecorderApp {
     pub hovered_sidebar: Option<usize>,
     /// Whether the annotation toolbar is expanded.
     pub annotation_toolbar_visible: bool,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl ScreenRecorderApp {
@@ -2070,6 +2066,7 @@ impl ScreenRecorderApp {
     /// Create a new application instance with default settings.
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             recording_state: RecordingState::Idle,
             capture_mode: CaptureMode::FullScreen,
             fps_preset: FpsPreset::Fps30,
@@ -2247,7 +2244,7 @@ impl ScreenRecorderApp {
             y: 0.0,
             width: self.window_width,
             height: self.window_height,
-            color: colors::BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2292,12 +2289,12 @@ impl ScreenRecorderApp {
 
         // Overlays (region selector, recording indicator, countdown)
         if self.region_selector.active {
-            cmds.extend(self.region_selector.render());
+            cmds.extend(self.region_selector.render(&self.palette));
         }
         if self.recording_state == RecordingState::Recording
             || self.recording_state == RecordingState::Paused
         {
-            cmds.extend(self.indicator.render());
+            cmds.extend(self.indicator.render(&self.palette));
         }
         if self.recording_state == RecordingState::Countdown {
             cmds.extend(self.render_countdown_overlay());
@@ -2316,7 +2313,7 @@ impl ScreenRecorderApp {
             y: 0.0,
             width: SIDEBAR_WIDTH,
             height: self.window_height,
-            color: colors::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2326,7 +2323,7 @@ impl ScreenRecorderApp {
             y: 14.0,
             text: "Screen Recorder".to_string(),
             font_size: 16.0,
-            color: colors::LAVENDER,
+            color: self.palette.lavender,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
@@ -2338,7 +2335,7 @@ impl ScreenRecorderApp {
             y1: 42.0,
             x2: SIDEBAR_WIDTH - PADDING,
             y2: 42.0,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2359,7 +2356,7 @@ impl ScreenRecorderApp {
                     y,
                     width: SIDEBAR_WIDTH - 8.0,
                     height: item_height - 2.0,
-                    color: colors::SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(SMALL_RADIUS),
                 });
                 // Active indicator bar
@@ -2368,7 +2365,7 @@ impl ScreenRecorderApp {
                     y: y + 6.0,
                     width: 3.0,
                     height: item_height - 14.0,
-                    color: colors::BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::all(1.5),
                 });
             } else if is_hovered {
@@ -2377,15 +2374,15 @@ impl ScreenRecorderApp {
                     y,
                     width: SIDEBAR_WIDTH - 8.0,
                     height: item_height - 2.0,
-                    color: colors::SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(SMALL_RADIUS),
                 });
             }
 
             let text_color = if is_active {
-                colors::TEXT
+                self.palette.text
             } else {
-                colors::SUBTEXT0
+                self.palette.subtext0
             };
             cmds.push(RenderCommand::Text {
                 x: PADDING + 8.0,
@@ -2410,7 +2407,7 @@ impl ScreenRecorderApp {
             y1: badge_y - 8.0,
             x2: SIDEBAR_WIDTH - PADDING,
             y2: badge_y - 8.0,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2420,7 +2417,7 @@ impl ScreenRecorderApp {
             y: badge_y + 4.0,
             width: 10.0,
             height: 10.0,
-            color: self.recording_state.color(),
+            color: self.recording_state.color(&self.palette),
             corner_radii: CornerRadii::all(5.0),
         });
 
@@ -2429,7 +2426,7 @@ impl ScreenRecorderApp {
             y: badge_y,
             text: self.recording_state.label().to_string(),
             font_size: 13.0,
-            color: self.recording_state.color(),
+            color: self.recording_state.color(&self.palette),
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 16.0),
             overflow: TextOverflow::Ellipsis,
@@ -2445,7 +2442,7 @@ impl ScreenRecorderApp {
                 self.fps_preset.label()
             ),
             font_size: 11.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
@@ -2464,7 +2461,7 @@ impl ScreenRecorderApp {
             y: 0.0,
             width: self.window_width - SIDEBAR_WIDTH,
             height: TOOLBAR_HEIGHT,
-            color: colors::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2474,7 +2471,7 @@ impl ScreenRecorderApp {
             y1: TOOLBAR_HEIGHT - 1.0,
             x2: self.window_width,
             y2: TOOLBAR_HEIGHT - 1.0,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2483,9 +2480,9 @@ impl ScreenRecorderApp {
 
         // Record / Stop button
         let (rec_label, rec_color) = if self.recording_state.is_active() {
-            ("Stop", colors::RED)
+            ("Stop", self.palette.red)
         } else {
-            ("Record", colors::GREEN)
+            ("Record", self.palette.green)
         };
 
         cmds.push(RenderCommand::FillRect {
@@ -2501,7 +2498,7 @@ impl ScreenRecorderApp {
             y: btn_y + 9.0,
             text: rec_label.to_string(),
             font_size: 13.0,
-            color: colors::CRUST,
+            color: self.palette.crust,
             font_weight: FontWeightHint::Bold,
             max_width: Some(66.0),
             overflow: TextOverflow::Ellipsis,
@@ -2522,7 +2519,7 @@ impl ScreenRecorderApp {
                 y: btn_y,
                 width: 80.0,
                 height: BUTTON_HEIGHT,
-                color: colors::SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
             cmds.push(RenderCommand::Text {
@@ -2530,7 +2527,7 @@ impl ScreenRecorderApp {
                 y: btn_y + 9.0,
                 text: pause_label.to_string(),
                 font_size: 13.0,
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(52.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2541,9 +2538,9 @@ impl ScreenRecorderApp {
         // Annotation toggle
         if self.recording_state == RecordingState::Recording {
             let ann_color = if self.annotation_toolbar_visible {
-                colors::BLUE
+                self.palette.blue
             } else {
-                colors::SURFACE1
+                self.palette.surface1
             };
             cmds.push(RenderCommand::FillRect {
                 x: btn_x,
@@ -2559,9 +2556,9 @@ impl ScreenRecorderApp {
                 text: "Annotate".to_string(),
                 font_size: 13.0,
                 color: if self.annotation_toolbar_visible {
-                    colors::CRUST
+                    self.palette.crust
                 } else {
-                    colors::TEXT
+                    self.palette.text
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(66.0),
@@ -2576,7 +2573,7 @@ impl ScreenRecorderApp {
             y: btn_y + 9.0,
             text: self.capture_mode.label().to_string(),
             font_size: 12.0,
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(170.0),
             overflow: TextOverflow::Ellipsis,
@@ -2601,7 +2598,7 @@ impl ScreenRecorderApp {
             y: cy,
             width: preview_w,
             height: preview_h,
-            color: colors::CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -2609,7 +2606,7 @@ impl ScreenRecorderApp {
             y: cy,
             width: preview_w,
             height: preview_h,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
@@ -2627,7 +2624,7 @@ impl ScreenRecorderApp {
             y: cy + preview_h / 2.0 - 8.0,
             text: preview_label.to_string(),
             font_size: 16.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(preview_w),
             overflow: TextOverflow::Ellipsis,
@@ -2664,7 +2661,7 @@ impl ScreenRecorderApp {
             y,
             width,
             height: 40.0,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
 
@@ -2675,14 +2672,14 @@ impl ScreenRecorderApp {
         for tool in tools {
             let is_active = self.active_annotation_tool == Some(*tool);
             let bg = if is_active {
-                colors::BLUE
+                self.palette.blue
             } else {
-                colors::SURFACE1
+                self.palette.surface1
             };
             let fg = if is_active {
-                colors::CRUST
+                self.palette.crust
             } else {
-                colors::TEXT
+                self.palette.text
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -2719,7 +2716,7 @@ impl ScreenRecorderApp {
             y,
             text: "Capture Settings".to_string(),
             font_size: 14.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -2734,7 +2731,7 @@ impl ScreenRecorderApp {
             y: row_y,
             text: "Mode".to_string(),
             font_size: 11.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
@@ -2744,7 +2741,7 @@ impl ScreenRecorderApp {
             y: row_y + 16.0,
             text: self.capture_mode.label().to_string(),
             font_size: 13.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
@@ -2756,7 +2753,7 @@ impl ScreenRecorderApp {
             y: row_y,
             text: "Frame Rate".to_string(),
             font_size: 11.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
@@ -2766,7 +2763,7 @@ impl ScreenRecorderApp {
             y: row_y + 16.0,
             text: self.fps_preset.label().to_string(),
             font_size: 13.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
@@ -2791,7 +2788,7 @@ impl ScreenRecorderApp {
             y: row_y,
             text: "Audio".to_string(),
             font_size: 11.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
@@ -2801,7 +2798,7 @@ impl ScreenRecorderApp {
             y: row_y + 16.0,
             text: audio_text,
             font_size: 13.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
@@ -2814,7 +2811,7 @@ impl ScreenRecorderApp {
             y: row2_y,
             text: "Cursor".to_string(),
             font_size: 11.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
@@ -2833,7 +2830,7 @@ impl ScreenRecorderApp {
             y: row2_y + 16.0,
             text: cursor_text.to_string(),
             font_size: 13.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
@@ -2845,7 +2842,7 @@ impl ScreenRecorderApp {
             y: row2_y,
             text: "Countdown".to_string(),
             font_size: 11.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
@@ -2855,7 +2852,7 @@ impl ScreenRecorderApp {
             y: row2_y + 16.0,
             text: format!("{}s", self.countdown.duration_secs),
             font_size: 13.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
@@ -2867,7 +2864,7 @@ impl ScreenRecorderApp {
             y: row2_y,
             text: "Save to".to_string(),
             font_size: 11.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
@@ -2878,7 +2875,7 @@ impl ScreenRecorderApp {
             y: row2_y + 16.0,
             text: dir_display,
             font_size: 13.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
@@ -2896,7 +2893,7 @@ impl ScreenRecorderApp {
             y: y + PADDING,
             text: "Recording History".to_string(),
             font_size: 16.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
@@ -2912,7 +2909,7 @@ impl ScreenRecorderApp {
                 format_file_size(self.history.total_size())
             ),
             font_size: 12.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
@@ -2924,7 +2921,7 @@ impl ScreenRecorderApp {
                 y: y + 80.0,
                 text: "No recordings yet.".to_string(),
                 font_size: 14.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PADDING * 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2939,9 +2936,9 @@ impl ScreenRecorderApp {
 
         for entry in &self.history.entries {
             let bg_color = if entry.selected {
-                colors::SURFACE0
+                self.palette.surface0
             } else {
-                colors::MANTLE
+                self.palette.mantle
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -2959,7 +2956,7 @@ impl ScreenRecorderApp {
                     y: entry_y,
                     width: list_w,
                     height: entry_height - 4.0,
-                    color: colors::BLUE,
+                    color: self.palette.blue,
                     line_width: 1.0,
                     corner_radii: CornerRadii::all(SMALL_RADIUS),
                 });
@@ -2971,7 +2968,7 @@ impl ScreenRecorderApp {
                 y: entry_y + 8.0,
                 width: 72.0,
                 height: 44.0,
-                color: colors::SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::all(3.0),
             });
 
@@ -2981,7 +2978,7 @@ impl ScreenRecorderApp {
                 y: entry_y + 8.0,
                 text: entry.name.clone(),
                 font_size: 13.0,
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(list_w - 96.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2999,7 +2996,7 @@ impl ScreenRecorderApp {
                     entry.fps,
                 ),
                 font_size: 11.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(list_w - 96.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3011,7 +3008,7 @@ impl ScreenRecorderApp {
                 y: entry_y + 42.0,
                 text: entry.timestamp_display(),
                 font_size: 10.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(list_w - 96.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3032,7 +3029,7 @@ impl ScreenRecorderApp {
             y: y + PADDING,
             text: "Trim Recording".to_string(),
             font_size: 16.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
@@ -3050,7 +3047,7 @@ impl ScreenRecorderApp {
                 y: track_y,
                 width: track_w,
                 height: track_h,
-                color: colors::SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
 
@@ -3065,7 +3062,7 @@ impl ScreenRecorderApp {
                 y: track_y,
                 width: sel_w,
                 height: track_h,
-                color: colors::SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::ZERO,
             });
 
@@ -3075,7 +3072,7 @@ impl ScreenRecorderApp {
                 y: track_y - 4.0,
                 width: 8.0,
                 height: track_h + 8.0,
-                color: colors::BLUE,
+                color: self.palette.blue,
                 corner_radii: CornerRadii::all(2.0),
             });
 
@@ -3085,7 +3082,7 @@ impl ScreenRecorderApp {
                 y: track_y - 4.0,
                 width: 8.0,
                 height: track_h + 8.0,
-                color: colors::BLUE,
+                color: self.palette.blue,
                 corner_radii: CornerRadii::all(2.0),
             });
 
@@ -3099,7 +3096,7 @@ impl ScreenRecorderApp {
                 y: track_y + track_h + 8.0,
                 text: format!("Start: {}", start_display),
                 font_size: 12.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(track_w / 3.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3109,7 +3106,7 @@ impl ScreenRecorderApp {
                 y: track_y + track_h + 8.0,
                 text: format!("Duration: {}", dur_display),
                 font_size: 12.0,
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(track_w / 3.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3119,7 +3116,7 @@ impl ScreenRecorderApp {
                 y: track_y + track_h + 8.0,
                 text: format!("End: {}", end_display),
                 font_size: 12.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(track_w / 3.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3133,7 +3130,7 @@ impl ScreenRecorderApp {
                 y: btn_y,
                 width: 100.0,
                 height: BUTTON_HEIGHT,
-                color: colors::GREEN,
+                color: self.palette.green,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
             cmds.push(RenderCommand::Text {
@@ -3141,7 +3138,7 @@ impl ScreenRecorderApp {
                 y: btn_y + 9.0,
                 text: "Apply Trim".to_string(),
                 font_size: 13.0,
-                color: colors::CRUST,
+                color: self.palette.crust,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3152,7 +3149,7 @@ impl ScreenRecorderApp {
                 y: btn_y,
                 width: 80.0,
                 height: BUTTON_HEIGHT,
-                color: colors::SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
             cmds.push(RenderCommand::Text {
@@ -3160,7 +3157,7 @@ impl ScreenRecorderApp {
                 y: btn_y + 9.0,
                 text: "Reset".to_string(),
                 font_size: 13.0,
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(60.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3171,7 +3168,7 @@ impl ScreenRecorderApp {
                 y: y + 60.0,
                 text: "Select a recording from History to trim.".to_string(),
                 font_size: 14.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PADDING * 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3194,14 +3191,14 @@ impl ScreenRecorderApp {
         for tab in tabs {
             let is_active = self.settings_tab == *tab;
             let bg = if is_active {
-                colors::SURFACE0
+                self.palette.surface0
             } else {
                 Color::TRANSPARENT
             };
             let fg = if is_active {
-                colors::TEXT
+                self.palette.text
             } else {
-                colors::SUBTEXT0
+                self.palette.subtext0
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -3271,7 +3268,7 @@ impl ScreenRecorderApp {
             y: cy,
             text: "Save Directory".to_string(),
             font_size: 12.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -3282,7 +3279,7 @@ impl ScreenRecorderApp {
             y: cy,
             width,
             height: 30.0,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         cmds.push(RenderCommand::Text {
@@ -3290,7 +3287,7 @@ impl ScreenRecorderApp {
             y: cy + 8.0,
             text: self.output.save_directory.to_string_lossy().to_string(),
             font_size: 12.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 16.0),
             overflow: TextOverflow::Ellipsis,
@@ -3303,7 +3300,7 @@ impl ScreenRecorderApp {
             y: cy,
             text: "Filename Template".to_string(),
             font_size: 12.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -3314,7 +3311,7 @@ impl ScreenRecorderApp {
             y: cy,
             width,
             height: 30.0,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         cmds.push(RenderCommand::Text {
@@ -3322,7 +3319,7 @@ impl ScreenRecorderApp {
             y: cy + 8.0,
             text: self.output.filename_template.clone(),
             font_size: 12.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 16.0),
             overflow: TextOverflow::Ellipsis,
@@ -3335,7 +3332,7 @@ impl ScreenRecorderApp {
             y: cy,
             text: format!("Auto-increment: #{:04}", self.output.auto_increment),
             font_size: 12.0,
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -3348,7 +3345,7 @@ impl ScreenRecorderApp {
             y: cy,
             text: format!("Max File Size: {}", self.output.max_size_display()),
             font_size: 12.0,
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -3369,7 +3366,7 @@ impl ScreenRecorderApp {
                 y: cy,
                 width,
                 height: row_height - 4.0,
-                color: colors::SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
 
@@ -3379,7 +3376,7 @@ impl ScreenRecorderApp {
                 y: cy + 9.0,
                 text: binding.action.label().to_string(),
                 font_size: 13.0,
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width / 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3391,7 +3388,7 @@ impl ScreenRecorderApp {
                 y: cy + 4.0,
                 width: 130.0,
                 height: 24.0,
-                color: colors::SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::all(3.0),
             });
             cmds.push(RenderCommand::Text {
@@ -3399,7 +3396,7 @@ impl ScreenRecorderApp {
                 y: cy + 9.0,
                 text: binding.display(),
                 font_size: 12.0,
-                color: colors::LAVENDER,
+                color: self.palette.lavender,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(122.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3429,7 +3426,7 @@ impl ScreenRecorderApp {
                 self.schedules.active_count()
             ),
             font_size: 13.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -3441,7 +3438,7 @@ impl ScreenRecorderApp {
                 y: y + 28.0,
                 text: "No scheduled recordings. Click + to add one.".to_string(),
                 font_size: 12.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -3453,7 +3450,7 @@ impl ScreenRecorderApp {
                 y: y + 52.0,
                 width: 120.0,
                 height: BUTTON_HEIGHT,
-                color: colors::BLUE,
+                color: self.palette.blue,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
             cmds.push(RenderCommand::Text {
@@ -3461,7 +3458,7 @@ impl ScreenRecorderApp {
                 y: y + 61.0,
                 text: "+ Add Schedule".to_string(),
                 font_size: 12.0,
-                color: colors::CRUST,
+                color: self.palette.crust,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3475,9 +3472,9 @@ impl ScreenRecorderApp {
 
         for sched in &self.schedules.schedules {
             let bg = if sched.enabled {
-                colors::SURFACE0
+                self.palette.surface0
             } else {
-                colors::CRUST
+                self.palette.crust
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -3491,9 +3488,9 @@ impl ScreenRecorderApp {
 
             // Enable/disable indicator
             let dot_color = if sched.enabled {
-                colors::GREEN
+                self.palette.green
             } else {
-                colors::OVERLAY0
+                self.palette.overlay0
             };
             cmds.push(RenderCommand::FillRect {
                 x: x + 10.0,
@@ -3511,9 +3508,9 @@ impl ScreenRecorderApp {
                 text: sched.label.clone(),
                 font_size: 13.0,
                 color: if sched.enabled {
-                    colors::TEXT
+                    self.palette.text
                 } else {
-                    colors::OVERLAY0
+                    self.palette.overlay0
                 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 180.0),
@@ -3530,7 +3527,7 @@ impl ScreenRecorderApp {
                     sched.duration_display()
                 ),
                 font_size: 11.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 180.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3543,7 +3540,7 @@ impl ScreenRecorderApp {
                 y: cy + 10.0,
                 width: 50.0,
                 height: 20.0,
-                color: colors::SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::all(3.0),
             });
             cmds.push(RenderCommand::Text {
@@ -3551,7 +3548,7 @@ impl ScreenRecorderApp {
                 y: cy + 13.0,
                 text: type_label.to_string(),
                 font_size: 10.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(42.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3566,7 +3563,7 @@ impl ScreenRecorderApp {
             y: cy + 4.0,
             width: 120.0,
             height: BUTTON_HEIGHT,
-            color: colors::BLUE,
+            color: self.palette.blue,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         cmds.push(RenderCommand::Text {
@@ -3574,7 +3571,7 @@ impl ScreenRecorderApp {
             y: cy + 13.0,
             text: "+ Add Schedule".to_string(),
             font_size: 12.0,
-            color: colors::CRUST,
+            color: self.palette.crust,
             font_weight: FontWeightHint::Bold,
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
@@ -3594,7 +3591,7 @@ impl ScreenRecorderApp {
             y: bar_y,
             width: self.window_width,
             height: STATUS_BAR_HEIGHT,
-            color: colors::CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3604,7 +3601,7 @@ impl ScreenRecorderApp {
             y1: bar_y,
             x2: self.window_width,
             y2: bar_y,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -3622,7 +3619,7 @@ impl ScreenRecorderApp {
                     format_file_size(self.total_bytes)
                 ),
                 font_size: 11.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.window_width / 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3633,7 +3630,7 @@ impl ScreenRecorderApp {
                 y: text_y,
                 text: "Ready to record".to_string(),
                 font_size: 11.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.window_width / 2.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3646,7 +3643,7 @@ impl ScreenRecorderApp {
             y: text_y,
             text: "F9: Start/Stop | F10: Pause".to_string(),
             font_size: 11.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
             overflow: TextOverflow::Ellipsis,
@@ -3678,7 +3675,7 @@ impl ScreenRecorderApp {
             y: cy,
             width: 100.0,
             height: 100.0,
-            color: colors::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(50.0),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -3686,7 +3683,7 @@ impl ScreenRecorderApp {
             y: cy,
             width: 100.0,
             height: 100.0,
-            color: colors::BLUE,
+            color: self.palette.blue,
             line_width: 3.0,
             corner_radii: CornerRadii::all(50.0),
         });
@@ -3697,7 +3694,7 @@ impl ScreenRecorderApp {
             y: cy + 28.0,
             text: format!("{}", self.countdown.remaining_secs),
             font_size: 40.0,
-            color: colors::TEXT,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3709,7 +3706,7 @@ impl ScreenRecorderApp {
             y: cy + 120.0,
             text: "Get ready...".to_string(),
             font_size: 16.0,
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3730,6 +3727,10 @@ impl Default for ScreenRecorderApp {
 // ============================================================================
 
 impl App for ScreenRecorderApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // What the recorder is doing and for how long, because a recording in
         // progress is the one thing you want to see without raising the window.
@@ -4442,10 +4443,11 @@ mod tests {
 
     #[test]
     fn test_state_colors_differ() {
-        let idle = RecordingState::Idle.color();
-        let recording = RecordingState::Recording.color();
-        let paused = RecordingState::Paused.color();
-        let stopped = RecordingState::Stopped.color();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let idle = RecordingState::Idle.color(&pal);
+        let recording = RecordingState::Recording.color(&pal);
+        let paused = RecordingState::Paused.color(&pal);
+        let stopped = RecordingState::Stopped.color(&pal);
         assert_ne!(idle, recording);
         assert_ne!(recording, paused);
         assert_ne!(paused, stopped);
@@ -4604,7 +4606,8 @@ mod tests {
 
     #[test]
     fn test_annotation_dimensions() {
-        let mut ann = Annotation::new(AnnotationTool::Rectangle, 10.0, 20.0, colors::RED);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut ann = Annotation::new(AnnotationTool::Rectangle, 10.0, 20.0, pal.red);
         ann.end_x = 110.0;
         ann.end_y = 70.0;
         assert!((ann.width() - 100.0).abs() < f32::EPSILON);
@@ -4615,7 +4618,8 @@ mod tests {
 
     #[test]
     fn test_annotation_render_rectangle() {
-        let mut ann = Annotation::new(AnnotationTool::Rectangle, 0.0, 0.0, colors::RED);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut ann = Annotation::new(AnnotationTool::Rectangle, 0.0, 0.0, pal.red);
         ann.end_x = 100.0;
         ann.end_y = 100.0;
         let cmds = ann.render();
@@ -4629,7 +4633,8 @@ mod tests {
 
     #[test]
     fn test_annotation_render_arrow() {
-        let mut ann = Annotation::new(AnnotationTool::Arrow, 0.0, 0.0, colors::BLUE);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut ann = Annotation::new(AnnotationTool::Arrow, 0.0, 0.0, pal.blue);
         ann.end_x = 100.0;
         ann.end_y = 50.0;
         let cmds = ann.render();
@@ -4643,7 +4648,8 @@ mod tests {
 
     #[test]
     fn test_annotation_render_text() {
-        let mut ann = Annotation::new(AnnotationTool::Text, 10.0, 10.0, colors::TEXT);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut ann = Annotation::new(AnnotationTool::Text, 10.0, 10.0, pal.text);
         ann.text_content = "Hello".to_string();
         let cmds = ann.render();
         assert!(cmds.iter().any(|c| matches!(c, RenderCommand::Text { .. })));
@@ -5124,18 +5130,20 @@ mod tests {
 
     #[test]
     fn test_region_selector_render_inactive() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let rs = RegionSelector::new(1920.0, 1080.0);
-        let cmds = rs.render();
+        let cmds = rs.render(&pal);
         assert!(cmds.is_empty());
     }
 
     #[test]
     fn test_region_selector_render_active() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut rs = RegionSelector::new(1920.0, 1080.0);
         rs.activate();
         rs.begin_drag(100.0, 100.0);
         rs.update_drag(300.0, 300.0);
-        let cmds = rs.render();
+        let cmds = rs.render(&pal);
         assert!(!cmds.is_empty());
     }
 
@@ -5200,16 +5208,18 @@ mod tests {
 
     #[test]
     fn test_indicator_render_visible() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let ind = RecordingIndicator::new(10.0, 10.0);
-        let cmds = ind.render();
+        let cmds = ind.render(&pal);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_indicator_render_hidden() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut ind = RecordingIndicator::new(10.0, 10.0);
         ind.visible = false;
-        let cmds = ind.render();
+        let cmds = ind.render(&pal);
         assert!(cmds.is_empty());
     }
 
@@ -5565,5 +5575,79 @@ mod tests {
             }
         });
         assert!(has_stats);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut ScreenRecorderApp) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = ScreenRecorderApp::new();
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        oswindow::app::App::theme_changed(
+            &mut app,
+            &theme(
+                appearance::ThemeMode::Dark,
+                Some(appearance::HighContrastScheme::WhiteOnBlack),
+            ),
+        );
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

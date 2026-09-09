@@ -22,6 +22,7 @@
 
 mod backend;
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::dialog::{DialogAction, FileDialog, list_directory};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -43,22 +44,7 @@ use std::process::ExitCode;
 // ============================================================================
 
 /// Catppuccin Mocha dark theme colors.
-pub mod theme {
-    use guitk::color::Color;
-
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-}
+pub mod theme {}
 
 // ============================================================================
 // Archive formats
@@ -828,11 +814,11 @@ impl TestResult {
         }
     }
 
-    pub fn display_color(&self) -> Color {
+    pub fn display_color(&self, pal: &Palette) -> Color {
         match self {
-            Self::Ok => theme::GREEN,
-            Self::Pending => theme::SUBTEXT0,
-            _ => theme::RED,
+            Self::Ok => pal.green,
+            Self::Pending => pal.subtext0,
+            _ => pal.red,
         }
     }
 }
@@ -1342,11 +1328,18 @@ pub struct AppState {
     /// `~/work` is more likely to extract into `~/work` again than into
     /// wherever the program happened to start.
     pub last_directory: PathBuf,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             archive: None,
             current_dir: String::new(),
             sort: SortState::default(),
@@ -1695,7 +1688,7 @@ pub fn render_toolbar(state: &AppState, frame: &mut Frame, y_offset: f32, width:
         y: y_offset,
         width,
         height: TOOLBAR_H,
-        color: theme::SURFACE0,
+        color: state.palette.surface0,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1707,14 +1700,14 @@ pub fn render_toolbar(state: &AppState, frame: &mut Frame, y_offset: f32, width:
         let text = format!("[{}] {}", action.icon(), action.label());
         let btn_w = text::padded_width(&text, 8.0, 12.0, FontWeightHint::Regular);
         let bg = if enabled {
-            theme::SURFACE1
+            state.palette.surface1
         } else {
-            theme::MANTLE
+            state.palette.mantle
         };
         let fg = if enabled {
-            theme::TEXT
+            state.palette.text
         } else {
-            theme::OVERLAY0
+            state.palette.overlay0
         };
 
         frame.push(RenderCommand::FillRect {
@@ -1751,7 +1744,7 @@ pub fn render_toolbar(state: &AppState, frame: &mut Frame, y_offset: f32, width:
         y1: y_offset + TOOLBAR_H - 1.0,
         x2: width,
         y2: y_offset + TOOLBAR_H - 1.0,
-        color: theme::OVERLAY0,
+        color: state.palette.overlay0,
         width: 1.0,
     });
 
@@ -1765,7 +1758,7 @@ pub fn render_path_bar(state: &AppState, frame: &mut Frame, y_offset: f32, width
         y: y_offset,
         width,
         height: PATH_BAR_H,
-        color: theme::MANTLE,
+        color: state.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1782,14 +1775,14 @@ pub fn render_path_bar(state: &AppState, frame: &mut Frame, y_offset: f32, width
             y: y_offset + 4.0,
             width: NAV_BUTTON_SIZE,
             height: NAV_BUTTON_SIZE,
-            color: theme::SURFACE0,
+            color: state.palette.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
         frame.push(RenderCommand::Text {
             x: x + 8.0,
             y: y_offset + 10.0,
             text: (*btn_text).to_string(),
-            color: theme::TEXT,
+            color: state.palette.text,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1824,14 +1817,14 @@ pub fn render_path_bar(state: &AppState, frame: &mut Frame, y_offset: f32, width
         y: y_offset + 4.0,
         width: width - path_x - 8.0,
         height: NAV_BUTTON_SIZE,
-        color: theme::SURFACE0,
+        color: state.palette.surface0,
         corner_radii: CornerRadii::all(3.0),
     });
     frame.push(RenderCommand::Text {
         x: path_x + 8.0,
         y: y_offset + 10.0,
         text: path_text,
-        color: theme::TEXT,
+        color: state.palette.text,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width - path_x - 24.0),
@@ -1844,7 +1837,7 @@ pub fn render_path_bar(state: &AppState, frame: &mut Frame, y_offset: f32, width
         y1: y_offset + PATH_BAR_H - 1.0,
         x2: width,
         y2: y_offset + PATH_BAR_H - 1.0,
-        color: theme::OVERLAY0,
+        color: state.palette.overlay0,
         width: 1.0,
     });
 
@@ -1864,7 +1857,7 @@ pub fn render_sidebar(state: &AppState, frame: &mut Frame, y_offset: f32, height
         y: y_offset,
         width: w,
         height,
-        color: theme::MANTLE,
+        color: state.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1873,7 +1866,7 @@ pub fn render_sidebar(state: &AppState, frame: &mut Frame, y_offset: f32, height
         x: 8.0,
         y: y_offset + 8.0,
         text: "Archive Tree".to_string(),
-        color: theme::BLUE,
+        color: state.palette.blue,
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(w - 16.0),
@@ -1908,7 +1901,7 @@ pub fn render_sidebar(state: &AppState, frame: &mut Frame, y_offset: f32, height
                     y: ry,
                     width: w,
                     height: ROW_H,
-                    color: theme::SURFACE1,
+                    color: state.palette.surface1,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -1925,7 +1918,7 @@ pub fn render_sidebar(state: &AppState, frame: &mut Frame, y_offset: f32, height
                 x: indent,
                 y: ry + 4.0,
                 text: arrow.to_string(),
-                color: theme::OVERLAY0,
+                color: state.palette.overlay0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1938,7 +1931,7 @@ pub fn render_sidebar(state: &AppState, frame: &mut Frame, y_offset: f32, height
                 x: indent + 12.0,
                 y: ry + 4.0,
                 text: display,
-                color: theme::TEXT,
+                color: state.palette.text,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - indent - 20.0),
@@ -1952,7 +1945,7 @@ pub fn render_sidebar(state: &AppState, frame: &mut Frame, y_offset: f32, height
                     x: w - 30.0,
                     y: ry + 4.0,
                     text: count_text,
-                    color: theme::SUBTEXT0,
+                    color: state.palette.subtext0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -1983,7 +1976,7 @@ pub fn render_sidebar(state: &AppState, frame: &mut Frame, y_offset: f32, height
         y1: y_offset,
         x2: w - 1.0,
         y2: y_offset + height,
-        color: theme::OVERLAY0,
+        color: state.palette.overlay0,
         width: 1.0,
     });
 
@@ -2003,7 +1996,7 @@ pub fn render_column_headers(
         y: y_offset,
         width,
         height: HEADER_H,
-        color: theme::SURFACE0,
+        color: state.palette.surface0,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -2016,7 +2009,7 @@ pub fn render_column_headers(
             x: x + 4.0,
             y: y_offset + 5.0,
             text,
-            color: theme::SUBTEXT0,
+            color: state.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_w - 8.0),
@@ -2038,7 +2031,7 @@ pub fn render_column_headers(
             y1: y_offset + 2.0,
             x2: x,
             y2: y_offset + HEADER_H - 2.0,
-            color: theme::OVERLAY0,
+            color: state.palette.overlay0,
             width: 1.0,
         });
     }
@@ -2049,7 +2042,7 @@ pub fn render_column_headers(
         y1: y_offset + HEADER_H - 1.0,
         x2: x_offset + width,
         y2: y_offset + HEADER_H - 1.0,
-        color: theme::OVERLAY0,
+        color: state.palette.overlay0,
         width: 1.0,
     });
 
@@ -2059,6 +2052,7 @@ pub fn render_column_headers(
 /// Render a single row in the file list.
 pub fn render_file_row(
     entry: &ArchiveEntry,
+    pal: &Palette,
     frame: &mut Frame,
     x_offset: f32,
     y: f32,
@@ -2072,7 +2066,7 @@ pub fn render_file_row(
             y,
             width,
             height: ROW_H,
-            color: Color::rgba(theme::BLUE.r, theme::BLUE.g, theme::BLUE.b, 60),
+            color: Color::rgba(pal.blue.r, pal.blue.g, pal.blue.b, 60),
             corner_radii: CornerRadii::ZERO,
         });
     } else if is_hovered {
@@ -2081,7 +2075,7 @@ pub fn render_file_row(
             y,
             width,
             height: ROW_H,
-            color: theme::SURFACE0,
+            color: pal.surface0,
             corner_radii: CornerRadii::ZERO,
         });
     }
@@ -2097,11 +2091,7 @@ pub fn render_file_row(
         "\u{1F4C4} "
     };
     let name_text = format!("{icon}{}", entry.name);
-    let name_color = if entry.is_dir {
-        theme::BLUE
-    } else {
-        theme::TEXT
-    };
+    let name_color = if entry.is_dir { pal.blue } else { pal.text };
     frame.push(RenderCommand::Text {
         x: x + 4.0,
         y: y + 4.0,
@@ -2120,7 +2110,7 @@ pub fn render_file_row(
             x: x + 4.0,
             y: y + 4.0,
             text: ArchiveEntry::format_size(entry.size),
-            color: theme::TEXT,
+            color: pal.text,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(Column::Size.default_width() - 8.0),
@@ -2135,7 +2125,7 @@ pub fn render_file_row(
             x: x + 4.0,
             y: y + 4.0,
             text: ArchiveEntry::format_size(entry.compressed_size),
-            color: theme::SUBTEXT0,
+            color: pal.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(Column::CompressedSize.default_width() - 8.0),
@@ -2148,11 +2138,11 @@ pub fn render_file_row(
     if !entry.is_dir {
         let ratio = entry.compression_ratio();
         let ratio_color = if ratio > 50.0 {
-            theme::GREEN
+            pal.green
         } else if ratio > 20.0 {
-            theme::YELLOW
+            pal.yellow
         } else {
-            theme::PEACH
+            pal.peach
         };
         frame.push(RenderCommand::Text {
             x: x + 4.0,
@@ -2172,7 +2162,7 @@ pub fn render_file_row(
         x: x + 4.0,
         y: y + 4.0,
         text: ArchiveEntry::format_date(entry.modified),
-        color: theme::SUBTEXT0,
+        color: pal.subtext0,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(Column::Date.default_width() - 8.0),
@@ -2186,7 +2176,7 @@ pub fn render_file_row(
             x: x + 4.0,
             y: y + 4.0,
             text: ArchiveEntry::format_crc(entry.crc32),
-            color: theme::SUBTEXT0,
+            color: pal.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(Column::Crc.default_width() - 8.0),
@@ -2200,7 +2190,7 @@ pub fn render_file_row(
         x: x + 4.0,
         y: y + 4.0,
         text: entry.method.clone(),
-        color: theme::SUBTEXT0,
+        color: pal.subtext0,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(Column::Method.default_width() - 8.0),
@@ -2223,7 +2213,7 @@ pub fn render_file_list(
         y: y_offset,
         width,
         height,
-        color: theme::BASE,
+        color: state.palette.base,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -2249,13 +2239,26 @@ pub fn render_file_list(
                 y: ry,
                 width,
                 height: ROW_H,
-                color: Color::rgba(theme::SURFACE0.r, theme::SURFACE0.g, theme::SURFACE0.b, 40),
+                color: Color::rgba(
+                    state.palette.surface0.r,
+                    state.palette.surface0.g,
+                    state.palette.surface0.b,
+                    40,
+                ),
                 corner_radii: CornerRadii::ZERO,
             });
         }
 
         let is_hovered = state.hovered_entry == Some(entry.id);
-        render_file_row(entry, frame, x_offset, ry, width, is_hovered);
+        render_file_row(
+            entry,
+            &state.palette,
+            frame,
+            x_offset,
+            ry,
+            width,
+            is_hovered,
+        );
         // By id, not by row number. The list re-sorts under the pointer when a
         // column header is clicked, and a row index would then name whatever
         // slid into that position.
@@ -2273,7 +2276,7 @@ pub fn render_file_list(
             x: x_offset + width / 2.0 - 80.0,
             y: y_offset + height / 2.0 - 20.0,
             text: "Drop an archive here".to_string(),
-            color: theme::OVERLAY0,
+            color: state.palette.overlay0,
             font_size: 16.0,
             font_weight: FontWeightHint::Light,
             max_width: Some(200.0),
@@ -2283,7 +2286,7 @@ pub fn render_file_list(
             x: x_offset + width / 2.0 - 100.0,
             y: y_offset + height / 2.0 + 4.0,
             text: "or use Open to browse".to_string(),
-            color: theme::OVERLAY0,
+            color: state.palette.overlay0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(220.0),
@@ -2295,6 +2298,7 @@ pub fn render_file_list(
 /// Render the progress bar for ongoing operations.
 pub fn render_progress_bar(
     progress: &OperationProgress,
+    pal: &Palette,
     frame: &mut Frame,
     x: f32,
     y: f32,
@@ -2306,7 +2310,7 @@ pub fn render_progress_bar(
         y,
         width,
         height: PROGRESS_H,
-        color: theme::SURFACE0,
+        color: pal.surface0,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -2315,7 +2319,7 @@ pub fn render_progress_bar(
         x: x + 8.0,
         y: y + 4.0,
         text: format!("{}: {}", progress.operation, progress.current_file),
-        color: theme::TEXT,
+        color: pal.text,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width - 16.0),
@@ -2333,7 +2337,7 @@ pub fn render_progress_bar(
         y: bar_y,
         width: bar_w,
         height: bar_track_h,
-        color: theme::MANTLE,
+        color: pal.mantle,
         corner_radii: CornerRadii::all(6.0),
     });
 
@@ -2341,11 +2345,11 @@ pub fn render_progress_bar(
     let pct = progress.percent() / 100.0;
     let fill_w = (bar_w * pct as f32).clamp(0.0, bar_w);
     let fill_color = if progress.error.is_some() {
-        theme::RED
+        pal.red
     } else if progress.completed {
-        theme::GREEN
+        pal.green
     } else {
-        theme::BLUE
+        pal.blue
     };
 
     if fill_w > 0.0 {
@@ -2364,7 +2368,7 @@ pub fn render_progress_bar(
         x: bar_x + bar_w + 8.0,
         y: bar_y + 1.0,
         text: format!("{:.0}%", progress.percent()),
-        color: theme::TEXT,
+        color: pal.text,
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -2376,7 +2380,7 @@ pub fn render_progress_bar(
         x: x + 8.0,
         y: y + 36.0,
         text: format!("{}/{} files", progress.files_done, progress.files_total),
-        color: theme::SUBTEXT0,
+        color: pal.subtext0,
         font_size: 10.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2393,7 +2397,7 @@ pub fn render_status_bar(state: &AppState, frame: &mut Frame, y: f32, width: f32
         y,
         width,
         height: STATUS_H,
-        color: theme::MANTLE,
+        color: state.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -2403,7 +2407,7 @@ pub fn render_status_bar(state: &AppState, frame: &mut Frame, y: f32, width: f32
         y1: y,
         x2: width,
         y2: y,
-        color: theme::OVERLAY0,
+        color: state.palette.overlay0,
         width: 1.0,
     });
 
@@ -2412,7 +2416,7 @@ pub fn render_status_bar(state: &AppState, frame: &mut Frame, y: f32, width: f32
         x: 8.0,
         y: y + 6.0,
         text: state.status_text(),
-        color: theme::SUBTEXT0,
+        color: state.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width / 2.0),
@@ -2426,7 +2430,7 @@ pub fn render_status_bar(state: &AppState, frame: &mut Frame, y: f32, width: f32
             x: width - 120.0,
             y: y + 6.0,
             text: format_text.to_string(),
-            color: theme::PEACH,
+            color: state.palette.peach,
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(110.0),
@@ -2440,6 +2444,7 @@ pub fn render_status_bar(state: &AppState, frame: &mut Frame, y: f32, width: f32
 /// Render the drag-and-drop overlay when dragging files.
 pub fn render_drag_overlay(
     drag: &DragState,
+    pal: &Palette,
     frame: &mut Frame,
     window_width: f32,
     window_height: f32,
@@ -2468,14 +2473,14 @@ pub fn render_drag_overlay(
                 y: *mouse_y + 12.0,
                 width: badge_w,
                 height: badge_h,
-                color: theme::SURFACE1,
+                color: pal.surface1,
                 corner_radii: CornerRadii::all(6.0),
             });
             frame.push(RenderCommand::Text {
                 x: *mouse_x + 20.0,
                 y: *mouse_y + 20.0,
                 text: format!("Extract {} file(s)", entries.len()),
-                color: theme::GREEN,
+                color: pal.green,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(badge_w - 16.0),
@@ -2500,7 +2505,7 @@ pub fn render_drag_overlay(
                 y: 20.0,
                 width: window_width - 40.0,
                 height: window_height - 40.0,
-                color: theme::BLUE,
+                color: pal.blue,
                 line_width: 2.0,
                 corner_radii: CornerRadii::all(8.0),
             });
@@ -2511,14 +2516,14 @@ pub fn render_drag_overlay(
                 y: *mouse_y + 12.0,
                 width: badge_w,
                 height: badge_h,
-                color: theme::SURFACE1,
+                color: pal.surface1,
                 corner_radii: CornerRadii::all(6.0),
             });
             frame.push(RenderCommand::Text {
                 x: *mouse_x + 20.0,
                 y: *mouse_y + 20.0,
                 text: format!("Add {} file(s)", files.len()),
-                color: theme::BLUE,
+                color: pal.blue,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(badge_w - 16.0),
@@ -2545,7 +2550,7 @@ pub fn build_frame(state: &AppState, width: f32, height: f32) -> Frame {
         y: 0.0,
         width: w,
         height: h,
-        color: theme::BASE,
+        color: state.palette.base,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -2573,7 +2578,14 @@ pub fn build_frame(state: &AppState, width: f32, height: f32) -> Frame {
 
     // Progress strip sits between the content and the status bar.
     if let Some(progress) = &state.progress {
-        render_progress_bar(progress, &mut frame, 0.0, status_y - PROGRESS_H, w);
+        render_progress_bar(
+            progress,
+            &state.palette,
+            &mut frame,
+            0.0,
+            status_y - PROGRESS_H,
+            w,
+        );
     }
 
     // Sidebar tree.
@@ -2598,7 +2610,7 @@ pub fn build_frame(state: &AppState, width: f32, height: f32) -> Frame {
     render_status_bar(state, &mut frame, status_y, w);
 
     // Drag overlay (on top of everything).
-    render_drag_overlay(&state.drag, &mut frame, w, h);
+    render_drag_overlay(&state.drag, &state.palette, &mut frame, w, h);
 
     frame
 }
@@ -3575,6 +3587,10 @@ pub fn create_sample_archive() -> ArchiveModel {
 // ============================================================================
 
 impl App for AppState {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         match &self.archive {
             Some(archive) => format!(
@@ -4360,9 +4376,10 @@ mod tests {
 
     #[test]
     fn test_result_colors() {
-        assert_eq!(TestResult::Ok.display_color(), theme::GREEN);
-        assert_eq!(TestResult::Pending.display_color(), theme::SUBTEXT0);
-        assert_eq!(TestResult::DecryptionFailed.display_color(), theme::RED);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(TestResult::Ok.display_color(&pal), pal.green);
+        assert_eq!(TestResult::Pending.display_color(&pal), pal.subtext0);
+        assert_eq!(TestResult::DecryptionFailed.display_color(&pal), pal.red);
     }
 
     // --- ArchiveTestResults tests ---
@@ -6309,5 +6326,79 @@ mod tests {
         assert_eq!(without - with, PROGRESS_H);
         // And the scroll limit follows, so the last rows cannot hide behind it.
         assert!(state.max_list_scroll(600.0) >= 0.0);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut AppState) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 900.0, 650.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = AppState::default();
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        oswindow::app::App::theme_changed(
+            &mut app,
+            &theme(
+                appearance::ThemeMode::Dark,
+                Some(appearance::HighContrastScheme::WhiteOnBlack),
+            ),
+        );
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

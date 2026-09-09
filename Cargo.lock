@@ -635,6 +635,7 @@ dependencies = [
 name = "archivemanager"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "ziparchive",
@@ -15541,6 +15542,7 @@ version = "0.1.0"
 name = "screenrecorder"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

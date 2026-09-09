@@ -56009,3 +56009,49 @@ that a boot test actually validated" would make this gap legible without
 blocking anybody. Whether that is worth building depends on how often `main`
 is merged to between lane A's runs — which nobody has measured, and which
 should be measured before anything is built.
+
+
+## An operator instruction inside B-Q7's answer was never recorded (lane A, 2026-09-09)
+
+**For the operator to decide — not actioned, because it concerns
+`os/CLAUDE.md`, which is theirs.**
+
+Answering B-Q7 on 2026-09-07 the operator wrote, in the same sentence as the
+decision:
+
+> "I generally want the best thing regardless of how much more work it might
+> take **(and by the way, is this in Slate OS's claude.md? If not, it should
+> be)**"
+
+The decision half was recorded properly (`design-decisions.md` §1005, "B,
+`coreutils` is the one home"). The parenthetical was not — it appears in no
+document in this tree.
+
+**As it stands the requirement is met, but by inheritance rather than by
+`os/CLAUDE.md`.** The principle lives in
+`E:isual studio projects\CLAUDE.md` — "I am generally NOT concerned with how
+long you think something will take … I care about one thing: the best possible
+end result. … Effort is not a cost I'm trying to minimize." All three lane
+worktrees (`os-lane-a/b/c`) and `os` itself sit under that directory, so every
+lane loads it on every turn. Functionally, the operator's wish holds today.
+
+**Why they may still want it copied into `os/CLAUDE.md`.** That parent file
+exists *because* the same rule stopped being loaded once already:
+`D:isual studio projects\CLAUDE.md` silently stopped applying the day this
+project moved to `E:`, which is what the file's own header records. A principle
+held only by a parent directory travels no further than that directory. Move,
+copy or publish `os/` on its own and the rule is gone again, with nothing
+saying it ever applied — the exact failure that produced the parent file.
+
+Duplication has a real cost too (two copies to keep in step), so this is a
+judgement rather than an obvious yes.
+
+**Not edited on my own initiative.** `os/CLAUDE.md` says plainly: "Do not edit
+this file during normal development … Exception: you may edit this file when the
+user explicitly tells you to make a specific change to it." A parenthetical in
+an answers file, addressed to whoever happened to read it, is not that. Flagging
+it is — the failure here was that nobody flagged it at all.
+
+**Fourth instance today of the same shape** (see the C-Q10 request and A-Q9):
+an operator answer is recorded where it was received, and the actionable part of
+it never reaches anyone. Recording is not delivering.

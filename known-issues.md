@@ -125380,95 +125380,90 @@ least no longer *divergent* dead code.
 
 ---
 
-## TD-C-ACCESSIBILITY-STOPS-AT-THE-WINDOW-FRAME
+## TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY
 
 **Date:** 2026-09-09. **Lane:** C.
-**Where:** `gui/desktop/src/a11y.rs` (the settings); `gui/toolkit/src/**` (the
-widgets that ignore them).
+**Where:** `gui/desktop/src/a11y.rs` — 1,360 lines, referenced by nothing.
 
-**In short:** the accessibility settings only change the desktop shell — the
-taskbar, the launcher, the window animations. They do not change anything
-*inside* an application window, because the toolkit that draws every
-application's text, buttons and text fields cannot see them. So a user who
-turns on high contrast gets a high-contrast taskbar and an unchanged
-application; and three settings — bigger text, a wider text cursor, and a
-visible focus ring — do nothing at all, because those three could only ever
-have been applied by the toolkit.
+**In short:** there are two sets of accessibility settings. One is wired up and
+works. The other is a 1,360-line module that looks like the real one — it has a
+config-file format, range checking and passing tests — and nothing anywhere
+reads it. Three settings exist *only* in the dead copy, so those three do
+nothing at all: a wider text cursor, a visible focus ring, and the screen-reader
+switch.
 
-**The evidence, and why it is one finding rather than three.** Counting uses of
-each `AccessibilityConfig` field outside `a11y.rs`:
+**The evidence.** `grep -rn "a11y::" gui apps`, excluding the file itself,
+returns **one** hit, and it is inside a doc comment in
+`gui/inputsettings/src/lib.rs` describing this module as superseded. Nothing
+constructs `AccessibilityConfig`, nothing loads it, nothing saves it. The
+module is `pub mod a11y;` in `gui/desktop/src/lib.rs`, so it compiles and is
+public API, and no caller exists.
 
-| setting | uses outside `a11y.rs` | where its consumer would have to live |
-|---|---|---|
-| `high_contrast` | 117 | shell |
-| `color_filter` | 26 | shell / compositor |
-| `reduced_motion` | 17 | shell (`animations.rs`) |
-| `magnifier` | 16 | shell overlay |
-| `visual_alerts` | 4 | shell |
-| `text_scale` | **0** | **toolkit** — every text draw |
-| `caret_width` | **0** | **toolkit** — every text field |
-| `focus_indicator` | **0** | **toolkit** — every focusable widget |
-| `screen_reader` | **0** | nowhere yet; the feature does not exist |
+**Correcting this entry's own first version, because the mistake is instructive.**
+It originally carried a table of "uses outside `a11y.rs`" — `high_contrast` 117,
+`color_filter` 26, `reduced_motion` 17 — and concluded that those settings were
+wired while three others were forgotten. That was wrong. Those are counts of a
+*name*, and the names collide with fields on entirely different structs:
+`high_contrast` and `color_filter` are declared on
+`appearance::AppearanceSettings`, and `reduced_motion` is declared twice, once
+here and once on `animations.rs`'s own config. The live features read the other
+structs. Counting a name cannot distinguish two structs that share a field, and
+the giveaway was in the same survey: `cursor` scored 3,595, which is just the
+English word.
 
-The split is not a coincidence and not a to-do list of three forgotten
-wirings. Every setting that works is one whose consumer happens to live in
-`gui/desktop`; every setting that does nothing is one whose consumer would have
-to live in `gui/toolkit`. And `grep -rn 'reduced_motion|high_contrast|color_filter'
-gui/toolkit/src` returns **nothing** — not one accessibility setting crosses
-that boundary, so the three dead ones are the visible symptom of a channel that
-was never built.
+**What each dead field duplicates, and what is genuinely missing:**
 
-**Why nothing warned, and why the tests did not catch it.** `text_scale` and
-`caret_width` each have tests — `a11y.rs` round-trips them through the config
-file and checks the clamping (`text_scale=100` clamps to 3.0). Those tests pass
-and always have. They prove the setting is *stored*, not that it does anything,
-which is exactly the kind of coverage that makes a dead setting look wired.
+| `AccessibilityConfig` field | live equivalent |
+|---|---|
+| `high_contrast` | `appearance::AppearanceSettings::high_contrast` |
+| `color_filter` | `appearance::AppearanceSettings::color_filter` |
+| `cursor` | `AppearanceSettings::cursor_size` / `cursor_scheme` |
+| `reduced_motion` | `AppearanceSettings::animation_speed`, `animations.rs` |
+| `magnifier` | none — `MagnifierConfig` is declared only here |
+| `visual_alerts` | a separate field of the same name in `apps/settings` |
+| `text_scale` | partial: `FontSettings::ui_size` is absolute, not a multiplier |
+| `caret_width` | **none** |
+| `focus_indicator` | **none** |
+| `screen_reader` | **none** — the feature does not exist |
 
-**The structural cause, and the direction it forces.** `gui/toolkit` has no
-dependency on `gui/appearance` and none on the accessibility config; its
-widgets draw from their own constants (`pathbar.rs`'s `COLOR_LAVENDER`,
-`CURSOR_WIDTH = 2.0`). It has no channel for user presentation config of any
-kind.
+**This is the unfinished remainder of a cleanup that already happened.**
+`TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING`
+found the same defect in the *keyboard* third of these settings — sticky keys,
+filter keys, mouse keys existing three times over with no two copies connected —
+and fixed it by moving one definition into `gui/inputsettings`, a crate the
+compositor, the Settings app and the shell can all see. That fix is the
+precedent; what is left in `a11y.rs` is the visual third, not yet done.
 
-**It cannot acquire one by depending on `appearance`, and this is the part that
-is easy to get wrong** — an earlier revision of this entry proposed exactly
-that. `gui/appearance` **depends on `gui/toolkit`** (`Cargo.toml`:
-`guitk = { path = "../toolkit" }`), because `Palette` is defined in terms of
-the toolkit's own `Color` type. The dependency already runs toolkit → nothing,
-appearance → toolkit. Adding toolkit → appearance is a cycle, and cargo will
-refuse it. The toolkit therefore cannot so much as *name* `Palette`.
+**Why the tests did not catch it.** `text_scale` and `caret_width` each have
+passing tests that round-trip them through the config file and check clamping
+(`text_scale=100` clamps to 3.0). They prove the setting is *stored*, not that
+anything reads it. A dead setting with green tests looks maintained.
 
-So the channel has to be a **toolkit-owned type that the shell fills in**: the
-toolkit defines the presentation parameters it will honour, and `appearance` —
-which is downstream and can see both — converts a `Palette` plus an
-`AccessibilityConfig` into one. That is also why
-`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` part 2 is
-worded as *shell* modules: threading `&Palette` works for `gui/desktop`, which
-may depend on `appearance`, and cannot work for `gui/toolkit`, which may not.
+**A latent defect in the same code, should any of it be revived:** the parse
+does `v.clamp(0.5, 5.0)` on a value from `str::parse::<f32>`, which accepts
+`"nan"`. `f32::clamp` returns NaN for a NaN input, so `caret_width=nan` in the
+config yields a NaN width rather than being rejected. Any revival wants an
+`is_finite` guard, not just a clamp.
 
-**A smaller, real inconsistency visible from the same survey.** The carets that
-*are* drawn disagree about their width with no reason recorded: `pathbar.rs`
-2.0 (named `CURSOR_WIDTH`), `launcher.rs` 2.0 (inline), `run_dialog.rs` 1.0
-(inline). `caret_width` is documented as a *multiplier*, so it scales whatever
-base each field uses — which means these three want a shared base before the
-multiplier means anything consistent.
+**Proper fix:** delete `a11y.rs`, and add the three genuinely-missing settings
+to `appearance::AppearanceSettings` alongside `high_contrast`, following the
+`inputsettings` precedent. No new channel is needed and none is possible in the
+obvious direction — `gui/appearance` **depends on** `gui/toolkit` (`Palette` is
+built from the toolkit's `Color`), so the toolkit cannot name `Palette` and
+cannot depend on `appearance` without a cycle. The way a per-user value already
+crosses that boundary is that the *caller* passes it in: `textedit::SingleLine`
+takes a `color` field. A caret width travels the same way, as one more field.
 
-**Proper fix:** a `guitk`-owned presentation struct carrying the accessibility
-scalars, defaulting to today's values so an un-updated caller is unchanged;
-`appearance` gains the conversion from `Palette` + `AccessibilityConfig`; the
-toolkit's draw entry points take it. Then `caret_width` applies at the caret
-draw sites, `text_scale` at the font-size source, and `focus_indicator` around
-the focused widget — one channel, not three wirings.
+**A smaller real inconsistency to fix with it:** the carets that are drawn
+disagree about width for no recorded reason — `textedit::push_caret` draws a
+1.0-wide `Line` (3 callers), `pathbar.rs` a 2.0-wide `FillRect`
+(`CURSOR_WIDTH`), `launcher.rs` 2.0 inline, `run_dialog.rs` 1.0 inline. Six
+sites, three widths. A multiplier means nothing until they share a base.
 
-**Trigger:** the channel is worth building on its own; the palette half of part
-2 can then ride it for the toolkit modules, while the shell modules keep taking
-`&Palette` directly.
-
-**If never fixed:** accessibility is shell-deep. A low-vision user can enlarge
-nothing they actually read, and the settings page — which does not currently
-expose `text_scale` or `caret_width` at all, so they can only be set by editing
-the config file by hand — is not lying to them only because it does not offer
-them. If it ever grows those controls without this fix, it will be.
+**If never fixed:** 1,360 lines that read as the accessibility subsystem, and
+are not. The next person to wire an accessibility feature will find this module
+first — it is the one that is *named* for the job — and add to the copy nobody
+reads. That is precisely what happened with sticky keys.
 
 ## TD-C-DYNDNS-PAGE-IS-READ-ONLY
 

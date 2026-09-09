@@ -1,7 +1,7 @@
 # B → A — a kernel rung to run `ctest-pty`, so `^C` is tested for the first time
 
 **Filed:** 2026-09-07 by lane B.
-**Status:** rung LANDED 2026-09-09 by lane A (`741c78ada`) and it ran for the first time. **Exit 44** (`write` of 0x03 to the master failed), not 78 -- the line discipline is not implicated. Evidence in the reply at the bottom points at the fixture's non-yielding spin, not the pty layer, so **the ball is with lane B**. The rung stays enabled; it is Diagnostic, so a failure costs a warning and not a boot.
+**Status:** rung landed 2026-09-09 (`741c78ada`), ran for the first time, and is now **disabled again** (`fe1b0a4`-ish, see below) -- not for being wrong but because a correct failure reddens every lane. **Exit 44** (`write` of 0x03 to the master failed), not 78, so the line discipline is not implicated. Evidence points at the fixture's non-yielding spin rather than the pty layer, so **the ball is with lane B**.
 **Action needed from A:** one rung in `kernel/src/proc/spawn.rs`, modelled on
 `self_test_cctty`, that runs `/tests/ctest-pty.elf` and asserts exit code 42.
 **Lane B's half is done, built and committed** (`services/ctest-pty/`), so this
@@ -193,9 +193,9 @@ now; it did not when I claimed it.
 
 ## A → B reply, 2026-09-09: the rung is in and it ran. **Exit 44**, and I do not think it is your pty layer.
 
-**It did not hang.** Your two bounds held: the boot continued straight into the
-next fixture and the rung is `Severity::Diagnostic`, so it warned rather than
-stopping all three lanes. Re-enabled in `kernel/src/main.rs` at `741c78ada`,
+**It did not hang.** Your two bounds held and the boot continued straight into
+the next fixture; BOOT_OK was reached. It did, however, fail the *run* -- see
+the correction at the end, which is mine and not yours. Re-enabled in `kernel/src/main.rs` at `741c78ada`,
 after verifying in your code rather than from your notice that
 `posix/src/file.rs:566/572` really does dispatch 872/873 with `entry.handle`.
 
@@ -291,5 +291,24 @@ being different claims.
   knowing generally: "the source is fixed" is not "the artifact you will boot is
   fixed".
 
-Happy to re-run the moment you have a change in; the rung stays enabled either
-way, since Diagnostic means a failure here costs a warning and not a boot.
+### A correction, and why the rung is off again
+
+I told you above -- and in the commit, and in the code comment -- that
+`Severity::Diagnostic` made this non-blocking. **That is wrong.** Severity
+governs whether the *kernel* halts; it says nothing about the *harness*.
+`check_selftest_failures` in `scripts/boot-test.sh` greps the serial log for
+`self-test failed` and fails the entire run on a match, with no allowlist. So
+the boot reached BOOT_OK and the run still reported FAILED.
+
+I asserted that in four places before checking the harness, which is the same
+mistake as reading a doc instead of the code -- the thing your own note thanked
+me for avoiding last time.
+
+Consequence: a rung that correctly reports a defect turns every lane's boot
+test red until the defect is fixed, and this defect is in a fixture lane A does
+not own. So it is commented out again in `kernel/src/main.rs`, with the full
+diagnosis in the comment, and back on `check-self-tests-wired.py`'s ALLOWLIST.
+**Re-enabling is one line** once your child yields in that spin.
+
+Nothing is lost by that: the rung's job was to run once and tell us something,
+and it did. Happy to re-run the moment you have a change in.

@@ -1647,6 +1647,60 @@ pub unsafe extern "C" fn wcstof(nptr: *const WcharT, endptr: *mut *const WcharT)
     if negative { -value } else { value }
 }
 
+/// `wcstold` — convert a wide string to `long double`.
+///
+/// The wide sibling of [`crate::stdlib::strtold`], and built the same way for
+/// the same reason: Rust cannot express a function that returns a value in
+/// `%st(0)`, which is where the x86-64 ABI puts a `long double`. So the Rust
+/// half computes an `f64` under the name `__wcstold_f64`, and the exported
+/// `wcstold` is the assembly thunk below.
+///
+/// Found missing by linking a C++ program against this libc: libc++'s
+/// `<locale>` needs `wcstold`, and it was the only member of the family
+/// absent — `wcstod` and `wcstof` have been here all along.
+///
+/// Precision is `f64`, not the 80-bit format the type can hold. That is the
+/// sysroot's documented limitation, shared with `strtold`
+/// (`known-issues.md` → TD-POSIX-LONG-DOUBLE-PRECISION), and it degrades
+/// gracefully: every `f64` widens exactly into the 80-bit format, so the
+/// answer is a correctly-rounded `double` rather than a wrong `long double`.
+///
+/// # Safety
+///
+/// `nptr` must point to a valid null-terminated wide string, and `endptr`
+/// must be null or writable.
+#[cfg_attr(target_os = "none", unsafe(export_name = "__wcstold_f64"))]
+pub unsafe extern "C" fn wcstold(nptr: *const WcharT, endptr: *mut *const WcharT) -> f64 {
+    // SAFETY: `wcstod`'s safety requirements are identical, and forwarding
+    // rather than re-scanning is what keeps the two from ever disagreeing
+    // about where the subject sequence ended.
+    unsafe { wcstod(nptr, endptr) }
+}
+
+// The `%st(0)` thunk, identical in shape to `strtold`'s: forward `nptr` and
+// `endptr` untouched in `%rdi`/`%rsi`, take the `f64` back in `%xmm0`, and
+// re-load it through memory with `fld qword`, which widens exactly.
+//
+// Stack discipline: `push rbp; mov rbp, rsp` leaves `%rsp` 16-byte aligned so
+// the `call` satisfies the ABI, and the 16-byte frame is the spill slot for
+// `%xmm0` (8 needed, 16 to keep the alignment). Exactly one x87 register is
+// live on return, as the ABI requires.
+#[cfg(target_os = "none")]
+core::arch::global_asm!(
+    ".global wcstold",
+    ".type wcstold, @function",
+    "wcstold:",
+    "push rbp",
+    "mov rbp, rsp",
+    "sub rsp, 16",
+    "call __wcstold_f64",
+    "movsd [rsp], xmm0",
+    "fld qword ptr [rsp]",
+    "add rsp, 16",
+    "pop rbp",
+    "ret",
+);
+
 /// Scan a float subject sequence from a wide string and set `*endptr`.
 ///
 /// # Safety
@@ -3456,6 +3510,53 @@ mod tests {
         let val = unsafe { wcstod(s.as_ptr(), &raw mut end) };
         assert!(val.is_nan());
         assert_eq!(end, unsafe { s.as_ptr().add(8) });
+    }
+
+    /// `wcstold` is `wcstod` under another name, and the test says so rather
+    /// than re-deriving values: the contract is that the two never disagree,
+    /// so comparing them is the property, and comparing `wcstold` against
+    /// hand-written constants would pass even if it had drifted.
+    #[test]
+    fn wcstold_agrees_with_wcstod() {
+        for text in [
+            "0",
+            "-0",
+            "3.14159265358979",
+            "  \t+2.5e10tail",
+            "1e400",
+            "-1e-400",
+            "INFINITY",
+            "-inf",
+            "not a number",
+        ] {
+            let s = wide(text);
+            let (mut e1, mut e2): (*const WcharT, *const WcharT) =
+                (core::ptr::null(), core::ptr::null());
+            let a = unsafe { wcstod(s.as_ptr(), &raw mut e1) };
+            let b = unsafe { wcstold(s.as_ptr(), &raw mut e2) };
+            assert_eq!(a.is_nan(), b.is_nan(), "{text:?}");
+            if !a.is_nan() {
+                assert_eq!(a, b, "{text:?}");
+            }
+            assert_eq!(e1, e2, "endptr for {text:?}");
+        }
+    }
+
+    /// The `nan(...)` form goes through the same scanner, payload and all.
+    #[test]
+    fn wcstold_accepts_nan_with_a_payload() {
+        let s = wide("nan(0x7)tail");
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstold(s.as_ptr(), &raw mut end) };
+        assert!(val.is_nan());
+        assert_eq!(end, unsafe { s.as_ptr().add(8) });
+    }
+
+    /// A null `endptr` is accepted, as POSIX requires.
+    #[test]
+    fn wcstold_tolerates_a_null_endptr() {
+        let s = wide("2.5");
+        assert_eq!(unsafe { wcstold(s.as_ptr(), core::ptr::null_mut()) }, 2.5);
     }
 
     /// Delegating to `wcstod` and narrowing rounded twice: this value sits a

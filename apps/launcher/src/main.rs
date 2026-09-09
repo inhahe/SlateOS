@@ -34,33 +34,6 @@ mod theme {
 
     /// Base background (slightly transparent for floating dialog feel).
     pub const BASE: Color = Color::rgba(30, 30, 46, 240);
-    /// Mantle — slightly darker background for input area.
-
-    /// Surface0 — card/result row background.
-    #[allow(dead_code, reason = "the palette is kept complete")]
-
-    /// Surface1 — hover/selected highlight.
-
-    /// Surface2 — borders.
-
-    /// Text — primary text color.
-
-    /// Subtext0 — secondary text (descriptions, category badges).
-
-    /// Subtext1 — dimmer text.
-
-    /// Overlay0 — placeholder text.
-
-    /// Blue — accent color (selected item highlight, input caret).
-
-    /// Mauve — category badge accent.
-
-    /// Green — system command badge.
-
-    /// Peach — settings badge.
-
-    /// Red — destructive actions.
-
     /// Shadow color for the dialog box.
     pub const SHADOW: Color = Color::rgba(0, 0, 0, 100);
 }

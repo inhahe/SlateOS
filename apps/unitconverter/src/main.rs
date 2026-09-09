@@ -16,6 +16,7 @@
 // Widget-heavy GUI render helpers take many positional params.
 #![allow(clippy::too_many_arguments)]
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -35,27 +36,11 @@ use std::fmt::Write as FmtWrite;
 mod theme {
     use guitk::color::Color;
 
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-    pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
-    pub const TEAL: Color = Color::from_hex(0x94E2D5);
     // `0x89DCEB`. Was `0x89DCFE` — a transposed byte pair copied from
     // `gui/appearance`, which had carried it since the constant was written.
     // This is the one that was visible: `Category::DigitalStorage` renders in
     // it. See known-issues.md
     // TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO.
-    pub const SKY: Color = Color::from_hex(0x89DCEB);
     pub const PINK: Color = Color::from_hex(0xF5C2E7);
     pub const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
     pub const ROSEWATER: Color = Color::from_hex(0xF5E0DC);
@@ -136,19 +121,19 @@ impl Category {
     }
 
     /// Color accent for this category.
-    pub fn accent(self) -> Color {
+    pub fn accent(self, pal: &Palette) -> Color {
         match self {
-            Category::Length => theme::BLUE,
-            Category::Weight => theme::GREEN,
-            Category::Temperature => theme::RED,
-            Category::Volume => theme::TEAL,
-            Category::Area => theme::YELLOW,
-            Category::Speed => theme::PEACH,
-            Category::Time => theme::MAUVE,
-            Category::DigitalStorage => theme::SKY,
+            Category::Length => pal.blue,
+            Category::Weight => pal.green,
+            Category::Temperature => pal.red,
+            Category::Volume => pal.teal,
+            Category::Area => pal.yellow,
+            Category::Speed => pal.peach,
+            Category::Time => pal.mauve,
+            Category::DigitalStorage => pal.sky,
             Category::Pressure => theme::FLAMINGO,
             Category::Energy => theme::PINK,
-            Category::Frequency => theme::LAVENDER,
+            Category::Frequency => pal.lavender,
             Category::Angle => theme::ROSEWATER,
         }
     }
@@ -558,6 +543,12 @@ pub struct UnitConverterApp {
     pub show_favorites: bool,
     /// Which input is focused: true = from, false = to (for future bidirectional).
     pub from_focused: bool,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl Default for UnitConverterApp {
@@ -570,6 +561,7 @@ impl UnitConverterApp {
     /// Create a new application with default state.
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             selected_category: Category::Length,
             from_unit_idx: 2, // meters
             to_unit_idx: 3,   // kilometers
@@ -1070,7 +1062,7 @@ impl UnitConverterApp {
             y: 0.0,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
-            color: theme::BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1097,7 +1089,7 @@ impl UnitConverterApp {
             y: 0.0,
             width: SIDEBAR_WIDTH,
             height: WINDOW_HEIGHT,
-            color: theme::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1106,7 +1098,7 @@ impl UnitConverterApp {
             x: 16.0,
             y: 18.0,
             text: String::from("Unit Converter"),
-            color: theme::BLUE,
+            color: self.palette.blue,
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - 24.0),
@@ -1119,7 +1111,7 @@ impl UnitConverterApp {
             y1: 48.0,
             x2: SIDEBAR_WIDTH - 12.0,
             y2: 48.0,
-            color: theme::SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
 
@@ -1138,7 +1130,7 @@ impl UnitConverterApp {
                     y,
                     width: SIDEBAR_WIDTH - 8.0,
                     height: item_height - 4.0,
-                    color: theme::SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(6.0),
                 });
 
@@ -1148,7 +1140,7 @@ impl UnitConverterApp {
                     y: y + 6.0,
                     width: 3.0,
                     height: item_height - 16.0,
-                    color: cat.accent(),
+                    color: cat.accent(&self.palette),
                     corner_radii: CornerRadii::all(1.5),
                 });
             }
@@ -1158,9 +1150,9 @@ impl UnitConverterApp {
             let icon_y = y + 8.0;
             let icon_size: f32 = 26.0;
             let icon_color = if is_selected {
-                cat.accent()
+                cat.accent(&self.palette)
             } else {
-                theme::SURFACE1
+                self.palette.surface1
             };
             tree.push(RenderCommand::FillRect {
                 x: icon_x,
@@ -1173,9 +1165,9 @@ impl UnitConverterApp {
 
             // Icon text.
             let icon_text_color = if is_selected {
-                theme::MANTLE
+                self.palette.mantle
             } else {
-                theme::SUBTEXT0
+                self.palette.subtext0
             };
             tree.push(RenderCommand::Text {
                 x: icon_x + 4.0,
@@ -1190,9 +1182,9 @@ impl UnitConverterApp {
 
             // Category name.
             let text_color = if is_selected {
-                theme::TEXT
+                self.palette.text
             } else {
-                theme::SUBTEXT0
+                self.palette.subtext0
             };
             tree.push(RenderCommand::Text {
                 x: 52.0,
@@ -1223,7 +1215,7 @@ impl UnitConverterApp {
             y1: 0.0,
             x2: main_left,
             y2: WINDOW_HEIGHT,
-            color: theme::SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -1232,7 +1224,7 @@ impl UnitConverterApp {
         let to_unit = units.get(self.to_unit_idx);
 
         // Category title with accent color.
-        let accent = self.selected_category.accent();
+        let accent = self.selected_category.accent(&self.palette);
         tree.push(RenderCommand::Text {
             x: main_left + 24.0,
             y: 20.0,
@@ -1251,9 +1243,9 @@ impl UnitConverterApp {
             "\u{2606}" // empty star
         };
         let star_color = if self.is_current_favorite() {
-            theme::YELLOW
+            self.palette.yellow
         } else {
-            theme::OVERLAY0
+            self.palette.overlay0
         };
         tree.push(RenderCommand::Text {
             x: main_right - 44.0,
@@ -1271,7 +1263,7 @@ impl UnitConverterApp {
             x: main_left + 24.0,
             y: 70.0,
             text: String::from("From"),
-            color: theme::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1318,14 +1310,14 @@ impl UnitConverterApp {
             y: swap_cy - swap_r,
             width: swap_r * 2.0,
             height: swap_r * 2.0,
-            color: theme::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(swap_r),
         });
         tree.push(RenderCommand::Text {
             x: swap_cx - 7.0,
             y: swap_cy - 8.0,
             text: String::from("\u{21C4}"), // left-right arrows
-            color: theme::BLUE,
+            color: self.palette.blue,
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1338,7 +1330,7 @@ impl UnitConverterApp {
             x: to_section_x,
             y: 70.0,
             text: String::from("To"),
-            color: theme::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1380,7 +1372,7 @@ impl UnitConverterApp {
             y: result_y,
             width: main_width - 32.0,
             height: 80.0,
-            color: theme::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(10.0),
         });
 
@@ -1407,7 +1399,7 @@ impl UnitConverterApp {
             x: main_left + 32.0,
             y: result_y + 16.0,
             text: result_line,
-            color: theme::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(main_width - 64.0),
@@ -1420,7 +1412,7 @@ impl UnitConverterApp {
             x: main_left + 32.0,
             y: result_y + 40.0,
             text: big_result,
-            color: theme::TEXT,
+            color: self.palette.text,
             font_size: 22.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(main_width - 64.0),
@@ -1433,7 +1425,7 @@ impl UnitConverterApp {
             x: main_left + 24.0,
             y: formula_y,
             text: String::from("Formula"),
-            color: theme::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1445,7 +1437,7 @@ impl UnitConverterApp {
             y: formula_y + 18.0,
             width: main_width - 32.0,
             height: 32.0,
-            color: theme::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -1453,7 +1445,7 @@ impl UnitConverterApp {
             x: main_left + 28.0,
             y: formula_y + 26.0,
             text: self.current_formula(),
-            color: theme::LAVENDER,
+            color: self.palette.lavender,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(main_width - 56.0),
@@ -1470,9 +1462,9 @@ impl UnitConverterApp {
             width: fav_btn_w,
             height: fav_btn_h,
             color: if self.show_favorites {
-                theme::SURFACE1
+                self.palette.surface1
             } else {
-                theme::SURFACE0
+                self.palette.surface0
             },
             corner_radii: CornerRadii::all(6.0),
         });
@@ -1484,7 +1476,7 @@ impl UnitConverterApp {
             } else {
                 String::from("\u{2606} Favorites")
             },
-            color: theme::YELLOW,
+            color: self.palette.yellow,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(fav_btn_w - 20.0),
@@ -1501,7 +1493,7 @@ impl UnitConverterApp {
                     x: main_left + 28.0,
                     y: fav_start_y + 6.0,
                     text: String::from("No favorites yet. Press Ctrl+F to add."),
-                    color: theme::OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(main_width - 56.0),
@@ -1519,7 +1511,7 @@ impl UnitConverterApp {
                         y: fy,
                         width: main_width - 40.0,
                         height: fav_item_h - 4.0,
-                        color: theme::SURFACE0,
+                        color: self.palette.surface0,
                         corner_radii: CornerRadii::all(4.0),
                     });
 
@@ -1527,7 +1519,7 @@ impl UnitConverterApp {
                         x: main_left + 30.0,
                         y: fy + 6.0,
                         text: fav.label(),
-                        color: theme::TEXT,
+                        color: self.palette.text,
                         font_size: 12.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(main_width - 60.0),
@@ -1543,7 +1535,7 @@ impl UnitConverterApp {
             x: main_left + 20.0,
             y: hint_y,
             text: String::from("Ctrl+S: Swap | Ctrl+F: Favorite | Tab: Switch focus"),
-            color: theme::OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(main_width - 40.0),
@@ -1563,9 +1555,9 @@ impl UnitConverterApp {
         focused: bool,
     ) {
         let border_color = if focused {
-            theme::BLUE
+            self.palette.blue
         } else {
-            theme::SURFACE1
+            self.palette.surface1
         };
 
         tree.push(RenderCommand::FillRect {
@@ -1573,7 +1565,7 @@ impl UnitConverterApp {
             y,
             width: w,
             height: h,
-            color: theme::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -1588,9 +1580,9 @@ impl UnitConverterApp {
         });
 
         let text_color = if text == "..." || text == "Invalid input" {
-            theme::OVERLAY0
+            self.palette.overlay0
         } else {
-            theme::TEXT
+            self.palette.text
         };
 
         tree.push(RenderCommand::Text {
@@ -1612,7 +1604,7 @@ impl UnitConverterApp {
                 y1: y + 8.0,
                 x2: cursor_x,
                 y2: y + h - 8.0,
-                color: theme::BLUE,
+                color: self.palette.blue,
                 width: 1.5,
             });
         }
@@ -1630,9 +1622,9 @@ impl UnitConverterApp {
         is_open: bool,
     ) {
         let bg = if is_open {
-            theme::SURFACE1
+            self.palette.surface1
         } else {
-            theme::SURFACE0
+            self.palette.surface0
         };
 
         tree.push(RenderCommand::FillRect {
@@ -1649,7 +1641,7 @@ impl UnitConverterApp {
             y,
             width: w,
             height: h,
-            color: theme::SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -1658,7 +1650,7 @@ impl UnitConverterApp {
             x: x + 10.0,
             y: y + 8.0,
             text: String::from(label),
-            color: theme::TEXT,
+            color: self.palette.text,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 30.0),
@@ -1671,7 +1663,7 @@ impl UnitConverterApp {
             x: x + w - 20.0,
             y: y + 8.0,
             text: String::from(arrow),
-            color: theme::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1721,7 +1713,7 @@ impl UnitConverterApp {
             y: dd_y,
             width: dd_w,
             height: dd_h,
-            color: theme::SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -1730,7 +1722,7 @@ impl UnitConverterApp {
             y: dd_y,
             width: dd_w,
             height: dd_h,
-            color: theme::SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -1746,12 +1738,16 @@ impl UnitConverterApp {
                     y: iy,
                     width: dd_w - 8.0,
                     height: item_h - 2.0,
-                    color: theme::BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
 
-            let text_color = if is_sel { theme::MANTLE } else { theme::TEXT };
+            let text_color = if is_sel {
+                self.palette.mantle
+            } else {
+                self.palette.text
+            };
 
             // Symbol.
             tree.push(RenderCommand::Text {
@@ -1771,9 +1767,9 @@ impl UnitConverterApp {
                 y: iy + 6.0,
                 text: String::from(unit.name),
                 color: if is_sel {
-                    theme::MANTLE
+                    self.palette.mantle
                 } else {
-                    theme::SUBTEXT0
+                    self.palette.subtext0
                 },
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
@@ -1793,7 +1789,7 @@ impl UnitConverterApp {
             y1: 0.0,
             x2: panel_x,
             y2: WINDOW_HEIGHT,
-            color: theme::SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -1803,7 +1799,7 @@ impl UnitConverterApp {
             y: 0.0,
             width: HISTORY_PANEL_WIDTH,
             height: WINDOW_HEIGHT,
-            color: theme::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1812,7 +1808,7 @@ impl UnitConverterApp {
             x: panel_x + 16.0,
             y: 18.0,
             text: String::from("Recent Conversions"),
-            color: theme::PEACH,
+            color: self.palette.peach,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(HISTORY_PANEL_WIDTH - 32.0),
@@ -1825,7 +1821,7 @@ impl UnitConverterApp {
             y1: 42.0,
             x2: panel_x + HISTORY_PANEL_WIDTH - 12.0,
             y2: 42.0,
-            color: theme::SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
 
@@ -1835,7 +1831,7 @@ impl UnitConverterApp {
                 x: panel_x + 16.0,
                 y: 56.0,
                 text: String::from("No conversions yet."),
-                color: theme::OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(HISTORY_PANEL_WIDTH - 32.0),
@@ -1845,7 +1841,7 @@ impl UnitConverterApp {
                 x: panel_x + 16.0,
                 y: 74.0,
                 text: String::from("Type a value and it will"),
-                color: theme::OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(HISTORY_PANEL_WIDTH - 32.0),
@@ -1855,7 +1851,7 @@ impl UnitConverterApp {
                 x: panel_x + 16.0,
                 y: 90.0,
                 text: String::from("appear here."),
-                color: theme::OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(HISTORY_PANEL_WIDTH - 32.0),
@@ -1887,12 +1883,12 @@ impl UnitConverterApp {
                     y: ey + 2.0,
                     width: HISTORY_PANEL_WIDTH - 16.0,
                     height: item_h - 6.0,
-                    color: theme::SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(6.0),
                 });
 
                 // Category badge.
-                let cat_color = entry.category.accent();
+                let cat_color = entry.category.accent(&self.palette);
                 tree.push(RenderCommand::FillRect {
                     x: panel_x + 14.0,
                     y: ey + 8.0,
@@ -1907,7 +1903,7 @@ impl UnitConverterApp {
                     x: panel_x + 26.0,
                     y: ey + 10.0,
                     text: entry.display(),
-                    color: theme::TEXT,
+                    color: self.palette.text,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(HISTORY_PANEL_WIDTH - 50.0),
@@ -1919,7 +1915,7 @@ impl UnitConverterApp {
                     x: panel_x + 26.0,
                     y: ey + 28.0,
                     text: String::from(entry.category.name()),
-                    color: theme::OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 9.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(HISTORY_PANEL_WIDTH - 50.0),
@@ -1937,6 +1933,10 @@ impl UnitConverterApp {
 // ============================================================================
 
 impl App for UnitConverterApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         format!("Unit Converter — {}", self.selected_category.name())
     }
@@ -2007,7 +2007,6 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
-    use oswindow::app::App as _;
 
     // ------------------------------------------------------------------
     // Compositor wiring
@@ -3360,5 +3359,79 @@ mod tests {
         let inch = &units[4]; // in
         let result = convert(25.4, mm, inch);
         assert!((result - 1.0).abs() < 1e-6);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut UnitConverterApp) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 800.0, 600.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = UnitConverterApp::new();
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        oswindow::app::App::theme_changed(
+            &mut app,
+            &theme(
+                appearance::ThemeMode::Dark,
+                Some(appearance::HighContrastScheme::WhiteOnBlack),
+            ),
+        );
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

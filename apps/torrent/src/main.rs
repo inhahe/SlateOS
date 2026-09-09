@@ -30,6 +30,7 @@
 // future-proofing.
 #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, dead_code)]
 
+use appearance::Palette;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -2161,29 +2162,6 @@ use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
 
-/// Catppuccin Mocha palette
-mod colors {
-    use guitk::Color;
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const CRUST: Color = Color::from_hex(0x11111B);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const SURFACE2: Color = Color::from_hex(0x585B70);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const TEAL: Color = Color::from_hex(0x94E2D5);
-    pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
-}
-
 /// Font size used for every detail-table header and cell.
 const TABLE_FONT: f32 = 11.0;
 
@@ -2309,6 +2287,12 @@ pub struct TorrentApp {
     pub status_message: String,
     pub labels: Vec<String>,
     pub selected_label: Option<String>,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 /// Column for sorting
@@ -2385,6 +2369,7 @@ impl TorrentApp {
         }
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             torrents: Vec::new(),
             settings: ClientSettings::default(),
             active_tab: Tab::Transfers,
@@ -2840,7 +2825,7 @@ impl TorrentApp {
             y: 0.0,
             width,
             height,
-            color: colors::BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2850,7 +2835,7 @@ impl TorrentApp {
             y: 0.0,
             width,
             height: header_h,
-            color: colors::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2860,7 +2845,7 @@ impl TorrentApp {
             y: 14.0,
             text: "Torrent".to_string(),
             font_size: 18.0,
-            color: colors::BLUE,
+            color: self.palette.blue,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2883,7 +2868,7 @@ impl TorrentApp {
                 y: 8.0,
                 width: bw,
                 height: 32.0,
-                color: colors::SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
@@ -2891,7 +2876,7 @@ impl TorrentApp {
                 y: 16.0,
                 text: label.to_string(),
                 font_size: 12.0,
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2907,7 +2892,7 @@ impl TorrentApp {
             y: sidebar_y,
             width: sidebar_w,
             height: sidebar_h,
-            color: colors::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2930,7 +2915,7 @@ impl TorrentApp {
                     y: fy,
                     width: sidebar_w - 8.0,
                     height: 28.0,
-                    color: colors::SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -2945,9 +2930,9 @@ impl TorrentApp {
                 text: format!("{} ({})", filter.label(), count),
                 font_size: 12.0,
                 color: if is_sel {
-                    colors::BLUE
+                    self.palette.blue
                 } else {
-                    colors::SUBTEXT1
+                    self.palette.subtext1
                 },
                 font_weight: if is_sel {
                     FontWeightHint::Bold
@@ -2967,7 +2952,7 @@ impl TorrentApp {
             y: fy,
             text: "Labels".to_string(),
             font_size: 11.0,
-            color: colors::OVERLAY0,
+            color: self.palette.overlay0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2981,7 +2966,7 @@ impl TorrentApp {
                     y: fy,
                     width: sidebar_w - 8.0,
                     height: 24.0,
-                    color: colors::SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -2991,9 +2976,9 @@ impl TorrentApp {
                 text: label.clone(),
                 font_size: 12.0,
                 color: if is_sel {
-                    colors::BLUE
+                    self.palette.blue
                 } else {
-                    colors::SUBTEXT0
+                    self.palette.subtext0
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sidebar_w - 24.0),
@@ -3010,7 +2995,7 @@ impl TorrentApp {
             y: header_h,
             width: content_w,
             height: tab_h,
-            color: colors::CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3024,7 +3009,7 @@ impl TorrentApp {
                     y: header_h + 4.0,
                     width: tw,
                     height: tab_h - 4.0,
-                    color: colors::BASE,
+                    color: self.palette.base,
                     corner_radii: CornerRadii {
                         top_left: 6.0,
                         top_right: 6.0,
@@ -3039,9 +3024,9 @@ impl TorrentApp {
                 text: tab.label().to_string(),
                 font_size: 12.0,
                 color: if is_active {
-                    colors::BLUE
+                    self.palette.blue
                 } else {
-                    colors::SUBTEXT0
+                    self.palette.subtext0
                 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -3082,7 +3067,7 @@ impl TorrentApp {
             y: sy,
             width,
             height: status_h,
-            color: colors::CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -3100,7 +3085,7 @@ impl TorrentApp {
                 self.status_message
             ),
             font_size: 11.0,
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -3129,7 +3114,7 @@ impl TorrentApp {
                 y: hy,
                 text: label.to_string(),
                 font_size: 11.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(*cw),
                 overflow: TextOverflow::Ellipsis,
@@ -3154,7 +3139,7 @@ impl TorrentApp {
                     y: ry,
                     width: w - 8.0,
                     height: row_h - 2.0,
-                    color: colors::SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -3167,7 +3152,7 @@ impl TorrentApp {
                 y: ry + 6.0,
                 text: torrent.name.clone(),
                 font_size: 12.0,
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(250.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3178,7 +3163,7 @@ impl TorrentApp {
                     y: ry + 24.0,
                     text: torrent.label.clone(),
                     font_size: 10.0,
-                    color: colors::MAUVE,
+                    color: self.palette.mauve,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(250.0),
                     overflow: TextOverflow::Ellipsis,
@@ -3192,7 +3177,7 @@ impl TorrentApp {
                 y: ry + 6.0,
                 text: format_size(torrent.total_size),
                 font_size: 12.0,
-                color: colors::SUBTEXT1,
+                color: self.palette.subtext1,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3207,18 +3192,18 @@ impl TorrentApp {
                 y: ry + 8.0,
                 width: bar_w,
                 height: bar_h,
-                color: colors::SURFACE1,
+                color: self.palette.surface1,
                 corner_radii: CornerRadii::all(3.0),
             });
             let progress = torrent.progress();
             let fill_w = (bar_w * progress as f32 / 100.0).min(bar_w);
             if fill_w > 0.5 {
                 let bar_color = match torrent.state {
-                    TorrentState::Downloading => colors::BLUE,
-                    TorrentState::Seeding => colors::GREEN,
-                    TorrentState::Paused => colors::YELLOW,
-                    TorrentState::Error => colors::RED,
-                    _ => colors::TEAL,
+                    TorrentState::Downloading => self.palette.blue,
+                    TorrentState::Seeding => self.palette.green,
+                    TorrentState::Paused => self.palette.yellow,
+                    TorrentState::Error => self.palette.red,
+                    _ => self.palette.teal,
                 };
                 cmds.push(RenderCommand::FillRect {
                     x: cx,
@@ -3234,7 +3219,7 @@ impl TorrentApp {
                 y: ry + 24.0,
                 text: format!("{progress:.1}%"),
                 font_size: 10.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3243,12 +3228,12 @@ impl TorrentApp {
 
             // Status
             let status_color = match torrent.state {
-                TorrentState::Downloading => colors::BLUE,
-                TorrentState::Seeding => colors::GREEN,
-                TorrentState::Paused => colors::YELLOW,
-                TorrentState::Error => colors::RED,
-                TorrentState::Complete => colors::TEAL,
-                _ => colors::SUBTEXT0,
+                TorrentState::Downloading => self.palette.blue,
+                TorrentState::Seeding => self.palette.green,
+                TorrentState::Paused => self.palette.yellow,
+                TorrentState::Error => self.palette.red,
+                TorrentState::Complete => self.palette.teal,
+                _ => self.palette.subtext0,
             };
             cmds.push(RenderCommand::Text {
                 x: cx,
@@ -3268,7 +3253,7 @@ impl TorrentApp {
                 y: ry + 6.0,
                 text: format_speed(torrent.download_speed.speed_bps()),
                 font_size: 12.0,
-                color: colors::TEAL,
+                color: self.palette.teal,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3281,7 +3266,7 @@ impl TorrentApp {
                 y: ry + 6.0,
                 text: format_speed(torrent.upload_speed.speed_bps()),
                 font_size: 12.0,
-                color: colors::PEACH,
+                color: self.palette.peach,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3294,7 +3279,7 @@ impl TorrentApp {
                 y: ry + 6.0,
                 text: format!("{:.2}", torrent.ratio()),
                 font_size: 12.0,
-                color: colors::SUBTEXT1,
+                color: self.palette.subtext1,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3310,7 +3295,7 @@ impl TorrentApp {
                 y: ry + 6.0,
                 text: eta_str,
                 font_size: 12.0,
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3325,7 +3310,7 @@ impl TorrentApp {
                 y: y + h / 2.0 - 10.0,
                 text: "No torrents".to_string(),
                 font_size: 14.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3345,7 +3330,7 @@ impl TorrentApp {
                 y: y + 20.0,
                 text: "Select a torrent to view details".to_string(),
                 font_size: 13.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3433,7 +3418,7 @@ impl TorrentApp {
                 y: dy,
                 text: label.to_string(),
                 font_size: 12.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3443,7 +3428,7 @@ impl TorrentApp {
                 y: dy,
                 text: value.clone(),
                 font_size: 12.0,
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_val_w),
                 overflow: TextOverflow::Ellipsis,
@@ -3464,7 +3449,7 @@ impl TorrentApp {
                 y: y + 20.0,
                 text: "Select a torrent to view peers".to_string(),
                 font_size: 13.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3473,7 +3458,7 @@ impl TorrentApp {
         };
 
         let table = Table::new(PEER_COLUMNS, x);
-        table.header(cmds, y + 4.0, colors::OVERLAY0, TABLE_FONT);
+        table.header(cmds, y + 4.0, self.palette.overlay0, TABLE_FONT);
 
         let mut py = y + 24.0;
         for peer in &torrent.peers {
@@ -3501,17 +3486,29 @@ impl TorrentApp {
             let cells: [(String, guitk::Color, Fit); 6] = [
                 (
                     format!("{}:{}", peer.address, peer.port),
-                    colors::SUBTEXT1,
+                    self.palette.subtext1,
                     Fit::Start,
                 ),
                 // A peer's client name is whatever the peer says it is: it
                 // arrives in the handshake from an untrusted party, so it is
                 // fitted like any other wire-supplied string.
-                (peer.client_name.clone(), colors::TEXT, Fit::Start),
-                (format_speed(peer.download_rate), colors::TEAL, Fit::Start),
-                (format_speed(peer.upload_rate), colors::PEACH, Fit::Start),
-                (format_size(peer.downloaded), colors::SUBTEXT0, Fit::Start),
-                (flags, colors::SUBTEXT0, Fit::Start),
+                (peer.client_name.clone(), self.palette.text, Fit::Start),
+                (
+                    format_speed(peer.download_rate),
+                    self.palette.teal,
+                    Fit::Start,
+                ),
+                (
+                    format_speed(peer.upload_rate),
+                    self.palette.peach,
+                    Fit::Start,
+                ),
+                (
+                    format_size(peer.downloaded),
+                    self.palette.subtext0,
+                    Fit::Start,
+                ),
+                (flags, self.palette.subtext0, Fit::Start),
             ];
             debug_assert_eq!(
                 cells.len(),
@@ -3531,7 +3528,7 @@ impl TorrentApp {
                 y: y + 40.0,
                 text: "No peers".to_string(),
                 font_size: 13.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3551,7 +3548,7 @@ impl TorrentApp {
                 y: y + 20.0,
                 text: "Select a torrent to view files".to_string(),
                 font_size: 13.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3565,7 +3562,7 @@ impl TorrentApp {
             .map_or(&[] as &[TorrentFile], |m| &m.files);
 
         let table = Table::new(FILE_COLUMNS, x);
-        table.header(cmds, y + 4.0, colors::OVERLAY0, TABLE_FONT);
+        table.header(cmds, y + 4.0, self.palette.overlay0, TABLE_FONT);
 
         let mut fy = y + 24.0;
         for (i, file) in meta_files.iter().enumerate() {
@@ -3579,10 +3576,10 @@ impl TorrentApp {
                 .copied()
                 .unwrap_or(FilePriority::Normal);
             let prio_color = match priority {
-                FilePriority::Skip => colors::OVERLAY0,
-                FilePriority::Low => colors::YELLOW,
-                FilePriority::Normal => colors::TEXT,
-                FilePriority::High => colors::GREEN,
+                FilePriority::Skip => self.palette.overlay0,
+                FilePriority::Low => self.palette.yellow,
+                FilePriority::Normal => self.palette.text,
+                FilePriority::High => self.palette.green,
             };
 
             // The path is elided from the *front*: it comes from the torrent's
@@ -3590,8 +3587,8 @@ impl TorrentApp {
             // identifies a file is its name, not the directory chain above it.
             // Cut the usual way, every episode in a season reads identically.
             let cells: [(String, guitk::Color, Fit); 3] = [
-                (file.path.clone(), colors::TEXT, Fit::End),
-                (format_size(file.length), colors::SUBTEXT1, Fit::Start),
+                (file.path.clone(), self.palette.text, Fit::End),
+                (format_size(file.length), self.palette.subtext1, Fit::Start),
                 (priority.to_string(), prio_color, Fit::Start),
             ];
             debug_assert_eq!(
@@ -3619,7 +3616,7 @@ impl TorrentApp {
                 y: y + 20.0,
                 text: "Select a torrent to view trackers".to_string(),
                 font_size: 13.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3628,7 +3625,7 @@ impl TorrentApp {
         };
 
         let table = Table::new(TRACKER_COLUMNS, x);
-        table.header(cmds, y + 4.0, colors::OVERLAY0, TABLE_FONT);
+        table.header(cmds, y + 4.0, self.palette.overlay0, TABLE_FONT);
 
         let mut ty = y + 24.0;
         for tracker in &torrent.trackers {
@@ -3637,10 +3634,10 @@ impl TorrentApp {
             }
 
             let status_color = match tracker.status {
-                TrackerStatus::Working => colors::GREEN,
-                TrackerStatus::Updating => colors::BLUE,
-                TrackerStatus::Error => colors::RED,
-                _ => colors::SUBTEXT0,
+                TrackerStatus::Working => self.palette.green,
+                TrackerStatus::Updating => self.palette.blue,
+                TrackerStatus::Error => self.palette.red,
+                _ => self.palette.subtext0,
             };
 
             // A tracker URL is elided from the front for the same reason a file
@@ -3648,11 +3645,11 @@ impl TorrentApp {
             // trackers on the same host, and cutting the usual way keeps only
             // the scheme and hostname they share.
             let cells: [(String, guitk::Color, Fit); 5] = [
-                (tracker.url.clone(), colors::TEXT, Fit::End),
+                (tracker.url.clone(), self.palette.text, Fit::End),
                 (tracker.status.to_string(), status_color, Fit::Start),
-                (tracker.seeders.to_string(), colors::GREEN, Fit::Start),
-                (tracker.leechers.to_string(), colors::PEACH, Fit::Start),
-                (tracker.tier.to_string(), colors::SUBTEXT0, Fit::Start),
+                (tracker.seeders.to_string(), self.palette.green, Fit::Start),
+                (tracker.leechers.to_string(), self.palette.peach, Fit::Start),
+                (tracker.tier.to_string(), self.palette.subtext0, Fit::Start),
             ];
             debug_assert_eq!(
                 cells.len(),
@@ -3763,7 +3760,7 @@ impl TorrentApp {
                 y: sy,
                 text: label.to_string(),
                 font_size: 12.0,
-                color: colors::OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3773,7 +3770,7 @@ impl TorrentApp {
                 y: sy,
                 text: value.clone(),
                 font_size: 12.0,
-                color: colors::TEXT,
+                color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_val_w),
                 overflow: TextOverflow::Ellipsis,
@@ -3809,6 +3806,10 @@ pub fn format_duration(seconds: u64) -> String {
 // ─── Main ────────────────────────────────────────────────────────────
 
 impl App for TorrentApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // How many transfers are running, because that is what a torrent
         // client is left open for. The harness re-reads this as it runs.
@@ -5103,6 +5104,80 @@ mod tests {
         assert!(
             clients.iter().any(|c| *c == "Deluge"),
             "a client name that fits must be drawn verbatim: {clients:?}"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut TorrentApp) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 1000.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = TorrentApp::new();
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        oswindow::app::App::theme_changed(
+            &mut app,
+            &theme(
+                appearance::ThemeMode::Dark,
+                Some(appearance::HighContrastScheme::WhiteOnBlack),
+            ),
+        );
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

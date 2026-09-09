@@ -125220,11 +125220,47 @@ with a space in it, and a name longer than its column. Both are covered by
 tests here, so if lane A escapes the name the tests keep passing and the parser
 does not need to change.
 
-**Still outstanding:** the 2,256-line in-memory model in `snapshots.rs` is
-still there, still unreachable, and is now clearly redundant rather than merely
-unused — the kernel does this. It should shrink to the display types the page
-needs. Left for a separate change because deleting two thousand lines and
-rewriting a page in one commit makes both harder to review.
+**And the model is gone, same day.** `snapshots.rs` is **2,256 → 313 lines**:
+the reader, `format_size`, and their tests. Removing the
+`#![allow(dead_code)]` *first* is what made the deletion safe — the compiler
+named all **41** unreachable items, so the cut was made from its list rather
+than by eye.
+
+**30 passing tests were deleted with it**, and that is the right outcome rather
+than a cost to regret: they tested `SnapshotManager`, `BlockHash`,
+`SnapshotIncludes` and the rest — a userspace reimplementation of a kernel
+subsystem that should not exist. A test suite over code that should be deleted
+is an argument for keeping it, which is exactly the trap. The eight tests that
+matter — the ones over the format the kernel actually emits — all remain.
+
+**The other two, checked the same day, and neither is a delete either.** Both
+turn out to be the colorpicker shape again — the unreachable copy holds
+something the reachable one does not — so "it duplicates a working app,
+therefore remove it" is wrong for both.
+
+| | duplicates | but holds, uniquely |
+|---|---|---|
+| `associations.rs` (1,753) | `apps/fileassoc` — 4,643 lines, a launching windowed app for exactly this ("which applications open which file types, browsing by category, search/filter, default-app assignment") | **fallback handlers**: the previous handler is remembered so that uninstalling an application auto-switches its file types back instead of orphaning them. `grep -in fallback apps/fileassoc/src/main.rs` → nothing. |
+| `remote.rs` (1,619) | `apps/remotedesktop` — 5,199 lines, likewise a real app | **DynDNS**. `grep -rln "DuckDNS\|dyndns\|NoIP"` across `apps/`, `net/`, `gui/` and `userspace/` returns *this file and nothing else*. It is the only dynamic-DNS configuration in the tree. |
+
+So the shape of the work is the same for both, and it is not deletion:
+
+1. Move the unique part to the application that owns the domain — fallback
+   handlers into `apps/fileassoc`, remote-desktop settings into
+   `apps/remotedesktop`.
+2. Decide where DynDNS belongs. It is not remote-desktop configuration and
+   never was; it sits in this file only because both were "remote" things. A
+   network-settings page or its own small application are both defensible, and
+   this is the one genuine open question of the three.
+3. *Then* delete the husk.
+
+**The recurring lesson, now four for four.** Every module in this entry that
+looked like a straightforward deletion turned out to hold something the
+reachable code lacked: the toolkit's HSV was the *correct* implementation, the
+snapshots model was redundant only because a *kernel* subsystem covers it, and
+these two each carry a feature that exists nowhere else. Unreachable is not the
+same as worthless, and the check that keeps finding this is cheap: diff the
+feature lists before deleting, not after.
 
 **Found by** the palette conversion. Every audit until then read only
 `main.rs`, so these three files were never looked at; they were found by

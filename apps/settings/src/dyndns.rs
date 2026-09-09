@@ -140,9 +140,8 @@ pub fn parse_proc_dyndns(text: &str) -> Vec<DynDnsRow> {
         if prov_at < 2 || status_at == after_provider || after_status >= fields.len() {
             continue;
         }
-        let join = |r: std::ops::Range<usize>| {
-            fields.get(r).map(|w| w.join(" ")).unwrap_or_default()
-        };
+        let join =
+            |r: std::ops::Range<usize>| fields.get(r).map(|w| w.join(" ")).unwrap_or_default();
         rows.push(DynDnsRow {
             id,
             name: join(1..prov_at),
@@ -253,7 +252,11 @@ mod tests {
     #[test]
     fn a_normal_table_parses() {
         let rows = parse_proc_dyndns(SAMPLE);
-        assert_eq!(rows.len(), 2, "header or router lines were taken for entries");
+        assert_eq!(
+            rows.len(),
+            2,
+            "header or router lines were taken for entries"
+        );
         assert_eq!(rows[0].id, 1);
         assert_eq!(rows[0].name, "home");
         assert_eq!(rows[0].provider, "Dynu");
@@ -339,7 +342,10 @@ Router: 2001:db8::1 (Box)
         let line = "5  Success  Dynu  host.dynu.net  Idle  1.2.3.4\n";
         let rows = parse_proc_dyndns(line);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "Success", "the name was swallowed as a status");
+        assert_eq!(
+            rows[0].name, "Success",
+            "the name was swallowed as a status"
+        );
         assert_eq!(rows[0].status, "Idle");
     }
 
@@ -350,8 +356,7 @@ Router: 2001:db8::1 (Box)
     /// direction: naming your only Dynu entry "Dynu" is ordinary.
     #[test]
     fn a_name_that_reads_like_a_provider_does_not_confuse_the_parse() {
-        let rows = parse_proc_dyndns("7  Dynu  Dynu  host.dynu.net  Idle  1.2.3.4
-");
+        let rows = parse_proc_dyndns("7  Dynu  Dynu  host.dynu.net  Idle  1.2.3.4\n");
         assert_eq!(rows.len(), 1, "the row was rejected as having no name");
         assert_eq!(rows[0].name, "Dynu");
         assert_eq!(rows[0].hostname, "host.dynu.net");
@@ -362,14 +367,11 @@ Router: 2001:db8::1 (Box)
     #[test]
     fn a_row_with_a_field_missing_is_skipped() {
         // No hostname between the provider and the status.
-        assert!(parse_proc_dyndns("8  my long name  Dynu  Idle  -
-").is_empty());
+        assert!(parse_proc_dyndns("8  my long name  Dynu  Idle  -\n").is_empty());
         // No address after the status.
-        assert!(parse_proc_dyndns("9  my home  Dynu  host.example  Idle
-").is_empty());
+        assert!(parse_proc_dyndns("9  my home  Dynu  host.example  Idle\n").is_empty());
         // No name before the provider.
-        assert!(parse_proc_dyndns("10  Dynu  host.example  Idle  -  x
-").is_empty());
+        assert!(parse_proc_dyndns("10  Dynu  host.example  Idle  -  x\n").is_empty());
     }
 
     #[test]

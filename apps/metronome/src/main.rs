@@ -24,10 +24,10 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::fn_params_excessive_bools)]
 
+use appearance::Palette;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -36,20 +36,6 @@ use oswindow::app::{App, Response};
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-const COL_BASE: u32 = 0x1E1E2E;
-const COL_MANTLE: u32 = 0x181825;
-const COL_SURFACE0: u32 = 0x313244;
-const COL_SURFACE1: u32 = 0x45475A;
-const COL_TEXT: u32 = 0xCDD6F4;
-const COL_SUBTEXT0: u32 = 0xA6ADC8;
-const COL_GREEN: u32 = 0xA6E3A1;
-const COL_RED: u32 = 0xF38BA8;
-const COL_YELLOW: u32 = 0xF9E2AF;
-const COL_LAVENDER: u32 = 0xB4BEFE;
-const COL_OVERLAY0: u32 = 0x6C7086;
-const COL_TEAL: u32 = 0x94E2D5;
-const COL_MAUVE: u32 = 0xCBA6F7;
 
 const MIN_BPM: u32 = 20;
 const MAX_BPM: u32 = 300;
@@ -233,6 +219,12 @@ struct MetronomeApp {
 
     // View
     show_settings: bool,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl MetronomeApp {
@@ -243,6 +235,7 @@ impl MetronomeApp {
             accents[0] = true;
         }
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             bpm: 120,
             time_signature: sig,
             sig_index: 2,
@@ -561,7 +554,7 @@ impl MetronomeApp {
             y: 0.0,
             width,
             height,
-            color: Color::from_hex(COL_BASE),
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -580,7 +573,7 @@ impl MetronomeApp {
             x: 30.0,
             y: 15.0,
             text: String::from("Metronome"),
-            color: Color::from_hex(COL_LAVENDER),
+            color: self.palette.lavender,
             font_size: 28.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -589,15 +582,15 @@ impl MetronomeApp {
 
         // Playing indicator
         let (status_text, status_color) = if self.playing {
-            ("● PLAYING", COL_GREEN)
+            ("● PLAYING", self.palette.green)
         } else {
-            ("○ STOPPED", COL_OVERLAY0)
+            ("○ STOPPED", self.palette.overlay0)
         };
         cmds.push(RenderCommand::Text {
             x: 250.0,
             y: 22.0,
             text: String::from(status_text),
-            color: Color::from_hex(status_color),
+            color: status_color,
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -610,14 +603,14 @@ impl MetronomeApp {
             y: 55.0,
             width: 250.0,
             height: 90.0,
-            color: Color::from_hex(COL_MANTLE),
+            color: self.palette.mantle,
             corner_radii: CornerRadii::all(12.0),
         });
         cmds.push(RenderCommand::Text {
             x: 60.0,
             y: 65.0,
             text: self.bpm.to_string(),
-            color: Color::from_hex(COL_TEXT),
+            color: self.palette.text,
             font_size: 56.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -627,7 +620,7 @@ impl MetronomeApp {
             x: 200.0,
             y: 95.0,
             text: String::from("BPM"),
-            color: Color::from_hex(COL_SUBTEXT0),
+            color: self.palette.subtext0,
             font_size: 18.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -639,7 +632,7 @@ impl MetronomeApp {
             x: 30.0,
             y: 150.0,
             text: String::from(tempo_name(self.bpm)),
-            color: Color::from_hex(COL_MAUVE),
+            color: self.palette.mauve,
             font_size: 18.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -657,7 +650,7 @@ impl MetronomeApp {
                 self.subdivision.name(),
                 self.beat_interval_ms()
             ),
-            color: Color::from_hex(COL_SUBTEXT0),
+            color: self.palette.subtext0,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -678,14 +671,14 @@ impl MetronomeApp {
 
             let color = if is_current && self.beat_flash_ms > 0 {
                 if is_accented {
-                    Color::from_hex(COL_RED)
+                    self.palette.red
                 } else {
-                    Color::from_hex(COL_GREEN)
+                    self.palette.green
                 }
             } else if is_accented {
-                Color::from_hex(COL_SURFACE1)
+                self.palette.surface1
             } else {
-                Color::from_hex(COL_SURFACE0)
+                self.palette.surface0
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -703,9 +696,9 @@ impl MetronomeApp {
                 y: beat_y + circle_size / 2.0 - 8.0,
                 text: (i + 1).to_string(),
                 color: if is_current && self.beat_flash_ms > 0 {
-                    Color::from_hex(COL_BASE)
+                    self.palette.base
                 } else {
-                    Color::from_hex(COL_TEXT)
+                    self.palette.text
                 },
                 font_size: 16.0,
                 font_weight: FontWeightHint::Bold,
@@ -727,9 +720,9 @@ impl MetronomeApp {
                     width: 10.0,
                     height: 10.0,
                     color: if is_current_sub && self.beat_flash_ms > 0 {
-                        Color::from_hex(COL_TEAL)
+                        self.palette.teal
                     } else {
-                        Color::from_hex(COL_SURFACE0)
+                        self.palette.surface0
                     },
                     corner_radii: CornerRadii::all(5.0),
                 });
@@ -750,7 +743,7 @@ impl MetronomeApp {
                     measure,
                     self.total_beats
                 ),
-                color: Color::from_hex(COL_TEAL),
+                color: self.palette.teal,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -765,7 +758,7 @@ impl MetronomeApp {
                 y: stats_y + 25.0,
                 width: 400.0,
                 height: 30.0,
-                color: Color::from_hex(COL_SURFACE0),
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
@@ -778,7 +771,7 @@ impl MetronomeApp {
                     self.practice_increment,
                     self.practice_measures
                 ),
-                color: Color::from_hex(COL_YELLOW),
+                color: self.palette.yellow,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -801,7 +794,7 @@ impl MetronomeApp {
                 x: 30.0,
                 y: ctrl_y + i as f32 * 18.0,
                 text: String::from(*line),
-                color: Color::from_hex(COL_OVERLAY0),
+                color: self.palette.overlay0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -815,7 +808,7 @@ impl MetronomeApp {
             x: 30.0,
             y: 20.0,
             text: String::from("Metronome Settings"),
-            color: Color::from_hex(COL_LAVENDER),
+            color: self.palette.lavender,
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -826,7 +819,7 @@ impl MetronomeApp {
             x: 30.0,
             y: 55.0,
             text: String::from("Esc/Enter: Back"),
-            color: Color::from_hex(COL_OVERLAY0),
+            color: self.palette.overlay0,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -834,37 +827,40 @@ impl MetronomeApp {
         });
 
         let settings = [
-            (format!("BPM: {}", self.bpm), COL_TEXT),
+            (format!("BPM: {}", self.bpm), self.palette.text),
             (
                 format!("Time Signature: {}", self.time_signature.display()),
-                COL_TEXT,
+                self.palette.text,
             ),
             (
                 format!("Subdivision: {}", self.subdivision.name()),
-                COL_TEXT,
+                self.palette.text,
             ),
-            (format!("Tempo: {}", tempo_name(self.bpm)), COL_MAUVE),
+            (
+                format!("Tempo: {}", tempo_name(self.bpm)),
+                self.palette.mauve,
+            ),
             (
                 format!(
                     "Practice Mode: {}",
                     if self.practice_mode { "ON" } else { "OFF" }
                 ),
-                COL_YELLOW,
+                self.palette.yellow,
             ),
             (
                 format!(
                     "Practice Target: {} BPM (↑/↓ to adjust)",
                     self.practice_target_bpm
                 ),
-                COL_TEAL,
+                self.palette.teal,
             ),
             (
                 format!("Practice Increment: +{} BPM", self.practice_increment),
-                COL_TEAL,
+                self.palette.teal,
             ),
             (
                 format!("Practice Measures: {}", self.practice_measures),
-                COL_TEAL,
+                self.palette.teal,
             ),
         ];
 
@@ -874,14 +870,14 @@ impl MetronomeApp {
                 y: 80.0 + i as f32 * 38.0,
                 width: 450.0,
                 height: 32.0,
-                color: Color::from_hex(COL_SURFACE0),
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
                 x: 45.0,
                 y: 86.0 + i as f32 * 38.0,
                 text: text.clone(),
-                color: Color::from_hex(*col),
+                color: *col,
                 font_size: 15.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -892,6 +888,10 @@ impl MetronomeApp {
 }
 
 impl App for MetronomeApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Metronome")
     }
@@ -1768,5 +1768,79 @@ mod tests {
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Practice:")));
         assert!(has_practice);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut MetronomeApp) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 600.0, 400.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = MetronomeApp::new();
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        oswindow::app::App::theme_changed(
+            &mut app,
+            &theme(
+                appearance::ThemeMode::Dark,
+                Some(appearance::HighContrastScheme::WhiteOnBlack),
+            ),
+        );
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

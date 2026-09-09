@@ -10598,6 +10598,7 @@ dependencies = [
 name = "metronome"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -18553,6 +18554,7 @@ dependencies = [
 name = "typingtutor"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

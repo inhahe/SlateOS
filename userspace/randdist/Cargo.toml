@@ -1,0 +1,16 @@
+[package]
+name = "randdist"
+version = "0.1.0"
+edition = "2024"
+description = "Non-uniform distributions — normal, exponential, Poisson — drawn from any randrange source."
+
+[lib]
+path = "src/lib.rs"
+
+# `randrange` is the only dependency, and deliberately the only one: this crate
+# adds shape to a stream of uniform bits and owns no entropy of its own.
+[dependencies]
+randrange = { path = "../../randrange" }
+
+[lints]
+workspace = true

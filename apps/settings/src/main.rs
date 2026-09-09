@@ -3875,33 +3875,51 @@ impl SettingsState {
 
     /// The Snapshots sub-page: package generations available for rollback.
     /// Read-only until the package manager exposes a rollback call.
+    /// The snapshots this machine actually has.
+    ///
+    /// Until 2026-09-08 this rendered four invented rows -- "Gen 42",
+    /// "2026-05-17 09:00", "Current" and three more -- while `fs::snapshot`
+    /// had been finished in the kernel for some time and publishes the real
+    /// list at `/proc/snapshots`. A settings page that shows made-up system
+    /// state is worse than one that shows none: it invites the user to believe
+    /// a rollback point exists.
+    ///
+    /// See `known-issues.md`
+    /// `TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING` for the
+    /// second, unreachable implementation of this page, which is a userspace
+    /// reimplementation of the same kernel subsystem and is not what this uses.
     fn build_snapshots_page<S: PageSink>(s: &mut S, pal: &Palette) {
         s.section("System Snapshots");
-        s.note("Package generation snapshots for safe rollback:", 32.0);
 
-        let snapshots = [
-            ("Gen 42", "2026-05-17 09:00", "Current"),
-            ("Gen 41", "2026-05-15 14:30", "After KB5032100"),
-            ("Gen 40", "2026-05-10 11:00", "After KB5031980"),
-            ("Gen 39", "2026-05-01 08:45", "After compositor update"),
-        ];
+        let snapshots = snapshots::system_snapshots();
+        if snapshots.is_empty() {
+            s.note("No snapshots have been taken.", 32.0);
+            return;
+        }
+        s.note("Point-in-time snapshots available for rollback:", 32.0);
 
-        for (name, date, desc) in snapshots {
+        for snap in snapshots {
             let control_x = s.control_x();
-            let is_current = desc == "Current";
+            // The newest id is the most recent, and a snapshot with no parent
+            // is a root of its tree rather than "the current one" -- there is
+            // no "current" snapshot to mark, which the mockup implied there
+            // was.
+            let branched = snap.parent.is_some();
+            let title = format!("{} (#{})", snap.name, snap.id);
+            // Lossy *only here*, and deliberately: this is the label under the
+            // row, and a path that cannot be spelled in UTF-8 still has to be
+            // shown somehow. `SnapshotRow::path` keeps the bytes for anything
+            // that acts on it.
+            let path = String::from_utf8_lossy(&snap.path).into_owned();
+            let size = snapshots::format_size(snap.bytes);
+            let files = format!("{} files", snap.files);
             s.draw(move |tree, x, y| {
-                let bg = if is_current {
-                    pal.surface1
-                } else {
-                    pal.surface0
-                };
+                let bg = if branched { pal.surface1 } else { pal.surface0 };
                 fill_rounded(tree, x, y, 580.0, 48.0, bg, 6.0);
-                text_bold(tree, x + 12.0, y + 8.0, name, pal.text, 13.0);
-                tree.text(x + 12.0, y + 28.0, desc, pal.subtext0, 11.0);
-                tree.text(control_x, y + 16.0, date, pal.subtext0, 12.0);
-                if is_current {
-                    tree.text(x + 520.0, y + 16.0, "\u{2713}", pal.green, 16.0);
-                }
+                text_bold(tree, x + 12.0, y + 8.0, &title, pal.text, 13.0);
+                tree.text(x + 12.0, y + 28.0, &path, pal.subtext0, 11.0);
+                tree.text(control_x, y + 8.0, &size, pal.subtext0, 12.0);
+                tree.text(control_x, y + 26.0, &files, pal.subtext0, 11.0);
             });
             s.advance(56.0);
         }
@@ -8703,5 +8721,42 @@ mod against_the_real_compositor {
         }
         let snap = desktop.until("the window to be reclaimed", |s| s.windows == 0);
         assert_eq!(snap.clients, 0, "the connection was dropped too");
+    }
+
+    /// The snapshots page draws what the kernel reports, and says so plainly
+    /// when there is nothing to report.
+    ///
+    /// It used to draw four invented rows unconditionally. The test that
+    /// matters is therefore the *empty* one: a page that shows "Gen 42" on a
+    /// machine with no snapshots is telling the user a rollback point exists.
+    #[test]
+    fn the_snapshots_page_shows_no_invented_rollback_points() {
+        use guitk::render::{RenderCommand, RenderTree};
+
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Snapshots;
+        let mut tree = RenderTree::new();
+        state.render_current_page(&mut tree, 0.0, 0.0);
+        let texts: Vec<String> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // The machine this test runs on has no `/proc/snapshots`, so the page
+        // must be the empty one rather than a mock-up.
+        assert!(
+            texts.iter().any(|t| t.contains("No snapshots")),
+            "the page did not report an empty snapshot list: {texts:?}"
+        );
+        for invented in ["Gen 42", "Gen 41", "After KB5032100"] {
+            assert!(
+                !texts.iter().any(|t| t.contains(invented)),
+                "the page still draws the hardcoded row {invented:?}"
+            );
+        }
     }
 }

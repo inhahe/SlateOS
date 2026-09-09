@@ -5346,12 +5346,21 @@ already satisfies everything a C++ program asks of C. What is missing is the
 *link line* — combining zig's `libc++` with our `libc.a` — which is wiring, not
 a toolchain.
 
-**That wiring was then measured too**, on 2026-09-09, and it is a short list
-rather than a vague one: `known-issues.md` →
-`B-THE-C-PLUS-PLUS-LINK-LINE-NEEDS-TWO-DECISIONS-AND-ONE-MISSING-FAMILY`. Two
-decisions (our libc already ships a C++ ABI that collides with zig's
-`libc++abi`, and dropping zig's then loses the standard exception classes) and
-one gap (`swprintf`/`vswprintf`; `wcstold` was the third and is fixed).
+**That wiring was then measured, and then done**, both on 2026-09-09. A C++
+translation unit using `<string>`, `<vector>` and a real `throw`/`catch` links
+for `x86_64-slateos` against our own `libc.a` with **zero undefined symbols and
+zero duplicates** — a 3.6 MB static `ET_EXEC`. The remaining obstacles were a
+missing `swprintf`/`wcstold` (implemented) and what looked like an
+ABI-ownership decision but turned out to be a packaging defect: our C++ ABI
+stubs shared an object file with `__libc_start_main`, so every program dragged
+them in and they collided with any real runtime. They now have their own
+archive member. See `known-issues.md` →
+`B-THE-C-PLUS-PLUS-LINK-LINE-NEEDS-TWO-DECISIONS-AND-ONE-MISSING-FAMILY`.
+
+**Still not established: nothing C++ has been *run* on SlateOS.** This is the
+link stage, exactly where the CPython and bash spikes each stood before their
+ring-3 rungs, and it carries the same caveat those did — linking proves the
+symbol surface, not the behaviour.
 
 **What this does NOT establish**, stated because the gap matters: nobody has
 cross-compiled genuine Oils, and nobody has run a C++ binary on SlateOS. This

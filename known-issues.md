@@ -125293,6 +125293,30 @@ per-backend split is the honest shape.
 
 ## B-THE-C-PLUS-PLUS-LINK-LINE-NEEDS-TWO-DECISIONS-AND-ONE-MISSING-FAMILY (lane B, 2026-09-09)
 
+**Status: RESOLVED 2026-09-09, the same day.** A C++ translation unit using
+`<string>`, `<vector>` and a real `throw`/`catch` now links for
+`x86_64-slateos` against our own `libc.a` plus zig's `libc++`/`libc++abi`/
+`libunwind` — **zero undefined symbols, zero duplicates**, a 3.6 MB static
+`ET_EXEC`. What follows is the original entry; the three items resolved as:
+
+* **The ABI-ownership decision dissolved rather than being made.** It was not a
+  decision at all, it was a packaging defect: our C++ ABI stubs shared an
+  object file with `__libc_start_main`, and *every* program extracts that
+  member, so the stubs arrived unconditionally and collided. Moved into their
+  own inline module (`posix/src/crt.rs`, `mod cxx_abi`), which gives them their
+  own archive member — the mechanism `design-decisions.md` §339 already
+  established for `asprintf`. A link that brings a real `libc++abi` now simply
+  never pulls them.
+* **The missing exception classes came with it.** They live in `libc++abi`,
+  which the link can now include without conflict.
+* **`swprintf`/`vswprintf` and `wcstold`** — implemented, see above and below.
+
+**Not established:** no C++ binary has been *run* on SlateOS. This is the
+link-stage result, exactly as the CPython and bash spikes were at their link
+stage, and it carries the same caveat: linking proves the symbol surface, not
+the behaviour.
+
+
 **In short:** we can now compile C++ for SlateOS — that was established today
 and annotated on `design-decisions.md` §73. Actually *linking* a C++ program
 against our own C library turns out to need two small things nobody has

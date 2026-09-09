@@ -1214,159 +1214,200 @@ pub extern "C" fn getauxval(typ: u64) -> u64 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static mut __environ: *mut *const u8 = core::ptr::null_mut();
 
-// ---------------------------------------------------------------------------
-// C++ ABI support — pure virtual calls
-// ---------------------------------------------------------------------------
-
-/// C++ ABI: Called when a pure virtual function is invoked.
+/// The C++ ABI symbols that **`libc++abi` also defines**, in their own inline
+/// module and therefore their own object file inside `libc.a`.
 ///
-/// This should never happen in correct code.  It means a base class
-/// constructor called a pure virtual method, or a dangling vtable
-/// reference was followed.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __cxa_pure_virtual() -> ! {
-    let msg = b"pure virtual method called\n";
-    let _ = crate::file::write(2, msg.as_ptr(), msg.len());
-    crate::unistd::abort();
-}
-
-/// Called when a deleted virtual function is invoked.
+/// Same mechanism as `printf.rs`'s `gnu_asprintf` and `design-decisions.md`
+/// §339: a static archive member is pulled in only if it defines a symbol that
+/// is still undefined, so a member holding nothing else can simply be declined
+/// by a program that brings its own. These lived beside `__libc_start_main`
+/// until 2026-09-09, and that member is extracted by *every* program, so the
+/// stubs came along unconditionally and collided with any real C++ runtime.
 ///
-/// Similar to `__cxa_pure_virtual` but for functions marked `= delete`.
-/// Prints a diagnostic and aborts.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __cxa_deleted_virtual() -> ! {
-    let msg = b"deleted virtual method called\n";
-    let _ = crate::file::write(2, msg.as_ptr(), msg.len());
-    crate::unistd::abort();
-}
-
-// ---------------------------------------------------------------------------
-// C++ ABI — static initialization guards
-// ---------------------------------------------------------------------------
-//
-// C++ static local variables with non-trivial constructors need
-// thread-safe one-time initialization.  The compiler emits a guard
-// variable and calls __cxa_guard_acquire before initialization,
-// __cxa_guard_release after success, and __cxa_guard_abort on
-// exception.
-//
-// Guard layout (Itanium C++ ABI):
-//   byte 0: 0 = uninitialized, 1 = initialized
-//   bytes 1-7: reserved (used for futex on some platforms)
-//
-// Since we're single-threaded (for now), these are simple flag checks.
-
-/// Acquire the initialization guard.
+/// Measured before the move: linking a C++ translation unit against
+/// `libc.a` plus zig's `libc++abi.a` failed with duplicate definitions of
+/// `__cxa_allocate_exception`, `__cxa_begin_catch` and `__cxa_deleted_virtual`
+/// — not missing symbols, duplicates, which is a much better problem and was
+/// still a wall of errors in front of anyone attempting a C++ port.
 ///
-/// Returns 1 if the caller should perform initialization (guard was
-/// uninitialized), or 0 if initialization already completed.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __cxa_guard_acquire(guard: *mut u64) -> i32 {
-    if guard.is_null() {
-        return 0;
+/// **Why these are grouped and `asprintf`'s pair deliberately is not.**
+/// `gnu_asprintf` argues that separate members can each be declined
+/// independently. That reasoning does not apply here: these symbols are
+/// declined *as a set*, because the thing that replaces them is a single
+/// archive (`libc++abi`) that provides all of them. A program cannot bring a
+/// real `__cxa_throw` and still want our stub `__cxa_begin_catch` — that
+/// combination is an aborting half-runtime.
+///
+/// **What stays outside**, and why: `__cxa_atexit`, `__cxa_finalize` and
+/// `__cxa_thread_atexit_impl` are the C library's own, not `libc++abi`'s.
+/// musl and glibc both own them, nothing replaces them, and moving them here
+/// would make a member that every C++ program needs declinable.
+///
+/// The stubs themselves are unchanged and still abort on any throw. They exist
+/// so that C++ compiled with exceptions enabled *links*, which is all they
+/// ever claimed — see the section header inside. What is new is that a link
+/// which brings a real implementation now silently gets it.
+pub mod cxx_abi {
+
+    // ---------------------------------------------------------------------------
+    // C++ ABI support — pure virtual calls
+    // ---------------------------------------------------------------------------
+
+    /// C++ ABI: Called when a pure virtual function is invoked.
+    ///
+    /// This should never happen in correct code.  It means a base class
+    /// constructor called a pure virtual method, or a dangling vtable
+    /// reference was followed.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __cxa_pure_virtual() -> ! {
+        let msg = b"pure virtual method called\n";
+        let _ = crate::file::write(2, msg.as_ptr(), msg.len());
+        crate::unistd::abort();
     }
-    // SAFETY: guard points to a compiler-generated static.
-    let byte0 = guard.cast::<u8>();
-    let val = unsafe { *byte0 };
-    // Returns 1 if caller should initialize (val == 0), 0 if already done.
-    i32::from(val == 0)
-}
 
-/// Release the initialization guard (mark as initialized).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __cxa_guard_release(guard: *mut u64) {
-    if guard.is_null() {
-        return;
+    /// Called when a deleted virtual function is invoked.
+    ///
+    /// Similar to `__cxa_pure_virtual` but for functions marked `= delete`.
+    /// Prints a diagnostic and aborts.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __cxa_deleted_virtual() -> ! {
+        let msg = b"deleted virtual method called\n";
+        let _ = crate::file::write(2, msg.as_ptr(), msg.len());
+        crate::unistd::abort();
     }
-    // SAFETY: guard points to a compiler-generated static.
-    let byte0 = guard.cast::<u8>();
-    unsafe {
-        *byte0 = 1;
+
+    // ---------------------------------------------------------------------------
+    // C++ ABI — static initialization guards
+    // ---------------------------------------------------------------------------
+    //
+    // C++ static local variables with non-trivial constructors need
+    // thread-safe one-time initialization.  The compiler emits a guard
+    // variable and calls __cxa_guard_acquire before initialization,
+    // __cxa_guard_release after success, and __cxa_guard_abort on
+    // exception.
+    //
+    // Guard layout (Itanium C++ ABI):
+    //   byte 0: 0 = uninitialized, 1 = initialized
+    //   bytes 1-7: reserved (used for futex on some platforms)
+    //
+    // Since we're single-threaded (for now), these are simple flag checks.
+
+    /// Acquire the initialization guard.
+    ///
+    /// Returns 1 if the caller should perform initialization (guard was
+    /// uninitialized), or 0 if initialization already completed.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __cxa_guard_acquire(guard: *mut u64) -> i32 {
+        if guard.is_null() {
+            return 0;
+        }
+        // SAFETY: guard points to a compiler-generated static.
+        let byte0 = guard.cast::<u8>();
+        let val = unsafe { *byte0 };
+        // Returns 1 if caller should initialize (val == 0), 0 if already done.
+        i32::from(val == 0)
+    }
+
+    /// Release the initialization guard (mark as initialized).
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __cxa_guard_release(guard: *mut u64) {
+        if guard.is_null() {
+            return;
+        }
+        // SAFETY: guard points to a compiler-generated static.
+        let byte0 = guard.cast::<u8>();
+        unsafe {
+            *byte0 = 1;
+        }
+    }
+
+    /// Abort initialization (exception during construction).
+    ///
+    /// Resets the guard so a future attempt can retry.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __cxa_guard_abort(guard: *mut u64) {
+        if guard.is_null() {
+            return;
+        }
+        // SAFETY: guard points to a compiler-generated static.
+        let byte0 = guard.cast::<u8>();
+        unsafe {
+            *byte0 = 0;
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // C++ exception handling stubs
+    // ---------------------------------------------------------------------------
+    //
+    // We don't support C++ exceptions, but these symbols must exist for
+    // link compatibility with C++ code compiled with exceptions enabled.
+    // All exception-throwing paths will abort.
+
+    /// C++ ABI: Allocate memory for an exception object.
+    ///
+    /// Stub: always returns a pointer to a static buffer (only one
+    /// exception can be in-flight at a time, but since we abort on throw
+    /// this doesn't matter).
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __cxa_allocate_exception(_thrown_size: usize) -> *mut u8 {
+        static mut EXCEPTION_BUF: [u8; 128] = [0; 128];
+        // SAFETY: Single-threaded; exceptions abort anyway.
+        core::ptr::addr_of_mut!(EXCEPTION_BUF).cast::<u8>()
+    }
+
+    /// C++ ABI: Throw an exception.
+    ///
+    /// Stub: aborts the process.  We don't support exception unwinding.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __cxa_throw(
+        _thrown_exception: *mut u8,
+        _tinfo: *mut u8,
+        _dest: Option<extern "C" fn(*mut u8)>,
+    ) -> ! {
+        let msg = b"C++ exception thrown (not supported)\n";
+        let _ = crate::file::write(2, msg.as_ptr(), msg.len());
+        crate::unistd::abort();
+    }
+
+    /// C++ ABI: Begin catching an exception.
+    ///
+    /// Stub: returns the exception object pointer (or null).
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __cxa_begin_catch(exception_object: *mut u8) -> *mut u8 {
+        exception_object
+    }
+
+    /// C++ ABI: End catching an exception.
+    ///
+    /// Stub: no-op.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __cxa_end_catch() {}
+
+    /// GCC C++ personality routine for exception handling.
+    ///
+    /// Stub: always returns `_URC_FATAL_PHASE1_ERROR` (8) to indicate
+    /// we can't handle exceptions.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn __gxx_personality_v0() -> i32 {
+        8 // _URC_FATAL_PHASE1_ERROR
+    }
+
+    /// Unwind library: Resume exception propagation.
+    ///
+    /// Stub: aborts.  We don't support stack unwinding.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn _Unwind_Resume(_exception_object: *mut u8) -> ! {
+        let msg = b"_Unwind_Resume called (not supported)\n";
+        let _ = crate::file::write(2, msg.as_ptr(), msg.len());
+        crate::unistd::abort();
     }
 }
 
-/// Abort initialization (exception during construction).
-///
-/// Resets the guard so a future attempt can retry.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __cxa_guard_abort(guard: *mut u64) {
-    if guard.is_null() {
-        return;
-    }
-    // SAFETY: guard points to a compiler-generated static.
-    let byte0 = guard.cast::<u8>();
-    unsafe {
-        *byte0 = 0;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// C++ exception handling stubs
-// ---------------------------------------------------------------------------
-//
-// We don't support C++ exceptions, but these symbols must exist for
-// link compatibility with C++ code compiled with exceptions enabled.
-// All exception-throwing paths will abort.
-
-/// C++ ABI: Allocate memory for an exception object.
-///
-/// Stub: always returns a pointer to a static buffer (only one
-/// exception can be in-flight at a time, but since we abort on throw
-/// this doesn't matter).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __cxa_allocate_exception(_thrown_size: usize) -> *mut u8 {
-    static mut EXCEPTION_BUF: [u8; 128] = [0; 128];
-    // SAFETY: Single-threaded; exceptions abort anyway.
-    core::ptr::addr_of_mut!(EXCEPTION_BUF).cast::<u8>()
-}
-
-/// C++ ABI: Throw an exception.
-///
-/// Stub: aborts the process.  We don't support exception unwinding.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __cxa_throw(
-    _thrown_exception: *mut u8,
-    _tinfo: *mut u8,
-    _dest: Option<extern "C" fn(*mut u8)>,
-) -> ! {
-    let msg = b"C++ exception thrown (not supported)\n";
-    let _ = crate::file::write(2, msg.as_ptr(), msg.len());
-    crate::unistd::abort();
-}
-
-/// C++ ABI: Begin catching an exception.
-///
-/// Stub: returns the exception object pointer (or null).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __cxa_begin_catch(exception_object: *mut u8) -> *mut u8 {
-    exception_object
-}
-
-/// C++ ABI: End catching an exception.
-///
-/// Stub: no-op.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __cxa_end_catch() {}
-
-/// GCC C++ personality routine for exception handling.
-///
-/// Stub: always returns `_URC_FATAL_PHASE1_ERROR` (8) to indicate
-/// we can't handle exceptions.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __gxx_personality_v0() -> i32 {
-    8 // _URC_FATAL_PHASE1_ERROR
-}
-
-/// Unwind library: Resume exception propagation.
-///
-/// Stub: aborts.  We don't support stack unwinding.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn _Unwind_Resume(_exception_object: *mut u8) -> ! {
-    let msg = b"_Unwind_Resume called (not supported)\n";
-    let _ = crate::file::write(2, msg.as_ptr(), msg.len());
-    crate::unistd::abort();
-}
+// Re-exported so callers and tests inside this crate keep naming these
+// directly; the definitions stay in the module above, which is what decides
+// the archive member they land in.
+pub use cxx_abi::*;
 
 // ---------------------------------------------------------------------------
 // __stack_chk_fail_local — local stack canary check

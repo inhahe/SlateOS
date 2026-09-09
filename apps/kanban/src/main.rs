@@ -4,6 +4,7 @@
 //! columns, rich cards (labels, priority, due dates, checklists, comments),
 //! filtering, sorting, WIP limits, swimlanes, archiving, and JSON export/import.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, content_bottom};
@@ -20,26 +21,7 @@ use std::collections::HashMap;
 // Catppuccin Mocha palette
 // =============================================================================
 
-mod palette {
-    use guitk::color::Color;
-
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const CRUST: Color = Color::from_hex(0x11111B);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-    pub const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-    pub const TEAL: Color = Color::from_hex(0x94E2D5);
-    pub const MAUVE: Color = Color::from_hex(0xCBA6F7);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-}
+mod palette {}
 
 // =============================================================================
 // Domain types
@@ -76,12 +58,12 @@ impl Priority {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Low => palette::TEAL,
-            Self::Medium => palette::BLUE,
-            Self::High => palette::PEACH,
-            Self::Critical => palette::RED,
+            Self::Low => pal.teal,
+            Self::Medium => pal.blue,
+            Self::High => pal.peach,
+            Self::Critical => pal.red,
         }
     }
 
@@ -447,19 +429,38 @@ impl Board {
         }
     }
 
+    /// The board a new user starts with.
+    ///
+    /// The label colours here are fixed values, not theme roles. A `Label`
+    /// stores its colour, so it is the user's own data: nothing rewrites it
+    /// when the theme changes, and a themed value would leave labels made
+    /// before the change in the old scheme and ones made after in the new.
+    /// Same rule as `snippets`' folder colours and `hexeditor`'s bookmarks.
     fn default_board() -> Self {
         let mut board = Self::new("My Project");
 
         // Default labels
-        board.labels.push(Label::new("Bug", palette::RED));
-        board.labels.push(Label::new("Feature", palette::BLUE));
-        board.labels.push(Label::new("Enhancement", palette::GREEN));
         board
             .labels
-            .push(Label::new("Documentation", palette::LAVENDER));
-        board.labels.push(Label::new("Urgent", palette::PEACH));
-        board.labels.push(Label::new("Design", palette::MAUVE));
-        board.labels.push(Label::new("Testing", palette::TEAL));
+            .push(Label::new("Bug", Color::from_hex(0xF38BA8)));
+        board
+            .labels
+            .push(Label::new("Feature", Color::from_hex(0x89B4FA)));
+        board
+            .labels
+            .push(Label::new("Enhancement", Color::from_hex(0xA6E3A1)));
+        board
+            .labels
+            .push(Label::new("Documentation", Color::from_hex(0xB4BEFE)));
+        board
+            .labels
+            .push(Label::new("Urgent", Color::from_hex(0xFAB387)));
+        board
+            .labels
+            .push(Label::new("Design", Color::from_hex(0xCBA6F7)));
+        board
+            .labels
+            .push(Label::new("Testing", Color::from_hex(0x94E2D5)));
 
         // Default columns
         board.columns.push(Column::new("Backlog"));
@@ -1046,6 +1047,12 @@ struct KanbanApp {
     input_buffer: String,
     input_mode: InputMode,
     timestamp_counter: u64,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 /// What the user is currently typing into.
@@ -1076,6 +1083,7 @@ impl KanbanApp {
     fn new() -> Self {
         let default_board = Board::default_board();
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             boards: vec![default_board],
             active_board_idx: 0,
             view: View::Board,
@@ -1253,7 +1261,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
         y: 0.0,
         width,
         height: toolbar_h,
-        color: palette::MANTLE,
+        color: app.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1262,7 +1270,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
         x: 12.0,
         y: 10.0,
         text: "Kanban Board".to_string(),
-        color: palette::BLUE,
+        color: app.palette.blue,
         font_size: 16.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(200.0),
@@ -1275,7 +1283,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
         x: 160.0,
         y: 12.0,
         text: format!("/ {}", board_name),
-        color: palette::SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(200.0),
@@ -1295,16 +1303,16 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
         70.0,
         button_h,
         "Boards",
-        palette::SURFACE0,
-        palette::TEXT,
+        app.palette.surface0,
+        app.palette.text,
         btn_radius,
     );
 
     // Filter button
     let filter_color = if app.filter.is_active() {
-        palette::BLUE
+        app.palette.blue
     } else {
-        palette::SURFACE0
+        app.palette.surface0
     };
     render_toolbar_button(
         tree,
@@ -1314,7 +1322,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
         button_h,
         "Filter",
         filter_color,
-        palette::TEXT,
+        app.palette.text,
         btn_radius,
     );
 
@@ -1326,8 +1334,8 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
         55.0,
         button_h,
         "Stats",
-        palette::SURFACE0,
-        palette::TEXT,
+        app.palette.surface0,
+        app.palette.text,
         btn_radius,
     );
 
@@ -1339,8 +1347,8 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
         65.0,
         button_h,
         "Archive",
-        palette::SURFACE0,
-        palette::TEXT,
+        app.palette.surface0,
+        app.palette.text,
         btn_radius,
     );
 
@@ -1352,8 +1360,8 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
         60.0,
         button_h,
         "Export",
-        palette::SURFACE0,
-        palette::TEXT,
+        app.palette.surface0,
+        app.palette.text,
         btn_radius,
     );
 
@@ -1365,8 +1373,8 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
         100.0,
         button_h,
         "+ New Card",
-        palette::BLUE,
-        palette::CRUST,
+        app.palette.blue,
+        app.palette.crust,
         btn_radius,
     );
 
@@ -1376,7 +1384,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
         y1: toolbar_h,
         x2: width,
         y2: toolbar_h,
-        color: palette::SURFACE0,
+        color: app.palette.surface0,
         width: 1.0,
     });
 }
@@ -1428,7 +1436,7 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
         y: y_offset,
         width,
         height: bar_h,
-        color: palette::CRUST,
+        color: app.palette.crust,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1437,7 +1445,7 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
         x: 12.0,
         y: y_offset + 9.0,
         text: "Search:".to_string(),
-        color: palette::SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1451,16 +1459,16 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
         &app.filter.search_text
     };
     let search_color = if app.filter.search_text.is_empty() {
-        palette::OVERLAY0
+        app.palette.overlay0
     } else {
-        palette::TEXT
+        app.palette.text
     };
     tree.push(RenderCommand::FillRect {
         x: 70.0,
         y: y_offset + 5.0,
         width: 180.0,
         height: 26.0,
-        color: palette::SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::all(3.0),
     });
     tree.push(RenderCommand::Text {
@@ -1479,7 +1487,7 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
         x: 270.0,
         y: y_offset + 9.0,
         text: "Priority:".to_string(),
-        color: palette::SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1492,14 +1500,14 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
         y: y_offset + 5.0,
         width: 70.0,
         height: 26.0,
-        color: palette::SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::all(3.0),
     });
     tree.push(RenderCommand::Text {
         x: 340.0,
         y: y_offset + 9.0,
         text: priority_label.to_string(),
-        color: palette::TEXT,
+        color: app.palette.text,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(54.0),
@@ -1515,8 +1523,8 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
             60.0,
             26.0,
             "Clear",
-            palette::RED,
-            palette::TEXT,
+            app.palette.red,
+            app.palette.text,
             CornerRadii::all(3.0),
         );
     }
@@ -1596,6 +1604,7 @@ fn card_height(card: &Card) -> f32 {
 /// Render a single card.
 fn render_card(
     tree: &mut RenderTree,
+    pal: &Palette,
     card: &Card,
     board: &Board,
     x: f32,
@@ -1613,7 +1622,7 @@ fn render_card(
         y,
         width: card_width,
         height: priority_bar_h,
-        color: card.priority.color(),
+        color: card.priority.color(pal),
         corner_radii: CornerRadii {
             top_left: 6.0,
             top_right: 6.0,
@@ -1624,18 +1633,14 @@ fn render_card(
     card_h += priority_bar_h;
 
     // Card background
-    let bg_color = if selected {
-        palette::SURFACE1
-    } else {
-        palette::SURFACE0
-    };
+    let bg_color = if selected { pal.surface1 } else { pal.surface0 };
 
     // Title
     tree.push(RenderCommand::Text {
         x: x + padding,
         y: y + card_h,
         text: card.title.clone(),
-        color: palette::TEXT,
+        color: pal.text,
         font_size: 13.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(card_width - padding * 2.0),
@@ -1661,7 +1666,7 @@ fn render_card(
                     x: label_x + 6.0,
                     y: y + card_h + 2.0,
                     text: label.name.clone(),
-                    color: palette::CRUST,
+                    color: pal.crust,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(lw - 10.0),
@@ -1681,7 +1686,7 @@ fn render_card(
             x: x + padding,
             y: y + card_h,
             text: meta_parts.join(" | "),
-            color: palette::SUBTEXT0,
+            color: pal.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(card_width - padding * 2.0),
@@ -1698,11 +1703,7 @@ fn render_card(
             x: x + padding,
             y: y + card_h,
             text: progress_text,
-            color: if done == total {
-                palette::GREEN
-            } else {
-                palette::YELLOW
-            },
+            color: if done == total { pal.green } else { pal.yellow },
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1718,7 +1719,7 @@ fn render_card(
             x: x + padding,
             y: y + card_h,
             text: comment_text,
-            color: palette::OVERLAY0,
+            color: pal.overlay0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1756,7 +1757,7 @@ fn render_card(
             y,
             width: card_width,
             height: card_h,
-            color: palette::BLUE,
+            color: pal.blue,
             line_width: 2.0,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -1777,6 +1778,7 @@ fn render_card(
 /// Render a column header.
 fn render_column_header(
     tree: &mut RenderTree,
+    pal: &Palette,
     col: &Column,
     board: &Board,
     x: f32,
@@ -1791,7 +1793,7 @@ fn render_column_header(
         y,
         width: col_width,
         height: header_h,
-        color: palette::MANTLE,
+        color: pal.mantle,
         corner_radii: CornerRadii {
             top_left: 6.0,
             top_right: 6.0,
@@ -1805,7 +1807,7 @@ fn render_column_header(
         x: x + 10.0,
         y: y + 9.0,
         text: col.name.clone(),
-        color: palette::TEXT,
+        color: pal.text,
         font_size: 13.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(col_width - 80.0),
@@ -1817,9 +1819,9 @@ fn render_column_header(
     let count_text = format!("{}", active_count);
 
     let badge_color = if col.is_over_wip_limit() {
-        palette::RED
+        pal.red
     } else {
-        palette::SURFACE1
+        pal.surface1
     };
 
     let badge_x = x + col_width - 50.0;
@@ -1835,7 +1837,7 @@ fn render_column_header(
         x: badge_x + 6.0,
         y: y + 11.0,
         text: count_text,
-        color: palette::TEXT,
+        color: pal.text,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1850,9 +1852,9 @@ fn render_column_header(
             y: y + 11.0,
             text: wip_text,
             color: if col.is_over_wip_limit() {
-                palette::RED
+                pal.red
             } else {
-                palette::OVERLAY0
+                pal.overlay0
             },
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
@@ -1877,7 +1879,7 @@ fn render_board_view(
             x: width / 2.0 - 80.0,
             y: y_start + 50.0,
             text: "No columns yet. Press 'C' to add one.".to_string(),
-            color: palette::SUBTEXT0,
+            color: app.palette.subtext0,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1901,7 +1903,7 @@ fn render_board_view(
             y: col_y,
             width: col_width,
             height: height - col_y - 8.0,
-            color: palette::BASE,
+            color: app.palette.base,
             corner_radii: CornerRadii::all(6.0),
         });
 
@@ -1919,7 +1921,7 @@ fn render_board_view(
         }
 
         // Column header
-        render_column_header(tree, col, board, col_x, col_y, col_width);
+        render_column_header(tree, &app.palette, col, board, col_x, col_y, col_width);
 
         // Cards
         let header_h: f32 = 36.0;
@@ -1963,6 +1965,7 @@ fn render_board_view(
                 let is_selected = app.selected_card == Some(*card_id);
                 let ch = render_card(
                     tree,
+                    &app.palette,
                     card,
                     board,
                     col_x + card_margin,
@@ -1982,7 +1985,7 @@ fn render_board_view(
                 x: col_x + card_margin,
                 y: card_y,
                 text: format!("+{hidden} more"),
-                color: palette::OVERLAY0,
+                color: app.palette.overlay0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(card_width),
@@ -2089,7 +2092,15 @@ fn max_detail_scroll(app: &KanbanApp, width: f32, height: f32) -> f32 {
     };
     let modal = DetailModal::for_window(width, height);
     let mut scratch = RenderTree::new();
-    render_card_detail_body(&mut scratch, board, card, 0.0, 0.0, modal.content_w());
+    render_card_detail_body(
+        &mut scratch,
+        &app.palette,
+        board,
+        card,
+        0.0,
+        0.0,
+        modal.content_w(),
+    );
     let content = content_bottom(&scratch.commands).unwrap_or(0.0).max(0.0);
     (content - modal.body_height()).max(0.0)
 }
@@ -2140,7 +2151,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
         y: modal_y,
         width: modal_w,
         height: modal_h,
-        color: palette::BASE,
+        color: app.palette.base,
         corner_radii: CornerRadii::all(8.0),
     });
 
@@ -2150,7 +2161,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
         y: modal_y,
         width: modal_w,
         height: modal_h,
-        color: palette::SURFACE1,
+        color: app.palette.surface1,
         line_width: 1.0,
         corner_radii: CornerRadii::all(8.0),
     });
@@ -2164,7 +2175,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
         x: content_x,
         y: modal_y + DETAIL_PAD,
         text: card.title.clone(),
-        color: palette::TEXT,
+        color: app.palette.text,
         font_size: 18.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(content_w - 60.0),
@@ -2179,8 +2190,8 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
         28.0,
         24.0,
         "X",
-        palette::SURFACE0,
-        palette::RED,
+        app.palette.surface0,
+        app.palette.red,
         CornerRadii::all(4.0),
     );
 
@@ -2200,6 +2211,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
     });
     render_card_detail_body(
         tree,
+        &app.palette,
         board,
         card,
         content_x,
@@ -2218,6 +2230,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
 /// resolving them twice is one more thing that could resolve differently.
 fn render_card_detail_body(
     tree: &mut RenderTree,
+    pal: &Palette,
     board: &Board,
     card: &Card,
     content_x: f32,
@@ -2232,14 +2245,14 @@ fn render_card_detail_body(
         y: cy,
         width: 80.0,
         height: 22.0,
-        color: card.priority.color(),
+        color: card.priority.color(pal),
         corner_radii: CornerRadii::all(4.0),
     });
     tree.push(RenderCommand::Text {
         x: content_x + 8.0,
         y: cy + 4.0,
         text: card.priority.label().to_string(),
-        color: palette::CRUST,
+        color: pal.crust,
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -2252,7 +2265,7 @@ fn render_card_detail_body(
             x: content_x + 90.0,
             y: cy + 4.0,
             text: format!("Assigned: {}", card.assignee),
-            color: palette::SUBTEXT0,
+            color: pal.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2266,7 +2279,7 @@ fn render_card_detail_body(
             x: content_x + 280.0,
             y: cy + 4.0,
             text: format!("Due: {}", date.display()),
-            color: palette::YELLOW,
+            color: pal.yellow,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2282,7 +2295,7 @@ fn render_card_detail_body(
             x: content_x,
             y: cy,
             text: "Labels:".to_string(),
-            color: palette::SUBTEXT0,
+            color: pal.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2304,7 +2317,7 @@ fn render_card_detail_body(
                     x: label_x + 7.0,
                     y: cy + 1.0,
                     text: label.name.clone(),
-                    color: palette::CRUST,
+                    color: pal.crust,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(lw - 12.0),
@@ -2322,7 +2335,7 @@ fn render_card_detail_body(
         y1: cy,
         x2: content_x + content_w,
         y2: cy,
-        color: palette::SURFACE0,
+        color: pal.surface0,
         width: 1.0,
     });
     cy += 10.0;
@@ -2332,7 +2345,7 @@ fn render_card_detail_body(
         x: content_x,
         y: cy,
         text: "Description".to_string(),
-        color: palette::TEXT,
+        color: pal.text,
         font_size: 13.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -2352,9 +2365,9 @@ fn render_card_detail_body(
     let desc_used = text::Paragraph::new(
         desc_text,
         if card.description.is_empty() {
-            palette::OVERLAY0
+            pal.overlay0
         } else {
-            palette::SUBTEXT0
+            pal.subtext0
         },
     )
     .at(content_x, cy, content_w)
@@ -2371,7 +2384,7 @@ fn render_card_detail_body(
             x: content_x,
             y: cy,
             text: format!("Checklist ({}/{})", done, total),
-            color: palette::TEXT,
+            color: pal.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2386,7 +2399,7 @@ fn render_card_detail_body(
             y: cy,
             width: bar_w,
             height: 6.0,
-            color: palette::SURFACE0,
+            color: pal.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
         if total > 0 {
@@ -2396,7 +2409,7 @@ fn render_card_detail_body(
                 y: cy,
                 width: progress_w,
                 height: 6.0,
-                color: palette::GREEN,
+                color: pal.green,
                 corner_radii: CornerRadii::all(3.0),
             });
         }
@@ -2404,11 +2417,7 @@ fn render_card_detail_body(
 
         for item in &card.checklist {
             let check_mark = if item.done { "[x]" } else { "[ ]" };
-            let item_color = if item.done {
-                palette::OVERLAY0
-            } else {
-                palette::TEXT
-            };
+            let item_color = if item.done { pal.overlay0 } else { pal.text };
             tree.push(RenderCommand::Text {
                 x: content_x + 4.0,
                 y: cy,
@@ -2430,7 +2439,7 @@ fn render_card_detail_body(
             x: content_x,
             y: cy,
             text: format!("Comments ({})", card.comments.len()),
-            color: palette::TEXT,
+            color: pal.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2443,7 +2452,7 @@ fn render_card_detail_body(
             // it contains -- so the body is measured first and the card sized
             // from that measurement, rather than the two being computed
             // separately and left to disagree.
-            let body = text::Paragraph::new(&comment.text, palette::SUBTEXT0)
+            let body = text::Paragraph::new(&comment.text, pal.subtext0)
                 .at(
                     content_x + COMMENT_PAD,
                     cy + COMMENT_BODY_TOP,
@@ -2456,14 +2465,14 @@ fn render_card_detail_body(
                 y: cy,
                 width: content_w,
                 height: card_h,
-                color: palette::SURFACE0,
+                color: pal.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             tree.push(RenderCommand::Text {
                 x: content_x + COMMENT_PAD,
                 y: cy + 4.0,
                 text: comment.author.clone(),
-                color: palette::BLUE,
+                color: pal.blue,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -2483,7 +2492,7 @@ fn render_archive_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_sta
         x: 20.0,
         y: y_start + 16.0,
         text: "Archived Cards".to_string(),
-        color: palette::TEXT,
+        color: app.palette.text,
         font_size: 16.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -2495,7 +2504,7 @@ fn render_archive_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_sta
             x: 20.0,
             y: y_start + 50.0,
             text: "No archived cards.".to_string(),
-            color: palette::OVERLAY0,
+            color: app.palette.overlay0,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2512,14 +2521,14 @@ fn render_archive_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_sta
                 y: cy,
                 width: width - 40.0,
                 height: 40.0,
-                color: palette::SURFACE0,
+                color: app.palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
             tree.push(RenderCommand::Text {
                 x: 32.0,
                 y: cy + 6.0,
                 text: card.title.clone(),
-                color: palette::TEXT,
+                color: app.palette.text,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 200.0),
@@ -2529,7 +2538,7 @@ fn render_archive_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_sta
                 x: 32.0,
                 y: cy + 22.0,
                 text: format!("Priority: {} | {}", card.priority.label(), card.assignee),
-                color: palette::SUBTEXT0,
+                color: app.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2543,8 +2552,8 @@ fn render_archive_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_sta
                 70.0,
                 24.0,
                 "Restore",
-                palette::GREEN,
-                palette::CRUST,
+                app.palette.green,
+                app.palette.crust,
                 CornerRadii::all(4.0),
             );
             cy += 48.0;
@@ -2561,7 +2570,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
         x: 20.0,
         y: y_start + 16.0,
         text: "Board Statistics".to_string(),
-        color: palette::TEXT,
+        color: app.palette.text,
         font_size: 16.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -2576,7 +2585,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
         x: 20.0,
         y: cy,
         text: format!("Completion Rate: {:.1}%", rate),
-        color: palette::GREEN,
+        color: app.palette.green,
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -2591,7 +2600,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
         y: cy,
         width: bar_w,
         height: 12.0,
-        color: palette::SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::all(6.0),
     });
     tree.push(RenderCommand::FillRect {
@@ -2599,7 +2608,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
         y: cy,
         width: bar_w * (rate / 100.0),
         height: 12.0,
-        color: palette::GREEN,
+        color: app.palette.green,
         corner_radii: CornerRadii::all(6.0),
     });
     cy += 30.0;
@@ -2613,7 +2622,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
             board.cards.len(),
             board.archived_card_ids.len()
         ),
-        color: palette::SUBTEXT0,
+        color: app.palette.subtext0,
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2626,7 +2635,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
         x: 20.0,
         y: cy,
         text: "Cards per Column:".to_string(),
-        color: palette::TEXT,
+        color: app.palette.text,
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -2644,7 +2653,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
             x: 30.0,
             y: cy,
             text: stat.name.clone(),
-            color: palette::TEXT,
+            color: app.palette.text,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(120.0),
@@ -2656,7 +2665,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
             y: cy + 2.0,
             width: stat_bar_w,
             height: 14.0,
-            color: palette::SURFACE0,
+            color: app.palette.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
         tree.push(RenderCommand::FillRect {
@@ -2665,9 +2674,9 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
             width: stat_bar_w * bar_fraction,
             height: 14.0,
             color: if stat.over_wip {
-                palette::RED
+                app.palette.red
             } else {
-                palette::BLUE
+                app.palette.blue
             },
             corner_radii: CornerRadii::all(3.0),
         });
@@ -2681,9 +2690,9 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
             y: cy,
             text: wip_text,
             color: if stat.over_wip {
-                palette::RED
+                app.palette.red
             } else {
-                palette::SUBTEXT0
+                app.palette.subtext0
             },
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
@@ -2701,7 +2710,7 @@ fn render_board_list(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_start
         x: 20.0,
         y: y_start + 16.0,
         text: "All Boards".to_string(),
-        color: palette::TEXT,
+        color: app.palette.text,
         font_size: 16.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -2712,9 +2721,9 @@ fn render_board_list(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_start
     for (i, board) in app.boards.iter().enumerate() {
         let is_active = i == app.active_board_idx;
         let bg = if is_active {
-            palette::SURFACE1
+            app.palette.surface1
         } else {
-            palette::SURFACE0
+            app.palette.surface0
         };
 
         tree.push(RenderCommand::FillRect {
@@ -2732,7 +2741,7 @@ fn render_board_list(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_start
                 y: cy,
                 width: width - 40.0,
                 height: 50.0,
-                color: palette::BLUE,
+                color: app.palette.blue,
                 line_width: 2.0,
                 corner_radii: CornerRadii::all(6.0),
             });
@@ -2742,7 +2751,7 @@ fn render_board_list(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_start
             x: 36.0,
             y: cy + 8.0,
             text: board.name.clone(),
-            color: palette::TEXT,
+            color: app.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 120.0),
@@ -2756,7 +2765,7 @@ fn render_board_list(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_start
                 board.columns.len(),
                 board.cards.len()
             ),
-            color: palette::SUBTEXT0,
+            color: app.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2774,8 +2783,8 @@ fn render_board_list(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_start
         120.0,
         30.0,
         "+ New Board",
-        palette::BLUE,
-        palette::CRUST,
+        app.palette.blue,
+        app.palette.crust,
         CornerRadii::all(6.0),
     );
 }
@@ -2821,7 +2830,7 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
         y: dlg_y,
         width: dlg_w,
         height: dlg_h,
-        color: palette::BASE,
+        color: app.palette.base,
         corner_radii: CornerRadii::all(8.0),
     });
     tree.push(RenderCommand::StrokeRect {
@@ -2829,7 +2838,7 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
         y: dlg_y,
         width: dlg_w,
         height: dlg_h,
-        color: palette::SURFACE1,
+        color: app.palette.surface1,
         line_width: 1.0,
         corner_radii: CornerRadii::all(8.0),
     });
@@ -2839,7 +2848,7 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
         x: dlg_x + 16.0,
         y: dlg_y + 16.0,
         text: prompt.to_string(),
-        color: palette::TEXT,
+        color: app.palette.text,
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -2852,14 +2861,14 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
         y: dlg_y + 42.0,
         width: dlg_w - 32.0,
         height: 30.0,
-        color: palette::SURFACE0,
+        color: app.palette.surface0,
         corner_radii: CornerRadii::all(4.0),
     });
     tree.push(RenderCommand::Text {
         x: dlg_x + 24.0,
         y: dlg_y + 48.0,
         text: app.input_buffer.clone(),
-        color: palette::TEXT,
+        color: app.palette.text,
         font_size: 13.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(dlg_w - 48.0),
@@ -2871,7 +2880,7 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
         x: dlg_x + 16.0,
         y: dlg_y + 84.0,
         text: "Enter to confirm, Escape to cancel".to_string(),
-        color: palette::OVERLAY0,
+        color: app.palette.overlay0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2889,7 +2898,7 @@ fn render_app(app: &KanbanApp, width: f32, height: f32) -> RenderTree {
         y: 0.0,
         width,
         height,
-        color: palette::CRUST,
+        color: app.palette.crust,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -3282,6 +3291,10 @@ fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
 // =============================================================================
 
 impl App for KanbanApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         self.boards
             .get(self.active_board_idx)
@@ -3507,7 +3520,8 @@ mod tests {
 
     #[test]
     fn test_priority_color_not_default() {
-        let c = Priority::High.color();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let c = Priority::High.color(&pal);
         assert_ne!(c, Color::BLACK);
     }
 
@@ -3550,9 +3564,10 @@ mod tests {
 
     #[test]
     fn test_label_creation() {
-        let l = Label::new("Bug", palette::RED);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let l = Label::new("Bug", pal.red);
         assert_eq!(l.name, "Bug");
-        assert_eq!(l.color, palette::RED);
+        assert_eq!(l.color, pal.red);
     }
 
     // ---- ChecklistItem tests ----
@@ -4067,7 +4082,8 @@ mod tests {
 
     #[test]
     fn test_json_export_label() {
-        let label = Label::new("Bug", palette::RED);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let label = Label::new("Bug", pal.red);
         let json = JsonExporter::export_label(&label);
         assert!(json.contains("\"name\":\"Bug\""));
         assert!(json.contains("\"color\":\"#"));
@@ -4390,6 +4406,7 @@ mod tests {
     /// label pill sits well above this section) and a looser filter picks them
     /// up too.
     fn comment_cards(tree: &RenderTree) -> Vec<(f32, f32)> {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let header_y = text_rows(tree)
             .into_iter()
             .find(|(_, t)| t.starts_with("Comments ("))
@@ -4405,10 +4422,7 @@ mod tests {
                     color,
                     corner_radii,
                     ..
-                } if *color == palette::SURFACE0
-                    && corner_radii.top_left == 4.0
-                    && *y > header_y =>
-                {
+                } if *color == pal.surface0 && corner_radii.top_left == 4.0 && *y > header_y => {
                     Some((*y, *height))
                 }
                 _ => None,
@@ -4653,7 +4667,15 @@ mod tests {
             .cards
             .get(&app.selected_card.expect("a card is open"))
             .expect("the open card exists");
-        render_card_detail_body(&mut scratch, board, card, 0.0, 0.0, modal.content_w());
+        render_card_detail_body(
+            &mut scratch,
+            &app.palette,
+            board,
+            card,
+            0.0,
+            0.0,
+            modal.content_w(),
+        );
         let content = content_bottom(&scratch.commands).expect("the body draws something");
 
         // Scrolled to the end, the last thing drawn sits exactly on the body's
@@ -5136,15 +5158,16 @@ mod tests {
 
     #[test]
     fn test_palette_colors_distinct() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let colors = [
-            palette::BASE,
-            palette::MANTLE,
-            palette::CRUST,
-            palette::SURFACE0,
-            palette::TEXT,
-            palette::BLUE,
-            palette::RED,
-            palette::GREEN,
+            pal.base,
+            pal.mantle,
+            pal.crust,
+            pal.surface0,
+            pal.text,
+            pal.blue,
+            pal.red,
+            pal.green,
         ];
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {
@@ -5163,8 +5186,9 @@ mod tests {
 
     #[test]
     fn test_widget_tree_render() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let root = Widget::container()
-            .with_background(palette::CRUST)
+            .with_background(pal.crust)
             .with_flex_direction(FlexDirection::Column);
         let mut wt = WidgetTree::new(root, 1200.0, 800.0);
         wt.layout();
@@ -5248,6 +5272,7 @@ mod tests {
 
     #[test]
     fn a_card_is_drawn_the_height_it_was_measured() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         // The column reserves `card_height` and `render_card` returns what it
         // drew. If they disagree the cards overlap, or the last one crosses the
         // column's bottom edge.
@@ -5264,7 +5289,7 @@ mod tests {
             }
             let expected = card_height(&card);
             let mut tree = RenderTree::new();
-            let drawn = render_card(&mut tree, &card, &board, 0.0, 0.0, 200.0, false);
+            let drawn = render_card(&mut tree, &pal, &card, &board, 0.0, 0.0, 200.0, false);
             assert!(
                 (drawn - expected).abs() < 0.001,
                 "decorate={decorate}: drew {drawn}, measured {expected}"
@@ -5395,6 +5420,80 @@ mod tests {
         assert_eq!(
             app.scroll_offset, deep,
             "the stored offset is not rewritten"
+        );
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut KanbanApp) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 1200.0, 800.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = KanbanApp::new();
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        oswindow::app::App::theme_changed(
+            &mut app,
+            &theme(
+                appearance::ThemeMode::Dark,
+                Some(appearance::HighContrastScheme::WhiteOnBlack),
+            ),
+        );
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
         );
     }
 }

@@ -8384,6 +8384,7 @@ version = "0.1.0"
 name = "kanban"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -16542,6 +16543,7 @@ dependencies = [
 name = "soundrecorder"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

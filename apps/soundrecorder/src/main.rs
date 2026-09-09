@@ -7,6 +7,7 @@
 
 #![allow(dead_code, clippy::too_many_arguments, clippy::vec_init_then_push)]
 
+use appearance::Palette;
 #[allow(unused_imports)]
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent};
@@ -24,22 +25,7 @@ use std::collections::VecDeque;
 // Catppuccin Mocha color palette
 // ============================================================================
 
-mod colors {
-    use guitk::color::Color;
-
-    pub const BASE: Color = Color::from_hex(0x1E1E2E);
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    pub const SURFACE1: Color = Color::from_hex(0x45475A);
-    pub const TEXT: Color = Color::from_hex(0xCDD6F4);
-    pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-    pub const OVERLAY0: Color = Color::from_hex(0x6C7086);
-    pub const BLUE: Color = Color::from_hex(0x89B4FA);
-    pub const GREEN: Color = Color::from_hex(0xA6E3A1);
-    pub const RED: Color = Color::from_hex(0xF38BA8);
-    pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
-    pub const PEACH: Color = Color::from_hex(0xFAB387);
-}
+mod colors {}
 
 // ============================================================================
 // Recording state machine
@@ -85,12 +71,12 @@ impl RecordingState {
     }
 
     /// Color associated with this state for UI display.
-    pub fn color(self) -> Color {
+    pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Idle => colors::SUBTEXT0,
-            Self::Recording => colors::RED,
-            Self::Paused => colors::YELLOW,
-            Self::Stopped => colors::GREEN,
+            Self::Idle => pal.subtext0,
+            Self::Recording => pal.red,
+            Self::Paused => pal.yellow,
+            Self::Stopped => pal.green,
         }
     }
 }
@@ -494,7 +480,7 @@ impl WaveformDisplay {
     }
 
     /// Render the waveform visualization to render commands.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render(&self, pal: &Palette) -> Vec<RenderCommand> {
         let mut commands = Vec::new();
 
         // Background
@@ -503,7 +489,7 @@ impl WaveformDisplay {
             y: self.y,
             width: self.width,
             height: self.height,
-            color: colors::MANTLE,
+            color: pal.mantle,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -514,7 +500,7 @@ impl WaveformDisplay {
             y1: center_y,
             x2: self.x + self.width,
             y2: center_y,
-            color: colors::OVERLAY0,
+            color: pal.overlay0,
             width: 1.0,
         });
 
@@ -538,7 +524,7 @@ impl WaveformDisplay {
                     y: center_y - bar_h,
                     width: bar_width.max(1.0),
                     height: bar_h * 2.0,
-                    color: colors::GREEN,
+                    color: pal.green,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -550,7 +536,7 @@ impl WaveformDisplay {
             y: self.y,
             width: self.width,
             height: self.height,
-            color: colors::SURFACE0,
+            color: pal.surface0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -627,18 +613,18 @@ impl VuMeter {
     }
 
     /// Convert a level to a display color (green -> yellow -> red).
-    fn level_color(level: f32) -> Color {
+    fn level_color(level: f32, pal: &Palette) -> Color {
         if level < 0.6 {
-            colors::GREEN
+            pal.green
         } else if level < 0.85 {
-            colors::YELLOW
+            pal.yellow
         } else {
-            colors::RED
+            pal.red
         }
     }
 
     /// Render the VU meter.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render(&self, pal: &Palette) -> Vec<RenderCommand> {
         let mut commands = Vec::new();
 
         // Background
@@ -647,7 +633,7 @@ impl VuMeter {
             y: self.y,
             width: self.width,
             height: self.height,
-            color: colors::MANTLE,
+            color: pal.mantle,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -659,7 +645,7 @@ impl VuMeter {
                 y: self.y + 2.0,
                 width: bar_width,
                 height: self.height - 4.0,
-                color: Self::level_color(self.current_level),
+                color: Self::level_color(self.current_level, pal),
                 corner_radii: CornerRadii::all(2.0),
             });
         }
@@ -672,7 +658,7 @@ impl VuMeter {
                 y1: self.y + 1.0,
                 x2: peak_x,
                 y2: self.y + self.height - 1.0,
-                color: colors::RED,
+                color: pal.red,
                 width: 2.0,
             });
         }
@@ -683,7 +669,7 @@ impl VuMeter {
             y: self.y,
             width: self.width,
             height: self.height,
-            color: colors::SURFACE0,
+            color: pal.surface0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(3.0),
         });
@@ -771,7 +757,7 @@ impl RecordingTimer {
     }
 
     /// Render the timer display.
-    pub fn render(&self, x: f32, y: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, pal: &Palette, x: f32, y: f32) -> Vec<RenderCommand> {
         let elapsed_text = self.format_elapsed();
         let remaining_text = format!("-{}", self.format_remaining());
 
@@ -781,7 +767,7 @@ impl RecordingTimer {
                 x,
                 y,
                 text: elapsed_text,
-                color: colors::TEXT,
+                color: pal.text,
                 font_size: 28.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -792,7 +778,7 @@ impl RecordingTimer {
                 x: x + 200.0,
                 y: y + 6.0,
                 text: remaining_text,
-                color: colors::SUBTEXT0,
+                color: pal.subtext0,
                 font_size: 16.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -838,11 +824,16 @@ impl MarkerList {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         let color_index = id as usize % 4;
+        // Fixed values, not theme roles. A marker stores its colour, so it is
+        // the user's own mark: nothing rewrites it when the theme changes, and
+        // a themed value would leave markers dropped before the change in the
+        // old scheme and ones dropped after in the new. Same rule as
+        // `kanban`'s labels and `hexeditor`'s bookmarks.
         let color = match color_index {
-            0 => colors::BLUE,
-            1 => colors::PEACH,
-            2 => colors::YELLOW,
-            _ => colors::GREEN,
+            0 => Color::from_hex(0x89B4FA),
+            1 => Color::from_hex(0xFAB387),
+            2 => Color::from_hex(0xF9E2AF),
+            _ => Color::from_hex(0xA6E3A1),
         };
         self.markers.push(Marker {
             id,
@@ -1016,6 +1007,7 @@ impl TrimRegion {
     /// Render the trim handles on a waveform region.
     pub fn render(
         &self,
+        pal: &Palette,
         region_x: f32,
         region_y: f32,
         region_width: f32,
@@ -1061,7 +1053,7 @@ impl TrimRegion {
             y: region_y,
             width: 6.0,
             height: region_height,
-            color: colors::BLUE,
+            color: pal.blue,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1071,7 +1063,7 @@ impl TrimRegion {
             y: region_y,
             width: 6.0,
             height: region_height,
-            color: colors::BLUE,
+            color: pal.blue,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1155,7 +1147,7 @@ impl NoiseGate {
     }
 
     /// Render the noise gate threshold indicator.
-    pub fn render(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, pal: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut commands = Vec::new();
 
         // Label
@@ -1163,11 +1155,7 @@ impl NoiseGate {
             x,
             y,
             text: format!("Noise Gate: {:.0}%", self.threshold * 100.0),
-            color: if self.enabled {
-                colors::TEXT
-            } else {
-                colors::OVERLAY0
-            },
+            color: if self.enabled { pal.text } else { pal.overlay0 },
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1181,7 +1169,7 @@ impl NoiseGate {
             y: track_y,
             width,
             height: 6.0,
-            color: colors::SURFACE0,
+            color: pal.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -1193,20 +1181,20 @@ impl NoiseGate {
             width: 8.0,
             height: 14.0,
             color: if self.enabled {
-                colors::PEACH
+                pal.peach
             } else {
-                colors::OVERLAY0
+                pal.overlay0
             },
             corner_radii: CornerRadii::all(4.0),
         });
 
         // Gate status indicator
         let status_color = if !self.enabled {
-            colors::OVERLAY0
+            pal.overlay0
         } else if self.is_open {
-            colors::GREEN
+            pal.green
         } else {
-            colors::RED
+            pal.red
         };
         commands.push(RenderCommand::FillRect {
             x: x + width + 10.0,
@@ -1349,7 +1337,7 @@ impl PlaybackController {
     }
 
     /// Render the playback bar.
-    pub fn render(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, pal: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut commands = Vec::new();
         let bar_height = 6.0;
         let bar_y = y + 10.0;
@@ -1360,7 +1348,7 @@ impl PlaybackController {
             y: bar_y,
             width,
             height: bar_height,
-            color: colors::SURFACE0,
+            color: pal.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -1372,7 +1360,7 @@ impl PlaybackController {
                 y: bar_y,
                 width: fill_width,
                 height: bar_height,
-                color: colors::BLUE,
+                color: pal.blue,
                 corner_radii: CornerRadii::all(3.0),
             });
         }
@@ -1384,7 +1372,7 @@ impl PlaybackController {
             y: bar_y - 4.0,
             width: 10.0,
             height: bar_height + 8.0,
-            color: colors::TEXT,
+            color: pal.text,
             corner_radii: CornerRadii::all(5.0),
         });
 
@@ -1393,7 +1381,7 @@ impl PlaybackController {
             x,
             y: bar_y + bar_height + 6.0,
             text: self.format_position(),
-            color: colors::SUBTEXT0,
+            color: pal.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1403,7 +1391,7 @@ impl PlaybackController {
             x: x + width - 40.0,
             y: bar_y + bar_height + 6.0,
             text: self.format_duration(),
-            color: colors::SUBTEXT0,
+            color: pal.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1610,7 +1598,7 @@ impl RecordingHistory {
     }
 
     /// Render the recording history list.
-    pub fn render(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, pal: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut commands = Vec::new();
         let row_height = 36.0;
 
@@ -1619,7 +1607,7 @@ impl RecordingHistory {
             x,
             y,
             text: "Recording History".into(),
-            color: colors::TEXT,
+            color: pal.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1631,7 +1619,7 @@ impl RecordingHistory {
                 x,
                 y: y + 24.0,
                 text: "No recordings yet.".into(),
-                color: colors::OVERLAY0,
+                color: pal.overlay0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1651,7 +1639,7 @@ impl RecordingHistory {
                     y: ey,
                     width,
                     height: row_height - 2.0,
-                    color: colors::SURFACE0,
+                    color: pal.surface0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -1661,11 +1649,7 @@ impl RecordingHistory {
                 x: x + 8.0,
                 y: ey + 4.0,
                 text: entry.filename.clone(),
-                color: if is_selected {
-                    colors::BLUE
-                } else {
-                    colors::TEXT
-                },
+                color: if is_selected { pal.blue } else { pal.text },
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.5),
@@ -1678,7 +1662,7 @@ impl RecordingHistory {
                 x: x + 8.0,
                 y: ey + 19.0,
                 text: info,
-                color: colors::SUBTEXT0,
+                color: pal.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1735,6 +1719,12 @@ pub struct SoundRecorderApp {
     /// Window dimensions.
     pub window_width: f32,
     pub window_height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl SoundRecorderApp {
@@ -1742,6 +1732,7 @@ impl SoundRecorderApp {
     pub fn new() -> Self {
         let preset = QualityPreset::Music;
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             state: RecordingState::Idle,
             preset,
             sample_rate: preset.sample_rate(),
@@ -1974,7 +1965,7 @@ impl SoundRecorderApp {
             y: 0.0,
             width: self.window_width,
             height: self.window_height,
-            color: colors::BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1984,14 +1975,14 @@ impl SoundRecorderApp {
             y: 0.0,
             width: self.window_width,
             height: 40.0,
-            color: colors::MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
             x: 16.0,
             y: 10.0,
             text: "Sound Recorder".into(),
-            color: colors::TEXT,
+            color: self.palette.text,
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2004,14 +1995,14 @@ impl SoundRecorderApp {
             y: 12.0,
             width: 10.0,
             height: 10.0,
-            color: self.state.color(),
+            color: self.state.color(&self.palette),
             corner_radii: CornerRadii::all(5.0),
         });
         cmds.push(RenderCommand::Text {
             x: 176.0,
             y: 10.0,
             text: self.state.label().into(),
-            color: self.state.color(),
+            color: self.state.color(&self.palette),
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2024,7 +2015,7 @@ impl SoundRecorderApp {
                 x: 20.0,
                 y: 50.0,
                 text: format!("Input: {}", device.name),
-                color: colors::SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
@@ -2037,7 +2028,7 @@ impl SoundRecorderApp {
             x: 350.0,
             y: 50.0,
             text: format!("Quality: {}", self.preset.label()),
-            color: colors::SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(240.0),
@@ -2045,13 +2036,13 @@ impl SoundRecorderApp {
         });
 
         // Timer display
-        cmds.extend(self.timer.render(20.0, 75.0));
+        cmds.extend(self.timer.render(&self.palette, 20.0, 75.0));
 
         // Waveform
-        cmds.extend(self.waveform.render());
+        cmds.extend(self.waveform.render(&self.palette));
 
         // VU meter
-        cmds.extend(self.vu_meter.render());
+        cmds.extend(self.vu_meter.render(&self.palette));
 
         // Markers overlay on waveform
         let wf = &self.waveform;
@@ -2065,15 +2056,15 @@ impl SoundRecorderApp {
 
         // Trim handles when stopped
         if let Some(ref trim) = self.trim {
-            cmds.extend(trim.render(wf.x, wf.y, wf.width, wf.height));
+            cmds.extend(trim.render(&self.palette, wf.x, wf.y, wf.width, wf.height));
         }
 
         // Noise gate control
-        cmds.extend(self.noise_gate.render(20.0, 260.0, 200.0));
+        cmds.extend(self.noise_gate.render(&self.palette, 20.0, 260.0, 200.0));
 
         // Playback bar when stopped
         if self.state == RecordingState::Stopped {
-            cmds.extend(self.playback.render(20.0, 300.0, 560.0));
+            cmds.extend(self.playback.render(&self.palette, 20.0, 300.0, 560.0));
         }
 
         // Control buttons
@@ -2081,7 +2072,7 @@ impl SoundRecorderApp {
         self.render_controls(&mut cmds, 20.0, button_y);
 
         // Recording history (right side or below)
-        cmds.extend(self.history.render(20.0, 390.0, 560.0));
+        cmds.extend(self.history.render(&self.palette, 20.0, 390.0, 560.0));
 
         cmds
     }
@@ -2090,22 +2081,22 @@ impl SoundRecorderApp {
     fn render_controls(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) {
         match self.state {
             RecordingState::Idle => {
-                self.render_button(cmds, x, y, 100.0, 32.0, "Record", colors::RED);
+                self.render_button(cmds, x, y, 100.0, 32.0, "Record", self.palette.red);
             }
             RecordingState::Recording => {
-                self.render_button(cmds, x, y, 80.0, 32.0, "Pause", colors::YELLOW);
-                self.render_button(cmds, x + 90.0, y, 80.0, 32.0, "Stop", colors::PEACH);
-                self.render_button(cmds, x + 180.0, y, 100.0, 32.0, "Marker", colors::BLUE);
+                self.render_button(cmds, x, y, 80.0, 32.0, "Pause", self.palette.yellow);
+                self.render_button(cmds, x + 90.0, y, 80.0, 32.0, "Stop", self.palette.peach);
+                self.render_button(cmds, x + 180.0, y, 100.0, 32.0, "Marker", self.palette.blue);
             }
             RecordingState::Paused => {
-                self.render_button(cmds, x, y, 80.0, 32.0, "Resume", colors::GREEN);
-                self.render_button(cmds, x + 90.0, y, 80.0, 32.0, "Stop", colors::PEACH);
-                self.render_button(cmds, x + 180.0, y, 100.0, 32.0, "Marker", colors::BLUE);
+                self.render_button(cmds, x, y, 80.0, 32.0, "Resume", self.palette.green);
+                self.render_button(cmds, x + 90.0, y, 80.0, 32.0, "Stop", self.palette.peach);
+                self.render_button(cmds, x + 180.0, y, 100.0, 32.0, "Marker", self.palette.blue);
             }
             RecordingState::Stopped => {
-                self.render_button(cmds, x, y, 80.0, 32.0, "New", colors::GREEN);
-                self.render_button(cmds, x + 90.0, y, 80.0, 32.0, "Save", colors::BLUE);
-                self.render_button(cmds, x + 180.0, y, 80.0, 32.0, "Play", colors::PEACH);
+                self.render_button(cmds, x, y, 80.0, 32.0, "New", self.palette.green);
+                self.render_button(cmds, x + 90.0, y, 80.0, 32.0, "Save", self.palette.blue);
+                self.render_button(cmds, x + 180.0, y, 80.0, 32.0, "Play", self.palette.peach);
             }
         }
     }
@@ -2133,7 +2124,7 @@ impl SoundRecorderApp {
             x: x + 10.0,
             y: y + 8.0,
             text: label.into(),
-            color: colors::BASE,
+            color: self.palette.base,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2153,6 +2144,10 @@ impl Default for SoundRecorderApp {
 // ============================================================================
 
 impl App for SoundRecorderApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Sound Recorder".to_string()
     }
@@ -2265,10 +2260,11 @@ mod tests {
 
     #[test]
     fn test_state_colors_differ() {
-        let idle = RecordingState::Idle.color();
-        let recording = RecordingState::Recording.color();
-        let paused = RecordingState::Paused.color();
-        let stopped = RecordingState::Stopped.color();
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let idle = RecordingState::Idle.color(&pal);
+        let recording = RecordingState::Recording.color(&pal);
+        let paused = RecordingState::Paused.color(&pal);
+        let stopped = RecordingState::Stopped.color(&pal);
         assert_ne!(idle, recording);
         assert_ne!(recording, paused);
         assert_ne!(paused, stopped);
@@ -2513,9 +2509,10 @@ mod tests {
 
     #[test]
     fn test_waveform_render_nonempty() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut wf = WaveformDisplay::new(0.0, 0.0, 100.0, 50.0);
         wf.push_amplitude(0.5);
-        let cmds = wf.render();
+        let cmds = wf.render(&pal);
         assert!(!cmds.is_empty());
     }
 
@@ -2564,16 +2561,18 @@ mod tests {
 
     #[test]
     fn test_vu_meter_render_produces_commands() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let vu = VuMeter::new(0.0, 0.0, 100.0, 20.0);
-        let cmds = vu.render();
+        let cmds = vu.render(&pal);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn test_vu_meter_level_color_ranges() {
-        assert_eq!(VuMeter::level_color(0.3), colors::GREEN);
-        assert_eq!(VuMeter::level_color(0.7), colors::YELLOW);
-        assert_eq!(VuMeter::level_color(0.95), colors::RED);
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        assert_eq!(VuMeter::level_color(0.3, &pal), pal.green);
+        assert_eq!(VuMeter::level_color(0.7, &pal), pal.yellow);
+        assert_eq!(VuMeter::level_color(0.95, &pal), pal.red);
     }
 
     // -- RecordingTimer tests ------------------------------------------------
@@ -2626,8 +2625,9 @@ mod tests {
 
     #[test]
     fn test_timer_render_produces_commands() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let t = RecordingTimer::new(1000, 100);
-        let cmds = t.render(0.0, 0.0);
+        let cmds = t.render(&pal, 0.0, 0.0);
         assert!(!cmds.is_empty());
     }
 
@@ -2772,18 +2772,20 @@ mod tests {
 
     #[test]
     fn test_trim_render_full_no_dim() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let t = TrimRegion::full(1000);
-        let cmds = t.render(0.0, 0.0, 100.0, 50.0);
+        let cmds = t.render(&pal, 0.0, 0.0, 100.0, 50.0);
         // Should have 2 handle rects but no dim rects
         assert_eq!(cmds.len(), 2);
     }
 
     #[test]
     fn test_trim_render_partial_has_dim() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let mut t = TrimRegion::full(1000);
         t.set_start(200);
         t.set_end(800);
-        let cmds = t.render(0.0, 0.0, 100.0, 50.0);
+        let cmds = t.render(&pal, 0.0, 0.0, 100.0, 50.0);
         // 2 dim regions + 2 handles = 4
         assert_eq!(cmds.len(), 4);
     }
@@ -2847,8 +2849,9 @@ mod tests {
 
     #[test]
     fn test_noise_gate_render_produces_commands() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let ng = NoiseGate::new(0.1);
-        let cmds = ng.render(0.0, 0.0, 100.0);
+        let cmds = ng.render(&pal, 0.0, 0.0, 100.0);
         assert!(!cmds.is_empty());
     }
 
@@ -2951,8 +2954,9 @@ mod tests {
 
     #[test]
     fn test_playback_render_produces_commands() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let pb = PlaybackController::new();
-        let cmds = pb.render(0.0, 0.0, 100.0);
+        let cmds = pb.render(&pal, 0.0, 0.0, 100.0);
         assert!(!cmds.is_empty());
     }
 
@@ -3463,5 +3467,79 @@ mod tests {
         wav.extend_from_slice(&u32::MAX.to_le_bytes()); // claims 4 GB
         wav.extend_from_slice(&[0u8; 8]);
         assert!(WavFile::from_bytes(&wav).is_none());
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut SoundRecorderApp) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(&pal, w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 800.0, 600.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = SoundRecorderApp::new();
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        oswindow::app::App::theme_changed(
+            &mut app,
+            &theme(
+                appearance::ThemeMode::Dark,
+                Some(appearance::HighContrastScheme::WhiteOnBlack),
+            ),
+        );
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

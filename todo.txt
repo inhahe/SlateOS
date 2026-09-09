@@ -55969,3 +55969,43 @@ reordering into the next run means a mistake in it costs a third. Do this as
 its own change once the merge has landed, and validate with `bash -n`,
 `scripts/test-boot-test.py`, and `scripts/check-gates-are-wired.py` before
 spending a run on it.
+
+
+## The whole tree's boot-test coverage is one lane's cadence (lane A, 2026-09-09)
+
+**Measured** from `bench/boot-history.jsonl` as it stands on `origin/main`,
+`origin/lane-b` and `origin/lane-c` — all three agree, so this is not a
+stale-branch artifact:
+
+    boots recorded since the E: migration (2026-09-06): 8
+    branch of every one of them:                        lane-a
+    most recent before today:                           2026-09-08T11:32Z
+
+Lanes B and C have recorded **zero** boot tests in three days. In that window
+lane B merged posix work to `main` (pause/sigsuspend, the ctest-pty fixture
+rework, the timer audit).
+
+**This is probably the right arrangement, and that is why it is worth writing
+down rather than filing as a fault.** A boot test builds the entire workspace
+and its QEMU phase is serialised by a cross-worktree lock, so three lanes each
+running their own would mostly duplicate work and queue behind each other. One
+lane booting covers everyone's code. The arrangement is sound.
+
+What follows from it is not obvious, though: **the assurance level of the whole
+tree equals lane A's boot cadence**, including for changes lane A did not
+write. When lane A is blocked, nobody is validating anything — and lane A was
+blocked for two days this week. The concrete cost is already on the record:
+`kernel/src/selftest.rs` sat failing a *deny*-level clippy gate for about a day
+(`A-KERNEL-CLIPPY-IS-CHECKED-ONLY-INSIDE-A-19-MINUTE-BOOT-TEST`), because the
+only thing that looks is the slowest thing anyone runs, and only one lane runs
+it.
+
+**Not proposing a gate for this.** Two gate proposals were costed today and one
+was rejected on the numbers; a third would be reflex rather than judgement. The
+useful smaller move, if anyone wants it, is *visibility* rather than
+enforcement: `bench/last-release-boot.json` already records the last
+release-profile boot for gate 15, and an equivalent "last commit of `main`
+that a boot test actually validated" would make this gap legible without
+blocking anybody. Whether that is worth building depends on how often `main`
+is merged to between lane A's runs — which nobody has measured, and which
+should be measured before anything is built.

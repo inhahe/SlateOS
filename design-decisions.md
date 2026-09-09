@@ -69680,7 +69680,7 @@ re-read.
 | proximity matching | `-P NUM` | `-P` = `--perl-regexp` | `--proximity NUM` |
 | filename globs | `-f PATTERN` | `-f` = patterns from file | `--name PATTERN` |
 | case-sensitive filenames | `-c` | `-c` = `--count` | `--name-case-sensitive` |
-| conjunction across patterns | repeated `-e` | `-e` repeated = alternation | `--all-patterns` (opt-in) |
+| conjunction across patterns | repeated `-e` | `-e` repeated = alternation | `--every-pattern` (opt-in) |
 
 The last is the sharp one, and the reason this is a decision rather than a
 rename: it is not a spelling clash but an **opposite meaning on identical
@@ -69688,6 +69688,41 @@ syntax**. `grep -e a -e b f` prints lines matching either under GNU and prints
 nothing unless the file contains both under the operator's. Silently choosing
 either would make a command that already appears in scripts mean something
 new, so conjunction becomes opt-in and alternation stays the default.
+
+### The name is `--every-pattern` and not `--all-patterns`, because the shorter one broke an abbreviation
+
+Written first as `--all-patterns`, which is the better name and could not be
+used. `scripts/getopt-ambiguity-check.py` refused the push and gave the reason:
+
+```text
+grep: --a we say ambiguous, GNU resolves it;
+      matches ['after-context', 'all-patterns']
+```
+
+GNU grep has exactly one long option beginning with `a`, so `grep --a 3 file`
+resolves to `--after-context` today. A second `a` option makes that
+abbreviation ambiguous, and an abbreviation that works now would stop working
+— which is precisely the GNU behaviour this decision promised would survive.
+
+`--every-pattern` has no such prefix. GNU grep has four options starting with
+`e`, so `--e` is already ambiguous on both sides and stays that way; nothing
+starts with `ev`, so every deeper prefix is one GNU rejects today and we accept
+now. That is a divergence rather than a regression: nothing that worked stops
+working.
+
+**The general rule, worth more than this instance:** a new long option may not
+share a prefix with a GNU option unless that prefix is *already* ambiguous in
+GNU. The safe construction is a name whose first letter GNU spends on two or
+more options, diverging from all of them before the depth at which GNU resolves
+uniquely.
+
+The gate now carries an `INTENTIONAL_EXTRAS` table so that a deliberate non-GNU
+option is not reported as a transcription error. Its exemption is deliberately
+narrow: it permits only "we resolve, GNU has never heard of it", never "we made
+ambiguous something GNU resolves". That was verified rather than reasoned about
+— re-adding `all-patterns` *with an exemption in place* still fails the gate on
+`--a`.
+
 
 **Against the choice, honestly:** it is the operator's OS, and their muscle
 memory is a real cost that falls on them rather than on a hypothetical GNU

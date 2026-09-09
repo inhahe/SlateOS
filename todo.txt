@@ -55921,3 +55921,51 @@ for the same CPU and disk), and record it in `bench/` so it is re-runnable --
   units untouched for over a week. Worth reconciling before quoting either.
 - Separate target dirs are the status quo, so "do nothing" is a real option and
   costs only disk.
+
+
+## Three sub-second gates are the LAST thing a 26-minute boot test checks (lane A, 2026-09-09)
+
+**Measured, from the per-gate timing logs the harness already writes**
+(`<git-common-dir>/worktrees/os-lane-a/boot-test-gate-timing.*.tsv`, run of
+2026-09-09 on E:, 220 gates / 440 s):
+
+| gate | cost | position |
+|---|---|---|
+| `check-design-decisions-bands` | 1.0 s | 212 / 220 |
+| `check-open-questions` | **0.0 s** | 214 / 220 |
+| `check-accidental-headings` | 1.0 s | 216 / 220 |
+
+All three are pure file readers with no dependency on anything earlier. They
+sit in the last 3% of the gate phase, so a one-second structural check on a
+single markdown file is the last thing standing between a nineteen-minute wait
+and the build.
+
+**This is not hypothetical.** It cost a boot test today: A-Q9 was filed below
+`# Resolved` in `open-questions.md`, `check-open-questions` refused (correctly
+-- a question in the archive is not a question that was asked), and the run had
+already spent nineteen minutes to reach it. `known-issues.md` records
+open-questions structure failing boot tests twice before this.
+
+**The pattern already exists in the file**: `check_requests_not_deleted` is
+also 0.0 s and is gate **#1**. These three simply do not follow it, and no
+comment anywhere in `boot-test.sh` gives a reason for the order.
+
+**The fix, and why it is not a one-line move.** `boot-test.sh` uses
+define-then-call, each gate's function body sitting ~30 lines above its
+invocation:
+
+    check_design_decisions_bands   defined 5770, called 5806
+    check_open_questions           defined 5823, called 5864
+    check_accidental_headings      defined 5886, called 5923
+
+A bash function must be defined before it is called, so moving the calls means
+moving the definitions with them. Happily the three are **contiguous**
+(5770-~5960), so it is one region to relocate to just after
+`check_requests_not_deleted` (~3365) rather than three separate edits.
+
+**Deliberately not done yet.** Seventeen commits are waiting on a green boot
+test, and two runs have already been lost today. Folding a `boot-test.sh`
+reordering into the next run means a mistake in it costs a third. Do this as
+its own change once the merge has landed, and validate with `bash -n`,
+`scripts/test-boot-test.py`, and `scripts/check-gates-are-wired.py` before
+spending a run on it.

@@ -51,6 +51,7 @@
 //! | `--escape-control` | render control bytes as `\xNN` instead of sending them to the terminal |
 //! | `--keep-color-escapes` | under `--escape-control`, let a complete colour sequence through |
 //! | `GREP_COLORS` `ec=` | the colour of an escape `--escape-control` wrote; ours, default `94` |
+//! | `GREP_COLORS` names | any capability may be written `red`, `brightgreen`, `default`, … instead of SGR digits |
 //! | `--exclude-path=A/B` | do not descend into a directory whose *path* ends `A/B` |
 //!
 //! ## Patterns are patterns
@@ -239,6 +240,54 @@ impl Default for Colors {
     }
 }
 
+/// The SGR parameters a `GREP_COLORS` colour *name* stands for, if it is one.
+///
+/// # Why names at all
+///
+/// The operator's grep sets its six colours by name -- `--set-colors
+/// brightgreen brightblack brightred default brightred brightblue` -- and
+/// `GREP_COLORS` takes SGR parameters, so the same request there reads
+/// `fn=92:se=90:ln=91:ms=39:ec=94`. The names are the substance of that
+/// feature; the config file it writes them to is not, because a shell profile
+/// already persists an environment variable and `osh` reads `/etc/profile`,
+/// `~/.bashrc` and `$BASH_ENV`. See `design-decisions.md` 1008.
+///
+/// The seventeen are theirs exactly, including `default`, which is SGR 39 --
+/// "the terminal's own foreground", not "no colour at all". `ms=` with an
+/// empty value is what means no colour, and it still does: an empty value is
+/// valid SGR and never reaches this function.
+///
+/// # The divergence, and its direction
+///
+/// GNU ignores a `GREP_COLORS` value that is not SGR parameters, in silence
+/// and by design -- so `GREP_COLORS='fn=brightgreen'` works here and is
+/// ignored there. That is the *unsafe* direction for a divergence in a script
+/// interface, and it is accepted here because `GREP_COLORS` is not one: it is
+/// per-user preference, set once in a profile, and the failure mode on a
+/// foreign grep is the default colour rather than a wrong answer.
+fn color_name(value: &[u8]) -> Option<&'static [u8]> {
+    Some(match value {
+        b"black" => b"30",
+        b"red" => b"31",
+        b"green" => b"32",
+        b"yellow" => b"33",
+        b"blue" => b"34",
+        b"magenta" => b"35",
+        b"cyan" => b"36",
+        b"white" => b"37",
+        b"default" => b"39",
+        b"brightblack" => b"90",
+        b"brightred" => b"91",
+        b"brightgreen" => b"92",
+        b"brightyellow" => b"93",
+        b"brightblue" => b"94",
+        b"brightmagenta" => b"95",
+        b"brightcyan" => b"96",
+        b"brightwhite" => b"97",
+        _ => return None,
+    })
+}
+
 impl Colors {
     /// The escape that begins a run of `cap`-coloured output, or nothing at all
     /// when `cap` is empty — an empty capability means "write it plainly", and
@@ -299,11 +348,22 @@ impl Colors {
                 None => (item, &[][..], false),
             };
             // A capability is SGR parameters: digits and `;`. Anything else is
-            // not something to hand to a terminal.
-            let sane = valued && value.iter().all(|b| b.is_ascii_digit() || *b == b';');
+            // not something to hand to a terminal -- unless it is one of the
+            // seventeen colour names, which stand for parameters. Order
+            // matters: the digit test runs first, so an empty value stays
+            // empty (GNU's "no highlight") and never looks like an unknown
+            // name.
+            let named = value.iter().all(|b| b.is_ascii_digit() || *b == b';');
+            let params: Option<&[u8]> = if !valued {
+                None
+            } else if named {
+                Some(value)
+            } else {
+                color_name(value)
+            };
             let set = |field: &mut Vec<u8>| {
-                if sane {
-                    *field = value.to_vec();
+                if let Some(p) = params {
+                    *field = p.to_vec();
                 }
             };
             match key {
@@ -4738,6 +4798,70 @@ mod tests {
         // other capability.
         c.apply(b"ec=rm -rf");
         assert_eq!(c.escape, b"35");
+    }
+
+    /// The seventeen names the operator's grep offers, mapped to the SGR
+    /// parameters `GREP_COLORS` already took. Written out rather than
+    /// generated, because a table whose test is the table proves nothing.
+    #[test]
+    fn every_colour_name_maps_to_its_sgr_parameter() {
+        for (name, sgr) in [
+            ("black", "30"),
+            ("red", "31"),
+            ("green", "32"),
+            ("yellow", "33"),
+            ("blue", "34"),
+            ("magenta", "35"),
+            ("cyan", "36"),
+            ("white", "37"),
+            ("default", "39"),
+            ("brightblack", "90"),
+            ("brightred", "91"),
+            ("brightgreen", "92"),
+            ("brightyellow", "93"),
+            ("brightblue", "94"),
+            ("brightmagenta", "95"),
+            ("brightcyan", "96"),
+            ("brightwhite", "97"),
+        ] {
+            assert_eq!(color_name(name.as_bytes()), Some(sgr.as_bytes()), "{name}");
+        }
+    }
+
+    /// The operator's own default palette, written both ways, producing the
+    /// same `Colors`. This is the port: their `--set-colors` request restated
+    /// in the mechanism we already had.
+    #[test]
+    fn a_palette_by_name_equals_the_same_palette_by_number() {
+        let mut named = Colors::default();
+        named.apply(b"fn=brightgreen:se=brightblack:ln=brightred:ms=default:ec=brightblue");
+        let mut numbered = Colors::default();
+        numbered.apply(b"fn=92:se=90:ln=91:ms=39:ec=94");
+        assert_eq!(named, numbered);
+    }
+
+    /// A name that is not one of the seventeen is ignored in silence, exactly
+    /// as a malformed SGR value is -- the capability keeps whatever it had.
+    #[test]
+    fn an_unknown_colour_name_is_ignored() {
+        assert_eq!(color_name(b"chartreuse"), None);
+        let mut c = Colors::default();
+        c.apply(b"fn=chartreuse");
+        assert_eq!(c.filename, b"35"); // GNU's default, untouched
+    }
+
+    /// `default` is SGR 39 -- the terminal's own foreground -- and **not** the
+    /// same as an empty value, which means "write it plainly, with no escape
+    /// at all". Both are reachable and they are different requests.
+    #[test]
+    fn default_is_a_colour_and_empty_is_the_absence_of_one() {
+        let mut named = Colors::default();
+        named.apply(b"ms=default");
+        assert_eq!(named.selected_match, b"39");
+
+        let mut empty = Colors::default();
+        empty.apply(b"ms=");
+        assert!(empty.selected_match.is_empty());
     }
 
     fn near_set(text: &str, patterns: &[&str], near: usize, opts: &Options) -> Vec<usize> {

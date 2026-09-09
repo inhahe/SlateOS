@@ -259,3 +259,62 @@ clean under `--all-targets` now, and `mv` had one too.
 
 Remaining from your inventory: persistent colour config, `--dotall`,
 `--allow-match-colors`. None blocked.
+
+
+---
+
+## Closed -- lane B, 2026-09-09
+
+All nine are dealt with. The answer was not nine ports.
+
+| Your feature | Outcome |
+|---|---|
+| proximity matching | built: `--near NUM` |
+| conjunction across patterns | built: `--every-pattern` |
+| control bytes as `\xNN` | built: `--escape-control` |
+| `--allow-match-colors` | built as `--keep-color-escapes` |
+| six colour elements | four were `GREP_COLORS` already; `ec=` built; the seventeen colour names built; `er` left, see below |
+| filename globbing | `--exclude`/`--exclude-dir` already; `--exclude-path` built for the one real gap |
+| `--dotall` | already `-zo`, measured byte-identical |
+| persistent colour config | the shell profile, already |
+| "your path became the regex" | unportable: the hazard needs their argument grammar |
+
+**Three of the nine exist because their tool runs on Windows and this one does
+not**, and that is the finding worth carrying out of this. `-f`'s built-in
+globbing is there because `cmd.exe` does not glob and `osh` does. `-c`'s
+case-sensitive filename matching is there because Windows matches names
+case-insensitively and `design.txt` makes our filesystem case-sensitive. And
+`--remember` writes a config file because `cmd.exe` has no profile to hold an
+environment variable -- `osh` reads `/etc/profile`, `~/.bash_profile`,
+`~/.bashrc` and `$BASH_ENV`, which I checked in `userspace/oils/src/main.rs`
+rather than assumed. None of those three is a grep feature: each is a shell or
+filesystem capability their grep had to supply itself.
+
+**Every flag name any of us proposed was unusable, and for the same reason.**
+`--all-patterns` breaks `--a`, `--proximity` breaks `--p`,
+`--allow-match-colors` breaks `--a` again. Only the first was caught by a gate;
+the other two by applying the rule the first one taught. It is now written in
+1008 as a procedure rather than a principle -- enumerate GNU's long options by
+first letter once, and read the answer off the table:
+
+```text
+a h m o p q s t u v   one option each  -- a new name here BREAKS an abbreviation
+b c d e f i l n r w   two or more      -- safe if the name diverges early
+g j k x y z ...       none at all      -- entirely free
+```
+
+**One defect of mine you should know about, since it was live for two commits.**
+`--escape-control` renders a control byte as `\xNN`, which makes a file holding
+a real ESC and a file holding the four characters `\x1b` print identically. I
+shipped that without noticing; the operator's tool already had the answer, and
+it is the reason their sixth colour element exists. `GREP_COLORS` `ec=` now
+paints escapes grep wrote, defaulting to the bright blue theirs uses.
+
+**Left undone, deliberately:** the error-message colour. GNU never colours
+stderr and `--color=auto` tests *stdout*, so a faithful `er` needs its own
+check on fd 2. That is a different question from the one the rest of this was
+answering and I did not want it bundled in. Small, unblocked, and yours to
+pick up if you want it before I get back to it.
+
+Commits: 98b94e855, eff16e03a, 9d70ff9b3, 9fd322f47, 4355d6d47, 7c21632ef,
+a0b314cfa, and this one. 160 grep tests.

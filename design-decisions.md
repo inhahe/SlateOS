@@ -70026,6 +70026,78 @@ one this entry is answering, and the wrong thing to bundle into a commit about
 stdout.
 
 
+### The last two features, and what the whole exercise turned out to be about
+
+**`--dotall` is `-zo`.** Measured on the operator's `grep.py`, on GNU and on
+ours, on the same three-line file:
+
+```text
+$ python grep.py 'alpha.beta' -f dot.txt --dotall
+dot.txt:alpha
+beta
+
+$ grep -zoH 'alpha.beta' dot.txt | od -c
+0000000 d o t . t x t : a l p h a \n b e t a \0
+```
+
+Byte-identical but for the terminator, and ours matches GNU byte for byte.
+`-z` makes the record separator NUL, so a file with no NUL is one record, `.`
+crosses newlines because they are no longer the separator, and `-o` prints the
+match rather than the record. Their `--dotall` prints the match too, which is
+why their README disables line numbers under it -- a match can span lines.
+
+Lane A's porting constraint said "ours will want a bound, since we have no
+guarantee about file size". The bound question is real and it is `-z`'s, not a
+new option's: our reader is `read_until(NUL, &mut line)` on a growable `Vec`, so
+a whole-file record is a whole file in memory. That is inherent to what `-z`
+*means* and is not new today, so it is left as it is rather than made to
+diverge from upstream on the strength of a hypothetical.
+
+**`--set-colors` splits into a real feature and a Windows workaround.** The real
+part is the seventeen colour *names*: `--set-colors brightgreen brightblack
+brightred default brightred brightblue` against `GREP_COLORS='fn=92:se=90:ln=91:ms=39:ec=94'`.
+Any `GREP_COLORS` capability may now be written by name. The workaround part is
+`--remember`, which writes them to a config file; a shell profile already
+persists an environment variable, and `osh` reads `/etc/profile`,
+`~/.bash_profile`, `~/.bashrc` and `$BASH_ENV` -- verified in
+`userspace/oils/src/main.rs`, not assumed. A config file that duplicates the
+profile would be a second place for the same setting to be wrong.
+
+The direction of that divergence is worth naming, because it is the *unsafe*
+one: GNU ignores a `GREP_COLORS` value that is not SGR parameters, so
+`fn=brightgreen` works here and does nothing there. Accepted because
+`GREP_COLORS` is per-user preference rather than a script interface, and the
+failure mode on a foreign grep is the default colour, not a wrong answer.
+
+### What nine features came to
+
+| | outcome |
+|---|---|
+| proximity matching | built: `--near NUM` |
+| conjunction across patterns | built: `--every-pattern` |
+| control bytes as `\xNN` | built: `--escape-control` (+ `--keep-color-escapes`, + `ec=`) |
+| six colour elements | four were `GREP_COLORS` already; `ec` built; names built; `er` left |
+| filename globbing | `--exclude`/`--exclude-dir` already; **`--exclude-path` built** for the one gap |
+| `--dotall` | already `-zo` |
+| `--allow-match-colors` | built as `--keep-color-escapes` |
+| persistent colour config | the shell profile, already |
+| "your path became the regex" | unportable: the hazard needs their grammar |
+
+**Three of the nine exist because their tool runs on Windows and this one does
+not.** `-f`'s built-in globbing is there because `cmd.exe` does not glob and
+`osh` does; `-c`'s case-sensitive filename matching is there because Windows
+matches names case-insensitively and `design.txt` makes our filesystem
+case-sensitive; `--remember` is there because `cmd.exe` has no profile to put
+an environment variable in. None of the three is a grep feature at all -- each
+is a shell or filesystem capability that their grep had to supply itself.
+
+That is the finding worth keeping from the whole exercise. The request was
+"integrate my grep's additional features", and the honest answer was not nine
+ports: it was six new things, four already present under GNU's own spellings
+(and one of ours *stronger* than theirs), and three that dissolve on a system
+with a real shell.
+
+
 **Against the choice, honestly:** it is the operator's OS, and their muscle
 memory is a real cost that falls on them rather than on a hypothetical GNU
 user. The mitigation is only a mitigation — aliasing the short forms back

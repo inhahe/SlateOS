@@ -130,7 +130,14 @@ pub fn parse_proc_dyndns(text: &str) -> Vec<DynDnsRow> {
         };
         // The name and hostname must be non-empty and an address must follow.
         // (`prov_at < status_at` already holds — the search was bounded by it.)
-        if prov_at < 2 || status_at == prov_at + 1 || status_at + 1 >= fields.len() {
+        //
+        // `saturating_add` rather than `+`: both are positions in `fields`, so
+        // both are below its length and cannot overflow, but the crate denies
+        // unchecked arithmetic and a saturating add is correct even in the case
+        // that cannot arise — it would leave the range empty and skip the row.
+        let after_provider = prov_at.saturating_add(1);
+        let after_status = status_at.saturating_add(1);
+        if prov_at < 2 || status_at == after_provider || after_status >= fields.len() {
             continue;
         }
         let join = |r: std::ops::Range<usize>| {
@@ -140,9 +147,9 @@ pub fn parse_proc_dyndns(text: &str) -> Vec<DynDnsRow> {
             id,
             name: join(1..prov_at),
             provider: (*fields.get(prov_at).unwrap_or(&"")).to_string(),
-            hostname: join(prov_at + 1..status_at),
+            hostname: join(after_provider..status_at),
             status: (*fields.get(status_at).unwrap_or(&"")).to_string(),
-            last_ip: join(status_at + 1..fields.len()),
+            last_ip: join(after_status..fields.len()),
         });
     }
     rows

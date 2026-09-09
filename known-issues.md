@@ -125148,7 +125148,37 @@ their suites.
 
 ---
 
-## TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING
+## TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING — TWO OF THREE RESOLVED 2026-09-09
+
+**Status, 2026-09-09.** Two of the three are gone. `snapshots.rs` (2,256
+lines) was deleted down to a 313-line `/proc/snapshots` reader, and
+`associations.rs` (1,753) was deleted outright after its fallback-handler
+logic was ported into `apps/fileassoc` — where it fixed a real bug, two
+records that could disagree about the default handler.
+
+**`remote.rs` (1,619 lines) remains, and is deliberately kept.** Both halves
+of it hold design that is recorded nowhere else, so deleting it would lose
+knowledge rather than remove duplication:
+
+- **The remote-desktop half** — `RemoteDesktopConfig`'s `require_authentication`,
+  `allowed_users`, port and encryption level — is the only statement in the
+  tree of what the compositor's connection gate should ask. The compositor
+  really does listen on a TCP socket and really does accept anyone; see the
+  2026-09-09 scope note on `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`.
+- **The dynamic-DNS half** was superseded only in part. The kernel owns the
+  entry list and the update mechanism, and the Settings page now reads it from
+  `/proc/dyndns` — but the kernel models credentials as one generic
+  `update_url` per entry, whereas `ProviderSettings` records *which* credentials
+  each provider actually needs (NoIP: email + password; DuckDNS: domain + token;
+  Dynu: hostname + username + password; FreeDNS: domain + auth token). That
+  mapping is real, non-obvious knowledge with no other home until an add-entry
+  flow exists. See `TD-C-DYNDNS-PAGE-IS-READ-ONLY`.
+
+**Trigger to delete each half:** the remote-desktop half, when the capability
+gate lands and the real config lives wherever the compositor reads it; the
+dynamic-DNS half, when the provider credential shapes are ported to whatever
+builds an entry — the same port-then-delete that `associations.rs` got, and the
+reason that one could be deleted and this one cannot yet.
 
 **Date:** 2026-09-08. **Lane:** C.
 **Where:** `apps/settings/src/snapshots.rs` (2,256 lines),
@@ -125349,6 +125379,53 @@ least no longer *divergent* dead code.
    to become unreachable says so.
 
 ---
+
+## TD-C-DYNDNS-PAGE-IS-READ-ONLY
+
+**Date:** 2026-09-09. **Lane:** C.
+**Where:** `apps/settings/src/main.rs` — `build_dyndns_page`;
+`apps/settings/src/dyndns.rs`; `kernel/src/fs/dyndns.rs`.
+
+**In short:** the new Settings → Network → Dynamic DNS page shows the entries
+the machine has, but the user cannot add, edit or remove one from it. Dynamic
+DNS keeps a hostname pointing at your home address as your ISP changes it;
+right now the only way to set one up is from inside the kernel, so in practice
+the page will read "No dynamic-DNS entries are configured" on every machine and
+there is no way to make it say anything else.
+
+**Why:** the kernel implements the whole feature — `add_entry`, `remove_entry`,
+`set_update_url`, `update_now`, plus UPnP/NAT-PMP forwarding — but exposes none
+of it to userspace. There is no dyndns syscall (`grep -rn dyndns kernel/src/sys*`
+returns nothing) and `/proc/dyndns` is generated read-only by `gen_dyndns`.
+Userspace can therefore observe the state and change nothing about it.
+
+**This is not the page being unfinished.** Rendering an Add button that cannot
+add would be the mistake the page was written to avoid — see the test
+`the_dyndns_page_invents_no_entries` and the unreachable version in `remote.rs`
+that defaults to a fabricated `home.example.com` entry. A read-only page that
+is honest about what it can do is the correct intermediate state.
+
+**Proper fix:** a capability-gated syscall pair for add/remove plus one for
+`update_now`, and then the page grows an editor. Two things it will need that
+exist already and should be used rather than rewritten: the per-provider
+credential shapes in `apps/settings/src/remote.rs` (`ProviderSettings`), which
+the kernel does not model — it stores one generic `update_url` per entry — and
+`apps/settings/src/dyndns.rs`'s `PROVIDERS`, which must stay in step with the
+kernel enum either way.
+
+**Trigger to fix:** when the syscall exists. That is lane A's; no request is
+filed yet, because the interface should be specified against a real editor
+design rather than guessed at now.
+
+**If never fixed:** the page is accurate and inert. Nothing breaks; the feature
+is simply unreachable by any user, exactly as it was before the page existed —
+the page's value in the meantime is that it stops the *next* reader concluding
+from `remote.rs` that dynamic DNS is wired up and working.
+
+**Related:** an entry can also read `Success` while publishing an address the
+router no longer has. The page flags that ("address out of date") by comparing
+each entry's last published address with the router's external address, because
+the status alone does not show it.
 
 ## TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS
 

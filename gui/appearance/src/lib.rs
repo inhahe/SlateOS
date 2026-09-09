@@ -26,6 +26,17 @@
 /// the compositor and the Settings application, and none of those call sites
 /// were wrong. See `settingsfile`'s own documentation for why it moved: it is
 /// not about appearance, and `inputsettings` needs it without needing colours.
+/// The sweep that proves a module draws from the palette rather than from
+/// colours of its own.
+///
+/// Behind a feature rather than `#[cfg(test)]`, because `cfg(test)` is set only
+/// when *this* crate is under test and never when a dependent is -- the same
+/// reason `settingsfile::testing` is a feature. It lived in `gui/desktop` until
+/// the blur pass moved to `gui/compositor` and took its tests with it: two
+/// crates needed it, and a helper about `Palette` belongs with `Palette`.
+#[cfg(feature = "testing")]
+pub mod palette_check;
+
 pub use settingsfile as config;
 
 use core::num::NonZeroU32;

@@ -921,7 +921,7 @@ mod tests {
     )]
 
     use super::*;
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
 
     fn mocha() -> Palette {
         Palette::for_mode(false)

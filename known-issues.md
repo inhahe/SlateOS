@@ -124286,7 +124286,7 @@ no other crate depends on it), so nothing outside the corpus could reach them.
 | module | what it holds | what is missing |
 |---|---|---|
 | `login_screen.rs` | ~~`LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig`~~ | **Done, 2026-09-08.** `ShellSession` constructs one when the account database names anybody (`design-decisions.md` §824), draws it on a fifth full-screen surface created last within `Layer::Overlay` so nothing the shell owns is over it, routes every key and click to it while it is up, and answers with `authlib`. What it still lacks is the *session hand-off* — a successful login unmaps the screen and reveals the desktop, but nothing starts a session as that user, because there is nowhere to send that (the shell has no channel to the process server; same gap as `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`). Autologin is read and not acted on; see `todo.txt`. Originally: Construction and a session hand-off. §815 says wire it up. *(Correction, 2026-09-08: an earlier version of this row said §818 has to take effect here. It does not — §818 is about the **lock** screen, `apps/lockscreen`, which is a separate program. See `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.)* |
-| `blur.rs` | `BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager` | A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
+| `blur.rs` | ~~`BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager`~~ | **Done, 2026-09-08: moved to `gui/compositor` and wired.** A surface asks with `WindowSpec::blur_behind` (a *role*, so the compositor resolves the parameters from its own palette), and `Compositor::blur_behind_window` runs the pass over the region immediately before that window is drawn — the one moment the framebuffer holds everything behind it and nothing in front. Software targets only; see `TD-C-BLUR-IS-SOFTWARE-ONLY`. Originally it could not be wired in the shell at all: It works on a *framebuffer* (`BlurManager::update_all(&mut [u32], w, h)`) and the shell has no framebuffer: it submits render trees and never sees a pixel of what is behind its surfaces. `blur.rs` was the only file in the whole `gui/desktop` crate to mention `[u32]`. The pixels behind a window are the compositor's, so the pass now lives where it can run; what remains is a protocol way for a surface to ask for it, and a call in the compositor's paint path. Originally: A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
 | `input_method.rs` | `InputMethodManager`, `SwitchShortcut` | A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
 | `tray_dnd.rs` | `TrayDragSource`, `TrayDropTarget`, `TrayIconSlot`, `TrayIconArrangement`, `TraySlotConfig`, `TrayArrangementConfig`, `StartInTrayConfig` | A caller in the tray's event path. |
 
@@ -125088,6 +125088,18 @@ comments bind forward to the item beneath them, so the real insertion point is
 before *the attribute run*, not before the item. `wire_app.py` now walks back
 over any `#[...]`, `///` or `//!` lines above its anchor.
 
+**It applies to deletion too, and the same day proved it.** Removing
+`pub mod palette_check;` from `gui/desktop/src/lib.rs` — when that module moved
+to `appearance` — left its `#[cfg(test)]` and doc comment attached to the next
+declaration down, `pub mod power;`. Forward binding makes a *deletion* exactly
+as dangerous as an insertion: whatever the attribute governed is gone, so it
+silently governs its new neighbour. This one would have compiled the power
+module out of every release build. The compiler caught it only because `power`
+is used elsewhere; had the stranded attribute been an `#[allow]`, nothing would
+have said a word — which is the nine-out-of-ten case above. **Deleting an item
+means deleting its attribute run with it**, which is the same rule
+`convert_app.py` learned for constants and their doc comments.
+
 **Found by:** a clippy warning in `filediff` that had no business being there,
 followed by grepping every application for an attribute directly above
 `use appearance::Palette;`. All ten fixed; all ten build clippy-clean and pass
@@ -125151,6 +125163,131 @@ least no longer *divergent* dead code.
 3. Remove the three `#![allow(dead_code)]` attributes, so that the next module
    to become unreachable says so.
 
+---
+
+## TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/settingsfile/src/…` — `testing::with_scratch_config`;
+`gui/window/src/app.rs` — the 27 tests that call `drive()`.
+
+**In short:** four tests in the window library point the "where is the config
+file" setting at a temporary directory of their own, so they can write a theme
+file and watch it being noticed. That setting is one value shared by the whole
+test *process*, and the other twenty-three tests read it without knowing. When
+the timing lines up, one of those twenty-three sees a theme file that a
+different test put there, redraws because of it, and fails an assertion about
+how many times it drew.
+
+**How it shows.** `cargo test -p oswindow --lib` fails
+`app::tests::a_file_written_while_answering_idle_is_still_announced` with
+`left: 2, right: 1` — "announcing is not redrawing: only the unprompted first
+frame". Run **alone**, `cargo test -p oswindow a_file_written_while` passes.
+That difference is the whole diagnosis: a test that passes by itself and fails
+in company is sharing something.
+
+**What is shared.** `with_scratch_config` takes an `ENV_LOCK` mutex and then
+sets a process-global **environment variable** naming the config directory. The
+lock makes its own callers take turns, which is what it was written for. It
+does nothing about a *reader* that never calls it: `drive()` constructs a
+`ThemeWatch`, which constructs an `appearance::config::Watcher`, which resolves
+the config directory from that same env var. Twenty-three tests reach that path
+and none of them hold the lock.
+
+So the invariant the lock provides is "two scratch configs are never installed
+at once", and the invariant actually needed is "nobody reads the config
+directory while a scratch one is installed". The second is strictly stronger.
+
+**Why it is worth more than a retry.** The failing assertion is about a real
+rule — *announcing a settings change to an application must not redraw it* —
+and the test is the only thing holding that rule. A flaky test on a real rule
+gets muted, and then the rule is unprotected. It is also latent for every test
+added to this file in future: 23 of 27 are one scheduling accident from the
+same failure.
+
+**Not caused by, but found during,** the blur work: `cargo test -p oswindow`
+had not been run directly in a while, and the failure reproduces with the blur
+change stashed.
+
+**The fix.** Make the reader take the lock too, rather than wrapping
+twenty-three tests by hand: the shared `desktop()` test helper that every
+`drive()` test already uses should hold the config lock for the life of the
+test. That serialises all 27 against the 4, which is affordable — the whole
+suite runs in hundredths of a second — and it cannot be forgotten by the next
+test added, which wrapping by hand can.
+
+An env var is process-wide by definition, so making the override thread-local
+is not available; serialising the readers is the only option that does not
+change what `Watcher` reads from.
+
+**Fixed 2026-09-08, and the first attempt deadlocked** — worth recording,
+because the failure mode is worse than the bug. `TestDesktop::new` was made to
+take `ENV_LOCK` directly, which is correct for the twenty-three readers and
+fatal for the four writers: they call `with_scratch_config` and build a
+`TestDesktop` **inside** it, and `std::sync::Mutex` is not reentrant. A second
+`lock()` on the same thread is not an error, it is a stop — the suite hangs
+with no failing test and no message, which is harder to diagnose than the
+flake it replaced.
+
+The turn is now reentrant by a thread-local depth: the outermost holder on a
+thread takes the mutex and everything nested inside it merely raises the count.
+`cargo test` runs a binary's tests as threads of one process, so per-thread is
+exactly the right grain. `TestDesktop` holds a `ConfigTurn` for its own
+lifetime, so a test takes the turn whether or not its author knew there was
+one.
+
+**A second, benign oddity found on the way:** `settingsfile` has *two*
+`ENV_LOCK` statics — one in `mod testing` (line 352) and one in its own
+`#[cfg(test)] mod tests` (line 515) — guarding the same process-global
+environment with different mutexes, so they do not exclude each other. It is
+harmless today because the two are never live in one build: the crate's own
+unit tests run with the `testing` feature off, and a dependent's run with it
+on. Left as it is rather than merged, since merging them would mean exposing
+the lock from a module that is compiled out of exactly the build that needs the
+other one. Noted so that a future `[features] default = ["testing"]` is
+understood to make them overlap.
+
+---
+
+## TD-C-BLUR-IS-SOFTWARE-ONLY
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/compositor/src/lib.rs` — `Compositor::blur_behind_window`.
+
+**In short:** the translucent-blurred look the taskbar and menus now ask for
+works when the compositor is drawing with the CPU, and quietly does nothing
+when it is drawing with the graphics card. Nothing breaks — the surface is just
+drawn plain — but on a machine with working graphics acceleration the feature
+is invisible, which is the opposite of where you would expect it to work.
+
+**Why.** A backdrop blur has to *read pixels back*: it exists to show a softened
+version of what is already behind a surface. The software target has a
+`Vec<u32>` to read and rewrite. A hardware backend has no mutable pixel
+access, and deliberately so — a GPU blur is a shader sampling a texture, not a
+CPU pass over an array — so `RenderBackend::as_software_mut()` returns `None`
+and the pass returns early.
+
+**Why it was built this way anyway.** The alternative was to leave 2,223 lines
+of written, tested blur code unreachable for longer, which is what it had been
+since before the three-lane split (see
+`TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED`). `BlurKind` is
+advisory in the way `WindowSpec::transparent` is: a compositor that cannot
+honour it draws the surface flat and does not tell the client. A plainer
+taskbar is not a broken desktop, which is exactly why this is a limitation and
+not a bug — unlike `layer`, which is refused rather than demoted, because a
+panel behind the windows *is* a broken desktop.
+
+**The proper fix** is a shader path in the hardware backend: render the region
+behind the surface to an offscreen texture, blur it there (two-pass separable
+Gaussian, which is what `BlurRenderer` already does on the CPU), and sample it
+when compositing the surface. The parameters are already resolved
+compositor-side from `BlurKind`, so nothing about the protocol changes; the
+work is entirely in the backend.
+
+**Do not "fix" this by making `RenderTarget` expose mutable pixels.** That
+would put a method on the trait that every implementor but one has to refuse,
+and it would make the software fallback the definition of the feature. The
+per-backend split is the honest shape.
 
 ## B-THE-C-PLUS-PLUS-LINK-LINE-NEEDS-TWO-DECISIONS-AND-ONE-MISSING-FAMILY (lane B, 2026-09-09)
 

@@ -1151,7 +1151,7 @@ mod tests {
                 DropEffect::Move,
                 DropEffect::Link,
             ] {
-                crate::palette_check::assert_drawn_from(
+                appearance::palette_check::assert_drawn_from(
                     &p,
                     &overlay_of(&p, 12, effect),
                     &[],
@@ -1171,7 +1171,7 @@ mod tests {
                 DropEffect::Move,
                 DropEffect::Link,
             ] {
-                crate::palette_check::assert_drawn_from(
+                appearance::palette_check::assert_drawn_from(
                     &p,
                     &render_drop_target_highlight(&p, &target_with("Drop here"), effect),
                     &[],

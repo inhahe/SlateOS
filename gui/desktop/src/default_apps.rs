@@ -1801,7 +1801,7 @@ mod tests {
             for (tab, cmds) in every_tab(&p) {
                 // The only computed colour here is the lettering on the
                 // accent-filled button, so that is the whole `derived` list.
-                crate::palette_check::assert_drawn_from(
+                appearance::palette_check::assert_drawn_from(
                     &p,
                     &cmds,
                     &[appearance::readable_on(p.accent)],

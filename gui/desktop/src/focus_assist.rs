@@ -699,8 +699,8 @@ mod tests {
     )]
 
     use super::*;
-    use crate::palette_check::assert_drawn_from;
     use appearance::AccentColor;
+    use appearance::palette_check::assert_drawn_from;
 
     fn make_mgr() -> FocusAssistManager {
         FocusAssistManager::new()

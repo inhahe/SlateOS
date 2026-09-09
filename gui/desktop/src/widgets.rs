@@ -1376,7 +1376,7 @@ mod tests {
             clock_date: "Tuesday, 3 June".to_string(),
         }
     }
-    use crate::palette_check::assert_drawn_from;
+    use appearance::palette_check::assert_drawn_from;
 
     fn make_mgr() -> DesktopWidgetManager {
         DesktopWidgetManager::new()

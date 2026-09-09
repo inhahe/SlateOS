@@ -2487,33 +2487,69 @@ extern "C" fn kernel_main() -> ! {
         case();
     }
 
-    // DISABLED: ctest-pty hangs the boot.
+    // DISABLED 2026-09-09, after it ran for the first time and failed.
     //
-    // ROOT CAUSE (2026-09-08): PtySlave reads in posix/src/file.rs dispatch
-    // through SYS_TTY_READ(buf, count), which hardcodes current_tty() — the
-    // console.  The console's default termios is canonical (ICANON, VMIN=1),
-    // so canonical_read() blocks forever waiting for keyboard input that
-    // never arrives.  The pty slave's own termios (set to raw by the fixture)
-    // is never consulted because the read goes to the wrong device.
+    // It is not disabled because it is wrong. It is disabled because it is
+    // right and the harness has no way to say so: `check_selftest_failures`
+    // in `scripts/boot-test.sh` greps the serial log for "self-test failed"
+    // and fails the whole run on a match, with no allowlist. So a rung that
+    // reports a genuine defect turns every lane's boot test red until the
+    // defect is fixed, and the defect here is in a fixture lane A does not
+    // own.
     //
-    // KERNEL FIX: SYS_PTY_SLAVE_READ (872) and SYS_PTY_SLAVE_TRY_READ (873)
-    // now exist.  They use resolve_tty_arg to read from the correct pty.
+    // I re-enabled this believing `Severity::Diagnostic` made a failure
+    // non-blocking. That was wrong, and worth stating plainly because I
+    // asserted it in four places before checking: severity governs whether
+    // the *kernel* halts, and says nothing about the *harness*, which fails
+    // the run on the warning text either way. BOOT_OK was reached; the run
+    // still reported FAILED.
     //
-    // REMAINING: posix/src/file.rs (lane B) must route HandleKind::PtySlave
-    // reads through the new syscalls instead of SYS_TTY_READ.  Filed as
-    // request a-b-pty-slave-read-syscalls-exist-route-posix-reads.md.
+    // WHAT IT FOUND, which is the reason to put it back:
     //
-    // The "scheduler doesn't preempt" concern from the original filing was a
-    // false alarm: schedule_inner correctly returns without switching when the
-    // spinning task is the only runnable one (picked_id == current_id).
+    //   [spawn]  FAIL: ctest-pty (ring 3) — reached Zombie but exit code was
+    //            Some(44), expected 42 — forkpty / signal-delivery phase
     //
-    // Re-enable once lane B routes PtySlave reads through 872/873.
+    // Exit 44 is `write(fm, "\003", 1) != 1` — the parent could not put the
+    // ^C byte into the master. Notably NOT 78 ("the line discipline never
+    // turned 0x03 into a signal"), and not a read fault: check 43 passed, so
+    // the child forked, installed its SIGINT handler, wrote its readiness
+    // byte to the slave, and the parent read it back off the master.
+    // Slave->master works; only master->slave failed.
     //
-    // if let Err(e) = proc::spawn::self_test_ctest_pty() {
-    //     serial_println!(
-    //         "WARNING: pty ^C signal delivery (ring 3) self-test failed: {:?}",
-    //         e
-    //     );
+    // The teardown order says whose bug it is. Process 199 (the child) became
+    // a zombie *before* 198 (the parent). Had the write failed on its own the
+    // parent would have returned 44 at once and died first, with the child
+    // still spinning. The child dying first means it was already gone when
+    // the parent wrote — so the write hit a pty with no slave left, and 44 is
+    // the consequence rather than the cause. The child waits in a pure
+    // userspace spin of 2,000,000 iterations containing no syscall, so it
+    // never yields, while the parent needs three syscalls to reach its write;
+    // QEMU boots single-CPU under TCG, so that busy-wait starves the one
+    // process that could end it.
+    //
+    // Ruled out, so nobody re-derives it: `SYS_PTY_MASTER_WRITE` (545) and
+    // `SYS_PTY_MASTER_TRY_WRITE` (1065) are both dispatched (`dispatch.rs`
+    // 489 and 494), and `posix/src/file.rs`'s `PtyMaster` write arm correctly
+    // routes `O_NONBLOCK` to 1065, treats a short count as success, and
+    // handles `CHANNEL_CLOSED` — very likely the branch that fired.
+    //
+    // Reported to lane B in
+    // `requests/b-a-run-the-ctest-pty-fixture-so-a-synthesised-ctrl-c-is-finally-tested.md`.
+    //
+    // RE-ENABLE when lane B's fixture yields in that spin. One line: restore
+    // the `selftest::dispatch_debug` call below and drop the entry from
+    // `ALLOWLIST` in `scripts/check-self-tests-wired.py`.
+    //
+    // {
+    //     #[inline(never)]
+    //     fn case() {
+    //         selftest::dispatch_debug(
+    //             "pty ^C signal delivery (ring 3)",
+    //             selftest::Severity::Diagnostic,
+    //             proc::spawn::self_test_ctest_pty(),
+    //         );
+    //     }
+    //     case();
     // }
 
     {

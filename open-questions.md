@@ -959,15 +959,99 @@ Response at
 
 ---
 
-# Resolved
+## A-Q9 — [A] Networking now exists twice: inside the kernel, and as an ordinary program. The second one is finished and switched off. Should it become the default? — Status: OPEN (raised 2026-09-09)
 
-**The body above holds OPEN questions only.** When the operator answers one,
-write it up in `design-decisions.md` as a `Decided by: Operator` entry,
-**delete the entry from the body**, and add one line here. That is the whole
-point of the file: it is scanned for what still needs a decision, so an
-answered question left in the body is pure cost — and, being older, it sorts
-*first*, right where it is most in the way. (Why this is not append-only:
-`design-decisions.md` §437.)
+**In short:** this system can do its networking two ways. The way it uses today
+runs inside the kernel — the innermost, most privileged part of the system,
+where a bug can take down or take over the whole machine. The other way runs it
+as an ordinary background program, so a bug there can only break networking.
+The second way is **built, working, and tested**, but it is switched off unless
+you ask for it. The question is whether to make it the one everybody gets. It is
+not a small flip: the two are not equally mature, and the new one has one known
+rough edge.
+
+**Why this is the operator's call and not mine.** The project's own design rule
+says networking belongs outside the kernel, so on principle the answer is yes.
+But the version inside the kernel has had months of features and fixes poured
+into it, and the replacement has not. Choosing the architecturally-correct
+option over the better-tested one is a judgement about what this system is for
+right now — a decision about risk appetite, not about code.
+
+**Glossary.** *Kernel* — the core of the OS; code there can do anything, so a
+fault is fatal or exploitable. *Daemon* — an ordinary program running in the
+background with no special powers. *Socket* — the handle a program uses to talk
+over the network. *Default* — what you get without setting anything.
+
+### Where things stand
+
+| | in the kernel (today's default) | the daemon (built, off by default) |
+|---|---|---|
+| matches the design rule | **no** | **yes** |
+| a bug there can crash the machine | **yes** | no — only networking stops |
+| maturity | months of work: congestion control, retransmission, out-of-order reassembly, fragmentation, keepalives | newer; feature parity reached, less mileage |
+| tested | every boot | every boot, *when switched on* |
+
+Everything a program needs has been brought across and each piece is checked on
+every boot with the switch on: connecting out, listening for incoming
+connections, IPv4 and IPv6, TCP and UDP, non-blocking mode, and name lookup.
+Real programs have driven it end to end — small stock-Linux test programs fetch
+a web page and resolve a name through it and exit 0.
+
+**The one known rough edge.** A *server* — a program accepting several incoming
+connections at once — currently serves them strictly one at a time through a
+single shared channel to the daemon. So one slow or stalled client can hold up
+the others. Clients (a browser, a package download) are unaffected; this only
+bites a program accepting connections. It is a known interim design, recorded as
+`D-NETSOCK-SYNC`, and removing it needs an asynchronous rewrite of that path,
+not a patch.
+
+### The options
+
+**A. Flip the default to the daemon now.**
+*What changes:* every program's networking goes through the background program
+instead of the kernel. A networking bug stops networking instead of stopping the
+machine. A server handling several connections at once gets slower under load
+until the rough edge above is fixed.
+
+**B. Leave the kernel one as the default; keep the daemon opt-in.**
+*What changes:* nothing visible. The daemon stays exercised only on boots that
+ask for it, which means it drifts from reality at whatever rate the two diverge.
+
+**C. Flip the default, but fix the server rough edge first.**
+*What changes:* nothing visible for now; later, the same as A but without the
+slowdown. Costs an asynchronous rewrite of the server path before anything
+changes.
+
+**D. Flip the default and delete the in-kernel one.**
+*What changes:* the same as A, plus there is no way back without reverting the
+deletion. Removes ~40 files from the kernel and makes the design rule true
+rather than merely available.
+
+**My recommendation: C, then D.** A is the right destination and B is how a
+finished migration quietly rots, but flipping while a server can serialise its
+own clients would trade a correctness win for a visible performance regression —
+and the first person to hit it would reasonably read it as "the new networking
+is slow" rather than "one known interim edge". C removes that objection before
+anyone can form it. D should follow C rather than accompany it, because keeping
+the old path for one release is what makes C reversible if something unmeasured
+turns up.
+
+**If this is never answered:** nothing breaks, and that is the trap. The kernel
+keeps serving the network and the daemon keeps passing its tests on the boots
+that enable it — so the cost is invisible and compounding: two networking stacks
+to keep working, a design rule the project states but does not follow, and a
+finished migration whose value is not being collected. The work is done. Only
+the decision is missing.
+
+**Where it bites:** `kernel/src/net/` (the resident stack, ~40 files),
+`kernel/src/net/netstack_client.rs` (the kernel's client for the daemon),
+`kernel/src/net/socket.rs` (the socket objects), `services/netstack/`
+(the daemon), and the `net.userspace` boot switch read by
+`fs::kernparam::is_set`. Roadmap: "TCP/IP stack" → Phase 5, increment 5.7.
+Prior decisions: `design-decisions.md` §63 (Path B chosen), §66 (staged
+cutover), §71 (Q23, shared session for server sockets).
+
+---
 
 ## C-Q12 — [C] There are two system trays, and neither can do what the spec asks. Which one is the real one? — Status: OPEN
 
@@ -1132,6 +1216,16 @@ The one thing worth avoiding is leaving the *reason* stale — the project has
 already lost ~1,100 commits once to a decision whose premise had quietly
 expired, which is why this was checked at all.
 
+# Resolved
+
+**The body above holds OPEN questions only.** When the operator answers one,
+write it up in `design-decisions.md` as a `Decided by: Operator` entry,
+**delete the entry from the body**, and add one line here. That is the whole
+point of the file: it is scanned for what still needs a decision, so an
+answered question left in the body is pure cost — and, being older, it sorts
+*first*, right where it is most in the way. (Why this is not append-only:
+`design-decisions.md` §437.)
+
 ## Resolved — lane A
 
 - Q45 Convert the whole shell to bytes, or only the expanded word? — resolved
@@ -1166,9 +1260,13 @@ expired, which is why this was checked at all.
 - Q47 [D: drive full — shared vs separate target directory?] — operator input
   received 2026-09-07: tree now on E: with ~300 GB free; serialisation cost
   may be near zero; needs re-evaluation on E: before deciding.
-- Q56 [Linux ABI exempt from native file-permission checks] — answered A
-  2026-09-07: suspend-and-prompt or ahead-of-time grant; per-account
-  default-grant policy. Operator follow-up pending lane A response.
+- Q56 [Linux ABI exempt from native file-permission checks] — resolved
+  2026-09-07, recorded 2026-09-09 (§924): **A, enforce parity**, paid for by
+  suspend-and-prompt or an ahead-of-time grant (the same facility as §918).
+  Operator's two follow-ups answered in §924: no per-account default-grant
+  mechanism exists anywhere in the tree (it is a new feature), and yes it
+  should cover native programs too — a per-account default grant is not
+  ambient authority, because a real, revocable token is still issued.
 - Q57 [capability-request prompt for keyboard/mic/camera?] — resolved
   2026-09-07 (§918): **A, yes,** and fix the error message.
 - A-Q1 [`find -size` bare number: bytes here, blocks elsewhere] — resolved
@@ -1186,8 +1284,12 @@ expired, which is why this was checked at all.
 - A-Q6 [deletion commits + fake-name commits in published history] — resolved
   2026-09-07 (§920): **A, leave history as-is.**
 - A-Q7 [70 ms/file-open on D: — antivirus or disk?] — resolved 2026-09-07
-  (§921): D: already excluded; likely CPU saturation + backup jobs; re-measure
-  on E:.
+  (§921), **closed by measurement 2026-09-09 (§923): it was the disk.**
+  Cold reads cost 19.3 s on D: vs 0.27 s on E: for the same 807 files (71x);
+  warm, both drives are identical. The "warm pass still costs 61.8 s"
+  observation that ruled out the disk does not reproduce (0.19 s). No
+  antivirus exclusion should be requested. Re-runnable:
+  `python bench/file-read-latency.py`.
 
 ## Resolved — lane B
 

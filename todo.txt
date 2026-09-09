@@ -55890,3 +55890,190 @@ checked and how, so the next reader can see the evidence rather than repeat
 the investigation. That is a mitigation and not a fix -- it only helps entries
 somebody has already re-checked.
 
+
+
+## Q47 needs one measurement before it can be answered (lane A, 2026-09-09)
+
+`open-questions.md` lists Q47 (shared vs separate cargo `target/` across the
+four worktrees) as "operator input received, needs re-evaluation on E: before
+deciding". It has no `design-decisions.md` entry, and it should not get one
+until the measurement below is taken -- writing it up from reasoning alone is
+the mistake s923 documents.
+
+**Why it is not answerable from the armchair.** I talked myself into and back
+out of a wrong argument today, so it is worth writing down. The intuitive case
+against sharing is cache thrash: four worktrees on four branches, each build
+invalidating the others. That is **wrong**, and `scripts/prune-build-cache.py`'s
+own header says why -- when a unit's inputs change cargo mints a new
+`-<hash>` artifact and writes it *beside* the old one rather than replacing it.
+Divergent branches therefore coexist in one `target/`; they do not evict each
+other. So sharing really would save the space taken by dependency units that
+are byte-identical across branches, which is most of the third-party tree.
+
+The real cost of sharing is different: cargo takes an **exclusive lock** on a
+target directory for the duration of a build, so a shared one serialises the
+lanes by construction.
+
+That makes the operator's own hypothesis the entire crux, exactly as they
+stated it:
+
+> "I don't know if that's really an issue because I think two builds going at a
+> time would each take twice as long anyway due to CPU and filesystem I/O
+> saturation?"
+
+If that is true, serialisation is free and sharing is a pure space win. If it
+is false, sharing trades wall-clock for disk. Nobody has measured it.
+
+**The measurement.** Wall-clock of the same clean build, (a) alone, and (b) with
+a second lane's identical build running concurrently in its own target dir. If
+2 x concurrent is within ~10% of 2 x serial, the operator is right. Use two
+worktrees that are not mid-task, run it when no boot test is live (it competes
+for the same CPU and disk), and record it in `bench/` so it is re-runnable --
+`bench/file-read-latency.py` is the pattern.
+
+**Context that is already established, so it need not be re-derived:**
+
+- Space is already bounded automatically: `prune-build-cache.py` is wired into
+  `boot-test.sh` (`prune_build_cache_if_low`) and fires when free space drops
+  below **100 GB**, taking only units cargo has not invoked in 14 days. E: had
+  208.8 GB free on 2026-09-09, which is why nothing is being pruned now.
+- The operator recalled that an earlier evaluation found "relatively little
+  could be spared". The pruner's own recorded measurements disagree: lane A's
+  `incremental/` was 31.6 GB of a 48.4 GB tree (65%), and lane B held 19,769
+  units untouched for over a week. Worth reconciling before quoting either.
+- Separate target dirs are the status quo, so "do nothing" is a real option and
+  costs only disk.
+
+
+## Three sub-second gates are the LAST thing a 26-minute boot test checks (lane A, 2026-09-09)
+
+**Measured, from the per-gate timing logs the harness already writes**
+(`<git-common-dir>/worktrees/os-lane-a/boot-test-gate-timing.*.tsv`, run of
+2026-09-09 on E:, 220 gates / 440 s):
+
+| gate | cost | position |
+|---|---|---|
+| `check-design-decisions-bands` | 1.0 s | 212 / 220 |
+| `check-open-questions` | **0.0 s** | 214 / 220 |
+| `check-accidental-headings` | 1.0 s | 216 / 220 |
+
+All three are pure file readers with no dependency on anything earlier. They
+sit in the last 3% of the gate phase, so a one-second structural check on a
+single markdown file is the last thing standing between a nineteen-minute wait
+and the build.
+
+**This is not hypothetical.** It cost a boot test today: A-Q9 was filed below
+`# Resolved` in `open-questions.md`, `check-open-questions` refused (correctly
+-- a question in the archive is not a question that was asked), and the run had
+already spent nineteen minutes to reach it. `known-issues.md` records
+open-questions structure failing boot tests twice before this.
+
+**The pattern already exists in the file**: `check_requests_not_deleted` is
+also 0.0 s and is gate **#1**. These three simply do not follow it, and no
+comment anywhere in `boot-test.sh` gives a reason for the order.
+
+**The fix, and why it is not a one-line move.** `boot-test.sh` uses
+define-then-call, each gate's function body sitting ~30 lines above its
+invocation:
+
+    check_design_decisions_bands   defined 5770, called 5806
+    check_open_questions           defined 5823, called 5864
+    check_accidental_headings      defined 5886, called 5923
+
+A bash function must be defined before it is called, so moving the calls means
+moving the definitions with them. Happily the three are **contiguous**
+(5770-~5960), so it is one region to relocate to just after
+`check_requests_not_deleted` (~3365) rather than three separate edits.
+
+**Deliberately not done yet.** Seventeen commits are waiting on a green boot
+test, and two runs have already been lost today. Folding a `boot-test.sh`
+reordering into the next run means a mistake in it costs a third. Do this as
+its own change once the merge has landed, and validate with `bash -n`,
+`scripts/test-boot-test.py`, and `scripts/check-gates-are-wired.py` before
+spending a run on it.
+
+
+## The whole tree's boot-test coverage is one lane's cadence (lane A, 2026-09-09)
+
+**Measured** from `bench/boot-history.jsonl` as it stands on `origin/main`,
+`origin/lane-b` and `origin/lane-c` — all three agree, so this is not a
+stale-branch artifact:
+
+    boots recorded since the E: migration (2026-09-06): 8
+    branch of every one of them:                        lane-a
+    most recent before today:                           2026-09-08T11:32Z
+
+Lanes B and C have recorded **zero** boot tests in three days. In that window
+lane B merged posix work to `main` (pause/sigsuspend, the ctest-pty fixture
+rework, the timer audit).
+
+**This is probably the right arrangement, and that is why it is worth writing
+down rather than filing as a fault.** A boot test builds the entire workspace
+and its QEMU phase is serialised by a cross-worktree lock, so three lanes each
+running their own would mostly duplicate work and queue behind each other. One
+lane booting covers everyone's code. The arrangement is sound.
+
+What follows from it is not obvious, though: **the assurance level of the whole
+tree equals lane A's boot cadence**, including for changes lane A did not
+write. When lane A is blocked, nobody is validating anything — and lane A was
+blocked for two days this week. The concrete cost is already on the record:
+`kernel/src/selftest.rs` sat failing a *deny*-level clippy gate for about a day
+(`A-KERNEL-CLIPPY-IS-CHECKED-ONLY-INSIDE-A-19-MINUTE-BOOT-TEST`), because the
+only thing that looks is the slowest thing anyone runs, and only one lane runs
+it.
+
+**Not proposing a gate for this.** Two gate proposals were costed today and one
+was rejected on the numbers; a third would be reflex rather than judgement. The
+useful smaller move, if anyone wants it, is *visibility* rather than
+enforcement: `bench/last-release-boot.json` already records the last
+release-profile boot for gate 15, and an equivalent "last commit of `main`
+that a boot test actually validated" would make this gap legible without
+blocking anybody. Whether that is worth building depends on how often `main`
+is merged to between lane A's runs — which nobody has measured, and which
+should be measured before anything is built.
+
+
+## An operator instruction inside B-Q7's answer was never recorded (lane A, 2026-09-09)
+
+**For the operator to decide — not actioned, because it concerns
+`os/CLAUDE.md`, which is theirs.**
+
+Answering B-Q7 on 2026-09-07 the operator wrote, in the same sentence as the
+decision:
+
+> "I generally want the best thing regardless of how much more work it might
+> take **(and by the way, is this in Slate OS's claude.md? If not, it should
+> be)**"
+
+The decision half was recorded properly (`design-decisions.md` §1005, "B,
+`coreutils` is the one home"). The parenthetical was not — it appears in no
+document in this tree.
+
+**As it stands the requirement is met, but by inheritance rather than by
+`os/CLAUDE.md`.** The principle lives in
+`E:\visual studio projects\CLAUDE.md` — "I am generally NOT concerned with how
+long you think something will take … I care about one thing: the best possible
+end result. … Effort is not a cost I'm trying to minimize." All three lane
+worktrees (`os-lane-a/b/c`) and `os` itself sit under that directory, so every
+lane loads it on every turn. Functionally, the operator's wish holds today.
+
+**Why they may still want it copied into `os/CLAUDE.md`.** That parent file
+exists *because* the same rule stopped being loaded once already:
+`D:\visual studio projects\CLAUDE.md` silently stopped applying the day this
+project moved to `E:`, which is what the file's own header records. A principle
+held only by a parent directory travels no further than that directory. Move,
+copy or publish `os/` on its own and the rule is gone again, with nothing
+saying it ever applied — the exact failure that produced the parent file.
+
+Duplication has a real cost too (two copies to keep in step), so this is a
+judgement rather than an obvious yes.
+
+**Not edited on my own initiative.** `os/CLAUDE.md` says plainly: "Do not edit
+this file during normal development … Exception: you may edit this file when the
+user explicitly tells you to make a specific change to it." A parenthetical in
+an answers file, addressed to whoever happened to read it, is not that. Flagging
+it is — the failure here was that nobody flagged it at all.
+
+**Fourth instance today of the same shape** (see the C-Q10 request and A-Q9):
+an operator answer is recorded where it was received, and the actionable part of
+it never reaches anyone. Recording is not delivering.

@@ -65893,6 +65893,28 @@ want them to differ; (3) D's real cost is one macro-level change (a
 `#[severity]` attribute or classification table) plus incremental per-test
 judgement, not 12 674 individual site edits.
 
+**`Severity` governs the kernel, not the harness — and the name invites the
+confusion.** Added 2026-09-09 after the distinction cost a boot test and four
+wrong statements in a row. `Severity::Diagnostic` decides whether the *machine*
+keeps booting, which is exactly what the operator asked for: a user's computer
+should not refuse to start over a cosmetic terminal flag. It says nothing about
+the *boot test*. `check_selftest_failures` in `scripts/boot-test.sh` greps the
+serial log for `self-test failed` and fails the entire run on a match, with no
+allowlist and no reference to severity.
+
+Both behaviours are right and they are not in tension: a shipped kernel should
+survive a cosmetic failure, and a development harness should refuse to call a
+run green when a test failed. The trap is purely that one word appears to
+answer both questions. It does not. A `Diagnostic` rung that fails will still
+redden every lane's boot test until the failure is fixed — see
+`kernel/src/main.rs`'s disabled `ctest-pty` rung, which is disabled for that
+reason and not for being wrong.
+
+**Migration progress, measured 2026-09-09:** 924 classified dispatch sites
+(138 `Integrity`, 786 `Diagnostic`) against 1,319 `self_test*` functions in
+`kernel/src`. The 15:85 split is the shape the decision predicted — structural
+invariants are the minority.
+
 **Implementation plan:** introduce a per-self-test severity classification
 (e.g. `Integrity` vs `Diagnostic`). `Integrity` tests (memory manager, page
 table, scheduler invariants, capability enforcement) keep the panic-on-failure
@@ -66048,6 +66070,320 @@ release test is about to be run.
 `bench/last-release-boot.json` (the baseline), wired into
 `scripts/hooks/pre-push` (gate 15) and `scripts/boot-test.sh` (informational
 line before build).
+
+---
+
+## §923 — The 70 ms per file was the disk after all, and the E: move fixed it; do not ask for an antivirus exclusion
+
+**Date:** 2026-09-09. **Decided by:** Claude (autonomous), closing the
+re-measurement §921 recorded as pending. **Lane:** A.
+
+**In short:** six days ago this project asked the operator to turn off virus
+scanning for the project folder, on the grounds that opening a file here cost
+about 70 milliseconds and that the antivirus was the only explanation left.
+That was wrong. Re-measuring now — same machine, same files, both drives — the
+cost is the *disk*: reading the 807 kernel source files costs 19.3 s on the old
+hard drive when they are not already in memory, and 0.27 s on the SSD. Once
+they are in memory both drives cost the same. Moving the project to `E:` in
+September already fixed it, and **no exclusion should be requested**, for `E:`
+or anywhere else — it would weaken a system-wide security setting to buy
+nothing.
+
+### What was measured
+
+`bench/file-read-latency.py`, 807 `.rs` files under `kernel/src`, the same
+content present on both drives, trees alternated pass to pass so neither gets a
+systematic warming advantage:
+
+| | not in memory | already in memory |
+|---|---|---|
+| `D:` (hard drive) | 19.3 s total, **20.9 ms** median per file | 0.19 s, **0.20 ms** |
+| `E:` (SSD) | 0.27 s total, **0.21 ms** median per file | 0.22 s, **0.17 ms** |
+
+Cold, the SSD is **71× faster**. Warm, the two drives are indistinguishable —
+which is the point: the cost tracks *the device*, and vanishes entirely once
+the device is out of the loop.
+
+### Why the original conclusion was wrong
+
+A-Q7 ruled out the disk and the cache on a single measurement: *"A second full
+pass over all 805 files, immediately: still 61.8 s."* If a warm pass really
+cost the same as a cold one, the storage could not be responsible and something
+inspecting each open would be the natural suspect.
+
+**That measurement does not reproduce.** The same second pass over the same
+files on the same drive costs **0.19 s** — 325× less than 61.8 s. A warm cache
+helps by about 100×, so the one observation that eliminated the disk was the
+one that was wrong, and everything downstream of it followed.
+
+Two other things independently falsify the antivirus story, and both were
+available at the time:
+
+- The operator reported that `D:\visual studio projects` **was already
+  excluded** from scanning. The cost was being paid inside an exclusion.
+- 37 MB of source cannot fail to stay in a cache on a machine with this much
+  memory, so "a warm cache changes nothing" should not have been believed
+  without asking why it was not warm.
+
+I cannot say what the 61.8 s actually was. The plausible candidate is the
+condition the operator described — CPU saturation plus four continuous backup
+jobs (two local, two cloud) whose filesystem filters and read traffic would
+both add latency and evict cache — against a single-actuator hard drive already
+serialising three lanes. That is a hypothesis; unlike the original one, it is
+not being acted on.
+
+### What follows
+
+1. **Do not request an antivirus exclusion.** The evidence for it is gone. This
+   matters beyond the performance question: the request would have spent the
+   operator's administrator access and weakened a security boundary on the
+   strength of a number nobody could re-run.
+2. **The `E:` migration already collected the win** — 71× on cold reads. The
+   `D:` trees remain only as a fallback.
+3. **The claim is now a script, not a paragraph.**
+   `bench/file-read-latency.py` (19 self-tests) reproduces the table above in
+   about a second. The reason A-Q7 stood unchallenged for six days is that
+   re-running it meant reconstructing an ad-hoc measurement from prose.
+
+### The general lesson, which is the reason this entry is long
+
+This is the same failure this lane has now recorded several times: **a verdict
+issued from an observation that was never actually made.** The specific shape
+here is worth naming, because it is the most expensive variant — a *control*
+that did not control. The warm-pass measurement existed to eliminate a
+hypothesis, and eliminating a hypothesis is exactly where a bad measurement
+does the most damage: a wrong positive result gets checked by the next person
+who tries to use it, whereas a wrong *negative* closes a door and nobody opens
+it again. The disk was ruled out on day one and never reconsidered, and the
+conclusion that survived was the one that asked a human to reduce their own
+security.
+
+The habit that catches it: when a measurement's job is to *rule something out*,
+that is the measurement to re-run, not the one that produced the headline
+number. And any performance claim that will be acted on should ship as
+something runnable — the cost of writing `bench/file-read-latency.py` was a few
+minutes, against six days of a wrong conclusion sitting in the operator's
+decision queue.
+
+---
+
+## §924 — The Linux ABI gets the same file-permission checks as native code, with suspend-and-prompt paying for it
+
+**Date:** 2026-09-09 (answered 2026-09-07; entry written 2026-09-09).
+**Decided by:** Operator (Claude recommended C; operator chose A and overruled).
+**Lane:** A.
+
+**In short:** a program built for Linux could ask this system about a file —
+"how big is it?", "when was it changed?" — without holding the permission token
+our own programs are required to hold. Same question, same file, policed or not
+depending on which door the program came in by. The operator's call is to
+**police both doors**. A Linux program that lacks the token is not simply
+refused: it is stopped at the check and the user is asked, or the permission is
+granted ahead of time, so the program never learns it happened.
+
+### Why this overruled the recommendation
+
+The recommendation was C — draw the boundary explicitly and leave the Linux
+door unpoliced — resting on the claim that Linux binaries *assume ambient
+authority by construction* (permission you get by being you, with no token to
+hold), so enforcing parity would break software nobody built for us.
+
+The operator's answer defeats that claim rather than accepting the cost:
+
+> "if you simply suspend the linux program long enough to ask the user for
+> permission, or the user gives it permission ahead of time, then that's not an
+> issue, right? It can be done without making any functional difference for the
+> Linux program"
+
+That is correct, and it is the piece the recommendation missed. A Linux binary
+cannot *ask* for a capability — but it does not have to, if something else asks
+on its behalf while it is suspended. From the program's side a prompt is
+indistinguishable from a slow syscall. The objection was never really "Linux
+programs can't hold capabilities"; it was "Linux programs can't *request* them",
+and a prompt supplies the request from outside. This is the same mechanism the
+operator approved in §918 for keyboard/microphone/camera, so it is one facility,
+not two.
+
+The honest caveat, which the operator stated first: a program denied a
+capability may then misbehave in ways that look like bugs, so the denial must
+warn plainly.
+
+### The operator's two questions back
+
+**1. "Do we have a mechanism to define what native programs (and also Linux
+programs) under a given account are granted by default?"**
+
+**No.** Nothing in `kernel/`, `posix/`, `services/` or `init/` carries
+per-account capability defaults — there is no `default_caps`, no account policy
+record, no grant set on the account at all. Capabilities are passed explicitly
+per spawn (`SpawnOptions.capabilities`), and every launch site names its own.
+So "I think we should" is a **new feature**, not a setting to switch on.
+
+**2. "Should native programs also be granted them by default?"**
+
+**Yes — the mechanism should cover both, but their default contents should
+differ, and the reason matters more than the answer.**
+
+The instinct against it is that default-granting to native programs would erode
+"no ambient authority" for the half of the system that currently honours it.
+That instinct is wrong, and the distinction is worth stating because it will
+come up again: **a per-account default grant is not ambient authority.** Ambient
+authority means there is no token — permission follows from identity and cannot
+be handed over, held, or taken away. A default grant still produces a real
+capability, handed to the process at spawn, which can be withheld, inspected and
+revoked. What the account default changes is *who does the handing*, not whether
+a token exists. The design rule survives intact.
+
+So the split should be by *what the population can do*, not by which ABI it is:
+
+| | default set | why |
+|---|---|---|
+| **Native** | minimal — ideally empty, or only what the program declares it needs and the account permits | a native program is ours and *can* ask, so a default is a convenience, and a broad one would waste the one advantage we have over the Linux side |
+| **Linux** | broader, and user-configurable ("grant all Linux programs these") | a Linux binary cannot ask, so its alternative to a default is a prompt on every cold path, which trains the user to click yes |
+
+Stated that way, the operator's "allow the user the option to grant all Linux
+programs the capabilities by default" is not a special case in the checker — it
+is simply an account whose Linux default set is non-empty.
+
+### What this costs, and what is not yet decided
+
+Enforcing parity means the Linux layer checks the rights the native layer does.
+Counted against the tree on 2026-09-09 rather than copied from the question,
+whose figures were written on 2026-09-03 and have since drifted (it said two
+against eight). `linux.rs` holds **three** `require_cap_type` sites, and only
+two of them concern the filesystem at all — one File-`READ` and one File-`WRITE`
+(the `require_fs_write` helper); the third gates `InputDevice` for keyboard
+reads and is unrelated to this question. It checks `Rights::METADATA`
+**nowhere** — zero occurrences in the whole file — while `handlers.rs` carries
+87 `require_cap_type` sites, **ten** of them requiring `METADATA`.
+
+So the asymmetry is sharper than the question made it sound: on the specific
+right at issue it is **ten against zero**, not two against eight. `stat`,
+`lstat`, `statx`, `readlink`, `statvfs` and the xattr readers go straight
+through. Blast radius as
+filed: ~50 Path-Z tests, plus dash, tcc, python and `ld.so`.
+
+That blast radius is the reason this is not a single change: **the prompt path
+and the account default set have to exist before parity can be switched on**, or
+every one of those launch sites fails with a permission error on a call it has
+no reason to expect can fail. Order: account default-grant record → the
+suspend-and-prompt path (shared with §918) → parity enforcement in `linux.rs`.
+
+Not decided here, and deliberately left open: what a *headless* boot does when a
+check needs a prompt and there is no user to ask. The boot test is exactly that
+case, so it has to be answered before parity lands — but it is an implementation
+question, not another decision for the operator.
+
+**Where it bites:** `kernel/src/syscall/linux.rs` (the two filesystem `require_cap_type`
+sites), `kernel/src/syscall/handlers.rs:8365+` (the native gates),
+`kernel/src/proc/spawn.rs` (`SpawnOptions.capabilities`, the only place a grant
+is made today).
+
+---
+
+## §925 — The native interval-timer syscalls return their two values in registers, and take no pointer at all
+
+**Date:** 2026-09-09. **Decided by:** Claude (autonomous). **Lane:** A.
+
+**In short:** a program that asks for "wake me in five seconds" currently gets
+told "certainly" and is never woken. The machinery to wake it has existed for
+some time in the kernel; what was missing was a way for our own C library to
+reach it. This adds that door. The design choice recorded here is a small one
+with a disproportionate payoff: because both calls hand back exactly two
+numbers, they return those numbers **in registers** rather than writing them
+into a buffer the caller supplies — which removes an entire class of failure
+from the pair before it exists.
+
+**The request.** Lane B's
+`requests/b-a-expose-the-interval-timer-natively-so-alarm-can-fire.md`:
+`alarm(3)` and `setitimer(2)` in our libc validate their arguments, report
+success, and arm nothing. `kernel/src/proc/itimer.rs` already backs
+`setitimer(ITIMER_REAL)`, `getitimer(ITIMER_REAL)` and legacy `alarm()` with a
+real timer and a real `SIGALRM` — but it is reachable only from
+`kernel/src/syscall/linux.rs`, and `posix/` has no number to call. This is the
+third request of this exact shape, after `SYS_PROCESS_SETGROUPS` (1067) and
+`SYS_PROCESS_CHROOT` (1068): the work exists and only the door is missing.
+
+### The decision
+
+```
+SYS_ITIMER_SET (1069)   (which, value_ns, interval_ns) -> ok2(prev_value_ns, prev_interval_ns)
+SYS_ITIMER_GET (1070)   (which)                        -> ok2(value_ns, interval_ns)
+```
+
+Three choices in that, each with a real alternative.
+
+**1. Nanoseconds, not `struct itimerval`.** Linux passes a pair of
+`{tv_sec, tv_usec}` structures by pointer. Our native ABI does not have to,
+and should not: `itimer.rs` already stores nanoseconds, `linux.rs` already owns
+the conversion for the Linux ABI, and duplicating a 32-byte four-field layout
+into the native path would mean two places that can disagree about a struct
+neither of them needs. libc converts, once, where it already converts
+everything else.
+
+*Alternative rejected:* mirror `itimerval`. It buys familiarity for whoever
+writes the libc shim and costs a marshalling routine, a size constant, and a
+second definition of a layout to keep in step.
+
+**2. Two return values in registers (`SyscallResult::ok2`), not an
+out-pointer.** Both calls hand back exactly two `u64`s, and the syscall ABI can
+already deliver a second value in `rdx`. So the pair needs **no user pointer**,
+and therefore has **no `PageFault` case, no `validate_user_write`, and no
+partially-applied state to reason about**.
+
+That last one is the real prize, and it is worth spelling out because Linux
+demonstrates the cost of the other choice. `do_setitimer` arms the new timer
+*before* copying the old value out, so a caller that passes a bad `old_value`
+pointer gets `EFAULT` **with the timer already armed** — a call that reports
+failure and changed the world anyway. Our `linux.rs` arm faithfully reproduces
+that, correctly, because it is emulating Linux. The native pair does not have
+to inherit it, and does not: there is no copy-out step to fail.
+
+*Alternative rejected:* `(which, value_ns, interval_ns, old_ptr)` with a
+nullable pointer. Familiar, and strictly worse — it reintroduces the fault
+path, the null-vs-not branch, and the arm-then-fail window, to convey two
+integers the ABI can already return.
+
+**3. `ITIMER_REAL` only; `VIRTUAL` and `PROF` are `InvalidArgument`.**
+`ITIMER_REAL` counts wall-clock time and is what `alarm` and every timeout
+built on it needs. The other two count CPU time consumed by the process, which
+this kernel does not yet account for per-process. Refusing them is honest;
+implementing them against a clock we do not keep would be the "reports success
+and arms nothing" failure this whole change exists to remove — one layer down.
+
+Lane B's request explicitly agrees: *"`ITIMER_REAL` alone unblocks every caller
+below. If they are cheap, take them; if they are not, `EINVAL` on the other two
+is a fine place to start."* They are not cheap, so they are `EINVAL`.
+
+### Why this matters beyond `alarm`
+
+**A timeout that never fires is worse than one that fails.** Lane B's audit
+makes the point precisely: `signal.alarm(5)` returning success and never
+firing converts a bounded wait into an unbounded one. That is not a missing
+feature, it is a hang generator — and this project has now paid for it twice in
+one week. `services/ctest-pty/main.c`'s header says so outright, and the
+consequence is in its code:
+
+> *"Deliberately no timeouts. `alarm`/`setitimer` report success and arm
+> nothing (`known-issues.md` → `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING`), so a
+> fixture that trusted them would hang the boot test rather than fail it."*
+
+So that fixture waits in a **counted spin** instead — and on 2026-09-09 that
+spin expired before its parent could act, which is the whole of why the ^C
+signal-delivery test failed with exit 44 rather than passing. A working
+`alarm` would let it wait on an event with a real deadline instead of guessing
+an iteration count. Fixing the door fixes the fixture's root cause, not just
+its symptom.
+
+**Who else is waiting:** `build/spike/python-slateos.elf` — the CPython this
+tree already boots — references `setitimer`, `getitimer`, `alarm`,
+`timer_create`, `timer_settime` and `timer_delete`. Lane B audited that rather
+than assuming it, and stated the method's limit honestly (a byte search of the
+linked binary, which shows the symbols are present, not that each is called on
+a live path).
+
+**Numbers 1069 and 1070**, the next free slots after 1068, per the file's
+standing rule that numbers are never recycled.
 
 ---
 

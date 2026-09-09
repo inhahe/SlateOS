@@ -28,6 +28,7 @@
 //! - Fuchsia unit test framework — in-kernel testing
 
 use crate::serial_println;
+use alloc::vec;
 use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
@@ -257,245 +258,238 @@ pub struct TestSuite {
 
 /// All registered test suites.
 fn all_suites() -> Vec<TestSuite> {
-    let mut suites = Vec::new();
-
-    // Memory subsystem
-    suites.push(TestSuite {
-        name: "frame_owner",
-        description: "Per-frame ownership tracking",
-        run: || crate::mm::frame_owner::self_test().is_ok(),
-        category: "mm",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "alloc_trace",
-        description: "Allocation event ring buffer",
-        run: || crate::mm::alloc_trace::self_test().is_ok(),
-        category: "mm",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "alloc_lat",
-        description: "Allocation latency histogram",
-        run: || crate::mm::alloc_lat::self_test().is_ok(),
-        category: "mm",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "heap_profile",
-        description: "Heap size distribution profiler",
-        run: || crate::mm::heap_profile::self_test().is_ok(),
-        category: "mm",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "alloc_checkpoint",
-        description: "Memory state checkpoints (leak detection)",
-        run: || crate::mm::alloc_checkpoint::self_test().is_ok(),
-        category: "mm",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "frag_history",
-        description: "Fragmentation history and trend tracking",
-        run: || crate::mm::frag_history::self_test().is_ok(),
-        category: "mm",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "fault_inject",
-        description: "Controlled allocation failure injection",
-        run: || crate::mm::fault_inject::self_test().is_ok(),
-        category: "mm",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "watermark",
-        description: "Memory usage metering (watermarks)",
-        run: || crate::mm::watermark::self_test().is_ok(),
-        category: "mm",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "poison",
-        description: "Memory poison detection",
-        run: || crate::mm::poison::self_test().is_ok(),
-        category: "mm",
-        severity: Severity::Diagnostic,
-    });
-
-    // Syscall subsystem
-    suites.push(TestSuite {
-        name: "syscall_profile",
-        description: "Per-syscall invocation count/latency",
-        run: || crate::syscall::profile::self_test().is_ok(),
-        category: "syscall",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "syscall_trace",
-        description: "Per-event syscall capture (strace)",
-        run: || crate::syscall::trace::self_test().is_ok(),
-        category: "syscall",
-        severity: Severity::Diagnostic,
-    });
-
-    // Capability subsystem
-    suites.push(TestSuite {
-        name: "cap_audit",
-        description: "Capability operation audit log",
-        run: || crate::cap::audit::self_test().is_ok(),
-        category: "cap",
-        severity: Severity::Diagnostic,
-    });
-
-    // IPC subsystem
-    suites.push(TestSuite {
-        name: "ipc_stats",
-        description: "IPC mechanism usage counters",
-        run: || crate::ipc::stats::self_test().is_ok(),
-        category: "ipc",
-        severity: Severity::Diagnostic,
-    });
-
-    // Kernel infrastructure
-    suites.push(TestSuite {
-        name: "kobject",
-        description: "Kernel object lifecycle tracking",
-        run: || crate::kobject::self_test().is_ok(),
-        category: "kernel",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "kevent",
-        description: "Kernel event bus (pub/sub)",
-        run: || crate::kevent::self_test().is_ok(),
-        category: "kernel",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "sysctl",
-        description: "Runtime configuration parameters",
-        run: || crate::sysctl::self_test().is_ok(),
-        category: "kernel",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "watchpoint",
-        description: "Software memory watchpoints",
-        run: || crate::watchpoint::self_test().is_ok(),
-        category: "kernel",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "ksnapshot",
-        description: "Comprehensive system state capture",
-        run: || crate::ksnapshot::self_test().is_ok(),
-        category: "kernel",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "rip_sample",
-        description: "Statistical RIP profiler",
-        run: || crate::rip_sample::self_test().is_ok(),
-        category: "kernel",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "invariant",
-        description: "System-wide consistency invariant checker",
-        run: || crate::invariant::self_test().is_ok(),
-        category: "kernel",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "sched_migrate",
-        description: "Scheduler task migration tracker",
-        run: || crate::sched_migrate::self_test().is_ok(),
-        category: "sched",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "wchan",
-        description: "Wait channel tracking (WCHAN for ps/top)",
-        run: || crate::wchan::self_test().is_ok(),
-        category: "sched",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "kdiag",
-        description: "Comprehensive diagnostic report generator",
-        run: || crate::kdiag::self_test().is_ok(),
-        category: "kernel",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "hypervisor",
-        description: "Hypervisor/VM detection via CPUID",
-        run: || crate::hypervisor::self_test().is_ok(),
-        category: "kernel",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "sched_fairness",
-        description: "Scheduler fairness (Jain's Index)",
-        run: || crate::sched_fairness::self_test().is_ok(),
-        category: "sched",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "eevdf",
-        description: "EEVDF scheduler algorithm (vruntime, deadlines, fairness)",
-        run: || crate::sched::eevdf::self_test().is_ok(),
-        category: "sched",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "deadline",
-        description: "Deadline scheduler (EDF, admission control, throttling)",
-        run: || crate::sched::deadline::self_test().is_ok(),
-        category: "sched",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "sched_backend",
-        description: "Scheduler backend enum (selectable PriorityRR/EEVDF/Deadline)",
-        run: || crate::sched::backend::self_test().is_ok(),
-        category: "sched",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "cet",
-        description: "Intel CET (shadow stacks + IBT) detection",
-        run: || crate::cet::self_test().is_ok(),
-        category: "security",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "smep_smap",
-        description: "SMEP/SMAP (user page execution/access prevention)",
-        run: || crate::smep_smap::self_test().is_ok(),
-        category: "security",
-        severity: Severity::Diagnostic,
-    });
-    suites.push(TestSuite {
-        name: "spectre",
-        description: "Spectre/Meltdown mitigations (IBRS/STIBP/SSBD/IBPB)",
-        run: || crate::spectre::self_test().is_ok(),
-        category: "security",
-        severity: Severity::Diagnostic,
-    });
-
-    // Timers
-    suites.push(TestSuite {
-        name: "hrtimer",
-        description: "High-resolution timers (nanosecond scheduling, HPET-backed)",
-        run: || crate::hrtimer::self_test().is_ok(),
-        category: "kernel",
-        severity: Severity::Diagnostic,
-    });
-
-    suites
+    vec![
+        // Memory subsystem
+        TestSuite {
+            name: "frame_owner",
+            description: "Per-frame ownership tracking",
+            run: || crate::mm::frame_owner::self_test().is_ok(),
+            category: "mm",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "alloc_trace",
+            description: "Allocation event ring buffer",
+            run: || crate::mm::alloc_trace::self_test().is_ok(),
+            category: "mm",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "alloc_lat",
+            description: "Allocation latency histogram",
+            run: || crate::mm::alloc_lat::self_test().is_ok(),
+            category: "mm",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "heap_profile",
+            description: "Heap size distribution profiler",
+            run: || crate::mm::heap_profile::self_test().is_ok(),
+            category: "mm",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "alloc_checkpoint",
+            description: "Memory state checkpoints (leak detection)",
+            run: || crate::mm::alloc_checkpoint::self_test().is_ok(),
+            category: "mm",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "frag_history",
+            description: "Fragmentation history and trend tracking",
+            run: || crate::mm::frag_history::self_test().is_ok(),
+            category: "mm",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "fault_inject",
+            description: "Controlled allocation failure injection",
+            run: || crate::mm::fault_inject::self_test().is_ok(),
+            category: "mm",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "watermark",
+            description: "Memory usage metering (watermarks)",
+            run: || crate::mm::watermark::self_test().is_ok(),
+            category: "mm",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "poison",
+            description: "Memory poison detection",
+            run: || crate::mm::poison::self_test().is_ok(),
+            category: "mm",
+            severity: Severity::Diagnostic,
+        },
+        // Syscall subsystem
+        TestSuite {
+            name: "syscall_profile",
+            description: "Per-syscall invocation count/latency",
+            run: || crate::syscall::profile::self_test().is_ok(),
+            category: "syscall",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "syscall_trace",
+            description: "Per-event syscall capture (strace)",
+            run: || crate::syscall::trace::self_test().is_ok(),
+            category: "syscall",
+            severity: Severity::Diagnostic,
+        },
+        // Capability subsystem
+        TestSuite {
+            name: "cap_audit",
+            description: "Capability operation audit log",
+            run: || crate::cap::audit::self_test().is_ok(),
+            category: "cap",
+            severity: Severity::Diagnostic,
+        },
+        // IPC subsystem
+        TestSuite {
+            name: "ipc_stats",
+            description: "IPC mechanism usage counters",
+            run: || crate::ipc::stats::self_test().is_ok(),
+            category: "ipc",
+            severity: Severity::Diagnostic,
+        },
+        // Kernel infrastructure
+        TestSuite {
+            name: "kobject",
+            description: "Kernel object lifecycle tracking",
+            run: || crate::kobject::self_test().is_ok(),
+            category: "kernel",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "kevent",
+            description: "Kernel event bus (pub/sub)",
+            run: || crate::kevent::self_test().is_ok(),
+            category: "kernel",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "sysctl",
+            description: "Runtime configuration parameters",
+            run: || crate::sysctl::self_test().is_ok(),
+            category: "kernel",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "watchpoint",
+            description: "Software memory watchpoints",
+            run: || crate::watchpoint::self_test().is_ok(),
+            category: "kernel",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "ksnapshot",
+            description: "Comprehensive system state capture",
+            run: || crate::ksnapshot::self_test().is_ok(),
+            category: "kernel",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "rip_sample",
+            description: "Statistical RIP profiler",
+            run: || crate::rip_sample::self_test().is_ok(),
+            category: "kernel",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "invariant",
+            description: "System-wide consistency invariant checker",
+            run: || crate::invariant::self_test().is_ok(),
+            category: "kernel",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "sched_migrate",
+            description: "Scheduler task migration tracker",
+            run: || crate::sched_migrate::self_test().is_ok(),
+            category: "sched",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "wchan",
+            description: "Wait channel tracking (WCHAN for ps/top)",
+            run: || crate::wchan::self_test().is_ok(),
+            category: "sched",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "kdiag",
+            description: "Comprehensive diagnostic report generator",
+            run: || crate::kdiag::self_test().is_ok(),
+            category: "kernel",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "hypervisor",
+            description: "Hypervisor/VM detection via CPUID",
+            run: || crate::hypervisor::self_test().is_ok(),
+            category: "kernel",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "sched_fairness",
+            description: "Scheduler fairness (Jain's Index)",
+            run: || crate::sched_fairness::self_test().is_ok(),
+            category: "sched",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "eevdf",
+            description: "EEVDF scheduler algorithm (vruntime, deadlines, fairness)",
+            run: || crate::sched::eevdf::self_test().is_ok(),
+            category: "sched",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "deadline",
+            description: "Deadline scheduler (EDF, admission control, throttling)",
+            run: || crate::sched::deadline::self_test().is_ok(),
+            category: "sched",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "sched_backend",
+            description: "Scheduler backend enum (selectable PriorityRR/EEVDF/Deadline)",
+            run: || crate::sched::backend::self_test().is_ok(),
+            category: "sched",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "cet",
+            description: "Intel CET (shadow stacks + IBT) detection",
+            run: || crate::cet::self_test().is_ok(),
+            category: "security",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "smep_smap",
+            description: "SMEP/SMAP (user page execution/access prevention)",
+            run: || crate::smep_smap::self_test().is_ok(),
+            category: "security",
+            severity: Severity::Diagnostic,
+        },
+        TestSuite {
+            name: "spectre",
+            description: "Spectre/Meltdown mitigations (IBRS/STIBP/SSBD/IBPB)",
+            run: || crate::spectre::self_test().is_ok(),
+            category: "security",
+            severity: Severity::Diagnostic,
+        },
+        // Timers
+        TestSuite {
+            name: "hrtimer",
+            description: "High-resolution timers (nanosecond scheduling, HPET-backed)",
+            run: || crate::hrtimer::self_test().is_ok(),
+            category: "kernel",
+            severity: Severity::Diagnostic,
+        },
+    ]
 }
 
 // ---------------------------------------------------------------------------

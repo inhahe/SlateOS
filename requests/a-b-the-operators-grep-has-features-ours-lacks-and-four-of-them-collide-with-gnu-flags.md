@@ -1,0 +1,115 @@
+# A → B — the operator's own `grep` has features ours lacks, and four of them collide with GNU flag meanings
+
+**From:** Lane A. **To:** Lane B. **Filed:** 2026-09-09. **Status:** open.
+**Action needed from B:** port the operator's grep features into
+`userspace/`'s `grep`. The feature inventory and the collision analysis are
+below, so this should not need re-deriving.
+
+## Why you are getting this
+
+`design-decisions.md` §919 records an operator decision from 2026-09-07: our
+shell `grep` switches to standard defaults, **and** the operator's own grep —
+at `D:/visual studio projects/grep`, a Python implementation and a C++ port —
+has features they want integrated, in their words:
+
+> "it'd probably be better to integrate my grep's additional features with
+> Slate OS's grep so that it has all the GNU grep features plus my additions."
+
+§919 says "the grep implementation is in `userspace/` (lane B's territory), so
+lane B handles the actual port" — and then **nobody filed anything**, so for two
+days the request existed only in a decisions file that lane B has no reason to
+re-read. That is the failure mode `CLAUDE.md` warns about, so this is me closing
+it rather than lane B having missed anything.
+
+I read the source rather than just forwarding the sentence, because the ask as
+stated is not satisfiable as-is. See "the collisions".
+
+## The genuinely novel features
+
+These have no GNU grep equivalent and are the reason the operator wants them:
+
+| Feature | What it does |
+|---|---|
+| **Proximity matching** (`-P NUM`) | Requires *all* patterns to occur within NUM lines of each other, not merely somewhere in the file. **This is the standout feature** — nothing in GNU grep does it. |
+| **Window-scoped output under proximity** | A line matching a pattern is *not* printed if it never lands in a satisfying window. `-C` still applies and can reach such a line as context. This is a real semantic, not a filter bolted on afterwards. |
+| **AND across patterns** | Multiple patterns (positional + repeated `-e`) are conjoined: a file produces no output unless *every* pattern appears. |
+| **Persistent colour config** (`--set-colors`, `--remember`) | Six independently-coloured elements (filename, colon, line number, match text, error, escape display) saved to a config file, read on each run, overridable per-invocation. GNU has only the `GREP_COLORS` environment variable. |
+| **Control characters rendered as `\xNN`** | Bytes 0x00–0x1f (except LF/CR) in matched text are displayed escaped, in their own colour, instead of being sent raw at the terminal. |
+| **`--allow-match-colors`** | Passes through ANSI colour sequences already present in matched text while still filtering every other escape. |
+| **`--dotall`** | `.` matches newlines; reads the whole file at once. |
+| **Built-in filename globbing** (`-f`, `-p`, `--x_files`, `--x_paths`) | File and path selection handled by the tool rather than the shell. `--x_paths` matches path *suffixes*, so `node_modules` excludes any directory of that name at any depth. |
+| **The "your path became the regex" warning** | If the first non-option argument looks like a path and matches existing files, it warns — because the failure is otherwise silent, a path being a valid regex that simply matches nothing. |
+
+The last one is worth keeping even though it is not a feature in the usual
+sense. It is a guard against a silent wrong answer, which is the class of bug
+this project cares most about.
+
+## The collisions — the part that needs a decision before you write code
+
+**"All the GNU grep features plus my additions" is not satisfiable as spelled.**
+Four of the operator's flags already mean something else in GNU grep:
+
+| Flag | GNU grep | Operator's grep |
+|---|---|---|
+| `-P` | `--perl-regexp` | `--proximity NUM` |
+| `-f` | `--file FILE` (read patterns from a file) | filename glob patterns |
+| `-c` | `--count` | case-sensitive *filename* matching |
+| repeated `-e` | patterns are **OR**ed (alternation) | patterns are **AND**ed (conjunction) |
+
+That last one is the sharp one: it is not a spelling clash but an opposite
+meaning on identical syntax. `grep -e a -e b file` prints lines matching either
+under GNU, and prints nothing at all unless the file contains both under the
+operator's.
+
+**I think the operator's own sentence settles it**, so I am proposing a
+resolution rather than sending this back as a question. They asked for *all the
+GNU features* **plus** their additions; if every GNU feature must survive, then
+GNU's meanings keep the contested short flags and the additions need
+non-colliding spellings:
+
+| Addition | Proposed spelling | GNU keeps |
+|---|---|---|
+| proximity | `--proximity NUM` (no short form) | `-P` = Perl regex |
+| filename globs | `--name PATTERN` | `-f` = patterns from file |
+| case-sensitive filenames | `--name-case-sensitive` | `-c` = count |
+| conjunction | `--all-patterns` (opt-in; OR stays the default) | `-e` = alternation |
+
+**The operator loses nothing at the command line**, which is what makes this
+proposal cheap: their grep already has a config file and a `--remember`
+mechanism, so their preferred short spellings can be restored as
+user-configurable aliases. Muscle memory is preserved by configuration rather
+than by breaking GNU compatibility for everyone else.
+
+If you disagree, this is worth an `open-questions.md` entry rather than a quiet
+choice either way — it is user-visible behaviour on the most-used tool in the
+system.
+
+## Two porting constraints specific to us
+
+1. **Do not carry over the UTF-8 assumption.** Both of the operator's builds
+   emit UTF-8 and reconfigure the console for it. That is right on Windows and
+   wrong here: `CLAUDE.md` rule 7 says OS-boundary data is bytes, and our own
+   design allows *every* byte in a filename except `/` and NUL. A filename here
+   need not be valid UTF-8 at all, so the port must handle names and matched
+   text as `&[u8]`/`OsStr`, never `String`. Forcing UTF-8 would be silent data
+   corruption on exactly the filenames the operator's tool was written to
+   handle well.
+
+2. **`--dotall` reads whole files.** The operator's README notes it disables
+   line numbers for that reason. Ours will want a bound, since we have no
+   guarantee about file size.
+
+## Where things are
+
+- Operator's source: `D:/visual studio projects/grep` — `README.md` (the flag
+  tables and semantics), `design.md`, `grep.cpp`, `grep.py`, and
+  `test_grep.py`, which asserts the Python and C++ builds produce
+  byte-identical output across a matrix of invocations. That test matrix is
+  probably the most useful artifact in the directory for a porter.
+- Note it is on `D:` and stays there — it is the operator's own project, not
+  part of the SlateOS migration.
+- Ours: `userspace/` grep, plus the shell builtin §919 already retargeted to
+  standard defaults.
+
+No urgency from my side; nothing is blocked on this. Filing it so the operator's
+request reaches the lane that owns the code, which is the step that was missing.

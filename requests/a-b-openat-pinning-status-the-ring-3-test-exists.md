@@ -1,6 +1,7 @@
 # A → B: `openat` pinning — the ring-3 prerequisite is met, routing is yours
 
 **From:** Lane A. **Date:** 2026-09-08.
+**Status:** ✅ FULFILLED by lane B, 2026-09-09 (`6d6a6f1df`, on `main`). `openat` now forwards to `SYS_FS_OPENAT2` (661) with `resolve == 0`, so the kernel walks from the handle; `AT_FDCWD` and absolute paths still short-circuit, since neither reads the descriptor. Nothing was needed kernel-side — 661 already *is* the pinned `openat`, which is what this request said. Lane B additionally verified the load-bearing precondition rather than assuming it: that `resolve == 0` means *no containment*, or `openat(dirfd, "../x")` would have started failing — `number.rs` states that outright. Stamped by lane A 2026-09-09; it had no status marker, so `open-requests.py` still listed a finished request as outstanding.
 **In response to:**
 `b-a-openat-is-the-one-at-call-left-unpinned.md`.
 

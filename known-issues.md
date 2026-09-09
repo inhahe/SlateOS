@@ -125092,3 +125092,61 @@ over any `#[...]`, `///` or `//!` lines above its anchor.
 followed by grepping every application for an attribute directly above
 `use appearance::Palette;`. All ten fixed; all ten build clippy-clean and pass
 their suites.
+
+---
+
+## TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `apps/settings/src/snapshots.rs` (2,256 lines),
+`remote.rs` (1,619), `associations.rs` (1,753). 5,628 lines.
+
+**In short:** the Settings app has three whole pages written — system
+snapshots, remote desktop, and which program opens which file type — that the
+user cannot reach. They are complete, they compile, and nothing anywhere opens
+them. A fourth thing makes it worse than a plain gap: the snapshots page exists
+*twice*, once here and once in `main.rs`, and it is the copy in `main.rs` that
+the user actually sees.
+
+**The evidence.** `main.rs` declares all three with `mod`, and then refers to
+them **zero** times: `grep -c 'snapshots::' main.rs` → 0, and the same for the
+other two. Their entry points — `render_snapshots_page`,
+`render_remote_page`, `render_associations_page` — have no callers at all.
+There is no `SettingsPage::Remote` and no `SettingsPage::Associations` variant,
+so those two pages have nowhere in the navigation to be opened *from*.
+
+**Why nothing warned.** Each file opens with a module-level
+`#![allow(dead_code)]` — `snapshots.rs:15`, `remote.rs:7`,
+`associations.rs:7`. That is the exact mechanism
+`TD-C-ALLOW-DEAD-CODE-IS-HIDING-WHOLE-UNWIRED-MODULES` describes, and this is
+the largest instance found so far: without it, `cargo build` would have said
+these modules were unreachable every time anyone built the Settings app.
+The attribute was presumably added for a handful of genuinely-unused helpers
+and now covers 5,628 lines.
+
+**The duplicate is the part to decide first.** `SettingsPage::Snapshots`
+exists and is drawn by `SettingsState::build_snapshots_page` in `main.rs` —
+a *different* implementation from `snapshots::render_snapshots_page`. So there
+are two snapshot pages, and any change made to the one the user cannot see is
+work thrown away. Whichever is kept, the other must go; they cannot both be
+maintained, and the file-scope palette this entry was discovered through was
+being maintained in both.
+
+**Found by** the palette conversion. Every audit until then read only
+`main.rs`, so these three files were never looked at; they were found by
+grepping every `.rs` under `apps/*/src` for the twenty Catppuccin hex values,
+and each turned out to carry its own copy of the palette under the comment
+*"Theme colors (same Catppuccin Mocha palette as main settings)"*. They have
+since been converted to read the palette, so this is dead code that is at
+least no longer *divergent* dead code.
+
+**What to do, in order.**
+
+1. Decide which snapshots page is the real one, delete the other.
+2. Decide whether Remote Desktop and File Associations are pages the Settings
+   app should have. If yes, add the `SettingsPage` variants and wire them; if
+   no, delete the modules. `apps/remotedesktop` already exists as a separate
+   application, which is an argument that `remote.rs` duplicates *that* too and
+   should go.
+3. Remove the three `#![allow(dead_code)]` attributes, so that the next module
+   to become unreachable says so.

@@ -28,6 +28,31 @@ CC_x86_64_slateos=cl.exe   (after running vcvarsall.bat x64)
 ```
 Or from bash without vcvarsall, pass the full cl.exe path and ensure the Windows SDK include/lib dirs are also set.
 
+### fastpy (for the ring-3 fixtures)
+
+`scripts/ctest-fixtures.py` compiles the ~70 fixture ELFs the boot test runs in
+ring 3, and the `fastpy-*` ones need the fastpy checkout importable. It looks
+for fastpy **beside the repo root** and honours `$FASTPY_DIR`.
+
+Since the 2026-09-06 migration the sibling search no longer finds it: the OS
+moved to `E:` and fastpy did not, so `<repo>/../fastpy` resolves to
+`E:/visual studio projects/fastpy`, which does not exist. fastpy is still at
+`D:/visual studio projects/fastpy` — see the "Still on `D:`" note at the bottom
+of `E:/visual studio projects/CLAUDE.md`.
+
+So prefix fixture builds:
+
+```
+FASTPY_DIR="D:/visual studio projects/fastpy" python scripts/ctest-fixtures.py build
+```
+
+The symptom without it is an import traceback that does not mention fastpy at
+all, which is why this is written down rather than left to be rediscovered.
+Note that rebuilding fixtures can rebuild `libc.a` first, and a new `libc.a`
+makes *every* fixture stale — so a one-fixture build can turn into a 70-fixture
+one, and the rootfs image then needs repacking too
+(`wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh`).
+
 ### Rust toolchains
 
 - `nightly-x86_64-pc-windows-gnu` — primary nightly, has `dlltool.exe` issue with newer crates (getrandom v0.3+). Fixed by copying `dlltool.exe` from self-contained dir to `~/.cargo/bin/`, but it may not work for all crates.

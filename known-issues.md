@@ -124286,7 +124286,7 @@ no other crate depends on it), so nothing outside the corpus could reach them.
 | module | what it holds | what is missing |
 |---|---|---|
 | `login_screen.rs` | ~~`LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig`~~ | **Done, 2026-09-08.** `ShellSession` constructs one when the account database names anybody (`design-decisions.md` §824), draws it on a fifth full-screen surface created last within `Layer::Overlay` so nothing the shell owns is over it, routes every key and click to it while it is up, and answers with `authlib`. What it still lacks is the *session hand-off* — a successful login unmaps the screen and reveals the desktop, but nothing starts a session as that user, because there is nowhere to send that (the shell has no channel to the process server; same gap as `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`). Autologin is read and not acted on; see `todo.txt`. Originally: Construction and a session hand-off. §815 says wire it up. *(Correction, 2026-09-08: an earlier version of this row said §818 has to take effect here. It does not — §818 is about the **lock** screen, `apps/lockscreen`, which is a separate program. See `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.)* |
-| `blur.rs` | ~~`BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager`~~ | **Moved to `gui/compositor`, 2026-09-08 — it could not be wired here.** It works on a *framebuffer* (`BlurManager::update_all(&mut [u32], w, h)`) and the shell has no framebuffer: it submits render trees and never sees a pixel of what is behind its surfaces. `blur.rs` was the only file in the whole `gui/desktop` crate to mention `[u32]`. The pixels behind a window are the compositor's, so the pass now lives where it can run; what remains is a protocol way for a surface to ask for it, and a call in the compositor's paint path. Originally: A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
+| `blur.rs` | ~~`BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager`~~ | **Done, 2026-09-08: moved to `gui/compositor` and wired.** A surface asks with `WindowSpec::blur_behind` (a *role*, so the compositor resolves the parameters from its own palette), and `Compositor::blur_behind_window` runs the pass over the region immediately before that window is drawn — the one moment the framebuffer holds everything behind it and nothing in front. Software targets only; see `TD-C-BLUR-IS-SOFTWARE-ONLY`. Originally it could not be wired in the shell at all: It works on a *framebuffer* (`BlurManager::update_all(&mut [u32], w, h)`) and the shell has no framebuffer: it submits render trees and never sees a pixel of what is behind its surfaces. `blur.rs` was the only file in the whole `gui/desktop` crate to mention `[u32]`. The pixels behind a window are the compositor's, so the pass now lives where it can run; what remains is a protocol way for a surface to ask for it, and a call in the compositor's paint path. Originally: A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
 | `input_method.rs` | `InputMethodManager`, `SwitchShortcut` | A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
 | `tray_dnd.rs` | `TrayDragSource`, `TrayDropTarget`, `TrayIconSlot`, `TrayIconArrangement`, `TraySlotConfig`, `TrayArrangementConfig`, `StartInTrayConfig` | A caller in the tray's event path. |
 
@@ -125246,3 +125246,45 @@ on. Left as it is rather than merged, since merging them would mean exposing
 the lock from a module that is compiled out of exactly the build that needs the
 other one. Noted so that a future `[features] default = ["testing"]` is
 understood to make them overlap.
+
+---
+
+## TD-C-BLUR-IS-SOFTWARE-ONLY
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/compositor/src/lib.rs` — `Compositor::blur_behind_window`.
+
+**In short:** the translucent-blurred look the taskbar and menus now ask for
+works when the compositor is drawing with the CPU, and quietly does nothing
+when it is drawing with the graphics card. Nothing breaks — the surface is just
+drawn plain — but on a machine with working graphics acceleration the feature
+is invisible, which is the opposite of where you would expect it to work.
+
+**Why.** A backdrop blur has to *read pixels back*: it exists to show a softened
+version of what is already behind a surface. The software target has a
+`Vec<u32>` to read and rewrite. A hardware backend has no mutable pixel
+access, and deliberately so — a GPU blur is a shader sampling a texture, not a
+CPU pass over an array — so `RenderBackend::as_software_mut()` returns `None`
+and the pass returns early.
+
+**Why it was built this way anyway.** The alternative was to leave 2,223 lines
+of written, tested blur code unreachable for longer, which is what it had been
+since before the three-lane split (see
+`TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED`). `BlurKind` is
+advisory in the way `WindowSpec::transparent` is: a compositor that cannot
+honour it draws the surface flat and does not tell the client. A plainer
+taskbar is not a broken desktop, which is exactly why this is a limitation and
+not a bug — unlike `layer`, which is refused rather than demoted, because a
+panel behind the windows *is* a broken desktop.
+
+**The proper fix** is a shader path in the hardware backend: render the region
+behind the surface to an offscreen texture, blur it there (two-pass separable
+Gaussian, which is what `BlurRenderer` already does on the CPU), and sample it
+when compositing the surface. The parameters are already resolved
+compositor-side from `BlurKind`, so nothing about the protocol changes; the
+work is entirely in the backend.
+
+**Do not "fix" this by making `RenderTarget` expose mutable pixels.** That
+would put a method on the trait that every implementor but one has to refuse,
+and it would make the software fallback the definition of the feature. The
+per-backend split is the honest shape.

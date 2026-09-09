@@ -126,7 +126,7 @@ pub use guiremote::control::Layer;
 // Same reason: `CompositorRequest::ShellControl` carries one, so a caller
 // building that request must be able to name it.
 pub use guiremote::control::ShellControlAction;
-use guiremote::control::{StackTier, WindowPolicy, WindowSpec};
+use guiremote::control::{BlurKind, StackTier, WindowPolicy, WindowSpec};
 // Re-exported for the same reason as `WindowInfo` below: `Window::reserved_edge`
 // holds one and `reserve_edge` takes one, and a panel that has to reach past the
 // compositor to name the edge it is anchored to is naming a different type from
@@ -904,6 +904,13 @@ pub struct Window {
     /// the band is a role rather than a starting z-order: a starting depth is
     /// something the first raise destroys.
     pub layer: Layer,
+    /// What this window asked to have blurred behind it.
+    ///
+    /// A *role*, not an effect: the parameters are resolved here, from this
+    /// compositor's palette, so a theme change moves the tint and a client
+    /// cannot ask for a radius that costs an arbitrary amount of frame time.
+    /// See [`guiremote::control::BlurKind`].
+    pub blur_behind: BlurKind,
     /// What the user may not do to this window, as a window rule says.
     ///
     /// Empty unless a shell has set it. See [`WindowPolicy`] -- it restrains
@@ -1107,6 +1114,7 @@ impl Window {
             focused: false,
             z_order: 0,
             layer: spec.layer,
+            blur_behind: spec.blur_behind,
             opacity: DEFAULT_OPACITY,
             client_pid,
             render_tree: RenderTree::new(),
@@ -1552,6 +1560,20 @@ pub struct Framebuffer {
 }
 
 impl Framebuffer {
+    /// The buffer being composited into, for a pass that reads pixels back and
+    /// rewrites them.
+    ///
+    /// `RenderTarget::working_pixels` gives the same buffer immutably, which is
+    /// enough for a test that inspects a frame and not for a *pass*. The one
+    /// caller is the backdrop blur, which is meaningless without read-back: it
+    /// exists to show what is already behind a surface. Deliberately not on the
+    /// `RenderTarget` trait -- a hardware backend has no such buffer, and a
+    /// trait method every implementor but one has to refuse is worse than a
+    /// method only the software target has.
+    pub(crate) const fn back_mut(&mut self) -> &mut Vec<u32> {
+        &mut self.back
+    }
+
     /// Create a new framebuffer with the given dimensions.
     pub fn new(width: u32, height: u32) -> CompositorResult<Self> {
         if width == 0 || height == 0 {
@@ -8013,6 +8035,7 @@ impl Compositor {
 
         if !self.occlusion_cull {
             for &window_id in &z_stack_copy {
+                self.blur_behind_window(window_id);
                 self.render_window(window_id);
             }
             return;
@@ -8125,6 +8148,58 @@ impl Compositor {
             }
             _ => false,
         }
+    }
+
+    /// Blur what has already been drawn beneath a window that asked for it.
+    ///
+    /// Called immediately before the window itself is drawn, which is the only
+    /// moment the framebuffer holds exactly "everything behind this window and
+    /// nothing in front of it" -- the z-stack is walked bottom to top, so
+    /// anything above has not been painted yet.
+    ///
+    /// # The software-target limitation, stated rather than hidden
+    ///
+    /// This reads and rewrites pixels, so it needs the buffer. A hardware
+    /// backend has no mutable pixel access by design -- a GPU blur is a shader
+    /// over a sampled texture, not a CPU pass over an array -- so on one, this
+    /// does nothing and the surface is drawn flat. That is the honest failure:
+    /// `BlurKind` is advisory in the way `WindowSpec::transparent` is, and a
+    /// plainer taskbar is not a broken desktop. See `known-issues.md`
+    /// `TD-C-BLUR-IS-SOFTWARE-ONLY`.
+    fn blur_behind_window(&mut self, window_id: WindowId) {
+        let Some(win) = self.window_ref(window_id) else {
+            return;
+        };
+        if !win.blur_behind.is_blurred() || !win.is_showing(self.current_workspace) {
+            return;
+        }
+        let kind = win.blur_behind;
+        let rect = win.frame_rect();
+        let palette = appearance::Palette::from_settings(&self.appearance);
+        let effect = match kind {
+            BlurKind::None => return,
+            BlurKind::Taskbar => blur::BlurEffect::taskbar(&palette),
+            BlurKind::TitleBar => blur::BlurEffect::title_bar(&palette),
+            BlurKind::Menu => blur::BlurEffect::menu(&palette),
+            BlurKind::Notification => blur::BlurEffect::notification(&palette),
+            BlurKind::Standard => blur::BlurEffect::standard(&palette),
+        };
+        let Some(fb) = self.backend.as_software_mut() else {
+            return;
+        };
+        let (fb_w, fb_h) = (fb.width, fb.height);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a window coordinate large enough to lose f32 precision is 16.7M pixels"
+        )]
+        let region = blur::BlurRegion::new(
+            rect.x as f32,
+            rect.y as f32,
+            rect.width as f32,
+            rect.height as f32,
+            effect,
+        );
+        blur::BlurRenderer::blur_region(fb.back_mut(), fb_w, fb_h, &region);
     }
 
     fn render_window(&mut self, window_id: WindowId) {
@@ -20153,6 +20228,92 @@ mod tests {
             Some(window),
             "a rectangle inside an over-wide one was reported as not \
              overlapping it"
+        );
+    }
+
+    /// A surface that asks for blur gets what is behind it softened; one that
+    /// does not is drawn over sharp edges.
+    ///
+    /// Asserted on the *pixels*, not on the request having been stored: a field
+    /// that was set proves nothing a user would see, and the whole reason this
+    /// feature was unreachable for so long is that 2,223 lines of blur code
+    /// were never once called.
+    ///
+    /// The probe is a hard vertical edge under the surface. A blur is a
+    /// weighted average of neighbours, so the one thing it must do is put
+    /// intermediate values where there were exactly two. Counting distinct
+    /// colours along a row across that edge says so without pinning any
+    /// particular kernel: sharp is 2, blurred is more.
+    #[test]
+    fn a_surface_that_asks_for_blur_softens_the_edge_behind_it() {
+        fn distinct_colours_across_the_edge(c: &Compositor, y: u32) -> usize {
+            let (w, _) = c.backend.size();
+            let mut seen = std::collections::BTreeSet::new();
+            for x in 40..w.min(90) {
+                if let Some(px) = working_pixel(&c.backend, x, y) {
+                    seen.insert(px);
+                }
+            }
+            seen.len()
+        }
+
+        // Two full-height bands meeting at x = 64: the edge to be softened.
+        let mut sharp = Compositor::new(160, 120, 60).expect("a software compositor");
+        sharp.backend.clear(0xFF_00_00_00);
+        sharp
+            .backend
+            .fill_rect(Rect::new(0, 0, 64, 120), 0xFF_FF_FF_FF, 1.0);
+
+        let before = distinct_colours_across_the_edge(&sharp, 60);
+        assert_eq!(
+            before, 2,
+            "the probe is not a hard edge, so softening it would prove nothing"
+        );
+
+        // Now the same picture with a blurring surface over it. The surface is
+        // registered but not drawn: `blur_behind_window` runs *before*
+        // `render_window`, and it is that pass alone under test.
+        let id = sharp.create_window_from_spec(
+            &WindowSpec {
+                blur_behind: BlurKind::Standard,
+                ..WindowSpec::new("blurred", 160, 120)
+            },
+            1,
+        );
+        sharp.move_window(id, 0, 0).expect("placed");
+        sharp.blur_behind_window(id);
+
+        let after = distinct_colours_across_the_edge(&sharp, 60);
+        assert!(
+            after > before,
+            "the edge behind a blurring surface is as sharp as it was \
+             ({before} distinct colours before, {after} after) -- the pass did \
+             not reach the framebuffer"
+        );
+    }
+
+    /// And a surface that asks for nothing costs nothing: the pixels behind it
+    /// are exactly as they were.
+    ///
+    /// The pair matters more than either half. A blur that ran for every window
+    /// would pass the test above and be a bug -- it is a full read-modify-write
+    /// of the region, every frame, for surfaces that never asked.
+    #[test]
+    fn a_surface_that_asks_for_no_blur_leaves_the_pixels_untouched() {
+        let mut c = Compositor::new(160, 120, 60).expect("a software compositor");
+        c.backend.clear(0xFF_00_00_00);
+        c.backend
+            .fill_rect(Rect::new(0, 0, 64, 120), 0xFF_FF_FF_FF, 1.0);
+        let before: Vec<u32> = c.backend.working_pixels().to_vec();
+
+        let id = c.create_window_from_spec(&WindowSpec::new("plain", 160, 120), 1);
+        c.move_window(id, 0, 0).expect("placed");
+        c.blur_behind_window(id);
+
+        assert_eq!(
+            c.backend.working_pixels(),
+            before.as_slice(),
+            "a window that asked for no blur had the pixels behind it rewritten"
         );
     }
 }

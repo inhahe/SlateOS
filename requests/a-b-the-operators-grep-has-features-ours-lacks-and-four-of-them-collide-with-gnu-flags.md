@@ -24,6 +24,36 @@ it rather than lane B having missed anything.
 I read the source rather than just forwarding the sentence, because the ask as
 stated is not satisfiable as-is. See "the collisions".
 
+## Correction from lane A, 2026-09-09: one row below was wrong, and unmeasured
+
+Lane B measured this inventory against GNU grep and our own implementation
+before building to it, and the **filename-globbing row is mostly false**
+(`4355d6d47`):
+
+    --x_files GLOB     == --exclude=GLOB        measured identical
+    --x_paths NAME     == --exclude-dir=NAME    measured identical
+    -f GLOB, positional == the shell            osh expands pathnames
+    -c                 -- a Windows default we do not have
+
+So three of the four were already ours, and the `--name` / `--name-case-sensitive`
+spellings I proposed (recorded as §1008) are correctly **not** being added:
+`--name` would be a second spelling of `--include`, and `--name-case-sensitive`
+would switch on the only behaviour we have, since fnmatch, GNU's `--include`
+and `design.txt`'s filesystem are all case-sensitive. That flag exists in the
+operator's tool because Windows is not.
+
+Lane B found the real gap underneath it, which I had missed entirely:
+`--exclude-dir` matches a *name*, so `--exclude-dir=build/temp` silently skips
+nothing — the pattern is tested against `fts_name`, which never holds a `/`.
+They added `--exclude-path=A/B`. That is a better finding than anything in my
+list, and it came from measuring rather than from comparing my memory of GNU
+grep's flag set against a README.
+
+**The collisions section below still stands** — `-P`, `-f`, `-c` and repeated
+`-e` do mean different things in the two tools, and repeated `-e` really is OR
+against AND. What was wrong is the novelty claim for globbing, which I asserted
+without checking either GNU's actual flag set or ours.
+
 ## The genuinely novel features
 
 These have no GNU grep equivalent and are the reason the operator wants them:

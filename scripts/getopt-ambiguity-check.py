@@ -488,6 +488,49 @@ def gnu_help_table(runner: list[str], util: str) -> set[str] | None:
     return names or None
 
 
+
+# Long options we carry **on purpose** that GNU does not have.
+#
+# Everything else in this file exists to keep our tables identical to GNU's,
+# and that is the right default: an entry GNU lacks is almost always one copied
+# from a different release, and it silently changes which option an ambiguous
+# abbreviation resolves to. So this is not a place to record an option that
+# "seems useful" -- it is for options a *decision* put there, and the reason
+# field is expected to name it.
+#
+# The name is removed from our side before the comparison rather than special-
+# cased inside it. An exemption means "this name is not part of the
+# GNU-compatibility claim", so the honest comparison is the one that does not
+# see it at all; anything else compares a table against a standard it was never
+# meant to meet and then apologises for the result.
+#
+# **What an exemption does NOT excuse.** An option GNU lacks still changes
+# abbreviation resolution for every prefix it shares with a GNU option --
+# `--all` is ambiguous for us and resolves for nobody in GNU grep, and that is
+# a real, intended difference in behaviour rather than a technicality this
+# table waves away. The prefix sweep below still runs, so the difference is
+# visible; the exemption only stops it being reported as a transcription error.
+#
+# Each entry can go stale in one direction: if GNU *adds* the name, our
+# exemption is now hiding a genuine comparison. That is checked below rather
+# than trusted.
+INTENTIONAL_EXTRAS: dict[str, dict[str, str]] = {
+    "grep": {
+        "every-pattern": (
+            "design-decisions.md 1008: the operator's grep conjoins patterns "
+            "where GNU's repeated -e alternates. Opposite meanings on identical "
+            "syntax, so conjunction is opt-in under a name GNU does not use "
+            "rather than a redefinition of -e."
+        ),
+    },
+}
+
+
+def intentional(util: str) -> dict[str, str]:
+    """The names `util` carries on purpose that GNU does not have."""
+    return INTENTIONAL_EXTRAS.get(util, {})
+
+
 def compare_name_sets(
     table: Table, theirs: set[str], verdicts: dict[str, str]
 ) -> list[str]:
@@ -516,6 +559,17 @@ def compare_name_sets(
     """
     ours = set(table.names) | set(table.aliases)
     problems = []
+    # Deliberate extras are not part of the comparison; see INTENTIONAL_EXTRAS.
+    # A name GNU has acquired since the exemption was written is reported,
+    # because the exemption would otherwise be suppressing a real check.
+    for n, why in sorted(intentional(table.util).items()):
+        if n in theirs:
+            problems.append(
+                f"{table.util}: --{n} is exempted as an intentional extra "
+                f"({why}) but GNU has it now; remove the exemption so the "
+                f"name is compared"
+            )
+        ours.discard(n)
     for n in sorted(theirs - ours):
         problems.append(
             f"{table.util}: GNU has --{n}, LONG_OPTIONS does not; "
@@ -542,9 +596,18 @@ def compare_tables(table: Table, theirs: list[str]) -> list[str]:
     the stronger of the two comparisons anyway.
     """
     ours = table.readout()
+    exempt = intentional(table.util)
+    stale = [
+        f"{table.util}: --{n} is exempted as an intentional extra ({why}) but "
+        f"GNU has it now; remove the exemption so the name is compared"
+        for n, why in sorted(exempt.items())
+        if n in theirs
+    ]
+    if exempt:
+        ours = [n for n in ours if n not in exempt]
     if ours == theirs:
-        return []
-    problems = []
+        return stale
+    problems = stale
     missing = [n for n in theirs if n not in ours]
     extra = [n for n in ours if n not in theirs]
     for n in missing:
@@ -668,10 +731,36 @@ def check(table: Table, runner: list[str]) -> list[str]:
         return [f"{table.util}: no GNU verdicts came back (utility missing?)"]
 
     problems: list[str] = []
+    exempt = intentional(table.util)
     for p in prefixes:
         ours = table.verdict(p)
         gnu = theirs.get(p)
         if gnu is None or ours == gnu:
+            continue
+        # A prefix that reaches *only* an intentional extra, and that GNU does
+        # not know at all, is the necessary consequence of carrying an option
+        # GNU lacks -- not a transcription defect. Nothing that worked stops
+        # working: GNU rejected the abbreviation before and we accept it now.
+        #
+        # The conditions are deliberately narrow, and the narrowness is the
+        # point. `ours == "resolves"` excludes the case that matters most: a
+        # prefix GNU *resolves* and we have made **ambiguous** by adding a
+        # second candidate. That breaks an abbreviation that works today, and
+        # it is exactly what this sweep caught when `--every-pattern` was first
+        # written as `--all-patterns` -- `--a` resolves to `--after-context`
+        # in GNU and would have become ambiguous here. The option was renamed
+        # rather than the finding suppressed. Widening this test to "any prefix
+        # of an exempted name" would have hidden that, which is the whole
+        # reason it is written this way.
+        if (
+            ours == "resolves"
+            and gnu == "unknown"
+            and exempt
+            and all(
+                n in exempt for n in table.names if n.startswith(p)
+            )
+            and any(n.startswith(p) for n in table.names)
+        ):
             continue
         if ours == "ambiguous" and gnu == "resolves":
             hits = [n for n in table.names if n.startswith(p)]

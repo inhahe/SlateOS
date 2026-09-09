@@ -451,12 +451,12 @@ fn glob_matches(glob: &[u8], name: &[u8]) -> bool {
 struct Options {
     syntax: Syntax,
     ignore_case: bool,
-    /// `--all-patterns`: a file produces no output unless **every** pattern
+    /// `--every-pattern`: a file produces no output unless **every** pattern
     /// occurs in it. Opt-in, because GNU's repeated `-e` means alternation and
     /// the operator's grep means conjunction on the same syntax -- an opposite
     /// meaning, not a spelling clash, so the default cannot quietly change.
     /// See `design-decisions.md` §1008.
-    all_patterns: bool,
+    every_pattern: bool,
     invert: bool,
     count_only: bool,
     line_numbers: bool,
@@ -813,7 +813,7 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("recursive", Takes::Nothing),
     ("dereference-recursive", Takes::Nothing),
     ("regexp", Takes::Required),
-    ("all-patterns", Takes::Nothing),
+    ("every-pattern", Takes::Nothing),
     ("invert-match", Takes::Nothing),
     ("silent", Takes::Nothing),
     ("text", Takes::Nothing),
@@ -889,7 +889,7 @@ Pattern selection and interpretation:
 
 Miscellaneous:
   -s, --no-messages         suppress error messages
-      --all-patterns        a file must contain every pattern, not any of them
+      --every-pattern        a file must contain every pattern, not any of them
   -v, --invert-match        select non-matching lines
   -V, --version             display version information and exit
       --help                display this help text and exit
@@ -1014,7 +1014,7 @@ impl Matcher {
 #[derive(Clone, Copy)]
 enum Flag {
     Short(u8),
-    AllPatterns,
+    EveryPattern,
     BinaryFiles,
     Color,
     Exclude,
@@ -1058,7 +1058,7 @@ fn long_flag(name: &str) -> Flag {
         "files-with-matches" => Flag::Short(b'l'),
         "files-without-match" => Flag::Short(b'L'),
         "group-separator" => Flag::GroupSeparator,
-        "all-patterns" => Flag::AllPatterns,
+        "every-pattern" => Flag::EveryPattern,
         "include" => Flag::Include,
         "ignore-case" => Flag::Short(b'i'),
         "no-ignore-case" => Flag::NoIgnoreCase,
@@ -1346,7 +1346,7 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
                 None => show_help = true,
             },
             Flag::Label => opts.label = Some(quote::os_bytes(&required(value)).into_owned()),
-            Flag::AllPatterns => opts.all_patterns = true,
+            Flag::EveryPattern => opts.every_pattern = true,
             Flag::LineBuffered => opts.line_buffered = true,
             // Upstream's `default: usage (EXIT_TROUBLE)`. Unreachable as things
             // stand — `SHORT_OPTIONS` lists exactly the letters matched above,
@@ -1830,7 +1830,7 @@ fn matches_in(
 
 /// Does every pattern occur somewhere in this stream?
 ///
-/// The `--all-patterns` gate. Ordinary grep selects a line if *any* pattern
+/// The `--every-pattern` gate. Ordinary grep selects a line if *any* pattern
 /// matches it; this asks a question about the **file** instead, and a file that
 /// fails it produces no output at all -- not even the `-c` count line, because
 /// what the operator's grep means by conjunction is that the file is not a hit.
@@ -2414,13 +2414,13 @@ impl Run<'_> {
             }
         };
 
-        // `--all-patterns`: decide about the whole file before printing any of
+        // `--every-pattern`: decide about the whole file before printing any of
         // it. The input is buffered rather than re-opened, which costs the
         // file's size in memory and buys the one thing a second `open` cannot
         // give: this works for `-` as well. Re-reading stdin is not a thing,
         // and a gate that silently did nothing on a pipe would be worse than
         // one that costs memory on a file.
-        if self.opts.all_patterns && self.pats.len() > 1 {
+        if self.opts.every_pattern && self.pats.len() > 1 {
             let mut data = Vec::new();
             if let Err(e) = reader.read_to_end(&mut data) {
                 if !self.opts.no_messages {
@@ -3829,7 +3829,7 @@ mod tests {
         assert!(selects("", "", &o));
     }
 
-    /// Compile several patterns at once, for the `--all-patterns` gate.
+    /// Compile several patterns at once, for the `--every-pattern` gate.
     fn many_pats(patterns: &[&str], opts: &Options) -> Vec<Pat> {
         let owned: Vec<Vec<u8>> = patterns.iter().map(|p| p.as_bytes().to_vec()).collect();
         compile_patterns(&owned, opts).unwrap().0
@@ -3844,21 +3844,21 @@ mod tests {
     /// conjunction and the thing a per-line reading would get wrong: the two
     /// patterns never share a line and the file still satisfies it.
     #[test]
-    fn all_patterns_gate_does_not_require_them_on_one_line() {
+    fn every_pattern_gate_does_not_require_them_on_one_line() {
         let o = Options::default();
         assert!(gate("alpha here\nbeta there\n", &["alpha", "beta"], &o));
     }
 
     #[test]
-    fn all_patterns_gate_fails_when_one_is_missing() {
+    fn every_pattern_gate_fails_when_one_is_missing() {
         let o = Options::default();
         assert!(!gate("alpha here\nalpha again\n", &["alpha", "beta"], &o));
     }
 
     /// A single pattern makes the gate a no-op -- there is nothing to conjoin,
-    /// and `--all-patterns` must not change what a one-pattern grep does.
+    /// and `--every-pattern` must not change what a one-pattern grep does.
     #[test]
-    fn all_patterns_gate_is_a_no_op_for_one_pattern() {
+    fn every_pattern_gate_is_a_no_op_for_one_pattern() {
         let o = Options::default();
         assert!(gate("nothing relevant\n", &["absent"], &o));
     }
@@ -3866,7 +3866,7 @@ mod tests {
     /// An empty file cannot contain both patterns, so the gate refuses it
     /// rather than passing vacuously.
     #[test]
-    fn all_patterns_gate_refuses_an_empty_file() {
+    fn every_pattern_gate_refuses_an_empty_file() {
         let o = Options::default();
         assert!(!gate("", &["alpha", "beta"], &o));
     }
@@ -3874,7 +3874,7 @@ mod tests {
     /// Satisfied on the first line, which is the path that returns before
     /// reading the rest.
     #[test]
-    fn all_patterns_gate_stops_once_the_last_pattern_is_found() {
+    fn every_pattern_gate_stops_once_the_last_pattern_is_found() {
         let o = Options::default();
         assert!(gate("alpha beta\nmore\nlines\n", &["alpha", "beta"], &o));
     }
@@ -3884,7 +3884,7 @@ mod tests {
     /// pattern is absent from some line" is nearly always true and would gate
     /// nothing.
     #[test]
-    fn all_patterns_gate_ignores_invert() {
+    fn every_pattern_gate_ignores_invert() {
         let mut o = Options::default();
         o.invert = true;
         assert!(gate("alpha\nbeta\n", &["alpha", "beta"], &o));
@@ -3894,7 +3894,7 @@ mod tests {
     /// Case folding is the compiled pattern's business, so the gate inherits
     /// it rather than reimplementing it.
     #[test]
-    fn all_patterns_gate_honours_ignore_case() {
+    fn every_pattern_gate_honours_ignore_case() {
         let mut o = Options::default();
         o.ignore_case = true;
         assert!(gate("ALPHA\nBeTa\n", &["alpha", "beta"], &o));
@@ -3903,7 +3903,7 @@ mod tests {
     /// A duplicate pattern is collapsed by `compile_patterns`, so asking for
     /// the same thing twice does not make the gate stricter.
     #[test]
-    fn all_patterns_gate_is_unaffected_by_a_repeated_pattern() {
+    fn every_pattern_gate_is_unaffected_by_a_repeated_pattern() {
         let o = Options::default();
         assert!(gate("alpha only\n", &["alpha", "alpha"], &o));
     }

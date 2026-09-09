@@ -125424,14 +125424,27 @@ file and checks the clamping (`text_scale=100` clamps to 3.0). Those tests pass
 and always have. They prove the setting is *stored*, not that it does anything,
 which is exactly the kind of coverage that makes a dead setting look wired.
 
-**The structural cause.** `gui/toolkit` has no dependency on `gui/appearance`
-and none on the accessibility config; its widgets draw from their own
-constants (`pathbar.rs`'s `COLOR_LAVENDER`, `CURSOR_WIDTH = 2.0`). It has no
-channel for user presentation config of any kind. That is the same missing
-channel `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`
-part 2 needs in order to thread `&Palette` into those modules, and the two
-should be fixed together: a second, ad-hoc parameter threaded now just for the
-caret would have to be unified with the palette channel later.
+**The structural cause, and the direction it forces.** `gui/toolkit` has no
+dependency on `gui/appearance` and none on the accessibility config; its
+widgets draw from their own constants (`pathbar.rs`'s `COLOR_LAVENDER`,
+`CURSOR_WIDTH = 2.0`). It has no channel for user presentation config of any
+kind.
+
+**It cannot acquire one by depending on `appearance`, and this is the part that
+is easy to get wrong** — an earlier revision of this entry proposed exactly
+that. `gui/appearance` **depends on `gui/toolkit`** (`Cargo.toml`:
+`guitk = { path = "../toolkit" }`), because `Palette` is defined in terms of
+the toolkit's own `Color` type. The dependency already runs toolkit → nothing,
+appearance → toolkit. Adding toolkit → appearance is a cycle, and cargo will
+refuse it. The toolkit therefore cannot so much as *name* `Palette`.
+
+So the channel has to be a **toolkit-owned type that the shell fills in**: the
+toolkit defines the presentation parameters it will honour, and `appearance` —
+which is downstream and can see both — converts a `Palette` plus an
+`AccessibilityConfig` into one. That is also why
+`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` part 2 is
+worded as *shell* modules: threading `&Palette` works for `gui/desktop`, which
+may depend on `appearance`, and cannot work for `gui/toolkit`, which may not.
 
 **A smaller, real inconsistency visible from the same survey.** The carets that
 *are* drawn disagree about their width with no reason recorded: `pathbar.rs`
@@ -125440,13 +125453,16 @@ caret would have to be unified with the palette channel later.
 base each field uses — which means these three want a shared base before the
 multiplier means anything consistent.
 
-**Proper fix:** give `gui/toolkit` one presentation-config channel carrying the
-palette and the accessibility scalars together, then apply `caret_width` at the
-caret draw sites, `text_scale` at the font-size source, and `focus_indicator`
-around the focused widget. Not three separate wirings.
+**Proper fix:** a `guitk`-owned presentation struct carrying the accessibility
+scalars, defaulting to today's values so an un-updated caller is unchanged;
+`appearance` gains the conversion from `Palette` + `AccessibilityConfig`; the
+toolkit's draw entry points take it. Then `caret_width` applies at the caret
+draw sites, `text_scale` at the font-size source, and `focus_indicator` around
+the focused widget — one channel, not three wirings.
 
-**Trigger:** do it as part of the palette entry's part 2, which needs the same
-channel and is much the larger half.
+**Trigger:** the channel is worth building on its own; the palette half of part
+2 can then ride it for the toolkit modules, while the shell modules keep taking
+`&Palette` directly.
 
 **If never fixed:** accessibility is shell-deep. A low-vision user can enlarge
 nothing they actually read, and the settings page — which does not currently

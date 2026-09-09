@@ -72,3 +72,33 @@ will simplify it if this changes.
 
 Context: `known-issues.md` →
 `TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING`.
+
+---
+
+## Addendum, same day: `/proc/dyndns` has the same shape
+
+Found while auditing the same class of table. `gen_dyndns()` in the same file:
+
+```rust
+out.push_str(&format!(
+    "{:<4} {:<15} {:<10} {:<25} {:<10} {}
+",
+    e.id, e.name, /* provider, hostname, status, ip */
+));
+```
+
+`e.name` is a user-supplied entry name, unescaped, in a whitespace-delimited
+table with **single**-space column separators — so a name containing a space is
+not merely ambiguous here, it is indistinguishable from a column break. And
+`{:<15}` is a minimum width like the other, so a long name shifts the rest.
+
+Same fix, same call: escape the name, or bound and validate it at the point it
+is set (`dyndns::add_entry`). Lane C mentions it here rather than opening a
+second request because it is one decision, not two — whatever you choose for
+snapshots should apply to both, and a reader finding one fixed and the other
+not would reasonably assume the second was deliberate.
+
+Lane C will be writing a `/proc/dyndns` reader shortly (the Settings dynamic-DNS
+page, which your `dyndns.rs` module doc already names as the intended caller),
+and will anchor it from both ends the way the snapshots reader does, so it
+tolerates the current format either way.

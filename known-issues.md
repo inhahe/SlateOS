@@ -125241,7 +125241,7 @@ therefore remove it" is wrong for both.
 | | duplicates | but holds, uniquely |
 |---|---|---|
 | ~~`associations.rs`~~ **deleted 2026-09-08** | `apps/fileassoc` | ~~**fallback handlers**~~ — ported first, as `FileType::handler_history`. The rest was checked item by item before deleting: `fileassoc` has `search`/`search_in_category` for the filtering, and config-line serialisation this file never had. The module doc's third claim, "per-extension icons", was a field set once at construction and **never read** — a promise the code did not keep, so nothing to preserve. |
-| `remote.rs` (1,619) | `apps/remotedesktop` — 5,199 lines, likewise a real app | **DynDNS**, and it is *specified*: `design.txt` line 1301 and `roadmap-detailed.md` line 2531, which says "in settings" — so this is a planned feature already in the right place, not a stray. See below. |
+| `remote.rs` (1,619) | `apps/remotedesktop` — 5,199 lines, likewise a real app | **DynDNS** — but *not* uniquely, as an earlier version of this row claimed. `kernel/src/fs/dyndns.rs` implements it (584 lines: `add_entry`, `list_entries`, `set_enabled`, `set_interval`, `set_update_url`, `update_now`, plus UPnP/NAT-PMP forwarding) and publishes `/proc/dyndns`. See below. |
 
 So the shape of the work is the same for both, and it is not deletion:
 
@@ -125255,21 +125255,29 @@ So the shape of the work is the same for both, and it is not deletion:
    right application — it has simply never been given a page. Nearly written up
    as an open question before checking; the roadmap had answered it.
 
-   **But it needs a transport before it is wired.** `force_update()` says
-   outright: *"In a live system this would spawn a network request. Here we
-   transition the status to `Updating`."* `net/httpclient` builds and parses
-   HTTP and deliberately does not send it — the caller carries the bytes, and
-   `userspace/pkg` is the one caller that has written that part (its
-   `http_roundtrip`, forty lines of `TcpStream` with timeouts). So the work is
-   a transport for this second caller, either its own or `pkg`'s lifted
-   somewhere both can reach — not, as an earlier version of this paragraph
-   claimed, the absence of any transport in the OS. See the withdrawn
-   `TD-C-THE-HTTP-CLIENT-CANNOT-MAKE-A-REQUEST` for how that error was made.
+   **And it is the snapshots case a second time, which I found only by
+   re-auditing my own greps.** `kernel/src/fs/dyndns.rs` implements dynamic
+   DNS — 584 lines, with UPnP/NAT-PMP port forwarding beside it — and its own
+   module doc states the architecture it expects:
 
-   Until then, giving it a page produces a settings screen whose "Update now"
-   button changes a label and nothing else, which is the snapshots-mockup trap.
-   The provider table it holds — NoIP, DuckDNS, Dynu, FreeDNS with their real
-   update URLs — is worth keeping exactly where it is.
+   ```text
+   Settings panel → Network → Dynamic DNS
+     → dyndns::list_providers() → configured providers
+   ```
+
+   That settings panel is `remote.rs`, unreachable, carrying a parallel
+   in-memory model. `/proc/dyndns` publishes the stats, the detected router,
+   and a table of entries (ID, NAME, PROVIDER, HOSTNAME, STATUS, IP).
+
+   **Two earlier claims in this entry were wrong and are corrected above:**
+   that `remote.rs` held the only dynamic-DNS configuration in the tree (the
+   grep behind it excluded `kernel/`), and that wiring it needs an HTTP
+   transport first (`dyndns::update_now` is the kernel's job, not the panel's).
+
+   **So the work is the same shape as the snapshots page:** read
+   `/proc/dyndns`, render that, give it a `SettingsPage`, and delete the
+   in-memory model. It is *not* blocked, which is the opposite of what this
+   entry said an hour ago.
 3. *Then* delete the husk.
 
 **Porting the fallback design found a live bug in the app it moved to.**

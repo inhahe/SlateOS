@@ -125240,7 +125240,7 @@ therefore remove it" is wrong for both.
 
 | | duplicates | but holds, uniquely |
 |---|---|---|
-| ~~`associations.rs` (1,753)~~ | `apps/fileassoc` — 4,643 lines, a launching windowed app for exactly this | ~~**fallback handlers**~~ — **ported 2026-09-08.** `FileType::handler_history` (bounded at three), recorded by `set_default_app` and walked by `remove_app`. The husk can now be deleted. |
+| ~~`associations.rs`~~ **deleted 2026-09-08** | `apps/fileassoc` | ~~**fallback handlers**~~ — ported first, as `FileType::handler_history`. The rest was checked item by item before deleting: `fileassoc` has `search`/`search_in_category` for the filtering, and config-line serialisation this file never had. The module doc's third claim, "per-extension icons", was a field set once at construction and **never read** — a promise the code did not keep, so nothing to preserve. |
 | `remote.rs` (1,619) | `apps/remotedesktop` — 5,199 lines, likewise a real app | **DynDNS**. `grep -rln "DuckDNS\|dyndns\|NoIP"` across `apps/`, `net/`, `gui/` and `userspace/` returns *this file and nothing else*. It is the only dynamic-DNS configuration in the tree. |
 
 So the shape of the work is the same for both, and it is not deletion:

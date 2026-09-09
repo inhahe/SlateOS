@@ -6,7 +6,6 @@
 //!
 //! Uses the guitk library for rendering. Dark theme (Catppuccin Mocha) by default.
 
-mod associations;
 mod remote;
 mod snapshots;
 

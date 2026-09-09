@@ -125177,8 +125177,15 @@ Filesystem snapshots: <n>
 
 with `PARENT` as an id or `-`, and the path **octal-escaped**
 (`mangle_mount_field`) precisely so a root path containing a newline cannot
-forge a row — a reader must un-escape it and must not assume one line is one
-snapshot until it has.
+forge a row.
+
+That escaping is what makes splitting on newlines *safe* — one line is one
+snapshot, guaranteed, because no raw newline can reach the output. (An earlier
+draft of this paragraph said the reverse: that a reader "must not assume one
+line is one snapshot". That was backwards, and worth correcting in place rather
+than quietly, because a reader who believed it would write a more complicated
+parser to defend against something the kernel already prevents. What the reader
+*does* owe is the un-escaping, on the path field, after splitting.)
 
 **So the work is:** read `/proc/snapshots`, render *that*, delete the mockup,
 and delete or drastically reduce `snapshots.rs` to whatever the page still

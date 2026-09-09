@@ -69838,6 +69838,79 @@ escaping, it is a smaller option than the one now implemented and can be added
 beside it.
 
 
+### Correction to the table above: `--name` is not being added, because we already have it
+
+The resolution table near the top of this entry promises `--name PATTERN` and
+`--name-case-sensitive`. Measuring the feature before implementing it shows
+that three quarters of "built-in filename globbing" is already in our grep
+under GNU's own spellings, and the fourth quarter belongs to the shell. The
+table stays as written because it records what was decided from lane A's
+inventory; this section records what measuring found, and it wins.
+
+The inventory listed the whole group under "these have no GNU grep
+equivalent". For file selection that is not so:
+
+| Operator's flag | Ours | Measured |
+|---|---|---|
+| `--x_files GLOB` | `--exclude=GLOB` | identical |
+| `--x_paths NAME` (one component) | `--exclude-dir=NAME` | identical -- both skip every `NAME` at every depth |
+| `--x_paths 'node_*'` | `--exclude-dir='node_*'` | **ours is the stronger one**: theirs compares components for equality and matches nothing here |
+| `-f GLOB`, positional globs | the shell | `osh` does pathname expansion, so `grep pat *.rs` already works |
+| `-c` case-sensitive names | -- | nothing to turn on; see below |
+| `--x_paths A/B` (two components) | -- | **the one real gap** |
+
+`--name PATTERN` would therefore be a second spelling of `--include`, and a
+tool with two spellings for one behaviour is worse than one with a single
+spelling, whichever is prettier.
+
+**`-c` is a flag about Windows, not about grep.** The operator's grep matches
+filenames case-*in*sensitively by default and `-c` turns that off, because that
+is what Windows does. `fnmatch` is case-sensitive, GNU's `--include` is
+case-sensitive, and `design.txt` makes the filesystem case-sensitive, so
+`--name-case-sensitive` would be a flag that switches on the only behaviour we
+have. Note the useful flag here is the *inverse* of the one proposed --
+a case-insensitive `--include`, which neither GNU nor we have -- and nobody
+asked for it, so it is not part of this port.
+
+### `--exclude-path=A/B`, the one thing in that group GNU cannot say
+
+`--exclude-dir` matches a **name**, so it cannot say *which* `temp` to skip.
+Ask it to and it agrees and does nothing: the pattern is compared against
+`ent->fts_name`, which never holds a `/`, so a pattern containing one can never
+match. Measured on GNU grep and on ours, on a tree holding `build/temp` and
+`keep/temp`:
+
+| command | skips |
+|---|---|
+| `--exclude-dir=temp` | both |
+| `--exclude-dir=build/temp` | **neither**, silently |
+| operator's `--x_paths build/temp` | `build/temp` |
+| our new `--exclude-path=build/temp` | `build/temp` |
+
+A silent no-op on a plausible command is the class of defect this project cares
+most about, and it is exactly the gap the operator's `--x_paths` fills.
+
+**The spelling passes this entry's own prefix rule, checked before writing
+code** rather than by a gate afterwards. GNU spends four options on `e`;
+`--exclude-` is *already* ambiguous there (`from`, `dir`), `--exclude-d` and
+`--exclude-f` still resolve uniquely after the addition, and `--exclude-p` is
+unknown to GNU today. Every prefix that works now still works.
+
+**Two deliberate divergences from `--x_paths`, both supersets.** Their
+components are compared for equality; ours are globs, so `--exclude-path='node_*/deep'`
+works and a plain name still means itself -- a spec with no metacharacters
+behaves exactly as theirs does. And the glob is applied *per component*, so `*`
+cannot cross a `/` here even though gnulib lets it cross one inside a name:
+`*/temp` means "a `temp` with a parent". Anything else would let a
+two-component spec match a one-component path and undo the distinction the
+option exists to draw.
+
+**A spec that could never match is refused, not accepted.** `--exclude-path=`,
+`--exclude-path=/a` and `--exclude-path=a//b` are usage errors. An option whose
+whole reason for existing is that `--exclude-dir=a/b` silently matches nothing
+must not be able to silently match nothing itself.
+
+
 **Against the choice, honestly:** it is the operator's OS, and their muscle
 memory is a real cost that falls on them rather than on a hypothetical GNU
 user. The mitigation is only a mitigation — aliasing the short forms back

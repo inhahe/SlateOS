@@ -516,6 +516,14 @@ def gnu_help_table(runner: list[str], util: str) -> set[str] | None:
 # than trusted.
 INTENTIONAL_EXTRAS: dict[str, dict[str, str]] = {
     "grep": {
+        "exclude-path": (
+            "design-decisions.md 1008: skip directories whose PATH ends with a "
+            "/-separated spec. GNU has no way to say this -- its "
+            "--exclude-dir=a/b is accepted and matches nothing. Safe under the "
+            "prefix rule: --exclude- is already ambiguous in GNU, --exclude-d "
+            "and --exclude-f still resolve, and --exclude-p is unknown there "
+            "today."
+        ),
         "escape-control": (
             "design-decisions.md 1008: render control bytes as \\xNN rather "
             "than sending them to the terminal. GNU has no equivalent. Safe "

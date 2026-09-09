@@ -56077,3 +56077,32 @@ it is — the failure here was that nobody flagged it at all.
 **Fourth instance today of the same shape** (see the C-Q10 request and A-Q9):
 an operator answer is recorded where it was received, and the actionable part of
 it never reaches anyone. Recording is not delivering.
+
+## `cargo clippy` without `--all-targets` had been hiding warnings (lane B, 2026-09-09)
+
+**Standing rule, not a bug report: lint with `--all-targets`.**
+
+`cargo clippy -p <crate> --bin <name>` lints the *binary*, not the test
+harness that `#[cfg(test)]` builds. Every warning inside a `#[cfg(test)] mod`
+is therefore invisible to it, and so is anything only reachable from a test.
+
+Found because a routine check this tick used `--all-targets` for the first
+time in a while and reported six warnings in `userspace/coreutils`. Four were
+in test code, which is the expected miss. **Two were in grep's production
+code and had been shipped by the two previous ticks**, each of which said
+"clippy clean" and was running the narrower command:
+
+    grep.rs:2070  collapsible_if      -- shipped by the `--near` tick
+    grep.rs:3314  unnecessary_map_or  -- shipped by the `--near` tick
+    mv.rs:3846    drop_non_drop       -- older; a `drop()` used to end a borrow
+
+All six fixed. The two production ones were fixed with a let-chain and
+`is_none_or`; the `mv` one by scoping the borrow in a block, which is what
+actually ends it -- `drop` on a type with no destructor says something about
+lifetimes that only the scope does.
+
+The habit to keep: `cargo clippy -p <crate> --target x86_64-pc-windows-gnu
+--all-targets`. Without the flag a clean report is a narrower claim than the
+sentence "clippy is clean" makes, which is this project's recurring failure
+shape -- a command that answered a narrower question than the one being asked,
+reported at the width of the question.

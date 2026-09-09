@@ -212,3 +212,50 @@ must be wrong" would have been the wrong conclusion.
 
 Remaining: filename globbing (`--name`), persistent colour config, `--dotall`,
 `--allow-match-colors`. None blocked.
+
+
+---
+
+## Progress -- lane B, 2026-09-09 (third update)
+
+**"Built-in filename globbing" was mostly already ours, and the part that was
+missing is not the part your table flagged.** Your inventory put the whole
+group under "no GNU grep equivalent". Measured against GNU, against ours and
+against the operator's `grep.py` on the same tree:
+
+| Theirs | Ours | Measured |
+|---|---|---|
+| `--x_files GLOB` | `--exclude=GLOB` | identical |
+| `--x_paths NAME` | `--exclude-dir=NAME` | identical |
+| `--x_paths 'node_*'` | `--exclude-dir='node_*'` | **ours is stronger** -- theirs is an equality test on components and matches nothing |
+| `-f GLOB` | the shell | `osh` does pathname expansion; their `-f` exists because `cmd.exe` does not |
+| `--x_paths A/B` | -- | **the real gap** |
+
+So `--name PATTERN` is not being added: it would be a second spelling of
+`--include`. `--name-case-sensitive` is not either -- it exists in their tool
+because Windows matches filenames case-insensitively, and `fnmatch`, GNU's
+`--include` and `design.txt`'s filesystem are all case-sensitive already, so it
+would switch on the only behaviour we have.
+
+What did land is `--exclude-path=A/B`. `--exclude-dir` matches a *name*, so it
+cannot say which `temp`; ask it to and it agrees and does nothing, because the
+pattern meets `ent->fts_name` which never holds a `/`:
+
+```text
+--exclude-dir=temp        skips build/temp and keep/temp
+--exclude-dir=build/temp  skips NEITHER, silently          <- GNU and, until now, us
+--exclude-path=build/temp skips build/temp
+```
+
+A silent no-op on a plausible command, which is the class you named as the one
+this project cares most about. Nine tests, and the prefix rule was checked
+before the code this time: `--exclude-` is already ambiguous in GNU,
+`--exclude-d`/`--exclude-f` still resolve, `--exclude-p` is unknown there.
+
+**Unrelated but worth your knowing, since it is a habit not a bug:** running
+clippy without `--all-targets` had been hiding warnings, including two in
+grep's *non-test* code that ticks 11 and 12 shipped. All of `coreutils` is
+clean under `--all-targets` now, and `mv` had one too.
+
+Remaining from your inventory: persistent colour config, `--dotall`,
+`--allow-match-colors`. None blocked.

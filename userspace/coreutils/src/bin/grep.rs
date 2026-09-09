@@ -30,6 +30,7 @@
 //! | `--include=G` / `--exclude=G` | search only / never the files whose name matches glob `G` |
 //! | `--exclude-from=F` | read `--exclude` globs from file `F`, one per line |
 //! | `--exclude-dir=G` | do not descend into a directory whose name matches `G` |
+//! | `--exclude-path=A/B` | do not descend into a directory whose *path* ends `A/B` (ours) |
 //! | `-Z` | write a NUL after a file name instead of the `:` or newline |
 //! | `-z` | the input is NUL-separated too, and so is the output |
 //! | `-a` | accepted and ignored: this grep never suppresses binary output |
@@ -76,7 +77,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
@@ -446,6 +447,87 @@ fn glob_matches(glob: &[u8], name: &[u8]) -> bool {
     false
 }
 
+/// One `--exclude-path` value: the path components it names, outermost first.
+///
+/// # Why this exists when `--exclude-dir` already does
+///
+/// `--exclude-dir` matches a **name**, so it cannot say *which* `temp` to
+/// skip. GNU accepts `--exclude-dir=build/temp` and then excludes nothing at
+/// all -- the pattern is compared against `ent->fts_name`, which never holds a
+/// `/`, so it can never match. That is a silent no-op on a plausible command,
+/// which is the class of defect this project cares most about, and it is the
+/// one gap the operator's `--x_paths` fills that GNU has no way to express.
+/// Measured on GNU grep 3.x, on a tree holding `build/temp` and `keep/temp`:
+///
+/// | command | skips |
+/// |---|---|
+/// | `--exclude-dir=temp` | both -- a name matches at every depth |
+/// | `--exclude-dir=build/temp` | **neither** |
+/// | `--exclude-path=build/temp` | `build/temp` only |
+///
+/// # The matching rule
+///
+/// The spec's components are matched against the **tail** of the directory's
+/// path, one glob per component, so `build/temp` skips `./build/temp` and
+/// `a/b/build/temp` alike but leaves `keep/temp` and a bare `build` alone.
+/// A suffix rather than a whole-path match because that is what makes it
+/// useful without knowing where the walk started, and it is the operator's
+/// rule too.
+///
+/// # Two deliberate divergences from the operator's `--x_paths`
+///
+/// Their components are compared for **equality**; ours are globs, so
+/// `--exclude-path='node_*/deep'` works and an ordinary name still means
+/// itself. That is a superset -- a spec with no metacharacters behaves exactly
+/// as theirs does -- and it keeps the option consistent with the
+/// `--exclude-dir` beside it, which is a glob.
+///
+/// The glob is applied **per component**, so a `*` cannot cross a `/` here
+/// even though [`glob_matches`] lets it cross one in a name. `*/temp`
+/// therefore means "a `temp` with a parent", not "any path ending in temp".
+/// Anything else would make a two-component spec able to match one component
+/// and undo the distinction the option exists to draw.
+///
+/// See `design-decisions.md` 1008.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct PathSpec {
+    /// One glob per component. Never empty, and no element is empty --
+    /// [`path_spec_arg`] refuses both, because either would produce a spec
+    /// that silently matches nothing, which is the very defect this option
+    /// removes.
+    components: Vec<Vec<u8>>,
+}
+
+impl PathSpec {
+    /// Whether `path` ends with this spec's components.
+    ///
+    /// `path` is taken **as this run names it**: under `grep -r pat .` the
+    /// walk builds `./build/temp`, and under `grep -r pat /srv/x` it builds
+    /// `/srv/x/build/temp`. A leading `.` is not a component and a `..` is,
+    /// which is `Path::components`' rule and also `pathlib`'s, so the operator's
+    /// specs carry over unchanged.
+    fn matches(&self, path: &Path) -> bool {
+        let names: Vec<Cow<'_, [u8]>> = path
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(n) => Some(quote::os_bytes(n)),
+                Component::ParentDir => Some(Cow::Borrowed(&b".."[..])),
+                // A root, a Windows prefix and a `.` are not names, so they
+                // are not components a spec can name.
+                Component::RootDir | Component::CurDir => None,
+                Component::Prefix(_) => None,
+            })
+            .collect();
+        let Some(start) = names.len().checked_sub(self.components.len()) else {
+            return false;
+        };
+        self.components
+            .iter()
+            .zip(names.get(start..).unwrap_or_default())
+            .all(|(glob, name)| fnmatch(glob, name, FnmatchFlags::NONE))
+    }
+}
+
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct Options {
@@ -484,6 +566,10 @@ struct Options {
     /// `--include` never reaches a directory and cannot filter the walk by the
     /// names of the directories in it.
     dir_selectors: Selectors,
+    /// `--exclude-path`, in the order written. A directory is skipped if
+    /// **any** of them matches -- there is no include form and so no ordering
+    /// to respect, unlike [`Selectors`]. See [`PathSpec`].
+    exclude_paths: Vec<PathSpec>,
     /// `-R`: also follow a symbolic link found *during* the walk.
     ///
     /// `-r` and `-R` differ over exactly this. Both follow a link named on the
@@ -657,6 +743,17 @@ impl Options {
         }
     }
 
+    /// Whether `--exclude-path` rejects this directory.
+    ///
+    /// Deliberately not folded into [`Options::skipped_file`]: that asks one
+    /// glob about one *name*, and this asks a sequence of globs about the tail
+    /// of a *path*. Only directories are ever asked -- the operator's
+    /// `--x_paths` prunes the walk, and a file's own name is `--exclude`'s
+    /// business.
+    fn excluded_dir_path(&self, path: &Path) -> bool {
+        self.exclude_paths.iter().any(|spec| spec.matches(path))
+    }
+
     /// The byte that ends a line of input and of output: `\n`, or NUL under
     /// `-z`.
     fn line_sep(&self) -> u8 {
@@ -799,6 +896,7 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("exclude", Takes::Required),
     ("exclude-from", Takes::Required),
     ("exclude-dir", Takes::Required),
+    ("exclude-path", Takes::Required),
     ("file", Takes::Required),
     ("files-with-matches", Takes::Nothing),
     ("files-without-match", Takes::Nothing),
@@ -932,6 +1030,8 @@ Output control:
       --exclude=GLOB        skip files that match GLOB
       --exclude-from=FILE   skip files that match any file pattern from FILE
       --exclude-dir=GLOB    skip directories that match GLOB
+      --exclude-path=SPEC   skip directories whose path ends with SPEC,
+                            a /-separated sequence of name patterns
   -L, --files-without-match  print only names of FILEs with no selected lines
   -l, --files-with-matches  print only names of FILEs with selected lines
   -c, --count               print only a count of selected lines per FILE
@@ -1035,6 +1135,7 @@ enum Flag {
     Color,
     Exclude,
     ExcludeDir,
+    ExcludePath,
     ExcludeFrom,
     GroupSeparator,
     NoGroupSeparator,
@@ -1070,6 +1171,7 @@ fn long_flag(name: &str) -> Flag {
         "exclude" => Flag::Exclude,
         "exclude-from" => Flag::ExcludeFrom,
         "exclude-dir" => Flag::ExcludeDir,
+        "exclude-path" => Flag::ExcludePath,
         "file" => Flag::Short(b'f'),
         "files-with-matches" => Flag::Short(b'l'),
         "files-without-match" => Flag::Short(b'L'),
@@ -1340,6 +1442,9 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
                 }
                 opts.dir_selectors.push(false, pat);
             }
+            Flag::ExcludePath => opts
+                .exclude_paths
+                .push(path_spec_arg(&quote::os_bytes(&required(value)))?),
             Flag::ExcludeFrom => {
                 let path = required(value);
                 let raw = fs::read(&path)
@@ -1484,6 +1589,32 @@ fn near_arg(value: &[u8]) -> Result<Option<usize>, getopt::Error> {
         }
         _ => Err(GREP.usage("invalid --near distance".to_string())),
     }
+}
+
+/// A `--exclude-path` value split into its components, with trailing slashes
+/// stripped as `--exclude-dir` strips them.
+///
+/// # Errors
+///
+/// An empty value, or one holding an empty component (`/a`, `a//b`), is a
+/// usage error rather than a spec that quietly matches nothing. This option
+/// exists *because* `--exclude-dir=a/b` silently matches nothing; one that
+/// could do the same thing itself would be self-defeating.
+fn path_spec_arg(value: &[u8]) -> Result<PathSpec, getopt::Error> {
+    let mut trimmed = value;
+    while trimmed.len() > 1 && trimmed.last() == Some(&b'/') {
+        trimmed = trimmed
+            .get(..trimmed.len().saturating_sub(1))
+            .unwrap_or_default();
+    }
+    if trimmed.is_empty() || trimmed == b"/" {
+        return Err(GREP.usage("empty --exclude-path".to_string()));
+    }
+    let components: Vec<Vec<u8>> = trimmed.split(|b| *b == b'/').map(<[u8]>::to_vec).collect();
+    if components.iter().any(Vec::is_empty) {
+        return Err(GREP.usage("empty component in --exclude-path".to_string()));
+    }
+    Ok(PathSpec { components })
 }
 
 fn max_count_arg(value: &[u8]) -> Result<Option<usize>, getopt::Error> {
@@ -1938,11 +2069,11 @@ fn near_eligible_lines(data: &[u8], pats: &[Pat], opts: &Options, near: usize) -
         // expire, then test. A pattern matched on this line cannot expire on
         // it, since the distance is zero.
         for slot in last.iter_mut() {
-            if let Some(ln) = *slot {
-                if lineno.saturating_sub(ln) >= near {
-                    *slot = None;
-                    live = live.saturating_sub(1);
-                }
+            if let Some(ln) = *slot
+                && lineno.saturating_sub(ln) >= near
+            {
+                *slot = None;
+                live = live.saturating_sub(1);
             }
         }
         // A future window's earliest live match is strictly newer than
@@ -2476,6 +2607,13 @@ impl Run<'_> {
             return;
         }
 
+        // A directory named on the command line faces `--exclude-path` too,
+        // matching `--exclude-dir`, which stops `grep -r pat sub` when `sub`
+        // is excluded rather than only pruning it mid-walk.
+        if is_dir && self.opts.excluded_dir_path(Path::new(f)) {
+            return;
+        }
+
         if is_dir {
             match self.opts.directories {
                 Directories::Recurse => {
@@ -2811,6 +2949,9 @@ impl Run<'_> {
                         if self.opts.skipped_file(&name, target.is_dir()) {
                             continue;
                         }
+                        if target.is_dir() && self.opts.excluded_dir_path(&path) {
+                            continue;
+                        }
                         if target.is_dir() {
                             self.walk(&path, ancestors);
                         } else if !(self.opts.skip_devices(false) && filekind::is_device(&target)) {
@@ -2828,6 +2969,10 @@ impl Run<'_> {
             }
 
             if self.opts.skipped_file(&name, md.is_dir()) {
+                continue;
+            }
+
+            if md.is_dir() && self.opts.excluded_dir_path(&path) {
                 continue;
             }
 
@@ -3168,7 +3313,7 @@ fn search_stream(
         // can still be reached as context. That is what the operator's README
         // describes, and keeping it here means there is one implementation of
         // context rather than two.
-        let in_window = eligible.map_or(true, |set| set.contains(&lineno));
+        let in_window = eligible.is_none_or(|set| set.contains(&lineno));
         if in_window && line_selected(body, pats, opts).map_err(limit_err)? {
             match_count = match_count.saturating_add(1);
             if stop_at_first {
@@ -3678,6 +3823,126 @@ mod tests {
         assert!(slash.skipped_file(b"deep", true));
     }
 
+    fn xpath(specs: &[&str]) -> Options {
+        let mut argv: Vec<String> = specs
+            .iter()
+            .map(|s| format!("--exclude-path={s}"))
+            .collect();
+        argv.push("foo".to_string());
+        let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+        parse_ok(&borrowed).opts
+    }
+
+    /// The whole reason the option exists: `--exclude-dir` cannot say *which*
+    /// `temp`, and GNU's answer to being asked is to exclude nothing at all.
+    ///
+    /// Measured on GNU grep before this was written -- `--exclude-dir=temp`
+    /// skips `build/temp` and `keep/temp` both, and `--exclude-dir=build/temp`
+    /// skips neither, because the pattern meets a base name that can never
+    /// hold a `/`.
+    #[test]
+    fn exclude_path_names_which_temp() {
+        let o = xpath(&["build/temp"]);
+        assert!(o.excluded_dir_path(Path::new("./build/temp")));
+        assert!(!o.excluded_dir_path(Path::new("./keep/temp")));
+        assert!(!o.excluded_dir_path(Path::new("./build")));
+
+        // …and the one-component spelling still means what --exclude-dir means.
+        let one = xpath(&["temp"]);
+        assert!(one.excluded_dir_path(Path::new("./build/temp")));
+        assert!(one.excluded_dir_path(Path::new("./keep/temp")));
+    }
+
+    /// A suffix match, so the spec need not know where the walk started.
+    #[test]
+    fn exclude_path_matches_at_any_depth() {
+        let o = xpath(&["build/temp"]);
+        assert!(o.excluded_dir_path(Path::new("build/temp")));
+        assert!(o.excluded_dir_path(Path::new("/srv/x/y/build/temp")));
+        // A *prefix* is not a suffix: the components must be the last ones.
+        assert!(!o.excluded_dir_path(Path::new("build/temp/inner")));
+    }
+
+    /// Each component is a glob, which the operator's `--x_paths` is not --
+    /// theirs compares components for equality. A plain name behaves
+    /// identically either way, so this is a superset rather than a divergence.
+    #[test]
+    fn exclude_path_globs_each_component() {
+        let o = xpath(&["node_*/deep"]);
+        assert!(o.excluded_dir_path(Path::new("./node_modules/deep")));
+        assert!(!o.excluded_dir_path(Path::new("./src/deep")));
+    }
+
+    /// The glob is applied per component, so `*` cannot cross a `/` here even
+    /// though [`glob_matches`] lets it cross one inside a name. `*/temp`
+    /// therefore means "a `temp` that has a parent" -- without this, a
+    /// two-component spec could match a one-component path and the distinction
+    /// the option draws would collapse.
+    #[test]
+    fn exclude_path_stars_do_not_cross_a_slash() {
+        let o = xpath(&["*/temp"]);
+        assert!(o.excluded_dir_path(Path::new("./build/temp")));
+        assert!(!o.excluded_dir_path(Path::new("./temp")));
+        assert!(!o.excluded_dir_path(Path::new("temp")));
+    }
+
+    /// More components than the path has is not a match, and not a panic.
+    #[test]
+    fn exclude_path_longer_than_the_path_never_matches() {
+        assert!(!xpath(&["a/b/c"]).excluded_dir_path(Path::new("b/c")));
+        assert!(!xpath(&["a"]).excluded_dir_path(Path::new("")));
+    }
+
+    /// `.` is not a component and `..` is, which is `Path::components`' rule
+    /// and `pathlib`'s -- so the operator's specs carry over unchanged, and a
+    /// spec written without the `./` still matches the path the walk builds.
+    #[test]
+    fn exclude_path_agrees_with_pathlib_about_dot_and_dotdot() {
+        assert!(xpath(&["build/temp"]).excluded_dir_path(Path::new("././build/temp")));
+        assert!(xpath(&["../temp"]).excluded_dir_path(Path::new("a/../temp")));
+    }
+
+    /// Any of several specs may match; they are not ordered against each other
+    /// the way `--include`/`--exclude` segments are, because there is no
+    /// include form for a path and so nothing to order.
+    #[test]
+    fn exclude_path_accepts_more_than_one() {
+        let o = xpath(&["build/temp", "node_modules/deep"]);
+        assert!(o.excluded_dir_path(Path::new("./build/temp")));
+        assert!(o.excluded_dir_path(Path::new("./node_modules/deep")));
+        assert!(!o.excluded_dir_path(Path::new("./keep/temp")));
+    }
+
+    /// A trailing slash is stripped, as `--exclude-dir` strips one: shell
+    /// completion appends them, and the intent is not in doubt.
+    #[test]
+    fn exclude_path_strips_a_trailing_slash() {
+        assert!(xpath(&["build/temp//"]).excluded_dir_path(Path::new("./build/temp")));
+    }
+
+    /// A spec that could never match is refused rather than accepted and
+    /// ignored. This option exists *because* `--exclude-dir=a/b` is a silent
+    /// no-op; one that could be a silent no-op itself would be self-defeating.
+    #[test]
+    fn exclude_path_refuses_a_spec_that_could_never_match() {
+        assert_eq!(
+            parse_err(&["--exclude-path=", "foo"]),
+            "empty --exclude-path"
+        );
+        assert_eq!(
+            parse_err(&["--exclude-path=/", "foo"]),
+            "empty --exclude-path"
+        );
+        assert_eq!(
+            parse_err(&["--exclude-path=/a", "foo"]),
+            "empty component in --exclude-path"
+        );
+        assert_eq!(
+            parse_err(&["--exclude-path=a//b", "foo"]),
+            "empty component in --exclude-path"
+        );
+    }
+
     /// The suffix pass of gnulib's `exclude_fnmatch`, which is what lets a
     /// pattern written without the `./` still match an operand written with it.
     #[test]
@@ -4044,8 +4309,10 @@ mod tests {
     }
 
     fn esc(bytes: &[u8], on: bool) -> Vec<u8> {
-        let mut o = Options::default();
-        o.escape_control = on;
+        let o = Options {
+            escape_control: on,
+            ..Options::default()
+        };
         escaped(bytes, &o).into_owned()
     }
 
@@ -4085,8 +4352,10 @@ mod tests {
     /// Nothing to do means nothing allocated.
     #[test]
     fn escape_control_borrows_when_there_is_nothing_to_change() {
-        let mut o = Options::default();
-        o.escape_control = true;
+        let o = Options {
+            escape_control: true,
+            ..Options::default()
+        };
         assert!(matches!(escaped(b"ordinary text", &o), Cow::Borrowed(_)));
     }
 
@@ -4210,8 +4479,10 @@ mod tests {
     /// nothing.
     #[test]
     fn every_pattern_gate_ignores_invert() {
-        let mut o = Options::default();
-        o.invert = true;
+        let o = Options {
+            invert: true,
+            ..Options::default()
+        };
         assert!(gate("alpha\nbeta\n", &["alpha", "beta"], &o));
         assert!(!gate("alpha\nalpha\n", &["alpha", "beta"], &o));
     }
@@ -4220,8 +4491,10 @@ mod tests {
     /// it rather than reimplementing it.
     #[test]
     fn every_pattern_gate_honours_ignore_case() {
-        let mut o = Options::default();
-        o.ignore_case = true;
+        let o = Options {
+            ignore_case: true,
+            ..Options::default()
+        };
         assert!(gate("ALPHA\nBeTa\n", &["alpha", "beta"], &o));
     }
 

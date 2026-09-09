@@ -125405,3 +125405,76 @@ discovered.
 **Until then, do not bind them.** A layout switch on the press of Shift-with-Alt
 is worse than no layout switch: it is a working shortcut (Alt+Shift+Tab) taken
 away in exchange for one that fires at the wrong time.
+
+---
+
+## TD-C-TWENTY-FOUR-THOUSAND-LINES-BEHIND-ALLOW-DEAD-CODE
+
+**Date:** 2026-09-08. **Lane:** C.
+**Where:** `gui/toolkit/src/` — `textview.rs` (4,018 lines), `svg.rs` (3,392),
+`menubar.rs` (3,341), `colorpicker.rs` (2,595), `filetypes.rs` (2,203),
+`disabled.rs` (1,739), `context_ext.rs` (1,604). Plus
+`apps/imageviewer/src/video.rs` (2,435) and
+`apps/procexplorer/src/features.rs` (2,539).
+
+**In short:** roughly twenty-four thousand lines of this lane's code are
+reached by nothing. Seven of them are widgets in the shared toolkit — a text
+view, an SVG renderer, a menu bar, a colour picker, a file-type table, a
+disabled-state helper, a context-menu extension — that no application uses.
+Two are features inside applications (video playback in the image viewer,
+and a features module in the process explorer) that their own `main.rs` never
+calls. Every one of these files opens with `#![allow(dead_code)]`, so the
+compiler has never once mentioned it.
+
+**The measurement**, so it can be repeated rather than believed:
+
+```
+for f in $(grep -rl "^#!\[allow(dead_code)\]" --include=*.rs gui/ apps/); do
+  # ... count `<module>::` references in sibling files, and for a library
+  # crate, count crates outside it that name `guitk::<module>`
+done
+```
+
+For the toolkit the sibling count is not the test — its modules are `pub` and
+exist to be used from outside — so the number that matters is **crates outside
+`gui/toolkit` that mention `guitk::<module>`**. For the seven above that number
+is **zero**. For comparison, the same measurement gives `grid` 5, `scaling` 3
+and `pathbar` 1, which is what a used module looks like.
+
+**A toolkit widget nobody has used yet is not automatically waste** — that is
+the honest counter-argument, and it is why this is a debt entry and not a
+deletion. A toolkit is built ahead of its callers. The reason it is *debt* is
+the next paragraph.
+
+**One verified case of an application reimplementing what the toolkit already
+had.** `guitk::colorpicker` defines `Hsv { h: f32, s: f32, v: f32 }` with
+`hsv_to_rgb`, `rgb_to_hsv` and `color_to_hex_string`. `apps/colorpicker`
+defines its own `Hsv { h: f32, s: f32, v: f32 }` — the same three fields, the
+same units, documented the same way — and its own conversions. Neither knows
+about the other. That is the cost the `allow` is hiding: not the unused lines,
+but the second implementation written because nobody could see the first.
+
+**Deliberately not claimed:** that the other six are duplicated too. It was
+checked for `filetypes` against `apps/explorer`'s file-type handling and the
+two are *not* the same thing, so the pattern is not assumed. `textview`,
+`svg`, `menubar`, `disabled` and `context_ext` have not been checked
+either way.
+
+**What to do, in order.**
+
+1. **Take the `#![allow(dead_code)]` off `gui/toolkit`'s modules** and see what
+   the compiler says. That is the cheap step and it is the one that stops the
+   next 24,000 lines accumulating. A `pub` item in a library is not dead code
+   to rustc, so this will be quieter than it sounds — which is itself the
+   point: the attribute is not earning anything on those files.
+2. **Decide the two application modules.** `imageviewer/video.rs` and
+   `procexplorer/features.rs` are unreachable inside their own binaries, where
+   `pub` buys nothing. Each is either wired or deleted; neither should stay as
+   it is.
+3. **Route `apps/colorpicker` through `guitk::colorpicker`,** or delete the
+   toolkit's copy. One of the two, not both.
+
+**Related.** `TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING` is
+the same mechanism with 5,628 more lines, found the same way and logged
+separately because it also has a *duplicate wired page*, which is a worse
+problem than being unreachable. Together they are about 30,000 lines.

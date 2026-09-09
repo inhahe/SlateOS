@@ -3398,7 +3398,9 @@ fn the_desktops_shortcuts_do_nothing_while_the_machine_is_locked() {
             text: String::new(),
         }),
     );
-    desktop.borrow_mut().send_input(std::slice::from_ref(&alt_tab));
+    desktop
+        .borrow_mut()
+        .send_input(std::slice::from_ref(&alt_tab));
     session.pump().expect("pump");
     assert!(
         !session.shell().alt_tab_active,

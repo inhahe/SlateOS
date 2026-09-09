@@ -302,6 +302,13 @@ pub extern "C" fn close(fd: Fd) -> i32 {
 /// - File → `SYS_FS_READ`
 /// - Pipe → `SYS_PIPE_READ`
 /// - Console → `SYS_TTY_READ` (through the kernel line discipline)
+/// - Pty master → `SYS_PTY_MASTER_READ` / `..._TRY_READ` on `O_NONBLOCK`
+/// - Pty slave → `SYS_PTY_SLAVE_READ` / `..._TRY_READ` on `O_NONBLOCK`
+///
+/// The two pty rows were missing from this list while both arms existed
+/// below, which is a cheap way to conclude that a pty read goes through the
+/// `SYS_TTY_READ` row above it. Until 2026-09-08 the slave arm did exactly
+/// that, and it hung a boot test; see the arm itself.
 ///
 /// Returns number of bytes read, 0 at EOF, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -533,21 +540,37 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             }
         }
         HandleKind::PtySlave => {
-            // The slave end reads through the line discipline, which is the
-            // same code path the console uses — `SYS_TTY_READ` honours
-            // `ICANON`, `VMIN`/`VTIME` and `ISIG` for whichever terminal the
-            // caller is on.
+            // Terminal input for the program running *on* the pty, through
+            // the line discipline — `ICANON`, `VMIN`/`VTIME` and `ISIG`.
             //
-            // It resolves the terminal as `current_tty()` and takes no
-            // handle, so it can only serve a slave that is *this* process's
-            // controlling terminal.  That is the case the fd exists for: a
-            // slave fd is what `login_tty` makes stdin, and `login_tty`
-            // acquires the terminal first.  A process holding a slave fd for
-            // a terminal it is not on has no way to read it; that needs a
-            // handle-taking `SYS_TTY_READ`, which does not exist yet and is
-            // logged as `TD-B-PTY-SLAVE-READ-IS-CTTY-ONLY` in
-            // `known-issues.md`.
-            syscall2(SYS_TTY_READ, buf as u64, count as u64)
+            // The handle is passed rather than resolved, and that distinction
+            // is the whole of `TD-A-CTEST-PTY-HANGS-BOOT`.  Until 2026-09-08
+            // this arm issued `SYS_TTY_READ`, which takes no handle and reads
+            // `current_tty()` — the *console*, for any process that has called
+            // `openpty` but not `login_tty`.  The console's default termios is
+            // canonical with `VMIN=1`, so the read waited for a keystroke that
+            // was never coming while the pty's own raw termios went unread.
+            // It hung a boot test rather than failing one.
+            //
+            // The comment this replaces described that limitation accurately
+            // and said it was "logged as `TD-B-PTY-SLAVE-READ-IS-CTTY-ONLY` in
+            // `known-issues.md`".  No such entry was ever written, so the one
+            // record of a known hang was a cross-reference to nothing.  The
+            // limitation was found by tripping over it, not by reading it.
+            //
+            // Lane A closed the asymmetry with 872/873; the master side has
+            // had a handle-taking read since the pty was built.
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
+            if is_nb {
+                syscall3(
+                    SYS_PTY_SLAVE_TRY_READ,
+                    entry.handle,
+                    buf as u64,
+                    count as u64,
+                )
+            } else {
+                syscall3(SYS_PTY_SLAVE_READ, entry.handle, buf as u64, count as u64)
+            }
         }
     };
 

@@ -124122,9 +124122,29 @@ side has had `SYS_PTY_MASTER_READ` (546) and `SYS_PTY_MASTER_TRY_READ`
 `SYS_PTY_SLAVE_TRY_READ` (873) added.  Both use `resolve_tty_arg` to
 target the correct pty and call `tty::read` / `tty::try_read`.
 
-**Fix (POSIX, pending lane B).** `posix/src/file.rs` must route PtySlave
-reads through 872/873 instead of `SYS_TTY_READ`.  Filed as request
-`a-b-pty-slave-read-syscalls-exist-route-posix-reads.md`.
+**Fix (POSIX, done -- lane B, 2026-09-09).** `posix/src/file.rs`'s PtySlave
+read arm now reads `fdtable::get_status_flags(fd)` and dispatches
+`SYS_PTY_SLAVE_TRY_READ` (873) when `O_NONBLOCK` is set and
+`SYS_PTY_SLAVE_READ` (872) otherwise, passing `entry.handle` as `arg0` -- the
+shape the neighbouring `SYS_PTY_SLAVE_WRITE` arm already used. Constants added
+to `posix/src/syscall.rs` and pinned in its number-assertion test.
+
+**The rung is still disabled** in `kernel/src/main.rs` and needs re-enabling by
+lane A for any of this to be worth anything; asked for in the request file.
+
+**Why lane B's "cannot hang" guarantee did not hold**, recorded because the
+shape recurs. The fixture set `O_NONBLOCK` and bounded every retry loop, and
+both of those were true. But `O_NONBLOCK` is a flag in libc's own descriptor
+table that each read arm must *consult* and turn into a `TRY_` syscall. The
+slave arm could not consult it -- `SYS_TTY_READ` takes no handle, so there was
+no descriptor whose flags it could honour. The flag was set, read by nobody,
+and dropped. A guarantee resting on a flag is only as strong as the narrowest
+path that flag has to survive, and "I set the flag" is a different claim from
+"the flag is honoured" -- only the second one bounds anything.
+
+**It hung at check 14**, the first slave read. The fixture's own exit-code
+legend would have named it in one line had it been able to fail instead of
+hang; that, rather than the bug, is what the wrong claim cost.
 
 **The "scheduler doesn't preempt" concern was a false alarm.**
 `schedule_inner` correctly returns without context-switching when the

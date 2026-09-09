@@ -451,6 +451,13 @@ fn glob_matches(glob: &[u8], name: &[u8]) -> bool {
 struct Options {
     syntax: Syntax,
     ignore_case: bool,
+    /// `--near NUM`: every pattern must occur within NUM lines of another,
+    /// and only matching lines inside a satisfying window are selected. The
+    /// sliding-window form of [`Options::every_pattern`]; see
+    /// [`near_eligible_lines`] for the rule, which is the operator's
+    /// implementation and deliberately not their README's description of it
+    /// (`design-decisions.md` §1008).
+    near: Option<usize>,
     /// `--every-pattern`: a file produces no output unless **every** pattern
     /// occurs in it. Opt-in, because GNU's repeated `-e` means alternation and
     /// the operator's grep means conjunction on the same syntax -- an opposite
@@ -814,6 +821,7 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("dereference-recursive", Takes::Nothing),
     ("regexp", Takes::Required),
     ("every-pattern", Takes::Nothing),
+    ("near", Takes::Required),
     ("invert-match", Takes::Nothing),
     ("silent", Takes::Nothing),
     ("text", Takes::Nothing),
@@ -890,6 +898,7 @@ Pattern selection and interpretation:
 Miscellaneous:
   -s, --no-messages         suppress error messages
       --every-pattern        a file must contain every pattern, not any of them
+      --near=NUM             every pattern within NUM lines of another
   -v, --invert-match        select non-matching lines
   -V, --version             display version information and exit
       --help                display this help text and exit
@@ -1015,6 +1024,7 @@ impl Matcher {
 enum Flag {
     Short(u8),
     EveryPattern,
+    Near,
     BinaryFiles,
     Color,
     Exclude,
@@ -1059,6 +1069,7 @@ fn long_flag(name: &str) -> Flag {
         "files-without-match" => Flag::Short(b'L'),
         "group-separator" => Flag::GroupSeparator,
         "every-pattern" => Flag::EveryPattern,
+        "near" => Flag::Near,
         "include" => Flag::Include,
         "ignore-case" => Flag::Short(b'i'),
         "no-ignore-case" => Flag::NoIgnoreCase,
@@ -1347,6 +1358,7 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
             },
             Flag::Label => opts.label = Some(quote::os_bytes(&required(value)).into_owned()),
             Flag::EveryPattern => opts.every_pattern = true,
+            Flag::Near => opts.near = near_arg(&quote::os_bytes(&required(value)))?,
             Flag::LineBuffered => opts.line_buffered = true,
             // Upstream's `default: usage (EXIT_TROUBLE)`. Unreachable as things
             // stand — `SHORT_OPTIONS` lists exactly the letters matched above,
@@ -1451,6 +1463,21 @@ fn binary_files_arg(value: &[u8]) -> Result<BinaryFiles, getopt::Error> {
 /// `grep: invalid max count`, exit 2, for a value that is not a number at all
 /// or that has a trailing character — upstream accepts `LONGINT_OK` and
 /// `LONGINT_OVERFLOW` from `xstrtoimax` and dies on everything else.
+/// The value of `--near`.
+///
+/// Rejects a negative or unparsable count rather than clamping it: `--near -1`
+/// is a typo for something, and silently reading it as "no window" would turn
+/// a narrowed search into a whole-file one without saying so.
+fn near_arg(value: &[u8]) -> Result<Option<usize>, getopt::Error> {
+    let (n, status) = xnum::xstrtoimax(value, None);
+    match status {
+        xnum::Status::Ok | xnum::Status::Overflow if n >= 0 => {
+            Ok(Some(usize::try_from(n).unwrap_or(usize::MAX)))
+        }
+        _ => Err(GREP.usage("invalid --near distance".to_string())),
+    }
+}
+
 fn max_count_arg(value: &[u8]) -> Result<Option<usize>, getopt::Error> {
     let (n, status) = xnum::xstrtoimax(value, None);
     match status {
@@ -1826,6 +1853,110 @@ fn matches_in(
         }
     }
     Ok(out)
+}
+
+/// Which lines `--near NUM` allows to be selected.
+///
+/// The sliding-window form of [`every_pattern_present`]. A window is satisfied
+/// when every pattern has a match no more than `near` lines back; the matching
+/// lines from the earliest live match up to the current line become eligible,
+/// and **the record is then cleared** so the next window starts fresh.
+///
+/// # The clearing is the whole rule, and it is not in the README
+///
+/// The operator's `README.md` gives one worked example -- `ALPHA` on 3, `BETA`
+/// on 5, `ALPHA` on 7, `--near 3` -- and says lines 3 and 5 print while 7 does
+/// not, because "its `ALPHA` has no `BETA` within 3 lines". But `|7-5| = 2`,
+/// which *is* within 3. The rule is not derivable from the example: `BETA` on
+/// line 5 was **consumed** by the window that ended there, so nothing is left
+/// for line 7 to pair with. Windows are non-overlapping, greedy and
+/// earliest-first.
+///
+/// The README also claims a `near` at least as large as the file is exactly
+/// equivalent to the whole-file gate. It is not, and the counterexample was
+/// measured against the operator's own program rather than argued:
+/// `ALPHA`/`BETA`/`ALPHA` on three lines prints 1,2,3 under the gate and 1,2
+/// under `-P 100`. This follows the program. See `design-decisions.md` §1008
+/// and `open-questions.md` B-Q10.
+///
+/// # Context is not folded in here
+///
+/// The operator's implementation expands each window by `-A`/`-B` while
+/// emitting it. This returns *eligibility* only and lets the ordinary context
+/// machinery run around the selected lines, which produces the same output --
+/// the README's own example notes that `-C` still reaches line 7 as context --
+/// and keeps one implementation of context rather than two.
+///
+/// # `--near 0` selects nothing
+///
+/// Not a special case: a pattern matched on line N expires when
+/// `N - N >= 0`, which is immediately, so no window is ever satisfied. The
+/// early return says so rather than leaving a reader to derive it.
+fn near_eligible_lines(data: &[u8], pats: &[Pat], opts: &Options, near: usize) -> BTreeSet<usize> {
+    let mut eligible = BTreeSet::new();
+    if near == 0 || pats.is_empty() {
+        return eligible;
+    }
+    let sep = opts.line_sep();
+    // Per pattern: the most recent line it matched, while that is still live.
+    let mut last: Vec<Option<usize>> = vec![None; pats.len()];
+    let mut live: usize = 0;
+    // Every line that matched anything, pruned to the window's reach so this
+    // stays O(near) rather than O(file).
+    let mut matching: VecDeque<usize> = VecDeque::new();
+    let mut lineno: usize = 0;
+    for raw in data.split_inclusive(|b| *b == sep) {
+        lineno = lineno.saturating_add(1);
+        let body = raw.strip_suffix(&[sep][..]).unwrap_or(raw);
+        let mut any = false;
+        for (i, slot) in last.iter_mut().enumerate() {
+            let Some(one) = pats.get(i..=i) else {
+                continue;
+            };
+            // As in `every_pattern_present`, a match-limit error counts as a
+            // match: an engine limit must not silently shrink the window.
+            if !matches!(next_match(one, body, 0, opts), Ok(None)) {
+                if slot.is_none() {
+                    live = live.saturating_add(1);
+                }
+                *slot = Some(lineno);
+                any = true;
+            }
+        }
+        if any {
+            matching.push_back(lineno);
+        }
+        // Expire, in the same order the reference does: update first, then
+        // expire, then test. A pattern matched on this line cannot expire on
+        // it, since the distance is zero.
+        for slot in last.iter_mut() {
+            if let Some(ln) = *slot {
+                if lineno.saturating_sub(ln) >= near {
+                    *slot = None;
+                    live = live.saturating_sub(1);
+                }
+            }
+        }
+        // A future window's earliest live match is strictly newer than
+        // `lineno - near`, so anything at or before it can never be inside one.
+        let unreachable = lineno.saturating_sub(near);
+        while matching.front().is_some_and(|f| *f <= unreachable) {
+            matching.pop_front();
+        }
+        if live == pats.len() {
+            let start = last.iter().flatten().copied().min().unwrap_or(lineno);
+            for m in &matching {
+                if *m >= start && *m <= lineno {
+                    eligible.insert(*m);
+                }
+            }
+            for slot in last.iter_mut() {
+                *slot = None;
+            }
+            live = 0;
+        }
+    }
+    eligible
 }
 
 /// Does every pattern occur somewhere in this stream?
@@ -2414,13 +2545,16 @@ impl Run<'_> {
             }
         };
 
-        // `--every-pattern`: decide about the whole file before printing any of
-        // it. The input is buffered rather than re-opened, which costs the
-        // file's size in memory and buys the one thing a second `open` cannot
-        // give: this works for `-` as well. Re-reading stdin is not a thing,
-        // and a gate that silently did nothing on a pipe would be worse than
-        // one that costs memory on a file.
-        if self.opts.every_pattern && self.pats.len() > 1 {
+        // `--every-pattern` and `--near` both decide about the whole file
+        // before printing any of it, so both read it first. The input is
+        // buffered rather than the file re-opened, which costs the file's size
+        // in memory and buys the one thing a second `open` cannot give: this
+        // works for `-` as well. Re-reading stdin is not a thing, and a gate
+        // that silently did nothing on a pipe would be worse than one that
+        // costs memory on a file.
+        let mut eligible: Option<BTreeSet<usize>> = None;
+        let gated = self.opts.every_pattern && self.pats.len() > 1;
+        if gated || self.opts.near.is_some() {
             let mut data = Vec::new();
             if let Err(e) = reader.read_to_end(&mut data) {
                 if !self.opts.no_messages {
@@ -2429,19 +2563,26 @@ impl Run<'_> {
                 self.had_error = true;
                 return;
             }
-            match every_pattern_present(&data[..], self.pats, self.opts) {
-                Ok(true) => {}
-                // Not a hit and not an error: the file was searched and did not
-                // hold every pattern, so it prints nothing and the run's status
-                // is unaffected by it.
-                Ok(false) => return,
-                Err(e) => {
-                    if !self.opts.no_messages {
-                        diag!("grep: {}: {}", quotef_os(path), strerror(&e));
+            if gated {
+                match every_pattern_present(&data[..], self.pats, self.opts) {
+                    Ok(true) => {}
+                    // Not a hit and not an error: the file was searched and did
+                    // not hold every pattern, so it prints nothing and the
+                    // run's status is unaffected by it.
+                    Ok(false) => return,
+                    Err(e) => {
+                        if !self.opts.no_messages {
+                            diag!("grep: {}: {}", quotef_os(path), strerror(&e));
+                        }
+                        self.had_error = true;
+                        return;
                     }
-                    self.had_error = true;
-                    return;
                 }
+            }
+            if let Some(near) = self.opts.near {
+                // An empty set is a real answer -- no window was satisfied --
+                // and not the same as `None`, which means the option is off.
+                eligible = Some(near_eligible_lines(&data[..], self.pats, self.opts, near));
             }
             reader = Box::new(io::Cursor::new(data));
         }
@@ -2459,6 +2600,7 @@ impl Run<'_> {
             &src,
             self.opts,
             &mut self.printed_before,
+            eligible.as_ref(),
         ) {
             Ok(Outcome {
                 matched,
@@ -2850,6 +2992,7 @@ fn search_stream(
     src: &Source<'_>,
     opts: &Options,
     printed_before: &mut bool,
+    eligible: Option<&BTreeSet<usize>>,
 ) -> io::Result<Outcome> {
     let filename = src.filename;
     let show_filename = src.show_filename;
@@ -2966,7 +3109,13 @@ fn search_stream(
             continue;
         }
 
-        if line_selected(body, pats, opts).map_err(limit_err)? {
+        // `--near` narrows *which* selected lines count, and nothing else: the
+        // context machinery below is untouched, so an ineligible matching line
+        // can still be reached as context. That is what the operator's README
+        // describes, and keeping it here means there is one implementation of
+        // context rather than two.
+        let in_window = eligible.map_or(true, |set| set.contains(&lineno));
+        if in_window && line_selected(body, pats, opts).map_err(limit_err)? {
             match_count = match_count.saturating_add(1);
             if stop_at_first {
                 return Ok(Outcome {
@@ -3840,6 +3989,81 @@ mod tests {
         every_pattern_present(text.as_bytes(), &ps, opts).unwrap()
     }
 
+    fn near_set(text: &str, patterns: &[&str], near: usize, opts: &Options) -> Vec<usize> {
+        let ps = many_pats(patterns, opts);
+        near_eligible_lines(text.as_bytes(), &ps, opts, near)
+            .into_iter()
+            .collect()
+    }
+
+    /// The operator's README's own worked example, reproduced exactly.
+    ///
+    /// This is the test that pins the rule, and it is here because the example
+    /// alone does not imply it: line 7's `ALPHA` is two lines from the `BETA`
+    /// on line 5, which *is* within 3, and every obvious reading of the
+    /// sentence prints it. It is absent because the window ending at line 5
+    /// consumed that `BETA`.
+    #[test]
+    fn near_reproduces_the_readme_example() {
+        let o = Options::default();
+        let text = "l1\nl2\nl3 ALPHA\nl4\nl5 BETA\nl6\nl7 ALPHA\n";
+        assert_eq!(near_set(text, &["ALPHA", "BETA"], 3, &o), vec![3, 5]);
+    }
+
+    /// `--near` at least as large as the file is **not** the whole-file gate,
+    /// whatever the README says. Measured against the operator's own program
+    /// before being written down here: their `grep.py` prints 1,2,3 without
+    /// `-P` and 1,2 with `-P 100`. See design-decisions §1008 and B-Q10.
+    #[test]
+    fn near_larger_than_the_file_is_still_window_scoped() {
+        let o = Options::default();
+        let text = "l1 ALPHA\nl2 BETA\nl3 ALPHA\n";
+        assert_eq!(near_set(text, &["ALPHA", "BETA"], 100, &o), vec![1, 2]);
+        // ...whereas the whole-file gate accepts the file outright, which is
+        // the difference the README denies exists.
+        assert!(gate(text, &["ALPHA", "BETA"], &o));
+    }
+
+    /// Windows are found repeatedly, not once.
+    #[test]
+    fn near_finds_a_later_window_too() {
+        let o = Options::default();
+        let text = "l1 A\nl2 B\nl3\nl4\nl5 A\nl6 B\n";
+        assert_eq!(near_set(text, &["A", "B"], 3, &o), vec![1, 2, 5, 6]);
+    }
+
+    /// Too far apart is no window at all.
+    #[test]
+    fn near_refuses_patterns_beyond_the_distance() {
+        let o = Options::default();
+        let text = "l1 ALPHA\nl2\nl3\nl4\nl5\nl6 BETA\n";
+        assert!(near_set(text, &["ALPHA", "BETA"], 3, &o).is_empty());
+    }
+
+    /// `--near 0` selects nothing, and not as a special case: a match on line
+    /// N expires when `N - N >= 0`, which is at once.
+    #[test]
+    fn near_zero_selects_nothing() {
+        let o = Options::default();
+        assert!(near_set("a\nb\n", &["a", "b"], 0, &o).is_empty());
+    }
+
+    /// One pattern makes every matching line its own satisfied window, so
+    /// `--near` with a single pattern is ordinary grep.
+    #[test]
+    fn near_with_one_pattern_selects_every_match() {
+        let o = Options::default();
+        let text = "hit\nmiss\nhit\n";
+        assert_eq!(near_set(text, &["hit"], 1, &o), vec![1, 3]);
+    }
+
+    /// A file with no final newline still has a last line.
+    #[test]
+    fn near_counts_a_final_unterminated_line() {
+        let o = Options::default();
+        assert_eq!(near_set("l1 A\nl2 B", &["A", "B"], 3, &o), vec![1, 2]);
+    }
+
     /// The gate is about the **file**, not the line. This is the whole point of
     /// conjunction and the thing a per-line reading would get wrong: the two
     /// patterns never share a line and the file still satisfies it.
@@ -4302,6 +4526,7 @@ mod tests {
             &src(filename, show_filename),
             opts,
             &mut printed_before,
+            None,
         )
         .unwrap();
         (out, outcome)
@@ -4631,6 +4856,7 @@ mod tests {
                 &src(name, true),
                 &opts,
                 &mut printed_before,
+                None,
             )
             .unwrap();
         }
@@ -4650,6 +4876,7 @@ mod tests {
                 &src(name, false),
                 &opts,
                 &mut printed_before,
+                None,
             )
             .unwrap();
         }

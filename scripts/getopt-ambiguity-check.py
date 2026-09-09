@@ -516,6 +516,12 @@ def gnu_help_table(runner: list[str], util: str) -> set[str] | None:
 # than trusted.
 INTENTIONAL_EXTRAS: dict[str, dict[str, str]] = {
     "grep": {
+        "near": (
+            "design-decisions.md 1008: proximity matching, which GNU grep has "
+            "no equivalent for. Spelled --near rather than --proximity because "
+            "--p resolves to --perl-regexp in GNU and a second p option would "
+            "break that abbreviation."
+        ),
         "every-pattern": (
             "design-decisions.md 1008: the operator's grep conjoins patterns "
             "where GNU's repeated -e alternates. Opposite meanings on identical "

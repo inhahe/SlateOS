@@ -82,7 +82,7 @@ use guiremote::control::{
 
 pub use guiremote::client::{ClientError as ConnectionError, Transport as ConnectionTransport};
 pub use guiremote::control::{
-    BufferFormat as PixelFormat, CursorShape as Cursor, DisplayInfo as Display, Layer,
+    BlurKind, BufferFormat as PixelFormat, CursorShape as Cursor, DisplayInfo as Display, Layer,
     ShellControlAction, WindowSpec as Spec,
 };
 /// What a shell learns about the windows it does not own. See
@@ -1610,6 +1610,35 @@ pub mod testing {
         pub refuse: Option<String>,
         /// Input to deliver, one batch per turn.
         pub script: VecDeque<Vec<InputEvent>>,
+        /// The config-directory turn, held for as long as this desktop exists.
+        ///
+        /// Not about the pipe or the windows at all. `drive()` builds a
+        /// `ThemeWatch`, which resolves `XDG_CONFIG_HOME` -- a *process-global*
+        /// value that `settingsfile::testing::with_scratch_config` replaces
+        /// while it runs. Its lock made its own callers take turns, which is
+        /// the wrong invariant: the four tests that install a scratch config
+        /// were serialised against each other and against nobody else, so any
+        /// of the twenty-three tests that merely *read* the config could land
+        /// in the middle of one and find a theme file it never wrote. That is
+        /// exactly what `a_file_written_while_answering_idle_is_still_announced`
+        /// did -- it redrew for somebody else's theme change and failed an
+        /// assertion about how many times it had drawn.
+        ///
+        /// Holding it here rather than at each call site is the point: a test
+        /// that builds a `TestDesktop` takes the turn whether or not its author
+        /// knew there was one, and the next test added cannot forget. See
+        /// `known-issues.md`
+        /// `TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS`.
+        ///
+        /// `#[cfg(test)]`, unlike the rest of this module, which is compiled
+        /// unconditionally so that dependents can reach it. The guard's type
+        /// comes from a *dev*-dependency and cannot appear in the shipped
+        /// library -- and it does not need to: `cargo test` gives each binary
+        /// its own process, so an environment variable set by this crate's
+        /// tests is invisible to any other crate's. The race is within one
+        /// binary, so the cure belongs in the same place.
+        #[cfg(test)]
+        _config_turn: settingsfile::testing::ConfigTurn,
     }
 
     impl TestDesktop {
@@ -1623,6 +1652,8 @@ pub mod testing {
                 submitted: Vec::new(),
                 refuse: None,
                 script: VecDeque::new(),
+                #[cfg(test)]
+                _config_turn: settingsfile::testing::config_turn(),
             }
         }
 

@@ -75,7 +75,8 @@ use appearance::Palette;
 use guitk::event::{Event, Key, Modifiers, MouseEvent, SettingsGroup};
 use guitk::render::RenderTree;
 use oswindow::{
-    ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer, PixelFormat, Spec,
+    BlurKind, ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer,
+    PixelFormat, Spec,
 };
 
 use crate::animations::{AnimationManager, WindowAnimation};
@@ -344,6 +345,10 @@ impl<T: Transport> ShellSession<T> {
                 display.height,
                 (0, 0),
                 Layer::Background,
+                // The wallpaper *is* the backdrop; there is nothing behind it
+                // to blur, and asking would cost a pass over the whole screen
+                // to composite it with itself.
+                BlurKind::None,
             ))?,
             origin: (0.0, 0.0),
         };
@@ -354,6 +359,7 @@ impl<T: Transport> ShellSession<T> {
                 px(bar.h),
                 (pos(bar.x), pos(bar.y)),
                 Layer::Overlay,
+                BlurKind::Taskbar,
             ))?,
             origin: (bar.x, bar.y),
         };
@@ -364,6 +370,7 @@ impl<T: Transport> ShellSession<T> {
                 display.height,
                 (0, 0),
                 Layer::Overlay,
+                BlurKind::Menu,
             ))?,
             origin: (0.0, 0.0),
         };
@@ -383,6 +390,7 @@ impl<T: Transport> ShellSession<T> {
                     display.height,
                     (0, 0),
                     Layer::Overlay,
+                    BlurKind::Notification,
                 )
             })?,
             origin: (0.0, 0.0),
@@ -399,6 +407,10 @@ impl<T: Transport> ShellSession<T> {
                 display.height,
                 (0, 0),
                 Layer::Overlay,
+                // Opaque and full-screen: there is nothing visible behind it,
+                // so a blur would be a full-screen pass whose result is
+                // entirely covered.
+                BlurKind::None,
             ))?,
             origin: (0.0, 0.0),
         };
@@ -1926,7 +1938,14 @@ impl<T: Transport> ShellSession<T> {
 /// Clickable, too. The one surface that is not — the heads-up overlay — says so
 /// at its own call site with `Spec { input_transparent: true, ..chrome(..) }`,
 /// which is where a reader will be asking the question.
-fn chrome(title: &str, width: u32, height: u32, at: (i32, i32), layer: Layer) -> Spec {
+fn chrome(
+    title: &str,
+    width: u32,
+    height: u32,
+    at: (i32, i32),
+    layer: Layer,
+    blur_behind: BlurKind,
+) -> Spec {
     Spec {
         title: title.to_owned(),
         // One id for all four surfaces, not one each: they are four windows of
@@ -1948,6 +1967,7 @@ fn chrome(title: &str, width: u32, height: u32, at: (i32, i32), layer: Layer) ->
         min_size: None,
         max_size: None,
         layer,
+        blur_behind,
     }
 }
 

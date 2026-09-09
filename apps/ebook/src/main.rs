@@ -24,6 +24,7 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::fn_params_excessive_bools)]
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -177,7 +178,18 @@ impl OverlayFrame {
 /// A color theme for the reader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemeKind {
-    Dark,
+    /// Follow the desktop's theme.
+    ///
+    /// Named `Dark` until the reader stopped carrying its own copy of the dark
+    /// palette. The name is now the honest one: what this draws depends on the
+    /// desktop, and calling it "Dark" while the desktop is light would be a
+    /// label that contradicts the screen.
+    System,
+    /// Warm paper, regardless of the desktop's theme.
+    ///
+    /// Deliberately *not* derived from the palette: sepia is a reading surface
+    /// the user picks for their eyes, and a sepia that turned dark with the
+    /// desktop would be the one thing it exists not to do.
     Sepia,
 }
 
@@ -202,22 +214,34 @@ pub struct ThemeColors {
 
 impl ThemeColors {
     /// Catppuccin Mocha dark theme.
-    pub const fn dark() -> Self {
+    /// The reader drawn in whatever the desktop's theme is.
+    ///
+    /// This was `dark()`, and it was a field-for-field copy of Catppuccin
+    /// Mocha: background was `base`, surface `surface0`, accent `blue`, and so
+    /// on down every one of the fourteen fields. So the reader had a private
+    /// duplicate of the desktop palette that could not follow it -- switch the
+    /// desktop to light and the reader stayed dark, for no reason anyone had
+    /// chosen.
+    ///
+    /// The highlight keeps its literal `rgba(249, 226, 175, 60)`. It is a
+    /// translucent wash over the page rather than a surface colour, and the
+    /// palette has no role for "yellow at 24% alpha".
+    pub const fn from_palette(pal: &Palette) -> Self {
         Self {
-            background: Color::from_hex(0x1E1E2E),
-            surface: Color::from_hex(0x313244),
-            surface_alt: Color::from_hex(0x45475A),
-            text: Color::from_hex(0xCDD6F4),
-            text_dim: Color::from_hex(0xA6ADC8),
-            accent: Color::from_hex(0x89B4FA),
-            accent_dim: Color::from_hex(0x585B70),
+            background: pal.base,
+            surface: pal.surface0,
+            surface_alt: pal.surface1,
+            text: pal.text,
+            text_dim: pal.subtext0,
+            accent: pal.blue,
+            accent_dim: pal.surface2,
             highlight: Color::rgba(249, 226, 175, 60),
-            bookmark_color: Color::from_hex(0xF38BA8),
-            progress_bar: Color::from_hex(0xA6E3A1),
-            progress_bg: Color::from_hex(0x313244),
-            separator: Color::from_hex(0x45475A),
-            selected_bg: Color::from_hex(0x45475A),
-            error: Color::from_hex(0xF38BA8),
+            bookmark_color: pal.red,
+            progress_bar: pal.green,
+            progress_bg: pal.surface0,
+            separator: pal.surface1,
+            selected_bg: pal.surface1,
+            error: pal.red,
         }
     }
 
@@ -241,9 +265,9 @@ impl ThemeColors {
         }
     }
 
-    pub const fn from_kind(kind: ThemeKind) -> Self {
+    pub const fn from_kind(kind: ThemeKind, pal: &Palette) -> Self {
         match kind {
-            ThemeKind::Dark => Self::dark(),
+            ThemeKind::System => Self::from_palette(pal),
             ThemeKind::Sepia => Self::sepia(),
         }
     }
@@ -1154,6 +1178,12 @@ pub struct EbookApp {
     // Window dimensions for layout
     pub window_width: f32,
     pub window_height: f32,
+    /// The user's colours, replaced whenever the theme changes.
+    ///
+    /// Seeded from the defaults so the field is never absent; the framework
+    /// calls `App::theme_changed` before the first frame, so nothing is drawn
+    /// with this initial value in a real window.
+    palette: Palette,
 }
 
 impl EbookApp {
@@ -1162,11 +1192,12 @@ impl EbookApp {
         let library = sample_library();
         let reading_states = library.iter().map(|_| ReadingState::new()).collect();
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             library,
             reading_states,
             selected_book: 0,
             view: AppView::Library,
-            theme: ThemeKind::Dark,
+            theme: ThemeKind::System,
             paginated: None,
             search_query: String::new(),
             search_active: false,
@@ -1454,14 +1485,14 @@ impl EbookApp {
     /// Toggle between dark and sepia themes.
     pub fn toggle_theme(&mut self) {
         self.theme = match self.theme {
-            ThemeKind::Dark => ThemeKind::Sepia,
-            ThemeKind::Sepia => ThemeKind::Dark,
+            ThemeKind::System => ThemeKind::Sepia,
+            ThemeKind::Sepia => ThemeKind::System,
         };
     }
 
     /// Get current theme colors.
     pub fn theme_colors(&self) -> ThemeColors {
-        ThemeColors::from_kind(self.theme)
+        ThemeColors::from_kind(self.theme, &self.palette)
     }
 
     // --------------------------------------------------------------------
@@ -2210,7 +2241,7 @@ impl EbookApp {
 
         // Theme indicator
         let theme_label = match self.theme {
-            ThemeKind::Dark => "Dark",
+            ThemeKind::System => "System",
             ThemeKind::Sepia => "Sepia",
         };
         cmds.push(RenderCommand::Text {
@@ -2646,6 +2677,10 @@ impl Default for EbookApp {
 // ============================================================================
 
 impl App for EbookApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         // The book being read, because that is what the window is. A reader
         // left open behind other windows is found again by its title, and
@@ -3450,28 +3485,46 @@ mod tests {
     #[test]
     fn test_toggle_theme() {
         let mut app = make_app();
-        assert_eq!(app.theme, ThemeKind::Dark);
+        assert_eq!(app.theme, ThemeKind::System);
         app.toggle_theme();
         assert_eq!(app.theme, ThemeKind::Sepia);
         app.toggle_theme();
-        assert_eq!(app.theme, ThemeKind::Dark);
+        assert_eq!(app.theme, ThemeKind::System);
     }
 
     #[test]
     fn test_theme_key_s() {
         let mut app = make_app();
         app.open_book(0);
-        assert_eq!(app.theme, ThemeKind::Dark);
+        assert_eq!(app.theme, ThemeKind::System);
         app.handle_key_event(&make_key(Key::S));
         assert_eq!(app.theme, ThemeKind::Sepia);
     }
 
+    /// The system theme is the desktop's, not a copy of it.
+    ///
+    /// Asserted against the palette rather than against "is it dark", which is
+    /// what the old test did -- and which passed just as well when the reader
+    /// held its own hardcoded Mocha and ignored the desktop entirely. A test
+    /// that a dark theme is dark cannot tell the two apart.
     #[test]
-    fn test_dark_theme_colors() {
-        let tc = ThemeColors::dark();
-        // Dark theme should have dark background.
-        assert!(tc.background.r < 100);
-        assert!(tc.text.r > 150);
+    fn the_system_theme_is_the_desktops_own_palette() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let tc = ThemeColors::from_palette(&pal);
+        assert_eq!(tc.background, pal.base);
+        assert_eq!(tc.text, pal.text);
+        assert_eq!(tc.accent, pal.blue);
+
+        // And it *moves* with the desktop, which is the whole point.
+        let light = Palette::from_settings(&appearance::AppearanceSettings {
+            theme_mode: appearance::ThemeMode::Light,
+            ..appearance::AppearanceSettings::default()
+        });
+        assert_ne!(
+            ThemeColors::from_palette(&light).background,
+            tc.background,
+            "the reader drew the same background under two different themes"
+        );
     }
 
     #[test]
@@ -3480,6 +3533,18 @@ mod tests {
         // Sepia theme should have light background.
         assert!(tc.background.r > 200);
         assert!(tc.text.r < 100);
+
+        // And it stays that way whatever the desktop is doing: sepia is a
+        // reading surface the user picked for their eyes, and one that turned
+        // dark with the desktop would be the one thing it exists not to do.
+        assert_eq!(
+            ThemeColors::from_kind(
+                ThemeKind::Sepia,
+                &Palette::from_settings(&appearance::AppearanceSettings::default()),
+            )
+            .background,
+            tc.background
+        );
     }
 
     // ================================================================
@@ -4030,7 +4095,7 @@ mod tests {
     #[test]
     fn test_default_theme_is_dark() {
         let app = make_app();
-        assert_eq!(app.theme, ThemeKind::Dark);
+        assert_eq!(app.theme, ThemeKind::System);
     }
 
     #[test]
@@ -4822,5 +4887,79 @@ mod tests {
         app.jump_to_chapter(999);
         // Should not crash; page should not change.
         assert_eq!(app.current_page(), page_before);
+    }
+
+    // -- Following the user's theme -------------------------------------------
+
+    /// The window draws in the user's colours rather than in constants of its
+    /// own.
+    ///
+    /// Asserted on the rectangles emitted, not on the `palette` field: a field
+    /// that was assigned proves nothing a user would see.
+    #[test]
+    fn the_window_draws_in_the_theme_it_is_given() {
+        fn theme(
+            mode: appearance::ThemeMode,
+            contrast: Option<appearance::HighContrastScheme>,
+        ) -> Palette {
+            Palette::from_settings(&appearance::AppearanceSettings {
+                theme_mode: mode,
+                high_contrast: contrast,
+                ..appearance::AppearanceSettings::default()
+            })
+        }
+
+        // Named explicitly rather than relied on from the file's own imports.
+        // The sixteen applications that declare their palette inside a
+        // `mod mocha` block import `Color` *there*, so it is not in scope at
+        // file level at all -- and once the module is emptied and removed, the
+        // import goes with it.
+        use guitk::Color;
+
+        fn fills(app: &mut EbookApp) -> Vec<Color> {
+            // Fully qualified. Several applications also have an *inherent*
+            // `render`, with different arguments, and an inherent method wins
+            // resolution over a trait one -- so `app.render(w, h)` calls the
+            // wrong function and fails to compile in a way that looks like the
+            // trait is missing.
+            oswindow::app::App::render(app, 900.0, 700.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut app = EbookApp::new();
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
+        let dark = fills(&mut app);
+        assert!(!dark.is_empty(), "the window drew no filled rectangles");
+
+        oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Light, None));
+        let light = fills(&mut app);
+        assert_eq!(dark.len(), light.len(), "the theme changed the layout");
+        assert_ne!(
+            dark, light,
+            "the window drew identically on the dark and light themes, so it \
+             is still painting from constants"
+        );
+
+        // High contrast is the case a hardcoded palette fails silently: the
+        // user asks for maximum legibility and this window alone ignores them.
+        oswindow::app::App::theme_changed(
+            &mut app,
+            &theme(
+                appearance::ThemeMode::Dark,
+                Some(appearance::HighContrastScheme::WhiteOnBlack),
+            ),
+        );
+        assert_ne!(
+            dark,
+            fills(&mut app),
+            "high contrast reached every other surface but not this window"
+        );
     }
 }

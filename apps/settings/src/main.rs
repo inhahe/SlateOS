@@ -1645,7 +1645,18 @@ fn render_theme_card(
         });
     }
 
-    // Theme preview (mini window mockup)
+    // Theme preview (mini window mockup).
+    //
+    // These are the one place in this file that must NOT follow the theme, and
+    // the reason is the card's whole purpose: it shows what each mode *looks
+    // like*, so the Dark card has to look dark while the user is in Light and
+    // the Light card has to look light while they are in Dark. Reading `pal`
+    // here would draw three identical swatches of the current theme, which is
+    // a preview that previews nothing.
+    //
+    // Hence the Latte values beside the Mocha ones -- `0xEFF1F5` is Latte's
+    // base and does not appear anywhere else in the tree. Left deliberately
+    // fixed by the palette conversion; do not "finish" them.
     let preview_x = x + 15.0;
     let preview_y = y + 12.0;
     let (win_bg, win_text) = match mode {

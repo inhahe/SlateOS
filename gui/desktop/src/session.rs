@@ -68,7 +68,7 @@
 //! things a point belongs to, and that comparison is only meaningful while they
 //! are all in one space.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use appearance::Palette;
@@ -79,6 +79,7 @@ use oswindow::{
 };
 
 use crate::animations::{AnimationManager, WindowAnimation};
+use crate::login_screen::{LoginAction, LoginPowerAction, LoginScreen};
 use crate::notif_pane;
 use crate::taskbar_autohide::{AutoHideConfig, AutoHideManager, ScreenEdge};
 use crate::wallpaper::WallpaperManager;
@@ -250,6 +251,33 @@ pub struct ShellSession<T: Transport> {
     /// was *not* remembered on failure would re-read and re-inflate a corrupt
     /// full-screen `.png` on every mouse click.
     wallpaper_image: Option<(u64, String)>,
+    /// The login screen, while the machine has not let anyone in yet.
+    ///
+    /// `None` is a session in use. It is *not* "login is disabled": a machine
+    /// whose account database names nobody has nobody to authenticate as, and
+    /// a screen that refuses everyone is a machine that cannot be used at all.
+    /// See `design-decisions.md` §824.
+    login: Option<LoginScreen>,
+    /// The full-screen surface the login screen is drawn on.
+    ///
+    /// Created last of the five, so within `Layer::Overlay` it stacks above the
+    /// taskbar, the menus and the overlays -- nothing the shell owns may be
+    /// drawn over a login screen. Unlike `osd` it is emphatically *not*
+    /// input-transparent: it exists to be typed into.
+    login_surface: Surface,
+    /// Whether that surface is currently mapped, reconciled as `popups_shown`
+    /// is.
+    login_shown: bool,
+    /// The verifier, held across attempts rather than rebuilt per guess.
+    ///
+    /// A rate limit rebuilt for every guess is not a rate limit. Held even
+    /// when no login screen is up, because the alternative is constructing one
+    /// at the moment a password is submitted, which is the moment it is least
+    /// affordable.
+    authority: authlib::Authenticator,
+    /// What the user picked from the login screen's power menu, awaiting
+    /// somebody who can act on it. See [`take_login_power`](Self::take_login_power).
+    login_power: Option<LoginPowerAction>,
     /// Why the wallpaper file could not be shown, if it could not.
     ///
     /// Kept rather than returned, because failing to show a wallpaper is not a
@@ -278,7 +306,31 @@ impl<T: Transport> ShellSession<T> {
     /// [`EventLoop::watch_desktop`]. A refused surface is fatal here rather
     /// than survivable: a shell with no taskbar is not a degraded shell, it is
     /// a desktop the user cannot switch windows from.
-    pub fn start(mut events: EventLoop<T>) -> Result<Self, Error<T>> {
+    pub fn start(events: EventLoop<T>) -> Result<Self, Error<T>> {
+        // The system store, and with it the system failure tally, so that a
+        // refused password here counts against one refused at `su` or `login`.
+        Self::start_with(events, None)
+    }
+
+    /// The same, against the account database at a given path.
+    ///
+    /// For a chroot, and for tests. Deliberately does **not** share the system
+    /// failure tally — `authlib::Authenticator::with_stores` counts in memory
+    /// only — for the reason that crate gives: a test must not be able to
+    /// delay a real user by running.
+    ///
+    /// One path, not two: the accounts offered and the accounts that can answer
+    /// must come from the same file, or the screen lists names nothing can
+    /// authenticate.
+    ///
+    /// # Errors
+    ///
+    /// As [`start`](Self::start).
+    pub fn start_with_stores(events: EventLoop<T>, users_yaml: &Path) -> Result<Self, Error<T>> {
+        Self::start_with(events, Some(users_yaml))
+    }
+
+    fn start_with(mut events: EventLoop<T>, users_yaml: Option<&Path>) -> Result<Self, Error<T>> {
         let display = events.display_info()?;
         let shell = DesktopShell::new(display.width, display.height);
         let bar = shell.taskbar_rect();
@@ -333,6 +385,21 @@ impl<T: Transport> ShellSession<T> {
                     Layer::Overlay,
                 )
             })?,
+            origin: (0.0, 0.0),
+        };
+
+        // Last of the five, so within `Layer::Overlay` it is above the panel,
+        // the menus and the overlays: nothing the shell owns may be drawn over
+        // a login screen. The opposite of `osd` in the one property that
+        // matters — this surface exists to be typed into.
+        let login_surface = Surface {
+            window: events.create(chrome(
+                "Login",
+                display.width,
+                display.height,
+                (0, 0),
+                Layer::Overlay,
+            ))?,
             origin: (0.0, 0.0),
         };
 
@@ -394,6 +461,37 @@ impl<T: Transport> ShellSession<T> {
             clock_ms: 0,
             wallpaper_image: None,
             wallpaper_error: None,
+            // A login screen exactly when there is somebody to log in as. On a
+            // machine whose account database cannot be read there is nobody to
+            // authenticate — `authlib` would answer `Unusable` to every name —
+            // so a screen would be one nothing could ever unlock, which is a
+            // machine that cannot be used rather than a machine that is
+            // secure. See `design-decisions.md` §824.
+            login: {
+                let users = users_yaml.map_or_else(
+                    crate::login_screen::system_users,
+                    crate::login_screen::users_from_db,
+                );
+                if users.is_empty() {
+                    None
+                } else {
+                    Some(LoginScreen::new(
+                        f32::from(u16::try_from(display.width).unwrap_or(u16::MAX)),
+                        f32::from(u16::try_from(display.height).unwrap_or(u16::MAX)),
+                        users,
+                    ))
+                }
+            },
+            login_surface,
+            // The compositor maps a new window; the first `paint_login` unmaps
+            // it if no screen is up. Recording `true` here rather than `false`
+            // is what makes that first unmap actually happen — the same reason
+            // `popups_shown` and `osd_shown` start `true`.
+            login_shown: true,
+            authority: users_yaml.map_or_else(authlib::Authenticator::new, |path| {
+                authlib::Authenticator::with_stores(path)
+            }),
+            login_power: None,
         };
         session.repaint()?;
         Ok(session)
@@ -446,6 +544,186 @@ impl<T: Transport> ShellSession<T> {
         self.osd
     }
 
+    /// The full-screen surface the login screen is drawn on, mapped only while
+    /// the machine has not let anyone in.
+    #[must_use]
+    pub const fn login_surface(&self) -> Surface {
+        self.login_surface
+    }
+
+    // ------------------------------------------------------------------
+    // The login screen
+    // ------------------------------------------------------------------
+
+    /// Whether a login screen is up, and so whether the desktop underneath it
+    /// is reachable at all.
+    #[must_use]
+    pub const fn is_locked(&self) -> bool {
+        self.login.is_some()
+    }
+
+    /// The login screen, while one is up.
+    ///
+    /// For a caller that wants to look at it — a test, or a shell that reports
+    /// which account is selected. Driving it from outside is not the intended
+    /// route: `dispatch` already routes every event to it while it is up.
+    #[must_use]
+    pub const fn login(&self) -> Option<&LoginScreen> {
+        self.login.as_ref()
+    }
+
+    /// Paint the login screen, and map or unmap its surface to match.
+    ///
+    /// Reconciled the way `popups_shown` is, and for the same reason: mapping
+    /// is a round trip, so it happens when the answer *changes* rather than on
+    /// every repaint.
+    ///
+    /// # Errors
+    ///
+    /// As [`EventLoop::submit`].
+    fn paint_login(&mut self) -> Result<(), Error<T>> {
+        let up = self.login.is_some();
+        if up != self.login_shown {
+            if let Some(mut handle) = self.events.window_mut(self.login_surface.window) {
+                handle.set_visible(up)?;
+            }
+            self.login_shown = up;
+        }
+        let Some(screen) = &self.login else {
+            return Ok(());
+        };
+        let palette = Palette::from_settings(&self.shell.appearance);
+        let mut tree = RenderTree::new();
+        tree.extend(screen.render(&palette));
+        self.events.submit(
+            self.login_surface.window,
+            &self.login_surface.localize(&tree),
+        )
+    }
+
+    /// Deliver an event to the login screen and act on what it asks for.
+    ///
+    /// Returns `true` if a login screen was up, which is what tells `dispatch`
+    /// to stop: while the machine is locked, nothing reaches the desktop.
+    fn login_event(&mut self, event: &Event) -> Result<bool, Error<T>> {
+        let Some(screen) = &mut self.login else {
+            return Ok(false);
+        };
+        let action = match event {
+            Event::Key(key) => screen.handle_key(key),
+            Event::Mouse(mouse) => screen.handle_mouse(mouse),
+            // A tick still animates the shake after a refused password, and
+            // still expires a lockout, both of which happen with nobody
+            // touching the machine.
+            Event::Tick { elapsed_ms } => {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a frame interval large enough to lose f32 precision is 97 days"
+                )]
+                let seconds = *elapsed_ms as f32 / 1000.0;
+                screen.tick_animation(seconds);
+                screen.check_lockout(self.clock_ms.saturating_add(*elapsed_ms));
+                LoginAction::Redraw
+            }
+            // Everything else — a resize, a settings change, a window list —
+            // is handled by `dispatch` as usual and does not concern the
+            // screen. Returning `Ignored` rather than swallowing it is what
+            // lets the display keep working underneath.
+            _ => LoginAction::Ignored,
+        };
+        self.apply_login_action(action)?;
+        Ok(!matches!(event, Event::Resize { .. } | Event::Tick { .. }))
+    }
+
+    fn apply_login_action(&mut self, action: LoginAction) -> Result<(), Error<T>> {
+        match action {
+            LoginAction::Ignored => return Ok(()),
+            LoginAction::Redraw => {}
+            LoginAction::Authenticate { username, password } => {
+                self.answer_login(&username, &password);
+            }
+            LoginAction::Power(choice) => {
+                // Nothing here can shut a machine down, for the same reason
+                // nothing here can start a program: that is the process
+                // server's job and inventing a path to it from the window
+                // manager would put the policy in the wrong place. Recorded
+                // for whoever drains it, exactly as a launch is.
+                self.login_power = Some(choice);
+            }
+        }
+        self.paint_login()
+    }
+
+    /// Ask the system whether this is the password, and tell the screen.
+    ///
+    /// The verdict comes from [`authlib`] — the one place SlateOS answers "is
+    /// this the user's password?" — held across attempts rather than rebuilt
+    /// per guess, because a rate limit rebuilt for every guess is not a rate
+    /// limit.
+    fn answer_login(&mut self, username: &str, password: &str) {
+        let outcome = self.authority.authenticate(username, password.as_bytes());
+        let Some(screen) = &mut self.login else {
+            return;
+        };
+        // The `match` is exhaustive by construction rather than by a wildcard:
+        // if `authlib` grows a seventh verdict, this must decide what the
+        // screen does about it, which is exactly the moment someone should be
+        // made to think.
+        match outcome {
+            // `NoPassword` opens the screen as `Accepted` does. An account with
+            // no password set is an account the administrator chose not to put
+            // one on, and refusing it here would make that setting mean
+            // "unusable account" rather than "no password".
+            authlib::Outcome::Accepted | authlib::Outcome::NoPassword => {
+                screen.auth_success();
+                // Nothing between this and the desktop: the screen's
+                // `LoggingIn` phase is a frame of feedback, not a step that can
+                // fail, and holding the machine on it would be inventing a
+                // failure mode.
+                self.login = None;
+            }
+            // Deliberately the same words for a wrong password and an unknown
+            // user. Distinguishing them tells someone standing at the machine
+            // which of the names they guessed is real, which is the account
+            // enumeration `authlib::burn` spends time to prevent — saying it in
+            // the error text would give away for free what the timing no longer
+            // does.
+            authlib::Outcome::Rejected => screen.auth_failure("Incorrect password"),
+            authlib::Outcome::Locked => {
+                screen.auth_failure("This account has been locked by an administrator");
+            }
+            // Not a wrong password: the stored entry cannot be checked at all,
+            // so no password will ever open it. Said plainly, because a user
+            // retyping a password they know is right learns nothing from
+            // "incorrect", and the fix is an administrator's, not theirs.
+            authlib::Outcome::Unusable => {
+                screen.auth_failure(
+                    "This account's password cannot be checked; ask an administrator",
+                );
+            }
+            authlib::Outcome::RateLimited { retry_after_secs } => {
+                screen.auth_failure(&format!(
+                    "Too many attempts. Try again in {retry_after_secs} seconds"
+                ));
+                // The screen's own lockout runs the countdown it draws. The
+                // authority's tally is the one that actually refuses, and it
+                // survives this process; this only keeps the screen from
+                // inviting an attempt that cannot succeed.
+                screen.locked_out = true;
+                screen.set_lockout_expiry(self.clock_ms);
+            }
+        }
+    }
+
+    /// What the user chose from the login screen's power menu, if anything.
+    ///
+    /// Drained like [`take_launches`](Self::take_launches) and for the same
+    /// reason: a shell has no channel to whatever turns the machine off, and
+    /// inventing one here would put the policy in the window manager.
+    pub fn take_login_power(&mut self) -> Option<LoginPowerAction> {
+        self.login_power.take()
+    }
+
     /// The programs the user has asked to start since this was last called.
     ///
     /// The one intent this loop cannot carry out itself. A shell has no channel
@@ -470,7 +748,8 @@ impl<T: Transport> ShellSession<T> {
     /// As [`EventLoop::submit`].
     pub fn repaint(&mut self) -> Result<(), Error<T>> {
         self.paint_background()?;
-        self.paint_chrome()
+        self.paint_chrome()?;
+        self.paint_login()
     }
 
     /// Paint the wallpaper.
@@ -1151,6 +1430,8 @@ impl<T: Transport> ShellSession<T> {
             Some(self.panel)
         } else if window == self.popups.window {
             Some(self.popups)
+        } else if window == self.login_surface.window {
+            Some(self.login_surface)
         } else if window == self.osd.window {
             // Listed even though it is click-through and so can never carry a
             // pointer event: a surface the shell owns but does not recognise
@@ -1167,6 +1448,35 @@ impl<T: Transport> ShellSession<T> {
         let Some(surface) = self.surface_for(window) else {
             return Ok(());
         };
+        // Before anything else. While the machine has not let anyone in, every
+        // keystroke and every click belongs to the login screen -- including
+        // the ones aimed at another of the shell's surfaces, because the panel
+        // is where the global shortcut grabs are held and Alt+Tab must not
+        // switch windows for someone who has not logged in. A pointer event is
+        // localised first for the same reason it is below: the screen's hit
+        // rectangles are in screen coordinates.
+        if self.is_locked() {
+            let localized = match event {
+                Event::Mouse(mouse) => Event::Mouse(surface.to_screen(&mouse)),
+                other => other,
+            };
+            if self.login_event(&localized)? {
+                return Ok(());
+            }
+            // A resize or a tick falls through: the display can change size
+            // and the clock can advance while the screen is up, and both are
+            // handled below exactly as they would be otherwise.
+            return self.dispatch_unlocked(window, localized, surface);
+        }
+        self.dispatch_unlocked(window, event, surface)
+    }
+
+    fn dispatch_unlocked(
+        &mut self,
+        window: u64,
+        event: Event,
+        surface: Surface,
+    ) -> Result<(), Error<T>> {
         // Sampled around the whole handler rather than beside the one call that
         // opens the overview today. `OverviewState::show` is not called from
         // here at all — it is reached through `handle_hotkey`, several frames

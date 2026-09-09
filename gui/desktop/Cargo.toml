@@ -91,6 +91,13 @@ keylayout = { path = "../keylayout" }
 # silently, and the person cannot tell a hidden account from a deleted one.
 loginusers = { path = "../loginusers" }
 
+# The one place SlateOS answers "is this the user's password?". The session
+# holds an `Authenticator` across attempts rather than building one per guess:
+# a rate limit rebuilt for every guess is not a rate limit. It reads the same
+# store `loginusers` enumerates, which is what stops the shell offering a name
+# nothing can answer for.
+authlib = { path = "../../userspace/authlib" }
+
 [lints]
 workspace = true
 
@@ -104,5 +111,10 @@ workspace = true
 # through the offer filter, so two tests naming one file would each assert
 # against the other's data.
 scratchdir = { path = "../../userspace/scratchdir" }
+# Test-only. The end-to-end "the right password unlocks the desktop" test needs
+# a stored entry, and it computes one with the same hasher `authlib` will
+# recompute it with rather than pasting a literal -- a pasted `$6$` string is a
+# test that keeps passing after the hasher it was copied from has changed.
+posix = { path = "../../posix" }
 
 settingsfile = { path = "../settingsfile", features = ["testing"] }

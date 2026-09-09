@@ -124210,14 +124210,15 @@ no other crate depends on it), so nothing outside the corpus could reach them.
 
 | module | what it holds | what is missing |
 |---|---|---|
-| `login_screen.rs` | `LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig` | Construction and a session hand-off. §815 says wire it up. *(Correction, 2026-09-08: an earlier version of this row said §818 has to take effect here. It does not — §818 is about the **lock** screen, `apps/lockscreen`, which is a separate program. See `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.)* |
+| `login_screen.rs` | ~~`LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig`~~ | **Done, 2026-09-08.** `ShellSession` constructs one when the account database names anybody (`design-decisions.md` §824), draws it on a fifth full-screen surface created last within `Layer::Overlay` so nothing the shell owns is over it, routes every key and click to it while it is up, and answers with `authlib`. What it still lacks is the *session hand-off* — a successful login unmaps the screen and reveals the desktop, but nothing starts a session as that user, because there is nowhere to send that (the shell has no channel to the process server; same gap as `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`). Autologin is read and not acted on; see `todo.txt`. Originally: Construction and a session hand-off. §815 says wire it up. *(Correction, 2026-09-08: an earlier version of this row said §818 has to take effect here. It does not — §818 is about the **lock** screen, `apps/lockscreen`, which is a separate program. See `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.)* |
 | `blur.rs` | `BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager` | A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
 | `input_method.rs` | `InputMethodManager`, `SwitchShortcut` | A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
 | `tray_dnd.rs` | `TrayDragSource`, `TrayDropTarget`, `TrayIconSlot`, `TrayIconArrangement`, `TraySlotConfig`, `TrayArrangementConfig`, `StartInTrayConfig` | A caller in the tray's event path. |
 
 **Order worth doing them in.** `login_screen` first: it is named in §815, it
 gates §818, and a machine with no login screen is a machine with no user
-accounts in any meaningful sense. Then `tray_dnd` (self-contained, one event
+accounts in any meaningful sense. **(`login_screen` is done as of 2026-09-08 —
+see its row above. Three left.)** Then `tray_dnd` (self-contained, one event
 path). Then `blur` (needs a compositing decision about where the pass runs —
 compare the colour-filter work, which had the same question). `input_method`
 last, because wiring is the small half of it.

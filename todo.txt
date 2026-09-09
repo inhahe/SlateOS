@@ -54152,6 +54152,15 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 
 ## ############################################################################
 ## Lane C — graphics, apps & net
+- Autologin is read but not acted on. `LoginUser::autologin` comes from the
+  account database and `LoginScreen::autologin_user` finds it, but an account
+  marked for autologin still gets a password prompt. Skipping the prompt needs
+  two things this change deliberately did not decide: how a user *escapes* an
+  autologin to reach a different account (holding a key at boot? a "switch
+  user" affordance on the way past?), and how the machine holds the autologin
+  when it is being recovered. Both are user-visible policy. See
+  `design-decisions.md` §824, "What this does not decide".
+
 ## ############################################################################
 (no lane-C-specific entries yet; see the pre-split entries above)
 

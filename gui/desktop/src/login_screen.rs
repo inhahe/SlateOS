@@ -515,11 +515,22 @@ impl LoginScreen {
     pub fn new(screen_width: f32, screen_height: f32, users: Vec<LoginUser>) -> Self {
         // Default select last-login user or first.
         let selected = users.iter().position(|u| u.last_login).unwrap_or(0);
+        // With one account there is no choice to make, so the list is a screen
+        // the user must dismiss before they can type — a row they have to
+        // click to reach the field they were already looking at. The same
+        // reasoning that makes Escape *clear the field* rather than go back
+        // when there is one account (see `key_password_entry`): a list of one
+        // is not a list.
+        let phase = if users.len() == 1 {
+            LoginPhase::PasswordEntry
+        } else {
+            LoginPhase::UserSelect
+        };
 
         Self {
             users,
             selected_user: selected,
-            phase: LoginPhase::UserSelect,
+            phase,
             password_input: String::new(),
             show_password: false,
             error_message: None,
@@ -3145,5 +3156,21 @@ mod tests {
     #[test]
     fn an_unreadable_database_offers_no_rows() {
         assert!(users_from_db(std::path::Path::new("/nonexistent/users.yaml")).is_empty());
+    }
+
+    /// A list of one is not a list: with a single account the screen opens on
+    /// the password field, because the row the user would have to click is the
+    /// only row and they were already looking at the field behind it.
+    #[test]
+    fn a_single_account_opens_straight_at_the_password_field() {
+        let screen = LoginScreen::new(1920.0, 1080.0, vec![LoginUser::new(1000, "alice", "Alice")]);
+        assert_eq!(screen.phase, LoginPhase::PasswordEntry);
+        assert_eq!(screen.current_user().unwrap().username, "alice");
+    }
+
+    /// Two accounts still ask which one, since now there is a choice.
+    #[test]
+    fn two_accounts_open_on_the_user_list() {
+        assert_eq!(make_screen().phase, LoginPhase::UserSelect);
     }
 }

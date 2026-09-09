@@ -3848,6 +3848,7 @@ name = "desktop"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "authlib",
  "guiremote",
  "guitk",
  "imagecodec",
@@ -3855,6 +3856,7 @@ dependencies = [
  "keylayout",
  "loginusers",
  "oswindow",
+ "posix",
  "scratchdir",
  "settingsfile",
  "tzrules",

@@ -184,12 +184,21 @@ static mut ORIG_TERMIOS: Option<libc::termios> = None;
 /// Enable raw terminal mode: disable echo and line buffering so we receive
 /// each keypress individually.
 ///
-/// On Slate OS this writes to `/proc/self/tty_raw` if available, otherwise we
-/// use the POSIX termios interface through the POSIX compatibility layer.
+/// Through `termios`, which is the only mechanism there is.
+///
+/// # What this had instead
+///
+/// `if std::fs::write("/proc/self/tty_raw", "1").is_ok() {}` -- an `if` whose
+/// body is empty, so the result was tested and then discarded either way, and
+/// the `termios` code below ran unconditionally regardless. `/proc/self/tty_raw`
+/// is not a Linux interface and this kernel serves no such entry, so the write
+/// could only fail; it was dead in both senses.
+///
+/// The doc said something different again: that the write was tried "if
+/// available, otherwise we use the POSIX termios interface" -- an either/or
+/// that the code has never had. Three descriptions of one function, and the
+/// only accurate one was the assembly.
 fn enable_raw_mode() {
-    // Try the SlateOS-specific procfs toggle first.
-    if std::fs::write("/proc/self/tty_raw", "1").is_ok() {}
-    // Fallback: use libc termios interface.
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -222,8 +231,9 @@ fn enable_raw_mode() {
 }
 
 /// Restore normal (cooked) terminal mode.
+///
+/// The mirror of [`enable_raw_mode`], and it carried the same dead write.
 fn disable_raw_mode() {
-    if std::fs::write("/proc/self/tty_raw", "0").is_ok() {}
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -1542,4 +1552,88 @@ fn main() {
     };
 
     pager.run();
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An escape sequence occupies no columns.
+    ///
+    /// This is what the whole function exists for: `less` decides where to
+    /// wrap and truncate from this number, so counting a colour code's bytes
+    /// as visible would wrap lines early and leave the terminal wrong by
+    /// however many escapes the line contained.
+    #[test]
+    fn ansi_escapes_take_no_width() {
+        assert_eq!(visible_width("hello"), 5);
+        assert_eq!(visible_width("\x1b[31mhello\x1b[0m"), 5);
+        assert_eq!(visible_width("\x1b[1;32mab\x1b[0mcd"), 4);
+    }
+
+    /// Control characters are not columns either.
+    #[test]
+    fn control_characters_take_no_width() {
+        assert_eq!(visible_width("a\u{7}b"), 2);
+        assert_eq!(visible_width("\r\n"), 0);
+    }
+
+    /// East Asian characters take two columns, Latin ones take one.
+    #[test]
+    fn wide_characters_take_two_columns() {
+        assert_eq!(visible_width("ab"), 2);
+        assert_eq!(visible_width("漢字"), 4);
+        assert_eq!(visible_width("a漢b"), 4);
+        // Hangul, and a fullwidth Latin letter, which is wide despite looking
+        // like an ordinary 'A'.
+        assert_eq!(visible_width("한"), 2);
+        assert_eq!(visible_width("Ａ"), 2);
+    }
+
+    /// ...and characters just outside each range are narrow.
+    ///
+    /// Ranges are where a table like this goes wrong, and both edges are cheap
+    /// to pin. `is_wide_char` is documented as approximate; these assert what
+    /// it currently claims so that a change to the table is a deliberate one.
+    #[test]
+    fn the_edges_of_the_wide_ranges_are_where_they_claim_to_be() {
+        assert!(!is_wide_char('\u{10FF}'));
+        assert!(is_wide_char('\u{1100}'));
+        assert!(is_wide_char('\u{115F}'));
+        assert!(!is_wide_char('\u{1160}'));
+        assert!(is_wide_char('\u{9FFF}'));
+        assert!(!is_wide_char('\u{A000}'));
+        assert!(!is_wide_char('a'));
+        assert!(!is_wide_char(' '));
+    }
+
+    /// A tab advances to the next multiple of eight, not by eight.
+    #[test]
+    fn tabs_expand_to_the_next_stop_not_by_a_fixed_amount() {
+        assert_eq!(expand_tabs("\tx"), "        x");
+        assert_eq!(expand_tabs("a\tx"), "a       x");
+        assert_eq!(expand_tabs("abcdefg\tx"), "abcdefg x");
+        // Exactly on a stop still advances a full eight, which is what a
+        // terminal does -- a tab never produces zero columns.
+        assert_eq!(expand_tabs("abcdefgh\tx"), "abcdefgh        x");
+    }
+
+    /// Tab expansion counts columns, so an escape sequence must not consume
+    /// any of them.
+    #[test]
+    fn an_escape_sequence_does_not_shift_the_tab_stops() {
+        assert_eq!(expand_tabs("\x1b[31m\tx"), "\x1b[31m        x");
+        assert_eq!(expand_tabs("a\x1b[0m\tx"), "a\x1b[0m       x");
+    }
+
+    /// A line with no tabs comes back unchanged.
+    #[test]
+    fn text_without_tabs_is_returned_as_it_was() {
+        assert_eq!(expand_tabs("plain text"), "plain text");
+        assert_eq!(expand_tabs(""), "");
+    }
 }

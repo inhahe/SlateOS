@@ -128317,11 +128317,30 @@ the checker's output before and after* rather than by running it and seeing it
 pass. Three produced byte-identical output. The fourth did not, and was
 reverted rather than argued with.
 
-**Still eight copies**, including `strip_comments` in five scripts and
-`mask_noncode` in one. They were not touched because this tick established that
-the names lie: whether they mask strings, whether they keep delimiters, and
-whether they know raw strings all vary. Each needs the same before/after diff,
-which is a tick's work each rather than a sweep.
+**CORRECTION, next tick: "twelve copies of one lexer" overstated it.** Read
+individually, the remaining eight are **three different jobs** whose names do
+not distinguish them:
+
+| script | job |
+|---|---|
+| `rustscan` | comments *and* literals — the same job. **Converted.** |
+| `host-errmsg` | comments only, literals **kept on purpose** — it searches for message text *inside* strings |
+| `check-variant-lists`, `count_centrings`, `getopt-ambiguity-check`, `rustemit` | `//` comments only |
+| `check-absent-operand-default` (`mask_noncode`) | lane A's |
+| `check-shell-callables` (`mask`) | shell, not Rust |
+
+Converting `host-errmsg` would blank the literals it exists to read and take
+its count to zero with its gate green — lane A's `mask_noncode` bug exactly, in
+the opposite direction. So the real duplication was **two** implementations of
+one job, not twelve, and both are now `rustlex`.
+
+`rustscan` is a library four checkers import — three of them lane C's gates —
+and its copy did not know raw strings, so that bug was live in all four. After
+delegating, all four produce **byte-identical output**, so nothing lane C sees
+changes today and the bug is closed for tomorrow. `rustlex` grew
+`keep_literals` to take rustscan's signature, which is the parameter it should
+have had: a masker that cannot be asked to spare literals invites each caller
+to write its own.
 
 ## TD-B-THE-2285-DELETIONS-PREDATE-THEIR-INSTRUMENT'S-FIX (lane B, 2026-09-10) — checked, no impact
 

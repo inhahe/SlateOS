@@ -32,6 +32,13 @@ the returned text and then index the ORIGINAL at the same offsets to show real
 source, which is how `check-read-defaults` reports the argument a call was
 written with rather than the blanked version.
 
+`keep_literals=True` blanks comments only and leaves strings, char literals
+and raw strings intact. That is a different job with a real caller:
+`scripts/host-errmsg.py` searches for message text INSIDE string literals, so
+blanking them would take its count to zero with its gate green -- which is
+exactly how lane A's `mask_noncode` lost 37 findings. A masker that cannot be
+asked to spare literals invites its callers to write their own.
+
 It does **not** understand nested block comments (`/* /* */ */`), which Rust
 allows and which nothing in this tree uses. If that changes, this is the place
 to fix it once.
@@ -53,7 +60,7 @@ _CHAR_LITERAL = re.compile(r"'(?:\\u\{[0-9a-fA-F]{1,6}\}|\\.|[^\\'\n])'")
 _RAW_OPEN = re.compile(r'b?r(#*)"')
 
 
-def strip_noise(src: str) -> str:
+def strip_noise(src: str, keep_literals: bool = False) -> str:
     """Blank comments and string literals, preserving length and newlines.
 
     Without this the scan matches its own documentation: the four fixes above
@@ -93,7 +100,7 @@ def strip_noise(src: str) -> str:
             for k in range(i, min(i + 2, n)):
                 out[k] = " "
             i += 2
-        elif (c in "rb") and (_m := _RAW_OPEN.match(src, i)):
+        elif (not keep_literals) and (c in "rb") and (_m := _RAW_OPEN.match(src, i)):
             close = '"' + "#" * len(_m.group(1))
             end = src.find(close, _m.end())
             end = n if end < 0 else end + len(close)
@@ -101,7 +108,7 @@ def strip_noise(src: str) -> str:
                 if src[k] != "\n":
                     out[k] = " "
             i = end
-        elif c == "'":
+        elif (not keep_literals) and c == "'":
             # A CHAR LITERAL, not a lifetime. `'a` / `'static` fall through to
             # the catch-all below and are left alone; only a complete literal
             # is blanked, so `find('\"')` cannot open a string.
@@ -112,7 +119,7 @@ def strip_noise(src: str) -> str:
                 i = m.end()
             else:
                 i += 1
-        elif c == '"':
+        elif (not keep_literals) and c == '"':
             j = i + 1
             while j < n:
                 if src[j] == "\\":

@@ -50,6 +50,10 @@ go and look at. Anything that needs real name resolution wants `syn`, not this.
 from __future__ import annotations
 
 import re
+
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import rustlex  # noqa: E402
 import sys
 
 # The indentation before a `fn`, in callers' regexes.
@@ -121,102 +125,20 @@ def is_char_literal(text: str, i: int) -> bool:
 
 
 def strip_comments(text: str, keep_literals: bool = False) -> str:
-    """Blank `//`-to-newline and `/* */` comments, and string/char literals.
+    """Blank comments, and string/char literals unless `keep_literals`.
 
-    A doc comment that *talks about* the construct a gate searches for --
-    including the one each finding leaves behind at its fix site -- must not
-    count as the file having the construct, or every file a gate causes to be
-    fixed becomes permanently invisible to it.
+    Delegates to `scripts/rustlex.py`. This was a local 98-line copy that did
+    not understand RAW STRINGS -- `r"a\\"` ends at that quote, because a
+    backslash is not an escape inside one, and treating it as an escape
+    swallowed the terminator and paired every later quote one off. Four
+    checkers import this function, three of them lane C's gates, so the bug
+    was live in all four.
 
-    Literals go too, and not for the same reason: nothing writes `Event::Tick`
-    in a string. They go because [`strip_cfg_test`] matches braces, and a
-    `'{'` or a `"unclosed {"` in the source would otherwise throw the match
-    off and swallow the rest of the file.
-
-    `keep_literals=True` blanks the comments and leaves the literals standing.
-    A gate whose *subject* is a literal needs that:
-    `check-diskcleanup-test-roots.py` looks for the path `"/"` being handed to
-    something that deletes, and the default would blank away the only evidence
-    there is. Literals are still fully *parsed* in that mode rather than
-    skipped over -- a `"http://x"` read as ordinary text would open a comment,
-    and a `'"'` would open a string that ran to the end of the file.
-
-    Callers that match braces must keep the default. A `"{"` left standing is
-    exactly the trap the blanking was written to close, and this argument does
-    not make it safe -- it makes it the caller's problem.
+    The signature is unchanged, and `keep_literals` is why `rustlex` grew the
+    same parameter rather than this file keeping its own lexer: a masker that
+    cannot be asked to spare literals invites each caller to write one.
     """
-    out = list(text)
-    i = 0
-    n = len(text)
-
-    def wipe(a: int, b: int) -> None:
-        for k in range(a, min(b, n)):
-            if out[k] != "\n":
-                out[k] = " "
-
-    def wipe_literal(a: int, b: int) -> None:
-        if not keep_literals:
-            wipe(a, b)
-
-    while i < n:
-        two = text[i : i + 2]
-        if two == "//":
-            j = text.find("\n", i)
-            j = n if j < 0 else j
-            wipe(i, j)
-            i = j
-        elif two == "/*":
-            # Rust block comments nest, so a naive `find("*/")` stops early on
-            # `/* /* */ */` and leaves a stray `*/` behind.
-            depth = 0
-            j = i
-            while j < n:
-                if text[j : j + 2] == "/*":
-                    depth += 1
-                    j += 2
-                elif text[j : j + 2] == "*/":
-                    depth -= 1
-                    j += 2
-                    if depth == 0:
-                        break
-                else:
-                    j += 1
-            wipe(i, j)
-            i = j
-        elif text[i] == "r" and (m := RAW_STRING_RE.match(text, i)):
-            hashes = m.group("hashes")
-            close = text.find('"' + hashes, m.end())
-            j = n if close < 0 else close + 1 + len(hashes)
-            wipe_literal(i, j)
-            i = j
-        elif text[i] == '"':
-            j = i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                elif text[j] == '"':
-                    j += 1
-                    break
-                else:
-                    j += 1
-            wipe_literal(i, j)
-            i = j
-        elif text[i] == "'" and is_char_literal(text, i):
-            j = i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                elif text[j] == "'":
-                    j += 1
-                    break
-                else:
-                    j += 1
-            wipe_literal(i, j)
-            i = j
-        else:
-            i += 1
-    return "".join(out)
-
+    return rustlex.strip_noise(text, keep_literals=keep_literals)
 
 def item_end(text: str, start: int) -> int:
     """Index just past the item beginning at `start`.

@@ -127433,3 +127433,49 @@ exporting a variable, which is precisely the spoofing bash refuses when it
 ignores an inherited `UID=`". The shell refused what six privileged programs
 accepted. **A correct answer already in the tree does not propagate by
 existing.**
+
+
+## TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME (lane B, 2026-09-10)
+
+**In short:** `cargo test -p <name>` takes a *package* name. Everyone types the
+*directory* name, because for 2944 of this workspace's 2955 crates they are the
+same string. For five they are not, and the directory name belongs to a
+different crate -- so the command compiles, runs a test suite, prints a green
+result and exits 0, having tested a crate nobody touched.
+
+| Directory | Its package | `-p <directory>` actually reaches | Lane |
+|---|---|---|---|
+| `apps/backup` | `backup-app` | the `backup` crate | C |
+| `apps/indexer` | `indexer-app` | the `indexer` crate | C |
+| `apps/sysinfo` | `sysinfo-app` | the `sysinfo` crate | C |
+| `apps/tmux` | `tmux-app` | the `tmux` crate | C |
+| `userspace/login` | `login-cli` | `init/login` | B |
+
+**How it was found.** Giving `userspace/login` its exec on 2026-09-10. Every
+`cargo test -p login` that tick, and a `cargo fmt -p login`, went to
+`init/login` -- a different program, never edited. It surfaced only because the
+test count did not move after three tests were added: 53 `#[test]` in the file,
+46 collected, and the 46 collected names turned out not to be in the file at
+all. Nothing else would have said a word.
+
+**The asymmetry that makes this worth a gate.** A mistyped `-p` that matches no
+package fails loudly and immediately. The dangerous case is the one that
+*resolves*, to somebody else. Six other crates in the tree have a package name
+that differs from their directory -- `gui/toolkit` is `guitk`,
+`toolchain/stubs` is `slateos-stubs` -- and they are harmless for exactly this
+reason: nothing claims `toolkit` or `stubs`.
+
+**Gate 18 (`scripts/check-crate-names.py`) stops it growing**, and only that:
+the five above are baselined, because four are lane C's to rename and a gate
+that refuses every lane's push over pre-existing state is a gate that gets
+bypassed. The baseline may only shrink -- resolving one and leaving it listed
+is also a failure, so the list cannot rot into things that used to be true.
+
+**The fix, for whoever owns each crate:** rename the package to match its
+directory, or rename the directory to match the package. For `userspace/login`
+both names are honestly "login", which is why it was named around in the first
+place; the collision is with `init/login`, a login *manager*, so renaming that
+directory to `init/loginmgr` (or its package) is probably the better end state.
+Not done here: `init/**` is lane B's, but the rename touches every Cargo.toml
+that depends on it and is worth doing deliberately rather than as a tail-end of
+an unrelated commit.

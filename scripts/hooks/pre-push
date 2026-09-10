@@ -1,5 +1,5 @@
 #!/bin/sh
-# Seventeen gates at the push boundary. Any one of them aborts the push.
+# Eighteen gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -23,6 +23,9 @@
 #      no entry in posix/src/abi_layout.rs.
 #  17. Refuse to publish `#[cfg(unix)]` code that does not compile — the code
 #      the Windows-target test command never reads.
+#  18. Refuse a crate whose directory name is a different crate's package
+#      name, because `cargo -p <directory>` then tests the other one and
+#      passes.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented, and it was wrong again the moment gate 13 was written --
@@ -2684,6 +2687,80 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 18 — refuse a crate whose directory name is a *different* crate's
+# package name.
+#
+# WHAT IT CATCHES. A `cargo -p` that succeeds against the wrong crate. `-p`
+# takes a package name; everyone types the directory name, because for 2944 of
+# this workspace's 2955 crates those are the same string. For five they are
+# not, and the directory name belongs to somebody else — so the command
+# compiles, runs a test suite, prints a green result and exits 0, having tested
+# a crate you did not touch.
+#
+# Found on 2026-09-10 giving `userspace/login` its exec: that crate's package
+# is `login-cli` and `login` is `init/login`. Every `cargo test -p login` that
+# tick, and a `cargo fmt -p login`, went to the other program. It surfaced only
+# because a test count did not move after three tests were added.
+#
+# A mistyped `-p` that matches nothing fails loudly and needs no gate. The
+# dangerous case is the one that resolves, to somebody else.
+#
+# COST. A directory walk over Cargo.toml files, no compilation: well under a
+# second. It runs on every push because the collision is created by adding or
+# renaming a crate, which `touches` cannot narrow usefully — a new crate is a
+# new file anywhere in the tree.
+#
+# NOT A BAN ON RENAMES. `gui/toolkit` is `guitk` and `toolchain/stubs` is
+# `slateos-stubs`; nothing claims `toolkit` or `stubs`, so a mistyped `-p`
+# there fails loudly. Only collisions count, and the five that already existed
+# are baselined in the checker — four are another lane's to rename, and a gate
+# that refuses every lane's push over pre-existing state is a gate that gets
+# bypassed. The baseline may only shrink.
+# ---------------------------------------------------------------------------
+cratenames="${repo_root:-.}/scripts/check-crate-names.py"
+skip_cratenames=0
+if [ "${ALLOW_CRATE_NAME_COLLISION:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_CRATE_NAME_COLLISION=1 set — skipping the crate-name gate." >&2
+    skip_cratenames=1
+fi
+[ -n "$py" ] || skip_cratenames=1
+[ -f "$cratenames" ] || skip_cratenames=1
+note_gate crate-names "$skip_cratenames"
+
+if [ "$skip_cratenames" != "1" ]; then
+    if ! run_checker crate-names-selftest "$py" "$cratenames" --self-test; then
+        echo "pre-push: check-crate-names.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        skip_cratenames=refused
+    fi
+fi
+
+if [ "$skip_cratenames" = "refused" ] || { [ "$skip_cratenames" != "1" ] && ! run_checker crate-names "$py" "$cratenames"; }; then
+    cat >&2 <<'EOF'
+
+pre-push: REFUSING to push — a crate's directory name belongs to another crate.
+
+`cargo test -p <that directory name>` will silently test the OTHER crate,
+pass, and exit 0. That is not a naming nicety; it is a green test run for code
+nobody compiled.
+
+Reproduce exactly what the hook saw:
+
+    python scripts/check-crate-names.py
+
+Fix it by renaming the package to match its directory, renaming the directory,
+or — if the collision is deliberate — adding it to KNOWN_COLLISIONS in that
+script with a comment naming the crate the directory name reaches instead.
+
+Full output is kept at the path named above.
+
+To push anyway:
+    ALLOW_CRATE_NAME_COLLISION=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # The tally. Unconditional, and on stderr with the rest of the hook's output.
 #
 # This is the line whose absence means "the hook did not run" — the one reading
@@ -2705,8 +2782,9 @@ fi
 #
 # Gate 13 (`bands`) made it 13 on 2026-09-05, gate 14 (`headings`) made it
 # 14 the same day, gate 15 (`release-staleness`) made it 15 on 2026-09-07, and
-# gate 16 (`libc-abi`) made it 16 on 2026-09-09, and gate 17 (`cfg-unix`) made
-# it 17 on 2026-09-10; if you add a gate, bump both.
+# gate 16 (`libc-abi`) made it 16 on 2026-09-09, gate 17 (`cfg-unix`) made
+# it 17 on 2026-09-10 and gate 18 (`crate-names`) made it 18 the same day; if
+# you add a gate, bump both.
 #
 # A refusing gate exits before this, so the tally is not a claim that the push
 # passed — only a record of what was asked.

@@ -9,6 +9,7 @@
 #![deny(clippy::all)]
 
 use std::env;
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -104,6 +105,13 @@ fn current_date() -> Option<(i32, u32, u32)> {
 
 /// Which month `cal` should print, given its positional arguments.
 ///
+/// Takes `OsStr` rather than `str` because argv is OS-boundary data and this
+/// OS allows any byte but `/` and NUL in it. Nothing here needs the argument
+/// to *be* text -- it needs it to be a number -- so a value that does not
+/// decode simply fails to parse, which is already an error this function
+/// reports. `cal` used to read argv as `String` and panicked with a Rust
+/// backtrace before its first statement on anything else.
+///
 /// Split out of `main` so the clock-less paths can be tested. The rule is that
 /// **only the arguments you did not supply need a clock**: `cal 9 2026` names
 /// a month outright and works with no clock at all, while bare `cal` and
@@ -112,7 +120,7 @@ fn current_date() -> Option<(i32, u32, u32)> {
 ///
 /// Returns the year, the month, and whether a full year was asked for.
 fn resolve_period(
-    positional: &[String],
+    positional: &[OsString],
     full_year: bool,
     today: Option<(i32, u32, u32)>,
 ) -> Result<(i32, u32, bool), NoClock> {
@@ -122,7 +130,7 @@ fn resolve_period(
     match positional.len() {
         0 => Ok((year_of(today)?, month_of(today)?, full_year)),
         1 => {
-            let Ok(val) = positional[0].parse::<i32>() else {
+            let Ok(val) = positional[0].to_str().unwrap_or("").parse::<i32>() else {
                 // Not a number at all: the old code fell back to the current
                 // year and printed *something*. Refusing is the honest answer,
                 // and it does not depend on the clock.
@@ -140,8 +148,16 @@ fn resolve_period(
             }
         }
         _ => {
-            let month = positional[0].parse::<u32>().map_err(|_| NoClock)?;
-            let year = positional[1].parse::<i32>().map_err(|_| NoClock)?;
+            let month = positional[0]
+                .to_str()
+                .unwrap_or("")
+                .parse::<u32>()
+                .map_err(|_| NoClock)?;
+            let year = positional[1]
+                .to_str()
+                .unwrap_or("")
+                .parse::<i32>()
+                .map_err(|_| NoClock)?;
             Ok((year, month, full_year))
         }
     }
@@ -467,25 +483,30 @@ fn print_full_year(
 // ============================================================================
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<OsString> = env::args_os().collect();
 
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("cal");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
+    // argv[0] is only ever compared against "ncal", so a name that does not
+    // decode is simply not that name. `to_str()` says so exactly; a lossy
+    // conversion would answer the same question by corrupting the input first.
+    let prog_name = args
+        .first()
+        .and_then(|s| s.to_str())
+        .map(|s| {
+            let bytes = s.as_bytes();
+            let mut last_sep = 0;
+            for (i, &b) in bytes.iter().enumerate() {
+                if b == b'/' || b == b'\\' {
+                    last_sep = i + 1;
+                }
             }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
+            let base = &s[last_sep..];
+            base.strip_suffix(".exe").unwrap_or(base).to_string()
+        })
+        .unwrap_or_else(|| "cal".to_string());
 
     let monday_default = prog_name == "ncal";
 
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    let rest: Vec<OsString> = args.into_iter().skip(1).collect();
 
     let mut opts = CalOpts {
         three_month: false,
@@ -497,10 +518,10 @@ fn main() {
         columns: 3,
     };
 
-    let mut positional: Vec<String> = Vec::new();
+    let mut positional: Vec<OsString> = Vec::new();
     let mut i = 0;
     while i < rest.len() {
-        match rest[i].as_str() {
+        match rest[i].to_str().unwrap_or("\u{fffd}") {
             "-h" | "--help" => {
                 println!("Usage: cal [options] [[month] year]");
                 println!("       ncal [options] [[month] year]");
@@ -536,11 +557,15 @@ fn main() {
             "-c" | "--columns" => {
                 i += 1;
                 if i < rest.len() {
-                    opts.columns = rest[i].parse().unwrap_or(3);
+                    opts.columns = rest[i].to_str().unwrap_or("").parse().unwrap_or(3);
                 }
             }
             s if !s.starts_with('-') => {
-                positional.push(s.to_string());
+                // Push the original OS string, not the decoded `s` -- `s` is a
+                // replacement character when the argument did not decode, and
+                // the point is to carry the caller's bytes through.
+                positional.push(rest[i].clone());
+                let _ = s;
             }
             _ => {}
         }
@@ -758,14 +783,14 @@ mod tests {
     /// A year and month given outright need no clock.
     #[test]
     fn an_explicit_month_works_without_a_clock() {
-        let args = vec!["9".to_string(), "2026".to_string()];
+        let args = vec![OsString::from("9"), OsString::from("2026")];
         assert_eq!(resolve_period(&args, false, None), Ok((2026, 9, false)));
     }
 
     /// A year given outright needs no clock either.
     #[test]
     fn an_explicit_year_works_without_a_clock() {
-        let args = vec!["2026".to_string()];
+        let args = vec![OsString::from("2026")];
         assert_eq!(resolve_period(&args, false, None), Ok((2026, 1, true)));
     }
 
@@ -779,7 +804,7 @@ mod tests {
     fn a_month_of_this_year_refuses_without_a_clock() {
         assert_eq!(resolve_period(&[], false, None), Err(NoClock));
         assert_eq!(
-            resolve_period(&["9".to_string()], false, None),
+            resolve_period(&[OsString::from("9")], false, None),
             Err(NoClock)
         );
     }
@@ -790,14 +815,55 @@ mod tests {
         let today = Some((2026, 9, 10));
         assert_eq!(resolve_period(&[], false, today), Ok((2026, 9, false)));
         assert_eq!(
-            resolve_period(&["9".to_string()], false, today),
+            resolve_period(&[OsString::from("9")], false, today),
             Ok((2026, 9, false))
         );
         // A number outside 1..=12 is a year, not a month, clock or no clock.
         assert_eq!(
-            resolve_period(&["2026".to_string()], false, today),
+            resolve_period(&[OsString::from("2026")], false, today),
             Ok((2026, 1, true))
         );
+    }
+
+    /// An argument that is not valid text at all is refused, not fatal.
+    ///
+    /// This is what the `argv-utf8` gate refuses, and `cal` walked straight
+    /// into it the moment the `notimpl` guard came off: reading argv as
+    /// `String` panics with a Rust backtrace *before the program's first
+    /// statement* on a byte sequence that is not UTF-8, and a path on this OS
+    /// may contain any byte but `/` and NUL. Nothing in `cal` needs its
+    /// argument to be text -- it needs it to be a number -- so the undecodable
+    /// case is just another thing that does not parse.
+    #[test]
+    fn an_argument_that_is_not_utf8_is_refused_rather_than_fatal() {
+        let bad = non_utf8_osstring();
+        assert!(bad.to_str().is_none(), "fixture must not be valid UTF-8");
+        let today = Some((2026, 9, 10));
+        assert_eq!(
+            resolve_period(std::slice::from_ref(&bad), false, today),
+            Err(NoClock)
+        );
+        assert_eq!(
+            resolve_period(&[bad, OsString::from("2026")], false, today),
+            Err(NoClock)
+        );
+    }
+
+    /// An `OsString` the platform accepts and `str` cannot represent.
+    #[cfg(windows)]
+    fn non_utf8_osstring() -> OsString {
+        use std::os::windows::ffi::OsStringExt;
+        // A lone high surrogate: legal in a Windows path, not encodable as
+        // UTF-8, so `to_str()` returns None.
+        OsString::from_wide(&[0xD800])
+    }
+
+    #[cfg(unix)]
+    fn non_utf8_osstring() -> OsString {
+        use std::os::unix::ffi::OsStringExt;
+        // 0xFF cannot begin a UTF-8 sequence, and is a legal byte in a path
+        // here -- which is the case this whole conversion exists for.
+        OsString::from_vec(vec![0xFF])
     }
 
     /// An argument that is not a number is refused rather than guessed at.
@@ -808,11 +874,11 @@ mod tests {
     fn a_nonsense_argument_is_refused_not_guessed() {
         let today = Some((2026, 9, 10));
         assert_eq!(
-            resolve_period(&["banana".to_string()], false, today),
+            resolve_period(&[OsString::from("banana")], false, today),
             Err(NoClock)
         );
         assert_eq!(
-            resolve_period(&["x".to_string(), "2026".to_string()], false, today),
+            resolve_period(&[OsString::from("x"), OsString::from("2026")], false, today),
             Err(NoClock)
         );
     }

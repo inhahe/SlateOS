@@ -1130,21 +1130,50 @@ fn read_kernel_name(_path: &[u8], _out: &mut [u8]) -> Option<usize> {
 /// set the hostname and read it back got its own value and concluded it had
 /// worked. **That is a worse failure than `setgroups`' `ENOSYS`**: it is a
 /// self-consistent lie rather than an honest refusal.
-fn current_hostname(out: &mut [u8]) -> usize {
-    // `/proc/sys/kernel/hostname` first and `/etc/hostname` second, which is
-    // the order the rest of the tree already uses: `osh` fills `$HOSTNAME`
-    // from exactly this pair in exactly this sequence, `dhcpcd` writes both
-    // when a lease supplies a name, and `sysctl` maps `kernel.hostname` onto
-    // the first. Matching it is the point -- a libc that agreed with the
-    // kernel but not with the shell would have replaced one disagreement
-    // with another.
+/// The system's hostname, or `None` if it cannot be read.
+///
+/// # There is one source, deliberately, and no fallback
+///
+/// `/proc/sys/kernel/hostname` is the kernel's live UTS name and the only
+/// thing this asks. If that read fails, this returns `None` and
+/// [`gethostname`] reports a failure.
+///
+/// It used to try `/etc/hostname` next and a process-local buffer last -- and
+/// that buffer is initialised to the literal `"localhost"`. So a `/proc` read
+/// that failed for any reason returned a *plausible machine name*,
+/// successfully, and nothing downstream could tell it from the truth.
+///
+/// **That was found by `services/ctest-hostname` on its first run**, and it is
+/// the fixture's own diagnosis being blunted one layer below it. Its check 6
+/// distinguishes "the kernel accepted the name and dropped it" from everything
+/// else -- and with this fallback in place, exit 6 also meant "the read failed
+/// and libc answered `localhost`". Lane A asked whether this could happen
+/// before their instrumentation had run, which is the question that found it.
+///
+/// The `/etc/hostname` step had an argument: `osh` fills `$HOSTNAME` from that
+/// pair in that order, and a libc agreeing with the kernel but not the shell
+/// trades one disagreement for another. The argument is sound and belongs in
+/// the shell, where it already is. `/etc/hostname` is the *persistent* name,
+/// which is what the live one is set *from* at boot; reporting it as the live
+/// name means answering a question nobody asked. Linux's `gethostname(2)` is a
+/// syscall over the kernel's UTS name and consults no file.
+#[cfg(target_os = "none")]
+fn current_hostname(out: &mut [u8]) -> Option<usize> {
+    read_kernel_name(b"/proc/sys/kernel/hostname\0", out)
+}
+
+/// The system's hostname, or `None` if it cannot be read.
+///
+/// The host build has no `/proc` to read, so it answers from the process-local
+/// buffer -- which is a **simulation**, exists for the tests, and is why the
+/// buffer still defaults to `"localhost"`. On the target that buffer is not
+/// consulted at all.
+#[cfg(not(target_os = "none"))]
+fn current_hostname(out: &mut [u8]) -> Option<usize> {
     if let Some(n) = read_kernel_name(b"/proc/sys/kernel/hostname\0", out) {
-        return n;
+        return Some(n);
     }
-    if let Some(n) = read_kernel_name(b"/etc/hostname\0", out) {
-        return n;
-    }
-    stored_hostname(out)
+    Some(stored_hostname(out))
 }
 
 /// Overwrite the stored hostname. **Tests only.**
@@ -1230,6 +1259,10 @@ fn stored_domain(out: &mut [u8]) -> usize {
 }
 
 /// The stored hostname buffer, which is the fallback for [`current_hostname`].
+/// Only the host build consults this. On the target `current_hostname`
+/// reads `/proc` and reports a failure instead of answering from a buffer
+/// that has said `localhost` since process start.
+#[cfg(not(target_os = "none"))]
 fn stored_hostname(out: &mut [u8]) -> usize {
     // SAFETY: Single-address-space, no concurrent writes during the read.
     let (src_ptr, src_len) = unsafe { (hostname_buf_ptr().cast_const(), *hostname_len_ptr()) };
@@ -1257,8 +1290,13 @@ fn stored_hostname(out: &mut [u8]) -> usize {
 /// Used by `utsname::uname()` so the utsname `nodename` field reflects
 /// the same hostname that `gethostname()` / `sethostname()` see, instead
 /// of a hardcoded "localhost".
+///
+/// Returns `0` when the hostname cannot be read. `uname` has no error channel
+/// for a single field -- the struct is all fixed arrays and the call returns 0
+/// or -1 for the whole thing -- so an empty `nodename` is what it can honestly
+/// say. An empty string is not a machine name; `localhost` is.
 pub(crate) fn copy_hostname(out: &mut [u8]) -> usize {
-    current_hostname(out)
+    current_hostname(out).unwrap_or(0)
 }
 
 process_global! {
@@ -1346,7 +1384,19 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
     // `current_hostname`, which is also what `uname`'s `nodename` reads, so
     // the two cannot disagree.
     let mut host = [0u8; HOST_NAME_MAX + 1];
-    let hlen = current_hostname(&mut host);
+    let Some(hlen) = current_hostname(&mut host) else {
+        // The one source could not be read. This used to answer `localhost`
+        // from a process-local buffer -- a plausible machine name reported by
+        // a call that had read nothing, which `services/ctest-hostname` could
+        // not distinguish from the kernel accepting a name and dropping it.
+        //
+        // `EIO` rather than `ENOENT`: the file is one this kernel always
+        // serves, so failing to read it is a broken system rather than a
+        // missing feature, and `ENOENT` would invite a caller to treat it as
+        // "this machine has no name".
+        errno::set_errno(errno::EIO);
+        return -1;
+    };
     let needed = hlen.wrapping_add(1); // +null
     let copy = if len < needed { len } else { needed };
 

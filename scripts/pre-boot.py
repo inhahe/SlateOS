@@ -399,6 +399,8 @@ def main() -> int:
         ("scan-unwrap.py", "--summary", "unwrap/expect in kernel production paths"),
         ("scan-orphan-modules.py", "--check", "newly unreachable library modules"),
         ("audit-cli-fabrication.py", "--check", "commands that state facts they did not measure"),
+        ("check-read-defaults.py", "--check",
+         "reads whose failure is indistinguishable from an empty file"),
     ):
         scan = SCRIPTS / name
         if not scan.is_file():

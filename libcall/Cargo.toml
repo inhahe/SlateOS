@@ -1,0 +1,24 @@
+[package]
+name = "libcall"
+version = "0.1.0"
+edition = "2024"
+description = "The stateful parts of our C library, reached through the linked C ABI rather than as a Rust dependency (design-decisions.md 768)."
+
+[lib]
+path = "src/lib.rs"
+
+# Deliberately empty, and it is the point of the crate rather than an
+# incidental property: a program that lists `posix` here compiles a second copy
+# of the libc with every syscall stubbed to -ENOSYS. Everything below the
+# `[dev-dependencies]` line exists only in the test binary.
+[dependencies]
+
+# Test-only, so it is never linked into a program. `constants_agree_with_posix`
+# asserts this crate's restated values against posix's, so the two cannot
+# drift -- restating a value is how one truth becomes two sources, and the
+# comparison is what stops that being a real risk here.
+[dev-dependencies]
+posix = { path = "../posix" }
+
+[lints]
+workspace = true

@@ -55,6 +55,18 @@ members = [
     # Same member-not-exclude rationale as `yamldoc`; like `textfind` it needs no
     # `alloc`, since everything returns a scalar or shuffles the caller's slice.
     "randrange",
+    # The stateful parts of our C library, reached through the linked C ABI
+    # rather than as a Rust dependency. `posix` compiles twice -- as `libc.a`
+    # with real syscalls, and as an rlib with every one of them stubbed to
+    # -ENOSYS -- so a program listing it in `[dependencies]` carries two
+    # libraries that disagree (design-decisions.md 768, known-issues.md
+    # TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT).
+    # Same remedy as `randrange::fill_secret` above and for the same stated
+    # reason: the correct route and the incorrect one are indistinguishable at
+    # the call site, so the call site must not be where the choice is made.
+    # Three crates proved that again on 2026-09-10 -- swapon, powerctl and
+    # dhcpcd -- within a week of the decision that says it.
+    "libcall",
     # Shared no_std monotonic-clock instants and spans. Three of the four
     # programs that read `SYS_CLOCK_MONOTONIC` had independently named their
     # wrapper after a unit the syscall does not return: `sshd` and `inetd` both

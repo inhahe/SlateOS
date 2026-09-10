@@ -351,10 +351,10 @@ fn parse_priority(arg: &str) -> Result<i32, String> {
     let Ok(p) = arg.parse::<i32>() else {
         return Err(format!("invalid priority: {arg}"));
     };
-    if !(0..=posix::unistd::SWAP_FLAG_PRIO_MASK).contains(&p) {
+    if !(0..=libcall::SWAP_FLAG_PRIO_MASK).contains(&p) {
         return Err(format!(
             "priority out of range: {p} (must be 0..={})",
-            posix::unistd::SWAP_FLAG_PRIO_MASK
+            libcall::SWAP_FLAG_PRIO_MASK
         ));
     }
     Ok(p)
@@ -369,11 +369,11 @@ fn parse_priority(arg: &str) -> Result<i32, String> {
 fn swap_flags(priority: Option<i32>, discard: bool) -> i32 {
     let mut flags = 0;
     if let Some(p) = priority {
-        flags |= posix::unistd::SWAP_FLAG_PREFER;
-        flags |= p & posix::unistd::SWAP_FLAG_PRIO_MASK;
+        flags |= libcall::SWAP_FLAG_PREFER;
+        flags |= p & libcall::SWAP_FLAG_PRIO_MASK;
     }
     if discard {
-        flags |= posix::unistd::SWAP_FLAG_DISCARD;
+        flags |= libcall::SWAP_FLAG_DISCARD;
     }
     flags
 }
@@ -395,10 +395,21 @@ fn swap_flags(priority: Option<i32>, discard: bool) -> i32 {
 /// it says the wrong thing to whoever reads it: the problem is not a missing
 /// file, it is that swap is not implemented.
 ///
-/// `posix::swapon` is the real interface and has been there all along. It
+/// `swapon(2)` is the real interface and has been there all along. It
 /// validates its arguments in Linux's own order and returns `ENOSYS`, so the
 /// message now names the actual state of the system -- and when the kernel
 /// grows swap, this program starts working with no change here.
+///
+/// Reached through `libcall`, not through `posix` as a Rust dependency. That
+/// distinction cost the whole tree a red `main` on 2026-09-10: this function
+/// called the `posix::unistd` Rust path for `swapon`, then read its `errno`
+/// through the same rlib's `get_errno` -- and *both* were the wrong copy of
+/// the library. The Rust path compiles a second libc with every syscall
+/// stubbed to `-ENOSYS`, and the `errno` it reports is that second copy's
+/// cell, which the linked library never wrote. So the program called a
+/// `swapon` that could not have worked and then asked a different library
+/// why. That is the archetype `design-decisions.md` 768 describes, reproduced
+/// six days after that decision was written, by the lane that wrote it.
 fn activate_swap(device: &str, priority: Option<i32>, discard: bool, verbose: bool) {
     let Ok(path) = std::ffi::CString::new(device) else {
         // A NUL inside the argument. `swapon(2)` takes a C string, so such a
@@ -406,25 +417,26 @@ fn activate_swap(device: &str, priority: Option<i32>, discard: bool, verbose: bo
         eprintln!("swapon: {}: path contains a NUL byte", quotef_os(device));
         return;
     };
-    // `swapon` is `extern "C"` but not `unsafe fn`, so no block is needed --
-    // the obligation is still real, and `CString` is what discharges it: the
-    // pointer is NUL-terminated and `path` outlives the call.
-    let rc = posix::unistd::swapon(path.as_ptr().cast::<u8>(), swap_flags(priority, discard));
-    if rc == 0 {
-        if verbose {
-            println!(
-                "swapon: {device}: activated{}",
-                priority
-                    .map(|p| format!(" (priority {p})"))
-                    .unwrap_or_default()
+    // The `errno` arrives with the failure instead of being fetched after it,
+    // so there is no second library left to read it from by mistake.
+    match libcall::swapon(&path, swap_flags(priority, discard)) {
+        Ok(()) => {
+            if verbose {
+                println!(
+                    "swapon: {device}: activated{}",
+                    priority
+                        .map(|p| format!(" (priority {p})"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "swapon: {}: failed to activate: {}",
+                quotef_os(device),
+                errno_text(e)
             );
         }
-    } else {
-        eprintln!(
-            "swapon: {}: failed to activate: {}",
-            quotef_os(device),
-            errno_text(posix::errno::get_errno())
-        );
     }
 }
 
@@ -435,11 +447,11 @@ fn activate_swap(device: &str, priority: Option<i32>, discard: bool, verbose: bo
 /// point here is to say something true about *these* calls.
 fn errno_text(e: i32) -> String {
     match e {
-        posix::errno::EPERM => "not permitted (needs CAP_SYS_ADMIN)".to_string(),
-        posix::errno::EINVAL => "invalid flags".to_string(),
-        posix::errno::ENOENT => "no such file".to_string(),
-        posix::errno::EFAULT => "bad path".to_string(),
-        posix::errno::ENOSYS => "swap is not implemented on this kernel".to_string(),
+        libcall::EPERM => "not permitted (needs CAP_SYS_ADMIN)".to_string(),
+        libcall::EINVAL => "invalid flags".to_string(),
+        libcall::ENOENT => "no such file".to_string(),
+        libcall::EFAULT => "bad path".to_string(),
+        libcall::ENOSYS => "swap is not implemented on this kernel".to_string(),
         other => format!("errno {other}"),
     }
 }
@@ -518,19 +530,19 @@ fn deactivate_swap(device: &str, verbose: bool) {
         eprintln!("swapoff: {}: path contains a NUL byte", quotef_os(device));
         return;
     };
-    // As in `activate_swap`: `CString` guarantees the NUL terminator and the
-    // binding keeps the buffer alive across the call.
-    let rc = posix::unistd::swapoff(path.as_ptr().cast::<u8>());
-    if rc == 0 {
-        if verbose {
-            println!("swapoff: {device}: deactivated");
+    match libcall::swapoff(&path) {
+        Ok(()) => {
+            if verbose {
+                println!("swapoff: {device}: deactivated");
+            }
         }
-    } else {
-        eprintln!(
-            "swapoff: {}: failed to deactivate: {}",
-            quotef_os(device),
-            errno_text(posix::errno::get_errno())
-        );
+        Err(e) => {
+            eprintln!(
+                "swapoff: {}: failed to deactivate: {}",
+                quotef_os(device),
+                errno_text(e)
+            );
+        }
     }
 }
 
@@ -773,23 +785,23 @@ mod tests {
     fn a_priority_sets_the_prefer_flag_as_well_as_the_bits() {
         let flags = swap_flags(Some(5), false);
         assert_ne!(
-            flags & posix::unistd::SWAP_FLAG_PREFER,
+            flags & libcall::SWAP_FLAG_PREFER,
             0,
             "without PREFER the kernel ignores the priority bits"
         );
-        assert_eq!(flags & posix::unistd::SWAP_FLAG_PRIO_MASK, 5);
+        assert_eq!(flags & libcall::SWAP_FLAG_PRIO_MASK, 5);
     }
 
     #[test]
     fn discard_is_independent_of_priority() {
         assert_eq!(
-            swap_flags(None, true) & posix::unistd::SWAP_FLAG_DISCARD,
-            posix::unistd::SWAP_FLAG_DISCARD
+            swap_flags(None, true) & libcall::SWAP_FLAG_DISCARD,
+            libcall::SWAP_FLAG_DISCARD
         );
         let both = swap_flags(Some(7), true);
-        assert_ne!(both & posix::unistd::SWAP_FLAG_PREFER, 0);
-        assert_ne!(both & posix::unistd::SWAP_FLAG_DISCARD, 0);
-        assert_eq!(both & posix::unistd::SWAP_FLAG_PRIO_MASK, 7);
+        assert_ne!(both & libcall::SWAP_FLAG_PREFER, 0);
+        assert_ne!(both & libcall::SWAP_FLAG_DISCARD, 0);
+        assert_eq!(both & libcall::SWAP_FLAG_PRIO_MASK, 7);
     }
 
     // ---- the priority argument ----
@@ -798,10 +810,7 @@ mod tests {
     fn an_ordinary_priority_is_accepted() {
         assert_eq!(parse_priority("0"), Ok(0));
         assert_eq!(parse_priority("100"), Ok(100));
-        assert_eq!(
-            parse_priority("32767"),
-            Ok(posix::unistd::SWAP_FLAG_PRIO_MASK)
-        );
+        assert_eq!(parse_priority("32767"), Ok(libcall::SWAP_FLAG_PRIO_MASK));
     }
 
     /// **A negative priority used to become the maximum.**
@@ -816,7 +825,7 @@ mod tests {
         // to show what the old masking did to the value, not to assert an
         // identity about a literal.
         let asked_for: i32 = -1;
-        assert_eq!(asked_for & posix::unistd::SWAP_FLAG_PRIO_MASK, 32767);
+        assert_eq!(asked_for & libcall::SWAP_FLAG_PRIO_MASK, 32767);
     }
 
     /// And one above the range became an unrelated number: 99999 masks to
@@ -826,7 +835,7 @@ mod tests {
         assert!(parse_priority("32768").is_err());
         assert!(parse_priority("99999").is_err());
         let asked_for: i32 = 99999;
-        assert_eq!(asked_for & posix::unistd::SWAP_FLAG_PRIO_MASK, 1695);
+        assert_eq!(asked_for & libcall::SWAP_FLAG_PRIO_MASK, 1695);
     }
 
     #[test]

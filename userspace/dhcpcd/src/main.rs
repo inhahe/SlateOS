@@ -1303,13 +1303,13 @@ fn write_resolv_conf(lease: &LeaseInfo) {
 /// and the point is to say something true about *this* call.
 fn sethostname_errno_text(e: i32) -> String {
     match e {
-        posix::errno::ENOSYS => {
+        libcall::ENOSYS => {
             "this kernel has no syscall for it yet (the name is still recorded in /etc/hostname)"
                 .to_string()
         }
-        posix::errno::EPERM => "not permitted".to_string(),
-        posix::errno::EINVAL => "the name is longer than the kernel allows".to_string(),
-        posix::errno::EFAULT => "bad name pointer".to_string(),
+        libcall::EPERM => "not permitted".to_string(),
+        libcall::EINVAL => "the name is longer than the kernel allows".to_string(),
+        libcall::EFAULT => "bad name pointer".to_string(),
         other => format!("errno {other}"),
     }
 }
@@ -1331,12 +1331,20 @@ fn sethostname_errno_text(e: i32) -> String {
 /// `/proc/sys/kernel/hostname` went on reporting the old name -- and the read
 /// side working is what made the write side look plausible.
 ///
-/// It now goes through `posix::unistd::sethostname`. That returns `ENOSYS`
-/// today, for the honest reason that no syscall number exists yet, so the
-/// observable behaviour is unchanged *except* that the failure is now
-/// reported. The reason to route it through `posix` rather than at some other
-/// file is that when lane A's `SYS_HOSTNAME_SET` reaches `main` and `posix` is
-/// wired to it, this call starts working with no change here.
+/// It now goes through `libcall::sethostname`. That returns `ENOSYS` today,
+/// for the honest reason that no syscall number exists yet, so the observable
+/// behaviour is unchanged *except* that the failure is now reported. The
+/// reason to route it through the libc rather than at some other file is that
+/// when lane A's `SYS_HOSTNAME_SET` reaches `main` and `posix` is wired to it,
+/// this call starts working with no change here.
+///
+/// Through `libcall` and not `posix` directly. For its first hour this called
+/// `posix::unistd::sethostname` and read `posix::errno::get_errno()`, which is
+/// the pairing `design-decisions.md` 768 exists to prevent: the Rust path runs
+/// a second copy of the libc with every syscall stubbed to `-ENOSYS`, and the
+/// `errno` read comes from that same second copy, which the linked library
+/// never wrote. Both halves of the failure report would have been wrong, and
+/// independently.
 ///
 /// Deliberately **not** `/sys/kernel/hostname`, which does accept writes:
 /// `kernel/src/fs/sysfs.rs` keeps a private `HOSTNAME` static that nothing
@@ -1350,13 +1358,12 @@ fn set_hostname(name: &str) {
         eprintln!("dhcpcd: warning: failed to write /etc/hostname: {e}");
     }
 
-    // `sethostname` is `extern "C"` but not `unsafe fn`; the obligation is
-    // still real, and `name` outliving the call is what discharges it.
-    let rc = posix::unistd::sethostname(name.as_ptr(), name.len());
-    if rc != 0 {
+    // The `errno` comes back with the failure rather than being fetched
+    // afterwards, so there is no second library to accidentally read it from.
+    if let Err(e) = libcall::sethostname(name.as_bytes()) {
         eprintln!(
             "dhcpcd: warning: could not set the running hostname to {name}: {}",
-            sethostname_errno_text(posix::errno::get_errno())
+            sethostname_errno_text(e)
         );
     }
 }
@@ -1918,12 +1925,12 @@ mod tests {
     /// Every errno this call can produce says something specific.
     #[test]
     fn the_sethostname_failure_text_names_the_actual_reason() {
-        assert!(sethostname_errno_text(posix::errno::ENOSYS).contains("no syscall"));
+        assert!(sethostname_errno_text(libcall::ENOSYS).contains("no syscall"));
         // The ENOSYS text must also say the name was not simply lost, because
         // that is the case a user will actually hit today.
-        assert!(sethostname_errno_text(posix::errno::ENOSYS).contains("/etc/hostname"));
-        assert_eq!(sethostname_errno_text(posix::errno::EPERM), "not permitted");
-        assert!(sethostname_errno_text(posix::errno::EINVAL).contains("longer"));
+        assert!(sethostname_errno_text(libcall::ENOSYS).contains("/etc/hostname"));
+        assert_eq!(sethostname_errno_text(libcall::EPERM), "not permitted");
+        assert!(sethostname_errno_text(libcall::EINVAL).contains("longer"));
         assert_eq!(sethostname_errno_text(4242), "errno 4242");
     }
 
@@ -1932,10 +1939,10 @@ mod tests {
     #[test]
     fn no_failure_is_reported_as_an_empty_string() {
         for e in [
-            posix::errno::ENOSYS,
-            posix::errno::EPERM,
-            posix::errno::EINVAL,
-            posix::errno::EFAULT,
+            libcall::ENOSYS,
+            libcall::EPERM,
+            libcall::EINVAL,
+            libcall::EFAULT,
             0,
             -1,
             12345,

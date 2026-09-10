@@ -422,10 +422,16 @@ fn orderly_shutdown(action: &str) -> bool {
 /// not whether a sync had happened. A test of the wrong proposition reads
 /// exactly like a test of the right one.
 ///
-/// `posix::unistd::sync` issues the kernel's `SYS_FS_SYNC` -- the same flush
+/// `libcall::sync` issues the kernel's `SYS_FS_SYNC` -- the same flush
 /// `fsync(2)` performs, but for every mounted filesystem rather than one
 /// descriptor, which is a valid superset of POSIX's `sync(2)` guarantee. It
 /// has been available the whole time.
+///
+/// Through `libcall` rather than `posix` directly, and the difference is not
+/// cosmetic: `posix` as a Rust dependency compiles a *second* copy of the libc
+/// with every syscall stubbed to `-ENOSYS`, so `posix::unistd::sync()` -- what
+/// this called for its first hours -- would have flushed nothing, exactly like
+/// the two invented writes it replaced. See `design-decisions.md` 768.
 ///
 /// # There is nothing to check
 ///
@@ -438,7 +444,7 @@ fn orderly_shutdown(action: &str) -> bool {
 /// and the buffers with it, so there is nothing to flush and a needless full
 /// sync would only delay the suspend.
 fn try_sync_filesystems() {
-    posix::unistd::sync();
+    libcall::sync();
 }
 
 /// Power off the machine directly when the service manager is unreachable.

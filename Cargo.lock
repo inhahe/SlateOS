@@ -3925,7 +3925,7 @@ dependencies = [
 name = "dhcpcd"
 version = "0.1.0"
 dependencies = [
- "posix",
+ "libcall",
 ]
 
 [[package]]
@@ -9159,6 +9159,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "libcall"
+version = "0.1.0"
+dependencies = [
+ "posix",
+]
+
+[[package]]
 name = "libchewing-cli"
 version = "0.1.0"
 dependencies = [
@@ -13879,7 +13886,7 @@ dependencies = [
 name = "powerctl"
 version = "0.1.0"
 dependencies = [
- "posix",
+ "libcall",
  "quoting",
 ]
 
@@ -17433,7 +17440,7 @@ dependencies = [
 name = "swapon"
 version = "0.1.0"
 dependencies = [
- "posix",
+ "libcall",
  "quoting",
 ]
 

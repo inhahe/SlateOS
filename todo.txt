@@ -56681,3 +56681,35 @@ Slate OS this would use the kernel clock; for now use a reasonable default" and
 mentions parsing `/proc/driver/rtc`. `SystemTime::now()` *is* the kernel clock
 on this target, so that comment describes an arrangement that is no longer the
 one in the code beneath it.
+
+================================================================================
+RESOLVED 2026-09-10: the ctest-hostname hold is lifted, and both halves landed
+together
+================================================================================
+
+Lane A's grant reached `main` in 13a5b3a99. All seven steps of the entry above
+were followed, and two of them earned their place:
+
+**Step 1 (verify rather than take the notice's word) mattered.** The syscall
+numbers being in `kernel/src/syscall/number.rs` is *not* the same fact as the
+grant existing, and checking only that would have been the narrower question
+answered at the width of the wider one. The grant is at
+`kernel/src/proc/spawn.rs:9217` -- `[(ResourceType::Process, 0,
+Rights::SET_HOSTNAME)]` inside `self_test_ctest_hostname` -- and that is the
+thing that actually gates the call. Confirmed before wiring anything.
+
+**Step 4 (rebuild the sysroot before the fixture) mattered too**, for the
+reason the entry gave: step 2 changes the very code the fixture tests, so a
+stale `libc.a` would have failed it with exit 3 ("libc not wired") when the
+libc was in fact wired. `libc.a` grew by 1,354 bytes and the fixture by 1,248.
+
+**What is not yet known**, stated so it is not mistaken for done: the fixture
+has never run. It compiles, links against a current sysroot, and the wiring
+was verified at the instruction level (`--emit asm` shows `movl $1072, %edi`
+into a `set_uts_name` that contains a real `syscall`), but nothing has executed
+it. That happens in lane A's boot-test rung, and the first run is the first
+evidence that any of this works end to end. If it comes back non-42, the exit
+code names the cause -- `services/ctest-hostname/main.c` is the authoritative
+mapping and lane A has the ranges.
+
+`lane-b-ctest-hostname-hold` is deleted, locally and on the remote.

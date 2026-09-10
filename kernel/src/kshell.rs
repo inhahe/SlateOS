@@ -7761,7 +7761,7 @@ fn dispatch(line: &str) {
         "disk" | "blkinfo" => cmd_disk(),
         "blkread" => cmd_blkread(args),
         "ls" | "dir" => cmd_ls(args),
-        "cat" | "type" => cmd_cat(args),
+        "cat" => cmd_cat(args),
         "write" => cmd_write(args),
         "rm" | "del" => cmd_rm(args),
         "mkdir" => cmd_mkdir(args),
@@ -8340,7 +8340,7 @@ fn dispatch(line: &str) {
         "let" => cmd_let(args),
         "trap" => cmd_trap(args),
         "command" => cmd_command(args),
-        "which" | "typeof" => cmd_type(args),
+        "which" | "type" | "typeof" => cmd_type(args),
         "return" => {
             // `return [N]` — set exit status and signal function return.
             if !args.is_empty() {
@@ -35773,7 +35773,12 @@ fn cmd_recent(args: &str) {
             }
         }
         "exclude" => {
-            let action = parts.get(1).copied().unwrap_or("list");
+            let action = parts.get(1).copied().unwrap_or("");
+            if action.is_empty() {
+                shell_println!("Usage: recent exclude <add|remove|list> [prefix]");
+                set_exit(1);
+                return;
+            }
             match action {
                 "add" => {
                     if parts.len() < 3 {
@@ -36776,7 +36781,12 @@ fn cmd_contextmenu(args: &str) {
     match sub {
         "build" => {
             // contextmenu build <target> [path]
-            let target_str = parts.get(1).copied().unwrap_or("file");
+            let target_str = parts.get(1).copied().unwrap_or("");
+            if target_str.is_empty() {
+                shell_println!("Usage: contextmenu build <target> [path]");
+                set_exit(1);
+                return;
+            }
             let path = parts.get(2).map(resolve_path).unwrap_or_else(get_cwd);
             let target = match target_str {
                 "file" => crate::fs::contextmenu::ContextTarget::File,
@@ -36983,7 +36993,12 @@ fn cmd_deskicons(args: &str) {
             }
         }
         "arrange" => {
-            let sort_str = parts.get(1).copied().unwrap_or("name");
+            let sort_str = parts.get(1).copied().unwrap_or("");
+            if sort_str.is_empty() {
+                shell_println!("Usage: deskicons arrange <sort>");
+                set_exit(1);
+                return;
+            }
             let sort = match sort_str {
                 "name" => crate::fs::deskicons::SortBy::Name,
                 "size" => crate::fs::deskicons::SortBy::Size,
@@ -39078,7 +39093,12 @@ fn cmd_rundialog(args: &str) {
             }
         }
         "bookmark" | "bm" => {
-            let bm_sub = parts.get(1).copied().unwrap_or("list");
+            let bm_sub = parts.get(1).copied().unwrap_or("");
+            if bm_sub.is_empty() {
+                shell_println!("Usage: rundialog bookmark <add|rm|list>");
+                set_exit(1);
+                return;
+            }
             match bm_sub {
                 "add" => {
                     let cmd_text = if parts.len() > 2 {
@@ -39130,7 +39150,12 @@ fn cmd_rundialog(args: &str) {
             }
         }
         "path" => {
-            let path_sub = parts.get(1).copied().unwrap_or("show");
+            let path_sub = parts.get(1).copied().unwrap_or("");
+            if path_sub.is_empty() {
+                shell_println!("Usage: rundialog path <show|refresh|clear>");
+                set_exit(1);
+                return;
+            }
             match path_sub {
                 "show" | "" => {
                     let dirs = rundialog::get_path();
@@ -57528,7 +57553,7 @@ fn cmd_sysdiag(args: &str) {
                     set_exit(1);
                 }
             } else {
-                shell_println!("Usage: diag category <name>");
+                shell_println!("Usage: sysdiag category <name>");
                 shell_println!("Categories: network, storage, memory, services, boot, security");
                 set_exit(1);
             }
@@ -58652,7 +58677,12 @@ fn cmd_envvars(args: &str) {
             }
         }
         "path" => {
-            let pcmd = parts.get(1).copied().unwrap_or("list");
+            let pcmd = parts.get(1).copied().unwrap_or("");
+            if pcmd.is_empty() {
+                shell_println!("Usage: envvars path <list|append|prepend|rm>");
+                set_exit(1);
+                return;
+            }
             match pcmd {
                 "list" | "" => {
                     let dirs = envvars::path_list();
@@ -58869,7 +58899,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt pair <address> <name> [type]");
+                shell_println!("Usage: bluetooth pair <address> <name> [type]");
                 shell_println!(
                     "Types: headphones, speaker, headset, keyboard, mouse, gamepad, phone, computer, printer, other"
                 );
@@ -58886,7 +58916,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt unpair <address>");
+                shell_println!("Usage: bluetooth unpair <address>");
                 set_exit(1);
             }
         }
@@ -58900,7 +58930,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt connect <address>");
+                shell_println!("Usage: bluetooth connect <address>");
                 set_exit(1);
             }
         }
@@ -58914,7 +58944,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt disconnect <address>");
+                shell_println!("Usage: bluetooth disconnect <address>");
                 set_exit(1);
             }
         }
@@ -58929,7 +58959,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt trust <address> [on|off]");
+                shell_println!("Usage: bluetooth trust <address> [on|off]");
                 set_exit(1);
             }
         }
@@ -58944,7 +58974,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt block <address> [on|off]");
+                shell_println!("Usage: bluetooth block <address> [on|off]");
                 set_exit(1);
             }
         }
@@ -58976,7 +59006,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt info <address>");
+                shell_println!("Usage: bluetooth info <address>");
                 set_exit(1);
             }
         }
@@ -58991,7 +59021,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt name <adapter name>");
+                shell_println!("Usage: bluetooth name <adapter name>");
                 set_exit(1);
             }
         }
@@ -59026,7 +59056,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt addscan <addr> <name> [type] [rssi]");
+                shell_println!("Usage: bluetooth addscan <addr> <name> [type] [rssi]");
                 set_exit(1);
             }
         }
@@ -68505,9 +68535,16 @@ fn cmd_svcstart(args: &str) {
         "addsock" => {
             use crate::sockact::{self, SocketSpec, SocketType};
             if parts.len() >= 4 {
-                let svc_id_str = parts.get(1).copied().unwrap_or("0");
-                let sock_type_str = parts.get(2).copied().unwrap_or("tcp");
-                let port_or_path = parts.get(3).copied().unwrap_or("0");
+                let svc_id_str = parts.get(1).copied().unwrap_or("");
+                let sock_type_str = parts.get(2).copied().unwrap_or("");
+                let port_or_path = parts.get(3).copied().unwrap_or("");
+                if svc_id_str.is_empty() || sock_type_str.is_empty() || port_or_path.is_empty() {
+                    shell_println!(
+                        "Usage: svcstart addsock <svc-id> <tcp|udp|unix|ipc> <port|path>"
+                    );
+                    set_exit(1);
+                    return;
+                }
                 if let Ok(svc_id) = svc_id_str.parse::<u32>() {
                     // Port 0 is this module's *no port* value -- the `sockets`
                     // listing renders it as `-`.  So `svcstart addsock 3 tcp
@@ -68680,7 +68717,12 @@ fn cmd_drvmon(args: &str) {
             use crate::drvmon::{BusType, DriverPolicy};
             if parts.len() >= 3 {
                 let name = parts.get(1).copied().unwrap_or("");
-                let bus_str = parts.get(2).copied().unwrap_or("pci");
+                let bus_str = parts.get(2).copied().unwrap_or("");
+                if bus_str.is_empty() {
+                    shell_println!("Usage: drvmon register <name> <bus> [pid]");
+                    set_exit(1);
+                    return;
+                }
                 // The pid is what the monitor *watches*: it is how a crash is
                 // attributed and what a restart replaces. Registering with a
                 // guessed 0 produces a driver entry the monitor is pointing at
@@ -71834,7 +71876,7 @@ fn cmd_netsyslog(args: &str) {
             // syslog forward <ip> [port]
             let ip_str = parts.get(1).copied().unwrap_or("");
             if ip_str.is_empty() {
-                shell_println!("Usage: syslog forward <ip> [port]");
+                shell_println!("Usage: netsyslog forward <ip> [port]");
                 set_exit(1);
                 return;
             }
@@ -71903,7 +71945,7 @@ fn cmd_netsyslog(args: &str) {
             // syslog send <message>
             let message = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
             if message.is_empty() {
-                shell_println!("Usage: syslog send <message>");
+                shell_println!("Usage: netsyslog send <message>");
                 set_exit(1);
                 return;
             }
@@ -77488,7 +77530,12 @@ fn cmd_appsandbox(args: &str) {
         }
         "check" => {
             let id_str = parts.get(1).copied().unwrap_or("");
-            let perm_str = parts.get(2).copied().unwrap_or("file_read");
+            let perm_str = parts.get(2).copied().unwrap_or("");
+            if perm_str.is_empty() {
+                shell_println!("Usage: sandbox check <id> <permission>");
+                set_exit(1);
+                return;
+            }
             if let Ok(id) = id_str.parse::<u32>() {
                 let perm = match perm_str {
                     "read" | "file_read" => appsandbox::Permission::FileRead,
@@ -79504,7 +79551,12 @@ fn cmd_speechio(args: &str) {
             }
         }
         "listen" => {
-            let mode = parts.get(1).copied().unwrap_or("start");
+            let mode = parts.get(1).copied().unwrap_or("");
+            if mode.is_empty() {
+                shell_println!("Usage: speech listen <start|stop>");
+                set_exit(1);
+                return;
+            }
             match mode {
                 "start" | "on" => {
                     speechio::set_recognition_enabled(true).ok();
@@ -81556,7 +81608,12 @@ fn cmd_sharesheet(args: &str) {
             }
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("custom");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: sharesheet register <app> [name]");
+                set_exit(1);
+                return;
+            }
             let display = parts.get(2).copied().unwrap_or(name);
             match sharesheet::register_target(
                 name,
@@ -81683,7 +81740,12 @@ fn cmd_oobe(args: &str) {
             }
         },
         "lang" => {
-            let language = parts.get(1).copied().unwrap_or("en-US");
+            let language = parts.get(1).copied().unwrap_or("");
+            if language.is_empty() {
+                shell_println!("Usage: oobe lang <lang> [region]");
+                set_exit(1);
+                return;
+            }
             let region = parts.get(2).copied().unwrap_or("US");
             match oobe::set_language(language, region) {
                 Ok(()) => shell_println!("Language: {}, Region: {}", language, region),
@@ -81694,7 +81756,12 @@ fn cmd_oobe(args: &str) {
             }
         }
         "keyboard" | "kb" => {
-            let layout = parts.get(1).copied().unwrap_or("us");
+            let layout = parts.get(1).copied().unwrap_or("");
+            if layout.is_empty() {
+                shell_println!("Usage: oobe keyboard <layout>");
+                set_exit(1);
+                return;
+            }
             match oobe::set_keyboard(layout) {
                 Ok(()) => shell_println!("Keyboard layout: {}", layout),
                 Err(e) => {
@@ -81759,7 +81826,12 @@ fn cmd_oobe(args: &str) {
             }
         }
         "theme" => {
-            let t = parts.get(1).copied().unwrap_or("Default");
+            let t = parts.get(1).copied().unwrap_or("");
+            if t.is_empty() {
+                shell_println!("Usage: oobe theme <name>");
+                set_exit(1);
+                return;
+            }
             match oobe::set_theme(t) {
                 Ok(()) => shell_println!("Theme: {}", t),
                 Err(e) => {
@@ -81984,7 +82056,12 @@ fn cmd_hdrdisplay(args: &str) {
             }
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("Monitor");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: hdrdisplay register <name> [nits]");
+                set_exit(1);
+                return;
+            }
             // Peak brightness is *stored on the display record* and is what
             // tone mapping is computed against, so a guessed 1000 misdescribes
             // the panel for every frame thereafter — and the confirmation
@@ -82076,7 +82153,12 @@ fn cmd_surroundsound(args: &str) {
             }
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("Speaker");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: surroundsound create <name> <layout>");
+                set_exit(1);
+                return;
+            }
             let layout = match parts.get(2).copied().unwrap_or("stereo") {
                 "mono" | "1.0" => surroundsound::SpeakerLayout::Mono,
                 "2.1" => surroundsound::SpeakerLayout::Surround21,
@@ -82400,7 +82482,12 @@ fn cmd_audioeq(args: &str) {
             }
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("Device");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: audioeq create <name>");
+                set_exit(1);
+                return;
+            }
             match audioeq::create_config(name) {
                 Ok(id) => shell_println!("Created EQ #{}: {}", id, name),
                 Err(e) => {
@@ -82572,7 +82659,12 @@ fn cmd_screensaver(args: &str) {
             }
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("Custom");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: screensaver register <name> <type>");
+                set_exit(1);
+                return;
+            }
             let stype = match parts.get(2).copied().unwrap_or("blank") {
                 "starfield" | "stars" => screensaver::SaverType::Starfield,
                 "matrix" => screensaver::SaverType::Matrix,
@@ -82938,8 +83030,13 @@ fn cmd_gamemode(args: &str) {
             }
         },
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("Game");
-            let proc_name = parts.get(2).copied().unwrap_or("game.exe");
+            let name = parts.get(1).copied().unwrap_or("");
+            let proc_name = parts.get(2).copied().unwrap_or("");
+            if name.is_empty() || proc_name.is_empty() {
+                shell_println!("Usage: gamemode register <name> <proc>");
+                set_exit(1);
+                return;
+            }
             match gamemode::register_game(name, proc_name) {
                 Ok(id) => shell_println!("Registered game #{}: {} ({})", id, name, proc_name),
                 Err(e) => {
@@ -83122,7 +83219,12 @@ fn cmd_dpiscaling(args: &str) {
             }
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("Monitor");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: dpiscaling register <name> <dpi>");
+                set_exit(1);
+                return;
+            }
             let Some(dpi) = optional_num::<u32>(&parts, 2, "dpiscaling", sub, "DPI", 96) else {
                 return;
             };
@@ -83135,7 +83237,12 @@ fn cmd_dpiscaling(args: &str) {
             }
         }
         "override" => {
-            let app = parts.get(1).copied().unwrap_or("app");
+            let app = parts.get(1).copied().unwrap_or("");
+            if app.is_empty() {
+                shell_println!("Usage: dpiscaling override <app> <aware> [%]");
+                set_exit(1);
+                return;
+            }
             let awareness = match parts.get(2).copied().unwrap_or("system") {
                 "unaware" => dpiscaling::DpiAwareness::Unaware,
                 "permonitor" | "pm" => dpiscaling::DpiAwareness::PerMonitorAware,
@@ -83236,7 +83343,12 @@ fn cmd_netprofile(args: &str) {
             }
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("Network");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: netprofile create <name> [ssid] [type]");
+                set_exit(1);
+                return;
+            }
             let ssid = parts.get(2).copied().unwrap_or("");
             let ntype = match parts.get(3).copied().unwrap_or("private") {
                 "public" => netprofile::NetworkType::Public,
@@ -83415,14 +83527,26 @@ fn cmd_apppermissions(args: &str) {
             shell_println!("App permissions initialized");
         }
         "check" => {
-            let app = parts.get(1).copied().unwrap_or("app");
-            let perm = parse_perm(parts.get(2).copied().unwrap_or("storage"));
+            let app = parts.get(1).copied().unwrap_or("");
+            let perm_arg = parts.get(2).copied().unwrap_or("");
+            if app.is_empty() || perm_arg.is_empty() {
+                shell_println!("Usage: apppermissions check <app> <perm>");
+                set_exit(1);
+                return;
+            }
+            let perm = parse_perm(perm_arg);
             let d = apppermissions::check(app, perm);
             shell_println!("{} → {}: {}", app, perm.label(), d.label());
         }
         "grant" => {
-            let app = parts.get(1).copied().unwrap_or("app");
-            let perm = parse_perm(parts.get(2).copied().unwrap_or("storage"));
+            let app = parts.get(1).copied().unwrap_or("");
+            let perm_arg = parts.get(2).copied().unwrap_or("");
+            if app.is_empty() || perm_arg.is_empty() {
+                shell_println!("Usage: apppermissions grant <app> <perm>");
+                set_exit(1);
+                return;
+            }
+            let perm = parse_perm(perm_arg);
             match apppermissions::grant(app, perm) {
                 Ok(()) => shell_println!("Granted {} to {}", perm.label(), app),
                 Err(e) => {
@@ -83432,8 +83556,14 @@ fn cmd_apppermissions(args: &str) {
             }
         }
         "deny" => {
-            let app = parts.get(1).copied().unwrap_or("app");
-            let perm = parse_perm(parts.get(2).copied().unwrap_or("storage"));
+            let app = parts.get(1).copied().unwrap_or("");
+            let perm_arg = parts.get(2).copied().unwrap_or("");
+            if app.is_empty() || perm_arg.is_empty() {
+                shell_println!("Usage: apppermissions deny <app> <perm>");
+                set_exit(1);
+                return;
+            }
+            let perm = parse_perm(perm_arg);
             match apppermissions::deny(app, perm) {
                 Ok(()) => shell_println!("Denied {} to {}", perm.label(), app),
                 Err(e) => {
@@ -83443,7 +83573,12 @@ fn cmd_apppermissions(args: &str) {
             }
         }
         "revoke" => {
-            let app = parts.get(1).copied().unwrap_or("app");
+            let app = parts.get(1).copied().unwrap_or("");
+            if app.is_empty() {
+                shell_println!("Usage: apppermissions revoke <app>");
+                set_exit(1);
+                return;
+            }
             match apppermissions::revoke_all(app) {
                 Ok(n) => shell_println!("Revoked {} permissions from {}", n, app),
                 Err(e) => {
@@ -83453,7 +83588,12 @@ fn cmd_apppermissions(args: &str) {
             }
         }
         "app" => {
-            let app = parts.get(1).copied().unwrap_or("app");
+            let app = parts.get(1).copied().unwrap_or("");
+            if app.is_empty() {
+                shell_println!("Usage: apppermissions app <app>");
+                set_exit(1);
+                return;
+            }
             let perms = apppermissions::list_app_permissions(app);
             if perms.is_empty() {
                 shell_println!("No permissions for {}", app);
@@ -83469,7 +83609,13 @@ fn cmd_apppermissions(args: &str) {
             }
         }
         "perm" => {
-            let perm = parse_perm(parts.get(1).copied().unwrap_or("camera"));
+            let perm_arg = parts.get(1).copied().unwrap_or("");
+            if perm_arg.is_empty() {
+                shell_println!("Usage: apppermissions perm <perm>");
+                set_exit(1);
+                return;
+            }
+            let perm = parse_perm(perm_arg);
             let apps = apppermissions::list_by_permission(perm);
             if apps.is_empty() {
                 shell_println!("No apps with {} permission", perm.label());
@@ -83557,9 +83703,14 @@ fn cmd_kbshortcuts(args: &str) {
         }
         "bind" => {
             // bind <mods> <key> <action> [desc]
-            let mods_str = parts.get(1).copied().unwrap_or("ctrl");
-            let key = parts.get(2).copied().unwrap_or("A");
-            let action = parts.get(3).copied().unwrap_or("action");
+            let mods_str = parts.get(1).copied().unwrap_or("");
+            let key = parts.get(2).copied().unwrap_or("");
+            let action = parts.get(3).copied().unwrap_or("");
+            if mods_str.is_empty() || key.is_empty() || action.is_empty() {
+                shell_println!("Usage: kbshortcuts bind <mods> <key> <action> [desc]");
+                set_exit(1);
+                return;
+            }
             let desc = parts.get(4).copied().unwrap_or(action);
             let mods = kbshortcuts::Modifiers {
                 ctrl: mods_str.contains("ctrl"),
@@ -83721,7 +83872,12 @@ fn cmd_displayarrange(args: &str) {
             }
         }
         "add" => {
-            let name = parts.get(1).copied().unwrap_or("Monitor");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: displayarrange add <name> [w] [h]");
+                set_exit(1);
+                return;
+            }
             // The double-guess shape: the default was written twice, once for
             // "absent" and once for "unreadable", so the two cases could never
             // be told apart even in principle.  The usage line documents these
@@ -83974,9 +84130,14 @@ fn cmd_filevault(args: &str) {
             }
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("Vault");
-            let path = parts.get(2).copied().unwrap_or("/home/vault");
-            let password = parts.get(3).copied().unwrap_or("password");
+            let name = parts.get(1).copied().unwrap_or("");
+            let path = parts.get(2).copied().unwrap_or("");
+            let password = parts.get(3).copied().unwrap_or("");
+            if name.is_empty() || path.is_empty() || password.is_empty() {
+                shell_println!("Usage: filevault create <name> <path> <pw> [cipher]");
+                set_exit(1);
+                return;
+            }
             let cipher = match parts.get(4).copied().unwrap_or("aes") {
                 "chacha" | "chacha20" => filevault::VaultCipher::ChaCha20Poly1305,
                 "cbc" => filevault::VaultCipher::Aes256Cbc,
@@ -84128,8 +84289,13 @@ fn cmd_mousegestures(args: &str) {
         "bind" => {
             // bind <dirs> <action> [desc]
             // e.g., bind left+up new_tab "New Tab"
-            let dir_str = parts.get(1).copied().unwrap_or("left");
-            let action = parts.get(2).copied().unwrap_or("action");
+            let dir_str = parts.get(1).copied().unwrap_or("");
+            let action = parts.get(2).copied().unwrap_or("");
+            if dir_str.is_empty() || action.is_empty() {
+                shell_println!("Usage: mousegestures bind <dirs> <action>");
+                set_exit(1);
+                return;
+            }
             let desc = parts.get(3).copied().unwrap_or(action);
             let dirs: Vec<mousegestures::Direction> = dir_str
                 .split('+')
@@ -86702,7 +86868,12 @@ fn cmd_recentsearch(args: &str) {
             }
         }
         "record" | "add" => {
-            let source_str = parts.get(1).copied().unwrap_or("files");
+            let source_str = parts.get(1).copied().unwrap_or("");
+            if source_str.is_empty() {
+                shell_println!("Usage: recentsearch record <source> <query>");
+                set_exit(1);
+                return;
+            }
             let query = parts.get(2..).map(|s| s.join(" ")).unwrap_or_default();
             if query.is_empty() {
                 shell_println!("Usage: recentsearch record <source> <query>");
@@ -87364,7 +87535,12 @@ fn cmd_quicknote(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "new" | "create" => {
-            let title = parts.get(1).copied().unwrap_or("Untitled");
+            let title = parts.get(1).copied().unwrap_or("");
+            if title.is_empty() {
+                shell_println!("Usage: quicknote new <title> [content]");
+                set_exit(1);
+                return;
+            }
             let content = if parts.len() > 2 {
                 parts[2..].join(" ")
             } else {
@@ -87650,7 +87826,7 @@ fn cmd_uicolorscheme(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: colorscheme set <id>");
+                shell_println!("Usage: uischeme set <id>");
                 set_exit(1);
             }
         }
@@ -87678,7 +87854,7 @@ fn cmd_uicolorscheme(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: colorscheme accent <#hex>");
+                shell_println!("Usage: uischeme accent <#hex>");
                 set_exit(1);
             }
         }
@@ -87694,7 +87870,7 @@ fn cmd_uicolorscheme(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: colorscheme color <role> <#hex>");
+                shell_println!("Usage: uischeme color <role> <#hex>");
                 shell_println!("  Roles: background, surface, primary, secondary, accent,");
                 shell_println!("         text, textsec, border, error, warning, success, link");
                 set_exit(1);
@@ -87709,7 +87885,7 @@ fn cmd_uicolorscheme(args: &str) {
                     set_exit(1);
                 }
             } else {
-                shell_println!("Usage: colorscheme get <role>");
+                shell_println!("Usage: uischeme get <role>");
                 set_exit(1);
             }
         }
@@ -87725,7 +87901,7 @@ fn cmd_uicolorscheme(args: &str) {
             shell_println!("Color scheme subsystem initialised.");
         }
         _ => {
-            shell_println!("Usage: colorscheme <subcommand>");
+            shell_println!("Usage: uischeme <subcommand>");
             shell_println!("  show / active         Show active scheme");
             shell_println!("  list                  List all schemes");
             shell_println!("  set <id>              Set active scheme");
@@ -88490,8 +88666,13 @@ fn cmd_filetransfer(args: &str) {
             }
         }
         "discover" => {
-            let name = parts.get(1).copied().unwrap_or("Device");
-            let dtype = parts.get(2).copied().unwrap_or("unknown");
+            let name = parts.get(1).copied().unwrap_or("");
+            let dtype = parts.get(2).copied().unwrap_or("");
+            if name.is_empty() || dtype.is_empty() {
+                shell_println!("Usage: filetransfer discover <n> <t> [tr]");
+                set_exit(1);
+                return;
+            }
             let transport = parts
                 .get(3)
                 .and_then(|s| parse_transport(s))
@@ -88705,7 +88886,12 @@ fn cmd_startupopt(args: &str) {
             }
         }
         "begin" => {
-            let name = parts.get(1).copied().unwrap_or("stage");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: startupopt begin <name> [cat]");
+                set_exit(1);
+                return;
+            }
             let cat = parts
                 .get(2)
                 .and_then(|s| parse_stage_category(s))
@@ -89241,8 +89427,13 @@ fn cmd_devpair(args: &str) {
             }
         },
         "discover" => {
-            let name = parts.get(1).copied().unwrap_or("Device");
-            let addr = parts.get(2).copied().unwrap_or("00:00:00:00:00:00");
+            let name = parts.get(1).copied().unwrap_or("");
+            let addr = parts.get(2).copied().unwrap_or("");
+            if name.is_empty() || addr.is_empty() {
+                shell_println!("Usage: devpair discover <n> <a> [t]");
+                set_exit(1);
+                return;
+            }
             let dtype = parts
                 .get(3)
                 .and_then(|s| parse_pair_device_type(s))
@@ -89448,8 +89639,13 @@ fn cmd_notifgroup(args: &str) {
             }
         }
         "add" => {
-            let app = parts.get(1).copied().unwrap_or("app");
-            let title = parts.get(2).copied().unwrap_or("Notification");
+            let app = parts.get(1).copied().unwrap_or("");
+            let title = parts.get(2).copied().unwrap_or("");
+            if app.is_empty() || title.is_empty() {
+                shell_println!("Usage: notifgroup add <app> <title>");
+                set_exit(1);
+                return;
+            }
             let body = if parts.len() > 3 {
                 parts[3..].join(" ")
             } else {
@@ -89713,7 +89909,12 @@ fn cmd_playmedia(args: &str) {
             }
         }
         "register" => {
-            let app = parts.get(1).copied().unwrap_or("app");
+            let app = parts.get(1).copied().unwrap_or("");
+            if app.is_empty() {
+                shell_println!("Usage: playmedia register <app> [type]");
+                set_exit(1);
+                return;
+            }
             let mtype = parts
                 .get(2)
                 .map(|s| match s.to_lowercase().as_str() {
@@ -89735,7 +89936,12 @@ fn cmd_playmedia(args: &str) {
         }
         "track" => {
             let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
-            let title = parts.get(2).copied().unwrap_or("Track");
+            let title = parts.get(2).copied().unwrap_or("");
+            if title.is_empty() {
+                shell_println!("Usage: playmedia track <session_id> <title> [artist]");
+                set_exit(1);
+                return;
+            }
             let artist = parts.get(3).copied().unwrap_or("Artist");
             if let Some(id) = id {
                 match playmedia::set_track(id, title, artist, "", 300000) {
@@ -94429,7 +94635,12 @@ fn cmd_filerules(args: &str) {
             let filename = parts[1];
             let ext = parts[2];
             let size: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let dir = parts.get(4).copied().unwrap_or("/");
+            let dir = parts.get(4).copied().unwrap_or("");
+            if dir.is_empty() {
+                shell_println!("Usage: filerules eval <filename> <ext> <size> <dir>");
+                set_exit(1);
+                return;
+            }
             match filerules::evaluate(filename, ext, size, dir) {
                 Ok(matches) => {
                     if matches.is_empty() {
@@ -97936,7 +98147,7 @@ fn cmd_cfreq(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         _ => {
-            shell_println!("Usage: cpufreq [list|governor|boost|stats]");
+            shell_println!("Usage: cfreq [list|governor|boost|stats]");
             set_exit(1);
         }
     }
@@ -98035,7 +98246,7 @@ fn cmd_therm(args: &str) {
                     set_exit(1);
                 }
             } else {
-                shell_println!("Usage: thermal fan <id> <duty%>");
+                shell_println!("Usage: therm fan <id> <duty%>");
                 set_exit(1);
             }
         }
@@ -98049,7 +98260,7 @@ fn cmd_therm(args: &str) {
             shell_println!("  Ops:             {}", ops);
         }
         _ => {
-            shell_println!("Usage: thermal [zones|fans|fan|stats]");
+            shell_println!("Usage: therm [zones|fans|fan|stats]");
             set_exit(1);
         }
     }
@@ -105637,7 +105848,12 @@ fn cmd_kthread(args: &str) {
             shell_println!("kthread: initialized");
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("unnamed");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: kthread register <name> [cpu]");
+                set_exit(1);
+                return;
+            }
             // `[cpu]` is documented optional, so an omission still pins the
             // thread to CPU 0; only an unreadable word is refused.  It matters
             // because the CPU is recorded on the thread and reported back --
@@ -106364,7 +106580,12 @@ fn cmd_bpfstat(args: &str) {
             shell_println!("bpfstat: initialized");
         }
         "load" => {
-            let name = parts.get(1).copied().unwrap_or("unnamed");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: bpfstat load <name> [type] [insns]");
+                set_exit(1);
+                return;
+            }
             let pt = match parts.get(2).copied().unwrap_or("kprobe") {
                 "socket" | "socket_filter" => bpfstat::BpfProgType::SocketFilter,
                 "tracepoint" | "tp" => bpfstat::BpfProgType::TracePoint,
@@ -106815,7 +107036,12 @@ fn cmd_ksmstat(args: &str) {
             let Some(pid) = required_num::<u32>(&parts, 1, "ksmstat", sub, "process id") else {
                 return;
             };
-            let name = parts.get(2).copied().unwrap_or("unnamed");
+            let name = parts.get(2).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: ksmstat register <pid> <name>");
+                set_exit(1);
+                return;
+            }
             match ksmstat::register_process(pid, name) {
                 Ok(()) => shell_println!("ksmstat: registered pid {} '{}'", pid, name),
                 Err(e) => {
@@ -106912,7 +107138,12 @@ fn cmd_clocksrc(args: &str) {
             shell_println!("clocksrc: initialized");
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("unnamed");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: clocksrc register <name> [freq] [rating]");
+                set_exit(1);
+                return;
+            }
             let freq = parts
                 .get(2)
                 .and_then(|s| s.parse::<u64>().ok())
@@ -107575,7 +107806,12 @@ fn cmd_netqueue(args: &str) {
             shell_println!("netqueue: initialized");
         }
         "register" => {
-            let iface = parts.get(1).copied().unwrap_or("eth0");
+            let iface = parts.get(1).copied().unwrap_or("");
+            if iface.is_empty() {
+                shell_println!("Usage: netqueue register <iface> <qid> [rx|tx]");
+                set_exit(1);
+                return;
+            }
             // Both usage lines write this `<qid>`, so it is required.  Queue 0
             // exists on every interface, so the guess always landed on a real
             // queue: a mistyped id was not a failure, it was a different
@@ -107884,7 +108120,12 @@ fn cmd_devfreq(args: &str) {
             shell_println!("devfreq: initialized");
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("unnamed");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: devfreq register <name> [min_khz] [max_khz]");
+                set_exit(1);
+                return;
+            }
             // The success line prints the range, so a guessed bound looks like
             // a report of what was asked for: `devfreq register gpu 3OO000
             // 1500000` printed `100000-1500000 kHz` and nothing said the
@@ -108447,7 +108688,12 @@ fn cmd_msivec(args: &str) {
             shell_println!("msivec: initialized");
         }
         "alloc" => {
-            let dev = parts.get(1).copied().unwrap_or("dev0");
+            let dev = parts.get(1).copied().unwrap_or("");
+            if dev.is_empty() {
+                shell_println!("Usage: msivec alloc <dev> <msi|msix> <count> [cpu]");
+                set_exit(1);
+                return;
+            }
             let mtype = match parts.get(2).copied().unwrap_or("msix") {
                 "msi" => msivec::MsiType::Msi,
                 _ => msivec::MsiType::MsiX,
@@ -108562,7 +108808,12 @@ fn cmd_cpuset(args: &str) {
         // widening case -- an unreadable mask became 0xF, four CPUs the caller
         // never asked for.
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("set0");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: cpuset create <name> [cpu_hex] [mem_hex] [excl]");
+                set_exit(1);
+                return;
+            }
             let Some(cpu_mask) = optional_hex(&parts, 2, "cpuset", sub, "CPU mask", 0xF) else {
                 return;
             };
@@ -108678,7 +108929,12 @@ fn cmd_ftrace(args: &str) {
             shell_println!("ftrace: initialized");
         }
         "add" => {
-            let func = parts.get(1).copied().unwrap_or("unknown");
+            let func = parts.get(1).copied().unwrap_or("");
+            if func.is_empty() {
+                shell_println!("Usage: ftrace add <func> [func|ret|tp|dyn]");
+                set_exit(1);
+                return;
+            }
             let kind = match parts.get(2).copied().unwrap_or("func") {
                 "ret" => ftrace::ProbeKind::ReturnProbe,
                 "tp" => ftrace::ProbeKind::TracePoint,
@@ -109051,7 +109307,12 @@ fn cmd_netlat(args: &str) {
             shell_println!("netlat: initialized");
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("eth0");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: netlat register <iface>");
+                set_exit(1);
+                return;
+            }
             match netlat::register_iface(name) {
                 Ok(()) => shell_println!("netlat: registered {}", name),
                 Err(e) => {
@@ -109061,7 +109322,12 @@ fn cmd_netlat(args: &str) {
             }
         }
         "rtt" => {
-            let name = parts.get(1).copied().unwrap_or("eth0");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: netlat rtt <iface> <tcp|udp|icmp> <ns>");
+                set_exit(1);
+                return;
+            }
             let proto = match parts.get(2).copied().unwrap_or("tcp") {
                 "udp" => netlat::Protocol::Udp,
                 "icmp" => netlat::Protocol::Icmp,
@@ -109091,7 +109357,12 @@ fn cmd_netlat(args: &str) {
             }
         }
         "proc" => {
-            let name = parts.get(1).copied().unwrap_or("eth0");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: netlat proc <iface> <ns>");
+                set_exit(1);
+                return;
+            }
             // The same fabricated-sample shape, for per-packet processing time.
             // Absence still means 5us.
             let Some(ns) =
@@ -109175,7 +109446,12 @@ fn cmd_diskstat(args: &str) {
             shell_println!("diskstat: initialized");
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("sdb");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: diskstat register <name>");
+                set_exit(1);
+                return;
+            }
             match diskstat::register(name) {
                 Ok(()) => shell_println!("diskstat: registered {}", name),
                 Err(e) => {
@@ -109438,7 +109714,12 @@ fn cmd_ttystat(args: &str) {
             shell_println!("ttystat: initialized");
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("tty1");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: ttystat register <name> <console|serial|pty|vt> [bufsize]");
+                set_exit(1);
+                return;
+            }
             let ttype = match parts.get(2).copied().unwrap_or("console") {
                 "serial" => ttystat::TtyType::Serial,
                 "pty" => ttystat::TtyType::Pty,
@@ -109803,7 +110084,12 @@ fn cmd_ratestat(args: &str) {
             shell_println!("ratestat: initialized");
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("limiter");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: ratestat register <name> <rate/s> <burst>");
+                set_exit(1);
+                return;
+            }
             let rate = parts
                 .get(2)
                 .and_then(|s| s.parse::<u32>().ok())
@@ -110022,7 +110308,14 @@ fn cmd_vmzone(args: &str) {
             shell_println!("vmzone: initialized");
         }
         "register" => {
-            let name = parts.get(1).copied().unwrap_or("Zone0");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!(
+                    "Usage: vmzone register <name> <dma|dma32|normal|highmem|movable> <pages>"
+                );
+                set_exit(1);
+                return;
+            }
             let ztype = match parts.get(2).copied().unwrap_or("normal") {
                 "dma" => vmzone::ZoneType::Dma,
                 "dma32" => vmzone::ZoneType::Dma32,
@@ -112301,7 +112594,12 @@ fn cmd_preview(args: &str) {
             }
         }
         "dir" => {
-            let dir_arg = parts.get(1).copied().unwrap_or(".");
+            let dir_arg = parts.get(1).copied().unwrap_or("");
+            if dir_arg.is_empty() {
+                shell_println!("Usage: preview dir <path> [size]");
+                set_exit(1);
+                return;
+            }
             let dir = resolve_path(dir_arg);
             let size = match parts.get(2).copied() {
                 Some("small") | Some("s") => preview::PreviewSize::Small,
@@ -112539,7 +112837,12 @@ fn cmd_columnview(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "compute" | "dir" => {
-            let dir_arg = parts.get(1).copied().unwrap_or(".");
+            let dir_arg = parts.get(1).copied().unwrap_or("");
+            if dir_arg.is_empty() {
+                shell_println!("Usage: columnview compute <dir>");
+                set_exit(1);
+                return;
+            }
             let dir = resolve_path(dir_arg);
             match columnview::compute_columns(&dir) {
                 Ok(cols) => {
@@ -112674,7 +112977,12 @@ fn cmd_pathbar(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "breadcrumbs" | "crumbs" => {
-            let path_arg = parts.get(1).copied().unwrap_or(".");
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() {
+                shell_println!("Usage: pathbar breadcrumbs <path>");
+                set_exit(1);
+                return;
+            }
             let path = resolve_path(path_arg);
             let crumbs = pathbar::parse_breadcrumbs(&path);
             for c in &crumbs {
@@ -112800,7 +113108,12 @@ fn cmd_viewstate(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "get" => {
-            let path_arg = parts.get(1).copied().unwrap_or(".");
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() {
+                shell_println!("Usage: viewstate get <path>");
+                set_exit(1);
+                return;
+            }
             let path = resolve_path(path_arg);
             let settings = viewstate::get(&path);
             shell_println!("View settings for {}:", path.display());
@@ -112833,7 +113146,12 @@ fn cmd_viewstate(args: &str) {
                 return;
             }
             let path = resolve_path(parts.get(1).copied().unwrap_or(""));
-            let mode_str = parts.get(2).copied().unwrap_or("details");
+            let mode_str = parts.get(2).copied().unwrap_or("");
+            if mode_str.is_empty() {
+                shell_println!("Usage: viewstate set <path> <mode> [sort_col] [asc|desc]");
+                set_exit(1);
+                return;
+            }
             let mode = viewstate::ViewMode::from_str(mode_str);
             match mode {
                 Some(m) => {
@@ -116319,7 +116637,7 @@ fn cmd_usb(args: &str) {
             );
         }
         _ => {
-            shell_println!("Usage: usb [status|ports|devices|hid|rescan]");
+            shell_println!("Usage: usbdev [status|ports|devices|hid|rescan]");
             shell_println!("  status  - Show USB controller status");
             shell_println!("  ports   - List USB ports and connection status");
             shell_println!("  devices - List enumerated USB devices");
@@ -118046,7 +118364,7 @@ fn cmd_wget(args: &str) {
 
 fn cmd_dns(args: &str) {
     if args.is_empty() {
-        shell_println!("Usage: dns <domain-name>");
+        shell_println!("Usage: nslookup <domain-name>");
         shell_println!("       dns -6 <domain-name>   (AAAA / IPv6)");
         shell_println!("  e.g., dns example.com");
         set_exit(1);
@@ -118057,7 +118375,7 @@ fn cmd_dns(args: &str) {
     let (query_ipv6, name) = if args.starts_with("-6 ") || args.starts_with("-6\t") {
         (true, args[3..].trim())
     } else if args == "-6" {
-        shell_println!("Usage: dns -6 <domain-name>");
+        shell_println!("Usage: nslookup -6 <domain-name>");
         set_exit(1);
         return;
     } else {
@@ -118065,7 +118383,7 @@ fn cmd_dns(args: &str) {
     };
 
     if name.is_empty() {
-        shell_println!("Usage: dns <domain-name>");
+        shell_println!("Usage: nslookup <domain-name>");
         set_exit(1);
         return;
     }
@@ -121396,7 +121714,12 @@ fn cmd_container(args: &str) {
                 // container volume <create|ls|rm|inspect|prune> ... (Docker
                 // `docker volume`): manage named volumes — runtime-owned backing
                 // directories mounted into containers via `-v NAME:/path`.
-                let action = parts.get(1).copied().unwrap_or("ls");
+                let action = parts.get(1).copied().unwrap_or("");
+                if action.is_empty() {
+                    shell_println!("Usage: container volume <create|ls|rm|inspect|prune>");
+                    set_exit(1);
+                    return;
+                }
                 match action {
                     "ls" | "list" => {
                         let names = crate::volume::list();
@@ -124728,7 +125051,7 @@ fn cmd_uname(args: &str) {
         parts.push(alloc::string::String::from(crate::uname::SYSNAME));
     }
     if show_n {
-        parts.push(crate::fs::sysfs::get_hostname());
+        parts.push(crate::fs::nameservice::get_hostname());
     }
     if show_r {
         parts.push(alloc::string::String::from(crate::uname::RELEASE));
@@ -130075,7 +130398,7 @@ fn cmd_hostname(args: &str) {
 
     if name.is_empty() {
         // Show current hostname.
-        shell_println!("{}", crate::fs::sysfs::get_hostname());
+        shell_println!("{}", crate::fs::nameservice::get_hostname());
     } else {
         // Set hostname.
         match crate::fs::Vfs::write_file("/sys/kernel/hostname", name.as_bytes()) {

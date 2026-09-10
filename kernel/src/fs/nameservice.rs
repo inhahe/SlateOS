@@ -159,7 +159,9 @@ pub fn get_hostname() -> String {
 /// [`set_domain`]'s already-permissive empty-string policy.
 pub fn set_hostname(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        if name.len() > 253 {
+        // crate::uname owns this bound; see NODENAME_MAX for why it is 64 and
+        // not the 253 this function used to allow.
+        if name.len() > crate::uname::NODENAME_MAX {
             return Err(KernelError::InvalidArgument);
         }
         state.hostname = String::from(name);

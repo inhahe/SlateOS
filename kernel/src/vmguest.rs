@@ -328,7 +328,7 @@ struct GuestInfoData {
 // There is deliberately no `hostname` field, and no `GuestInfoData::new`.
 //
 // The hostname lives once, in `fs::sysfs` behind `/sys/kernel/hostname`, and
-// is read through `fs::sysfs::get_hostname()` at the moment it is reported.
+// is read through `fs::nameservice::get_hostname()` at the moment it is reported.
 // The field this replaces was a second copy that `init` never populated, so
 // the hostname we told the hypervisor was the empty string on every real
 // boot; the only thing that ever wrote it was this module's own self-test,
@@ -1184,7 +1184,7 @@ pub fn notify_host_shutdown() {
 /// read *before* `STATE` is locked so that this function establishes no lock
 /// ordering between the two.
 pub fn guest_info() -> (String, String, String, u32, u64, String, u64) {
-    let hostname = crate::fs::sysfs::get_hostname();
+    let hostname = crate::fs::nameservice::get_hostname();
     let state = STATE.lock();
     (
         state.guest_info.os_name.clone(),
@@ -1219,7 +1219,7 @@ pub fn stats() -> (bool, &'static str, u32, u32, u64) {
 /// Generate content for `/proc/vmguest`.
 pub fn procfs_content() -> String {
     // Read before locking STATE, for the reason given on `guest_info`.
-    let hostname = crate::fs::sysfs::get_hostname();
+    let hostname = crate::fs::nameservice::get_hostname();
     let state = STATE.lock();
     let mut out = String::with_capacity(1024);
 
@@ -1472,7 +1472,7 @@ fn self_test_inner() {
     // What is worth asserting is the invariant that replaced it: whatever
     // `/sys/kernel/hostname` holds is what leaves this module.  Reading it
     // is also non-destructive, which the old test was not.
-    let system_hostname = crate::fs::sysfs::get_hostname();
+    let system_hostname = crate::fs::nameservice::get_hostname();
     assert!(
         !system_hostname.is_empty(),
         "sysfs falls back to a default, so this is never empty"

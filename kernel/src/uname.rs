@@ -72,6 +72,21 @@ pub const VERSION: &str = "#1 SMP";
 /// `uname(2)` `machine`. The only target this kernel builds for.
 pub const MACHINE: &str = "x86_64";
 
+/// Longest hostname or domain name the kernel will store, in bytes.
+///
+/// 64 because that is what `utsname.nodename` can return: a name longer than
+/// this is settable by one route and unreportable by every other, which is the
+/// same one-value-many-publishers defect this module was written to end, only
+/// expressed as a length instead of a string.
+///
+/// It replaces two disagreeing bounds. `fs::nameservice` capped at 253, the DNS
+/// limit for a fully-qualified name, and `SYS_HOSTNAME_SET` capped at 64, the
+/// Linux `__NEW_UTS_LEN`. A 100-byte name was therefore accepted through the
+/// filesystem and refused through the syscall, and once stored it could not be
+/// read back by `gethostname` or `uname -n`. 253 is the right bound for a name
+/// being RESOLVED, which is a different question from what this host is called.
+pub const NODENAME_MAX: usize = 64;
+
 /// The operating system as distinct from the kernel ABI it presents — GNU
 /// `uname -o`. Not a `struct utsname` field on Linux either; see the module docs
 /// for why it is one word.

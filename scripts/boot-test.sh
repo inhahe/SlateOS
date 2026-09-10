@@ -4341,6 +4341,179 @@ check_unreachable_mutators() {
 
 check_unreachable_mutators
 
+# An operand the user did not give, silently becoming a number.
+#
+# Sibling of `check-option-refusal`, and deliberately a separate gate with a
+# separate ledger rather than a second rule inside it. That checker counts a
+# guessed value surviving a FAILED parse; this one counts a numeric default
+# supplied for an ABSENT operand, which then parses perfectly. `filevault unlock`
+# with nothing after it attempted to unlock vault 0 with an empty password --
+# refusing the unreadable word correctly the whole time, which is why the older
+# checker cannot see it.
+#
+# It exists because the population could not be counted. Three hand measurements
+# gave 14, 31 and 37, two of which reached known-issues.md as though they answered
+# the same question; the code-defined answer is 38 across 13 functions. A backlog
+# that cannot be counted the same way twice cannot be burned down, so the counter
+# came before the sweep.
+#
+# Folding it into one ledger would have made "78 of 800" ambiguous, and that number
+# is quoted.
+check_absent_operand_default() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Absent-operand-default check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    if ! run_checker check-absent-operand-default-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-absent-operand-default.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The absent-operand analyser fails its own" >&2
+        echo "cases.  Those cases pin WHAT COUNTS rather than how many there are," >&2
+        echo "which is the only part that must not drift: the count is the tree's" >&2
+        echo "business and changes with every batch." >&2
+        return 1
+    fi
+
+    echo "=== Checking that a missing operand does not become a number ==="
+    if run_checker check-absent-operand-default "$py" \
+            "$PROJECT_ROOT/scripts/check-absent-operand-default.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Either a new site supplies a numeric" >&2
+    echo "default for an operand the user did not give, or a ledger entry" >&2
+    echo "claims more sites than exist." >&2
+    echo "" >&2
+    echo "\`parts.get(n)\` returning None means \"you did not say\", and the" >&2
+    echo "usage line is the answer to it.  That is a different question from" >&2
+    echo "\"you said something I could not read\", which the surrounding match" >&2
+    echo "already answers by name -- which is exactly why this class hid behind" >&2
+    echo "a correct-looking refusal." >&2
+    echo "" >&2
+    echo "Do NOT raise a count to make this pass.  The ledger only shrinks." >&2
+    exit 1
+}
+
+check_absent_operand_default
+
+# A file read whose failure is indistinguishable from an empty file.
+#
+# Lane B's checker, wired here by lane A because `scripts/boot-test.sh` is lane
+# A's file and `check-gates-are-wired` was refusing the build without it. It was
+# named only in `scripts/pre-boot.py` -- the forty-minute local pre-flight nobody
+# is obliged to run -- which is exactly the case that meta-gate exists to catch:
+# a checker that looks enforced and is not.
+#
+# Verified before wiring rather than after, because running another lane's gate
+# can redden a tree they have not seen: `--check` exits 0 here with "17 pinned
+# site(s), none new", and its own self-test passes. If it ever does fail on lane
+# A's or lane C's tree, the finding is real -- the shape it counts is a defect
+# anywhere -- but the fix belongs to whoever owns the file.
+#
+# Third spelling this week of one defect, and the sibling of the gate directly
+# above. For a value that guards a decision, "I do not know" and "there is
+# nothing there" must not be the same:
+#
+#   check-read-defaults        a read that FAILED           read_to_string().unwrap_or_default()
+#   check-option-refusal       a word that could not PARSE  §600's guessed value
+#   check-absent-operand-...   a word that was never SAID   a numeric default for a missing operand
+#
+# All three were written independently several times each by the lanes that own
+# them, with the rule already stated in three documents. That is the argument for
+# a checker over a rule.
+check_read_defaults() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Read-default check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    if ! run_checker check-read-defaults-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-read-defaults.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-read-defaults.py fails its own" >&2
+        echo "cases, so its verdict on the tree means nothing." >&2
+        return 1
+    fi
+
+    echo "=== Checking that a failed read is not read as an empty file ==="
+    if run_checker check-read-defaults "$py" \
+            "$PROJECT_ROOT/scripts/check-read-defaults.py" --check; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A read_to_string(...).unwrap_or_default()" >&2
+    echo "appeared that the baseline does not pin.  That call collapses three" >&2
+    echo "situations into one empty string: the file is empty, the file is" >&2
+    echo "absent, and the file could not be read.  The third is the defect --" >&2
+    echo "for a value that guards a decision, \"I do not know\" must not look" >&2
+    echo "like \"there is nothing there\"." >&2
+    echo "" >&2
+    echo "The baseline is scripts/read-defaults-baseline.txt and it only shrinks." >&2
+    exit 1
+}
+
+check_read_defaults
+
+# A usage line that names a word running a different command.
+#
+# cmd_bluetooth printed `Usage: bt pair <address>` nine times, and `bt` runs
+# cmd_backtrace. So the operator who typed what they were told got a stack trace
+# from an unrelated subsystem -- which is worse than a name that does not exist,
+# because a nonexistent name errors and a wrong one answers.
+#
+# Decidable with no judgment: one side is the printed string, the other is the
+# `"word" => cmd_foo(args)` arm, both in kshell.rs. The gate has no opinion about
+# which name ought to be canonical, only that the help and the dispatch table
+# agree. No baseline: the tree is at zero and this is where it stays.
+check_usage_names() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Usage-name check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    if ! run_checker check-usage-names-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-usage-names-reach-the-command.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-usage-names-reach-the-command.py" >&2
+        echo "fails its own cases, so its verdict on the tree means nothing." >&2
+        return 1
+    fi
+
+    echo "=== Checking that a usage line names a command it can reach ==="
+    if run_checker check-usage-names "$py" \
+            "$PROJECT_ROOT/scripts/check-usage-names-reach-the-command.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A command prints a usage line naming a word" >&2
+    echo "that dispatches somewhere else.  Fix the HELP to print a word that" >&2
+    echo "reaches this command, or fix the DISPATCH so the printed word arrives" >&2
+    echo "here.  The shell builtin type was the second kind: it printed" >&2
+    echo "Usage: type while the word type was an alias of cat." >&2
+    exit 1
+}
+
+check_usage_names
+
 # Keep every path-taking VFS entry point behind the one permission gate.
 #
 # This guards the failure mode that no runtime test can see, because both

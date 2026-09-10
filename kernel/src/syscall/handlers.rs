@@ -6994,7 +6994,7 @@ pub fn sys_signal_altstack(args: &SyscallArgs) -> SyscallResult {
 /// already caps at 64, and a native caller able to set a name that a
 /// Linux-ABI caller then cannot is a disagreement between two paths onto one
 /// value. That is the class of defect this syscall pair was added to end.
-const UTS_NAME_MAX: usize = 64;
+use crate::uname::NODENAME_MAX as UTS_NAME_MAX;
 
 /// Read a UTS name out of user memory and hand it to `apply`.
 ///

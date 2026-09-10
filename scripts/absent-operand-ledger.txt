@@ -1,0 +1,59 @@
+# The counted `absent-operand-becomes-a-number` backlog for
+# scripts/check-absent-operand-default.py.
+#
+# Each line is `<enclosing function> <count>`: that many places inside that
+# function supply a numeric default for an operand the user did not give, so a
+# missing id becomes a real one. See that script's header for why the
+# definition lives in code and the count lives here.
+#
+# The number may only go DOWN. An entry claiming more sites than exist fails
+# too, because that is how a fixed site stays counted.
+# ONE exception, and it must be auditable. The number may rise when the RULE
+# changes -- a better question finds sites that were always there. When that
+# happens the re-pin belongs in the same commit as the rule change, so the
+# diff shows a new detector next to the new total. A re-pin on its own, with
+# no rule change beside it, is the ratchet being filed off.
+#
+#
+# An `allow <function> <literal>` line exempts one (function, default) pair.
+# The criterion is the command's OWN printed synopsis and nothing else: square
+# brackets mean the operand may be omitted, so a default for it is documented
+# behaviour. `sharesheet` prints `history [count]`, so defaulting to 10 rows is
+# correct. Each allow line below quotes the help text that licenses it.
+#
+# Do not bless by magnitude. The first version of this file did -- a default
+# that names an object is 0 or 1, one that names an amount is larger -- and it
+# blessed three defects: screensaver prints `timeout <id> <s>`, sysanimations
+# prints `speed <percent>`, filevault prints `autolock <id> <seconds>`. Angle
+# brackets, all three. The command tells the operator the operand is required,
+# the operator omits it, and the command silently succeeds on a value it chose.
+#
+# So the floor of this ledger is NOT zero, and a reader who drives it to zero
+# deletes three working defaults.
+#
+# These lines say nothing about the other defect on the same source line. Each
+# allowed site also writes `.parse().unwrap_or(N)`, replacing a word it could
+# not read with a guess -- design-decisions.md 600's shape, counted separately
+# in scripts/option-refusal-ledger.txt, where all three functions already
+# appear. Blessed here means blessed for the absent-operand question only.
+#
+allow cmd_sharesheet 10 # its own help prints `history [count]` -- square brackets
+allow cmd_apppermissions 10 # its own help prints `log [count]` -- square brackets
+allow cmd_udp6 5000 # its own help prints `listen <port> [timeout_ms]` -- square
+
+cmd_audioeq 6
+cmd_filevault 4
+cmd_gamemode 1
+cmd_kbshortcuts 3
+cmd_mousegestures 1
+cmd_netdiag 3
+cmd_netprofile 5
+cmd_peninput 1
+cmd_screensaver 5
+cmd_sharesheet 2
+cmd_surroundsound 5
+cmd_sysanimations 1
+cmd_udp6 1
+cmd_vmfrag 1
+cmd_volumeosd 1
+cmd_wintiling 1

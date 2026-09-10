@@ -442,6 +442,12 @@ function renderFullPages() {
     'Two things are easiest to judge here and nowhere else: the shaded column puts <b>five</b> different greys ' +
     'on screen at once in a single window, and in the bordered column the accent has to carry selection by ' +
     'itself &mdash; which is why the selected row and nav item are outlined in it rather than filled.' +
+    '<br><br><b>Which of these are drawn from shipped code.</b> The settings window and the context menu are: ' +
+    'the row fills, the menu panel and its hovered row all follow what <code>apps/settings</code> and ' +
+    '<code>gui/desktop/src/context_ext.rs</code> actually do today. The <b>file manager is illustrative</b> ' +
+    '&mdash; the file explorer is on the roadmap and not built yet, so its list follows the settings ' +
+    'convention as the most likely one rather than a real one. The dialog and notification are shipped ' +
+    'shapes with illustrative content.' +
     '<br><br><b>Why the menu looks lighter than the settings rows.</b> It is not an inconsistency in this page: ' +
     'a menu panel is <code>base</code>, the same colour as the page, and only its <em>hovered</em> row is ' +
     'filled. A settings page fills <em>every</em> row at <code>surface0</code>, three rungs down. So a menu is ' +

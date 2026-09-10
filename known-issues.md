@@ -128354,7 +128354,31 @@ the hostname round-trip can be tested without the grant lane A added for a
 fixture. The general risk is for the next right, and it scales with how privileged
 that right is.
 
-## TD-A-A-FIXTURE-THAT-WAS-NEVER-BUILT-IS-INVISIBLE-TO-THE-IMAGE-CHECK (lane A, 2026-09-10) — **open**
+## TD-A-A-FIXTURE-THAT-WAS-NEVER-BUILT-IS-INVISIBLE-TO-THE-IMAGE-CHECK (lane A, 2026-09-10)
+
+**Status: FIXED the same day, by lane B, in `scripts/ctest-fixtures.py`.**
+`cmd_image_check` now calls `_unbuilt_recipes()` and refuses when a recipe has
+a `build.py` and no `.elf`, before the hash comparison, with the two-step
+remedy in the right order (build, then repack) — a message naming only the
+repack would send the reader to a script that refuses.
+
+Verified rather than assumed: a synthetic `services/ctest-zzsynthetic/` holding
+only a `build.py` makes it exit 1 with
+`services/ctest-zzsynthetic: has a build.py and no .elf`, and the tree was left
+clean afterwards.
+
+**A note on how this entry was nearly reimplemented.** Lane A filed it, sent
+lane B a notice describing the mechanism, merged `origin/main` — which brought
+their fix — and then, an hour later, began writing the same fix again from this
+entry without re-reading the file. The duplicate was caught only because the
+anchor for the edit no longer matched, and the block above it turned out to say
+*"it happened on 2026-09-10 and cost a boot test its meaning"*.
+
+That is worth recording next to the defect, because it is the same shape: a
+note is a claim about the tree at the moment it was written, and acting on the
+note instead of the tree is how a fixed thing gets fixed twice — or, in the
+other direction, how a fixed thing stays filed as open. Both happened in this
+file today.
 
 **In short:** a ring-3 test fixture can arrive in the tree, never be compiled on
 this machine, and the boot test will pass without ever running it — reporting

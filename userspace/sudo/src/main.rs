@@ -3312,6 +3312,37 @@ fn run_sudoedit(files: &[OsString]) -> i32 {
 }
 
 /// Main entry point for the `visudo` personality.
+/// The text `visudo` should open in the editor, or why it will not open one.
+///
+/// # Why a failed read must not be an empty buffer
+///
+/// Whatever the editor saves is written back over this file. So when this was
+/// `fs::read_to_string(file_path).unwrap_or_default()`, a read that failed
+/// handed the user an EMPTY sudoers; they added their rule to it, saved, and
+/// visudo replaced every existing rule with the one line they had just typed.
+///
+/// Two ways to reach it, and the second needs no unusual permissions: reading
+/// as text fails for the whole file if any single byte is not valid UTF-8, so
+/// one accented name in a comment was enough.
+///
+/// `NotFound` is the one failure that legitimately means "empty" -- visudo on
+/// a system with no sudoers file yet is creating one. Everything else is "we
+/// could not read it", which is not the same as "it is blank".
+///
+/// Not-valid-UTF-8 is refused rather than converted, because the rest of this
+/// command works in text: accepting it would rewrite those bytes as something
+/// else the moment the user saved, which is a quieter version of the same
+/// destruction.
+fn starting_buffer(file_path: &Path) -> Result<String, String> {
+    match fs::read(file_path) {
+        Ok(bytes) => String::from_utf8(bytes).map_err(|_| {
+            "holds bytes that are not valid UTF-8, and this editor works in text".to_string()
+        }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("cannot be read: {e}")),
+    }
+}
+
 fn run_visudo(args: &[OsString]) -> i32 {
     let opts = match parse_visudo_args(args) {
         Ok(o) => o,
@@ -3365,9 +3396,20 @@ fn run_visudo(args: &[OsString]) -> i32 {
         }
     };
 
-    // Read current content.
-    let original_content = fs::read_to_string(file_path).unwrap_or_default();
-
+    // Read current content. See `starting_buffer` for why a failed read is
+    // not an empty buffer.
+    let original_content = match starting_buffer(file_path) {
+        Ok(text) => text,
+        Err(why) => {
+            eprintln!("visudo: {}: {why}", quoteaf_os(&opts.file));
+            eprintln!(
+                "visudo: refusing to open an editor -- saving would replace \
+                 the file's contents with whatever you typed"
+            );
+            release_lock(&lock_path);
+            return 1;
+        }
+    };
     // Create temp file.
     let temp_path = PathBuf::from(format!("/tmp/visudo-{}", std::process::id()));
     if let Err(e) = fs::write(&temp_path, &original_content) {
@@ -3596,6 +3638,58 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_existing_file_is_opened_as_itself() {
+        let scratch = scratchdir::ScratchDir::new("visudo-read");
+        let p = scratch.path("sudoers");
+        fs::write(&p, b"root ALL=(ALL) ALL\n").expect("write");
+        assert_eq!(
+            starting_buffer(&p).expect("should read"),
+            "root ALL=(ALL) ALL\n"
+        );
+    }
+
+    /// The one failure that legitimately means "empty": there is no sudoers
+    /// file yet and visudo is creating one.
+    #[test]
+    fn a_missing_file_starts_an_empty_buffer() {
+        let scratch = scratchdir::ScratchDir::new("visudo-absent");
+        assert_eq!(starting_buffer(&scratch.path("nope")).as_deref(), Ok(""));
+    }
+
+    /// THE CASE THIS EXISTS FOR. An unreadable file must not open as blank,
+    /// because saving a blank buffer replaces the file.
+    ///
+    /// A directory where the file belongs produces a read error that is not
+    /// `NotFound`, on every platform, without touching permissions.
+    #[test]
+    fn an_unreadable_file_refuses_rather_than_opening_blank() {
+        let scratch = scratchdir::ScratchDir::new("visudo-blocked");
+        let p = scratch.path("sudoers");
+        fs::create_dir(&p).expect("a directory where the file goes");
+        let got = starting_buffer(&p);
+        assert!(
+            got.is_err(),
+            "an unreadable sudoers must not open as an empty buffer: {got:?}"
+        );
+    }
+
+    /// Non-UTF-8 is refused rather than converted: accepting it would rewrite
+    /// those bytes the moment the user saved. One byte is enough, and it needs
+    /// no unusual permissions -- which is what made the old
+    /// `read_to_string(..).unwrap_or_default()` reachable in ordinary use.
+    #[test]
+    fn a_single_non_utf8_byte_refuses_rather_than_emptying_the_file() {
+        let scratch = scratchdir::ScratchDir::new("visudo-bytes");
+        let p = scratch.path("sudoers");
+        fs::write(&p, b"# admin: Jos\xe9\nroot ALL=(ALL) ALL\n").expect("write");
+        let got = starting_buffer(&p);
+        assert!(
+            got.is_err(),
+            "one latin-1 byte in a comment must not empty the file: {got:?}"
+        );
+    }
 
     // -- Authentication --
     //

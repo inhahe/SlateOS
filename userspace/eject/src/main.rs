@@ -504,5 +504,4 @@ mod tests {
         assert!(!opts.verbose);
         assert!(!opts.no_unmount);
     }
-
 }

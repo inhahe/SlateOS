@@ -804,8 +804,7 @@ mod tests {
     /// reader already expects.
     #[test]
     fn quotes_are_not_interpreted_and_that_is_deliberate() {
-        let (prog, args) =
-            split_exec("/bin/say --msg=\"hello world\"").expect("should split");
+        let (prog, args) = split_exec("/bin/say --msg=\"hello world\"").expect("should split");
         assert_eq!(prog, "/bin/say");
         assert_eq!(args, vec!["--msg=\"hello", "world\""]);
 

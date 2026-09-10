@@ -133,7 +133,10 @@ fn signal_number(spec: &str) -> Option<i32> {
     if let Ok(n) = spec.parse::<i32>() {
         return if (1..=64).contains(&n) { Some(n) } else { None };
     }
-    let name = spec.strip_prefix("SIG").unwrap_or(spec).to_ascii_uppercase();
+    let name = spec
+        .strip_prefix("SIG")
+        .unwrap_or(spec)
+        .to_ascii_uppercase();
     let name = name.strip_prefix("SIG").unwrap_or(&name);
     Some(match name {
         "HUP" => 1,
@@ -197,9 +200,8 @@ fn send_signal(pid: u32, sig: i32) -> Result<(), io::Error> {
     unsafe extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }
-    let target = i32::try_from(pid).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidInput, "pid does not fit in pid_t")
-    })?;
+    let target = i32::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "pid does not fit in pid_t"))?;
     // SAFETY: as above.
     if unsafe { kill(target, sig) } == 0 {
         Ok(())
@@ -741,10 +743,7 @@ fn fuser_main(args: &[String]) -> i32 {
                         }
                     }
                     if let Err(e) = send_signal(proc_match.pid, signum) {
-                        eprintln!(
-                            "fuser: cannot send {signal} to pid {}: {e}",
-                            proc_match.pid
-                        );
+                        eprintln!("fuser: cannot send {signal} to pid {}: {e}", proc_match.pid);
                         kill_failed = true;
                     }
                 }

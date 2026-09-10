@@ -293,7 +293,53 @@ MemAvailable:    8192000 kB
 Buffers:          512000 kB
 Cached:          4096000 kB
 SwapTotal:             0 kB
+Shmem:            131072 kB
+SReclaimable:      65536 kB
 ";
+
+/// `Shmem` and `SReclaimable`, which `free` needs to split used from cache.
+///
+/// Both are published by `gen_meminfo`, so a caller that wants them has a real
+/// number to read rather than a hole.
+#[test]
+fn meminfo_reads_the_two_fields_free_splits_its_columns_by() {
+    let mem = MemInfo::parse(MEMINFO);
+    assert_eq!(mem.shmem_kib, Some(131_072));
+    assert_eq!(mem.sreclaimable_kib, Some(65_536));
+}
+
+/// The four fields this kernel deliberately never emits come back `None`.
+///
+/// `None` here means "not accounted for", not "the read failed", and the
+/// distinction is the point: `kernel/src/fs/procfs.rs` withholds
+/// `Committed_AS` precisely because printing it against an absent
+/// `CommitLimit` would read as a machine committed past its limit. A caller
+/// that turned `None` into `0` would rebuild that.
+#[test]
+fn the_fields_this_kernel_does_not_account_for_are_none_not_zero() {
+    let mem = MemInfo::parse(MEMINFO);
+    assert_eq!(mem.commit_limit_kib, None);
+    assert_eq!(mem.committed_as_kib, None);
+    assert_eq!(mem.high_total_kib, None);
+    assert_eq!(mem.low_total_kib, None);
+}
+
+/// ...but they parse when something does emit them.
+///
+/// The parser reads the format, not this kernel's subset. Asserted so that the
+/// `None`s above are attributed to the producer rather than to a parser that
+/// cannot see the keys at all -- which would look identical from the struct.
+#[test]
+fn the_same_fields_parse_when_they_are_present() {
+    let mem = MemInfo::parse(
+        b"CommitLimit:     8192000 kB\nCommitted_AS:    1024000 kB\n\
+HighTotal:             0 kB\nLowTotal:       16384000 kB\n",
+    );
+    assert_eq!(mem.commit_limit_kib, Some(8_192_000));
+    assert_eq!(mem.committed_as_kib, Some(1_024_000));
+    assert_eq!(mem.high_total_kib, Some(0));
+    assert_eq!(mem.low_total_kib, Some(16_384_000));
+}
 
 #[test]
 fn meminfo_reads_the_five_fields_sysinfo_shows() {

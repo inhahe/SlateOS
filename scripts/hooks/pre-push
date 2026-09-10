@@ -776,7 +776,7 @@ To push anyway:
 
     ALLOW_UNLINTED_CRATE=1 git push \$remote_name ...
 EOF
-    fail=1
+    exit 1
 fi
 
 if [ "$suites_failed" = "1" ]; then
@@ -796,7 +796,7 @@ To push anyway:
 
     ALLOW_TOOLING_SUITE_FAILURE=1 git push $remote_name ...
 EOF
-    fail=1
+    exit 1
 fi
 
 if [ "$readdef_failed" = "1" ]; then

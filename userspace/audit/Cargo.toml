@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS audit utility"
 [dependencies]
+# An absent rule store and an unreadable one are different answers,
+# and `auditctl` rewrites the file it read. See `optionalfile`.
+optionalfile = { path = "../../optionalfile" }
 # autrace names the program it is about to trace, twice; that is a path from
 # argv and may hold any byte but `/`.
 quoting = { path = "../quoting" }

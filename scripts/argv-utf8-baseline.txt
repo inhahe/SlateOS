@@ -51,7 +51,6 @@ userspace/bluetuith-cli/src/main.rs:argv-as-string
 userspace/bluez-tools-cli/src/main.rs:argv-as-string
 userspace/bootctl/src/main.rs:argv-as-string
 userspace/bricscad-cli/src/main.rs:argv-as-string
-userspace/bridge/src/main.rs:argv-as-string
 userspace/brlcad-cli/src/main.rs:argv-as-string
 userspace/btmgmt-cli/src/main.rs:argv-as-string
 userspace/cage-cli/src/main.rs:argv-as-string

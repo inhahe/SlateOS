@@ -669,16 +669,34 @@ mod tests {
         crate::unistd::set_stored_hostname_for_test(b"localhost");
     }
 
+    /// `uname`'s `domainname` is the same value `getdomainname` reports.
+    ///
+    /// It read `uname_domainname_tracks_setdomainname` and drove the change
+    /// through `setdomainname`, which wrote a process-local buffer and
+    /// returned `0` — so the test passed while neither function had anything
+    /// to do with the system's actual domain. The property worth asserting is
+    /// that the two agree, whatever they answer.
     #[test]
-    fn uname_domainname_tracks_setdomainname() {
-        let new_name = b"uname-test-domain";
-        let rc = crate::unistd::setdomainname(new_name.as_ptr(), new_name.len());
-        assert_eq!(rc, 0);
+    fn uname_domainname_is_what_getdomainname_reports() {
+        crate::unistd::set_stored_domain_for_test(b"uname-domain-test");
 
-        assert_eq!(field(&sample().domainname), new_name);
+        // SAFETY: `Utsname` is an all-array `repr(C)` struct, so an all-zero
+        // value is valid.
+        let mut uts = unsafe { mem::zeroed::<Utsname>() };
+        assert_eq!(uname(&raw mut uts), 0);
 
-        let restore = b"(none)";
-        let _ = crate::unistd::setdomainname(restore.as_ptr(), restore.len());
+        let mut dom = [0u8; 256];
+        assert_eq!(crate::unistd::getdomainname(dom.as_mut_ptr(), dom.len()), 0);
+
+        let uts_len = uts.domainname.iter().position(|b| *b == 0).unwrap_or(0);
+        let dom_len = dom.iter().position(|b| *b == 0).unwrap_or(0);
+        assert_eq!(
+            uts.domainname.get(..uts_len),
+            dom.get(..dom_len),
+            "uname's domainname and getdomainname must be one answer, not two"
+        );
+
+        crate::unistd::set_stored_domain_for_test(b"(none)");
     }
 
     // -----------------------------------------------------------------------

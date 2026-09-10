@@ -65280,7 +65280,15 @@ supplies a name, and `sysctl` maps `kernel.hostname` onto the first. Matching
 the existing order was the point -- a libc that agreed with the kernel but not
 with the shell would have replaced one disagreement with another.
 
-**`sethostname` and `setdomainname` return `ENOSYS` now instead of `0`.** They
+**`sethostname` returned `ENOSYS` from that change; `setdomainname` did not,
+for one commit longer.** The commit message said both, and only one was true --
+`setdomainname` kept writing its process-local buffer and returning `0`, and
+`getdomainname` kept reading it back, so the domain-name pair retained the
+entire original defect while the record said it was fixed. Corrected the same
+day, together with the `sethostname` doc comment, which still described the
+storage behaviour the same commit had removed.
+
+Both return `ENOSYS` now instead of `0`. They
 wrote a process-local buffer that `gethostname` then read back, so a program
 could set the hostname, read it, get its own value and conclude it had worked.
 That is worse than `setgroups`' honest refusal in the one way that matters:

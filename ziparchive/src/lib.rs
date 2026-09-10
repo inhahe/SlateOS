@@ -375,6 +375,89 @@ fn parse_zip64_extra(
 // Public API — parse (unzip)
 // ---------------------------------------------------------------------------
 
+/// Walk a central directory and build the entry list.
+///
+/// `cd` is the central directory's bytes and nothing else, so every index here
+/// is relative to its start. That is what lets one walk serve both the
+/// whole-archive API (which hands it a slice of `data`) and a ranged reader
+/// (which has read those bytes and nothing more). The absolute file offsets an
+/// entry carries -- `local_header_offset` above all -- are read out of the
+/// records themselves rather than computed from a position in this buffer,
+/// which is precisely why relocating the buffer changes no result.
+///
+/// Stops early and returns what it has when a record is truncated or does not
+/// begin with the central-directory signature. That is the behaviour this was
+/// lifted from, kept deliberately: a directory ending sooner than its own count
+/// claims yields the entries that were really there rather than an error.
+fn walk_central_directory(cd: &[u8], total_entries: u64) -> Vec<ZipEntry> {
+    let mut entries = Vec::with_capacity(total_entries.min(4096) as usize);
+    let mut off = 0usize;
+
+    for _ in 0..total_entries {
+        if off.wrapping_add(46) > cd.len() {
+            break;
+        }
+        if le_u32(cd, off) != CENTRAL_SIG {
+            break;
+        }
+
+        let flags = le_u16(cd, off.wrapping_add(8));
+        let method = le_u16(cd, off.wrapping_add(10));
+        // The two halves are stored as separate little-endian `u16`s, time
+        // first at +12 and date at +14, and are combined `(date << 16) | time`
+        // -- the order that makes the whole `u32` compare chronologically, and
+        // the layout MS-DOS itself used.  Not decoded here: turning this into a
+        // calendar date needs a calendar, and this crate is `no_std` and has no
+        // business acquiring one.  See `ZipEntry::dos_datetime`.
+        let dos_datetime = (u32::from(le_u16(cd, off.wrapping_add(14))) << 16)
+            | u32::from(le_u16(cd, off.wrapping_add(12)));
+        let crc32 = le_u32(cd, off.wrapping_add(16));
+        let comp32 = le_u32(cd, off.wrapping_add(20));
+        let uncomp32 = le_u32(cd, off.wrapping_add(24));
+        let name_len = le_u16(cd, off.wrapping_add(28)) as usize;
+        let extra_len = le_u16(cd, off.wrapping_add(30)) as usize;
+        let comment_len = le_u16(cd, off.wrapping_add(32)) as usize;
+        let offset32 = le_u32(cd, off.wrapping_add(42));
+
+        let name_start = off.wrapping_add(46);
+        let name_end = name_start.wrapping_add(name_len).min(cd.len());
+        let name_bytes = cd.get(name_start..name_end).unwrap_or(&[]);
+        let name = name_bytes.to_vec();
+
+        // Parse extra field for ZIP64 overrides.
+        let extra_start = name_end;
+        let extra_end = extra_start.wrapping_add(extra_len).min(cd.len());
+        let extra_cd = cd.get(extra_start..extra_end).unwrap_or(&[]);
+
+        let (uncompressed_size, compressed_size, local_header_offset) =
+            parse_zip64_extra(extra_cd, uncomp32, comp32, offset32);
+
+        // The trailing `/` that marks a directory member is a byte of the
+        // stored name, so the test is on bytes rather than on a `char`.
+        let is_dir = name.as_slice().ends_with(b"/");
+
+        entries.push(ZipEntry {
+            name,
+            method,
+            crc32,
+            compressed_size,
+            uncompressed_size,
+            local_header_offset,
+            is_dir,
+            dos_datetime,
+            flags,
+        });
+
+        off = off
+            .wrapping_add(46)
+            .wrapping_add(name_len)
+            .wrapping_add(extra_len)
+            .wrapping_add(comment_len);
+    }
+
+    entries
+}
+
 /// Parse a ZIP archive and return a list of all entries from the central
 /// directory.
 ///
@@ -410,70 +493,10 @@ pub fn parse(data: &[u8]) -> Result<Vec<ZipEntry>> {
 
     let _ = cd_size; // Used for validation in real impls; we walk by sig.
 
-    let mut entries = Vec::with_capacity(total_entries.min(4096) as usize);
-    let mut off = cd_offset as usize;
-
-    for _ in 0..total_entries {
-        if off.wrapping_add(46) > data.len() {
-            break;
-        }
-        if le_u32(data, off) != CENTRAL_SIG {
-            break;
-        }
-
-        let flags = le_u16(data, off.wrapping_add(8));
-        let method = le_u16(data, off.wrapping_add(10));
-        // The two halves are stored as separate little-endian `u16`s, time
-        // first at +12 and date at +14, and are combined `(date << 16) | time`
-        // -- the order that makes the whole `u32` compare chronologically, and
-        // the layout MS-DOS itself used.  Not decoded here: turning this into a
-        // calendar date needs a calendar, and this crate is `no_std` and has no
-        // business acquiring one.  See `ZipEntry::dos_datetime`.
-        let dos_datetime = (u32::from(le_u16(data, off.wrapping_add(14))) << 16)
-            | u32::from(le_u16(data, off.wrapping_add(12)));
-        let crc32 = le_u32(data, off.wrapping_add(16));
-        let comp32 = le_u32(data, off.wrapping_add(20));
-        let uncomp32 = le_u32(data, off.wrapping_add(24));
-        let name_len = le_u16(data, off.wrapping_add(28)) as usize;
-        let extra_len = le_u16(data, off.wrapping_add(30)) as usize;
-        let comment_len = le_u16(data, off.wrapping_add(32)) as usize;
-        let offset32 = le_u32(data, off.wrapping_add(42));
-
-        let name_start = off.wrapping_add(46);
-        let name_end = name_start.wrapping_add(name_len).min(data.len());
-        let name_bytes = data.get(name_start..name_end).unwrap_or(&[]);
-        let name = name_bytes.to_vec();
-
-        // Parse extra field for ZIP64 overrides.
-        let extra_start = name_end;
-        let extra_end = extra_start.wrapping_add(extra_len).min(data.len());
-        let extra_data = data.get(extra_start..extra_end).unwrap_or(&[]);
-
-        let (uncompressed_size, compressed_size, local_header_offset) =
-            parse_zip64_extra(extra_data, uncomp32, comp32, offset32);
-
-        // The trailing `/` that marks a directory member is a byte of the
-        // stored name, so the test is on bytes rather than on a `char`.
-        let is_dir = name.as_slice().ends_with(b"/");
-
-        entries.push(ZipEntry {
-            name,
-            method,
-            crc32,
-            compressed_size,
-            uncompressed_size,
-            local_header_offset,
-            is_dir,
-            dos_datetime,
-            flags,
-        });
-
-        off = off
-            .wrapping_add(46)
-            .wrapping_add(name_len)
-            .wrapping_add(extra_len)
-            .wrapping_add(comment_len);
-    }
+    // The walk is handed the central directory alone, so it indexes from zero
+    // and the same code serves a ranged reader that cannot see the rest.
+    let cd_bytes = data.get(cd_offset as usize..).unwrap_or(&[]);
+    let entries = walk_central_directory(cd_bytes, total_entries);
 
     Ok(entries)
 }
@@ -551,9 +574,17 @@ pub fn extract_entry(data: &[u8], entry: &ZipEntry) -> Result<Vec<u8>> {
 /// # Errors
 ///
 /// As [`extract_entry`].
-pub fn extract_entry_limited(data: &[u8], entry: &ZipEntry, limit: usize) -> Result<Vec<u8>> {
-    let raw = entry_data(data, entry)?;
-
+/// Decompress and verify one entry's compressed bytes.
+///
+/// Split out because this half needs only the member's own bytes, never the
+/// archive they came from — which is what lets a ranged reader, holding one
+/// extent and nothing else, apply exactly the same size and CRC checks as the
+/// whole-archive path. Two callers, one definition of what a valid member is.
+///
+/// `raw` is the stored or deflated bytes; `limit` caps inflation independently
+/// of what the entry declares, so a member claiming more than the caller will
+/// tolerate is refused rather than allocated for.
+fn decompress_checked(raw: &[u8], entry: &ZipEntry, limit: usize) -> Result<Vec<u8>> {
     // The archive's own claim, clamped to what the caller will tolerate.
     let declared = usize::try_from(entry.uncompressed_size).unwrap_or(usize::MAX);
     let cap = declared.min(limit);
@@ -589,6 +620,11 @@ pub fn extract_entry_limited(data: &[u8], entry: &ZipEntry, limit: usize) -> Res
     }
 
     Ok(decompressed)
+}
+
+pub fn extract_entry_limited(data: &[u8], entry: &ZipEntry, limit: usize) -> Result<Vec<u8>> {
+    let raw = entry_data(data, entry)?;
+    decompress_checked(raw, entry, limit)
 }
 
 // ---------------------------------------------------------------------------

@@ -33,41 +33,41 @@ use super::number::{
     SYS_CP_UNREGISTER, SYS_CP_WAIT, SYS_CPU_COUNT, SYS_CPU_TIMES, SYS_DEBUG_PRINT, SYS_DMA_ALLOC,
     SYS_DMA_ATTACH, SYS_DMA_DETACH, SYS_DMA_DOMAIN_CREATE, SYS_DMA_DOMAIN_DESTROY, SYS_DMA_FREE,
     SYS_DMA_MAP, SYS_DMA_UNMAP, SYS_DNS_CACHE_STATS, SYS_DNS_RESOLVE, SYS_DNS_REVERSE_RESOLVE,
-    SYS_DRM_ATOMIC_COMMIT, SYS_DRM_CLOSE, SYS_DRM_CONNECTOR_STATUS, SYS_DRM_CRTC_INFO,
-    SYS_DRM_CURSOR_MOVE, SYS_DRM_CURSOR_SET, SYS_DRM_DISPLAY_SIZE, SYS_DRM_FB_CREATE,
-    SYS_DRM_FB_DESTROY, SYS_DRM_FLUSH_REGION, SYS_DRM_GEM_CREATE, SYS_DRM_GEM_DESTROY,
-    SYS_DRM_GEM_MMAP, SYS_DRM_MODE_GET, SYS_DRM_OPEN, SYS_DRM_PAGE_FLIP, SYS_EVENTFD_CLOSE,
-    SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE, SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT,
-    SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EVENTFD_WRITE_TIMEOUT, SYS_EXIT, SYS_FS_APPEND,
-    SYS_FS_CHECK, SYS_FS_CLOSE, SYS_FS_COPY, SYS_FS_DELETE, SYS_FS_DUP, SYS_FS_FALLOCATE,
-    SYS_FS_FCHMODAT_PINNED, SYS_FS_FLOCK, SYS_FS_FORMAT, SYS_FS_FSTAT, SYS_FS_FSTATAT_PINNED,
-    SYS_FS_FTRUNCATE, SYS_FS_FUNLOCK, SYS_FS_GET_XATTR, SYS_FS_GETDENTS_PINNED, SYS_FS_HANDLE_PATH,
-    SYS_FS_JOURNAL_CURSOR, SYS_FS_JOURNAL_FLUSH, SYS_FS_JOURNAL_READ, SYS_FS_LINK,
-    SYS_FS_LINKAT_PINNED, SYS_FS_LIST_DIR, SYS_FS_LIST_XATTRS, SYS_FS_LSTAT, SYS_FS_METADATA,
-    SYS_FS_MKDIR, SYS_FS_MKDIR_MODE, SYS_FS_MKDIRAT_PINNED, SYS_FS_MOUNT, SYS_FS_OPEN,
-    SYS_FS_OPEN_MODE, SYS_FS_OPENAT2, SYS_FS_READ, SYS_FS_READ_FILE, SYS_FS_READDIR_AT,
-    SYS_FS_READLINK, SYS_FS_REMOVE_XATTR, SYS_FS_RENAME, SYS_FS_RENAMEAT_PINNED, SYS_FS_RMDIR,
-    SYS_FS_SEEK, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE, SYS_FS_SET_ATTR, SYS_FS_SET_OWNER,
-    SYS_FS_SET_PERMS, SYS_FS_SET_TIMES, SYS_FS_SET_XATTR, SYS_FS_STAT, SYS_FS_STATVFS,
-    SYS_FS_SYMLINK, SYS_FS_SYMLINKAT_PINNED, SYS_FS_SYNC, SYS_FS_TMPFILE, SYS_FS_TRASH,
-    SYS_FS_TRASH_EMPTY, SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRIM, SYS_FS_TRUNCATE,
-    SYS_FS_UMOUNT, SYS_FS_UNLINKAT_PINNED, SYS_FS_UTIMENSAT_PINNED, SYS_FS_WATCH_CLOSE,
-    SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ, SYS_FS_WRITE, SYS_FS_WRITE_FILE,
+    SYS_DOMAINNAME_SET, SYS_DRM_ATOMIC_COMMIT, SYS_DRM_CLOSE, SYS_DRM_CONNECTOR_STATUS,
+    SYS_DRM_CRTC_INFO, SYS_DRM_CURSOR_MOVE, SYS_DRM_CURSOR_SET, SYS_DRM_DISPLAY_SIZE,
+    SYS_DRM_FB_CREATE, SYS_DRM_FB_DESTROY, SYS_DRM_FLUSH_REGION, SYS_DRM_GEM_CREATE,
+    SYS_DRM_GEM_DESTROY, SYS_DRM_GEM_MMAP, SYS_DRM_MODE_GET, SYS_DRM_OPEN, SYS_DRM_PAGE_FLIP,
+    SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE, SYS_EVENTFD_READ,
+    SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EVENTFD_WRITE_TIMEOUT,
+    SYS_EXIT, SYS_FS_APPEND, SYS_FS_CHECK, SYS_FS_CLOSE, SYS_FS_COPY, SYS_FS_DELETE, SYS_FS_DUP,
+    SYS_FS_FALLOCATE, SYS_FS_FCHMODAT_PINNED, SYS_FS_FLOCK, SYS_FS_FORMAT, SYS_FS_FSTAT,
+    SYS_FS_FSTATAT_PINNED, SYS_FS_FTRUNCATE, SYS_FS_FUNLOCK, SYS_FS_GET_XATTR,
+    SYS_FS_GETDENTS_PINNED, SYS_FS_HANDLE_PATH, SYS_FS_JOURNAL_CURSOR, SYS_FS_JOURNAL_FLUSH,
+    SYS_FS_JOURNAL_READ, SYS_FS_LINK, SYS_FS_LINKAT_PINNED, SYS_FS_LIST_DIR, SYS_FS_LIST_XATTRS,
+    SYS_FS_LSTAT, SYS_FS_METADATA, SYS_FS_MKDIR, SYS_FS_MKDIR_MODE, SYS_FS_MKDIRAT_PINNED,
+    SYS_FS_MOUNT, SYS_FS_OPEN, SYS_FS_OPEN_MODE, SYS_FS_OPENAT2, SYS_FS_READ, SYS_FS_READ_FILE,
+    SYS_FS_READDIR_AT, SYS_FS_READLINK, SYS_FS_REMOVE_XATTR, SYS_FS_RENAME, SYS_FS_RENAMEAT_PINNED,
+    SYS_FS_RMDIR, SYS_FS_SEEK, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE, SYS_FS_SET_ATTR,
+    SYS_FS_SET_OWNER, SYS_FS_SET_PERMS, SYS_FS_SET_TIMES, SYS_FS_SET_XATTR, SYS_FS_STAT,
+    SYS_FS_STATVFS, SYS_FS_SYMLINK, SYS_FS_SYMLINKAT_PINNED, SYS_FS_SYNC, SYS_FS_TMPFILE,
+    SYS_FS_TRASH, SYS_FS_TRASH_EMPTY, SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRIM,
+    SYS_FS_TRUNCATE, SYS_FS_UMOUNT, SYS_FS_UNLINKAT_PINNED, SYS_FS_UTIMENSAT_PINNED,
+    SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ, SYS_FS_WRITE, SYS_FS_WRITE_FILE,
     SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI, SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE,
     SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI,
-    SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE, SYS_GETRANDOM, SYS_ICMP_PING, SYS_ICMP_PING_WAIT,
-    SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE,
-    SYS_IRQ_WAIT, SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_LOADAVG, SYS_LOG_READ, SYS_MM_GET_PROFILE,
-    SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MPROTECT, SYS_MUNMAP, SYS_NET_FW_ADD_RULE,
-    SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH, SYS_NET_FW_SET_POLICY,
-    SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE, SYS_NET_RAW_OPEN, SYS_NET_RAW_RX,
-    SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST, SYS_NET_STAT,
-    SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE, SYS_NS_QUERY,
-    SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL, SYS_PIPE_CLOSE, SYS_PIPE_CREATE,
-    SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES,
-    SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE,
-    SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT,
-    SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS,
+    SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE, SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING,
+    SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP,
+    SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT, SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_LOADAVG,
+    SYS_LOG_READ, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MPROTECT, SYS_MUNMAP,
+    SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH,
+    SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE, SYS_NET_RAW_OPEN,
+    SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST,
+    SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE,
+    SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL, SYS_PIPE_CLOSE,
+    SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT,
+    SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE,
+    SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_CHROOT,
+    SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS,
     SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID,
     SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID, SYS_PROCESS_IS_READY,
     SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_EXEC_FDS,
@@ -386,6 +386,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_ITIMER_SET as usize] = Some(handlers::sys_itimer_set);
     handlers[SYS_ITIMER_GET as usize] = Some(handlers::sys_itimer_get);
     handlers[SYS_SIGNAL_ALTSTACK as usize] = Some(handlers::sys_signal_altstack);
+    handlers[SYS_HOSTNAME_SET as usize] = Some(handlers::sys_hostname_set);
+    handlers[SYS_DOMAINNAME_SET as usize] = Some(handlers::sys_domainname_set);
 
     // io_ring (260–269).
     handlers[SYS_IO_RING_SETUP as usize] = Some(handlers::sys_io_ring_setup);
@@ -1031,6 +1033,7 @@ pub fn self_test_fs() -> KernelResult<()> {
     test_dispatch_openat2_native()?;
     test_dispatch_chroot()?;
     test_dispatch_itimer()?;
+    test_dispatch_uts_name()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())
@@ -4481,6 +4484,94 @@ fn test_dispatch_chroot() -> KernelResult<()> {
     pcb::set_root_dir(pid, None)?;
 
     serial_println!("[syscall]   Dispatch chroot: OK (set '/', verify, clean)");
+    Ok(())
+}
+
+/// `SYS_HOSTNAME_SET` / `SYS_DOMAINNAME_SET`: registered, and gated before they
+/// look at their arguments.
+///
+/// Needs no process, which is the point. The boot self-tests run with no owning
+/// process, so a test that required one would skip in its entirety and report
+/// nothing -- the mistake the first version of `test_dispatch_itimer` made,
+/// passing a whole boot while proving neither syscall existed.
+///
+/// The probe passes a **deliberately invalid length**, far over the 64-byte
+/// bound, and asserts the answer is *not* `InvalidArgument`. That single
+/// assertion covers two things worth covering:
+///
+/// * the number is registered -- `NoSuchSyscall` would say it is not;
+/// * the permission check runs **before** argument validation. If the order
+///   inverted, an unprivileged caller could probe which lengths the kernel
+///   accepts, and would be told `InvalidArgument` for a call it was never
+///   entitled to make. Linux orders `CAP_SYS_ADMIN` first for the same reason,
+///   and so does our own Linux-ABI `sethostname`.
+///
+/// What this cannot check here: that a *granted* capability actually lets the
+/// name through. That needs a process holding `(Process, SET_HOSTNAME)`, which
+/// nothing grants yet -- the grant side is `init`'s, and lane B has it. Stated
+/// rather than silently absent, because "the gate refuses everyone" and "the
+/// gate works" look identical from a test that only ever gets refused.
+fn test_dispatch_uts_name() -> KernelResult<()> {
+    let bad_arg = SyscallResult::err(KernelError::InvalidArgument).value;
+    let no_such = SyscallResult::err(KernelError::NoSuchSyscall).value;
+    let denied = SyscallResult::err(KernelError::PermissionDenied).value;
+    let no_proc = SyscallResult::err(KernelError::NoSuchProcess).value;
+
+    for (nr, name) in [
+        (SYS_HOSTNAME_SET, "SYS_HOSTNAME_SET"),
+        (SYS_DOMAINNAME_SET, "SYS_DOMAINNAME_SET"),
+    ] {
+        let r = dispatch(
+            nr,
+            &SyscallArgs {
+                arg0: 0x1000,
+                arg1: 9999, // far over UTS_NAME_MAX
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        );
+        if r.value == no_such {
+            serial_println!(
+                "[syscall]   FAIL: {} ({}) is not registered -- dispatch returned \
+                 NoSuchSyscall, so the number was never wired to a handler",
+                name,
+                nr
+            );
+            return Err(KernelError::InternalError);
+        }
+        if r.value == bad_arg {
+            serial_println!(
+                "[syscall]   FAIL: {} ({}) returned InvalidArgument for an \
+                 over-long name, which means it validated the argument BEFORE \
+                 checking the capability. An unprivileged caller must not learn \
+                 which lengths the kernel accepts for a call it may not make",
+                name,
+                nr
+            );
+            return Err(KernelError::InternalError);
+        }
+        if r.value != denied && r.value != no_proc {
+            serial_println!(
+                "[syscall]   FAIL: {} ({}) returned {}, expected PermissionDenied \
+                 ({}) or NoSuchProcess ({}). Anything else means the name was \
+                 accepted from a caller holding no SET_HOSTNAME right",
+                name,
+                nr,
+                r.value,
+                denied,
+                no_proc
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!(
+        "[syscall]   uts name setters (1072/1073 registered; both refuse before \
+         they read the length, so an unprivileged caller learns only that it is \
+         unprivileged): OK"
+    );
     Ok(())
 }
 

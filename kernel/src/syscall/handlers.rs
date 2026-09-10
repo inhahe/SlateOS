@@ -6987,6 +6987,104 @@ pub fn sys_signal_altstack(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// The longest name either setter accepts, matching Linux's `__NEW_UTS_LEN`.
+///
+/// `fs::nameservice::set_hostname` itself allows up to 253 (the DNS limit), so
+/// this is the stricter of the two on purpose: the Linux-ABI `sethostname`
+/// already caps at 64, and a native caller able to set a name that a
+/// Linux-ABI caller then cannot is a disagreement between two paths onto one
+/// value. That is the class of defect this syscall pair was added to end.
+const UTS_NAME_MAX: usize = 64;
+
+/// Read a UTS name out of user memory and hand it to `apply`.
+///
+/// Shared by both setters rather than written twice. The two differ only in
+/// which field they write, and a capability check, a length bound, a null test,
+/// a user copy and a UTF-8 validation copied into two functions is five chances
+/// for the pair to drift apart -- which for a permission check means one of them
+/// silently stops having one.
+fn uts_name_set(
+    args: &SyscallArgs,
+    apply: fn(&str) -> crate::error::KernelResult<()>,
+) -> SyscallResult {
+    use crate::cap::{ResourceType, Rights};
+    use crate::proc::thread;
+
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+
+    // The capability first, so an unprivileged caller cannot learn anything
+    // about argument validity it was not entitled to ask. Same ordering as the
+    // Linux-ABI handler and as Linux itself, where CAP_SYS_ADMIN precedes the
+    // length check.
+    if !pcb::has_capability_type(pid, ResourceType::Process, Rights::SET_HOSTNAME) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+
+    let ptr = args.arg0;
+    let Ok(len) = usize::try_from(args.arg1) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if len > UTS_NAME_MAX {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if ptr == 0 && len != 0 {
+        return SyscallResult::err(KernelError::InvalidAddress);
+    }
+
+    // Length zero clears the name, and reads nothing: a null pointer is legal
+    // here precisely because there is nothing to dereference.
+    if len == 0 {
+        return match apply("") {
+            Ok(()) => SyscallResult::ok(0),
+            Err(e) => SyscallResult::err(e),
+        };
+    }
+
+    let mut buf = [0u8; UTS_NAME_MAX];
+    // SAFETY: `buf` is a live kernel array of UTS_NAME_MAX bytes and `len` is
+    // bounded by UTS_NAME_MAX above, so the destination cannot be overrun;
+    // `copy_from_user` validates that the source is readable user memory and
+    // performs the SMAP dance.
+    let copied = unsafe { crate::mm::user::copy_from_user(ptr, buf.as_mut_ptr(), len) };
+    if let Err(e) = copied {
+        return SyscallResult::err(e);
+    }
+
+    let Some(bytes) = buf.get(..len) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let Ok(name) = core::str::from_utf8(bytes) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+
+    match apply(name) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_HOSTNAME_SET` — set the system host name.
+///
+/// `arg0`: pointer to UTF-8 bytes. `arg1`: length, 0..=64; 0 clears the name.
+///
+/// See `number.rs`'s [`SYS_HOSTNAME_SET`](crate::syscall::number::SYS_HOSTNAME_SET)
+/// for why this exists and why no getter is paired with it.
+pub fn sys_hostname_set(args: &SyscallArgs) -> SyscallResult {
+    crate::fs::nameservice::init_defaults();
+    uts_name_set(args, crate::fs::nameservice::set_hostname)
+}
+
+/// `SYS_DOMAINNAME_SET` — set the system NIS/YP domain name.
+///
+/// `arg0`: pointer to UTF-8 bytes. `arg1`: length, 0..=64; 0 clears the name.
+pub fn sys_domainname_set(args: &SyscallArgs) -> SyscallResult {
+    crate::fs::nameservice::init_defaults();
+    uts_name_set(args, crate::fs::nameservice::set_domain)
+}
+
 /// `SYS_SIGNAL_SEND` — post a signal to a target process.
 ///
 /// `arg0`: target PID. `arg1`: signal number (1..=NSIG).

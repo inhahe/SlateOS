@@ -9157,6 +9157,137 @@ pub fn self_test_ctest_altstack() -> KernelResult<()> {
     Ok(())
 }
 
+/// Run `ctest-hostname` in ring 3, holding the one grant of `SET_HOSTNAME`.
+///
+/// **This rung exists to make the grant exist.** `SYS_HOSTNAME_SET` (1072) and
+/// `SYS_DOMAINNAME_SET` (1073) are gated on `Rights::SET_HOSTNAME`, and until
+/// something is spawned holding that right, nothing in the system can reach the
+/// accept path -- so "the gate refuses everyone" and "the gate works" are
+/// indistinguishable, which is the state design-decisions.md §927 records as
+/// untested.
+///
+/// Lane A owns the grant and did not realise it. The notice announcing 1072/1073
+/// told lane B the grant side was `init/**`; lane B checked and it is not.
+/// `init/` holds `loginmgr` and `servicebus`, neither of which spawns a process,
+/// and `grep -rn 'Rights::|grant' init/` finds nothing. **All 179 capability
+/// grants in this tree are `SpawnOptions` sites in `kernel/**`**, and the
+/// userspace delegation path cannot start the chain because rights may be
+/// narrowed and never widened -- a parent can only pass on what it holds, and
+/// nothing held this. See
+/// `requests/b-a-the-first-grant-of-set-hostname-cannot-come-from-my-lane.md`,
+/// which names the failure mode that was avoided: each lane believing the other
+/// owns the grant, `sethostname` sitting at `PermissionDenied` forever, and both
+/// lanes' notes recording it as done.
+///
+/// **The fixture does not exist yet, and that is deliberate on lane B's part.**
+/// Until the grant landed it could only fail, and a failing `ctest-*` reddens
+/// the boot test for all three lanes. So this rung self-skips loudly via
+/// `pathz_test_elf` -- the skip is reported, not silent -- and becomes a real
+/// test the moment `services/ctest-hostname/` appears. Landing the rung first is
+/// what unblocks them.
+///
+/// **No exit-code hints, on purpose.** The fixture's numbering is lane B's to
+/// choose and it does not exist yet; inventing ranges here would produce hints
+/// that are wrong from the first commit. The altstack rung shipped hints for
+/// checks "1-31" against a fixture that already had 37, and a stale hint is
+/// worse than none because it misdirects confidently. What the rung can say
+/// without guessing is the three failure classes lane B named, and where the
+/// authoritative mapping lives.
+pub fn self_test_ctest_hostname() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+
+    let Some(ctest_elf) = pathz_test_elf("ctest-hostname", "ctest-hostname")? else {
+        return Ok(());
+    };
+
+    serial_println!(
+        "[spawn] Running hostname round-trip (ring 3, C, native ABI) integration test ({} bytes \
+         ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only after the full round trip succeeds.
+    const EXPECTED: i32 = 42;
+
+    // The whole point of this rung. `(Process, SET_HOSTNAME)` is the kernel-side
+    // gate on SYS_HOSTNAME_SET/SYS_DOMAINNAME_SET, and this is the first and
+    // only place in the tree that grants it. Remove this and the syscalls become
+    // unreachable again -- not broken, unreachable, which reads the same from
+    // userspace and is why §927 lists the accept path as untested.
+    let caps = [(ResourceType::Process, 0u64, Rights::SET_HOSTNAME)];
+
+    let argv: &[&[u8]] = &[b"ctest-hostname"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-hostname",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-hostname spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Bounded. The fixture's work is one syscall and one small file read, both
+    // synchronous, so reaching this ceiling means it stopped progressing rather
+    // than that it is waiting on something.
+    let mut became_zombie = false;
+    for _ in 0..8000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-hostname (ring 3) — expected Zombie, got {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-hostname (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {}. Three things fail differently here and the fixture's own source is the \
+             authoritative mapping (services/ctest-hostname/main.c): a REFUSAL means this rung's \
+             (Process, SET_HOSTNAME) grant did not arrive, so check the caps array above; ENOSYS \
+             means libc is still not wired to 1072/1073; and a read-back that succeeded but \
+             returned the OLD name means the kernel accepted the call and dropped it, which is the \
+             one failure the gate cannot catch and this fixture exists for",
+            exit_code,
+            EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   hostname round trip (ring 3, native ABI: sethostname through SYS_HOSTNAME_SET \
+         with a real SET_HOSTNAME grant, read back from /proc/sys/kernel/hostname, and the two \
+         agree): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of **pty-based `^C` signal delivery**.
 ///
 /// The fixture (`services/ctest-pty/`) opens a pty pair, forks, and the parent

@@ -79601,6 +79601,23 @@ quietly changed.
 
 ## TD-A-BOOT-HISTORY-IS-A-TRACKED-FILE-EVERY-BOOT-DIRTIES (lane A, 2026-08-24) — **open**
 
+**Still open 2026-09-10, with fresh first-hand evidence of the smaller cost.**
+In one session lane A ran five boot tests and had to make *two separate commits*
+whose entire content was `bench/boot-history.jsonl` -- one of them literally
+titled "bench: boot-history row from the run that validated 1072/1073" -- plus
+a third where the ledger rode along inside an unrelated kernel commit because it
+was dirty when that commit was made. None of those is the data-loss hazard this
+entry was filed for; they are the everyday version of it, and they are why the
+hazard keeps being reachable: the file's normal state is dirty, so clearing it
+never looks destructive, and committing it is a chore that attaches itself to
+whatever commit happens to be next.
+
+The first proposed fix below -- have `boot-test.sh` commit the row itself, as its
+own single-file commit -- removes all three. Noting also that the harness already
+works around the symptom: `boot-test.sh` excludes this path from its own
+dirty-tree check (`':(exclude)bench/boot-history.jsonl'`), which keeps the run
+from complaining but leaves every other git command exposed.
+
 `bench/boot-history.jsonl` is committed to git *and* appended to by every run of
 `scripts/boot-test.sh`. So a boot always leaves the worktree dirty in a tracked
 file that all three lanes write, and the record of a run exists only in the
@@ -85057,8 +85074,22 @@ feature. It is that a column which should be able to go *down* can only ever go
 data.
 
 Measured by `scripts/find-unreachable-mutators.py` (reporting tool, always exits
-0): **520 mutators with no caller outside their own module, across 222 modules,
-out of 1940 mutators in 428 files** — about 27%. A function called only by its
+0). **First measurement, 2026-08-26: 520 mutators with no caller outside their
+own module, across 222 modules, out of 1940 mutators in 428 files** -- about 27%.
+
+**Re-measured 2026-09-10: 503 across 219 modules, of 1928 in 430 files.** Down
+17, so the work is moving, and the paragraph below this one was still quoting the
+August figure two weeks later. That is worth more than the seventeen: this entry
+is about code a tool can see and nothing calls, and its own headline number had
+drifted from the tool that produces it, because the number lives in prose and the
+tool exits 0 whatever it finds. The heading was right and the body was not, which
+is the harder direction to notice.
+
+The remedy is the one applied to `check-linux-only-capabilities.py` earlier the
+same day: make the count a **ratchet** -- pin it, let it fall, fail when it
+rises -- so the number is asserted by something that runs rather than restated by
+somebody who remembered. A reporting tool that always exits 0 records a fact
+nobody is obliged to keep true. A function called only by its
 own `self_test` counts as unreachable, and that is the important case: the test
 proves the code works, which is exactly why the gap survives review.
 

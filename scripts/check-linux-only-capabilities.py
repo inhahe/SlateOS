@@ -25,10 +25,15 @@ other than what it claims. `--self-test` asserts exactly that.
 
 WHY IT IS A RATCHET AND NOT A GATE
 ----------------------------------
-Fourteen modules are Linux-only as this is written, and thirteen of them are
+Thirteen modules are Linux-only as this is written and all thirteen are
 deliberate -- `ipc::epoll` has no native syscall number on purpose, because this
 system uses channels. Failing outright would block all three lanes over state
 none of them created, and a gate that does that is a gate that gets bypassed.
+
+It was fourteen until 2026-09-10, when the fourteenth -- `fs::nameservice`, pinned
+as an open question rather than a decision -- got the native syscalls it was
+missing. This check is what reported the entry stale, on the same change that
+resolved it, which is the half of a ratchet that is easy to leave out.
 So the known set is pinned in `BASELINE` with a reason each, and this fails when
 the set *changes*:
 
@@ -147,17 +152,17 @@ BASELINE: dict[str, str] = {
     # --- Linux-specific thread machinery ------------------------------------
     "proc::thread_clone": "rseq, robust futex lists and prctl are Linux TLS/futex "
     "machinery with no native equivalent intended",
-    # --- OPEN: this one is a question, not a decision -----------------------
-    # There is NO native syscall for the hostname or domain name at all --
-    # verified by grepping number.rs, where the only matches are the unrelated
-    # SYS_DMA_DOMAIN_CREATE/DESTROY. sethostname, setdomainname and uname reach
-    # fs::nameservice and nothing native does. Whether that is a defect depends
-    # on whether our libc's gethostname goes through a native number or the
-    # Linux table, which is lane B's to answer; asked 2026-09-10. If it is
-    # native, this is instance four with the same signature as setgroups.
-    "fs::nameservice": "OPEN QUESTION to lane B (2026-09-10): no native hostname "
-    "syscall exists at all. Not known to be deliberate -- remove this entry when "
-    "answered, in either direction",
+    # --- RESOLVED 2026-09-10, and this is the entry that proves the ratchet --
+    # fs::nameservice was pinned here as an OPEN QUESTION, not a decision: no
+    # native syscall for the hostname existed at all. Lane B answered that our
+    # libc's sethostname wrote a static mut in the calling program's own
+    # address space and returned 0, so a program could rename the machine, read
+    # the new name back from the same private buffer, and be told it had worked.
+    # SYS_HOSTNAME_SET (1072) and SYS_DOMAINNAME_SET (1073) now front
+    # fs::nameservice natively, so the entry went stale -- and this check is
+    # what said so, on the same change that fixed it. That is the half of a
+    # ratchet nobody remembers to build: an exemption list that cannot notice
+    # when its exemptions stop being true stops describing the tree.
 }
 
 

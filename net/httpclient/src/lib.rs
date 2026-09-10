@@ -19,7 +19,7 @@
 //! above -- "used by the package manager for network fetching" -- is exactly
 //! true, and the split is deliberate rather than unfinished.
 //!
-//! A second caller wanting to fetch something (the DynDNS updater in
+//! A second caller wanting to fetch something (the `DynDNS` updater in
 //! `apps/settings/src/remote.rs` is the next in line) needs a transport of its
 //! own, or `pkg`'s lifted somewhere both can reach. That is the open question,
 //! not the absence of one here.

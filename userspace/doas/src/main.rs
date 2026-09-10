@@ -821,33 +821,32 @@ fn current_epoch_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Determine the current user's UID from the environment or /proc.
-fn current_uid() -> u32 {
-    // Try /proc/self/status first.
-    if let Ok(content) = fs::read_to_string("/proc/self/status") {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:")
-                && let Some(uid_str) = rest.split_whitespace().next()
-                && let Ok(uid) = uid_str.parse::<u32>()
-            {
-                return uid;
-            }
-        }
-    }
-
-    // Fallback: UID env var.
-    env::var("UID")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(u32::MAX)
+/// The caller's uid, as the kernel reports it.
+///
+/// `getuid(2)`, via `authlib::identity::caller_uid`. This used to read
+/// `/proc/self/status` and fall back to the `UID` environment variable; the
+/// call it now makes is better than both, because there is no file to be
+/// missing, no line to be parsed, and no way for the process's parent to
+/// influence the answer.
+fn current_uid() -> Option<u32> {
+    authlib::identity::caller_uid()
 }
 
-/// Get the current user's name, trying USER env var then /etc/passwd lookup.
+/// The caller's name, resolved from their uid in `/etc/passwd`.
+///
+/// # `$USER` is not consulted, and that is the point
+///
+/// This function used to return `$USER` outright when it was set, falling back
+/// to the uid lookup only when it was not. That is the name `doas` matches its
+/// `/etc/doas.conf` rules against -- so the program asked the caller to name
+/// themselves and then looked up what that person was permitted to do.
+/// `USER=<anyone with a permit rule> doas <command>` inherited their rules.
+///
+/// The uid cannot be chosen by the caller, so the name derived from it cannot
+/// either. A uid with no `/etc/passwd` entry yields `None`, and `main` refuses:
+/// a caller `doas` cannot name matches no rule, and the default is deny.
 fn current_username() -> Option<String> {
-    if let Ok(name) = env::var("USER") {
-        return Some(name);
-    }
-    let uid = current_uid();
+    let uid = current_uid()?;
     lookup_passwd_uid(uid).map(|e| e.username)
 }
 
@@ -988,7 +987,10 @@ fn main() {
 
     // -L: clear persist timestamp and exit.
     if args.clear_persist {
-        let uid = current_uid();
+        let Some(uid) = current_uid() else {
+            eprintln!("doas: cannot determine who is running this command");
+            process::exit(1);
+        };
         persist_clear(uid);
         process::exit(0);
     }
@@ -1089,8 +1091,13 @@ fn main() {
         }
     };
 
-    // Authentication.
-    let caller_uid = current_uid();
+    // Authentication. The uid is what the persist timestamp is keyed on, so an
+    // unidentifiable caller must not reach it -- they would all share one entry
+    // and one caller's successful authentication would stand in for another's.
+    let Some(caller_uid) = current_uid() else {
+        eprintln!("doas: cannot determine who is running this command");
+        process::exit(1);
+    };
     if !opts.nopass {
         // Check persist timestamp.
         let already_authed = opts.persist && persist_valid(caller_uid);

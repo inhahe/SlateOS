@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS interactive process viewer"
 [dependencies]
+# The `/proc` readers live in `procinfo` so that this program and
+# `apps/procexplorer` parse the same bytes the same way. See that crate's
+# header and `known-issues.md` ->
+# TD-B-TEN-PROC-PARSERS-IN-USERSPACE-AND-ONE-CRATE.
+procinfo = { path = "../../procinfo" }

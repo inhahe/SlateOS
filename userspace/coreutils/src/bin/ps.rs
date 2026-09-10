@@ -9,7 +9,6 @@
 
 use coreutils::stdfd;
 use std::env;
-use std::fs;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
@@ -48,6 +47,9 @@ struct ProcInfo {
     uid: u32,
     tty: String,
     time_str: String,
+    /// The `-f` command line, already rendered. Empty when `-f` was not asked
+    /// for, which is also when it was never read.
+    cmd: String,
 }
 
 /// The funnel. A diagnostic that could not be written turns the earned
@@ -75,115 +77,83 @@ fn run_main() -> ExitCode {
         let _ = writeln!(out, "{:>5} {:<8} CMD", "PID", "TTY");
     }
 
-    let proc_dir = match fs::read_dir("/proc") {
-        Ok(d) => d,
-        Err(_) => {
-            // No /proc — nothing to show
-            return ExitCode::SUCCESS;
-        }
+    let procfs = procinfo::ProcFs::new();
+    let Ok(pids) = procfs.process_ids() else {
+        // No /proc — nothing to show.
+        return ExitCode::SUCCESS;
     };
 
-    let my_pid = std::process::id();
-
-    for entry_result in proc_dir {
-        let entry = match entry_result {
-            Ok(e) => e,
-            Err(_) => continue,
+    for pid in pids {
+        let Ok(Some(info)) = read_one(&procfs, pid, parsed.full_format) else {
+            // A process that exits between the listing and the read is the
+            // normal case for anything walking /proc, not a failure.
+            continue;
         };
-
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-
-        // Only directories that are numeric PIDs
-        let pid: u32 = match name_str.parse() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-
-        let stat_path = format!("/proc/{pid}/stat");
-        let stat_content = match fs::read_to_string(&stat_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let info = parse_proc_stat(&stat_content);
-
-        // If not showing all, only show processes in current session.
-        // Simple heuristic: show all until we can determine session
-        // membership.
-        if !parsed.all_procs && pid != my_pid {
-            // intentionally left blank
-        }
+        let pid32 = u32::try_from(pid).unwrap_or(0);
 
         if parsed.full_format {
-            let cmdline_path = format!("/proc/{pid}/cmdline");
-            let cmd = fs::read_to_string(&cmdline_path)
-                .unwrap_or_default()
-                .replace('\0', " ")
-                .trim()
-                .to_string();
-            let cmd_display = if cmd.is_empty() {
-                format!("[{}]", info.comm)
-            } else {
-                cmd
-            };
-
             let _ = writeln!(
                 out,
                 "{:>5} {:>5} {:>5}  {:<6} {:<8} {}",
-                info.uid, pid, info.ppid, info.state, info.time_str, cmd_display
+                info.uid, pid32, info.ppid, info.state, info.time_str, info.cmd
             );
         } else {
-            let _ = writeln!(out, "{:>5} {:<8} {}", pid, info.tty, info.comm);
+            let _ = writeln!(out, "{:>5} {:<8} {}", pid32, info.tty, info.comm);
         }
     }
 
     ExitCode::SUCCESS
 }
 
-/// Parse the contents of `/proc/<pid>/stat`.  The format is:
+/// One process, read through [`procinfo`].
 ///
-///     pid (comm) state ppid pgrp session tty_nr ...
+/// The `/proc/<pid>/stat` parsing this used to do itself now lives in the
+/// crate, shared with `userspace/ps`, `userspace/htop` and
+/// `apps/procexplorer`. Two things it could not do on its own:
 ///
-/// `comm` is wrapped in parentheses and may contain spaces or even
-/// `)` characters; we use the *last* `)` as the end so command names
-/// like "weird (name)" work.  All subsequent fields are
-/// space-separated.  Missing or malformed fields default to zero or
-/// `"?"` so the function never panics on attacker-controlled input.
-fn parse_proc_stat(stat: &str) -> ProcInfo {
-    // /proc/<pid>/stat: "<pid> (<comm>) <state> <ppid> ..."
-    // comm can contain spaces and parens, so we span from the first '(' to
-    // the *last* ')'.  If either is missing the line is malformed.
-    let (comm, rest) = match (stat.find('('), stat.rfind(')')) {
-        (Some(open), Some(close)) if open < close => {
-            let c = stat
-                .get(open.saturating_add(1)..close)
-                .unwrap_or("?")
-                .to_string();
-            let r = stat.get(close.saturating_add(2)..).unwrap_or("");
-            (c, r)
-        }
-        _ => ("?".to_string(), ""),
+/// * **the real UID.** This was `uid: 0` with the comment "would need
+///   `/proc/<pid>/status` for real UID" — so the `-f` listing showed every
+///   process as root. The crate reads `status`, so it is a field now.
+/// * **a name that is not UTF-8.** `read_to_string` fails on one, and the
+///   process was skipped entirely by `continue`. A `ps` that omits exactly
+///   the processes with unusual names is the worst way to be wrong.
+///
+/// # Errors
+///
+/// Any read error other than "no such file", which is `Ok(None)`.
+fn read_one(procfs: &procinfo::ProcFs, pid: u64, full: bool) -> std::io::Result<Option<ProcInfo>> {
+    let Some(stat) = procfs.process_stat(pid)? else {
+        return Ok(None);
     };
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-
-    let state = fields.first().copied().unwrap_or("?").to_string();
-    let ppid: u32 = fields.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let tty_nr: i32 = fields.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let utime: u64 = fields.get(11).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let stime: u64 = fields.get(12).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-    let tty = format_tty(tty_nr);
-    let time_str = format_cpu_time(utime, stime);
-
-    ProcInfo {
+    let comm = procinfo::display_bytes(&stat.comm);
+    let uid = procfs
+        .process_status(pid)?
+        .and_then(|st| st.uid)
+        .unwrap_or(0);
+    // Only `-f` prints the command line, and reading it costs a second open
+    // per process.
+    let cmd = if full {
+        let args = procfs.process_cmdline(pid)?.unwrap_or_default();
+        if args.is_empty() {
+            format!("[{comm}]")
+        } else {
+            args.iter()
+                .map(|a| procinfo::display_bytes(a))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+    } else {
+        String::new()
+    };
+    Ok(Some(ProcInfo {
         comm,
-        state,
-        ppid,
-        uid: 0, // would need /proc/<pid>/status for real UID
-        tty,
-        time_str,
-    }
+        state: char::from(stat.state).to_string(),
+        ppid: u32::try_from(stat.ppid).unwrap_or(0),
+        uid,
+        tty: format_tty(i32::try_from(stat.tty_nr).unwrap_or(0)),
+        time_str: format_cpu_time(stat.utime_ticks, stat.stime_ticks),
+        cmd,
+    }))
 }
 
 /// Format the `tty_nr` field from /proc/<pid>/stat.  Zero is "?" (no
@@ -197,10 +167,13 @@ fn format_tty(tty_nr: i32) -> String {
     }
 }
 
-/// Format CPU time (user + system clock ticks at 100Hz) as HH:MM:SS.
+/// Format CPU time (user + system clock ticks) as HH:MM:SS.
+///
+/// The tick rate is `procinfo::TICKS_PER_SEC` rather than a literal 100:
+/// it is a fact about the kernel and belongs in one place.
 fn format_cpu_time(utime: u64, stime: u64) -> String {
     let total_ticks = utime.saturating_add(stime);
-    let total_secs = total_ticks / 100;
+    let total_secs = total_ticks / procinfo::TICKS_PER_SEC;
     let hours = total_secs / 3600;
     let mins = (total_secs / 60) % 60;
     let secs = total_secs % 60;
@@ -325,81 +298,54 @@ mod tests {
 
     // ---------------- parse_proc_stat ----------------
 
-    #[test]
-    fn parse_minimal_stat() {
-        // pid (comm) state ppid pgrp session tty_nr tpgid flags ...
-        // Field positions (0-indexed after comm):
-        //   0=state, 1=ppid, 4=tty_nr, 11=utime, 12=stime
-        let stat = "1 (init) S 0 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0";
-        let info = parse_proc_stat(stat);
-        assert_eq!(info.comm, "init");
-        assert_eq!(info.state, "S");
-        assert_eq!(info.ppid, 0);
-        assert_eq!(info.tty, "?");
-        assert_eq!(info.time_str, "00:00:00");
-        assert_eq!(info.uid, 0);
-    }
+    // The `/proc/<pid>/stat` parsing tests that used to live here have moved to
+    // `procinfo`, with the parser. They covered the minimal line, a `comm`
+    // containing spaces, a `comm` containing parentheses, and pathological
+    // input; `procinfo/src/tests.rs` covers all four and adds one this file
+    // could not — a `comm` that is not valid UTF-8, which this program used to
+    // drop the process for.
+    //
+    // **One behavioural difference is deliberate and worth naming.** The old
+    // parser returned a defaulted `ProcInfo` for a truncated line such as
+    // `"1 (a) S"`, so `ps` printed a row of zeros for it. `procinfo` returns
+    // `None` for a line with fewer than 22 fields, so the process is skipped.
+    // A three-field `stat` is not a process the kernel is describing; printing
+    // a confident row of zeros for it is the same class of mistake as the CPU
+    // bars' `max(1)`.
+    //
+    // What stays here is what is still this program's: the two formatters.
 
     #[test]
-    fn parse_with_cpu_time() {
-        // utime at field index 11, stime at 12 (1-indexed after comm = 14,15).
-        // Layout: pid (comm) state ppid pgrp session tty_nr tpgid flags
-        //         minflt cminflt majflt cmajflt utime stime ...
-        //         (0)   (1)   (2)   (3) (4) (5) (6) (7) (8) (9) (10) (11)(12)
-        let stat = "100 (sh) R 1 100 100 34816 -1 0 0 0 0 0 200 100 0 0 20 0 1";
-        let info = parse_proc_stat(stat);
-        assert_eq!(info.comm, "sh");
-        assert_eq!(info.state, "R");
-        assert_eq!(info.ppid, 1);
-        // tty_nr=34816 → pts/(34816 & 0xff)
-        assert_eq!(info.tty, format!("pts/{}", 34816 & 0xff));
-        // 200 + 100 = 300 ticks = 3 seconds
-        assert_eq!(info.time_str, "00:00:03");
+    fn no_controlling_terminal_is_a_question_mark() {
+        assert_eq!(format_tty(0), "?");
     }
 
+    /// The low eight bits are the minor number, which is why 34816 and 256
+    /// both render as `pts/0` — the major is not shown.
     #[test]
-    fn parse_comm_with_parens_uses_last() {
-        // comm = "weird (name)" — must keep the inner parens intact.
-        let stat = "5 (weird (name)) S 1 5 5 0 -1 0 0 0 0 0 0 0 0 0 20 0 1";
-        let info = parse_proc_stat(stat);
-        assert_eq!(info.comm, "weird (name)");
-        assert_eq!(info.state, "S");
-        assert_eq!(info.ppid, 1);
+    fn a_tty_renders_as_its_minor_number() {
+        assert_eq!(format_tty(34816), "pts/0");
+        assert_eq!(format_tty(34817), "pts/1");
+        assert_eq!(format_tty(0x8_00_ff), "pts/255");
     }
 
+    /// Ticks, not seconds. `procinfo::TICKS_PER_SEC` is the divisor, so this
+    /// test also pins that the two agree.
     #[test]
-    fn parse_comm_with_spaces() {
-        let stat = "7 (my proc) Z 2 7 7 0 -1 0 0 0 0 0 0 0 0 0 20 0 1";
-        let info = parse_proc_stat(stat);
-        assert_eq!(info.comm, "my proc");
-        assert_eq!(info.state, "Z");
-        assert_eq!(info.ppid, 2);
+    fn cpu_time_is_ticks_rendered_as_hms() {
+        assert_eq!(format_cpu_time(0, 0), "00:00:00");
+        assert_eq!(format_cpu_time(200, 100), "00:00:03");
+        assert_eq!(procinfo::TICKS_PER_SEC, 100);
+        // One hour, one minute, one second.
+        let ticks = (3600 + 60 + 1) * procinfo::TICKS_PER_SEC;
+        assert_eq!(format_cpu_time(ticks, 0), "01:01:01");
     }
 
+    /// Hours are not wrapped at 24: a process can run for days, and `01:00:00`
+    /// after 25 hours would be a lie.
     #[test]
-    fn parse_truncated_returns_defaults() {
-        // Missing fields default — should not panic.
-        let stat = "1 (a) S";
-        let info = parse_proc_stat(stat);
-        assert_eq!(info.comm, "a");
-        assert_eq!(info.state, "S");
-        assert_eq!(info.ppid, 0);
-        assert_eq!(info.tty, "?");
-        assert_eq!(info.time_str, "00:00:00");
-    }
-
-    #[test]
-    fn parse_missing_parens() {
-        // Pathological input: no parens at all.  Must not panic.
-        let info = parse_proc_stat("garbage");
-        assert_eq!(info.comm, "?");
-    }
-
-    #[test]
-    fn parse_empty_string() {
-        let info = parse_proc_stat("");
-        assert_eq!(info.comm, "?");
-        assert_eq!(info.state, "?");
-        assert_eq!(info.ppid, 0);
+    fn hours_accumulate_past_a_day() {
+        let ticks = 25 * 3600 * procinfo::TICKS_PER_SEC;
+        assert_eq!(format_cpu_time(ticks, 0), "25:00:00");
     }
 }

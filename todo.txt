@@ -54892,7 +54892,7 @@ TRIGGER
   `FileSystem::extents` work first; do not wire discard to the existing
   callers on the assumption they pass device offsets.
 
-## A process started with a closed standard descriptor has no protection (lane B, 2026-08-24)
+## ~~A process started with a closed standard descriptor has no protection~~ (lane B, 2026-08-24) -- FIXED 2026-09-10
 
 Found while explaining why `tee out <&-` differs from GNU: it differs because
 Rust's std reopens any closed standard descriptor onto /dev/null before main is
@@ -54916,7 +54916,35 @@ entry point, check descriptors 0, 1 and 2 and open /dev/null (read-only for 0,
 write-only for 1 and 2) for any that is absent.  Doing it in the child rather
 than in the parent's spawn arguments is what makes it unconditional -- a parent
 that deliberately closes a descriptor should not be able to opt the child out
-of it.  See known-issues.md -> "`tee` was five options short ..." for the
+of it.
+
+**Done, exactly there**: `sanitize_standard_fds` in `posix/src/crt.rs`, called
+from `__libc_start_main` immediately after `retrieve_initial_fds` and before
+anything can open a file. That is in the child, before `main`, so a parent
+cannot opt out of it -- and every program linked against our libc gets it,
+which is every program in the tree.
+
+Two details the entry did not anticipate, both from our libc keeping its own
+descriptor table rather than deferring to the kernel:
+
+* **"Is it open" is a question for `fdtable`, not `fcntl`.** `fdtable::get_fd`
+  answers it directly; going through `fcntl(F_GETFD)` would have asked a layer
+  that does not own the answer.
+* **It must run *after* `retrieve_initial_fds`**, because that call is what
+  decides what the table contains. Checking first would inspect the table the
+  process is about to replace.
+
+`/dev/null` unopenable leaves the descriptor closed rather than pointed
+somewhere arbitrary -- the pre-existing behaviour, so nothing is made worse,
+and inventing a destination is the bug this prevents.
+
+Three tests, on the fallback table rather than the syscall loop: that 0 is
+read-only and 1 and 2 write-only (a read-only descriptor 1 turns "printed into
+your file" into "mysteriously failed" -- better, still wrong), and that the
+repair order is **ascending**. The order is load-bearing: `open` returns the
+lowest free descriptor, so working downward would hand descriptor 0's
+`/dev/null` to descriptor 1, which is the substitution the whole function
+exists to prevent, made by the function itself.  See known-issues.md -> "`tee` was five options short ..." for the
 measurement that turned this up (`tee /proc/self/fd/0 <&-` reads the
 descriptor table from inside the process and is the direct test).
 
@@ -55423,7 +55451,7 @@ that used to be listed had nothing to bind them to and were removed:
 Put the rows back -- with a `Command` each -- when either prerequisite lands.
 Restoring one is two lines in the table plus an arm in `run`.
 
-## su -: the login-shell argv[0] convention is not implemented (lane B, 2026-09-06)
+## ~~su -: the login-shell argv[0] convention is not implemented~~ (lane B, 2026-09-06) -- FIXED 2026-09-10, and this entry's premise was false
 
 A shell decides whether to read its login profile by looking at its own
 `argv[0]`: a leading `-` (`-bash`, `-sh`) means "login shell". `su -` is
@@ -55442,12 +55470,40 @@ to run `/etc/profile` is a real bug that it was hiding. What is *not* fixed is
 the behaviour: `su -` still starts a shell that does not know it is a login
 shell.
 
-The fix needs an exec that takes `argv[0]` separately from the program path.
-`SYS_PROCESS_SPAWN_EX2` does; `std::process::Command` does not. Either call it
-directly here, or -- better, since `login`, `sshd` and `getty` all want the
-same thing -- add a small helper next to `posix`'s process spawn that takes
-(program, argv0, args) and use it from all four. Do this when one of the other
-three needs it, so the helper is shaped by more than one caller.
+~~The fix needs an exec that takes `argv[0]` separately from the program path.
+`SYS_PROCESS_SPAWN_EX2` does; `std::process::Command` does not.~~
+
+**That is wrong, and it is the interesting part of this entry.**
+`std::os::unix::process::CommandExt::arg0` does exactly this, and
+`userspace/sshd` has been calling it for its own login shells all along --
+`login_argv0` at `userspace/sshd/src/lib.rs`, with the hyphen and everything.
+The entry above was written from reading `Command`'s *inherent* methods and
+concluding the capability did not exist; the Unix extension trait was never
+looked at. A whole syscall's worth of proposed work, and a "wait for a second
+caller" instruction, rested on it.
+
+The fix was one `cmd.arg0(...)` under `#[cfg(unix)]`, plus the four-line
+basename helper. `su -` now starts a shell that knows it is a login shell and
+therefore reads `/etc/profile` and `~/.profile` -- which `osh` does read, so
+this was a live difference and not a formality.
+
+**What the shared-helper instruction should have said.** There is nothing to
+share at the exec layer: `std` already provides it. What is duplicated is four
+lines of basename-and-hyphen, once in `sshd` (over `String`) and once in `su`
+(over bytes, because a shell path may hold any byte but `/` and NUL). Two
+copies of four lines is cheaper than a crate to hold them. If `init/login` or
+`userspace/getty` grows a third, that arithmetic changes -- which is what the
+original instinct was right about, applied to the wrong thing.
+
+**And a testing gap this exposed, which is more general than `su`.** The new
+code is `#[cfg(unix)]`, and this tree's tests are compiled for
+`x86_64-pc-windows-gnu` -- so `cargo test` compiles none of it. `cargo check -p
+<crate> --target x86_64-unknown-linux-gnu` does, and that target *is* installed
+here. Nothing in the tree appears to run it. Every `#[cfg(unix)]` block in
+`userspace/` is currently unverified by the ordinary loop, including `sshd`'s
+own `arg0` call, whose comment shows the author knew and had no way to check.
+Worth a gate; not built here because one command in a hook needs to be right
+about which crates have unix-only code, and that is its own piece of work.
 
 ## ircclient: no transport, and no clock a message can be stamped with
 
@@ -55493,12 +55549,36 @@ groupadd/groupdel/groupmod), and read by `pwdb`, `chown`, `chroot` and `id`.
 
 Two consequences, both live today:
 
-1. **Group membership is stored twice.** `/etc/group` has a member list per
-   group; the account record has a `groups` list per user. `Database` in
-   `userspace/useradd/src/main.rs` now changes both together through
+1. **Group membership is stored twice** -- three times, really. `/etc/group`
+   has a member list per group, `/etc/gshadow` repeats it, and the account
+   record has a `groups` list per user. `Database` in
+   `userspace/useradd/src/main.rs` changes all of them together through
    `add_to_group`, `remove_user_from_groups`, `rename_group_everywhere` and
    `forget_group`, so nothing in *this* binary can update one and forget the
-   other. Nothing enforces that for a future writer.
+   other. ~~Nothing enforces that for a future writer.~~
+
+   **Something does now, as of 2026-09-10.** `assert_membership_agrees` in that
+   file's test module states the invariant -- an account is in a group's member
+   list exactly when it names that group, the two files agree about members,
+   and no account names a group that does not exist -- and
+   `every_membership_mutation_leaves_the_three_records_agreeing` asserts it
+   after each of the five mutating operations. A sixth mutator has to keep the
+   copies in step to get through the suite. A companion test builds each shape
+   of drift deliberately and requires the checker to catch it, so the invariant
+   cannot quietly become a decoration.
+
+   **It found one immediately, which is the part worth carrying.**
+   `rename_group_everywhere` renamed the group in `/etc/gshadow` and in every
+   account, and *not* in `/etc/group`. It was not a live bug: `cmd_groupmod`,
+   its only caller, assigned `db.groups[idx].name` itself first, so between the
+   two of them the job got done. But a method named `rename_group_everywhere`
+   reached two of the three places, and calling it alone left an
+   `/etc/gshadow` line for a group `/etc/group` did not have. The crate's own
+   test did call it alone, and passed, because it asserted only the account
+   half -- and its fixture never created the `/etc/gshadow` line the rename
+   would have had to reach, so there was nothing there to miss. Two independent
+   ways for a test to be blind to the thing it is named after. The rename now
+   lives entirely in the method and the caller does none of it.
 
 2. **A save is not atomic across the two stores.** `userdb::UserDb::save`
    stages its three files and renames them together; the group files are a
@@ -55516,6 +55596,15 @@ a decision §353 did not take, so it needs the operator: see
 
 Trigger: do it when something other than `useradd` needs to *write* a group,
 or when the duplicated membership is observed to have drifted.
+
+**Status 2026-09-10: still not fired, and the redesign is still the
+operator's.** Checked rather than assumed: `grep -rln users.yaml` finds only
+readers, and no seed `users.yaml` or `/etc/group` exists in the tree -- the
+account files are created at runtime, so drift cannot be observed statically
+and no second writer exists. What has changed is only consequence 1's *last
+sentence*: the enforcement gap is closed, so the cost of leaving the redesign
+undecided is lower than it was. The `/etc/groups.yaml` question above is
+untouched and stays in `open-questions.md`.
 
 ## login cannot make a user change an expired password (lane B, 2026-09-06)
 
@@ -56107,6 +56196,101 @@ sentence "clippy is clean" makes, which is this project's recurring failure
 shape -- a command that answered a narrower question than the one being asked,
 reported at the width of the question.
 
+## ~~Next: a gate that checks every C-ABI struct against musl automatically~~ (lane B, 2026-09-09) -- BUILT the same day
+
+**Built as `scripts/check-libc-abi.py`, pre-push gate 16, design-decisions.md 1011.** 15 of the 98 boundary types are checked; the
+other 83 are frozen by a ratchet that may shrink and never grow. Shrinking
+it is one `abi!` line per type in `posix/src/abi_layout.rs` and one name
+removed from `BASELINE_UNCOVERED`. **Start with the by-value types** --
+`PthreadMutexT`, `PthreadAttrT`, `CpuSetT`, `SemT`, `RegexT` -- because a C
+program declares those on its own stack, so ours being smaller than musl's
+means our writes land past the caller's object. The original sketch is
+below; it survived contact, with one change noted after it.
+
+**What changed from the sketch:** the macro lives in a `#[cfg(test)]`
+module and emits C on stdout between markers rather than writing a file,
+so the script and the test share no path. And `-fsyntax-only` had to be
+abandoned -- `zig cc` injects its own `-c`, then fails looking for an
+output it was told not to produce, and *only when the compile otherwise
+succeeds*. See 1011.
+
+The sketch as written, for the record:
+
+**Why.** `Sigaction` carried the kernel's field order under a comment claiming
+it was glibc's, for months, because both layouts are 152 bytes and the one
+field they agree on -- `sa_handler` at offset 0 -- is the one every test
+touched (design-decisions.md §1010). A size test existed and passed. Offsets
+were never checked.
+
+Today's response was manual: measure `sigaction`, `stack_t` and `termios`
+against musl with `zig cc --target=x86_64-linux-musl` and `_Static_assert`,
+then pin the numbers in Rust tests. That covers three structs and nothing else,
+and the next one to drift will drift silently.
+
+**The gate, and it can be genuinely single-source.** A `#[test]` on the host
+*emits* a C file of `_Static_assert`s derived from `offset_of!` and
+`size_of::<T>()`; `scripts/check-libc-abi.py` then compiles that file with
+`zig cc --target=x86_64-linux-musl -fsyntax-only`. Rust is the source of the
+numbers and musl is the oracle, so there is no table to keep in step -- which
+is the property that makes it worth building rather than a second list to rot.
+
+Sketch:
+
+    // in posix, #[cfg(test)]
+    abi_check! { Sigaction as "struct sigaction" in "signal.h" {
+        sa_handler, sa_mask, sa_flags, sa_restorer
+    } }
+
+emitting, per field:
+
+    _Static_assert(offsetof(struct sigaction, sa_flags) == 136, "...");
+
+**Candidates to cover**, in rough order of how much would break: `Sigaction`,
+`StackT`, `Termios`, `Winsize`, `SigsetT`, `Stat`, `Dirent`, `Timespec`,
+`Timeval`, `Rusage`, `Rlimit`, `Iovec`, `Sockaddr*`, `Pollfd`, `Utsname`.
+
+**Wire it into `scripts/hooks/pre-push`** beside `check-libc-shape.py`, which
+is its closest sibling: that one asserts libc.a's archive *shape* and this
+asserts its *type* shape. Same failure class -- a property that was true by
+accident, then relied on.
+
+**One caveat to design around:** a few of our types deliberately differ from
+musl because they are the *kernel* wire format (`KERNEL_NCCS = 19` in
+`ioctl.rs` is the honest example). The macro needs an explicit "kernel format,
+not libc" opt-out, and the opt-out should name the translation function that
+converts between them -- otherwise the gate teaches people to add exemptions.
+
+## Standing rule: a scripted deletion must start at the doc comment (lane B, 2026-09-10)
+
+**Three times in three ticks** I deleted a Rust function with a Python regex
+anchored on `fn name(`, which leaves the `///` block above it behind. A doc
+comment with nothing to document does not become an error: doc comments
+*concatenate*, so it silently becomes the first line of whatever item follows.
+
+The three, all in `userspace/htop/src/main.rs`, all absorbed by the same
+unlucky neighbour:
+
+    /// Read per-CPU stats from /proc/stat.      -> caught by clippy
+    /// Read uptime in seconds from /proc/uptime. -> not caught
+    /// Read /proc/meminfo.                       -> not caught
+
+Only the first was caught, and only because a blank line happened to follow it
+(`clippy::empty_line_after_doc_comment`). When the orphan is directly adjacent
+to the next item's doc comment there is **no** lint, no warning, and no test
+that can see it -- the code compiles and the rendered documentation simply
+carries a sentence about a function that no longer exists.
+
+**The rule:** when removing an item with a pattern, anchor the pattern at the
+start of its documentation, not at its `fn`/`struct` keyword. In practice that
+means the regex begins `(?:///[^\n]*\n)*` or the literal first doc line.
+
+**Not made into a gate**, deliberately. It is a mistake one author makes with
+one tool, the fix is a habit rather than a policy, and a checker for
+"documentation that describes the wrong item" cannot be written without
+understanding the prose. If it happens a fourth time, the proportionate gate is
+a *diff-shape* check -- a hunk that deletes a `fn` line while keeping the `///`
+line directly above it -- and this entry is the evidence that it would be worth
+building.
 ## RETRACTED: the C-Q10 "dropped operator answer" was not dropped (lane A, 2026-09-09)
 
 Earlier today I recorded, here and in a request to lane C, that the operator's

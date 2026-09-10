@@ -57,6 +57,7 @@
 //! real thing is a reader whose error handling is never exercised, and error
 //! handling is most of what item 1 above is about.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -158,6 +159,14 @@ fn as_str(bytes: &[u8]) -> Option<&str> {
 
 /// Parse an ASCII decimal integer out of a byte field.
 fn parse_u64(bytes: &[u8]) -> Option<u64> {
+    as_str(trim(bytes))?.parse().ok()
+}
+
+/// Parse a **signed** ASCII decimal out of a byte field.
+///
+/// `nice` is the only signed thing `/proc` reports that this crate reads, and
+/// it goes negative for every process a user has bothered to prioritise.
+fn parse_i64(bytes: &[u8]) -> Option<i64> {
     as_str(trim(bytes))?.parse().ok()
 }
 
@@ -327,6 +336,10 @@ pub struct MemInfo {
     pub buffers_kib: Option<u64>,
     /// `Cached`.
     pub cached_kib: Option<u64>,
+    /// `SwapTotal`.
+    pub swap_total_kib: Option<u64>,
+    /// `SwapFree`.
+    pub swap_free_kib: Option<u64>,
 }
 
 impl MemInfo {
@@ -346,6 +359,8 @@ impl MemInfo {
             available_kib: field("MemAvailable"),
             buffers_kib: field("Buffers"),
             cached_kib: field("Cached"),
+            swap_total_kib: field("SwapTotal"),
+            swap_free_kib: field("SwapFree"),
         }
     }
 
@@ -359,6 +374,45 @@ impl MemInfo {
     pub fn used_kib(&self) -> Option<u64> {
         let total = self.total_kib?;
         let free = self.free_kib?;
+        Some(total.saturating_sub(free))
+    }
+
+    /// Memory in use **excluding** what the kernel can reclaim: total minus
+    /// free, buffers and page cache.
+    ///
+    /// # Two "used" figures, and why both are here
+    ///
+    /// [`MemInfo::used_kib`] is `total - free`, which counts the page cache as
+    /// used -- true of the kernel's bookkeeping and misleading to a person,
+    /// because a machine with 30 GiB of cache is not short of memory. This is
+    /// the figure `htop` and `free` put in front of a user.
+    ///
+    /// Neither is wrong; they answer different questions, and the reason they
+    /// are two named methods rather than one is that every program that
+    /// computed this for itself picked one silently. `None` unless every
+    /// figure it needs was present, for [`MemInfo::used_kib`]'s reason: a
+    /// number derived from a missing total is not worth showing.
+    #[must_use]
+    pub fn used_excluding_cache_kib(&self) -> Option<u64> {
+        let total = self.total_kib?;
+        let free = self.free_kib?;
+        Some(
+            total
+                .saturating_sub(free)
+                .saturating_sub(self.buffers_kib?)
+                .saturating_sub(self.cached_kib?),
+        )
+    }
+
+    /// Swap in use: total minus free.
+    ///
+    /// `None` unless both were present. A machine with no swap reports
+    /// `SwapTotal: 0`, which is `Some(0)` -- distinct from a kernel that does
+    /// not export the field at all.
+    #[must_use]
+    pub fn swap_used_kib(&self) -> Option<u64> {
+        let total = self.swap_total_kib?;
+        let free = self.swap_free_kib?;
         Some(total.saturating_sub(free))
     }
 
@@ -897,6 +951,577 @@ impl ProcFs {
         }
         pids.sort_unstable();
         Ok(pids)
+    }
+
+    /// `/proc/stat`'s CPU lines, parsed.
+    ///
+    /// # Errors
+    ///
+    /// Any read error other than "no such file", which is `Ok(None)`.
+    pub fn cpu_stats(&self) -> io::Result<Option<CpuStats>> {
+        Ok(self.read_optional("stat")?.map(|c| CpuStats::parse(&c)))
+    }
+
+    /// `/proc/<pid>/stat`, parsed.
+    ///
+    /// # Errors
+    ///
+    /// Any read error other than "no such file", which is `Ok(None)` -- a
+    /// process that exits between [`ProcFs::process_ids`] and this call is the
+    /// normal case, not a failure.
+    pub fn process_stat(&self, pid: u64) -> io::Result<Option<ProcessStat>> {
+        Ok(self
+            .read_optional(&format!("{pid}/stat"))?
+            .and_then(|c| ProcessStat::parse(&c)))
+    }
+
+    /// `/proc/<pid>/statm`, parsed.
+    ///
+    /// # Errors
+    ///
+    /// As [`ProcFs::process_stat`].
+    pub fn process_statm(&self, pid: u64) -> io::Result<Option<ProcessStatm>> {
+        Ok(self
+            .read_optional(&format!("{pid}/statm"))?
+            .and_then(|c| ProcessStatm::parse(&c)))
+    }
+
+    /// `/proc/<pid>/status`, parsed.
+    ///
+    /// # Errors
+    ///
+    /// As [`ProcFs::process_stat`].
+    pub fn process_status(&self, pid: u64) -> io::Result<Option<ProcessStatus>> {
+        Ok(self
+            .read_optional(&format!("{pid}/status"))?
+            .map(|c| ProcessStatus::parse(&c)))
+    }
+
+    /// `/proc/<pid>/cmdline`, split into arguments.
+    ///
+    /// `Ok(Some(vec![]))` is a kernel thread; `Ok(None)` is a process that is
+    /// no longer there. The two used to be the same answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`ProcFs::process_stat`].
+    pub fn process_cmdline(&self, pid: u64) -> io::Result<Option<Vec<Vec<u8>>>> {
+        Ok(self
+            .read_optional(&format!("{pid}/cmdline"))?
+            .map(|c| cmdline_args(&c)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-process: /proc/<pid>/stat, statm, status, cmdline
+// ---------------------------------------------------------------------------
+
+/// KiB per page on SlateOS.
+///
+/// `design.txt` fixes this at **16 KiB**, not the 4 KiB every `/proc` example
+/// on the internet assumes, and `/proc/<pid>/stat` reports RSS in *pages* --
+/// so a reader that gets this wrong is out by a factor of four and still
+/// produces plausible numbers.
+///
+/// It lives here because it was a private `const PAGE_SIZE_KB: u64 = 16;` in
+/// both `userspace/htop` and `userspace/ps`, which is one copy per program of
+/// a fact about the kernel. Both were right; nothing made them stay right.
+pub const PAGE_SIZE_KIB: u64 = 16;
+
+/// Scheduler ticks per second, the unit `utime`/`stime` are counted in.
+pub const TICKS_PER_SEC: u64 = 100;
+
+/// One process, as `/proc/<pid>/stat` reports it.
+///
+/// Only the fields something in this tree reads. `stat` has 52 of them and
+/// adding one is a line; carrying all 52 unread would be a claim to have
+/// checked all 52.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessStat {
+    /// Process ID.
+    pub pid: u64,
+    /// The executable name, **as bytes**.
+    ///
+    /// Not a `String`: a command name comes from `argv[0]`, which is bytes,
+    /// and our own filesystem allows every byte but `/` and NUL
+    /// (`CLAUDE.md` self-review item 7). `htop` read this through
+    /// `read_to_string`, so a process whose name is not UTF-8 was skipped
+    /// entirely rather than shown with its name escaped.
+    pub comm: Vec<u8>,
+    /// State letter: `R`, `S`, `D`, `Z`, `T`, …
+    pub state: u8,
+    /// Parent process ID.
+    pub ppid: u64,
+    /// Process group ID.
+    pub pgrp: u64,
+    /// Session ID.
+    pub session: u64,
+    /// Controlling terminal, as the kernel's packed device number.
+    ///
+    /// Zero means no controlling terminal. Decoding it into `tty7` or
+    /// `pts/3` is a presentation question and deliberately not answered here.
+    pub tty_nr: i64,
+    /// User-mode time in ticks.
+    pub utime_ticks: u64,
+    /// Kernel-mode time in ticks.
+    pub stime_ticks: u64,
+    /// Scheduling priority.
+    pub priority: i64,
+    /// Nice value.
+    pub nice: i64,
+    /// Threads in this process.
+    pub num_threads: u64,
+    /// Virtual memory size, in **bytes** -- `stat` reports this one in bytes
+    /// and the next one in pages, which is the kind of thing this crate exists
+    /// to stop each caller rediscovering.
+    pub vsize_bytes: u64,
+    /// Resident set size, in **pages**. See [`ProcessStat::rss_kib`].
+    pub rss_pages: u64,
+    /// Start time, in ticks **after boot** -- not a wall-clock instant.
+    ///
+    /// Turning it into one needs `/proc/uptime` and the current time, which is
+    /// two more readings and therefore the caller's job. See
+    /// [`Uptime`].
+    pub starttime_ticks: u64,
+}
+
+impl ProcessStat {
+    /// Parse the single line of `/proc/<pid>/stat`.
+    ///
+    /// # The comm field is why this cannot be a `split_whitespace`
+    ///
+    /// The second field is the executable name in parentheses, and it may
+    /// contain **both spaces and parentheses** -- `(my (odd) name)` is a legal
+    /// value. Splitting on whitespace therefore mis-numbers every field after
+    /// it for exactly the processes most worth looking at. The name runs to the
+    /// **last** `)` in the line, which works because every field after it is
+    /// numeric.
+    ///
+    /// Returns `None` if the line is not shaped like `stat` at all -- no
+    /// parentheses, or too few fields after them. A *missing* field within a
+    /// well-formed line is taken as zero rather than failing the whole read,
+    /// because a kernel that stops exporting field 31 should not blank the
+    /// process table.
+    #[must_use]
+    pub fn parse(content: &[u8]) -> Option<Self> {
+        let open = content.iter().position(|b| *b == b'(')?;
+        let close = content.iter().rposition(|b| *b == b')')?;
+        if close < open {
+            return None;
+        }
+        let pid = parse_u64(content.get(..open)?)?;
+        let comm = content.get(open.saturating_add(1)..close)?.to_vec();
+        // `close + 1` is the space; the state letter follows it.
+        let rest = content.get(close.saturating_add(2)..)?;
+        let fields = split_ws(rest);
+        // `stat`'s field 24 (rss) is index 21 here, and it is the last one
+        // anything reads. Fewer than that and the line is not usable.
+        if fields.len() < 22 {
+            return None;
+        }
+        let at = |i: usize| -> u64 { fields.get(i).and_then(|f| parse_u64(f)).unwrap_or(0) };
+        let at_i = |i: usize| -> i64 { fields.get(i).and_then(|f| parse_i64(f)).unwrap_or(0) };
+        Some(Self {
+            pid,
+            comm,
+            state: fields
+                .first()
+                .and_then(|f| f.first().copied())
+                .unwrap_or(b'?'),
+            ppid: at(1),
+            pgrp: at(2),
+            session: at(3),
+            tty_nr: at_i(4),
+            utime_ticks: at(11),
+            stime_ticks: at(12),
+            priority: at_i(15),
+            nice: at_i(16),
+            // A process always has at least the one thread running it, so zero
+            // here means "the kernel did not say", not "no threads".
+            num_threads: fields.get(17).and_then(|f| parse_u64(f)).unwrap_or(1),
+            starttime_ticks: at(19),
+            vsize_bytes: at(20),
+            rss_pages: at(21),
+        })
+    }
+
+    /// Total CPU time in ticks.
+    #[must_use]
+    pub fn cpu_ticks(&self) -> u64 {
+        self.utime_ticks.saturating_add(self.stime_ticks)
+    }
+
+    /// Resident set size in KiB, converted with [`PAGE_SIZE_KIB`].
+    #[must_use]
+    pub fn rss_kib(&self) -> u64 {
+        self.rss_pages.saturating_mul(PAGE_SIZE_KIB)
+    }
+
+    /// Virtual size in KiB. `stat` gives bytes here, unlike RSS.
+    #[must_use]
+    pub fn vsize_kib(&self) -> u64 {
+        self.vsize_bytes / 1024
+    }
+}
+
+/// The three fields of `/proc/<pid>/statm` anything here reads, in pages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProcessStatm {
+    /// Total program size.
+    pub size_pages: u64,
+    /// Resident set size.
+    pub resident_pages: u64,
+    /// Resident shared pages.
+    pub shared_pages: u64,
+}
+
+impl ProcessStatm {
+    /// Parse `/proc/<pid>/statm`: seven whitespace-separated page counts.
+    #[must_use]
+    pub fn parse(content: &[u8]) -> Option<Self> {
+        let f = split_ws(content);
+        if f.len() < 3 {
+            return None;
+        }
+        Some(Self {
+            size_pages: f.first().and_then(|x| parse_u64(x)).unwrap_or(0),
+            resident_pages: f.get(1).and_then(|x| parse_u64(x)).unwrap_or(0),
+            shared_pages: f.get(2).and_then(|x| parse_u64(x)).unwrap_or(0),
+        })
+    }
+
+    /// Shared resident memory in KiB.
+    #[must_use]
+    pub fn shared_kib(&self) -> u64 {
+        self.shared_pages.saturating_mul(PAGE_SIZE_KIB)
+    }
+}
+
+/// The fields of `/proc/<pid>/status` that anything here reads.
+///
+/// # One reader, not one per field
+///
+/// This began as a `status_uid(content)` free function, which is the right
+/// shape for exactly one caller and the wrong one for two: `ps` wants the GID,
+/// the supplementary groups and the `Vm*` figures from the same file, and
+/// adding a `status_gid`, `status_groups`, … beside it would be four scans of
+/// one file and four places to disagree about what `Uid:`'s four columns mean.
+/// Parsing the file once into a struct is the same choice this whole crate is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessStatus {
+    /// The **real** UID -- the first of the four on the `Uid:` line, which
+    /// carries real, effective, saved-set and filesystem in that order.
+    ///
+    /// A caller wanting the effective UID wants another field here, not a
+    /// different index at the call site.
+    pub uid: Option<u32>,
+    /// The real GID, from `Gid:`, on the same four-column rule.
+    pub gid: Option<u32>,
+    /// Supplementary groups, from `Groups:`. Empty is a real answer: a process
+    /// may genuinely have none.
+    pub groups: Vec<u32>,
+    /// `VmSize` in KiB. Absent for a kernel thread, which has no address
+    /// space -- which is why this is an `Option` and not a zero.
+    pub vm_size_kib: Option<u64>,
+    /// `VmRSS` in KiB. Absent for the same reason.
+    pub vm_rss_kib: Option<u64>,
+}
+
+impl ProcessStatus {
+    /// Parse `/proc/<pid>/status`.
+    #[must_use]
+    pub fn parse(content: &[u8]) -> Self {
+        let first_id = |key: &str| -> Option<u32> {
+            let value = key_value(content, key)?;
+            let first = split_ws(&value).first().copied()?.to_vec();
+            parse_u64(&first).and_then(|v| u32::try_from(v).ok())
+        };
+        let groups = key_value(content, "Groups").map_or_else(Vec::new, |value| {
+            split_ws(&value)
+                .iter()
+                .filter_map(|f| parse_u64(f))
+                .filter_map(|v| u32::try_from(v).ok())
+                .collect()
+        });
+        Self {
+            uid: first_id("Uid"),
+            gid: first_id("Gid"),
+            groups,
+            vm_size_kib: key_value(content, "VmSize").and_then(|v| parse_kib(&v)),
+            vm_rss_kib: key_value(content, "VmRSS").and_then(|v| parse_kib(&v)),
+        }
+    }
+}
+
+/// `/proc/<pid>/cmdline` split into its arguments.
+///
+/// NUL-separated and NUL-terminated, so the trailing empty element is dropped.
+/// **Bytes**: an argument is not text, and a program whose arguments are not
+/// UTF-8 is exactly the one a process viewer is most useful for.
+///
+/// An empty result means a kernel thread, which has no command line at all --
+/// distinct from a process whose command line we could not read, which is an
+/// `Err` from [`ProcFs::process_cmdline`].
+#[must_use]
+pub fn cmdline_args(content: &[u8]) -> Vec<Vec<u8>> {
+    content
+        .split(|b| *b == 0)
+        .filter(|a| !a.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// /proc/stat: CPU time
+// ---------------------------------------------------------------------------
+
+/// One `cpu` line of `/proc/stat`: time in ticks since boot, by category.
+///
+/// All ten fields Linux publishes, not the seven a viewer happens to show. The
+/// two that get left out are the two that matter here:
+///
+/// * **`steal`** is time the hypervisor gave to somebody else. SlateOS
+///   develops and tests under QEMU, so this is not hypothetical — and a reader
+///   that omits it computes a *total* smaller than the truth, which makes every
+///   process's CPU percentage larger than the truth. The error is invisible
+///   because the numbers stay plausible.
+/// * **`guest`** and **`guest_nice`** must be left out of the total for the
+///   opposite reason: Linux already counts them inside `user` and `nice`, so
+///   adding them again double-counts. They are carried because a caller may
+///   want to *show* them, and dropped from [`CpuTimes::total`] because a caller
+///   summing the struct's fields would otherwise be wrong.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CpuTimes {
+    /// Normal processes in user mode.
+    pub user: u64,
+    /// Niced processes in user mode.
+    pub nice: u64,
+    /// Processes in kernel mode.
+    pub system: u64,
+    /// Twiddling thumbs.
+    pub idle: u64,
+    /// Waiting for I/O.
+    pub iowait: u64,
+    /// Servicing hardware interrupts.
+    pub irq: u64,
+    /// Servicing soft interrupts.
+    pub softirq: u64,
+    /// Involuntary wait: the hypervisor was running something else.
+    pub steal: u64,
+    /// Running a guest. **Already counted in `user`.**
+    pub guest: u64,
+    /// Running a niced guest. **Already counted in `nice`.**
+    pub guest_nice: u64,
+}
+
+impl CpuTimes {
+    /// Parse one `cpu`/`cpuN` line, with the CPU's index when it has one.
+    ///
+    /// `Ok((None, times))` is the aggregate `cpu ` line; `Some(n)` is `cpuN`.
+    /// Returns `None` for any other line, so a caller can hand it every line of
+    /// the file.
+    ///
+    /// A short line is accepted, not rejected: `iowait` arrived in 2.5.41 and
+    /// `steal` in 2.6.11, so a kernel that publishes seven fields is publishing
+    /// a valid older format rather than a broken one. Missing fields read as
+    /// zero. The previous reader required seven and silently dropped any CPU
+    /// with fewer, which turns an older kernel into an empty CPU list.
+    #[must_use]
+    pub fn parse_line(line: &[u8]) -> Option<(Option<u64>, Self)> {
+        let fields = split_ws(line);
+        let label = fields.first()?;
+        let rest = label.strip_prefix(b"cpu".as_slice())?;
+        let index = if rest.is_empty() {
+            None
+        } else {
+            Some(parse_u64(rest)?)
+        };
+        let at = |i: usize| -> u64 { fields.get(i).and_then(|f| parse_u64(f)).unwrap_or(0) };
+        Some((
+            index,
+            Self {
+                user: at(1),
+                nice: at(2),
+                system: at(3),
+                idle: at(4),
+                iowait: at(5),
+                irq: at(6),
+                softirq: at(7),
+                steal: at(8),
+                guest: at(9),
+                guest_nice: at(10),
+            },
+        ))
+    }
+
+    /// Total time in ticks — everything except `guest` and `guest_nice`.
+    ///
+    /// See [`CpuTimes`] for why those two are excluded and `steal` is not.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.user
+            .saturating_add(self.nice)
+            .saturating_add(self.system)
+            .saturating_add(self.idle)
+            .saturating_add(self.iowait)
+            .saturating_add(self.irq)
+            .saturating_add(self.softirq)
+            .saturating_add(self.steal)
+    }
+
+    /// The time accumulated between `earlier` and `self`, field by field.
+    ///
+    /// # Why a viewer needs this and not the raw counters
+    ///
+    /// Everything in `/proc/stat` counts **since boot**. Dividing one sample by
+    /// its own total answers "how has this machine spent its life", which after
+    /// a few hours of uptime is a number that barely moves whatever the machine
+    /// is doing. What a viewer wants is the same ratio over the interval
+    /// between two samples, and that needs the subtraction to happen before the
+    /// division.
+    ///
+    /// `saturating_sub` per field rather than an assertion that time only goes
+    /// forwards: a CPU that is taken offline and brought back starts its
+    /// counters again, so `earlier` can legitimately be larger. Saturating
+    /// gives that CPU a zero-length interval for one refresh, which shows as an
+    /// idle bar and corrects itself on the next one. Subtracting with `-` would
+    /// panic in debug and wrap to something enormous in release.
+    #[must_use]
+    pub fn since(&self, earlier: &Self) -> Self {
+        Self {
+            user: self.user.saturating_sub(earlier.user),
+            nice: self.nice.saturating_sub(earlier.nice),
+            system: self.system.saturating_sub(earlier.system),
+            idle: self.idle.saturating_sub(earlier.idle),
+            iowait: self.iowait.saturating_sub(earlier.iowait),
+            irq: self.irq.saturating_sub(earlier.irq),
+            softirq: self.softirq.saturating_sub(earlier.softirq),
+            steal: self.steal.saturating_sub(earlier.steal),
+            guest: self.guest.saturating_sub(earlier.guest),
+            guest_nice: self.guest_nice.saturating_sub(earlier.guest_nice),
+        }
+    }
+
+    /// Time not spent idle or waiting for I/O.
+    ///
+    /// `iowait` counts as not-busy, which is the convention `top` and `htop`
+    /// use and is arguable either way — a disk-bound machine is *doing*
+    /// something. It is stated here so that a caller who disagrees knows to
+    /// compute their own rather than discovering the choice from a graph.
+    #[must_use]
+    pub fn busy(&self) -> u64 {
+        self.total()
+            .saturating_sub(self.idle)
+            .saturating_sub(self.iowait)
+    }
+}
+
+/// The CPU half of `/proc/stat`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CpuStats {
+    /// The aggregate `cpu ` line, if the kernel published one.
+    pub total: Option<CpuTimes>,
+    /// The `cpuN` lines, in file order — which is CPU-index order in practice
+    /// but is not promised by `proc(5)`.
+    pub per_cpu: Vec<CpuTimes>,
+}
+
+impl CpuStats {
+    /// Parse every `cpu` line of `/proc/stat` in **one** pass.
+    ///
+    /// The reader this replaces opened `/proc/stat` a second time when it found
+    /// no `cpuN` lines, so on a single-CPU machine it read the file twice and
+    /// could see two different instants.
+    #[must_use]
+    pub fn parse(content: &[u8]) -> Self {
+        let mut out = Self::default();
+        for line in content.split(|b| *b == b'\n') {
+            match CpuTimes::parse_line(line) {
+                Some((None, times)) => out.total = Some(times),
+                Some((Some(_), times)) => out.per_cpu.push(times),
+                None => {}
+            }
+        }
+        out
+    }
+
+    /// Per-CPU times, falling back to the aggregate when the kernel published
+    /// no `cpuN` lines.
+    ///
+    /// A caller drawing one bar per CPU wants this rather than `per_cpu`: one
+    /// bar for the whole machine is a better answer than no bars.
+    #[must_use]
+    pub fn per_cpu_or_total(&self) -> Vec<CpuTimes> {
+        if self.per_cpu.is_empty() {
+            self.total.into_iter().collect()
+        } else {
+            self.per_cpu.clone()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Showing bytes to a person
+// ---------------------------------------------------------------------------
+
+/// Bytes from `/proc` rendered for a terminal.
+///
+/// # Why a display helper is in a crate that says it does not format
+///
+/// This crate's header says it deals in facts and leaves presentation alone,
+/// and that is still the rule. This is the one exception, and it earns its
+/// place by being the direct consequence of the rule rather than a breach of
+/// it: the crate returns **bytes** for command names and arguments, precisely
+/// because forcing them through UTF-8 would be wrong, and so every caller
+/// inherits the same problem of putting one on a screen. Two callers solved it
+/// two different ways within a day of each other -- `htop` with this function
+/// and `ps` with `from_utf8_lossy` -- which is the duplication this crate
+/// exists to end, one level up.
+///
+/// # `\xNN`, not `from_utf8_lossy`
+///
+/// `CLAUDE.md` self-review item 7 forbids the lossy conversion as silent data
+/// corruption. Here the corruption would be of the thing the user is reading:
+/// U+FFFD maps every invalid byte to the same character, so two different
+/// process names become the same string and a viewer cannot tell one from the
+/// other. This is explicit and does not collide.
+///
+/// The alternative that is worse than either is what `htop` did before it had
+/// this: read through `read_to_string`, fail, and drop the process from the
+/// list. A viewer that hides exactly the processes with unusual names is worse
+/// than one that renders them oddly.
+#[must_use]
+pub fn display_bytes(raw: &[u8]) -> String {
+    match core::str::from_utf8(raw) {
+        Ok(text) => text.to_string(),
+        Err(_) => {
+            let mut out = String::with_capacity(raw.len());
+            let mut rest = raw;
+            loop {
+                match core::str::from_utf8(rest) {
+                    Ok(text) => {
+                        out.push_str(text);
+                        return out;
+                    }
+                    Err(e) => {
+                        let good = e.valid_up_to();
+                        if let Some(text) =
+                            rest.get(..good).and_then(|b| core::str::from_utf8(b).ok())
+                        {
+                            out.push_str(text);
+                        }
+                        let bad = e.error_len().unwrap_or(1);
+                        for b in rest.get(good..good.saturating_add(bad)).unwrap_or_default() {
+                            let _ = write!(out, "\\x{b:02x}");
+                        }
+                        let Some(next) = rest.get(good.saturating_add(bad)..) else {
+                            return out;
+                        };
+                        rest = next;
+                    }
+                }
+            }
+        }
     }
 }
 

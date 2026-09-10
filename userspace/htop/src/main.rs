@@ -27,8 +27,11 @@ use std::process;
 
 const VERSION: &str = "0.1.0";
 
-/// Slate OS uses 16 KiB pages.
-const PAGE_SIZE_KB: u64 = 16;
+// `PAGE_SIZE_KB` used to live here, a private copy of a fact about the kernel.
+// It is `procinfo::PAGE_SIZE_KIB` now, and this program no longer converts
+// pages to KiB itself -- `ProcessStat::rss_kib` and `ProcessStatm::shared_kib`
+// do. `userspace/ps` still has its own copy; see `known-issues.md` ->
+// TD-B-TEN-PROC-PARSERS-IN-USERSPACE-AND-ONE-CRATE.
 
 /// Assumed tick rate (ticks per second).
 const TICKS_PER_SEC: u64 = 100;
@@ -533,23 +536,10 @@ fn read_key() -> Key {
 // Data structures
 // ============================================================================
 
-/// Per-CPU statistics from /proc/stat.
-#[derive(Clone, Default)]
-struct CpuStat {
-    user: u64,
-    nice: u64,
-    system: u64,
-    idle: u64,
-    iowait: u64,
-    irq: u64,
-    softirq: u64,
-}
-
-impl CpuStat {
-    fn total(&self) -> u64 {
-        self.user + self.nice + self.system + self.idle + self.iowait + self.irq + self.softirq
-    }
-}
+// `CpuStat` used to be declared here, with seven of the ten fields
+// `/proc/stat` publishes and a `total()` that omitted `steal`. It is
+// `procinfo::CpuTimes` now -- see that type for why the missing fields
+// mattered under QEMU.
 
 /// Per-process information scraped from /proc/<pid>/.
 #[derive(Clone)]
@@ -581,30 +571,11 @@ struct ProcessInfo {
     time_str: String,
 }
 
-/// Memory information from /proc/meminfo.
-#[derive(Default)]
-struct MemInfo {
-    total_kb: u64,
-    free_kb: u64,
-    available_kb: u64,
-    buffers_kb: u64,
-    cached_kb: u64,
-    swap_total_kb: u64,
-    swap_free_kb: u64,
-}
-
-impl MemInfo {
-    fn used_kb(&self) -> u64 {
-        self.total_kb
-            .saturating_sub(self.free_kb)
-            .saturating_sub(self.buffers_kb)
-            .saturating_sub(self.cached_kb)
-    }
-
-    fn swap_used_kb(&self) -> u64 {
-        self.swap_total_kb.saturating_sub(self.swap_free_kb)
-    }
-}
+// `MemInfo` used to be declared here, with `u64` fields that were zero
+// both when the kernel did not export a figure and when the figure was
+// genuinely zero. It is `procinfo::MemInfo` now, whose fields are
+// `Option<u64>` for that reason; this program unwraps to 0 at each use,
+// which is what it always did -- but the unwrap is now visible.
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SortField {
@@ -680,124 +651,119 @@ struct Config {
 }
 
 // ============================================================================
-// /proc readers
+// System readers -- thin wrappers over `procinfo`, plus /etc/passwd
 // ============================================================================
 
+/// Read a small text file, trimmed.
+///
+/// The only caller left is [`uid_to_user`], which reads `/etc/passwd`.
+/// Everything under `/proc` goes through [`procinfo`] now, which reads
+/// bytes rather than a `String` -- the distinction that stopped this
+/// program silently dropping processes whose names are not UTF-8.
 fn read_file(path: &str) -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
 
-fn parse_kb_value(s: &str) -> u64 {
-    s.trim()
-        .trim_end_matches(" kB")
-        .trim_end_matches(" KB")
-        .trim()
-        .parse()
-        .unwrap_or(0)
+/// What one CPU's bar shows: the three drawn fractions of the interval.
+///
+/// Fractions of the *interval*, so they sum to at most one. They do not sum to
+/// the busy fraction: `irq`, `softirq` and `steal` are busy time and are not
+/// drawn, so a CPU pegged servicing interrupts reads near zero here. That is
+/// pre-existing and is written down in `known-issues.md` ->
+/// `TD-B-HTOPS-CPU-BAR-PERCENTAGE-OMITS-INTERRUPT-AND-STOLEN-TIME`; it is left
+/// alone here so that this change is only about *which two samples* the bar
+/// divides, not about what counts as busy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CpuBar {
+    user: f64,
+    system: f64,
+    nice: f64,
 }
 
-fn get_meminfo_value(content: &str, key: &str) -> u64 {
-    for line in content.lines() {
-        if let Some((k, v)) = line.split_once(':')
-            && k.trim() == key
-        {
-            return parse_kb_value(v);
-        }
+impl CpuBar {
+    /// The number printed beside the bar: the sum of what is drawn.
+    ///
+    /// Deliberately the sum of the drawn segments rather than
+    /// [`procinfo::CpuTimes::busy`] -- a percentage that does not match the bar
+    /// next to it is worse than one that under-reports consistently, and the
+    /// under-report has its own entry.
+    fn percent(self) -> f64 {
+        (self.user + self.system + self.nice) * 100.0
     }
-    0
 }
 
-/// Read /proc/meminfo.
-fn read_meminfo() -> MemInfo {
-    let mut mem = MemInfo::default();
-    if let Some(content) = read_file("/proc/meminfo") {
-        mem.total_kb = get_meminfo_value(&content, "MemTotal");
-        mem.free_kb = get_meminfo_value(&content, "MemFree");
-        mem.available_kb = get_meminfo_value(&content, "MemAvailable");
-        mem.buffers_kb = get_meminfo_value(&content, "Buffers");
-        mem.cached_kb = get_meminfo_value(&content, "Cached");
-        mem.swap_total_kb = get_meminfo_value(&content, "SwapTotal");
-        mem.swap_free_kb = get_meminfo_value(&content, "SwapFree");
+/// The fractions for one refresh interval, or `None` when there is no interval.
+///
+/// A zero-length interval is "no data yet", not "idle": it is what the first
+/// refresh sees, and what a CPU that has just come back online sees for one
+/// frame. Drawing an empty bar for it is right; dividing by it is not, which is
+/// what the previous `total().max(1)` did -- turning a missing measurement into
+/// a confident 0.0%.
+fn cpu_bar_fractions(delta: &procinfo::CpuTimes) -> Option<CpuBar> {
+    let total = delta.total();
+    if total == 0 {
+        return None;
     }
-    mem
+    let total = total as f64;
+    Some(CpuBar {
+        user: delta.user as f64 / total,
+        system: delta.system as f64 / total,
+        nice: delta.nice as f64 / total,
+    })
 }
 
-/// Read per-CPU stats from /proc/stat.
-fn read_cpu_stats() -> Vec<CpuStat> {
-    let mut cpus = Vec::new();
-    if let Some(stat) = read_file("/proc/stat") {
-        for line in stat.lines() {
-            // Skip the aggregate "cpu " line; only read per-core "cpuN" lines.
-            if line.starts_with("cpu") && !line.starts_with("cpu ") {
-                let parts: Vec<u64> = line
-                    .split_whitespace()
-                    .skip(1) // skip "cpuN" label
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
-                if parts.len() >= 7 {
-                    cpus.push(CpuStat {
-                        user: parts[0],
-                        nice: parts[1],
-                        system: parts[2],
-                        idle: parts[3],
-                        iowait: *parts.get(4).unwrap_or(&0),
-                        irq: *parts.get(5).unwrap_or(&0),
-                        softirq: *parts.get(6).unwrap_or(&0),
-                    });
-                }
-            }
-        }
-    }
-    // If no per-CPU lines found, try the aggregate line as a single CPU.
-    if cpus.is_empty()
-        && let Some(stat) = read_file("/proc/stat")
-    {
-        for line in stat.lines() {
-            if let Some(rest) = line.strip_prefix("cpu ") {
-                let parts: Vec<u64> = rest
-                    .split_whitespace()
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
-                if parts.len() >= 7 {
-                    cpus.push(CpuStat {
-                        user: parts[0],
-                        nice: parts[1],
-                        system: parts[2],
-                        idle: parts[3],
-                        iowait: *parts.get(4).unwrap_or(&0),
-                        irq: *parts.get(5).unwrap_or(&0),
-                        softirq: *parts.get(6).unwrap_or(&0),
-                    });
-                }
-                break;
-            }
-        }
-    }
-    cpus
+/// Memory and swap, through [`procinfo`].
+fn read_meminfo() -> procinfo::MemInfo {
+    procinfo::ProcFs::new()
+        .memory()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
-/// Read uptime in seconds from /proc/uptime.
+/// Uptime in whole seconds, through [`procinfo`].
 fn read_uptime() -> u64 {
-    read_file("/proc/uptime")
-        .and_then(|s| s.split_whitespace().next().map(|v| v.to_string()))
-        .and_then(|s| s.parse::<f64>().ok())
-        .map(|f| f as u64)
-        .unwrap_or(0)
+    procinfo::ProcFs::new()
+        .uptime()
+        .ok()
+        .flatten()
+        .map_or(0, |u| u.up.as_secs())
 }
 
-/// Read load average from /proc/loadavg.
+/// The three load averages, formatted for the header.
+///
+/// `procinfo` parses these as `f64`; the two decimal places are this program's
+/// choice about how to show them, which is why the formatting is here and the
+/// parsing is not.
 fn read_loadavg() -> (String, String, String) {
-    if let Some(content) = read_file("/proc/loadavg") {
-        let parts: Vec<&str> = content.split_whitespace().collect();
-        if parts.len() >= 3 {
-            return (
-                parts[0].to_string(),
-                parts[1].to_string(),
-                parts[2].to_string(),
-            );
-        }
-    }
-    ("0.00".to_string(), "0.00".to_string(), "0.00".to_string())
+    procinfo::ProcFs::new()
+        .load_average()
+        .ok()
+        .flatten()
+        .map_or_else(
+            || ("0.00".to_string(), "0.00".to_string(), "0.00".to_string()),
+            |l| {
+                (
+                    format!("{:.2}", l.one),
+                    format!("{:.2}", l.five),
+                    format!("{:.2}", l.fifteen),
+                )
+            },
+        )
+}
+
+/// Per-CPU times, through [`procinfo`].
+///
+/// One read of `/proc/stat`, not two: the reader this replaces opened the file
+/// a second time when it found no `cpuN` lines, so on a single-CPU machine it
+/// compared two different instants.
+fn read_cpu_times() -> Vec<procinfo::CpuTimes> {
+    procinfo::ProcFs::new()
+        .cpu_stats()
+        .ok()
+        .flatten()
+        .map(|s| s.per_cpu_or_total())
+        .unwrap_or_default()
 }
 
 /// Resolve a UID to a username via /etc/passwd.  Falls back to the numeric UID.
@@ -818,36 +784,19 @@ fn uid_to_user(uid: u32) -> String {
     uid.to_string()
 }
 
-/// Read information about a single process from /proc/<pid>/.
-fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
-    let stat_path = format!("/proc/{pid}/stat");
-    let stat_content = read_file(&stat_path)?;
+/// Read information about a single process, through [`procinfo`].
+///
+/// The parsing this used to do itself now lives in `procinfo`, so that
+/// `apps/procexplorer` gets the same answers -- including the two things this
+/// function got wrong on its own: a `comm` containing spaces and parentheses
+/// (handled by finding the last `)`, which this did correctly) and a name that
+/// is not UTF-8 (which it did not, dropping the process).
+fn read_process(procfs: &procinfo::ProcFs, pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
+    let stat = procfs.process_stat(u64::from(pid)).ok()??;
 
-    // /proc/<pid>/stat format: pid (comm) state ppid ...
-    // comm can contain spaces and parentheses, so find the last ')'.
-    let comm_start = stat_content.find('(')?;
-    let comm_end = stat_content.rfind(')')?;
-    let name = stat_content[comm_start + 1..comm_end].to_string();
-    let rest = stat_content.get(comm_end + 2..)?; // skip ") "
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-
-    if fields.len() < 22 {
-        return None;
-    }
-
-    let state = fields[0].chars().next().unwrap_or('?');
-    let ppid: u32 = fields[1].parse().unwrap_or(0);
-    let utime: u64 = fields[11].parse().unwrap_or(0);
-    let stime: u64 = fields[12].parse().unwrap_or(0);
-    let priority: i32 = fields[15].parse().unwrap_or(0);
-    let nice: i32 = fields[16].parse().unwrap_or(0);
-    let threads: u32 = fields[17].parse().unwrap_or(1);
-    let vsize_bytes: u64 = fields[20].parse().unwrap_or(0);
-    let rss_pages: u64 = fields[21].parse().unwrap_or(0);
-
-    let rss_kb = rss_pages.saturating_mul(PAGE_SIZE_KB);
-    let vsize_kb = vsize_bytes / 1024;
-    let cpu_ticks = utime.saturating_add(stime);
+    let name = procinfo::display_bytes(&stat.comm);
+    let rss_kb = stat.rss_kib();
+    let cpu_ticks = stat.cpu_ticks();
 
     let mem_pct = if mem_total_kb > 0 {
         (rss_kb as f64 / mem_total_kb as f64) * 100.0
@@ -856,9 +805,8 @@ fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
     };
 
     // Format CPU time as H:MM:SS.cc (hundredths).
-    let total_centisecs = cpu_ticks;
-    let total_secs = total_centisecs / TICKS_PER_SEC;
-    let centis = total_centisecs % TICKS_PER_SEC;
+    let total_secs = cpu_ticks / TICKS_PER_SEC;
+    let centis = cpu_ticks % TICKS_PER_SEC;
     let hours = total_secs / 3600;
     let mins = (total_secs % 3600) / 60;
     let secs = total_secs % 60;
@@ -868,33 +816,37 @@ fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
         format!("{mins}:{secs:02}.{centis:02}")
     };
 
-    // Read UID from /proc/<pid>/status.
-    let uid = read_file(&format!("/proc/{pid}/status"))
-        .and_then(|content| {
-            for line in content.lines() {
-                if let Some(val) = line.strip_prefix("Uid:") {
-                    return val.split_whitespace().next().and_then(|s| s.parse().ok());
-                }
-            }
-            None
-        })
+    let uid = procfs
+        .process_status(u64::from(pid))
+        .ok()
+        .flatten()
+        .and_then(|st| st.uid)
         .unwrap_or(0);
 
-    // Read shared memory from /proc/<pid>/statm (field 2).
-    let shr_kb = read_file(&format!("/proc/{pid}/statm"))
-        .and_then(|s| {
-            s.split_whitespace()
-                .nth(2)
-                .and_then(|v| v.parse::<u64>().ok())
-        })
-        .unwrap_or(0)
-        .saturating_mul(PAGE_SIZE_KB);
+    let shr_kb = procfs
+        .process_statm(u64::from(pid))
+        .ok()
+        .flatten()
+        .map_or(0, |m| m.shared_kib());
 
-    // Read full command line from /proc/<pid>/cmdline.
-    let cmdline = read_file(&format!("/proc/{pid}/cmdline"))
-        .map(|s| s.replace('\0', " ").trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("[{name}]"));
+    // An empty argument list is a kernel thread, which is why it shows as
+    // `[name]` rather than blank. `procinfo` distinguishes that from a process
+    // that has exited, which arrives here as `None` and gets the same display
+    // -- the difference does not matter to a viewer, only to the reader.
+    let cmdline = procfs
+        .process_cmdline(u64::from(pid))
+        .ok()
+        .flatten()
+        .filter(|args| !args.is_empty())
+        .map_or_else(
+            || format!("[{name}]"),
+            |args| {
+                args.iter()
+                    .map(|a| procinfo::display_bytes(a))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            },
+        );
 
     let user = uid_to_user(uid);
 
@@ -902,14 +854,14 @@ fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
         pid,
         name,
         cmdline,
-        state,
-        ppid,
+        state: char::from(stat.state),
+        ppid: u32::try_from(stat.ppid).unwrap_or(0),
         uid,
         user,
-        priority,
-        nice,
-        threads,
-        vsize_kb,
+        priority: i32::try_from(stat.priority).unwrap_or(0),
+        nice: i32::try_from(stat.nice).unwrap_or(0),
+        threads: u32::try_from(stat.num_threads).unwrap_or(1),
+        vsize_kb: stat.vsize_kib(),
         rss_kb,
         shr_kb,
         cpu_ticks,
@@ -921,18 +873,14 @@ fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
 
 /// Enumerate all processes from /proc.
 fn read_all_processes(mem_total_kb: u64) -> Vec<ProcessInfo> {
-    let mut procs = Vec::new();
-    if let Ok(entries) = fs::read_dir("/proc") {
-        for entry in entries.flatten() {
-            if let Some(fname) = entry.file_name().to_str()
-                && let Ok(pid) = fname.parse::<u32>()
-                && let Some(info) = read_process(pid, mem_total_kb)
-            {
-                procs.push(info);
-            }
-        }
-    }
-    procs
+    let procfs = procinfo::ProcFs::new();
+    let Ok(pids) = procfs.process_ids() else {
+        return Vec::new();
+    };
+    pids.into_iter()
+        .filter_map(|pid| u32::try_from(pid).ok())
+        .filter_map(|pid| read_process(&procfs, pid, mem_total_kb))
+        .collect()
 }
 
 /// Compute CPU usage percentages by comparing two snapshots.
@@ -1113,9 +1061,9 @@ struct App {
     /// Previous aggregate CPU total.
     prev_cpu_total: u64,
     /// Per-CPU stats (previous snapshot).
-    prev_cpu_stats: Vec<CpuStat>,
+    prev_cpu_stats: Vec<procinfo::CpuTimes>,
     /// Memory info.
-    mem: MemInfo,
+    mem: procinfo::MemInfo,
     /// Cursor position in the process list (0-based).
     cursor: usize,
     /// Scroll offset (first visible process index).
@@ -1134,12 +1082,21 @@ struct App {
     load: (String, String, String),
     /// Number of CPUs.
     num_cpus: usize,
+    /// Per-CPU time accumulated **since the previous refresh**.
+    ///
+    /// Not the counters themselves. `/proc/stat` counts since boot, so a bar
+    /// drawn from the raw sample shows how the machine has spent its life and
+    /// barely moves after a few hours of uptime. This holds the difference
+    /// between the last two samples, which is what the bars are supposed to
+    /// mean. Empty until the second refresh, and the renderer treats a
+    /// zero-length interval as "no data yet" rather than as an idle CPU.
+    cpu_delta: Vec<procinfo::CpuTimes>,
 }
 
 impl App {
     fn new(config: Config) -> Self {
         let (rows, cols) = terminal_size();
-        let cpu_stats = read_cpu_stats();
+        let cpu_stats = read_cpu_times();
         let num_cpus = cpu_stats.len().max(1);
         Self {
             term_rows: rows,
@@ -1150,7 +1107,7 @@ impl App {
             prev_ticks: Vec::new(),
             prev_cpu_total: 0,
             prev_cpu_stats: cpu_stats,
-            mem: MemInfo::default(),
+            mem: procinfo::MemInfo::default(),
             cursor: 0,
             scroll: 0,
             filter: String::new(),
@@ -1160,6 +1117,7 @@ impl App {
             uptime: 0,
             load: ("0.00".to_string(), "0.00".to_string(), "0.00".to_string()),
             num_cpus,
+            cpu_delta: Vec::new(),
         }
     }
 
@@ -1186,10 +1144,10 @@ impl App {
         self.uptime = read_uptime();
         self.load = read_loadavg();
 
-        let cpu_stats = read_cpu_stats();
+        let cpu_stats = read_cpu_times();
         self.num_cpus = cpu_stats.len().max(1);
 
-        let mut procs = read_all_processes(self.mem.total_kb);
+        let mut procs = read_all_processes(self.mem.total_kib.unwrap_or(0));
 
         // Compute aggregate CPU delta for per-process CPU%.
         let current_total: u64 = cpu_stats.iter().map(|c| c.total()).sum();
@@ -1197,6 +1155,15 @@ impl App {
         let cpu_delta = current_total.saturating_sub(prev_total);
 
         compute_cpu_usage(&mut procs, &self.prev_ticks, cpu_delta);
+
+        // The per-CPU interval, for the bars. Same two samples the aggregate
+        // above uses; `zip` drops any CPU that appeared or disappeared between
+        // them, which is the honest answer for one refresh.
+        self.cpu_delta = cpu_stats
+            .iter()
+            .zip(self.prev_cpu_stats.iter())
+            .map(|(now, before)| now.since(before))
+            .collect();
 
         // Save for next delta.
         self.prev_ticks = procs.iter().map(|p| (p.pid, p.cpu_ticks)).collect();
@@ -1294,7 +1261,8 @@ impl App {
     }
 
     fn render_header(&self, buf: &mut String) {
-        let cpu_stats = &self.prev_cpu_stats;
+        // The interval, not the counters -- see `App::cpu_delta`.
+        let cpu_stats = &self.cpu_delta;
         let half_cols = self.term_cols / 2;
 
         // Render CPU bars and system info in a two-column layout.
@@ -1308,18 +1276,11 @@ impl App {
             let cpu_label = format!("{:>3}", i);
             let _ = write!(buf, " {BOLD_CYAN}{cpu_label}{RESET}");
 
-            if i < cpu_stats.len() {
-                let stat = &cpu_stats[i];
-                let total = stat.total().max(1) as f64;
-                let user_frac = stat.user as f64 / total;
-                let system_frac = stat.system as f64 / total;
-                let nice_frac = stat.nice as f64 / total;
-
+            if let Some(bar) = cpu_stats.get(i).and_then(cpu_bar_fractions) {
                 // Bar width: half_cols minus label and brackets.
                 let bar_width = half_cols.saturating_sub(8);
-                self.render_cpu_bar(buf, bar_width, user_frac, system_frac, nice_frac);
-
-                let pct = ((stat.user + stat.system + stat.nice) as f64 / total) * 100.0;
+                self.render_cpu_bar(buf, bar_width, bar.user, bar.system, bar.nice);
+                let pct = bar.percent();
                 let _ = write!(buf, " {BOLD_WHITE}{pct:4.1}%{RESET}");
             }
 
@@ -1356,16 +1317,16 @@ impl App {
             let mut s = String::new();
             let _ = write!(s, "{BOLD_CYAN}Mem{RESET}");
             let bar_width = half_cols.saturating_sub(20);
-            let total = self.mem.total_kb.max(1) as f64;
-            let used_frac = self.mem.used_kb() as f64 / total;
-            let buf_frac = self.mem.buffers_kb as f64 / total;
-            let cache_frac = self.mem.cached_kb as f64 / total;
+            let total = self.mem.total_kib.unwrap_or(0).max(1) as f64;
+            let used_frac = self.mem.used_excluding_cache_kib().unwrap_or(0) as f64 / total;
+            let buf_frac = self.mem.buffers_kib.unwrap_or(0) as f64 / total;
+            let cache_frac = self.mem.cached_kib.unwrap_or(0) as f64 / total;
             self.render_mem_bar_into(&mut s, bar_width, used_frac, buf_frac, cache_frac);
             let _ = write!(
                 s,
                 " {}/{}",
-                format_mib(self.mem.used_kb()),
-                format_mib(self.mem.total_kb)
+                format_mib(self.mem.used_excluding_cache_kib().unwrap_or(0)),
+                format_mib(self.mem.total_kib.unwrap_or(0))
             );
             lines.push(s);
         }
@@ -1375,14 +1336,14 @@ impl App {
             let mut s = String::new();
             let _ = write!(s, "{BOLD_CYAN}Swp{RESET}");
             let bar_width = half_cols.saturating_sub(20);
-            let total = self.mem.swap_total_kb.max(1) as f64;
-            let used_frac = self.mem.swap_used_kb() as f64 / total;
+            let total = self.mem.swap_total_kib.unwrap_or(0).max(1) as f64;
+            let used_frac = self.mem.swap_used_kib().unwrap_or(0) as f64 / total;
             self.render_swap_bar_into(&mut s, bar_width, used_frac);
             let _ = write!(
                 s,
                 " {}/{}",
-                format_mib(self.mem.swap_used_kb()),
-                format_mib(self.mem.swap_total_kb)
+                format_mib(self.mem.swap_used_kib().unwrap_or(0)),
+                format_mib(self.mem.swap_total_kib.unwrap_or(0))
             );
             lines.push(s);
         }
@@ -2200,4 +2161,76 @@ fn main() {
 
     let mut app = App::new(config);
     app.run();
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::cpu_bar_fractions;
+    use procinfo::CpuTimes;
+
+    /// The bars divide the **interval**, which is the whole point of the
+    /// change that introduced this function. A CPU that was 90% idle since
+    /// boot but has been flat out since the last refresh must read ~100%.
+    #[test]
+    fn the_bar_measures_the_interval_it_is_given() {
+        let interval = CpuTimes {
+            user: 90,
+            system: 10,
+            ..CpuTimes::default()
+        };
+        let bar = cpu_bar_fractions(&interval).unwrap();
+        assert!((bar.user - 0.9).abs() < 1e-9);
+        assert!((bar.system - 0.1).abs() < 1e-9);
+        assert!((bar.percent() - 100.0).abs() < 1e-9);
+    }
+
+    /// A zero-length interval has no answer, and `None` is that answer.
+    ///
+    /// The code this replaced divided by `total().max(1)` and printed 0.0%,
+    /// which is a confident claim that the CPU is idle -- said about the first
+    /// refresh, before any measurement exists.
+    #[test]
+    fn a_zero_interval_has_no_reading_rather_than_zero_percent() {
+        assert!(cpu_bar_fractions(&CpuTimes::default()).is_none());
+    }
+
+    /// Idle time is in the denominator and not drawn, so a quiet CPU reads low
+    /// rather than reading nothing.
+    #[test]
+    fn idle_time_lowers_the_reading_without_hiding_it() {
+        let interval = CpuTimes {
+            user: 25,
+            idle: 75,
+            ..CpuTimes::default()
+        };
+        let bar = cpu_bar_fractions(&interval).unwrap();
+        assert!((bar.percent() - 25.0).abs() < 1e-9);
+    }
+
+    /// The known under-report, pinned so that fixing it is a deliberate change
+    /// with a failing test rather than a silent one.
+    ///
+    /// `irq`, `softirq` and `steal` are busy time and are not drawn, so a CPU
+    /// doing nothing but servicing interrupts reads 0%. See
+    /// `known-issues.md` -> TD-B-HTOPS-CPU-BAR-PERCENTAGE-OMITS-INTERRUPT-AND-STOLEN-TIME.
+    #[test]
+    fn interrupt_and_stolen_time_are_not_counted_yet() {
+        let interval = CpuTimes {
+            irq: 50,
+            softirq: 30,
+            steal: 20,
+            ..CpuTimes::default()
+        };
+        let bar = cpu_bar_fractions(&interval).unwrap();
+        assert!(
+            (bar.percent() - 0.0).abs() < 1e-9,
+            "a fully-busy CPU currently reads 0%"
+        );
+        // …while the crate's own definition of busy sees all of it.
+        assert_eq!(interval.busy(), 100);
+    }
 }

@@ -86,11 +86,33 @@ pub const POLLRDHUP: i16 = 0x2000;
 // select() constants
 // ---------------------------------------------------------------------------
 
-/// Maximum number of file descriptors in an `fd_set`.
+/// Highest file descriptor this system can put in an `fd_set`.
+///
+/// 256, because `fdtable::MAX_FDS` is 256 -- an fd at or above this cannot
+/// exist, so [`fd_set_set`] and friends refuse one. This is a **limit**, not
+/// the size of the structure; see [`FD_SET_BITS`].
 pub const FD_SETSIZE: usize = 256;
 
-/// Number of `u64` words needed for `FD_SETSIZE` bits.
-const FD_SET_WORDS: usize = FD_SETSIZE / 64;
+/// Bits in the `fd_set` a C caller hands us: musl's 1024, not our 256.
+///
+/// # These are two different numbers and used to be one
+///
+/// A C program writes `fd_set r;` on its own stack, and `sizeof(fd_set)` there
+/// is **128 bytes**. Ours was `FD_SETSIZE / 64` words = 32 bytes, so every
+/// `select()` read and wrote a quarter of the caller's object and left the rest
+/// as it found it -- including on the *write* back, where a caller that reuses
+/// a set across calls kept stale bits in the 96 bytes we never touched.
+///
+/// The limit and the layout are genuinely separate facts. Our fdtable stops at
+/// 256, so no descriptor above that can be in a set and the extra words are
+/// always zero; but the *structure* is still the C library's, because the
+/// caller allocated it. Found by `scripts/check-libc-abi.py`;
+/// `design-decisions.md` §1011.
+pub const FD_SET_BITS: usize = 1024;
+
+/// Number of `u64` words in the structure -- from [`FD_SET_BITS`], the ABI
+/// size, never from [`FD_SETSIZE`], which is a policy limit.
+const FD_SET_WORDS: usize = FD_SET_BITS / 64;
 
 // ---------------------------------------------------------------------------
 // Structures
@@ -1057,10 +1079,18 @@ mod tests {
 
     // -- FdSet size/layout --
 
+    /// The limit and the layout are separate numbers, and this pins both.
+    ///
+    /// It used to assert `FD_SET_WORDS == 4 // 256 / 64`, tying the structure's
+    /// width to our fd limit. They are different facts: a C caller's `fd_set`
+    /// is 1024 bits whatever our fdtable can hold, and conflating them made
+    /// `select()` read and write a quarter of the caller's object. See
+    /// [`FD_SET_BITS`].
     #[test]
     fn test_fd_setsize() {
-        assert_eq!(FD_SETSIZE, 256);
-        assert_eq!(FD_SET_WORDS, 4); // 256 / 64
+        assert_eq!(FD_SETSIZE, 256); // our fdtable's limit
+        assert_eq!(FD_SET_BITS, 1024); // the C library's structure
+        assert_eq!(FD_SET_WORDS, 16); // 1024 / 64
     }
 
     #[test]
@@ -1225,10 +1255,14 @@ mod tests {
 
     // -- FdSet size --
 
+    /// 128 bytes, which is `sizeof(fd_set)` in musl and glibc alike.
+    ///
+    /// Asserted 32 until 2026-09-09, under the comment "4 words × 8 bytes",
+    /// which restated our own declaration rather than the C library's. See
+    /// [`FD_SET_BITS`] and `design-decisions.md` §1011.
     #[test]
     fn test_fdset_size() {
-        // 4 words × 8 bytes = 32 bytes.
-        assert_eq!(core::mem::size_of::<FdSet>(), 32);
+        assert_eq!(core::mem::size_of::<FdSet>(), 128);
     }
 
     #[test]

@@ -57,19 +57,37 @@ pub const UT_HOSTSIZE: usize = 256;
 /// Size of the `ut_id` field.
 pub const UT_IDSIZE: usize = 4;
 
-/// Timeval for utmpx (32-bit fields for compatibility).
+/// The `ut_tv` of a `struct utmpx`: a **full** `struct timeval`, 16 bytes.
+///
+/// # Not 32-bit fields, whatever the comment used to say
+///
+/// This was `i32`/`i32` under "32-bit fields for compatibility", which is
+/// glibc's `struct { __int32_t tv_sec; __int32_t tv_usec; }`. musl uses a real
+/// `struct timeval` — `time_t` and `suseconds_t`, both 8 bytes — and musl is
+/// the C library every port in this tree links against. Measured:
+///
+/// ```text
+/// musl: sizeof(struct utmpx)=400  ut_tv@344 (16 bytes)  ut_addr_v6@360
+/// ours: 384                       ut_tv@340 ( 8 bytes)  ut_addr_v6@348
+/// ```
+///
+/// Eight bytes short *and* 4-aligned rather than 8, which is where both the
+/// missing 16 bytes and the shifted offsets came from. Found by
+/// `scripts/check-libc-abi.py`; `design-decisions.md` §1011.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct UtmpxTimeval {
     /// Seconds since epoch.
-    pub tv_sec: i32,
+    pub tv_sec: i64,
     /// Microseconds.
-    pub tv_usec: i32,
+    pub tv_usec: i64,
 }
 
 /// User accounting database entry.
 ///
-/// Matches the POSIX `struct utmpx` layout (glibc-compatible).
+/// Matches musl's `struct utmpx`, 400 bytes, asserted against musl's own
+/// header by `scripts/check-libc-abi.py`. It used to say "glibc-compatible",
+/// which was true and was the wrong library — see [`UtmpxTimeval`].
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Utmpx {
@@ -93,7 +111,10 @@ pub struct Utmpx {
     pub ut_tv: UtmpxTimeval,
     /// Internet address of remote host (IPv6).
     pub ut_addr_v6: [i32; 4],
-    /// Reserved for future use.
+    /// musl's trailing `char __unused[20]`. Was documented as "reserved for
+    /// future use", which is what it looks like from this side and not what it
+    /// is: it is part of the record a C `who` reads, and removing it would make
+    /// the structure 380 bytes.
     _reserved: [u8; 20],
 }
 
@@ -284,9 +305,12 @@ mod tests {
         );
     }
 
+    /// 16, a full `struct timeval`. Asserted 8 until 2026-09-09, which is
+    /// glibc's `__int32_t` pair; musl uses `time_t`/`suseconds_t`. See
+    /// [`UtmpxTimeval`].
     #[test]
     fn test_utmpx_timeval_size() {
-        assert_eq!(core::mem::size_of::<UtmpxTimeval>(), 8);
+        assert_eq!(core::mem::size_of::<UtmpxTimeval>(), 16);
     }
 
     // -- setutxent / endutxent (no-ops) --

@@ -329,6 +329,11 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     }
 }
 
+// Emits C `_Static_assert`s for `scripts/check-libc-abi.py` to compile against
+// musl. Test-only: it is a checking apparatus, not part of the library.
+#[cfg(test)]
+mod abi_layout;
+
 pub mod aio;
 pub mod alloca;
 pub mod ar;

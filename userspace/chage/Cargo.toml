@@ -11,6 +11,7 @@ description = "SlateOS chage utility"
 # `/etc/shadow` itself -- and never wrote anything at all: it printed the line
 # it would have written to stdout and reported "updated aging for <user>".
 userdb = { path = "../userdb" }
+authlib = { path = "../authlib" }
 # chage names accounts, and a user name is attacker-chosen on any machine where
 # an unprivileged account can be created.
 quoting = { path = "../quoting" }

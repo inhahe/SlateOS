@@ -83,15 +83,21 @@ mod tests {
         assert_eq!(FD_SETSIZE, 256);
     }
 
+    /// 128 bytes, which is what a C caller's `fd_set` is.
+    ///
+    /// This asserted `> 0` -- true of every struct that has ever existed, so
+    /// it could not fail. `FdSet` was in fact 32 bytes against musl's 128
+    /// until 2026-09-09, and `select()` therefore read and wrote a quarter of
+    /// the caller's object. See `crate::poll::FD_SET_BITS`.
     #[test]
     fn test_fdset_struct_size() {
-        assert!(core::mem::size_of::<FdSet>() > 0);
+        assert_eq!(core::mem::size_of::<FdSet>(), 128);
     }
 
     #[test]
     fn test_fd_zero_clears() {
         let mut set = FdSet {
-            fds_bits: [0xFFFF_FFFF_FFFF_FFFF; 4],
+            fds_bits: [0xFFFF_FFFF_FFFF_FFFF; { crate::poll::FD_SET_BITS / 64 }],
         };
         fd_zero(&mut set);
         for &slot in &set.fds_bits {
@@ -101,7 +107,9 @@ mod tests {
 
     #[test]
     fn test_fd_set_isset() {
-        let mut set = FdSet { fds_bits: [0; 4] };
+        let mut set = FdSet {
+            fds_bits: [0; { crate::poll::FD_SET_BITS / 64 }],
+        };
         assert!(!fd_isset(5, &set));
         fd_set(5, &mut set);
         assert!(fd_isset(5, &set));
@@ -109,7 +117,9 @@ mod tests {
 
     #[test]
     fn test_fd_clr() {
-        let mut set = FdSet { fds_bits: [0; 4] };
+        let mut set = FdSet {
+            fds_bits: [0; { crate::poll::FD_SET_BITS / 64 }],
+        };
         fd_set(10, &mut set);
         assert!(fd_isset(10, &set));
         fd_clr(10, &mut set);
@@ -118,7 +128,9 @@ mod tests {
 
     #[test]
     fn test_fd_set_multiple() {
-        let mut set = FdSet { fds_bits: [0; 4] };
+        let mut set = FdSet {
+            fds_bits: [0; { crate::poll::FD_SET_BITS / 64 }],
+        };
         fd_set(0, &mut set);
         fd_set(63, &mut set);
         fd_set(64, &mut set);
@@ -133,7 +145,9 @@ mod tests {
 
     #[test]
     fn test_fd_set_does_not_affect_others() {
-        let mut set = FdSet { fds_bits: [0; 4] };
+        let mut set = FdSet {
+            fds_bits: [0; { crate::poll::FD_SET_BITS / 64 }],
+        };
         fd_set(42, &mut set);
         for i in 0..FD_SETSIZE as i32 {
             if i == 42 {

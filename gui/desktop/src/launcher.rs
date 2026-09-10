@@ -702,14 +702,16 @@ impl LauncherState {
                 INPUT_FONT_SIZE,
                 FontWeightHint::Regular,
             );
-        cmds.push(RenderCommand::Line {
-            x1: cursor_x,
-            y1: text_y,
-            x2: cursor_x,
-            y2: text_y + INPUT_FONT_SIZE,
-            color: p.accent,
-            width: 2.0,
-        });
+        let mut caret = guitk::render::RenderTree::new();
+        guitk::textedit::push_caret(
+            &mut caret,
+            cursor_x,
+            text_y,
+            INPUT_FONT_SIZE,
+            p.accent,
+            guitk::textedit::CARET_WIDTH,
+        );
+        cmds.extend(caret.commands);
 
         // Results
         let results_y_start = INPUT_HEIGHT;

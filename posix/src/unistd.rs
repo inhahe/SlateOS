@@ -2808,8 +2808,20 @@ pub struct Sysinfo {
     pub freehigh: u64,
     /// Memory unit size in bytes.
     pub mem_unit: u32,
-    /// Padding to 64 bytes.
-    _padding: [u8; 4],
+    /// musl's trailing `char __reserved[256]`, which is the whole of the
+    /// difference between our 112 bytes and its 368.
+    ///
+    /// Every named field above is already at musl's offset -- `uptime` 0,
+    /// `loads` 8, `totalram` 32 … `mem_unit` 104, measured. Without this the
+    /// struct simply stopped a third of the way into the caller's object and
+    /// left the rest as the caller's allocator had it. `_padding` used to sit
+    /// here with a comment saying "padding to 64 bytes", which the struct has
+    /// not been since long before anyone read it.
+    ///
+    /// `u8`, not a wider word, so it lands at 108 where musl puts it rather
+    /// than being pushed to 112 by an alignment we would have invented.
+    /// Found by `scripts/check-libc-abi.py`; `design-decisions.md` §1011.
+    __reserved: [u8; 256],
 }
 
 /// Read the kernel's live process count for `sysinfo.procs`.
@@ -2893,7 +2905,7 @@ pub extern "C" fn sysinfo(info: *mut Sysinfo) -> i32 {
         s._pad = [0; 6];
         s.totalhigh = 0;
         s.freehigh = 0;
-        s._padding = [0; 4];
+        s.__reserved = [0; 256];
 
         #[cfg(target_os = "none")]
         {

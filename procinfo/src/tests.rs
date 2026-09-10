@@ -654,3 +654,479 @@ fn default_and_new_point_at_the_kernels_proc() {
     assert_eq!(ProcFs::new().root(), Path::new("/proc"));
     assert_eq!(ProcFs::default().root(), Path::new("/proc"));
 }
+
+// ---------------------------------------------------------------------------
+// Per-process: /proc/<pid>/stat, statm, status, cmdline
+// ---------------------------------------------------------------------------
+
+/// A `stat` line with the field numbering `proc(5)` gives, so the indices in
+/// [`ProcessStat::parse`] can be checked against something readable.
+///
+/// Fields 3.. after the comm: state R, ppid 1, … utime 1234 (14), stime 567
+/// (15), … priority 20 (18), nice -5 (19), threads 7 (20), … vsize 4096000
+/// (23), rss 250 (24).
+fn stat_line(comm: &str) -> Vec<u8> {
+    format!(
+        "42 ({comm}) R 1 42 42 0 -1 4194304 100 0 0 0 1234 567 0 0 20 -5 7 0 \
+         99 4096000 250 18446744073709551615 1 2 3 4 5 6 7 8 9"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn process_stat_reads_the_fields_proc5_numbers() {
+    let st = ProcessStat::parse(&stat_line("bash")).unwrap();
+    assert_eq!(st.pid, 42);
+    assert_eq!(st.comm, b"bash");
+    assert_eq!(st.state, b'R');
+    assert_eq!(st.ppid, 1);
+    assert_eq!(st.pgrp, 42);
+    assert_eq!(st.session, 42);
+    assert_eq!(st.tty_nr, 0);
+    assert_eq!(st.starttime_ticks, 99);
+    assert_eq!(st.utime_ticks, 1234);
+    assert_eq!(st.stime_ticks, 567);
+    assert_eq!(st.priority, 20);
+    assert_eq!(st.nice, -5);
+    assert_eq!(st.num_threads, 7);
+    assert_eq!(st.vsize_bytes, 4_096_000);
+    assert_eq!(st.rss_pages, 250);
+    assert_eq!(st.cpu_ticks(), 1234 + 567);
+}
+
+/// The whole reason this is not a `split_whitespace`.
+///
+/// A process may be named `my (odd) name`, and `/proc/<pid>/stat` wraps it in
+/// one more pair of parentheses without escaping anything. Splitting on
+/// whitespace mis-numbers every field after it — so a viewer would report the
+/// wrong parent, the wrong memory and the wrong CPU time for exactly the
+/// processes whose names are worth a second look.
+#[test]
+fn a_comm_with_spaces_and_parentheses_does_not_shift_the_fields() {
+    let st = ProcessStat::parse(&stat_line("my (odd) name")).unwrap();
+    assert_eq!(st.comm, b"my (odd) name");
+    assert_eq!(st.state, b'R');
+    assert_eq!(st.ppid, 1);
+    assert_eq!(st.rss_pages, 250, "fields after comm must not shift");
+}
+
+/// A name that is not UTF-8 is kept, byte for byte.
+///
+/// `htop` read this file through `read_to_string`, so such a process was
+/// dropped from the list entirely rather than shown with an odd name — and our
+/// own filesystem allows every byte but `/` and NUL, so this is not exotic.
+#[test]
+fn a_comm_that_is_not_utf8_survives() {
+    let mut line = b"7 (od".to_vec();
+    line.push(0xff);
+    line.extend_from_slice(b"d) S 1 7 7 0 -1 0 0 0 0 0 1 2 0 0 20 0 1 0 0 1024 3 0 0 0 0 0 0");
+    let st = ProcessStat::parse(&line).unwrap();
+    assert_eq!(st.comm, b"od\xffd");
+    assert_eq!(st.state, b'S');
+    assert!(
+        core::str::from_utf8(&st.comm).is_err(),
+        "the fixture must be non-UTF-8"
+    );
+}
+
+/// Not shaped like `stat` at all: no parentheses, or too few fields.
+#[test]
+fn process_stat_refuses_a_line_that_is_not_stat() {
+    assert!(ProcessStat::parse(b"").is_none());
+    assert!(
+        ProcessStat::parse(b"42 bash R 1").is_none(),
+        "no parentheses"
+    );
+    assert!(
+        ProcessStat::parse(b"42 (bash) R 1 2 3").is_none(),
+        "too few fields"
+    );
+}
+
+/// 16 KiB pages, not 4.
+///
+/// `stat` reports RSS in *pages*, and every `/proc` example on the internet
+/// assumes 4 KiB. `design.txt` fixes SlateOS at 16, so a reader that takes the
+/// internet's word is out by a factor of four and still prints a plausible
+/// number — which is why this has a test rather than a comment.
+#[test]
+fn rss_converts_with_slateos_page_size() {
+    let st = ProcessStat::parse(&stat_line("x")).unwrap();
+    assert_eq!(PAGE_SIZE_KIB, 16);
+    assert_eq!(st.rss_kib(), 250 * 16);
+    // …and vsize is already bytes in the same line, which is the trap.
+    assert_eq!(st.vsize_kib(), 4_096_000 / 1024);
+}
+
+#[test]
+fn statm_reads_three_page_counts() {
+    let m = ProcessStatm::parse(b"1000 250 100 5 0 60 0").unwrap();
+    assert_eq!(m.size_pages, 1000);
+    assert_eq!(m.resident_pages, 250);
+    assert_eq!(m.shared_pages, 100);
+    assert_eq!(m.shared_kib(), 100 * 16);
+    assert!(ProcessStatm::parse(b"1 2").is_none());
+}
+
+/// `Uid:` and `Gid:` each carry four values -- real, effective, saved-set,
+/// filesystem -- and the real one is the first. Taking a different one is a
+/// one-character change at a call site and a security question, which is why
+/// the choice is made in the crate once.
+#[test]
+fn status_takes_the_real_id_of_four() {
+    let content = b"Name:\tbash\n\
+Uid:\t1000\t1001\t1002\t1003\n\
+Gid:\t100\t101\t102\t103\n\
+Groups:\t4 24 27\n\
+VmSize:\t  4096 kB\n\
+VmRSS:\t   512 kB\n";
+    let st = ProcessStatus::parse(content);
+    assert_eq!(st.uid, Some(1000), "real, not effective");
+    assert_eq!(st.gid, Some(100), "real, not effective");
+    assert_eq!(st.groups, vec![4, 24, 27]);
+    assert_eq!(st.vm_size_kib, Some(4096));
+    assert_eq!(st.vm_rss_kib, Some(512));
+}
+
+/// A kernel thread has no address space, so `VmSize`/`VmRSS` are absent -- and
+/// absent is not zero. It may also genuinely have no supplementary groups,
+/// which is an empty list rather than a missing one.
+#[test]
+fn a_status_without_vm_fields_reports_none_not_zero() {
+    let st = ProcessStatus::parse(b"Name:\tkthreadd\nUid:\t0\t0\t0\t0\n");
+    assert_eq!(st.uid, Some(0));
+    assert_eq!(st.vm_size_kib, None);
+    assert_eq!(st.vm_rss_kib, None);
+    assert!(st.groups.is_empty());
+
+    // …and a status with nothing in it reports nothing, not zeros.
+    let empty = ProcessStatus::parse(b"");
+    assert_eq!(empty.uid, None);
+    assert_eq!(empty.gid, None);
+}
+
+/// NUL-separated, NUL-terminated, and not text.
+#[test]
+fn cmdline_splits_on_nul_and_keeps_bytes() {
+    assert_eq!(
+        cmdline_args(b"/bin/ls\0-l\0/tmp\0"),
+        vec![b"/bin/ls".to_vec(), b"-l".to_vec(), b"/tmp".to_vec()],
+        "the trailing NUL must not produce an empty argument"
+    );
+    assert_eq!(
+        cmdline_args(b"a\0\xff\0"),
+        vec![b"a".to_vec(), b"\xff".to_vec()]
+    );
+    // A kernel thread has no command line. Empty, not absent.
+    assert!(cmdline_args(b"").is_empty());
+}
+
+/// The readers, against a fixture `/proc`.
+#[test]
+fn procfs_reads_one_process() {
+    let fx = Fixture::new("process");
+    fx.write("42/stat", &stat_line("bash"));
+    fx.write("42/statm", b"1000 250 100 5 0 60 0");
+    fx.write("42/status", b"Name:\tbash\nUid:\t1000\t1000\t1000\t1000\n");
+    fx.write("42/cmdline", b"/bin/bash\0-i\0");
+    let procfs = fx.procfs();
+
+    let st = procfs.process_stat(42).unwrap().unwrap();
+    assert_eq!(st.comm, b"bash");
+    assert_eq!(procfs.process_statm(42).unwrap().unwrap().shared_pages, 100);
+    assert_eq!(procfs.process_status(42).unwrap().unwrap().uid, Some(1000));
+    assert_eq!(
+        procfs.process_cmdline(42).unwrap().unwrap(),
+        vec![b"/bin/bash".to_vec(), b"-i".to_vec()]
+    );
+    assert_eq!(procfs.process_ids().unwrap(), vec![42]);
+}
+
+/// A process that exits between the listing and the read is `Ok(None)`, not an
+/// error — that race is the normal case for anything walking `/proc`.
+#[test]
+fn a_vanished_process_is_not_an_error() {
+    let fx = Fixture::new("vanished");
+    let procfs = fx.procfs();
+    assert_eq!(procfs.process_stat(999).unwrap(), None);
+    assert_eq!(procfs.process_statm(999).unwrap(), None);
+    assert_eq!(procfs.process_status(999).unwrap(), None);
+    assert_eq!(procfs.process_cmdline(999).unwrap(), None);
+}
+
+/// A kernel thread and a vanished process gave the same answer before this
+/// crate: both were "no command line". They are different facts.
+#[test]
+fn a_kernel_thread_is_an_empty_cmdline_not_a_missing_one() {
+    let fx = Fixture::new("kthread");
+    fx.write("3/cmdline", b"");
+    let procfs = fx.procfs();
+    assert_eq!(procfs.process_cmdline(3).unwrap(), Some(vec![]));
+    assert_eq!(procfs.process_cmdline(4).unwrap(), None);
+}
+
+// ---------------------------------------------------------------------------
+// /proc/stat: CPU time
+// ---------------------------------------------------------------------------
+
+/// A `/proc/stat` with an aggregate line, two CPUs, and the non-CPU lines a
+/// real one carries — so the parser is asked to ignore things, not just to
+/// read things.
+const STAT: &[u8] = b"cpu  100 20 30 400 5 6 7 8 9 10\n\
+cpu0 50 10 15 200 2 3 3 4 4 5\n\
+cpu1 50 10 15 200 3 3 4 4 5 5\n\
+intr 12345 0 0\n\
+ctxt 999\n\
+btime 1700000000\n\
+processes 42\n\
+procs_running 3\n\
+procs_blocked 1\n";
+
+#[test]
+fn cpu_stats_reads_the_aggregate_and_each_cpu() {
+    let st = CpuStats::parse(STAT);
+    let total = st.total.unwrap();
+    assert_eq!(total.user, 100);
+    assert_eq!(total.nice, 20);
+    assert_eq!(total.system, 30);
+    assert_eq!(total.idle, 400);
+    assert_eq!(total.iowait, 5);
+    assert_eq!(total.irq, 6);
+    assert_eq!(total.softirq, 7);
+    assert_eq!(total.steal, 8);
+    assert_eq!(total.guest, 9);
+    assert_eq!(total.guest_nice, 10);
+    assert_eq!(st.per_cpu.len(), 2);
+    assert_eq!(st.per_cpu[0].user, 50);
+    assert_eq!(st.per_cpu[1].iowait, 3);
+}
+
+/// `steal` is in the total and `guest`/`guest_nice` are not.
+///
+/// Both halves are load-bearing and for opposite reasons. Omitting `steal`
+/// makes the total too small, so every process's CPU percentage comes out too
+/// large — and SlateOS develops under QEMU, where `steal` is exactly the field
+/// that is non-zero. Including `guest` double-counts, because Linux already
+/// counts it inside `user`.
+#[test]
+fn total_includes_steal_and_excludes_guest() {
+    let t = CpuStats::parse(STAT).total.unwrap();
+    assert_eq!(t.total(), 100 + 20 + 30 + 400 + 5 + 6 + 7 + 8);
+    // The two ways of getting it wrong, stated as what they would produce:
+    assert_ne!(
+        t.total(),
+        100 + 20 + 30 + 400 + 5 + 6 + 7,
+        "steal was dropped"
+    );
+    assert_ne!(
+        t.total(),
+        100 + 20 + 30 + 400 + 5 + 6 + 7 + 8 + 9 + 10,
+        "guest was double-counted"
+    );
+    assert_eq!(t.busy(), t.total() - 400 - 5);
+}
+
+/// An older kernel publishes fewer fields, and that is a valid file rather
+/// than a broken one — `iowait` arrived in 2.5.41 and `steal` in 2.6.11. The
+/// reader this replaces required seven fields and silently dropped any CPU
+/// line with fewer, turning an older kernel into an empty CPU list.
+#[test]
+fn a_short_cpu_line_reads_the_fields_it_has() {
+    let st = CpuStats::parse(b"cpu  1 2 3 4\ncpu0 1 2 3 4\n");
+    let t = st.total.unwrap();
+    assert_eq!((t.user, t.nice, t.system, t.idle), (1, 2, 3, 4));
+    assert_eq!(t.iowait, 0);
+    assert_eq!(t.steal, 0);
+    assert_eq!(t.total(), 10);
+    assert_eq!(
+        st.per_cpu.len(),
+        1,
+        "the short cpu0 line must not be dropped"
+    );
+}
+
+/// Lines that are not CPU lines are ignored, including ones that merely start
+/// with the same letters.
+#[test]
+fn non_cpu_lines_are_ignored() {
+    assert!(CpuTimes::parse_line(b"intr 1 2 3").is_none());
+    assert!(CpuTimes::parse_line(b"ctxt 999").is_none());
+    assert!(CpuTimes::parse_line(b"").is_none());
+    // `cpu` followed by something that is not a number is not `cpuN`.
+    assert!(CpuTimes::parse_line(b"cpufreq 1 2 3").is_none());
+    assert_eq!(CpuTimes::parse_line(b"cpu 1 2 3").unwrap().0, None);
+    assert_eq!(CpuTimes::parse_line(b"cpu7 1 2 3").unwrap().0, Some(7));
+}
+
+/// One bar for the whole machine beats no bars.
+#[test]
+fn per_cpu_falls_back_to_the_aggregate() {
+    let one = CpuStats::parse(b"cpu  1 2 3 4 5 6 7 8\n");
+    assert!(one.per_cpu.is_empty());
+    assert_eq!(one.per_cpu_or_total().len(), 1);
+    assert_eq!(CpuStats::parse(STAT).per_cpu_or_total().len(), 2);
+    assert!(CpuStats::parse(b"intr 1\n").per_cpu_or_total().is_empty());
+}
+
+/// The whole file is read once. The reader this replaces opened `/proc/stat` a
+/// second time when it found no `cpuN` lines, so on a single-CPU machine it
+/// read two different instants and compared them.
+#[test]
+fn procfs_reads_cpu_stats_from_a_fixture() {
+    let fx = Fixture::new("cpustat");
+    fx.write("stat", STAT);
+    let st = fx.procfs().cpu_stats().unwrap().unwrap();
+    assert_eq!(st.per_cpu.len(), 2);
+    assert!(st.total.is_some());
+    // …and the scheduler counters in the same file still parse, since both
+    // readers see every line.
+    let sched = SchedCounters::parse(STAT);
+    assert_eq!(sched.running, Some(3));
+    assert_eq!(sched.blocked, Some(1));
+}
+
+/// The subtraction a viewer needs before it divides.
+#[test]
+fn since_gives_the_interval_not_the_lifetime() {
+    let earlier = CpuTimes {
+        user: 100,
+        idle: 900,
+        ..CpuTimes::default()
+    };
+    let later = CpuTimes {
+        user: 150,
+        idle: 950,
+        ..CpuTimes::default()
+    };
+    let d = later.since(&earlier);
+    assert_eq!(d.user, 50);
+    assert_eq!(d.idle, 50);
+    assert_eq!(d.total(), 100);
+    // The point of doing it at all: the lifetime ratio and the interval ratio
+    // are different numbers, and only the second one moves.
+    assert_eq!(later.user * 100 / later.total(), 13);
+    assert_eq!(d.user * 100 / d.total(), 50);
+}
+
+/// A CPU taken offline and brought back restarts its counters, so `earlier`
+/// can legitimately be the larger sample. That must be a zero-length interval
+/// for one refresh, not a panic and not a wrap to something enormous.
+#[test]
+fn since_saturates_when_a_counter_goes_backwards() {
+    let earlier = CpuTimes {
+        user: 500,
+        idle: 500,
+        ..CpuTimes::default()
+    };
+    let later = CpuTimes {
+        user: 10,
+        idle: 20,
+        ..CpuTimes::default()
+    };
+    let d = later.since(&earlier);
+    assert_eq!(d.user, 0);
+    assert_eq!(d.idle, 0);
+    assert_eq!(
+        d.total(),
+        0,
+        "a zero interval, which a caller must treat as no data"
+    );
+}
+
+/// Swap, and the two different "used" figures.
+#[test]
+fn meminfo_reads_swap_and_both_used_figures() {
+    let content = b"MemTotal:       8000 kB\n\
+MemFree:        1000 kB\n\
+MemAvailable:   5000 kB\n\
+Buffers:         500 kB\n\
+Cached:         2500 kB\n\
+SwapTotal:      4000 kB\n\
+SwapFree:       3000 kB\n";
+    let m = MemInfo::parse(content);
+    assert_eq!(m.swap_total_kib, Some(4000));
+    assert_eq!(m.swap_free_kib, Some(3000));
+    assert_eq!(m.swap_used_kib(), Some(1000));
+    // The kernel's figure: everything that is not free.
+    assert_eq!(m.used_kib(), Some(7000));
+    // The one a person is shown: cache and buffers are reclaimable, so a
+    // machine holding 2.5 MiB of cache is not short of memory.
+    assert_eq!(m.used_excluding_cache_kib(), Some(4000));
+}
+
+/// A machine with no swap and a kernel that does not export swap at all are
+/// different answers.
+#[test]
+fn no_swap_and_no_swap_field_are_distinguishable() {
+    let none = MemInfo::parse(b"MemTotal: 8000 kB\n");
+    assert_eq!(none.swap_total_kib, None);
+    assert_eq!(none.swap_used_kib(), None);
+
+    let zero = MemInfo::parse(b"SwapTotal: 0 kB\nSwapFree: 0 kB\n");
+    assert_eq!(zero.swap_total_kib, Some(0));
+    assert_eq!(zero.swap_used_kib(), Some(0));
+}
+
+/// Every figure must be present, because a used-memory number derived from a
+/// missing one is not worth showing.
+#[test]
+fn used_excluding_cache_needs_every_figure() {
+    let m = MemInfo::parse(b"MemTotal: 8000 kB\nMemFree: 1000 kB\nBuffers: 500 kB\n");
+    assert_eq!(m.used_kib(), Some(7000), "the simple figure still works");
+    assert_eq!(m.used_excluding_cache_kib(), None, "Cached is missing");
+}
+
+// ---------------------------------------------------------------------------
+// Showing bytes to a person
+// ---------------------------------------------------------------------------
+
+/// The ordinary case costs nothing and changes nothing.
+#[test]
+fn valid_utf8_passes_through_unchanged() {
+    assert_eq!(display_bytes(b"bash"), "bash");
+    assert_eq!(display_bytes("na\u{ef}ve".as_bytes()), "na\u{ef}ve");
+    assert_eq!(display_bytes(b""), "");
+}
+
+/// An invalid byte is shown, not swallowed. This is the case that used to
+/// remove the whole process from the list: the old reader went through
+/// `read_to_string`, which fails, and `read_process` returned `None`.
+#[test]
+fn an_invalid_byte_is_shown_as_hex() {
+    assert_eq!(display_bytes(b"od\xffd"), r"od\xffd");
+    assert_eq!(display_bytes(b"\xc3"), r"\xc3");
+}
+
+/// The valid parts either side of a bad byte survive intact.
+#[test]
+fn text_around_an_invalid_byte_is_kept() {
+    assert_eq!(display_bytes(b"a\xffb\xfec"), r"a\xffb\xfec");
+    // `\xc3\xa9` is a valid `é`; the `\xff` after it is not.
+    assert_eq!(display_bytes(b"\xc3\xa9\xff"), "\u{e9}\\xff");
+}
+
+/// The reason this is not `from_utf8_lossy`: that maps every invalid byte
+/// to U+FFFD, so two different names become the same string and a viewer
+/// cannot tell one process from another. `CLAUDE.md` self-review item 7
+/// calls the lossy conversion silent data corruption; here it would be
+/// corruption of the very thing the user is reading.
+///
+/// The second assertion is the one that makes the point: it shows the
+/// alternative really does collide, rather than asserting that ours does
+/// not and leaving the comparison to the reader.
+#[test]
+fn two_different_invalid_names_do_not_collide() {
+    assert_ne!(display_bytes(b"x\xff"), display_bytes(b"x\xfe"));
+    assert_eq!(
+        String::from_utf8_lossy(b"x\xff"),
+        String::from_utf8_lossy(b"x\xfe"),
+        "if this ever fails, from_utf8_lossy has changed and this test's premise with it"
+    );
+}
+
+/// A truncated multi-byte sequence at the very end has no continuation to
+/// consume, which is the loop's one exit that is not `Ok`.
+#[test]
+fn a_truncated_sequence_at_the_end_terminates() {
+    assert_eq!(display_bytes(b"ok\xe2\x82"), r"ok\xe2\x82");
+}

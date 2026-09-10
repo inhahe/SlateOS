@@ -54,7 +54,6 @@ const BAR_PADDING: f32 = 4.0;
 const DROPDOWN_ITEM_HEIGHT: f32 = 24.0;
 const DROPDOWN_MAX_VISIBLE: usize = 8;
 const DROPDOWN_PADDING: f32 = 4.0;
-const CURSOR_WIDTH: f32 = 2.0;
 /// The height of a breadcrumb pill: one line of text with padding above and
 /// below it.
 ///
@@ -837,14 +836,20 @@ impl PathBar {
                 FONT_SIZE,
                 FontWeightHint::Regular,
             );
-        cmds.push(RenderCommand::FillRect {
-            x: cursor_x,
-            y: text_y - 2.0,
-            width: CURSOR_WIDTH,
-            height: FONT_SIZE + 4.0,
-            color: COLOR_LAVENDER,
-            corner_radii: CornerRadii::ZERO,
-        });
+        // Through the shared helper rather than a rectangle of its own: one
+        // place decides how wide a caret is, so an accessibility scale has
+        // somewhere to apply. The geometry is unchanged -- it started two
+        // pixels above the text and ran four taller, and still does.
+        let mut caret = crate::render::RenderTree::new();
+        crate::textedit::push_caret(
+            &mut caret,
+            cursor_x,
+            text_y - 2.0,
+            FONT_SIZE + 4.0,
+            COLOR_LAVENDER,
+            crate::textedit::CARET_WIDTH,
+        );
+        cmds.extend(caret.commands);
 
         // Autocomplete dropdown.
         if self.dropdown_visible && !self.completions.is_empty() {

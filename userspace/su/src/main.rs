@@ -39,6 +39,20 @@
 //! on the stored entry, which is a valid setting for itself. Root (uid 0) can
 //! switch to any user without a password.
 //!
+//! # Becoming the user
+//!
+//! The authenticated identity is applied to the child for real: `setgid` then
+//! `setuid`, in that order, between fork and exec. Before 2026-09-10 this
+//! program checked the password and then ran the target's shell under *the
+//! caller's* credentials -- the environment said `alice`, and every file the
+//! shell created was owned by whoever ran `su`.
+//!
+//! **Supplementary groups are not reset**, because `posix::setgroups` returns
+//! `ENOSYS` and asking for them would abort the exec. Today that leaks
+//! nothing, since `getgroups` reports none; it stops being nothing the moment
+//! the kernel grows the syscall. See `known-issues.md`
+//! (TD-B-USER-SWITCHING-PROGRAMS-CANNOT-RESET-SUPPLEMENTARY-GROUPS).
+//!
 //! # Session tracking
 //!
 //! On login-shell switches, writes a session file to `/run/sessions/`
@@ -111,9 +125,74 @@ fn home_of(record: &Record) -> String {
     }
 }
 
+/// `argv[0]` for a login shell: its basename with a hyphen in front.
+///
+/// The convention every Bourne-family shell uses to decide whether to read its
+/// login profile. `/bin/bash` becomes `-bash`.
+///
+/// # Bytes, and why this half is separate from its caller
+///
+/// A shell path on this OS may hold any byte but `/` and NUL, so the rule has
+/// to be expressed over bytes. Converting bytes *to* an `OsString` is only
+/// possible through `std::os::unix::ffi`, which does not exist on the Windows
+/// host these tests are compiled for -- so a single `OsStr -> OsString`
+/// function could not be called by any test at all.
+///
+/// Splitting it leaves the rule testable everywhere and the three-line
+/// conversion unix-only. The same shape as separating a parser from its
+/// reader, for the same reason: the part with the decisions in it should not
+/// be the part that needs a particular platform to run.
+/// Dead only on a non-unix *host* build, which is how this crate's tests are
+/// compiled -- there the `arg0` call that uses it is `#[cfg]`-ed away. The
+/// allow is conditioned rather than unconditional for `userspace/sshd`'s
+/// reason, stated at its own `login_argv0`: on the real target, `dead_code`
+/// here would mean the login-shell convention had been dropped from the spawn
+/// path, and that is a warning worth keeping.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn login_argv0_bytes(shell: &[u8]) -> Vec<u8> {
+    let base = match shell.iter().rposition(|b| *b == b'/') {
+        // A trailing slash leaves nothing after it; the whole path is the best
+        // answer available and is at least not empty.
+        Some(i) if i.saturating_add(1) < shell.len() => {
+            shell.get(i.saturating_add(1)..).unwrap_or(shell)
+        }
+        _ => shell,
+    };
+    let mut out = Vec::with_capacity(base.len().saturating_add(1));
+    out.push(b'-');
+    out.extend_from_slice(base);
+    out
+}
+
+/// [`login_argv0_bytes`] as an `OsString`, for handing to `CommandExt::arg0`.
+#[cfg(unix)]
+fn login_argv0(shell: &OsStr) -> std::ffi::OsString {
+    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+    std::ffi::OsString::from_vec(login_argv0_bytes(shell.as_bytes()))
+}
+
 /// The record's login shell, or the system default.
 fn shell_of(record: &Record) -> String {
     record.shell().unwrap_or_else(|| "/bin/sh".to_string())
+}
+
+/// The numeric identity the child must actually run as, or `None` if the
+/// record cannot name one.
+///
+/// **`None` is a refusal, not a default.** This used to be
+/// `record.uid().unwrap_or(u32::MAX)`, which was harmless while nothing acted
+/// on the number -- it only picked a `PATH`. Now that it is passed to
+/// `setuid`, a record with no `uid:` would start a shell owned by uid
+/// 4294967295: an identity belonging to nobody, holding whatever a
+/// nonexistent user's permissions turn out to be. A session whose owner
+/// cannot be named must not start.
+///
+/// The gid falls back to the uid because a record with no `gid:` of its own
+/// belongs to its user-private group, which `useradd` numbers after the uid --
+/// the same rule `useradd`'s own `primary_gid` applies.
+fn target_ids(record: &Record) -> Option<(u32, u32)> {
+    let uid = record.uid()?;
+    Some((uid, record.gid().unwrap_or(uid)))
 }
 
 // ============================================================================
@@ -220,42 +299,13 @@ fn authenticate(
 // Environment and identity helpers
 // ============================================================================
 
-/// Get the current (calling) user's UID.
-///
-/// Tries /proc/self/status first, then falls back to the USER env var
-/// matched against the user database, then defaults to u32::MAX (nobody).
-fn get_caller_uid(users: &UserDb) -> u32 {
-    // Try /proc/self/status for the real UID.
-    if let Ok(content) = fs::read_to_string("/proc/self/status") {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:")
-                && let Some(uid_str) = rest.split_whitespace().next()
-                && let Ok(uid) = uid_str.parse::<u32>()
-            {
-                return uid;
-            }
-        }
-    }
-
-    // Fallback: resolve USER env var against the database.
-    //
-    // `var_os` and an explicit `to_str`, not `var`. A value that is not text
-    // cannot name a user in a YAML file, so the outcome is the same either
-    // way — but `var` reports it as `Err(NotUnicode)`, which an `if let Ok`
-    // silently treats as "unset". The two are different facts, and writing
-    // code that cannot tell them apart is how `sudo` ended up ignoring a set
-    // `EDITOR` (see known-issues.md, TD-B-SUDO-...).
-    if let Some(name) = env::var_os("USER")
-        && let Some(name) = name.to_str()
-        && let Some(user) = users.find(name)
-        && let Some(uid) = user.uid()
-    {
-        return uid;
-    }
-
-    // Unknown caller.
-    u32::MAX
-}
+// The caller's uid used to be worked out here, from `/proc/self/status` with a
+// fallback to resolving `$USER` against the account database. The fallback was
+// a way past the password prompt: `caller_uid == 0` skips authentication
+// entirely (root may become anyone), so on a system where `/proc/self/status`
+// could not be read, `USER=root su alice` became alice without being asked for
+// her password. It is now `authlib::identity::caller_uid()` -- `getuid(2)`,
+// which no parent process can set.
 
 /// Read a password from the terminal without echoing.
 ///
@@ -381,7 +431,14 @@ fn exec_as_user(
     let target_shell = shell_of(target);
     let target_home = home_of(target);
     let target_name = name_of(target);
-    let target_uid = target.uid().unwrap_or(u32::MAX);
+    // Resolved before the command is built, and before any credential is
+    // changed: everything below this line assumes the identity is known.
+    let Some((target_uid, target_gid)) = target_ids(target) else {
+        eprintln!(
+            "su: {target_name} has no uid in the account database; refusing to start a session"
+        );
+        return 1;
+    };
     // `-s` names a path, and a path on this OS is bytes; the database's own
     // `shell:` field comes from YAML and so is text. Both are borrowed as
     // `&OsStr`, which is the type that can hold either.
@@ -391,20 +448,35 @@ fn exec_as_user(
 
     // `-c` mode passes ["-c", "command"] through untouched: the command is
     // the shell's to parse, and this program must not narrow what it can say.
-    //
-    // Interactive mode passes nothing. There used to be a computed argv[0]
-    // here — `-bash` for a login shell, per the convention a shell uses to
-    // decide whether to read its login profile — and it was dead code, as its
-    // own comment conceded: `std::process::Command` sets argv[0] to the
-    // program path and offers no way to override it, so the value was built
-    // and then dropped on the floor for interactive shells and passed as a
-    // *positional argument* for none. It is gone rather than left in place,
-    // because a computation whose result is discarded reads to the next
-    // person as a feature that works. The convention needs an exec that takes
-    // argv[0] separately (`SYS_PROCESS_SPAWN_EX2`); see `todo.txt`.
     if let Some(c) = command {
         cmd.arg("-c");
         cmd.arg(c);
+    }
+
+    // `su -` means "start a login shell", and a shell decides that about
+    // itself by looking at its own `argv[0]`: a leading hyphen -- `-bash`,
+    // `-sh` -- is the convention. Without it `/etc/profile` and `~/.profile`
+    // are never read, so `su -` produces a shell with none of the environment
+    // a login is supposed to set up. `osh` reads those files
+    // (`userspace/oils/src/main.rs`), so this is a live difference and not a
+    // formality.
+    //
+    // # This was recorded as needing a new syscall, and it does not
+    //
+    // `todo.txt` said the fix "needs an exec that takes argv[0] separately
+    // (`SYS_PROCESS_SPAWN_EX2`)", on the premise that "`std::process::Command`
+    // sets argv[0] to the program path and offers no way to override it".
+    // That premise is false: `std::os::unix::process::CommandExt::arg0` does
+    // exactly this, and `userspace/sshd` has been using it for its own login
+    // shells all along. The entry was written from reading `Command`'s
+    // inherent methods and not its Unix extension trait.
+    //
+    // Only for a login shell. Plain `su` starts an ordinary interactive shell
+    // and must not claim otherwise.
+    #[cfg(unix)]
+    if login_mode {
+        use std::os::unix::process::CommandExt as _;
+        cmd.arg0(login_argv0(shell));
     }
 
     if login_mode && !preserve_env {
@@ -451,6 +523,18 @@ fn exec_as_user(
     if login_mode {
         cmd.current_dir(&target_home);
     }
+
+    // Become the target user, for real. Until 2026-09-10 this program checked
+    // the password and then ran the target's shell under *the caller's*
+    // credentials: the environment said `alice` and every file the shell
+    // created was owned by whoever ran `su`.
+    //
+    // The call lives in `authlib` because four other programs need the same
+    // two lines and one of them -- resetting supplementary groups -- is still
+    // missing system-wide. When lane A's `setgroups` syscall number lands it
+    // has to be added in one place rather than five. See
+    // `authlib::identity` for the ordering rule and what is missing.
+    authlib::identity::become_user(&mut cmd, target_uid, target_gid);
 
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),
@@ -690,7 +774,10 @@ fn run_su(args: &[OsString]) -> i32 {
     // Authenticate unless the caller is root. The tally is keyed by the
     // account whose password is being guessed — here the *target*, since `su`
     // asks for the password of the user you are becoming.
-    let caller_uid = get_caller_uid(&users);
+    let Some(caller_uid) = authlib::identity::caller_uid() else {
+        eprintln!("su: cannot determine who is running this command");
+        return 1;
+    };
     let mut auth = authlib::Authenticator::new();
     if caller_uid != 0 && !authenticate(&mut auth, target, "Password: ", "su") {
         return 1;
@@ -757,7 +844,86 @@ fn main() {
 )]
 #[cfg(test)]
 mod tests {
+
+    /// The convention: basename, hyphen in front.
+    #[test]
+    fn login_argv0_is_the_basename_with_a_hyphen() {
+        assert_eq!(super::login_argv0_bytes(b"/bin/bash"), b"-bash");
+        assert_eq!(super::login_argv0_bytes(b"/usr/local/bin/osh"), b"-osh");
+        // Already bare: no directory to strip.
+        assert_eq!(super::login_argv0_bytes(b"sh"), b"-sh");
+    }
+
+    /// A shell path may hold any byte but `/` and NUL, so the rule is over
+    /// bytes and a name that is not UTF-8 survives it.
+    #[test]
+    fn login_argv0_keeps_bytes_that_are_not_utf8() {
+        assert_eq!(
+            super::login_argv0_bytes(b"/bin/o\xffh"),
+            b"-o\xffh".to_vec()
+        );
+    }
+
+    /// Degenerate paths must still produce something a shell can be called by.
+    /// A trailing slash has no basename, so the whole path is the best answer
+    /// available -- and is at least not the empty `argv[0]`, which would leave
+    /// the shell unable to name itself in its own diagnostics.
+    #[test]
+    fn login_argv0_never_returns_a_bare_hyphen() {
+        assert_eq!(super::login_argv0_bytes(b"/bin/"), b"-/bin/".to_vec());
+        assert_eq!(super::login_argv0_bytes(b"/"), b"-/".to_vec());
+        assert_eq!(super::login_argv0_bytes(b""), b"-".to_vec());
+    }
     use super::*;
+
+    // --- The identity the child is given ---
+
+    /// A record naming both numbers yields both.
+    #[test]
+    fn target_ids_takes_the_uid_and_gid_the_record_names() {
+        let mut r = Record::new();
+        r.set(userdb::field::USERNAME, "alice");
+        r.set_uid(1000);
+        r.set_gid(50);
+        assert_eq!(target_ids(&r), Some((1000, 50)));
+    }
+
+    /// No `gid:` means the user-private group, which `useradd` numbers after
+    /// the uid. Falling back to 0 here would hand every such account root's
+    /// group, which is the failure worth naming: the fallback is not a
+    /// formality.
+    #[test]
+    fn target_ids_falls_back_to_the_user_private_group_not_to_zero() {
+        let mut r = Record::new();
+        r.set(userdb::field::USERNAME, "alice");
+        r.set_uid(1000);
+        assert_eq!(target_ids(&r), Some((1000, 1000)));
+    }
+
+    /// A record that cannot name its owner gets no session at all.
+    ///
+    /// This is the case that used to be `unwrap_or(u32::MAX)`. Harmless while
+    /// the number only chose a `PATH`; now it is passed to `setuid`, where it
+    /// would start a shell owned by an identity belonging to nobody.
+    #[test]
+    fn target_ids_refuses_a_record_with_no_uid() {
+        let mut r = Record::new();
+        r.set(userdb::field::USERNAME, "alice");
+        assert_eq!(target_ids(&r), None);
+    }
+
+    /// Root is a real answer, not a missing one -- `Some((0, 0))` and never
+    /// `None`, which an `unwrap_or_default` somewhere in this path would
+    /// blur into each other.
+    #[test]
+    fn target_ids_distinguishes_root_from_absent() {
+        let mut r = Record::new();
+        r.set(userdb::field::USERNAME, "root");
+        r.set_uid(0);
+        r.set_gid(0);
+        assert_eq!(target_ids(&r), Some((0, 0)));
+        assert_ne!(target_ids(&r), None);
+    }
 
     // --- User database parsing ---
     //

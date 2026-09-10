@@ -2417,6 +2417,7 @@ dependencies = [
 name = "chage"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "quoting",
  "scratchdir",
  "userdb",
@@ -3163,6 +3164,7 @@ dependencies = [
  "ere",
  "localtime",
  "modechange",
+ "procinfo",
  "pwdb",
  "quoting",
  "scratchdir",
@@ -3360,6 +3362,10 @@ dependencies = [
 [[package]]
 name = "crontab"
 version = "0.1.0"
+dependencies = [
+ "authlib",
+ "userdb",
+]
 
 [[package]]
 name = "crontab-cli"
@@ -7415,6 +7421,9 @@ dependencies = [
 [[package]]
 name = "htop"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "htop-cli"
@@ -11617,6 +11626,7 @@ dependencies = [
  "authlib",
  "posix",
  "quoting",
+ "userdb",
 ]
 
 [[package]]
@@ -14093,6 +14103,9 @@ dependencies = [
 [[package]]
 name = "ps"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "ps2pdf-cli"

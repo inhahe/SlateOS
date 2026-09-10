@@ -21,18 +21,20 @@
 //! ```
 
 use std::env;
-use std::fs;
 use std::process;
 
 // ============================================================================
 // Constants
 // ============================================================================
 
-/// Slate OS uses 16 KiB pages.
-const PAGE_SIZE_KB: u64 = 16;
+// `PAGE_SIZE_KB` used to be declared here, a second private copy of a fact
+// about the kernel -- `userspace/htop` had the other. It is
+// `procinfo::PAGE_SIZE_KIB` now, and this program no longer converts pages
+// to KiB itself.
 
-/// Assumed tick rate (ticks per second).
-const TICKS_PER_SEC: u64 = 100;
+/// Scheduler ticks per second. `procinfo::TICKS_PER_SEC` is the same
+/// number; this alias keeps the arithmetic below readable.
+const TICKS_PER_SEC: u64 = procinfo::TICKS_PER_SEC;
 
 // ANSI colour codes for state display.
 const GREEN: &str = "\x1b[32m";
@@ -149,43 +151,31 @@ struct Config {
 // /proc readers
 // ============================================================================
 
-/// Read a file into a trimmed string, returning None on any error.
-fn read_file(path: &str) -> Option<String> {
-    fs::read_to_string(path).ok().map(|s| s.trim().to_string())
-}
-
-/// Extract a kB value from a `/proc/<pid>/status`-style line.
-fn parse_status_kb(line: &str) -> u64 {
-    // e.g. "VmSize:   12345 kB"
-    line.split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
-}
-
-/// Get the system uptime in ticks (seconds * TICKS_PER_SEC).
+/// System uptime in ticks, through [`procinfo`].
+///
+/// `procinfo` gives a `Duration`; the conversion to ticks is here because the
+/// tick is what `/proc/<pid>/stat`'s `starttime` is measured in, and pairing
+/// the two is this program's business.
 fn system_uptime_ticks() -> u64 {
-    read_file("/proc/uptime")
-        .and_then(|s| {
-            s.split_whitespace()
-                .next()
-                .and_then(|v| v.parse::<f64>().ok())
-        })
-        .map(|secs| (secs * TICKS_PER_SEC as f64) as u64)
-        .unwrap_or(0)
+    procinfo::ProcFs::new()
+        .uptime()
+        .ok()
+        .flatten()
+        .map_or(0, |u| u.up.as_secs().saturating_mul(TICKS_PER_SEC))
 }
 
-/// Get total physical memory in kB from /proc/meminfo.
+/// Total physical memory in KiB, through [`procinfo`].
+///
+/// The reader this replaces reassembled the line it had just taken apart --
+/// `strip_prefix("MemTotal:")` and then `format!("MemTotal:{rest}")` so that a
+/// helper could split it again -- which is the shape code takes when the
+/// parsing has nowhere to live.
 fn total_memory_kb() -> u64 {
-    read_file("/proc/meminfo")
-        .and_then(|content| {
-            for line in content.lines() {
-                if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    return Some(parse_status_kb(&format!("MemTotal:{rest}")));
-                }
-            }
-            None
-        })
+    procinfo::ProcFs::new()
+        .memory()
+        .ok()
+        .flatten()
+        .and_then(|m| m.total_kib)
         .unwrap_or(0)
 }
 
@@ -214,132 +204,62 @@ fn coloured_state(c: char) -> String {
     }
 }
 
-/// Read information about a single process from /proc/<pid>/.
+/// Read information about a single process, through [`procinfo`].
+///
+/// The parsing this used to do itself now lives in `procinfo`, shared with
+/// `userspace/htop` and `apps/procexplorer`. Two things it got wrong on its own
+/// and no longer can:
+///
+/// * a name that is not UTF-8 dropped the whole process, because `read_file`
+///   goes through `read_to_string`. `comm` is bytes now.
+/// * `VmSize`/`VmRSS` absent -- which is every kernel thread, since a kernel
+///   thread has no address space -- was indistinguishable from zero.
 fn read_process(pid: u32) -> Option<ProcessInfo> {
-    let stat_path = format!("/proc/{pid}/stat");
-    let stat_content = read_file(&stat_path)?;
+    let procfs = procinfo::ProcFs::new();
+    let stat = procfs.process_stat(u64::from(pid)).ok()??;
+    let status = procfs
+        .process_status(u64::from(pid))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
 
-    // /proc/<pid>/stat format:
-    //   pid (comm) state ppid pgrp session tty tpgid flags
-    //   minflt cminflt majflt cmajflt utime stime cutime cstime
-    //   priority nice num_threads itrealvalue starttime vsize rss ...
-    //
-    // comm can contain spaces and parentheses, so find the last ')'.
-    let comm_start = stat_content.find('(')?;
-    let comm_end = stat_content.rfind(')')?;
-    let name = stat_content.get(comm_start + 1..comm_end)?.to_string();
-    let rest = stat_content.get(comm_end + 2..)?; // skip ") "
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-
-    if fields.len() < 22 {
-        return None;
-    }
-
-    let state = fields.first()?.chars().next().unwrap_or('?');
-    let ppid: u32 = fields.get(1)?.parse().unwrap_or(0);
-    let pgrp: u32 = fields.get(2)?.parse().unwrap_or(0);
-    let session: u32 = fields.get(3)?.parse().unwrap_or(0);
-    let tty: i32 = fields.get(4)?.parse().unwrap_or(0);
-    let utime: u64 = fields.get(11)?.parse().unwrap_or(0);
-    let stime: u64 = fields.get(12)?.parse().unwrap_or(0);
-    let priority: i32 = fields.get(15)?.parse().unwrap_or(0);
-    let nice: i32 = fields.get(16)?.parse().unwrap_or(0);
-    let threads: u32 = fields.get(17)?.parse().unwrap_or(1);
-    let starttime: u64 = fields.get(19)?.parse().unwrap_or(0);
-    let vsize: u64 = fields.get(20)?.parse().unwrap_or(0);
-    let rss: u64 = fields.get(21)?.parse().unwrap_or(0);
-
+    let name = procinfo::display_bytes(&stat.comm);
+    let state = char::from(stat.state);
     let state_long = state_description(state);
-
-    // Read supplementary info from /proc/<pid>/status.
-    let mut uid = 0u32;
-    let mut gid = 0u32;
-    let mut groups = Vec::new();
-    let mut vm_size_kb = 0u64;
-    let mut vm_rss_kb = 0u64;
-
-    if let Some(status_content) = read_file(&format!("/proc/{pid}/status")) {
-        for line in status_content.lines() {
-            if let Some(val) = line.strip_prefix("Uid:") {
-                uid = val
-                    .split_whitespace()
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-            } else if let Some(val) = line.strip_prefix("Gid:") {
-                gid = val
-                    .split_whitespace()
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-            } else if let Some(val) = line.strip_prefix("Groups:") {
-                groups = val
-                    .split_whitespace()
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
-            } else if line.starts_with("VmSize:") {
-                vm_size_kb = parse_status_kb(line);
-            } else if line.starts_with("VmRSS:") {
-                vm_rss_kb = parse_status_kb(line);
-            }
-        }
-    }
 
     Some(ProcessInfo {
         pid,
         name,
         state,
         state_long,
-        ppid,
-        pgrp,
-        session,
-        tty,
-        utime,
-        stime,
-        priority,
-        nice,
-        threads,
-        starttime,
-        vsize,
-        rss,
-        uid,
-        gid,
-        groups,
-        vm_size_kb,
-        vm_rss_kb,
+        ppid: u32::try_from(stat.ppid).unwrap_or(0),
+        pgrp: u32::try_from(stat.pgrp).unwrap_or(0),
+        session: u32::try_from(stat.session).unwrap_or(0),
+        tty: i32::try_from(stat.tty_nr).unwrap_or(0),
+        utime: stat.utime_ticks,
+        stime: stat.stime_ticks,
+        priority: i32::try_from(stat.priority).unwrap_or(0),
+        nice: i32::try_from(stat.nice).unwrap_or(0),
+        threads: u32::try_from(stat.num_threads).unwrap_or(1),
+        starttime: stat.starttime_ticks,
+        vsize: stat.vsize_bytes,
+        rss: stat.rss_pages,
+        uid: status.uid.unwrap_or(0),
+        gid: status.gid.unwrap_or(0),
+        groups: status.groups,
+        vm_size_kb: status.vm_size_kib.unwrap_or(0),
+        vm_rss_kb: status.vm_rss_kib.unwrap_or(0),
     })
 }
 
-/// Enumerate all process PIDs from /proc.
-fn enumerate_pids() -> Vec<u32> {
-    let mut pids = Vec::new();
-
-    if let Ok(entries) = fs::read_dir("/proc") {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str()
-                && let Ok(pid) = name.parse::<u32>()
-            {
-                pids.push(pid);
-            }
-        }
-    }
-
-    pids
-}
-
-/// Read all processes from /proc.
 fn read_all_processes() -> Vec<ProcessInfo> {
-    let pids = enumerate_pids();
-    let mut procs = Vec::with_capacity(pids.len());
-
-    for pid in pids {
-        // Processes can disappear between enumeration and reading; skip failures.
-        if let Some(info) = read_process(pid) {
-            procs.push(info);
-        }
-    }
-
-    procs
+    let Ok(pids) = procinfo::ProcFs::new().process_ids() else {
+        return Vec::new();
+    };
+    pids.into_iter()
+        .filter_map(|pid| u32::try_from(pid).ok())
+        .filter_map(read_process)
+        .collect()
 }
 
 // ============================================================================
@@ -391,7 +311,7 @@ fn mem_percent(proc_info: &ProcessInfo, mem_total_kb: u64) -> f64 {
     if mem_total_kb == 0 {
         return 0.0;
     }
-    let rss_kb = proc_info.rss.saturating_mul(PAGE_SIZE_KB);
+    let rss_kb = proc_info.rss.saturating_mul(procinfo::PAGE_SIZE_KIB);
     (rss_kb as f64 / mem_total_kb as f64) * 100.0
 }
 
@@ -504,7 +424,7 @@ fn print_long(procs: &[ProcessInfo], no_header: bool, uptime_ticks: u64) {
     for p in procs {
         let c = cpu_percent(p, uptime_ticks);
         let sz_kb = p.vsize / 1024;
-        let rss_kb = p.rss.saturating_mul(PAGE_SIZE_KB);
+        let rss_kb = p.rss.saturating_mul(procinfo::PAGE_SIZE_KIB);
         println!(
             "{:>2}  {}  {:>7}  {:>7}  {:>7}  {:>3.0}  {:>4}  {:>4}  {:>9}  {:>9}  {:<8}  {:<8}  {:>10}  {}",
             0, // flags (not tracked yet)
@@ -540,7 +460,7 @@ fn print_user(procs: &[ProcessInfo], no_header: bool, uptime_ticks: u64, mem_tot
         let cpu = cpu_percent(p, uptime_ticks);
         let mem = mem_percent(p, mem_total_kb);
         let sz_kb = p.vsize / 1024;
-        let rss_kb = p.rss.saturating_mul(PAGE_SIZE_KB);
+        let rss_kb = p.rss.saturating_mul(procinfo::PAGE_SIZE_KIB);
         println!(
             "{:>7}  {:>7}  {:>5.1}  {:>5.1}  {:>9}  {:>9}  {:<8}  {:<5}  {:>10}  {}",
             p.uid,
@@ -618,7 +538,7 @@ fn format_column_value(
         Column::Priority => format!("{}", p.priority),
         Column::Threads => format!("{}", p.threads),
         Column::Vsize => format_size(p.vsize / 1024),
-        Column::Rss => format_size(p.rss.saturating_mul(PAGE_SIZE_KB)),
+        Column::Rss => format_size(p.rss.saturating_mul(procinfo::PAGE_SIZE_KIB)),
         Column::Time => format_time(p.utime.saturating_add(p.stime)),
         Column::Cpu => format!("{:.1}", cpu_percent(p, uptime_ticks)),
         Column::Tty => format_tty(p.tty),
@@ -773,7 +693,7 @@ fn print_json(procs: &[ProcessInfo], uptime_ticks: u64, mem_total_kb: u64) {
     for (i, p) in procs.iter().enumerate() {
         let cpu = cpu_percent(p, uptime_ticks);
         let mem = mem_percent(p, mem_total_kb);
-        let rss_kb = p.rss.saturating_mul(PAGE_SIZE_KB);
+        let rss_kb = p.rss.saturating_mul(procinfo::PAGE_SIZE_KIB);
         let vsize_kb = p.vsize / 1024;
         let total_time = p.utime.saturating_add(p.stime);
 
@@ -1097,6 +1017,139 @@ fn main() {
                     mem_total_kb,
                 );
             }
+        }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::{
+        ProcessInfo, TICKS_PER_SEC, cpu_percent, format_size, format_start_time, format_time,
+        format_tty, mem_percent, state_description,
+    };
+
+    fn proc_with(utime: u64, stime: u64, starttime: u64, rss: u64) -> ProcessInfo {
+        ProcessInfo {
+            pid: 1,
+            name: "t".to_string(),
+            state: 'S',
+            state_long: "sleeping".to_string(),
+            ppid: 0,
+            pgrp: 0,
+            session: 0,
+            tty: 0,
+            utime,
+            stime,
+            priority: 20,
+            nice: 0,
+            threads: 1,
+            starttime,
+            vsize: 0,
+            rss,
+            uid: 0,
+            gid: 0,
+            groups: Vec::new(),
+            vm_size_kb: 0,
+            vm_rss_kb: 0,
+        }
+    }
+
+    /// The unit boundaries, which are where a size formatter goes wrong.
+    #[test]
+    fn size_switches_units_at_the_right_place() {
+        assert_eq!(format_size(0), "0 KiB");
+        assert_eq!(format_size(1023), "1023 KiB");
+        assert_eq!(format_size(1024), "1.0 MiB");
+        assert_eq!(format_size(1_048_575), "1024.0 MiB");
+        assert_eq!(format_size(1_048_576), "1.0 GiB");
+    }
+
+    /// Ticks, not seconds, and hours do not wrap at a day: a process can run
+    /// for a week, and `01:00:00` after 25 hours would be a lie.
+    #[test]
+    fn time_is_ticks_and_hours_accumulate() {
+        assert_eq!(format_time(0), "00:00:00");
+        assert_eq!(format_time(TICKS_PER_SEC), "00:00:01");
+        assert_eq!(format_time(3661 * TICKS_PER_SEC), "01:01:01");
+        assert_eq!(format_time(25 * 3600 * TICKS_PER_SEC), "25:00:00");
+    }
+
+    /// **This program and `coreutils`'s `ps` render the same `tty_nr`
+    /// differently**, and this test exists to say so rather than to bless it.
+    ///
+    /// Here a tty is `tty{n}` from the raw number; `coreutils/src/bin/ps.rs`
+    /// renders `pts/{n & 0xff}`, taking the low byte as a minor. For
+    /// `tty_nr = 34816` the two commands print `tty34816` and `pts/0`.
+    ///
+    /// Neither is obviously right -- 34816 is `(136 << 8) | 0`, so `pts/0` is
+    /// the better reading of a real Linux device number and `tty34816` is not
+    /// a device that exists. It is recorded as a measured disagreement between
+    /// two implementations of one command, which is the concrete form of
+    /// `known-issues.md` ->
+    /// `TD-B-THIRTY-NINE-COMMAND-NAMES-ARE-BUILT-BY-TWO-CRATES-EACH`.
+    #[test]
+    fn tty_rendering_differs_from_the_other_ps() {
+        assert_eq!(format_tty(0), "?");
+        assert_eq!(format_tty(-1), "?", "a negative tty_nr is also no terminal");
+        assert_eq!(format_tty(34816), "tty34816");
+        // The other implementation's answer for the same input, for the record.
+        assert_ne!(format_tty(34816), format!("pts/{}", 34816 & 0xff));
+    }
+
+    /// Both percentages divide, so both need a zero guard, and both have one.
+    #[test]
+    fn percentages_do_not_divide_by_zero() {
+        // Elapsed is zero when a process started this very tick.
+        assert!((cpu_percent(&proc_with(10, 10, 100, 0), 100) - 0.0).abs() < 1e-9);
+        // …and a machine reporting no memory at all.
+        assert!((mem_percent(&proc_with(0, 0, 0, 10), 0) - 0.0).abs() < 1e-9);
+    }
+
+    /// RSS is in pages and the conversion is the crate's, not a local 4 KiB.
+    #[test]
+    fn memory_percent_converts_pages_at_the_page_size() {
+        // 100 pages of 16 KiB = 1600 KiB, against a 3200 KiB machine.
+        let pct = mem_percent(&proc_with(0, 0, 0, 100), 3200);
+        assert!((pct - 50.0).abs() < 1e-9, "got {pct}");
+    }
+
+    /// CPU% here is cumulative over the process's life, which its own doc
+    /// says. Pinned so that anyone changing it to an interval measure has to
+    /// change a test that states the old meaning.
+    #[test]
+    fn cpu_percent_is_lifetime_not_recent() {
+        // Half of the elapsed ticks spent on CPU.
+        let p = proc_with(50, 50, 0, 0);
+        assert!((cpu_percent(&p, 200) - 50.0).abs() < 1e-9);
+    }
+
+    /// **A known defect, pinned rather than fixed.** `starttime` is ticks
+    /// *since boot*, so this renders "hours and minutes after boot", not the
+    /// wall-clock time real `ps` shows in its `START` column. Turning it into
+    /// a clock time needs the boot instant, which is `/proc/uptime` and the
+    /// current time -- two more readings, and a change to what the column
+    /// means. See `known-issues.md`.
+    #[test]
+    fn start_time_is_since_boot_not_a_clock_time() {
+        assert_eq!(format_start_time(0), "00:00");
+        // A process that started 90 minutes after boot, on a machine that has
+        // been up for days, still shows 01:30.
+        assert_eq!(format_start_time(90 * 60 * TICKS_PER_SEC), "01:30");
+    }
+
+    /// The state letters a viewer has to know, including the two that are easy
+    /// to omit: `I` (idle kernel thread) and `t` (tracing stop).
+    #[test]
+    fn every_state_letter_has_a_description() {
+        for c in ['R', 'S', 'D', 'Z', 'T', 'I'] {
+            let d = state_description(c);
+            assert!(!d.is_empty(), "{c} has no description");
+            assert_ne!(d, "unknown", "{c} should be known");
         }
     }
 }

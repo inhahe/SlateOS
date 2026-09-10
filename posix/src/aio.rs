@@ -35,28 +35,63 @@ use crate::errno;
 // aiocb — async I/O control block
 // ---------------------------------------------------------------------------
 
-/// Async I/O control block.
+/// Async I/O control block -- musl's `struct aiocb`, 168 bytes.
 ///
-/// Matches the POSIX `struct aiocb` layout.  All fields are present
-/// for source compatibility even though the operations are stubbed.
+/// # "Matches the POSIX layout" was the claim, and the order was not musl's
+///
+/// This declared `aio_fildes, aio_offset, aio_buf, ...` and came to 136 bytes.
+/// musl's order is `aio_fildes, aio_lio_opcode, aio_reqprio, aio_buf,
+/// aio_nbytes, aio_sigevent`, then 32 bytes of its own per-request state, then
+/// `aio_offset` at 128 and 32 more to 168. Measured with
+/// `zig cc --target=x86_64-linux-musl`:
+///
+/// | field | ours, before | musl |
+/// |---|---|---|
+/// | `aio_offset` | 8 | 128 |
+/// | `aio_reqprio` | 32 | 8 |
+/// | `aio_sigevent` | 36 | 32 |
+/// | `aio_lio_opcode` | 100 | 4 |
+/// | size | 136 | 168 |
+///
+/// Every one of those is a field a C caller fills in before calling
+/// `aio_read`, so a program setting an offset was setting the opcode. "Matches
+/// the POSIX `struct aiocb` layout" is the kind of claim POSIX cannot settle:
+/// POSIX names the members and leaves the order to the implementation, so
+/// there is no such thing as *the* POSIX layout to match -- only a particular
+/// C library's. Nothing in this tree calls the aio family, which is the only
+/// reason it went unnoticed.
+///
+/// All fields are present for source compatibility even though the operations
+/// are stubbed. Found by `scripts/check-libc-abi.py`; `design-decisions.md`
+/// §1011.
 #[repr(C)]
 pub struct Aiocb {
     /// File descriptor.
     pub aio_fildes: i32,
-    /// Offset within file.
-    pub aio_offset: i64,
+    /// Operation (LIO_READ, LIO_WRITE, LIO_NOP).
+    pub aio_lio_opcode: i32,
+    /// Request priority offset.
+    pub aio_reqprio: i32,
+    /// Alignment before the first pointer. musl's struct has the same hole.
+    __pad0: u32,
     /// Buffer for I/O.
     pub aio_buf: *mut u8,
     /// Number of bytes to read/write.
     pub aio_nbytes: usize,
-    /// Request priority offset.
-    pub aio_reqprio: i32,
     /// Signal notification.
-    pub aio_sigevent: [u8; 64], // Opaque sigevent-sized placeholder.
-    /// Operation (LIO_READ, LIO_WRITE, LIO_NOP).
-    pub aio_lio_opcode: i32,
-    /// Internal padding/reserved.
-    _reserved: [u8; 32],
+    ///
+    /// An opaque 64 bytes rather than a `Sigevent`, which is what it should
+    /// eventually be — but 64 is the right *size*, measured, so a caller's
+    /// `aio_offset` lands where it belongs either way.
+    pub aio_sigevent: [u8; 64],
+    /// musl's own per-request state, which lives between `aio_sigevent` and
+    /// `aio_offset`. Never read here; it exists so the public fields either
+    /// side of it are at musl's offsets.
+    __private1: [u8; 32],
+    /// Offset within file.
+    pub aio_offset: i64,
+    /// The rest of musl's private state, taking the structure to 168.
+    __private2: [u8; 32],
 }
 
 // ---------------------------------------------------------------------------

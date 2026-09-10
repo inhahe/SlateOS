@@ -8,6 +8,15 @@
   h1 { font-size:17px; margin:0 0 4px; font-weight:650; }
   header p { margin:0; color:#5c6070; max-width:75ch; }
   .wrap { display:grid; grid-template-columns:340px 1fr; gap:22px; padding:18px 24px 40px; align-items:start; }
+  /* The controls stay put and scroll on their own, so a colour can be changed
+     while looking at whichever example is on screen. Without this the only way
+     to reach the controls from the bottom of the page was to scroll back up,
+     which loses the thing you were judging. */
+  .wrap > div:first-child { position:sticky; top:12px; max-height:calc(100vh - 24px);
+                            overflow-y:auto; overscroll-behavior:contain; padding-right:4px; }
+  .wrap > div:first-child::-webkit-scrollbar { width:10px; }
+  .wrap > div:first-child::-webkit-scrollbar-thumb { background:#c8ccd6; border-radius:5px; }
+  .wrap > div:first-child::-webkit-scrollbar-track { background:#eceef3; border-radius:5px; }
   .panel { background:#fff; border:1px solid #dfe2e8; border-radius:10px; padding:14px 16px; }
   .panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:#6a6f80; margin:0 0 10px; font-weight:650; }
   .uc { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
@@ -19,6 +28,26 @@
   .uc .t2 { font-size:11px; margin-top:2px; }
   .uc .sw { width:34px; height:18px; border-radius:9px; position:relative; flex:0 0 auto; }
   .uc .sw i { position:absolute; top:2px; width:14px; height:14px; border-radius:50%; background:#fff; }
+  .fp { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .fp h3 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:#666; margin:0 0 6px; font-weight:600; }
+  .win { border-radius:9px; overflow:hidden; border:1px solid #c9ccd4; box-shadow:0 6px 18px rgba(0,0,0,.10);
+         position:relative; font-size:12px; }
+  .win .tb { padding:7px 11px; font-weight:600; font-size:12px; }
+  .win .bd { display:flex; min-height:236px; }
+  .win .side { width:116px; flex:0 0 auto; padding:8px 7px; }
+  .win .cnt { flex:1; padding:11px 13px; }
+  .win .nav { padding:6px 8px; border-radius:6px; margin-bottom:3px; }
+  .win .sec { font-size:10px; text-transform:uppercase; letter-spacing:.05em; margin:1px 0 8px; font-weight:700; }
+  .win .r { padding:8px 10px; border-radius:6px; margin-bottom:6px; display:flex; align-items:center; gap:9px; }
+  .win .r .g { flex:1; }
+  .win .t2s { font-size:10.5px; margin-top:2px; }
+  .win .btn { padding:5px 13px; border-radius:6px; display:inline-block; margin-right:7px; }
+  .win .menu { position:absolute; border-radius:8px; padding:4px; width:154px; z-index:5;
+               box-shadow:0 10px 26px rgba(0,0,0,.20); }
+  .win .mi { padding:6px 9px; border-radius:5px; }
+  .tag { display:inline-block; font:9.5px ui-monospace,Consolas,monospace; color:#1c1c1c;
+         background:rgba(255,255,255,.72); border:1px solid rgba(0,0,0,.22); border-radius:3px;
+         padding:0 3px; margin-left:6px; vertical-align:middle; white-space:nowrap; }
   .presets { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
   .presets button { flex:1 1 auto; padding:7px 10px; border:1px solid #d3d7e0; background:#f3f4f7; border-radius:7px; cursor:pointer; font:inherit; font-size:13px; }
   .presets button.on { background:#1d62ec; border-color:#1d62ec; color:#fff; font-weight:600; }
@@ -75,8 +104,20 @@
     <div class="row"><label>Secondary (subtext0)</label><input type="color" id="c_sec"><input type="text" id="t_sec"></div>
     <div class="row"><label>Secondary (subtext1)</label><input type="color" id="c_sec1"><input type="text" id="t_sec1"></div>
     <div class="row"><label>Accent text</label><input type="color" id="c_acc"><input type="text" id="t_acc"></div>
+    <div class="row"><label>Disabled / hint (overlay0)</label><input type="color" id="c_ovl"><input type="text" id="t_ovl"></div>
     <div class="row"><label>Page (unshaded)</label><input type="color" id="c_page"><input type="text" id="t_page"></div>
-    <div class="row"><label>Card (shaded)</label><input type="color" id="c_card"><input type="text" id="t_card"></div>
+    <div class="row"><label>Card being measured</label><input type="color" id="c_card"><input type="text" id="t_card"></div>
+    <p class="note" style="margin-top:6px">Feeds the preview at the top and the contrast table &mdash; it is
+       &ldquo;the card this question is about&rdquo;, which is not always the ordinary one (preset 3 measures the
+       <em>deepest</em> card). The examples are drawn from the five panes below.</p>
+
+    <h2 style="margin-top:14px">Panes &mdash; every example is drawn from these</h2>
+    <div class="row"><label>mantle &mdash; menus, title bars</label><input type="color" id="c_L_mantle"><input type="text" id="t_L_mantle"></div>
+    <div class="row"><label>crust &mdash; sidebars</label><input type="color" id="c_L_crust"><input type="text" id="t_L_crust"></div>
+    <div class="row"><label>surface0 &mdash; the ordinary card</label><input type="color" id="c_L_s0"><input type="text" id="t_L_s0"></div>
+    <div class="row"><label>surface1 &mdash; selected row</label><input type="color" id="c_L_s1"><input type="text" id="t_L_s1"></div>
+    <div class="row"><label>surface2 &mdash; deepest / control chrome</label><input type="color" id="c_L_s2"><input type="text" id="t_L_s2"></div>
+    <div class="row" style="margin-top:8px"><label><input type="checkbox" id="lbl_on" checked> Label which pane each element uses</label><span></span><span></span></div>
 
     <h2 style="margin-top:14px">Card shade</h2>
     <div class="swatchrow" id="shades"></div>
@@ -116,6 +157,17 @@
     </div>
 
     <div class="panel" style="margin-top:18px">
+      <h2>Whole windows &mdash; the same palette, in the places it actually lands</h2>
+      <p class="note" style="margin-top:0">The strip below shows the shades in isolation and the pairs after it show
+         one element at a time. This shows them <b>composed</b>, which is the only way to judge the question you are
+         actually being asked: not &ldquo;is this card readable&rdquo; but <em>does a screen made of these read as
+         organised or as busy</em>. Left column is today's shaded build; right column is the same window with the
+         fills removed and a border doing the work. Both follow the colours you pick above.</p>
+      <div class="fp" id="fp"></div>
+      <p class="note" id="fp_note"></p>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
       <h2>What the shades are actually used for &mdash; and the same thing with borders instead</h2>
       <p class="note" style="margin-top:0">Taken from the code, not invented. Grepping every use of the three
          shades in <code>gui/desktop</code> and <code>apps/settings</code> shows they are <b>not</b> three depths
@@ -151,7 +203,16 @@
     </div>
 
     <div class="panel" style="margin-top:18px">
-      <h2>Ink vs ink &mdash; how far apart the four text colours are</h2>
+      <h2>Pane vs pane &mdash; how many background colours are really here</h2>
+      <table>
+        <thead><tr><th>step</th><th class="num">separation</th><th>reads as</th></tr></thead>
+        <tbody id="panesep"></tbody>
+      </table>
+      <p class="note" id="panesep_note"></p>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>Ink vs ink &mdash; how far apart the text colours are</h2>
       <table>
         <thead><tr><th>pair</th><th class="num">separation</th><th>reads as</th></tr></thead>
         <tbody id="sep"></tbody>
@@ -248,8 +309,25 @@ const PRESETS = {
 const SHIPPED_LADDER = { mantle:'#E6E9EF', crust:'#DCE0E8', s0:'#CCD0DA', s1:'#BCC0CC', s2:'#ACB0BE' };
 
 const $ = id => document.getElementById(id);
-const KEYS = ['main','sec','sec1','acc','page','card'];
-let cur = { ...PRESETS.cur };
+const KEYS = ['main','sec','sec1','acc','ovl','page','card'];
+// overlay0 was missing from this tool entirely until 2026-09-09, though the
+// palette declares it and the tree uses it 829 times -- more than surface1.
+// Its absence is why the ink tables looked easier to satisfy than the real
+// palette is. Presets that predate it inherit the shipped value.
+const INK_DEFAULTS = { ovl: '#9CA0B0' };
+// The five panes, in ladder order. Kept separate from KEYS because they live on
+// `cur.ladder` rather than on `cur` -- and because until 2026-09-09 they were
+// not editable at all, which is the bug this fixes: the examples read the
+// ladder, the only card control wrote `cur.card`, and the two never met, so
+// changing a colour moved the preview at the top and nothing else.
+const LKEYS = ['mantle','crust','s0','s1','s2'];
+// Every preset gets a ladder, whether it declared one or not. Presets `cur`,
+// `a` and `b` did not, and used to fall through to SHIPPED_LADDER at each read
+// site -- which is exactly what made them un-editable.
+const withLadder = pre => ({ ...INK_DEFAULTS, ...pre, ladder: { ...(pre.ladder || SHIPPED_LADDER) } });
+let cur = withLadder(PRESETS.cur);
+// Whether to chip each element with the pane it is drawn from.
+let showTags = true;
 
 // --- WCAG contrast ---------------------------------------------------------------------------
 const srgb = c => { c /= 255; return c <= 0.03928 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4); };
@@ -277,8 +355,188 @@ const badge = (r, lim) => r >= 7 && lim === 4.5
 // `p.accent` and `p.surface2` for exactly that. `surface1` is the menu border
 // (context_ext.rs) and the selected-row fill (datetime_settings.rs:811).
 // `surface0` is the hovered/selected row (context_ext.rs:1045).
+// Whole-window mockups. Every element is drawn from the same six values the
+// controls above set, and each window is emitted twice from one function --
+// `b` true means "borders instead of fills" -- so the two columns cannot drift
+// apart structurally and the only difference the eye sees is the one under
+// discussion.
+function renderFullPages() {
+  const L = cur.ladder;
+  const ink = cur.main, dim = cur.sec1, acc = cur.acc, page = cur.page, off = cur.ovl;
+  const esc = t => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+
+  // A filled surface, or the same element outlined. `edge` overrides the
+  // outline colour -- the selected row uses the accent rather than a shade,
+  // because with no fill available it is the only thing left to select with.
+  const surf = (b, shade, edge) => b
+    ? `background:transparent;border:1px solid ${edge || L.s2};`
+    : `background:${shade};border:1px solid transparent;`;
+
+  const T1 = `color:${ink}`, T2 = `color:${dim}`, TA = `color:${acc}`;
+
+  // A chip naming the pane an element is drawn from. In the bordered column the
+  // fill is gone, so it names the border instead -- which is the honest answer
+  // to "which shade is this" on that side.
+  const tag = n => showTags ? `<span class="tag">${n}</span>` : '';
+  const tagF = (b, n, edge) => showTags
+    ? `<span class="tag">${b ? 'border ' + (edge || 'surface2') : n}</span>` : '';
+
+  // --- 1. Settings: sidebar + rows. Where surface0 mostly lives. ---
+  const settings = b => `
+    <div class="win" style="background:${page}">
+      <div class="tb" style="${b ? `background:${page};` : `background:${L.mantle};`}
+           border-bottom:1px solid ${L.s1};${T1}">Settings${tag(b ? 'base' : 'mantle')}</div>
+      <div class="bd">
+        <div class="side" style="${b ? `background:${page};border-right:1px solid ${L.s2};`
+                                     : `background:${L.crust};`}">
+          ${tag(b ? 'base' : 'crust')}
+          ${['System', 'Network', 'Personalisation', 'Accounts'].map((n, i) =>
+            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${i === 1 ? T1 : T2}">${n}` +
+            `${i === 1 ? tagF(b, 'surface1', 'accent') : ''}</div>`
+          ).join('')}
+        </div>
+        <div class="cnt">
+          <div class="sec" style="${T2}">Wi-Fi</div>
+          <div class="r" style="${surf(b, L.s0)}">
+            <div class="g"><div style="${T1}">Home network</div>
+              <div class="t2s" style="${T2}">Connected &middot; 5 GHz &middot; strong</div></div>
+            <div style="${TA}">Disconnect</div>${tagF(b, 'surface0')}
+          </div>
+          <div class="r" style="${surf(b, L.s0)}">
+            <div class="g"><div style="${T1}">Guest</div>
+              <div class="t2s" style="${T2}">Saved network</div></div>
+            <div style="color:${off}">Forget</div>${tag('overlay0')}
+          </div>
+          <div class="sec" style="${T2}">Options</div>
+          <div class="r" style="${surf(b, L.s0)}">
+            <div class="g"><div style="${T1}">Connect automatically</div></div>
+            <div class="sw" style="background:${acc}"><i style="right:2px"></i></div>
+          </div>
+          <div class="r" style="${surf(b, L.s0)}">
+            <div class="g"><div style="${T1}">Metered connection</div></div>
+            <div class="sw" style="background:${L.s2}"><i style="left:2px"></i></div>${tag('surface2')}
+          </div>
+          <div style="margin-top:11px">
+            <span class="btn" style="background:${acc};color:${page}">Save</span>
+            <span class="btn" style="${surf(b, L.s0)}${T1}">Cancel</span>
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  // --- 2. File manager with a menu open. Where mantle/crust live. ---
+  const files = b => `
+    <div class="win" style="background:${page}">
+      <div class="tb" style="${b ? `background:${page};` : `background:${L.mantle};`}
+           border-bottom:1px solid ${L.s1};${T1}">Documents${tag(b ? 'base' : 'mantle')}</div>
+      <div class="bd">
+        <div class="side" style="${b ? `background:${page};border-right:1px solid ${L.s2};`
+                                     : `background:${L.crust};`}">
+          ${tag(b ? 'base' : 'crust')}
+          ${['Home', 'Documents', 'Pictures', 'Downloads'].map((n, i) =>
+            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${i === 1 ? T1 : T2}">${n}` +
+            `${i === 1 ? tagF(b, 'surface1', 'accent') : ''}</div>`
+          ).join('')}
+        </div>
+        <div class="cnt" style="position:relative">
+          ${['design.txt', 'roadmap.md', 'notes.md', 'budget.ods', 'photo.png'].map((n, i) =>
+            `<div class="r" style="${i === 2 ? surf(b, L.s1, acc) : surf(b, L.s0)}">
+               <div class="g" style="${T1}">${esc(n)}</div>
+               <div class="t2s" style="${T2}">${['12 KB', '48 KB', '3 KB', '21 KB', '1.4 MB'][i]}</div>
+               ${i === 0 ? tagF(b, 'surface0') : i === 2 ? tagF(b, 'surface1', 'accent') : ''}
+             </div>`).join('')}
+          <!-- The menu panel is p.base, the same colour as the page behind
+               it, told apart by its border and shadow alone. Not a choice made
+               here: context_ext.rs asserts it. So this panel barely changes
+               between the two columns; only its hovered row does.
+               (No backticks in this comment: it sits inside a template
+               literal, and a stray one ends the string.) -->
+          <div class="menu" style="left:74px;top:64px;background:${page};
+               border:1px solid ${b ? L.s2 : L.s1};">
+            ${tag('base')}
+            <div class="mi" style="${T1}">Open</div>
+            <div class="mi" style="${surf(b, L.s0, acc)}${T1}">Rename${tagF(b, 'surface0', 'accent')}</div>
+            <div class="mi" style="${T1}">Duplicate</div>
+            <div class="mi" style="${T1}">Delete</div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  // --- 3. A dialog and a notification, floating over a window. ---
+  const dialog = b => `
+    <div class="win" style="background:${L.s2}">
+      <div style="padding:26px 20px">
+        ${tag('surface2 — the window behind')}
+        <div style="${b ? `background:${page};border:1px solid ${L.s2};` : `background:${L.mantle};`}
+             border-radius:9px;padding:14px 15px;box-shadow:0 10px 26px rgba(0,0,0,.22)">
+          <div style="font-weight:600;margin-bottom:5px;${T1}">Discard changes?${tag(b ? 'base' : 'mantle')}</div>
+          <div class="t2s" style="margin-bottom:12px;${T2}">
+            design.txt has unsaved edits. Closing now loses them.</div>
+          <div style="text-align:right">
+            <span class="btn" style="${surf(b, L.s0)}${T1}">Cancel</span>
+            <span class="btn" style="background:${acc};color:${page};margin-right:0">Discard</span>
+          </div>
+        </div>
+        <div style="${b ? `background:${page};border:1px solid ${L.s2};` : `background:${L.mantle};`}
+             border-radius:9px;padding:11px 13px;margin-top:13px;box-shadow:0 6px 16px rgba(0,0,0,.16)">
+          <div style="font-weight:600;${T1}">Backup finished${tag(b ? 'base' : 'mantle')}</div>
+          <div class="t2s" style="${T2}">4,812 files &middot; 2.1 GB &middot; 3 min 14 s</div>
+          <div class="t2s" style="margin-top:5px;${TA}">Show report</div>
+        </div>
+      </div>
+    </div>`;
+
+  const shots = [
+    ['Settings &mdash; rows on a page, sidebar behind', settings],
+    ['File manager &mdash; with a menu open over the list', files],
+    ['A dialog and a notification, over a window', dialog],
+  ];
+  $('fp').innerHTML = shots.map(([name, make]) =>
+    `<div><h3>${name} &mdash; shaded (today)</h3>${make(false)}</div>` +
+    `<div><h3>&hellip; the same, with borders</h3>${make(true)}</div>`
+  ).join('');
+
+  $('fp_note').innerHTML =
+    'Which rung is where, so these can be read against the strip at the top: the <b>title bar</b>, and the ' +
+    '<b>menu</b> and <b>dialog</b> panels, are <code>mantle</code>; the <b>sidebar</b> is <code>crust</code>; ' +
+    'the <b>rows</b> are <code>surface0</code>; a <b>selected</b> row or nav item is <code>surface1</code>; the ' +
+    '<b>off switch track</b> is <code>surface2</code>. The page behind everything is unshaded. ' +
+    'Two things are easiest to judge here and nowhere else: the shaded column puts <b>five</b> different greys ' +
+    'on screen at once in a single window, and in the bordered column the accent has to carry selection by ' +
+    'itself &mdash; which is why the selected row and nav item are outlined in it rather than filled.' +
+    '<br><br><b>Why the selected menu item and the selected settings row are not the same colour.</b> ' +
+    'Because selection here is not a colour, it is a <em>step</em>: a thing lifts one rung above whatever it ' +
+    'is sitting on. A menu sits on <code>base</code>, so its selected row is <code>surface0</code>. A settings ' +
+    'row is already <code>surface0</code>, so <em>its</em> selected row is <code>surface1</code>. They look ' +
+    'different because they are one step above different things. Making them match means setting ' +
+    '<code>surface0</code> = <code>surface1</code> &mdash; and then the selected settings row becomes ' +
+    'identical to the unselected ones, which is the thing you were trying to show. ' +
+    '<b>That is a real argument for the bordered column:</b> an accent outline means &ldquo;selected&rdquo; ' +
+    'and means the same thing everywhere, because it does not depend on what is underneath it. A shade ' +
+    'cannot, and never will be able to.' +
+    '<br><br><b>About <code>overlay0</code>, the fifth ink.</b> It fails 4.5 on every pane and is meant to &mdash; ' +
+    'it marks <em>disabled</em> things, and WCAG exempts disabled controls precisely so that &ldquo;switched ' +
+    'off&rdquo; can look switched off. Do not try to make it pass; if it did, it would stop reading as ' +
+    'disabled. It is shown here because it is real (829 uses in the tree, more than <code>surface1</code>) and ' +
+    'because its absence made these tables look easier to satisfy than the palette actually is.' +
+    '<br><br><b>Which of these are drawn from shipped code.</b> The settings window and the context menu are: ' +
+    'the row fills, the menu panel and its hovered row all follow what <code>apps/settings</code> and ' +
+    '<code>gui/desktop/src/context_ext.rs</code> actually do today. The <b>file manager is illustrative</b> ' +
+    '&mdash; the file explorer is on the roadmap and not built yet, so its list follows the settings ' +
+    'convention as the most likely one rather than a real one. The dialog and notification are shipped ' +
+    'shapes with illustrative content.' +
+    '<br><br><b>Why the menu looks lighter than the settings rows.</b> It is not an inconsistency in this page: ' +
+    'a menu panel is <code>base</code>, the same colour as the page, and only its <em>hovered</em> row is ' +
+    'filled. A settings page fills <em>every</em> row at <code>surface0</code>, three rungs down. So a menu is ' +
+    'mostly unshaded and a settings list is mostly shaded, and the card question bites the second far harder ' +
+    'than the first. Note also that the tree has <b>two</b> list conventions &mdash; settings pages fill every ' +
+    'row, while the extension list in <code>context_ext.rs</code> leaves rows at <code>mantle</code> and fills ' +
+    'only the selected one. Whichever way this decision goes, those two want reconciling.';
+}
+
 function renderUseCases() {
-  const L = (cur.ladder || SHIPPED_LADDER);
+  const L = cur.ladder;
   const ink = cur.main, dim = cur.sec1, acc = cur.acc;
   const esc = t => t.replace(/&/g,'&amp;').replace(/</g,'&lt;');
 
@@ -290,35 +548,46 @@ function renderUseCases() {
     `<div style="flex:1"><div class="t1" style="color:${ink}">${esc(title)}</div>` +
     `<div class="t2" style="color:${dim}">${esc(sub)}</div></div>${extra||''}</div>`;
 
+  // Same chip as the whole-window examples, so the two sections can be read
+  // against each other and against the strip at the top. Declared before `sw`,
+  // which uses it: it only works after the fact either way, because `sw` is not
+  // called until later, but relying on that is a trap for the next edit.
+  const tg = n => showTags ? `<span class="tag">${n}</span>` : '';
+
   const sw = on => `<div class="sw" style="background:${on ? acc : L.s2}">` +
-                   `<i style="${on ? 'right:2px' : 'left:2px'}"></i></div>`;
+                   `<i style="${on ? 'right:2px' : 'left:2px'}"></i></div>` +
+                   (on ? '' : tg('surface2'));
 
   const examples = [
     { name: 'Settings list &mdash; a row, and the selected row',
-      shaded: row('Display', 'Resolution, scale, night light', L.s0, null) +
-              row('Sound', 'Output device, volume, per-app mixing', L.s1, null) +
-              row('Network', 'Wi-Fi, Ethernet, VPN', L.s0, null),
-      bordered: row('Display', 'Resolution, scale, night light', null, L.s2) +
-                row('Sound', 'Output device, volume, per-app mixing', null, acc) +
-                row('Network', 'Wi-Fi, Ethernet, VPN', null, L.s2),
+      shaded: row('Display', 'Resolution, scale, night light', L.s0, null, tg('surface0')) +
+              row('Sound', 'Output device, volume, per-app mixing', L.s1, null, tg('surface1')) +
+              row('Network', 'Wi-Fi, Ethernet, VPN', L.s0, null, tg('surface0')),
+      bordered: row('Display', 'Resolution, scale, night light', null, L.s2, tg('border surface2')) +
+                row('Sound', 'Output device, volume, per-app mixing', null, acc, tg('border accent')) +
+                row('Network', 'Wi-Fi, Ethernet, VPN', null, L.s2, tg('border surface2')),
       note: 'The selected row is the only place the desktop really stacks one shade on another. ' +
             'With borders it becomes an accent outline, which is stronger and does not need a second shade.' },
 
     { name: 'Context menu &mdash; already bordered today',
-      shaded: `<div style="background:${L.mantle};border:1px solid ${L.s1};border-radius:8px;padding:5px">` +
-              row('Open', '', null, null) + row('Rename', '', L.s0, null) + row('Delete', '', null, null) +
+      shaded: `<div style="background:${cur.page};border:1px solid ${L.s1};border-radius:8px;padding:5px">` +
+              row('Open', '', null, null, tg('base')) + row('Rename', '', L.s0, null, tg('surface0')) +
+              row('Delete', '', null, null) +
               `</div>`,
       bordered: `<div style="background:${cur.page};border:1px solid ${L.s2};border-radius:8px;padding:5px">` +
-                row('Open', '', null, null) + row('Rename', '', null, acc) + row('Delete', '', null, null) +
+                row('Open', '', null, null, tg('base')) + row('Rename', '', null, acc, tg('border accent')) +
+                row('Delete', '', null, null) +
                 `</div>`,
-      note: 'This one is already a border in the shipped code &mdash; surface1 is the menu edge. Only the ' +
-            'hovered row is a fill.' },
+      note: 'This one is already a border in the shipped code, and more completely than it looks: the menu ' +
+            'panel is <code>base</code> &mdash; the same colour as the page behind it &mdash; told apart by its ' +
+            'edge and shadow alone. <code>surface1</code> is that edge, and the only fill is the hovered row. ' +
+            'So a menu barely changes between the two columns.' },
 
     { name: 'Toggle row &mdash; where surface2 actually lives',
-      shaded: row('Night light', 'Warmer colours after sunset', L.s0, null, sw(true)) +
-              row('Automatic brightness', 'Adjust to ambient light', L.s0, null, sw(false)),
-      bordered: row('Night light', 'Warmer colours after sunset', null, L.s2, sw(true)) +
-                row('Automatic brightness', 'Adjust to ambient light', null, L.s2, sw(false)),
+      shaded: row('Night light', 'Warmer colours after sunset', L.s0, null, tg('surface0') + sw(true)) +
+              row('Automatic brightness', 'Adjust to ambient light', L.s0, null, tg('surface0') + sw(false)),
+      bordered: row('Night light', 'Warmer colours after sunset', null, L.s2, tg('border surface2') + sw(true)) +
+                row('Automatic brightness', 'Adjust to ambient light', null, L.s2, tg('border surface2') + sw(false)),
       note: 'The off switch track is surface2. It is chrome inside a control, not a card &mdash; so it ' +
             'survives whichever way the card question goes, and needs a shade either way.' },
   ];
@@ -339,16 +608,17 @@ function renderUseCases() {
 }
 
 function renderAllSurfaces() {
-  const L = (cur.ladder || SHIPPED_LADDER);
+  const L = cur.ladder;
   const surfaces = [
     ['page (unshaded)',    cur.page, ''],
-    ['mantle  (353 uses)', L.mantle, 'lighter than the page'],
-    ['crust   (285 uses)', L.crust,  'lighter than the page'],
+    ['mantle  (353 uses)', L.mantle, 'one step off the page — menus, title bars'],
+    ['crust   (285 uses)', L.crust,  'two steps — sidebars, the deepest chrome'],
     ['surface0 (1012)',    L.s0,     'the ordinary card'],
     ['surface1 (542)',     L.s1,     ''],
     ['surface2 (159)',     L.s2,     'the deepest card'],
   ];
-  const inks = [['main', cur.main], ['subtext1', cur.sec1], ['subtext0', cur.sec], ['accent', cur.acc]];
+  const inks = [['main', cur.main], ['subtext1', cur.sec1], ['subtext0', cur.sec], ['accent', cur.acc],
+                ['overlay0', cur.ovl]];
 
   // Flag a ladder that does not descend -- option 1 inverts it, and that is
   // easy to miss by eye when the colours are close.
@@ -391,6 +661,10 @@ function renderAllSurfaces() {
 
 function render() {
   for (const k of KEYS) { $('c_'+k).value = cur[k]; $('t_'+k).value = cur[k].toUpperCase(); }
+  for (const k of LKEYS) {
+    $('c_L_'+k).value = cur.ladder[k];
+    $('t_L_'+k).value = cur.ladder[k].toUpperCase();
+  }
   $('stage').style.background = cur.page;
   $('card').style.background  = cur.card;
   for (const [el, col] of [['pg_main','main'],['pg_sec','sec'],['pg_sec1','sec1'],['pg_acc','acc'],
@@ -400,7 +674,8 @@ function render() {
   const rows = [];
   for (const [bgName, bg] of [['page (unshaded)', cur.page], ['card (shaded)', cur.card]])
     for (const [inkName, ink] of [['main text', cur.main], ['secondary (subtext0)', cur.sec],
-                                 ['secondary (subtext1)', cur.sec1], ['accent', cur.acc]]) {
+                                 ['secondary (subtext1)', cur.sec1], ['accent', cur.acc],
+                                 ['disabled / hint (overlay0)', cur.ovl]]) {
       const r = ratio(ink, bg);
       rows.push(`<tr><td>${inkName}</td><td>${bgName}</td><td class="num">${r.toFixed(2)}</td>` +
                 `<td>${badge(r,4.5)}</td><td>${badge(r,3.0)}</td></tr>`);
@@ -408,11 +683,42 @@ function render() {
   $('tbl').innerHTML = rows.join('');
   renderAllSurfaces();
   renderUseCases();
+  renderFullPages();
 
-  // Ink against ink. Six pairs, because four inks have six.
-  const NAME = { main:'main', sec:'subtext0', sec1:'subtext1', acc:'accent' };
-  const pairs = [['main','sec'],['main','sec1'],['main','acc'],
-                 ['sec','sec1'],['sec','acc'],['sec1','acc']];
+  // Pane against pane. The question this answers is not "can you read on it"
+  // but "is this a different colour at all" -- six named rungs are only six
+  // colours if the steps between them are visible.
+  const ladderRungs = [['base', cur.page], ['mantle', cur.ladder.mantle], ['crust', cur.ladder.crust],
+                       ['surface0', cur.ladder.s0], ['surface1', cur.ladder.s1],
+                       ['surface2', cur.ladder.s2]];
+  let distinct = 1, merged = [];
+  $('panesep').innerHTML = ladderRungs.slice(1).map(([name, hex], i) => {
+    const [prevName, prevHex] = ladderRungs[i];
+    const r = ratio(hex, prevHex);
+    // Same thresholds the ink table uses, for the same reason: they are a
+    // reading of the number, not a standard, and the number is always shown.
+    const reads = r < 1.10 ? '<span class="badge fail">one colour</span>'
+                : r < 1.30 ? '<span class="badge fail">barely distinct</span>'
+                : '<span class="badge pass">distinct</span>';
+    if (r < 1.10) merged.push(prevName + '/' + name); else distinct++;
+    return `<tr><td>${prevName} &rarr; ${name}</td><td class="num">${r.toFixed(2)}</td><td>${reads}</td></tr>`;
+  }).join('');
+  $('panesep_note').innerHTML =
+    `<b>Six named rungs, ${distinct} colour${distinct === 1 ? '' : 's'} you can actually see.</b> ` +
+    (merged.length
+      ? `These steps fall below the 1.10 the ink table calls &ldquo;one colour&rdquo;, so by this page's own ` +
+        `standard they are not separate shades: <code>${merged.join('</code>, <code>')}</code>. `
+      : `Every step clears 1.10. `) +
+    `That is the answer to &ldquo;do we need six&rdquo;: only where a step is visible does the rung earn its ` +
+    `place. Worth knowing while you judge it &mdash; a pane does not have to clear 4.5 against anything. ` +
+    `<b>4.5 is for ink on a pane, never pane on pane.</b> Two panes only need to be far enough apart to be ` +
+    `told apart, which is what this table measures, so adding rungs costs contrast nowhere; it costs only ` +
+    `the ink that has to stay readable on the <em>darkest</em> one.`;
+
+  // Ink against ink. Ten pairs, because five inks have ten.
+  const NAME = { main:'main', sec:'subtext0', sec1:'subtext1', acc:'accent', ovl:'overlay0' };
+  const INKS = ['main','sec','sec1','acc','ovl'];
+  const pairs = INKS.flatMap((x, i) => INKS.slice(i + 1).map(y => [x, y]));
   $('sep').innerHTML = pairs.map(([x, y]) => {
     const r = ratio(cur[x], cur[y]);
     // 1.10 and 1.30 are judgement, not standard: WCAG says nothing about ink
@@ -433,11 +739,21 @@ for (const k of KEYS) {
     render();
   });
 }
+for (const k of LKEYS) {
+  $('c_L_'+k).addEventListener('input', e => { cur.ladder[k] = e.target.value; render(); });
+  $('t_L_'+k).addEventListener('change', e => {
+    const v = e.target.value.trim().replace(/^#?/, '#');
+    if (/^#[0-9a-fA-F]{6}$/.test(v)) { cur.ladder[k] = v; }
+    render();
+  });
+}
+$('lbl_on').addEventListener('change', e => { showTags = e.target.checked; render(); });
+
 document.querySelectorAll('.presets button').forEach(b =>
   b.addEventListener('click', () => {
     document.querySelectorAll('.presets button').forEach(x => x.classList.remove('on'));
     b.classList.add('on');
-    cur = { ...PRESETS[b.dataset.p] };
+    cur = withLadder(PRESETS[b.dataset.p]);
     render();
   }));
 

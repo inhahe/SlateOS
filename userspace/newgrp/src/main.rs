@@ -125,29 +125,58 @@ fn read_gshadow_db() -> Vec<GshadowEntry> {
 // Current user info
 // ============================================================================
 
-fn get_current_user() -> UserInfo {
-    // Read from environment / /proc/self/status in a real system.
-    let username = env::var("USER")
-        .or_else(|_| env::var("LOGNAME"))
-        .unwrap_or_else(|_| "root".to_string());
-    let uid = env::var("UID")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0u32);
-    let gid = env::var("GID")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0u32);
+/// Who is running this, from the kernel and the account database.
+///
+/// # What this replaces, and why it mattered here more than most
+///
+/// The username came from `$USER`, falling back to `$LOGNAME` and then to the
+/// literal string `"root"`; the uid and gid came from `$UID` and `$GID`, both
+/// falling back to `0`. All four are set by whoever starts the program.
+///
+/// `newgrp` is setuid root and the username is not decoration: it selects the
+/// caller's group memberships out of `/etc/group`, and
+/// [`user_is_member`] uses that to decide whether to ask for the group
+/// password at all. So `USER=<anyone in wheel> newgrp wheel` skipped the
+/// password outright -- and with `USER` unset, which is the normal case, the
+/// caller was `"root"` and inherited root's memberships. The gshadow password
+/// this program exists to check was reachable only by callers who had already
+/// failed to be somebody useful.
+///
+/// # Resolution, and what happens when it fails
+///
+/// The uid is `getuid(2)` -- see `authlib::identity::caller_uid` -- and the
+/// name and gid come from that uid's record in the account database.
+///
+/// A uid with no record is **not** an error here: the caller gets an empty
+/// username, which matches no group's member list, and a gid equal to their
+/// uid, which is the user-private-group convention `useradd` follows. The
+/// effect is that an unknown caller has no memberships and must supply the
+/// group password, which is the fail-closed direction and still leaves the
+/// program usable. Refusing outright would deny them the one legitimate way
+/// in.
+fn get_current_user() -> Option<UserInfo> {
+    let uid = authlib::identity::caller_uid()?;
 
-    // Read supplementary groups from /proc/self/status or id output.
+    let record = userdb::UserDb::load(userdb::DEFAULT_PATH)
+        .ok()
+        .and_then(|db| db.find_uid(uid).cloned());
+
+    let username = record
+        .as_ref()
+        .and_then(userdb::Record::username)
+        .unwrap_or_default();
+    // No `gid:` of its own means the user-private group, which `useradd`
+    // numbers after the uid.
+    let gid = record.as_ref().and_then(userdb::Record::gid).unwrap_or(uid);
+
     let groups = read_user_supplementary_groups(uid, &username);
 
-    UserInfo {
+    Some(UserInfo {
         username,
         _uid: uid,
         gid,
         groups,
-    }
+    })
 }
 
 fn read_user_supplementary_groups(_uid: u32, username: &str) -> Vec<u32> {
@@ -338,7 +367,10 @@ fn newgrp_main(args: &[OsString]) -> i32 {
         i += 1;
     }
 
-    let user = get_current_user();
+    let Some(user) = get_current_user() else {
+        eprintln!("newgrp: cannot determine who is running this command");
+        return 1;
+    };
     let group_db = read_group_db();
 
     let target_group = match &group_name {
@@ -451,7 +483,10 @@ fn sg_main(args: &[OsString]) -> i32 {
         }
     }
 
-    let user = get_current_user();
+    let Some(user) = get_current_user() else {
+        eprintln!("sg: cannot determine who is running this command");
+        return 1;
+    };
     let group_db = read_group_db();
 
     // A group name is text, so a name that is not text names no group -- and

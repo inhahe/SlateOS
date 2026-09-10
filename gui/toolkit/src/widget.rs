@@ -759,7 +759,14 @@ impl Widget {
                         overflow: TextOverflow::Ellipsis,
                     });
                     if self.focused {
-                        crate::textedit::push_caret(tree, cx, cy, line_h, self.style.foreground);
+                        crate::textedit::push_caret(
+                            tree,
+                            cx,
+                            cy,
+                            line_h,
+                            self.style.foreground,
+                            crate::textedit::CARET_WIDTH,
+                        );
                     }
                 } else {
                     self.render_text_input_value(
@@ -896,6 +903,7 @@ impl Widget {
                 font_size: self.style.font_size,
                 weight: FontWeightHint::Regular,
                 color: self.style.foreground,
+                caret_width: crate::textedit::CARET_WIDTH,
             },
         );
     }

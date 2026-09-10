@@ -14,6 +14,7 @@ quoting = { path = "../quoting" }
 # Before this dependency existed, `_verify_group_password` accepted **any**
 # non-empty string. See `design-decisions.md` §329 and §341.
 authlib = { path = "../authlib" }
+userdb = { path = "../userdb" }
 
 [dev-dependencies]
 # The tests build a real `crypt(3)` entry rather than pasting one, so they

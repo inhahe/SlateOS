@@ -77,6 +77,10 @@ pub struct Statvfs {
     pub f_flag: u64,
     /// Maximum filename length.
     pub f_namemax: u64,
+    /// musl's trailing `__f_spare[6]`, which takes the struct from 88 bytes to
+    /// 112. Every named field was already at the right offset; only the tail
+    /// was short. Found by `scripts/check-libc-abi.py`.
+    pub __f_spare: [u32; 6],
 }
 
 // ---------------------------------------------------------------------------
@@ -512,10 +516,18 @@ mod tests {
     // Struct layout
     // -----------------------------------------------------------------------
 
+    /// 112, which is musl's, not the 88 our eleven named fields come to.
+    ///
+    /// This asserted `11 * 8` -- a restatement of our own declaration rather
+    /// than a claim about the C library, so it could only ever pass. musl
+    /// carries `__f_spare[6]` after `f_namemax`, so a caller's object is 112
+    /// bytes and `statvfs()` filled 88 of it. Every *named* field was already
+    /// at the right offset, which is why nothing looked wrong. Found by
+    /// `scripts/check-libc-abi.py`, which now asserts this against musl's own
+    /// header on every push rather than against arithmetic.
     #[test]
     fn statvfs_struct_size() {
-        // Statvfs has 11 u64 fields = 11 * 8 = 88 bytes.
-        assert_eq!(mem::size_of::<Statvfs>(), 11 * 8);
+        assert_eq!(mem::size_of::<Statvfs>(), 112);
     }
 
     #[test]

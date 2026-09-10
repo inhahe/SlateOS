@@ -125415,6 +125415,198 @@ least no longer *divergent* dead code.
 
 ---
 
+## TD-C-CARGO-BUILD-WORKSPACE-ON-THE-HOST-TARGET-FAILS-ON-THE-KERNEL
+
+**Date:** 2026-09-09. **Lane:** C.
+**Where:** not a code defect — a trap in the prescribed workflow.
+
+**In short:** running the whole-project build the way the instructions describe
+fails with a wall of linker errors that look alarming and have nothing to do
+with whatever you just changed. It is trying to build the kernel — a bare-metal
+binary with its own linker script — as an ordinary Windows program, which
+cannot work. Everything else builds fine.
+
+**The command and the result:**
+
+```
+cargo build --workspace --target x86_64-pc-windows-gnu
+  → error: linking with `x86_64-w64-mingw32-gcc` failed
+    relocation truncated to fit: IMAGE_REL_AMD64_ADDR32NB
+    ... `-T kernel/linker.ld`
+  → error: could not compile `kernel` (bin "kernel")
+```
+
+**Why it is reachable by accident.** Both halves are what an agent is told to
+do: `CLAUDE.md` says to run the workspace build/test before merging, and every
+`cargo` invocation in this tree needs `--target x86_64-pc-windows-gnu` because
+the host is Windows. Put together they ask for the kernel to be linked for the
+host, with `kernel/linker.ld`, against mingw's CRT.
+
+**`cargo check` is unaffected — measured, not assumed.**
+`cargo check --workspace --target x86_64-pc-windows-gnu` exits **0** on the same
+tree. `check` type-checks without linking, and the kernel's failure is entirely
+at the link step, so the whole workspace checks cleanly. That matters because it
+is `cargo check --workspace` that C-Q11 proposes as the pre-merge gate: the gate
+being considered works today, and only the `build` spelling of it does not.
+
+**What to run instead**, when the point is "did I break anything outside my own
+crate":
+
+```
+cargo check --workspace --target x86_64-pc-windows-gnu            # works
+cargo build --workspace --exclude kernel --target …               # if you need artifacts
+```
+
+**Why this is worth writing down rather than just knowing.** The failure names
+`libmsvcrt.a`, relocations and a linker script — none of which appear in a GUI
+change — so the natural first reaction is that something is badly wrong, and the
+natural second is to start bisecting a change that is innocent. It cost lane C a
+detour today on the way to merging a caret-width change.
+
+**Proper fix (not done):** the kernel package could carry
+`forced-target = "x86_64-slateos"`, which would make cargo build it for its own
+target regardless of `--target` on the command line and let the plain workspace
+command work. That is lane A's file, so it is written here rather than done.
+
+## TD-C-OVERLAY0-IS-A-DISABLED-INK-AND-SOME-LIVE-TEXT-IS-DRAWN-IN-IT
+
+**Date:** 2026-09-09. **Lane:** C.
+**Where:** `gui/appearance/src/lib.rs` (`LIGHT_OVERLAY0 = #9CA0B0`); about ten
+draw sites, `apps/editor/src/main.rs:2329` and `:2345` among them.
+
+**In short:** the palette has a deliberately faint grey for things that are
+switched off, so that "disabled" looks disabled. A handful of places use it for
+text that is *not* disabled — the editor's status bar draws the live cursor
+position and line count in it — and at that colour the text is close to
+unreadable: 2.30 : 1 against the page, where 4.5 is the floor.
+
+**The ink is not the bug.** `overlay0` fails 4.5 on all six panes, by design:
+
+| ink | base | mantle | crust | surface0 | surface1 | surface2 |
+|---|---|---|---|---|---|---|
+| text | 18.57 | 17.27 | 15.87 | 13.60 | 11.55 | 9.71 |
+| subtext1 | 10.50 | 9.77 | 8.98 | 7.69 | 6.53 | 5.49 |
+| subtext0 | 9.58 | 8.91 | 8.19 | 7.02 | 5.96 | 5.01 |
+| accent | 9.03 | 8.40 | 7.72 | 6.61 | 5.62 | 4.72 |
+| **overlay0** | **2.30** | **2.14** | **1.97** | **1.69** | **1.43** | **1.20** |
+
+WCAG exempts disabled controls precisely so that off can look off, and most of
+the 829 uses are that: `if self.enabled { pal.text } else { pal.overlay0 }` in
+`apps/alarmclock`, the same shape in `apps/dictionary`. Those are correct and
+should stay.
+
+**The bug is the sites where nothing is disabled.** `apps/editor`'s status bar
+is the clearest: `tree.text(8.0, bar_y + 5.0, &pos_text, …overlay0, 11.0)` draws
+"Ln 12, Col 4" — live, always-current information — at 2.30 : 1 and 11 px. A
+first pass counts about ten draws that are not behind an enabled/live
+conditional; each needs reading individually, because "not behind a conditional"
+is not the same as "not disabled".
+
+**Proper fix:** audit those ten. Anything conveying live state moves to
+`subtext0`; anything genuinely marking disabled or placeholder stays. Note that
+*placeholder* text is **not** exempt under WCAG even though disabled is, so the
+three placeholder uses need deciding rather than assuming.
+
+**Why it went unnoticed, and the wider point.** `overlay0` was absent from
+`scripts/contrast-explorer.html` until today, and the guard added with §826 —
+`light_inks_clear_the_contrast_floor_on_every_surface` — checks four inks and
+does not include it. So both instruments that would have shown this were
+looking at a palette with one fewer ink than the palette has. The tool now
+includes it; the guard deliberately still does not, because asserting a known
+and partly-legitimate failure means either a red build or a muted test. That
+is the same reasoning as the thirteen accents in
+`TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS`, and it should be revisited
+once the ten sites are triaged: after that, a guard could assert overlay0 is
+used *only* in exempt positions, which is the property that actually matters.
+
+**Also found in the same survey:** `overlay1` and `overlay2` are declared and
+used **zero** times anywhere in `gui` or `apps`. They are dead palette rungs.
+
+## TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY
+
+**Date:** 2026-09-09. **Lane:** C.
+**Where:** `gui/desktop/src/a11y.rs` — 1,360 lines, referenced by nothing.
+
+**In short:** there are two sets of accessibility settings. One is wired up and
+works. The other is a 1,360-line module that looks like the real one — it has a
+config-file format, range checking and passing tests — and nothing anywhere
+reads it. Three settings exist *only* in the dead copy, so those three do
+nothing at all: a wider text cursor, a visible focus ring, and the screen-reader
+switch.
+
+**The evidence.** `grep -rn "a11y::" gui apps`, excluding the file itself,
+returns **one** hit, and it is inside a doc comment in
+`gui/inputsettings/src/lib.rs` describing this module as superseded. Nothing
+constructs `AccessibilityConfig`, nothing loads it, nothing saves it. The
+module is `pub mod a11y;` in `gui/desktop/src/lib.rs`, so it compiles and is
+public API, and no caller exists.
+
+**Correcting this entry's own first version, because the mistake is instructive.**
+It originally carried a table of "uses outside `a11y.rs`" — `high_contrast` 117,
+`color_filter` 26, `reduced_motion` 17 — and concluded that those settings were
+wired while three others were forgotten. That was wrong. Those are counts of a
+*name*, and the names collide with fields on entirely different structs:
+`high_contrast` and `color_filter` are declared on
+`appearance::AppearanceSettings`, and `reduced_motion` is declared twice, once
+here and once on `animations.rs`'s own config. The live features read the other
+structs. Counting a name cannot distinguish two structs that share a field, and
+the giveaway was in the same survey: `cursor` scored 3,595, which is just the
+English word.
+
+**What each dead field duplicates, and what is genuinely missing:**
+
+| `AccessibilityConfig` field | live equivalent |
+|---|---|
+| `high_contrast` | `appearance::AppearanceSettings::high_contrast` |
+| `color_filter` | `appearance::AppearanceSettings::color_filter` |
+| `cursor` | `AppearanceSettings::cursor_size` / `cursor_scheme` |
+| `reduced_motion` | `AppearanceSettings::animation_speed`, `animations.rs` |
+| `magnifier` | none — `MagnifierConfig` is declared only here |
+| `visual_alerts` | a separate field of the same name in `apps/settings` |
+| `text_scale` | partial: `FontSettings::ui_size` is absolute, not a multiplier |
+| `caret_width` | **none** |
+| `focus_indicator` | **none** |
+| `screen_reader` | **none** — the feature does not exist |
+
+**This is the unfinished remainder of a cleanup that already happened.**
+`TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING`
+found the same defect in the *keyboard* third of these settings — sticky keys,
+filter keys, mouse keys existing three times over with no two copies connected —
+and fixed it by moving one definition into `gui/inputsettings`, a crate the
+compositor, the Settings app and the shell can all see. That fix is the
+precedent; what is left in `a11y.rs` is the visual third, not yet done.
+
+**Why the tests did not catch it.** `text_scale` and `caret_width` each have
+passing tests that round-trip them through the config file and check clamping
+(`text_scale=100` clamps to 3.0). They prove the setting is *stored*, not that
+anything reads it. A dead setting with green tests looks maintained.
+
+**A latent defect in the same code, should any of it be revived:** the parse
+does `v.clamp(0.5, 5.0)` on a value from `str::parse::<f32>`, which accepts
+`"nan"`. `f32::clamp` returns NaN for a NaN input, so `caret_width=nan` in the
+config yields a NaN width rather than being rejected. Any revival wants an
+`is_finite` guard, not just a clamp.
+
+**Proper fix:** delete `a11y.rs`, and add the three genuinely-missing settings
+to `appearance::AppearanceSettings` alongside `high_contrast`, following the
+`inputsettings` precedent. No new channel is needed and none is possible in the
+obvious direction — `gui/appearance` **depends on** `gui/toolkit` (`Palette` is
+built from the toolkit's `Color`), so the toolkit cannot name `Palette` and
+cannot depend on `appearance` without a cycle. The way a per-user value already
+crosses that boundary is that the *caller* passes it in: `textedit::SingleLine`
+takes a `color` field. A caret width travels the same way, as one more field.
+
+**A smaller real inconsistency to fix with it:** the carets that are drawn
+disagree about width for no recorded reason — `textedit::push_caret` draws a
+1.0-wide `Line` (3 callers), `pathbar.rs` a 2.0-wide `FillRect`
+(`CURSOR_WIDTH`), `launcher.rs` 2.0 inline, `run_dialog.rs` 1.0 inline. Six
+sites, three widths. A multiplier means nothing until they share a base.
+
+**If never fixed:** 1,360 lines that read as the accessibility subsystem, and
+are not. The next person to wire an accessibility feature will find this module
+first — it is the one that is *named* for the job — and add to the copy nobody
+reads. That is precisely what happened with sticky keys.
+
 ## TD-C-DYNDNS-PAGE-IS-READ-ONLY
 
 **Date:** 2026-09-09. **Lane:** C.
@@ -126315,6 +126507,893 @@ test `light_inks_clear_the_contrast_floor_on_every_surface` deliberately does
 **not** cover the accents, because asserting a known failure means either a red
 build or a muted test — it grows to cover them the day this is decided.
 
+
+## B-SIGACTION-USED-THE-KERNEL-STRUCT-LAYOUT-NOT-THE-C-LIBRARYS (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** the structure a C program fills in to install a signal handler has
+two different field orders on x86_64 -- one the kernel uses, one the C library
+uses -- at the same total size. Our libc used the kernel's. Handlers still ran,
+because the handler is the one field both put first; everything else the
+program asked for was read out of the wrong bytes.
+
+**Where.** `posix/src/signal.rs`, `struct Sigaction` and `sigaction()`.
+
+**Measured**, on Linux 6.6 with `offsetof`, and against musl at compile time
+with `zig cc --target=x86_64-linux-musl`:
+
+| | offsets |
+|---|---|
+| kernel (`rt_sigaction`) -- what we had | handler 0, flags 8, restorer 16, mask 24 |
+| glibc and musl -- what a C caller passes | handler 0, mask 8, flags 136, restorer 144 |
+
+**Effect.** `sa_flags` was read from the first word of the caller's `sa_mask`,
+zeroed by `sigemptyset`, so every flag was silently dropped and read back as
+zero. `sa_mask` was read sixteen bytes into itself -- harmless while empty,
+wrong otherwise. `oldact` was written in the wrong order, so a caller reading
+its own flags back got bytes from the middle of its own mask.
+
+**Why it went unnoticed.** No `sa_flag` was implemented, so a dropped flag and
+a stored one behaved identically. `SA_ONSTACK` (design-decisions 1009), added
+hours earlier, is the first flag a C program can set and observe. Also: no Rust
+test could see it, because Rust builds the struct by field name and agrees with
+itself whichever order it picks -- the same reason the `long double` fixtures
+are written in C.
+
+**Worse than unnoticed: certified.** A test pinned
+`offset_of!(Sigaction, sa_flags) == 8` under a comment reading "glibc x86_64".
+
+**Fixed** by reordering the struct and narrowing `sa_flags` to `u32` (the C
+declaration is `int`; a `u64` would land on the same offsets by absorbing the
+padding and would read four bytes belonging to the caller).
+`services/ctest-altstack/` gained a C-side round-trip check that would have
+caught it: install a flag and a mask, read them back, assert both survive.
+
+**Adjacent, checked at the same time and clean:** `stack_t` matches musl at
+`ss_sp` 0, `ss_flags` 8, `ss_size` 16, size 24.
+
+
+## B-REGMATCH-T-WAS-HALF-MUSLS-SIZE-SO-EVERY-SUBGROUP-OFFSET-WAS-WRONG (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** the structure `regexec` fills in to report *where* each part of a
+regular expression matched was half the size the C library uses. A program
+asking for ten sub-match positions got an array written a quarter full, with
+every entry after the first at the wrong place.
+
+**Where.** `posix/src/regex.rs`, `struct RegMatch`.
+
+**Cause.** `regoff_t` is `int` in glibc and `long` in musl, and every C port in
+this tree links musl. The struct's own doc comment said "Layout matches
+glibc/musl `regmatch_t` (`regoff_t` = `int`)" -- true of one of the two
+libraries it named.
+
+| | glibc | musl |
+|---|---|---|
+| `regoff_t` | 4 | 8 |
+| `regmatch_t` | 8 | 16 |
+
+Measured by compiling one program twice, `gcc` under WSL and
+`zig cc --target=x86_64-linux-musl`.
+
+**Effect.** `regmatch_t m[10]` is 160 bytes to the caller and was 80 to us, so
+element *n* landed at byte 8n instead of 16n and every offset was truncated to
+32 bits. Only group 0 was ever at the right address. Anything using the POSIX
+regex C API with sub-expressions was affected.
+
+**Fixed** by widening `rm_so`/`rm_eo` to `isize`. Found by
+`scripts/check-libc-abi.py` (design-decisions 1011) within an hour of that gate
+existing, which is the argument for the gate.
+
+**A test certified it**, asserting `size_of::<RegMatch>() == 8` under the
+comment quoted above. Corrected, with the measurement in the doc.
+
+
+## B-SCHED-PARAM-WAS-GLIBCS-4-BYTES-NOT-MUSLS-48 (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** the structure used to get and set a thread's scheduling priority
+was 4 bytes where musl's is 48. Reading a priority worked, because the priority
+is the first field in both; a call meant to *fill in* the caller's structure
+filled a twelfth of it.
+
+**Where.** `posix/src/sched.rs`, `struct SchedParam`.
+
+**Cause.** musl carries five reserved fields after `sched_priority` -- POSIX
+permits them, and musl uses them to keep room for the sporadic-server
+parameters. glibc's struct is 4 bytes. Ours was glibc's.
+
+**Severity is genuinely low** and is recorded so nobody promotes it: the
+priority is at offset 0 in both, so every read and every write of the field
+itself was correct. What was wrong is the whole-struct store in
+`posix_spawnattr_getschedparam` and the size a caller reserves.
+
+**Fixed** by carrying musl's reserved fields, zero-initialised. Two tests that
+asserted 4 bytes and 4-byte alignment corrected with the measurement. Found by
+`scripts/check-libc-abi.py`.
+
+
+## B-ADDRINFO-HAD-AI-ADDR-AND-AI-CANONNAME-TRANSPOSED (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** the structure `getaddrinfo` returns had two of its pointers the
+wrong way round. A program that resolved a hostname and then connected to it
+passed the *name text* to `connect()` where the address should have been.
+
+**Where.** `posix/src/socket.rs`, `struct Addrinfo`.
+
+**Not a glibc/musl divergence** -- both put `ai_addr` before `ai_canonname`.
+Ours was simply wrong.
+
+**Effect.** The canonical loop is
+
+```c
+for (p = res; p; p = p->ai_next)
+    if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
+```
+
+`p->ai_addr` read the canonical-hostname string pointer, so `connect()` was
+handed `ai_addrlen` bytes of a NUL-terminated name and read the first two as a
+`sa_family_t`. Every C network client that resolves a name was affected.
+
+**Fixed** by putting the fields in the C order. Found by
+`scripts/check-libc-abi.py` (design-decisions 1011) on the day that gate was
+written.
+
+
+## B-RUSAGE-AND-STATVFS-WERE-SHORT-OF-MUSLS-SIZE (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** two structures the system fills in for a caller were smaller than
+the C library's, so calls that are supposed to fill the caller's object filled
+the front of it and left the rest untouched.
+
+| | ours, before | musl |
+|---|---|---|
+| `struct rusage` | 144 | 272 |
+| `struct statvfs` | 88 | 112 |
+
+**Where.** `posix/src/resource.rs` and `posix/src/statvfs.rs`.
+
+**Why neither was noticed.** Every *named* field was already at the correct
+offset in both; only the trailing reserved arrays were missing. `getrusage`,
+`wait4` and `statvfs` therefore returned correct values for everything anyone
+reads, and left the tail as the caller's allocator had it.
+
+**Fixed** by carrying musl's `__reserved[16]` and `__f_spare[6]`. Found by
+`scripts/check-libc-abi.py`.
+
+**`statvfs`'s size test could not have caught it**: it asserted
+`size_of::<Statvfs>() == 11 * 8`, restating the declaration it was checking. A
+test whose expected value comes from the thing under test passes for any
+declaration -- and occupies the place a real check would go.
+
+
+## B-FD-SET-WAS-A-QUARTER-OF-THE-CALLERS-OBJECT (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** the set of file descriptors a program hands to `select()` is 128
+bytes in C and was 32 bytes to us, so every `select()` read and wrote the front
+quarter of the caller's own variable and left the rest as it found it.
+
+**Where.** `posix/src/poll.rs`, `struct FdSet`.
+
+**Cause, and it is instructive.** `FD_SET_WORDS` was derived from `FD_SETSIZE`,
+which is 256 here because `fdtable::MAX_FDS` is 256. That reasoning is correct
+about *this system's fd limit* and wrong about *the C library's structure* --
+two facts that happen to be the same number in glibc and musl (1024 both ways)
+and are not the same fact. A C caller writes `fd_set r;` on its stack and gets
+128 bytes whatever our fdtable can hold.
+
+**Effect.** `select()`'s write-back covered 32 of 128 bytes, so a caller reusing
+a set across calls kept stale bits in the 96 bytes we never touched. No fd at or
+above 256 can exist here, so nothing could read a *wrong* bit -- but nothing
+guaranteed that either, and any C program that memsets its own set and then
+inspects it after `select` was reading three quarters uninitialised.
+
+**Fixed** by splitting the two facts: `FD_SET_BITS` (1024, the ABI) sizes the
+structure and `FD_SETSIZE` (256, the policy) still bounds `FD_SET`/`FD_ISSET`.
+Found by `scripts/check-libc-abi.py`.
+
+**Two tests could not have caught it.** One asserted
+`size_of::<FdSet>() > 0`, true of every struct that has ever existed; the other
+asserted `FD_SET_WORDS == 4 // 256 / 64`, restating the derivation under test.
+Both now assert 128 against musl's own number.
+
+
+## B-AIOCB-FIELD-ORDER-IS-NOT-MUSLS (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** the structure used to queue an asynchronous read or write has its
+fields in a different order from the C library's, and is smaller.
+
+| | ours | musl |
+|---|---|---|
+| `sizeof(struct aiocb)` | 136 | **168** |
+| `aio_offset` | 8 | 128 |
+| `aio_reqprio` | 32 | 8 |
+| `aio_sigevent` | 36 | 32 |
+| `aio_lio_opcode` | 100 | 4 |
+
+musl orders it `aio_fildes, aio_lio_opcode, aio_reqprio, aio_buf, aio_nbytes,
+aio_sigevent`, then 32 bytes of its own private state, then `aio_offset` at
+128 and more private state to 168. Ours opens `aio_fildes, aio_offset, aio_buf`.
+`aio_sigevent` is also an opaque `[u8; 64]` placeholder here rather than a real
+`struct sigevent` — which is at least the right *size*, measured.
+
+**Where.** `posix/src/aio.rs`.
+
+**Why it is recorded rather than fixed today.** Nothing in the tree calls the
+POSIX aio family, and the fix is a reorder plus giving `aio_sigevent` a real
+type -- which is a second change (`Sigevent` itself is only three fields here
+against musl's union). Doing both properly is worth its own commit rather than
+a tail-end of a gate-shrinking one.
+
+**Fixed** by reordering to musl's, with musl's two runs of private state
+carried as opaque padding so the public fields either side of them are at the
+right offsets. `aio_sigevent` stays an opaque `[u8; 64]` -- the right *size*,
+measured -- rather than a real `Sigevent`, which is a separate improvement.
+
+**The doc comment said "matches the POSIX `struct aiocb` layout".** POSIX
+cannot settle that: it names the members and leaves the order to the
+implementation, so there is no *the* POSIX layout to match, only a particular C
+library's. A claim that cannot be true or false is worse than a wrong one --
+nothing can contradict it.
+
+
+## B-SYSINFO-IS-112-BYTES-AGAINST-MUSLS-368 (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** the structure `sysinfo()` fills in is a third of the size of the
+C library's, so a caller's 368-byte variable gets 112 bytes written and 256
+left as it found them.
+
+**Where.** `posix/src/unistd.rs`, `struct Sysinfo`.
+
+**Every named field is at the right offset**, measured: `uptime` 0, `loads` 8,
+`totalram` 32 … `mem_unit` 104. What is missing is musl's trailing
+`char __reserved[256]`, which is the whole of the difference. So the fix is one
+field, and the effect until then is an under-fill rather than an overrun.
+
+**Correction, and it is mine.** This entry first said the reverse — that ours
+was 368 against musl's 112, and that it therefore wrote 256 bytes *past* the
+caller's object. That reads the gate's `'368 == 112'` the wrong way round: the
+assertion is `sizeof(C type) == <our size>`, so the left number is musl's. A
+confident direction stated without re-reading the numbers is the exact defect
+this whole family of entries is about, committed while writing them up.
+
+**Fixed** by adding musl's `__reserved[256]` — one field, as predicted, and
+`u8` rather than a wider word so it lands at 108 where musl puts it rather
+than at 112 behind an alignment we would have invented.
+
+
+## B-UTMPX-IS-384-BYTES-AGAINST-MUSLS-400 (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** the login-record structure is 16 bytes smaller than the C
+library's and its last two fields are at the wrong offsets, so `who`, `last`
+and anything reading `/var/run/utmp` through the C API sees the time and
+address fields shifted.
+
+| | ours | musl |
+|---|---|---|
+| `sizeof(struct utmpx)` | 384 | **400** |
+| `ut_tv` | 340 | **344** |
+| `ut_addr_v6` | 348 | **360** |
+
+**The cause, measured rather than assumed:** musl's `ut_tv` is a full
+`struct timeval` — **16 bytes**, `time_t` plus `suseconds_t`, both 8 — and ours
+is a pair of `i32`s modelled on glibc's `__int32_t` variant. That is 8 bytes
+short and 8-aligned rather than 4, which is where both the offset shift and the
+missing 16 bytes come from; musl also carries `char __unused[20]` at the end.
+
+Everything up to and including `ut_session` is at the correct offset, so the
+type, pid, line, id, user and host all read correctly -- which is why nothing
+noticed.
+
+**Correction:** this entry first gave the two columns the wrong way round.
+
+**Fixed** by widening `UtmpxTimeval` to two `i64`s, which is a real
+`struct timeval`. The trailing `__unused[20]` turned out to be **already
+present**, as `_reserved`, documented "reserved for future use" — which is what
+it looks like from this side and not what it is. It is now documented as musl's.
+
+Worth recording: the first attempt at this fix *added* a second 20-byte field,
+because the struct was read as far as the fields the gate had named and no
+further. The gate caught it immediately — 416 against 400 — which is the third
+time in two days that reading only as far as the question took me produced a
+confident wrong edit.
+
+**Where.** `posix/src/utmpx.rs`.
+
+**Registered in `KNOWN_MISMATCH`.**
+
+
+## B-SYSV-IPC-DS-STRUCTS-FLATTEN-IPC-PERM-AND-COME-UP-SHORT (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** the two System V IPC status structures inline the permission
+block instead of nesting it, and end up smaller than the C library's.
+
+| | ours | musl |
+|---|---|---|
+| `struct msqid_ds` | 80 | 120 |
+| `struct shmid_ds` | 72 | 112 |
+
+**Where.** `posix/src/sysv_msg.rs` and `posix/src/sysv_shm.rs`. Both open with
+`msg_perm_uid`/`shm_perm_uid` and friends where C has a nested
+`struct ipc_perm`, so the field *names* do not correspond either -- which is
+why the gate checks their size only.
+
+**The right fix is a real `struct ipc_perm`**, shared by both, which is also
+what makes `msgctl`/`shmctl`'s `IPC_STAT` fill a caller's structure correctly.
+
+**Fixed** exactly that way. `linux_ipc::IpcPerm` is the C library's structure
+and sits beside the kernel's `Ipc64Perm` in the same file, deliberately: they
+are the same 48 bytes and differ inside, and keeping them adjacent is what
+stops one type being pressed into both roles -- which is how `sigaction` came
+to carry the kernel's field order under a comment claiming glibc's.
+
+**Both are now checked field by field**, not by size: the flattening was the
+only reason the gate could not name their fields, and with it gone
+`msg_perm`/`shm_perm` and the eight fields after each are asserted against
+musl's own header.
+
+**Worth noting what was already right.** `posix/src/linux_ipc_perm_types.rs`
+has held the correct offsets -- key 0, uid 4 … mode 20, seq 24, size 48 -- the
+whole time. The knowledge was in the tree; the two structures that needed it
+just did not use it, which no test could see because none of them crossed a C
+boundary.
+
+
+## TD-B-FIFTY-PROC-READERS-DUPLICATE-WHAT-PROCINFO-ALREADY-PARSES (lane B, 2026-09-10)
+
+> **Renamed and corrected 2026-09-10.** This was
+> `TD-B-TEN-PROC-PARSERS-IN-USERSPACE-AND-ONE-CRATE`, and **ten was wrong by a
+> factor of five.** The correction is at the bottom, under "The count was
+> wrong, and how", because the way it was wrong matters more than the number.
+
+**In short:** ten programs in `userspace/` each parse `/proc` themselves. There
+is now one crate that does it properly, and nine of them still do not use it.
+
+**Found while** fulfilling
+`requests/c-b-extract-htops-proc-readers-into-a-shared-crate.md`. Lane C's
+argument for the crate was that *two* parsers would drift; the count inside
+`userspace/` alone is ten, and twenty-four files across `userspace/` and
+`apps/` touch `/proc` in some form.
+
+**The ten:** `htop`, `ps`, `free`, `coreutils`'s `free`, `earlyoom`, `iostat`,
+`hwinfo`, `lsmem`, `numactl`, `hwclock`.
+
+**Why it matters more than tidiness.** The things these disagree about are not
+cosmetic:
+
+* `/proc/<pid>/stat` reports RSS in **pages**, and SlateOS pages are 16 KiB
+  where every published example assumes 4. `htop` and `ps` each carry a private
+  `const PAGE_SIZE_KB: u64 = 16;`. Both are right today and nothing makes them
+  stay right.
+* The second field of `stat` is the command name in parentheses and may contain
+  spaces *and* parentheses, so it must be found by the **last** `)`. A reader
+  that splits on whitespace mis-numbers every field after it, for exactly the
+  processes worth a second look.
+* A command name is bytes. Reading it as UTF-8 silently drops processes.
+
+**The fix** is to move each onto `procinfo`, which now covers memory, load,
+uptime, cpuinfo, mounts and the per-process family. Not one change: each
+program has its own output format and its own idea of which fields it needs,
+and the useful unit is one program per commit.
+
+**One down, nine to go.** `htop` moved completely on 2026-09-10, in three
+steps: per-process reading (where the crate's per-process half came from), then
+CPU, then memory, uptime and load. Its private `PAGE_SIZE_KB`, its `CpuStat`
+and its `MemInfo` are gone with them. **`htop` no longer opens anything under
+`/proc`** -- its one remaining `read_file` reads `/etc/passwd`.
+
+Two things the crate had to grow to absorb it, both worth having anyway:
+
+* `CpuTimes::since`, the subtraction a viewer needs before it divides. Its
+  first consumer was htop's bar fix; `apps/procexplorer` needs the same.
+* `MemInfo`'s swap fields, and a **second** used-memory figure.
+  `used_kib` is `total - free`, the kernel's bookkeeping; `used_excluding_cache_kib`
+  subtracts buffers and cache, which is the number `htop` and `free` show a
+  person. Neither is wrong and every program that computed it privately picked
+  one silently -- which is the whole shape of this entry.
+
+**Two down, eight to go.** `ps` moved on 2026-09-10 and, like `htop`, no
+longer opens anything under `/proc`. **No program in the tree now carries a
+private `PAGE_SIZE_KB`.**
+
+The crate grew three more things to absorb it:
+
+* four more `/proc/<pid>/stat` fields -- `pgrp`, `session`, `tty_nr`,
+  `starttime_ticks`;
+* `ProcessStatus`, which **replaced** the `status_uid` free function rather
+  than joining it. `ps` needs the GID, the supplementary groups and the `Vm*`
+  figures from the same file, and a `status_gid`/`status_groups`/… beside
+  `status_uid` would have been four scans of one file and four places to
+  disagree about what `Uid:`'s four columns mean;
+* `display_bytes`, moved out of `htop`. That one is the lesson of this tick:
+  see below.
+
+**`ps` was one edit away from a fourth private answer to the same question.**
+Converted mechanically, its `comm` came out as `String::from_utf8_lossy`, which
+`CLAUDE.md` item 7 forbids and which `htop` had already been given a correct
+answer for a tick earlier. Two callers, two different renderings of the same
+bytes, one day apart -- inside the crate that exists to stop exactly that.
+`display_bytes` now lives in `procinfo` with its five tests, and its doc says
+why a crate that disclaims formatting owns one formatter: the crate hands out
+**bytes** on purpose, so every caller inherits the same problem, and one
+correct answer is the point.
+
+**Three down.** `coreutils`'s own `ps` moved on 2026-09-10 -- a reader the
+original list did not contain at all, which is how the miscount came to light.
+It gained two things it could not do for itself: the **real UID** (it was
+`uid: 0` with a comment saying "would need `/proc/<pid>/status`", so `ps -f`
+showed every process as root) and a `comm` that is not UTF-8 (`read_to_string`
+failed and the process was skipped by `continue`).
+
+### The count was wrong, and how
+
+The original entry said **ten** readers. The real numbers, derived rather than
+grepped for:
+
+| | |
+|---|---|
+| files under `userspace/` and `apps/` that open a `/proc` path and do not use `procinfo` | **95** |
+| of those, files opening something `procinfo` already parses | **50** |
+
+Ten came from `grep -rln "/proc/stat\|/proc/meminfo"` -- a command that answers
+*"which files mention these two paths"* -- and the answer was written down as
+*"which files parse `/proc`"*. Every reader that touches only
+`/proc/<pid>/...` was invisible to it, which is most of them, and
+`coreutils`'s `ps` -- one of the two `ps` implementations in this tree -- was
+among the missing.
+
+**This is the same defect the entry is about, one level up.** A number derived
+from a pattern that answered a narrower question than the one being asked, and
+reported at the width of the question. It also travelled: the figure went into
+a reply on lane C's request, so they were told ten as well. That reply is
+corrected.
+
+### What the real number changes
+
+"One program per commit" is a plan for ten. For fifty it is not a plan, and
+saying so is the useful part of the correction. What actually follows:
+
+* **Convert on contact.** A file that is being edited for another reason moves;
+  nobody schedules fifty commits.
+* **The ones worth seeking out** are those whose parsing is *load-bearing and
+  subtle* -- anything reading `/proc/<pid>/stat` (the `comm` field mis-numbers
+  every field after it if split naively) or converting RSS pages (16 KiB here,
+  4 KiB in every published example). `top`, `pgrep`, `pstree`, `w`, `who` and
+  `vmstat` are in that set.
+* **The other 45** mostly open one path for one purpose -- `/proc/self/exe`,
+  `/proc/mounts`, `/proc/net/*` -- and are not duplicating `procinfo` at all.
+  They are in the 95 and not in the 50, and lumping them together is what made
+  the first number meaningless in the other direction.
+
+Remaining: `ps`, `free`, `coreutils`'s `free`, `earlyoom`, `iostat`, `hwinfo`,
+`lsmem`, `numactl`, `hwclock`. `ps` is the one that still carries its own
+`const PAGE_SIZE_KB: u64 = 16;`.
+
+**Not urgent, and worth saying why.** Every one of the ten works today. This is
+the debt of ten right answers with nothing keeping them right, not a list of
+bugs.
+
+
+## TD-B-HTOPS-CPU-BARS-SHOW-TIME-SINCE-BOOT-NOT-RECENT-ACTIVITY (lane B, 2026-09-10) -- FIXED the same day
+
+**In short:** the per-CPU bars along the top of `htop` show how the machine has
+spent its time *since it booted*, not how it is spending it now. After a few
+hours of uptime they barely move, whatever the machine is doing.
+
+**Where.** `userspace/htop/src/main.rs`, the CPU-bar block in the renderer:
+
+```rust
+let total = stat.total().max(1) as f64;
+let user_frac = stat.user as f64 / total;
+```
+
+`stat` is the *cumulative* counter from `/proc/stat`. Real `htop` divides the
+**delta** between two samples, which is why its bars move.
+
+**The program already has what it needs.** `App` keeps `prev_cpu_stats` and
+uses it for the per-process percentages; the bars are the one consumer that
+reads the current sample alone. The fix is to subtract field by field and
+divide by the delta of [`procinfo::CpuTimes::total`].
+
+**Found while** moving the reader into `procinfo`, not by anyone watching the
+bars -- which is the point worth recording. A display that is *always* wrong in
+the same direction looks like a design choice rather than a defect, and nobody
+reports it.
+
+**Deliberately not fixed in the same commit** as the extraction: that commit's
+claim is "behaviour is unchanged except where it was wrong to read", and
+changing what the bars *mean* is a different claim that deserves its own diff.
+
+**Fixed** in that separate diff. `App` keeps a `cpu_delta` -- the per-CPU
+difference between the last two samples, from `procinfo::CpuTimes::since` --
+and the renderer divides that instead of the raw counters.
+
+Two things fell out of doing it:
+
+* **A zero-length interval now has no reading, rather than 0.0%.** The old code
+  divided by `total().max(1)`, so the first refresh -- before any interval
+  exists -- printed a confident "0.0%" for every CPU. It draws nothing now.
+  The same case arises for one frame when a CPU is taken offline and brought
+  back, which is why `since` saturates instead of asserting time runs forwards.
+* **The arithmetic is a pure function with tests.** It was four lines inside a
+  render loop, which is why nobody could have noticed it was dividing the wrong
+  pair of numbers.
+
+
+## TD-B-HTOPS-CPU-BAR-PERCENTAGE-OMITS-INTERRUPT-AND-STOLEN-TIME (lane B, 2026-09-10)
+
+**In short:** a CPU doing nothing but servicing interrupts shows as 0% busy in
+`htop`.
+
+**Where.** `userspace/htop/src/main.rs`, `CpuBar::percent` -- the number beside
+each CPU bar is the sum of the three segments actually drawn (`user`, `system`,
+`nice`) and therefore omits `irq`, `softirq` and `steal`. `procinfo`'s own
+`CpuTimes::busy` counts all of them, so the crate and its caller currently
+disagree about what "busy" means.
+
+**Why it is a percentage and not just a missing colour.** Under QEMU, `steal`
+is the field that is reliably non-zero, and a network- or disk-heavy workload
+puts real time in `softirq`. Both are the machine being unavailable to the user
+and both read as idle.
+
+**The fix is a UI change**, which is why it is separate: the bar needs a fourth
+segment before the number can include a fourth category, or the number stops
+matching the bar beside it -- and a percentage that disagrees with the picture
+next to it is worse than one that under-reports consistently.
+
+**Pinned by a test** (`interrupt_and_stolen_time_are_not_counted_yet`) that
+asserts the current under-report *and* asserts `busy()` sees all of it, so
+fixing this is a deliberate change with a failing test rather than a silent
+one.
+
+
+## TD-B-THIRTY-NINE-COMMAND-NAMES-ARE-BUILT-BY-TWO-CRATES-EACH (lane B, 2026-09-10)
+
+**In short:** thirty-nine command names are produced by two different crates in
+this tree. `free`, `ps`, `df`, `sed`, `tar`, `wc`, `who`, `uname` and thirty-one
+others each exist twice -- once as `userspace/coreutils/src/bin/<name>.rs` and
+once as `userspace/<name>/`.
+
+**Derived, not listed:** the set of `coreutils` bin targets intersected with the
+`name =` of every other `userspace/*/Cargo.toml`. 84 coreutils binaries, 2762
+other userspace crates, 39 names in both.
+
+**It does not cut one way, which is why this is a question and not a chore.**
+Two measured examples:
+
+* **`free`** -- `coreutils`'s is a 1876-line transcription of procps-ng 4.0.4,
+  measured against the real binary, and its own module doc lists the defects of
+  "the implementation this replaces": invented flags, wrong header widths,
+  `shared` hardcoded to zero, and `used = total - free - buffers - cached`
+  where upstream's is `MemTotal - MemAvailable`. **`userspace/free` still has
+  every one of them**, including that `used`. Here `coreutils` plainly wins.
+* **`ps`** -- `coreutils`'s is 405 lines and supports `-e -f`;
+  `userspace/ps` is 1022 lines with a full column selection. Here the
+  standalone plainly wins.
+
+So the answer is per command, and for some pairs it is "merge", not "pick".
+
+**Nothing collides today**, because `scripts/create-ext4-rootfs.sh` stages
+neither -- no `userspace/` binary reaches `/bin` yet. The collision is latent
+and arrives whole on the day they are staged, which is the worst time to
+discover thirty-nine of them.
+
+**Why this is not a lane-B decision to make alone.** Deleting a working program
+is user-visible, and doing it thirty-nine times on my own judgement is a policy
+rather than a fix. What lane B can do without asking is the evidence: for each
+pair, which is the measured port and which is the invention. `free` and `ps`
+above are two of thirty-nine; the rest are unexamined.
+
+**Related but distinct** from the `/proc` entry above. That one is two parsers
+of one *file*; this is two implementations of one *command*, and a pair can be
+guilty of both -- the two `free`s are.
+
+### The evidence, gathered 2026-09-10
+
+The entry above said lane B could supply the evidence without deciding
+anything. Here it is. Four signals per side, all mechanical: lines, `#[test]`
+count, **fidelity markers** (mentions of `GNU coreutils`, `procps-ng`,
+`util-linux`, "measured against", "transcription", "byte-exact", "upstream"),
+and stub markers.
+
+The fidelity count is the one that separates the groups, and it separates them
+sharply: on the `coreutils` side it runs to 76 (`df`), 71 (`free`), 69 (`sed`),
+67 (`cal`); on the standalone side it is **0 for every one of the 39**. A file
+that cites upstream seventy times was written against upstream.
+
+Classified by a stated rule -- `coreutils` fidelity >= 10 means it is the
+measured port; otherwise a standalone more than 1.5x longer *and* with more
+tests means it is the substantial one; otherwise it needs a human reading.
+
+| | count | commands |
+|---|---|---|
+| `coreutils` is the measured port | **27** | cal, chown, cmp, comm, cut, dd, df, du, expand, fold, free, head, join, nl, paste, sed, seq, split, stat, strings, tar, tee, tr, tsort, uniq, wc, xargs |
+| the standalone is the substantial one | **6** | date, logger, patch, sha256sum, uptime, who |
+| needs reading | **6** | diff, env, hostname, kill, ps, uname |
+
+Two spot-checks, because a rule that classifies without being checked is a
+different kind of guess:
+
+* `coreutils`'s `date` opens *"No timezone support yet -- always UTC"* against a
+  standalone with strftime, RFC 5322/3339, ISO 8601 and parsing. Group 2 is
+  right.
+* `coreutils`'s `stat` is a real port, but the standalone is **larger** (2840
+  against 2118) with twice the tests. Group 1's rule fires on the fidelity
+  markers and the evidence is genuinely mixed. Which turned up the complication
+  below.
+
+### Eleven of the thirty-nine are not pairs
+
+**`userspace/stat` is one binary that answers to six names** -- `stat`, `ln`,
+`mkfifo`, `readlink`, `realpath`, `touch` -- dispatched on `argv[0]`. Eleven of
+the thirty-nine standalone crates do this. "Retire the standalone" is therefore
+not a per-command decision for those eleven; it removes whatever else rides
+along.
+
+Checked rather than assumed: all five of `stat`'s riders **do** have
+`coreutils` counterparts, so that one is safe. One command is not:
+
+> **`ncal` exists only inside `userspace/cal`.** `coreutils/src/bin/cal.rs`
+> does not contain the string at all. Retiring `userspace/cal` deletes `ncal`
+> from the system.
+
+That is the whole of the loss across the eleven, and it is one command -- which
+is worth knowing precisely, because "some of them provide other commands too"
+would have been enough to stall the decision indefinitely.
+
+### One thing this exercise found about lane B's own recent work
+
+`userspace/ps` had **zero tests** -- verified by running them, not by counting
+`#[test]`. It was converted to `procinfo` two ticks ago and no test was added,
+while `coreutils`'s `ps` was converted the next tick *and* given four. Same
+lane, same week, same kind of change, two standards.
+
+**Given eight**, since the gap was mine and closing it does not prejudge which
+`ps` survives. One of the eight is not an assertion about `ps` at all but about
+the pair:
+
+> **The two `ps` implementations render the same `tty_nr` differently.**
+> `userspace/ps` prints `tty{n}` from the raw number; `coreutils/src/bin/ps.rs`
+> prints `pts/{n & 0xff}`. For `tty_nr = 34816` they print `tty34816` and
+> `pts/0`. Neither is obviously right -- 34816 is `(136 << 8) | 0`, so `pts/0`
+> reads a real Linux device number correctly and `tty34816` names a device that
+> does not exist -- but they are two answers to one question, measured, in one
+> tree. It is the concrete form of everything above.
+
+### What is still not decided, and by whom
+
+Nothing above chooses. The 27 in group 1 look like deletions and the 6 in
+group 2 look like the reverse, but *acting* on 39 commands is a user-visible
+policy and stays the operator's. What has changed is that it can now be decided
+from a table instead of from thirty-nine readings.
+
+
+## TD-B-EVERY-CFG-UNIX-BLOCK-IN-USERSPACE-IS-UNVERIFIED-BY-THE-TEST-LOOP (lane B, 2026-09-10) -- FIXED the same day
+
+**In short:** code inside `#[cfg(unix)]` is never compiled by the command this
+project uses to test, so it can be broken -- not merely wrong, *uncompilable* --
+and every test still passes.
+
+**Why.** `cargo test --target x86_64-pc-windows-gnu` is the standing command in
+`CLAUDE.md` and in every lane's loop. On that target `cfg(unix)` is false, so
+the compiler never looks at those blocks. The real target,
+`x86_64-slateos`, *is* unix, so they are exactly the blocks that run on the
+machine and never on the test rig.
+
+**Found while** fixing `su -`'s login-shell `argv[0]`. The fix is one
+`cmd.arg0(...)` under `#[cfg(unix)]`; it compiled and tested clean on the host
+without the compiler having read it once.
+
+**It is checkable today, with no new tooling.**
+
+```
+cargo check -p su --target x86_64-unknown-linux-gnu
+```
+
+`x86_64-unknown-linux-gnu` is already installed on this machine
+(`rustup target list --installed`). Nothing in the tree appears to run it.
+
+**Who else is exposed.** Every `#[cfg(unix)]` block under `userspace/`,
+including `userspace/sshd`'s `cmd.arg0(login_argv0(...))` -- the call that
+proves the capability exists. Its own comment shows the author knew the host
+build could not see it and reasoned carefully about the `dead_code` allow
+instead, which is the best that could be done without a way to compile it.
+
+**Fixed** as `scripts/check-cfg-unix.py`, pre-push gate 17, built the way the
+paragraph below proposed: `cargo check` against `x86_64-unknown-linux-gnu`, with
+the crate list **derived** by scanning for the attribute so that a file grows
+into the gate by existing.
+
+**How much code this was.** The derivation finds **57 crates**, and
+`userspace/coreutils` alone holds **533** unix-gated blocks. All 57 compile
+today -- the gate went in green, which is the only honest time to add one.
+
+**Cost: about 7 seconds warm**, 15 cold, because it is one `cargo check` with
+every `-p` rather than 57 invocations paying for the dependency graph each
+time.
+
+**`x86_64-unknown-linux-gnu`, not `x86_64-slateos`**, deliberately: the point is
+to compile the unix branch, not to reproduce the target. slateos needs
+`-Zbuild-std` and a built sysroot, which is minutes and a nightly, and would
+make the gate too expensive to run on every push. Any unix target reads the
+same lines.
+
+**The self-test asserts the premise, not just the plumbing.** It compiles a
+`#[cfg(unix)]` block containing a plain type error twice, and requires it to
+**pass** on `x86_64-pc-windows-gnu` and **fail** on the unix target. If that
+ever stops being true the gate is buying nothing, and the fixture says so in
+those words -- which is the check that a gate for an invisible defect most
+needs, since nothing else would notice it had become useless.
+
+The original proposal, kept for the record:
+
+**The proper fix is a gate**, and it is small: `cargo check` each crate that
+contains `#[cfg(unix)]` against `x86_64-unknown-linux-gnu` in the pre-push hook,
+with the crate list *derived* by grepping for the attribute rather than
+enumerated. Not built in the same commit as the `su` fix because a gate that is
+wrong about which crates to check is worse than no gate, and getting that right
+is its own piece of work rather than a tail-end of this one.
+
+
+## TD-B-USER-SWITCHING-PROGRAMS-CANNOT-RESET-SUPPLEMENTARY-GROUPS (lane B, 2026-09-10)
+
+**In short:** when a program switches to another user, it can now change that
+user's main identity for real, but it cannot clear the *extra* group
+memberships the original user had. Right now nobody has any extra groups, so
+nothing leaks. The moment the kernel starts tracking them, every user switch
+carries the old user's extra groups into the new session.
+
+**Where.** `userspace/su/src/main.rs`, `exec_as_user`. The same will apply to
+`doas`, `sudo`, `login` and `sshd` as each gains its privilege drop.
+
+**Why it is not simply done.** `posix::setgroups` returns `ENOSYS`
+deliberately -- the kernel implements it only in the Linux-ABI table
+(`kernel/src/syscall/linux.rs`) and `posix/src/syscall.rs` has no native number
+for native libc to call. Filed as
+`requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
+`std`'s `CommandExt::groups` makes the child call `setgroups` between fork and
+exec; on `ENOSYS` the child aborts and never execs, so requesting it today does
+not leave `su` half-working, it leaves `su` not working.
+
+**Why `ENOSYS` is the right answer and not a bug.** `posix::setgroups`'s own
+doc comment argues it: a stub returning 0 would let privilege-dropping code
+ship believing it had dropped something. That reasoning is why this entry
+exists at all -- the failure is visible instead of silent.
+
+**The shape of the leak.** A process that keeps the caller's supplementary
+groups and lowers only its uid still holds every group the caller was in. That
+is the textbook version, and it is what this code does. It is *empty today*:
+`posix::getgroups` reports zero groups, so there is nothing to retain. That is
+a fact about the current kernel, not a guarantee, and it is precisely the kind
+of fact that stops being true without anyone revisiting the code that depends
+on it.
+
+**The fix, when the syscall lands.** Set the target's groups in the child
+before `setgid`/`setuid` -- `CommandExt::groups` if it is stable by then,
+otherwise a `pre_exec` closure calling `setgroups` directly. The ordering is
+not optional: groups, then gid, then uid, because each step drops the privilege
+the previous one needed.
+
+
+## TD-B-FOUR-MORE-PROGRAMS-RUN-A-SHELL-AS-THE-WRONG-USER (lane B, 2026-09-10)
+
+**In short:** four programs still check who you are and then run the new user's
+shell under the *old* user's identity. `su` was fixed on 2026-09-10; these were
+found by the same look and are not yet done.
+
+| Program | What it does today |
+|---|---|
+| `userspace/doas` | `exec_command` sets `UID`/`GID` *environment variables* as "hints" and calls no credential syscall. |
+| `userspace/sudo` | No `setuid`/`setgid`/`CommandExt::uid` anywhere in `src/`. |
+| `userspace/sshd` | Same -- it sets `argv[0]` for a login shell but never the identity. |
+| `userspace/login` | Its success path is still `eprintln!("login: would exec shell ...")`; it execs nothing at all yet. |
+
+**The premise that expired.** `doas` carries the note that "the real privilege
+change will use the kernel's capability system once the POSIX exec layer
+supports `setuid`/`setgid` syscalls". That has fired: `posix::setuid` and
+`posix::setgid` apply real credentials through `set_real_credentials` and
+`getuid()` reflects them. They were stubs returning 0 once -- which is the
+interesting part, because **a stub that reports success is what keeps a
+deferral looking current**. Nothing about the note went stale in a visible way;
+the capability arrived under it.
+
+**What "wrong user" costs today.** Less than it sounds, and more than nothing.
+Every process is uid 0 in the current model, so the shell was already root and
+the switch was cosmetic either way. What changes with the fix is that the
+switch becomes real *first*, so the code is correct before the model tightens
+rather than after -- and `su`'s fix proves the mechanism works, which is what
+makes the other four a conversion rather than a design.
+
+**Do them the way `su` was done:** resolve `(uid, gid)` from the record and
+refuse if the record cannot name a uid (a session whose owner has no name must
+not start), then `CommandExt::gid` before `CommandExt::uid`. `login` needs its
+exec built first; see `todo.txt`.
+
+
+## ~~TD-B-FIVE-PROGRAMS-STILL-TAKE-THE-CALLERS-IDENTITY-FROM-THE-ENVIRONMENT~~ (lane B, 2026-09-10) -- CLOSED the same day, and it was six
+
+**In short:** several programs work out who is running them by reading an
+environment variable. The environment is set by whoever starts the program, so
+this asks the caller who they are and believes the answer. Three of them fall
+back to *root* when the variable is missing -- and the variable is normally
+missing, so they were not merely spoofable, they were unconditionally root.
+`passwd` was fixed on 2026-09-10; these five were found by the same look.
+
+| Program | Code | Falls back to |
+|---|---|---|
+| `userspace/chage` | `current_uid()` = `env::var("UID")` | **0 (root)**, and there is no other source |
+| `userspace/newgrp` | `get_current_user()` = `env::var("UID")`/`GID` | **0 (root)**, and `$USER` for the name |
+| `userspace/polkit` | `/proc/self/status` first, then `env::var("UID")` | **"0" (root)** if both fail |
+| `userspace/crontab` | `effective_uid()` = `env::var("EUID")` | 1000 -- conservative, but `EUID=0` is still believed |
+| `userspace/doas` | `/proc/self/status` first, then `env::var("UID")` | `u32::MAX` -- the safe direction |
+
+**Why the fallback is the normal path, not a corner case.** `UID` and `EUID`
+are *shell* variables, not exported ones. This tree's own shell is explicit
+about it: "an inherited `UID=...` in the environment neither wins nor becomes
+exported" (`userspace/oils/src/interp.rs`). So a program launched from `osh`
+sees no `UID` at all, the `unwrap_or(0)` fires, and the answer is root every
+single time. **No spoofing was required to get root; spoofing was required to
+get anything else.**
+
+**What it cost in `passwd`, which is why this is filed rather than noted.**
+`is_root()` was `current_uid() == 0`, and it guarded two checks: "only root may
+change another user's password" and "only root may use this option". Both were
+therefore unreachable for the entire life of the program. A check that is
+always skipped is indistinguishable from a check that always passes, and no
+test could tell them apart because the decision was made in `main` from process
+state.
+
+**The fix, done once.** `authlib::identity::caller_uid()` returns
+`Option<u32>` from `getuid(2)` -- the credential the kernel recorded, which the
+process's parent cannot set. `None` means "this build cannot tell" and must
+never be read as root. The caller's *name* is then resolved from that uid
+against the account database, because `$USER` is the same spoofable input
+wearing different clothes: in `passwd`, `USER=root passwd root` satisfied the
+"changing your own password" exemption without being root.
+
+**All converted, 2026-09-10.** `chage`, `newgrp`, `polkit`, `crontab`, `doas`
+and `sudo` now take the caller's uid from `authlib::identity::caller_uid()`,
+and their *names* from that uid resolved against the account database. `su`
+was on the list too once its own fallback was read properly. Nothing in the
+tree derives an identity from `$UID`, `$EUID`, `$GID` or `$USER` any more --
+`grep -rn 'env::var("UID")'` returns only the doc comments describing what was
+removed.
+
+**Three things the conversion turned up that the survey above had not.**
+
+- **`sudo` was a sixth.** `current_id_from_proc("Uid:", "UID")` read
+  `/proc/self/status` and fell back to `$UID`, then to 1000. The non-zero
+  default was reasoned and is kept (as `UNKNOWN_CALLER_ID`, with the reason
+  attached), but the environment lookup between them was not: this value
+  "decides whether a password is demanded", so `UID=0 sudo <command>` skipped
+  the prompt wherever procfs was unreadable.
+
+- **`doas` was worse than the table said.** Its `current_username` returned
+  `$USER` *outright* when set, before any uid lookup -- and that name is what
+  it matches `/etc/doas.conf` rules against. `USER=<anyone with a permit rule>
+  doas <command>` inherited their rules. The uid fallback listed above was
+  never reached in the case that mattered.
+
+- **`crontab`'s fallback identity was the process id, not a uid.** Under a
+  comment reading "use the numeric UID as the 'username' ... On a real Slate OS
+  system this would call `getuid()`", the code was
+  `format!("uid{}", std::process::id())`. A pid is unique per *invocation*, so
+  `crontab -e` wrote `uid4123` and the `crontab -l` after it read `uid4127` and
+  found an empty crontab. Not a security bug -- a plain one, sitting inside a
+  security one, with a comment naming the fix it was waiting for and a premise
+  that had already arrived.
+
+**`/proc/self/status` is gone from this path too**, not just the environment
+fallbacks. `getuid(2)` is strictly better than parsing it: no file to be
+missing, no line to be absent, no parse to fail -- and every one of those
+failure modes was what dropped control into the environment fallback in the
+first place.
+
+**`userspace/oils` is not on this list and is the reason the fix was easy.** It
+had already reasoned the whole thing out for its own `$UID`, and reached the
+opposite conclusion: consulting an environment variable "on a system that
+*can* [supply the credential] would let any parent process redefine `$UID` by
+exporting a variable, which is precisely the spoofing bash refuses when it
+ignores an inherited `UID=`". The shell refused what six privileged programs
+accepted. **A correct answer already in the tree does not propagate by
+existing.**
 
 ---
 

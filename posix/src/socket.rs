@@ -4463,10 +4463,17 @@ pub struct Addrinfo {
     pub ai_protocol: i32,
     /// Length of ai_addr.
     pub ai_addrlen: SocklenT,
+    /// Socket address.
+    ///
+    /// **`ai_addr` comes before `ai_canonname`.** These two were the other way
+    /// round until 2026-09-09, which is wrong against glibc and musl alike --
+    /// not a divergence between them, just wrong. A caller that read `ai_addr`
+    /// got the canonical-name string and handed it to `connect()` as a
+    /// `struct sockaddr`. Found by `scripts/check-libc-abi.py`;
+    /// `design-decisions.md` 1011.
+    pub ai_addr: *mut Sockaddr,
     /// Canonical hostname (may be null).
     pub ai_canonname: *mut u8,
-    /// Socket address.
-    pub ai_addr: *mut Sockaddr,
     /// Next result in linked list.
     pub ai_next: *mut Addrinfo,
 }

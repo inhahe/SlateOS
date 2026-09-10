@@ -70363,3 +70363,878 @@ burying it. The alternative -- waiting for the kernel piece and shipping
 nothing -- leaves `SA_ONSTACK` as a constant nothing reads for however long
 that takes, and leaves the kernel request without a working half to attach to.
 
+## 1010. There are two `struct sigaction` on x86_64 and our libc had the wrong one
+
+**Date:** 2026-09-09
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** the structure a C program fills in to install a signal handler
+comes in two different field orders on this machine -- one the kernel uses, one
+the C library uses. They are the same total size, so nothing caught the
+difference by measuring it. Our C library used the kernel's, under a comment
+saying it was the C library's. The one field that happens to sit in the same
+place in both is the handler itself, which is the field every test in the tree
+exercises -- so signals worked, and everything else a program asked for was
+quietly read out of the wrong bytes.
+
+### The two layouts
+
+| | offsets |
+|---|---|
+| kernel (`rt_sigaction`) | handler 0, **flags 8**, restorer 16, **mask 24** |
+| glibc **and** musl | handler 0, **mask 8**, **flags 136**, restorer 144 |
+
+Both are 152 bytes.
+
+Measured, not recalled. `offsetof` printed under glibc on Linux 6.6:
+
+```text
+glibc struct sigaction: size=152 handler=0 mask=8 flags=136 restorer=144
+```
+
+and the same numbers asserted at compile time against musl with
+`zig cc --target=x86_64-linux-musl`, which is the toolchain every C port in
+this tree is built with. `_Static_assert` also pins `sa_flags` at **4** bytes:
+it is `int`, with four bytes of padding after it, not `unsigned long`.
+
+### What the wrong layout actually did
+
+* `sa_flags` was read from bytes 8..12 -- the first word of the caller's
+  `sa_mask`, which `sigemptyset` has just zeroed. **Every flag a C program
+  passed was silently dropped** and read back as zero.
+* `sa_mask` was read from byte 24, sixteen bytes into the caller's mask. An
+  empty mask is still empty when shifted, so the common case survived; a
+  non-empty one blocked the wrong signals.
+* `oldact` was written in the wrong order too, so a caller reading back its own
+  flags got bytes out of the middle of its own mask.
+* `sa_handler` is at offset 0 in both, so handlers ran.
+
+### Why it survived, which is the part worth keeping
+
+**Every consequence was invisible until today.** No `sa_flag` was implemented:
+`SA_RESTART` is not honoured, `SA_SIGINFO` is not honoured, `SA_RESETHAND` and
+`SA_NODEFER` are read from our own table by Rust code that never crossed the
+ABI. A flag that is dropped and then never consulted is indistinguishable from
+a flag that is stored. `SA_ONSTACK`, added hours earlier in 1009, is the first
+one a C program can set and observe -- and it is the reason this surfaced.
+
+**No Rust test could have caught it.** Every test in `posix/src/signal.rs`
+builds a `Sigaction` with named fields, which is layout-independent: Rust
+agrees with itself whichever order the struct declares. The `#[repr(C)]`
+layout only matters at a boundary with C, and the crate's tests have no such
+boundary. This is the same reason the `long double` family of fixtures exists
+in plain C -- `services/ctest-longdouble/` says it outright: "both faults are
+invisible to the posix crate's own unit tests, because there Rust calls Rust
+and the two sides agree on the same wrong convention."
+
+**There was a test, and it asserted the wrong thing confidently.** It pinned
+`offset_of!(Sigaction, sa_flags) == 8` under a comment reading "glibc x86_64".
+A test that encodes a mistaken premise does not merely fail to catch the bug;
+it certifies it, and it makes the next reader confident too.
+
+### The shape of the error, stated plainly
+
+Two structures with the same name, the same size, and different orders, where
+the field every test touches is the field they agree on. Nothing about the
+symptom points at the cause: handlers work, so signal handling looks fine.
+
+This is the third time in one session that a confident claim about upstream
+turned out to be about a different layer or a different artifact than the one
+being asked about -- the operator's README against the operator's program, the
+`do_sigaltstack` internals against the `sigaltstack` ABI, and now the kernel
+struct against the libc struct. The correction is identical every time and it
+is cheap: compile or run the thing, do not remember it.
+
+### What was changed
+
+`Sigaction` is reordered to `handler, mask, flags, restorer` with `sa_flags` as
+`u32`, and the `SA_*` constants become `u32` to match the C declaration's
+`int`. The width matters as much as the offset: a `u64` field would land on the
+same offsets by absorbing the padding, and would read four bytes that belong to
+the caller and hold whatever was there before.
+
+`services/ctest-altstack/` gains a round-trip check -- install a flag and a
+mask through `sigaction`, read them back through `sigaction(sig, NULL, &old)`,
+and assert both survive. A flag that does not survive a round trip is this bug
+and nothing else. It is in C for the reason above.
+
+`stack_t` was checked at the same time, since 1009 rests on it: musl agrees
+with ours at `ss_sp` 0, `ss_flags` 8, `ss_size` 16, size 24.
+
+**Against the change, honestly:** it is an ABI break for anything already
+compiled against the old layout. In practice that is every C binary in the
+image, all of which are rebuilt from source by the same build that produces the
+libc, and none of which could have been relying on the old behaviour -- because
+the old behaviour was that their flags were discarded. The fixtures were
+relinked in the same commit.
+
+## 827. Every caret goes through one helper, and the shared width is 2, not 1
+
+**Date:** 2026-09-09
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** the blinking bar that marks where your typing will go was drawn by
+six different bits of code, and they disagreed about how thick it should be —
+some drew it one pixel wide, some two. They now all call one function, and the
+shared answer is two pixels. This also gives the "make my text cursor wider"
+accessibility setting somewhere to attach, which it never had.
+
+**What was there.** Six draw sites, three widths, no decision behind any of
+them: `textedit::push_caret` drew a 1-pixel line and had three callers; the
+launcher drew 2 inline; the path bar drew a 2-wide filled rectangle via its own
+`CURSOR_WIDTH`; the run dialog drew 1 inline. They were written at different
+times and each picked for itself.
+
+**The choice that had to be made.** Unifying means picking, because two of the
+sites have to change whichever number wins.
+
+| | 1 pixel | 2 pixels |
+|---|---|---|
+| *What changes* | the launcher and path bar carets get thinner | the run dialog and the three toolkit fields get thicker |
+| for | the conventional desktop caret; least visually heavy | visible on a high-resolution display, where a 1px caret nearly disappears; already what the two most-used fields had |
+| against | on a HiDPI panel it is easy to lose | slightly heavier than the platform convention |
+
+**Two pixels**, for the accessibility reason: this whole change exists so a user
+who cannot easily find the caret can make it wider, and defaulting to the
+thinnest possible value is the wrong end to start from. A user who prefers the
+hairline can still have it — the width is a parameter, and `CARET_WIDTH * 0.5`
+is one.
+
+**A degenerate width falls back rather than drawing.** `push_caret` replaces any
+width that is not finite and positive with the default. This is not defensive
+padding: the accessibility config parses its multiplier with
+`str::parse::<f32>`, which accepts `"nan"`, and `f32::clamp` passes NaN through
+unchanged, so a hand-edited config could otherwise erase every caret in the
+shell with no error anywhere — and a caret that is not drawn loses the user's
+place in the text.
+
+**What it does not do yet.** Nothing reads a user preference into it; every
+caller passes the constant. The setting that should feed it is dead — see
+`known-issues.md` `TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY`. The
+value of doing this half now is that the six sites became one, so wiring the
+preference later is a change in one function rather than a hunt.
+
+## 828. The high-contrast colours that are also palette roles are pinned, not forbidden
+
+**Date:** 2026-09-09
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** a test used to check that none of the high-contrast colour schemes
+happened to use exactly the same colour as any normal theme colour. Choosing
+pure black for the light theme's text (§826) made that false — black is now both
+the ordinary text colour and the background of three high-contrast schemes. The
+test now checks for *exactly which* overlaps exist rather than for none, so the
+four unavoidable ones are written down and a new one still fails.
+
+**Why neither side can move.** `#000000` is the operator's choice for main text.
+A scheme named "white on black" cannot be given a black that is not black. And
+these draws cannot be routed through `Palette::text` instead: that role is black
+only in light mode and near-white in dark mode, so a high-contrast scheme built
+on it would invert itself along with the theme and stop being a high-contrast
+scheme. The overlap is real and permanent.
+
+**What the test was protecting.** `a11y.rs`'s header states the rule: the
+high-contrast values are *pinned by an exact hand-written table rather than
+merely excused*, because an exemption with nothing behind it is a region the
+sweep stops looking at. The old assertion supported that by proving the pinned
+values were disjoint from the palette.
+
+**Alternatives.**
+
+| option | *What changes* | why not |
+|---|---|---|
+| Delete the test | nothing observable; the guard is gone | it is the only thing keeping the exception honest |
+| Skip black specifically | the test passes; black is never checked again | this is the "exemption with nothing behind it" the module forbids by name |
+| **Pin the exact set** | the test names the four overlaps and fails on a fifth | chosen |
+
+Pinning is strictly stronger than the emptiness check it replaces: making
+`LIGHT_BASE` pure white, which would collide with `BlackOnWhite`'s background,
+fails the test today and would have failed it before. What changed is that the
+four permanent overlaps are now recorded with their reason instead of standing
+between the guard and a green build.
+
+**Found by:** running `cargo test -p desktop` after §826, which I had not done —
+§826 changed a palette that four crates read and I tested only the crate I had
+edited. The failure was sitting on `main`.
+
+## 1011. The ABI gate: Rust supplies the numbers, musl is the oracle, and the list of what to check is derived
+
+**Date:** 2026-09-09
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** yesterday's bug was a structure whose fields our C library put in
+the wrong order. Fixing that one structure by hand was not a response to it,
+because nothing would catch the next one. This is a check that compares *every*
+such structure against the real C library's own header files, automatically, at
+push time -- and that notices when a new structure appears without being
+checked.
+
+### Three programs and no third copy
+
+| | who says it |
+|---|---|
+| the numbers | Rust: `size_of` and `offset_of!`, emitted by `posix::abi_layout`, never typed by a person |
+| the truth | musl: `zig cc --target=x86_64-linux-musl` compiles the emitted `_Static_assert`s against its own headers |
+| what to check | derived: every `#[repr(C)] pub struct` that is also a pointer parameter of an exported `extern "C" fn` |
+
+That third row is the one that took the thinking. A gate whose coverage is a
+hand-kept list is a second list to rot, and `todo.txt`'s own sketch of this
+warned about exactly that. So `scripts/check-libc-abi.py` parses the sources
+for both halves -- the set of `#[repr(C)]` struct names, and the set of types
+appearing as pointer parameters of exported functions -- and takes the
+intersection. **The intersection is what makes it useful**: the parameter set
+alone also catches `WcharT`, `TimeT`, `GidT` and friends, which are typedefs
+with no layout to get wrong. Neither half is written down anywhere, so neither
+can go stale.
+
+There are 98 pointer-parameter types and 15 are checked today, so the gate
+carries a `BASELINE_UNCOVERED` ratchet: it may shrink, never grow. A type that
+starts crossing the boundary tomorrow is refused until it has an entry.
+
+### Why the oracle is musl and not a table of numbers
+
+Both alternatives were available. A table of expected offsets would be a third
+copy, and a wrong one is exactly what caused §1010 -- the test that certified
+the bug *was* such a table. Compiling against the real headers has no such
+failure mode: the numbers cannot be stale, because they are not stored.
+
+musl specifically, rather than glibc, because it is the C library every port in
+this tree already links against. That makes it the right oracle rather than
+merely an available one -- if our `struct stat` disagreed with glibc but agreed
+with musl, the ports would still work and the gate should not fire.
+
+### It found something on its first run, and it was mine
+
+`struct utsname`'s last field. glibc declares `__domainname` and `#define`s the
+short name; musl declares `domainname` directly under `_GNU_SOURCE`. I had
+written the glibc spelling into the table. The gate refused it in sixteen
+seconds.
+
+A small thing, and worth recording because it is the shape of what this catches:
+a plausible belief about a header, held confidently, wrong for the library we
+actually use.
+
+### The failure that would have made the gate a liar
+
+`zig cc -fsyntax-only` does not work. It injects its own `-c`, warns that the
+`-c` is unused, and then fails with `error: FileNotFound` looking for an output
+it was told not to produce.
+
+**That failure only appears when the clang stage succeeds.** So the sequence
+was: a run with a real error reported the real error and looked fine; the run
+after I fixed the error reported `FileNotFound` -- a checker that says "problem"
+exactly when there is none. If that had shipped, the gate would have been a
+permanent red that everybody learned to bypass, which is worse than no gate at
+all. It compiles to a throwaway object file instead.
+
+Caught only because the gate was run *after* a clean fix as well as before one.
+Running a checker against a known-good input is as necessary as running it
+against a known-bad one, and it is the half that gets skipped.
+
+### The self-test asserts the failure path, not just the pass
+
+Per the tree's gate rule, `--self-test` covers both directions of both checks:
+
+* a true assertion is not reported as failing;
+* **the exact §1010 defect is reported** -- it feeds
+  `offsetof(struct sigaction, sa_flags) == 8`, the old wrong value, and fails
+  if the gate stays quiet;
+* a compile error is not reported as a pass;
+* with the live baseline the ratchet reports nothing, and with one name removed
+  from the baseline it reports exactly that name.
+
+The last pair is what proves the ratchet would notice a type someone adds
+tomorrow. A ratchet whose failure has never run is a ratchet nobody knows the
+sign of.
+
+### Cost, and where it is paid
+
+The gate runs `cargo test -p posix --lib` to get the numbers, so it is minutes
+on a cold target directory rather than seconds. It is therefore scoped to
+pushes that touch `posix/src/` or the checker itself -- the only pushes that
+can change either the layouts or the verdict. Without zig it says so by name
+and still runs the coverage ratchet, rather than passing silently.
+
+### The gate found two more the same hour, and both were glibc/musl divergences
+
+Coverage went from 15 types to 28 by adding the by-value ones — the entries
+this entry called the scary ones, where a C program puts the object on its own
+stack. Two of the new thirteen failed immediately, and both failed in the same
+way: our type matched **glibc** and the ports link **musl**.
+
+| | glibc | musl | ours, before |
+|---|---|---|---|
+| `regoff_t` | 4 | **8** | 4 |
+| `regmatch_t` | 8 | **16** | 8 |
+| `struct sched_param` | 4 | **48** | 4 |
+
+Measured by compiling one program twice, once with `gcc` under WSL and once
+with `zig cc --target=x86_64-linux-musl`.
+
+**`regmatch_t` is the serious one.** A C program writes `regmatch_t m[10]` and
+calls `regexec(&re, s, 10, m, 0)`. Its array is 160 bytes; we wrote 80 into the
+front of it, with every element after the first landing at the wrong offset and
+every position truncated to 32 bits. Anything using POSIX regex with
+sub-expressions — `sed`, `awk`, `grep -E` through the C API — got wrong offsets
+for every group but the first. Fixed by widening `rm_so`/`rm_eo` to `isize`,
+which is what `regoff_t` is here.
+
+**`sched_param` is mild and worth stating anyway.** `sched_priority` is at
+offset 0 in both, so reading one worked, which is why nothing noticed. What did
+not work is a `sched_getparam` that is supposed to fill the caller's object and
+filled a twelfth of it. Fixed by carrying musl's five reserved fields.
+
+**Three more tests had certified the wrong answer**, and one of them is the
+best example of the shape yet:
+
+```rust
+// glibc/musl: regoff_t is `int` (i32), so regmatch_t is 8 bytes.
+```
+
+It is `int` in glibc and `long` in musl. **A test that names two libraries and
+describes one is worse than a test that names neither**, because it reads as
+though the question had been asked. That is the same defect as §1010's "glibc
+x86_64" comment on the kernel's struct, twice in two days, in code written
+months apart — which is what makes it a class rather than a slip, and why the
+answer had to be a gate rather than three more careful comments.
+
+**This is also the case that justifies choosing musl as the oracle.** Had the
+gate compared against glibc it would have passed all three of these and left
+the `regmatch_t` corruption in place. "The C library every port here already
+links against" was the right reason, and it turned out to be load-bearing
+within the hour.
+
+### Batch three: 28 → 42 types, and the worst one yet
+
+The types real ports touch — sockets, `passwd`/`group`/`shadow`, `statvfs`,
+`rusage`, `epoll_event`. Three more failures.
+
+**`struct addrinfo` had `ai_addr` and `ai_canonname` transposed**, and this one
+is not a glibc/musl divergence: both put `ai_addr` first, and ours put
+`ai_canonname` there. It was simply wrong.
+
+The consequence is the sharpest of any found today. `getaddrinfo` fills a list
+and the caller does the canonical thing:
+
+```c
+for (p = res; p; p = p->ai_next)
+    if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
+```
+
+`p->ai_addr` read the **canonical hostname string pointer** and handed it to
+`connect()` as a `struct sockaddr`, with `ai_addrlen` bytes of a NUL-terminated
+name reinterpreted as an address family and port. Every C program that resolves
+a name and connects to it — which is every network client — was affected.
+
+**`struct rusage` was 144 bytes against musl's 272**, and **`struct statvfs`
+was 88 against 112**. Both for the same reason: a trailing reserved array we
+had left off. Every *named* field was already at the right offset in both,
+which is exactly why neither was ever noticed — `getrusage` and `statvfs` fill
+the caller's object correctly as far as they go and then stop a third of the
+way in, leaving the tail as the caller's allocator left it.
+
+### A fourth kind of bad test: the tautology
+
+§1010 found a test asserting a wrong fact about an external library. This batch
+found a different failure:
+
+```rust
+// Statvfs has 11 u64 fields = 11 * 8 = 88 bytes.
+assert_eq!(mem::size_of::<Statvfs>(), 11 * 8);
+```
+
+That is not a claim about C at all. It restates the declaration it is checking,
+so it passes for any declaration and fails only if `size_of` is broken. **A
+test whose expected value is derived from the thing under test can only ever
+pass**, and it occupies the space where a real check would go — which is worse
+than the space being empty, because the file now looks covered.
+
+The running tally of what tests were doing in place of checking:
+
+| | shape |
+|---|---|
+| §1010, `Sigaction` | a wrong fact about an external library, stated confidently |
+| §1011, `regmatch_t` | a fact about *one* of the two libraries it named |
+| §1011, `Statvfs` | a restatement of our own declaration |
+
+All three read as though the question had been asked. None of them asked it.
+The gate asks it, on every push, against the library we actually link.
+
+### Batch four: 42 → 62 types, and the third state the ratchet was missing
+
+`BASELINE_UNCOVERED` says "nobody has looked". Batch four needed a state it
+could not express: **somebody looked, it is broken, and here is where it is
+written down.** Taking a failing type back *out* of `abi_layout.rs` makes it
+indistinguishable from one that was never added, and throws the measurement
+away.
+
+So the gate gained `KNOWN_MISMATCH`, a **two-way** ratchet. A failure naming a
+listed type is reported and does not refuse the push. A listed type that
+produces **no** failure is a hard error — it means somebody fixed it and left
+the exemption behind, and an exemption for a defect that no longer exists is
+how an exemption list starts covering real ones. Every entry must name a
+`known-issues.md` key.
+
+Five types are in it, and **all five are ours being smaller than musl's**:
+`aiocb` (136 against 168, and the field order differs too), `sysinfo` (112
+against 368 — every named field at the right offset, musl's trailing
+`__reserved[256]` absent), `utmpx` (384 against 400, because musl's `ut_tv` is a
+full 16-byte `struct timeval` and ours is two `i32`s), and the two System V IPC
+status structures, which flatten `ipc_perm` and come up short.
+
+**The first version of this paragraph had three of those backwards**, including
+a claim that `sysinfo` wrote 256 bytes *past* the caller's object. The gate
+prints `'368 == 112'`, and the assertion is `sizeof(C type) == <our size>`, so
+the left number is musl's — read the other way it inverts every one of these.
+Recorded rather than quietly fixed because it is the same defect as everything
+else in §1010 and §1011: a confident direction stated without re-reading the
+number it came from, committed *while writing up* a family of bugs of exactly
+that kind.
+
+**Fixed rather than listed: `fd_set`.** 32 bytes against the C library's 128,
+so every `select()` read and wrote the front quarter of the caller's own
+variable. The cause is worth keeping: `FD_SET_WORDS` was derived from
+`FD_SETSIZE`, which is 256 here because `fdtable::MAX_FDS` is. That reasoning is
+right about *this system's fd limit* and wrong about *the C library's
+structure* — two facts that are the same number in glibc and musl and are not
+the same fact. They are now `FD_SET_BITS` (1024, the ABI) and `FD_SETSIZE`
+(256, the policy).
+
+### The checker's own classifier was wrong the whole time
+
+Worth its own section because of how it hid.
+
+`compile_c` split clang's output into "assertion failures" and "everything
+else" with a regex expecting the message in **quotes**. clang prints it bare:
+
+```text
+error: static assertion failed due to requirement 'sizeof(x) == 8': x size
+```
+
+So the regex never matched, and every assertion failure since the gate was
+written had been falling through to the "(compile error, not an assertion)"
+branch — arriving as one opaque blob with a problem count of 1 regardless of
+how many assertions had failed.
+
+**The verdict was right and the classification was wrong**, which is the
+hardest kind of wrong to notice: the gate refused exactly when it should, so
+every run looked correct. It surfaced only when `KNOWN_MISMATCH` needed to ask
+*which* type a failure belonged to, and got "none of them" for all of them —
+which then reported all five known-bad types as fixed.
+
+Two things came out of it, and the second matters more than the first:
+
+* the parse is now pinned by a self-test that asserts the extracted message
+  **exactly** — `got == ["the 1010 bug"]`, not `"the 1010 bug" in stderr`. The
+  weaker form passes against the raw blob, so it would have certified the bug,
+  which is the same shape as everything else in §1010 and §1011;
+* a translation unit that fails to *compile* now suppresses the "this type
+  produced no failure, so it must be fixed" sweep, because a unit that stopped
+  early reached no verdict on the assertions after the error. Without that,
+  one missing header silently declares every known mismatch repaired.
+
+The summary line was also saying "0 mismatches" while the lines above it listed
+five. A summary that contradicts its own detail trains the reader to skip the
+detail.
+
+### Two of the five fixed, and the same conflation a third time
+
+`sysinfo` and `utmpx` are closed. Both fixes were one field, once the layouts
+were **measured** rather than reasoned about — a program compiled with
+`zig cc --target=x86_64-linux-musl` and run under WSL, printing every offset.
+That took one command and settled four types at once; the two left are left
+because they need structural work, not because anything about them is unknown.
+Their measured layouts are recorded in `KNOWN_MISMATCH` itself, so the next
+attempt starts from numbers rather than from a header.
+
+`sysinfo` produced the kernel/libc conflation for the **third** time in two
+days. Its test read:
+
+```rust
+// Linux struct sysinfo is 112 bytes on x86_64.
+assert_eq!(core::mem::size_of::<Sysinfo>(), 112);
+```
+
+That sentence is true. The kernel's `struct sysinfo` ends
+`char _f[20-2*sizeof(long)-sizeof(int)]` and comes to 112. musl's userspace one
+ends `char __reserved[256]` and comes to 368. Same name, same header name, two
+structures — exactly `sigaction` again, and exactly `regmatch_t` again.
+
+Which boundary governs was **checked** this time rather than assumed:
+`unistd::sysinfo` fills the caller's structure field by field from
+`SYS_CLOCK_MONOTONIC` and a process count, and never hands it to the kernel. So
+the only boundary is with C, and musl's number wins. Had it been a struct we
+pass *to* the kernel, 112 would have been right and the gate's entry would have
+been the error.
+
+### And one I got wrong while fixing it
+
+The first `utmpx` patch *added* musl's trailing `__unused[20]`. The struct
+already had it, as `_reserved`, documented "reserved for future use" — which is
+what it looks like from this side and not what it is. The result was 416 against
+400, caught by the gate on the next run.
+
+The cause is the same one this whole entry keeps circling: the struct was read
+as far as the fields the gate had named and no further. Three times in two days
+now, and the pattern is specific enough to state as a rule — **when a tool
+reports a defect at a location, the unit of reading is the whole declaration,
+not the lines the tool pointed at.** The gate catching it in seconds is the
+argument for the gate; needing it caught is the argument for the rule.
+
+### KNOWN_MISMATCH is empty again, one tick after it was built
+
+All three remaining types are fixed: `aiocb` reordered to musl's, and the two
+System V status structures given a real nested `ipc_perm`. The table that was
+built to hold defects across ticks held them for one.
+
+That is the argument for the mechanism rather than against it. The alternative
+was to take each failing type back *out* of `abi_layout.rs` until someone got
+to it, which loses the measurement and makes "broken" indistinguishable from
+"never looked at". The table cost about twenty lines and made the difference
+between three recorded defects and three forgotten ones — and its second
+ratchet, the one that refuses a stale entry, is what turned each fix into a
+push that could not silently leave the exemption behind.
+
+The comment left in the empty table says so: **empty is a state, not a
+default.**
+
+### Three things the IPC fix turned up that are not about IPC
+
+**The knowledge was already in the tree.** `posix/src/linux_ipc_perm_types.rs`
+has held the correct `ipc_perm` offsets — key 0, uid 4 … mode 20, seq 24, size
+48 — the whole time, and `linux_ipc.rs` has held a kernel `ipc64_perm`. The two
+structures that needed them simply did not use them. No test could see that,
+because no test crossed a C boundary. A constant that is right and unread is
+worth exactly as much as one that is wrong.
+
+**The two structures now sit in the same file on purpose.** `IpcPerm` (the C
+library's) is declared directly above `Ipc64Perm` (the kernel's). They are the
+same 48 bytes and differ inside — the kernel's carries `seq` as a `short` with
+padding either side, the C library's an `int`. Keeping them adjacent, each
+saying what the other is, is the cheapest available defence against one type
+being pressed into both roles, which is precisely how §1010 happened.
+
+**`aiocb`'s doc claimed something unfalsifiable.** It said it "matches the
+POSIX `struct aiocb` layout". POSIX cannot settle that: it names the members
+and leaves the order to the implementation, so there is no *the* POSIX layout —
+only a particular C library's. A claim that cannot be true or false is worse
+than a wrong one, because nothing can contradict it. It is now stated as
+musl's, with the numbers.
+
+### Coverage is complete: 76 types, and the last 17 were nearly written off
+
+The remaining seventeen looked like kernel wire formats — `open_how`,
+`clone_args`, `perf_event_attr`, the capability structs, io_uring — and were
+about to be recorded as outside this gate's remit on the strength of musl not
+declaring them. **Probing first showed the toolchain declares thirteen of
+them.** zig ships the Linux uapi headers alongside musl's, so the same
+mechanism checks both.
+
+That changes the rule the gate follows, and the new statement is better than
+the old one: **compare against the header that defines the boundary this type
+crosses.** musl for a libc type, `<linux/openat2.h>` for `struct open_how`. It
+was never really "musl is the oracle"; it was "the other side of the boundary
+is the oracle", and musl happened to be the only boundary in view.
+
+### A fourth state, and this one is checkable too
+
+Four of the seventeen have no definition anywhere — `ndbm.h`, `fts.h` and
+`linux/sysctl.h` are absent from musl and from the uapi headers. Leaving them
+in `BASELINE_UNCOVERED` would be a slow lie: they would sit there for ever
+looking like work nobody had got to.
+
+`NO_ORACLE` records them with the reason, and the reason is **verified**. Each
+entry names the C type and header it claims cannot be found, and the gate
+compiles a probe for it on every run; if the header ever appears, the entry
+fails and the type gets a real check. Only one entry is taken on trust —
+`CapEntryInfo`, which is SlateOS's own and has no counterpart to probe for.
+
+So the three tables now say three different things, and each is enforced:
+
+| table | means | enforced by |
+|---|---|---|
+| `KNOWN_MISMATCH` | measured, wrong, recorded | fails if the type starts passing |
+| `NO_ORACLE` | looked, nothing to compare with | fails if the C type becomes findable |
+| `BASELINE_UNCOVERED` | nobody has looked | may only shrink |
+
+The third is now empty, which is the point.
+
+### `abi_extensible!`, for structs whose size is a version number
+
+`landlock_ruleset_attr` (ours 16, header 24) and `perf_event_attr` (112 against
+144) failed, and neither is a defect. Those syscalls take the structure's size
+explicitly — `landlock_create_ruleset(attr, size, flags)`, `perf_event_open`
+via `attr->size` — precisely so the structure can grow without breaking callers
+built against an older header. Ours being *smaller* is an older ABI version,
+which the kernel is required to accept.
+
+So `abi_extensible!` asserts `sizeof(C) >= ours` and every named field at `==`.
+That still catches the failure that matters — ours being **larger** than the
+kernel knows about — and refuses to let a genuinely short structure hide:
+`statvfs` was short and `statvfs()` takes no size, so it does not qualify. The
+macro's doc says so, because the temptation to reach for it the next time a
+size assertion is inconvenient is obvious.
+
+### Three self-inflicted defects in one sitting, all in the checker
+
+Worth listing together, because they have one cause between them.
+
+* **`str.index("BASELINE_UNCOVERED")` matched inside the module docstring**,
+  which *mentions* the identifier, and the replacement that followed ate the
+  docstring's closing `"""`. The file stopped parsing. Fixed by restoring it
+  and re-applying every edit with anchors that are whole top-level statements
+  rather than words — a word appears in prose, a statement does not.
+* **`BASELINE_UNCOVERED: set[str] = {}` is a `dict`.** The annotation is not
+  checked at run time, so the gate died on `set - dict` the moment the baseline
+  reached the state it exists to reach. `set()`, with the reason written beside
+  it.
+* **`COVERED_RE` matched only `abi!`**, so the four types moved to
+  `abi_extensible!` immediately reported as *uncovered* — which would have had
+  the ratchet demand entries for types it was already checking.
+
+The common cause is a pattern that was right about the case in front of it and
+silently wrong about the next one: an identifier that also occurs in prose, an
+annotation that is not a constructor, a regex that knows one spelling of a
+thing with two. Each was caught within a minute by running the checker, and
+none by reading it.
+
+**Against it, honestly:** coverage is now complete — 76 types checked, none
+known-bad, five accounted for in `NO_ORACLE` — and "complete" is a claim
+about the *set of types*, not about the depth of each. Five are checked by
+size alone because ours flattens a union or a nested struct, and one
+(`CapEntryInfo`) is taken on trust. The honest summary is that every type
+which crosses the boundary is now accounted for, and that accounting is
+itself enforced. (This paragraph has been
+rewritten three times in one session — 15, 28, 42, 62 — which is the ratchet
+working as intended rather than a correction to it. The number in it will keep
+going stale; the two ratchets in the script are the copies that cannot.) The most dangerous names are in
+that frozen set -- `PthreadMutexT`, `PthreadAttrT`, `CpuSetT`, `SemT` are all
+types a C program declares *by value*, where being smaller than musl's means
+our writes land past the caller's own object. The counter-argument is that a
+ratchet at 15 is strictly better than the nothing that existed yesterday, and
+the frozen set is now written down in one place with a note on which entries
+are the scary ones -- which is what makes shrinking it a task somebody can pick
+up rather than an audit somebody has to invent.
+
+## 1012. Duplicated state gets an asserted invariant now, not a redesign later
+
+**Date:** 2026-09-10
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** which groups a user belongs to is written down in three separate
+files, and nothing but careful code keeps the three copies saying the same
+thing. The right long-term answer is to stop storing it three times -- but that
+is a change to how accounts are stored on disk, which is the operator's call and
+has been sitting unanswered. So instead of leaving the copies unguarded until
+that question is answered, the code now carries a test that reads all three
+after every operation and fails if they disagree.
+
+**The state.** `/etc/group` lists each group's members. `/etc/gshadow` lists
+them again. Each account record carries its own list of the groups it is in.
+`Database` in `userspace/useradd/src/main.rs` -- which is `useradd`, `usermod`,
+`groupadd`, `groupdel`, `groupmod` and the rest in one binary -- has five
+methods that mutate membership, and each has to touch all three.
+
+**The alternatives.**
+
+*Do the redesign.* `design-decisions.md` §353 already made `/etc/passwd` and
+`/etc/shadow` generated from a single `/etc/users.yaml`; the matching move is an
+`/etc/groups.yaml` with the two group files generated from it, and one of the
+two membership lists dropped. That is the proper fix and it stays the proper
+fix. It is not mine to make: §353 did not decide it for groups, dropping one of
+the two lists changes what is on a user's disk, and it is already raised in
+`open-questions.md`. Doing it unasked would be deciding a storage format on the
+operator's behalf.
+
+*Leave it.* The four-day-old `todo.txt` entry that named this said plainly that
+`Database` "now changes both together ... so nothing in *this* binary can update
+one and forget the other. **Nothing enforces that for a future writer.**" That
+sentence is a description of a gap, and re-reading it each tick is not closing
+it. The trigger the entry set for the redesign -- a second writer, or observed
+drift -- has not fired and, checked rather than assumed, *cannot* fire
+observably: the account files are created at runtime, so there is no drift to
+observe in the tree.
+
+*Assert the invariant.* Chosen. `assert_membership_agrees` states what has to be
+true of the three stores together, and one test runs every mutating operation
+with that assertion after each.
+
+**Why this is worth doing even though the redesign supersedes it.** The
+invariant is not scaffolding for the redesign; it is the specification the
+redesign has to satisfy. If `/etc/groups.yaml` lands tomorrow, this test is what
+says the generated files still agree with the accounts. And it is cheap in the
+way that matters: it makes no claim about how the data *should* be stored, so it
+does not prejudice the decision it is standing in for.
+
+**It found a defect in the code it was written to protect, on the first run.**
+`rename_group_everywhere` renamed the group in `/etc/gshadow` and in every
+account and not in `/etc/group`. Not a live bug -- its only caller, `cmd_groupmod`,
+assigned `db.groups[idx].name` itself before calling it, so the pair of them did
+the whole job. But the method's name promised all three, and a second caller
+written from that name would have produced an `/etc/gshadow` line for a group
+`/etc/group` did not have. The rename now lives entirely in the method.
+
+**Two ways the existing test was blind, both worth carrying past this file.**
+There *was* a test named `renaming_a_group_renames_it_in_the_accounts_that_are_in_it`.
+It called `rename_group_everywhere` standalone -- exactly the unsafe usage --
+and passed, because (1) it asserted only the account half of "everywhere", and
+(2) its fixture pushed a `/etc/group` entry with no `/etc/gshadow` line, so the
+one file the method silently skipped was never populated for it to skip. The
+second is the subtler one: **a fixture that omits a store cannot detect an
+operation that omits the same store**, and it reads as thorough either way. When
+I added the missing assertion, it failed against the fixture rather than the
+code, and the fix was to give the fixture its third file.
+
+**The self-test.** An invariant nothing exercises is a decoration, and one whose
+checker has quietly stopped checking is worse -- it reports the absence of a
+problem it can no longer see, which is the failure mode §1011's gate hit when
+its classifier stopped matching. So a companion test builds each of the three
+shapes of drift deliberately and requires the checker to panic on each. If a
+future edit to `assert_membership_agrees` weakens it, that test goes red rather
+than the suite going quietly green.
+
+## 1013. `su` drops uid and gid now, and documents the half it cannot drop
+
+**Date:** 2026-09-10
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `su alice` asked for alice's password, checked it, and then ran
+alice's shell as whoever typed the command. It set `HOME`, `USER` and `SHELL`
+to alice and changed nothing the operating system checks. It now really becomes
+alice. One piece is still missing -- clearing the *extra* groups the previous
+user was in -- because the call that does that does not exist yet, and the
+decision recorded here is to ship the two-thirds that works rather than wait
+for the third.
+
+**How it had been blocked.** `userspace/doas` carries this note: "the real
+privilege change will use the kernel's capability system once the POSIX exec
+layer supports `setuid`/`setgid` syscalls". That was true when written.
+`posix::setuid` and `posix::setgid` now apply real credentials through
+`set_real_credentials`, and `getuid()` reflects them.
+
+**Why nobody noticed the premise expire.** The functions did not appear; they
+*changed behaviour*. `posix::setuid`'s own doc records it: "pre-Phase-192 we
+returned `0` for *every* uid value, ignoring caps ... exactly the kind of
+silent 'permission boundary skipped' bug containers care about." So for a while
+`setuid` existed, was callable, and did nothing while reporting success. **A
+stub that reports success is what keeps a deferral looking current.** There was
+no compile error to trip over and no failing call to investigate; the
+capability arrived underneath a comment that still said it had not. This is the
+`todo.txt` S305 standing rule -- re-check the premise of anything deferred for
+a missing capability -- and it is the third time this week it has paid.
+
+**The decision: drop what can be dropped, or drop nothing?**
+
+*Drop nothing until `setgroups` exists.* The status quo, and it has a real
+argument: a partial privilege drop is the classic vulnerability shape, and code
+that looks like it drops privilege but does so incompletely is more dangerous
+than code that visibly does not, because the next reader stops looking.
+
+*Drop uid and gid, and write down what is missing.* Chosen. Three reasons.
+First, the missing piece leaks **nothing today**: `posix::getgroups` reports
+zero supplementary groups, so there are none to retain -- the gap is real but
+currently empty. Second, the alternative is not "safe", it is "wrong in the
+other direction": every file the shell created was owned by the caller, and
+every permission check it passed was the caller's. Third, waiting has no end
+condition anyone is watching, which is precisely how the original deferral
+lasted this long.
+
+*Why not `CommandExt::groups`?* It is not a matter of taste.
+`posix::setgroups` returns `ENOSYS` on purpose, and `std` calls it in the child
+between fork and exec -- so asking for it would abort the child before exec.
+The choice is not "with or without groups", it is "uid and gid, or nothing at
+all".
+
+**What makes the partial drop safe to leave.** Not a comment -- an entry.
+`known-issues.md` gains
+TD-B-USER-SWITCHING-PROGRAMS-CANNOT-RESET-SUPPLEMENTARY-GROUPS, which says what
+the fix is, what order the calls must go in (groups, then gid, then uid --
+each step drops the privilege the previous one needed), and names the filed
+request the kernel side is waiting on. The thing that made the *last* deferral
+invisible was that its trigger was a sentence rather than a tracked item.
+
+**A second defect the same look found, fixed here.** The uid came from
+`record.uid().unwrap_or(u32::MAX)`. That was harmless while the number only
+chose a `PATH` string -- and it stops being harmless the instant it is handed
+to `setuid`, where a record with no `uid:` would start a shell owned by uid
+4294967295, an identity belonging to nobody. It is now `Option`, and a record
+that cannot name its owner gets no session. **A sentinel is safe exactly as
+long as nothing acts on it**, and adding the first thing that acts on it is not
+an occasion the sentinel announces.
+
+**Not done here:** `doas`, `sudo`, `sshd` and `login` have the same hole.
+Logged as TD-B-FOUR-MORE-PROGRAMS-RUN-A-SHELL-AS-THE-WRONG-USER. `su` first
+because it is the smallest complete case and proves the mechanism; the rest are
+a conversion rather than a design, and `login` needs its exec built first.
+
+## 1014. Identity comes from the kernel, "I do not know" is not root, and the rule that decides is a function
+
+**Date:** 2026-09-10
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `passwd` decided whether you were allowed to change someone
+else's password by reading an environment variable -- a setting the person
+running the command chooses. When the variable was absent it assumed root, and
+it is normally absent, so the permission check never once ran. The answer now
+comes from the operating system, and the rule that uses it is a separate
+function with tests.
+
+**The three decisions here, in the order they matter.**
+
+**1. Ask the kernel, not the environment.** `getuid(2)` reports the credential
+recorded at spawn; a process's parent cannot set it. The environment is the
+parent's to write. There is no version of "read `$UID`" that is safe in a
+program that grants privilege on the answer, so the variable is not consulted
+at all -- not as a primary source, and not as a fallback either, which is where
+`doas` and `polkit` still have it.
+
+**2. `Option<u32>`, and `None` is not root.** The defect was not really the
+environment lookup; it was `.unwrap_or(0)` on the end of it. That collapses "I
+could not find out" into "the most privileged answer available". The type now
+keeps them apart and callers must handle absence explicitly -- in `passwd`, by
+refusing to run.
+
+*The alternative considered:* return `u32` and use `u32::MAX` for unknown, as
+`doas` does. Rejected because a sentinel is safe exactly as long as nothing
+does arithmetic or comparison on it, and the entire purpose of this value is to
+be compared. §1013 has the matching case in `su`, where a `u32::MAX` that was
+harmless for months became a shell owned by nobody the moment `setuid` was
+given it.
+
+**3. The permission rule is a function that returns, not lines in `main` that
+exit.** This is the part with a real tradeoff, because the three lines in
+`main` were perfectly readable. They were also **unreachable for the entire
+life of the program**, and nothing found that out, because a decision made in
+`main` from process state cannot be reached from a test. Lifting it into
+`permission(caller_uid, caller_name, target, named_explicitly, action)` cost an
+argument list and bought the first six tests this program has ever had of who
+may do what. One of them -- `a_user_may_not_change_another_users_password` --
+is the bug.
+
+**The failure mode worth naming.** A check that is always skipped looks exactly
+like a check that always passes. Both produce a program that works, in the
+sense that the intended user gets the intended result. The only way to tell
+them apart is to reach the check with a caller who should be refused, and that
+is a test, not a read.
+
+**And the one that stings.** `userspace/oils` had already worked this out. Its
+`reported_identity` deliberately ignores an inherited `UID=`, citing "precisely
+the spoofing bash refuses", and it is in this same tree, written by the same
+process, before the six programs that did the opposite. **A correct answer
+already in the tree does not propagate by existing** -- nothing connects the
+shell's reasoning about `$UID` to `passwd`'s use of `$UID` except somebody
+grepping for the string. That is an argument for the shared function in
+`authlib` over six correct copies: the copies would have been correct on the
+day they were written too.
+
+**Scope.** `passwd` is converted here. `chage`, `newgrp`, `polkit`, `crontab`
+and `doas` are logged as
+TD-B-FIVE-PROGRAMS-STILL-TAKE-THE-CALLERS-IDENTITY-FROM-THE-ENVIRONMENT and
+follow.

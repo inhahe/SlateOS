@@ -56396,7 +56396,7 @@ and the refreshed release baseline). All are pushed to `origin/lane-a` and
 compile clean; only publication to `main` waits.
 
 
-## pgrep requires a pattern, and procps does not (lane B, 2026-09-10)
+## ~~pgrep requires a pattern, and procps does not~~ (lane B, 2026-09-10) -- DONE the same day
 
 `pgrep -P 1`, `pgrep -u root` and `pgrep -t tty1` are all valid invocations of
 procps' `pgrep`: the selectors stand on their own and list every process
@@ -56412,6 +56412,12 @@ only when *no* selector was given either. `process_matches` already returns
 `true` from its pattern stage when `opts.pattern` is `None`, so the matching
 side needs nothing -- it is the argument check alone that refuses.
 
-**Not done in the same commit** because that commit is about `/proc` bytes and
+~~**Not done in the same commit** because that commit is about `/proc` bytes and
 this is a change to which command lines are accepted, which is worth its own
-before/after. It is small.
+before/after. It is small.~~ Done, and it was.
+
+**One thing the fix had to get right that the sketch above did not mention.**
+The absent pattern is `None`, not an empty compiled pattern. Those are the same
+answer -- everything matches -- right up until `-v` negates it, at which point
+one selects every process and the other selects none. `pgrep -v -P 1` is a real
+invocation, so the difference is reachable, and there is a test for it.

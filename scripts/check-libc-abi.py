@@ -241,7 +241,9 @@ def compile_c(zig: str, src: str) -> tuple[list[str], str | None]:
     """
     with tempfile.TemporaryDirectory() as tmp:
         c = Path(tmp) / "abi.c"
-        c.write_text(src, encoding="utf-8")
+        # newline="" so the probe is LF on every platform. cc accepts either,
+        # but the gate grades the declaration, not the compiler.
+        c.write_text(src, encoding="utf-8", newline="")
         proc = subprocess.run(
             [zig, "cc", f"--target={MUSL_TARGET}", "-c",
              str(c), "-o", str(Path(tmp) / "abi.o")],

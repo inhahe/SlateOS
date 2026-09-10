@@ -148,7 +148,9 @@ def self_test() -> int:
         )
         with tempfile.TemporaryDirectory() as tmp:
             f = Path(tmp) / "probe.rs"
-            f.write_text(src, encoding="utf-8")
+            # newline="" so the probe is LF on every platform. rustc accepts
+            # either, but the gate grades the declaration, not the compiler.
+            f.write_text(src, encoding="utf-8", newline="")
             def rustc(target: str) -> int:
                 return subprocess.run(
                     ["rustc", "--crate-type", "lib", "--target", target,

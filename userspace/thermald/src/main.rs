@@ -151,10 +151,29 @@ fn _parse_temp(s: &str) -> Option<i64> {
 
 // ── Thermal zone discovery ─────────────────────────────────────────────
 
+// `fallback_zones` and `fallback_cooling` used to be here, and they are the
+// reason this file needs a note rather than a one-line diff.
+//
+// `fallback_zones` returned an `x86_pkg_temp` zone reading **45000 mC -- 45
+// degrees C** -- with a passive trip point at 85. `fallback_cooling` returned
+// a Processor, a Fan and one more. Both fired whenever `/sys/class/thermal`
+// could not be read, which on this kernel is EVERY RUN: sysfs serves no
+// `thermal` entry at all.
+//
+// So a thermal daemon reported a comfortable 45 degrees, always, having read
+// no sensor. That is worse than the other invented data in this tree, because
+// the number is not merely wrong -- it is reassuring. A machine that is
+// actually overheating and a machine with no thermal sensors produced the
+// same output, and the output was "fine".
+//
+// They now return nothing. A daemon with no zones has no zones to act on,
+// which is the truth, and `report_zones` prints an empty list rather than a
+// temperature nobody measured.
+
 fn read_thermal_zones() -> Vec<ThermalZone> {
     let entries = match std::fs::read_dir(THERMAL_BASE) {
         Ok(e) => e,
-        Err(_) => return fallback_zones(),
+        Err(_) => return Vec::new(),
     };
 
     let mut zones = Vec::new();
@@ -218,70 +237,17 @@ fn read_thermal_zones() -> Vec<ThermalZone> {
     }
 
     if zones.is_empty() {
-        return fallback_zones();
+        return Vec::new();
     }
 
     zones.sort_by_key(|z| z.id);
     zones
 }
 
-fn fallback_zones() -> Vec<ThermalZone> {
-    vec![
-        ThermalZone {
-            id: 0,
-            zone_type: "x86_pkg_temp".to_string(),
-            temp_mc: 45000,
-            trip_points: vec![
-                TripPoint {
-                    id: 0,
-                    trip_type: TripType::Passive,
-                    temp_mc: 85000,
-                    _hysteresis: 5000,
-                },
-                TripPoint {
-                    id: 1,
-                    trip_type: TripType::Critical,
-                    temp_mc: 100000,
-                    _hysteresis: 0,
-                },
-            ],
-            policy: "step_wise".to_string(),
-            _mode: "enabled".to_string(),
-        },
-        ThermalZone {
-            id: 1,
-            zone_type: "acpitz".to_string(),
-            temp_mc: 40000,
-            trip_points: vec![
-                TripPoint {
-                    id: 0,
-                    trip_type: TripType::Active,
-                    temp_mc: 50000,
-                    _hysteresis: 2000,
-                },
-                TripPoint {
-                    id: 1,
-                    trip_type: TripType::Passive,
-                    temp_mc: 80000,
-                    _hysteresis: 5000,
-                },
-                TripPoint {
-                    id: 2,
-                    trip_type: TripType::Critical,
-                    temp_mc: 95000,
-                    _hysteresis: 0,
-                },
-            ],
-            policy: "step_wise".to_string(),
-            _mode: "enabled".to_string(),
-        },
-    ]
-}
-
 fn read_cooling_devices() -> Vec<CoolingDevice> {
     let entries = match std::fs::read_dir(THERMAL_BASE) {
         Ok(e) => e,
-        Err(_) => return fallback_cooling(),
+        Err(_) => return Vec::new(),
     };
 
     let mut devices = Vec::new();
@@ -318,34 +284,11 @@ fn read_cooling_devices() -> Vec<CoolingDevice> {
     }
 
     if devices.is_empty() {
-        return fallback_cooling();
+        return Vec::new();
     }
 
     devices.sort_by_key(|d| d.id);
     devices
-}
-
-fn fallback_cooling() -> Vec<CoolingDevice> {
-    vec![
-        CoolingDevice {
-            id: 0,
-            device_type: "Processor".to_string(),
-            cur_state: 0,
-            max_state: 5,
-        },
-        CoolingDevice {
-            id: 1,
-            device_type: "Fan".to_string(),
-            cur_state: 3,
-            max_state: 10,
-        },
-        CoolingDevice {
-            id: 2,
-            device_type: "intel_powerclamp".to_string(),
-            cur_state: 0,
-            max_state: 50,
-        },
-    ]
 }
 
 fn read_file_string(path: &std::path::Path) -> Option<String> {
@@ -695,6 +638,74 @@ fn main() {
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // Sample hardware, for the tests that need some
+    // -----------------------------------------------------------------------
+    //
+    // These were production functions until 2026-09-10, returning invented
+    // hardware whenever the real source could not be read -- which on this
+    // kernel was every run. A few tests borrowed them because they needed
+    // something to iterate over, and that borrowing gave the fabrications a
+    // second set of callers keeping them alive.
+    //
+    // Inside `#[cfg(test)]` they are fine: a test may invent a machine,
+    // because it is asking whether a rule holds over some data and the answer
+    // does not depend on the data being real. The program may not, because it
+    // is reporting what the machine is.
+
+    fn sample_zones() -> Vec<ThermalZone> {
+        vec![
+            ThermalZone {
+                id: 0,
+                zone_type: "x86_pkg_temp".to_string(),
+                temp_mc: 45000,
+                trip_points: vec![
+                    TripPoint {
+                        id: 0,
+                        trip_type: TripType::Passive,
+                        temp_mc: 85000,
+                        _hysteresis: 5000,
+                    },
+                    TripPoint {
+                        id: 1,
+                        trip_type: TripType::Critical,
+                        temp_mc: 100000,
+                        _hysteresis: 0,
+                    },
+                ],
+                policy: "step_wise".to_string(),
+                _mode: "enabled".to_string(),
+            },
+            ThermalZone {
+                id: 1,
+                zone_type: "acpitz".to_string(),
+                temp_mc: 40000,
+                trip_points: vec![
+                    TripPoint {
+                        id: 0,
+                        trip_type: TripType::Active,
+                        temp_mc: 50000,
+                        _hysteresis: 2000,
+                    },
+                    TripPoint {
+                        id: 1,
+                        trip_type: TripType::Passive,
+                        temp_mc: 80000,
+                        _hysteresis: 5000,
+                    },
+                    TripPoint {
+                        id: 2,
+                        trip_type: TripType::Critical,
+                        temp_mc: 95000,
+                        _hysteresis: 0,
+                    },
+                ],
+                policy: "step_wise".to_string(),
+                _mode: "enabled".to_string(),
+            },
+        ]
+    }
+
     #[test]
     fn test_format_temp() {
         assert_eq!(format_temp(45000), "45.0°C");
@@ -728,31 +739,62 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_zones() {
-        let zones = fallback_zones();
-        assert_eq!(zones.len(), 2);
-        assert_eq!(zones[0].zone_type, "x86_pkg_temp");
-        assert_eq!(zones[1].zone_type, "acpitz");
+    /// No thermal sysfs means no zones, not a comfortable 45 degrees.
+    ///
+    /// This asserted `zones[0].zone_type == "x86_pkg_temp"` at 45000 mC --
+    /// certifying that a daemon with no sensors reports a temperature. The
+    /// assertion is now tied to whether the source exists, so it is honest on
+    /// the SlateOS kernel (which serves no `thermal` entry), on a Windows host
+    /// and on the Linux box the pre-push gate uses.
+    fn zones_are_reported_only_where_there_is_a_sensor_to_read() {
+        // One direction, deliberately. "No source, therefore nothing" is the
+        // property that matters and the one the fabrications broke. The converse
+        // -- source present, therefore something -- is NOT true and asserting it
+        // failed on the Linux box the pre-push gate uses, where
+        // /sys/class/thermal exists as an empty directory because the VM has no
+        // sensors. A machine with a thermal subsystem and no thermal zones is
+        // ordinary; a machine reporting zones it never read is not.
+        if !std::path::Path::new("/sys/class/thermal").exists() {
+            assert!(
+                read_thermal_zones().is_empty(),
+                "thermal zones reported without a /sys/class/thermal to read them from"
+            );
+        }
     }
 
     #[test]
-    fn test_fallback_cooling() {
-        let devices = fallback_cooling();
-        assert_eq!(devices.len(), 3);
-        assert_eq!(devices[0].device_type, "Processor");
-        assert_eq!(devices[1].device_type, "Fan");
+    /// And no cooling devices either.
+    fn cooling_devices_are_reported_only_where_there_are_any() {
+        if !std::path::Path::new("/sys/class/thermal").exists() {
+            assert!(
+                read_cooling_devices().is_empty(),
+                "cooling devices reported without a /sys/class/thermal"
+            );
+        }
     }
 
     #[test]
     fn test_read_thermal_zones() {
+        // Asserted NON-empty before, and passed everywhere, because
+        // `fallback_zones` supplied a 45 degree x86_pkg_temp zone.
         let zones = read_thermal_zones();
-        assert!(!zones.is_empty());
+        if !std::path::Path::new("/sys/class/thermal").exists() {
+            assert!(zones.is_empty(), "thermal zones reported without a source");
+        }
     }
 
     #[test]
     fn test_read_cooling_devices() {
+        // Asserted NON-empty before, and passed everywhere, because
+        // `fallback_cooling` supplied a Processor and a Fan whenever
+        // /sys/class/thermal could not be read.
         let devices = read_cooling_devices();
-        assert!(!devices.is_empty());
+        if !std::path::Path::new("/sys/class/thermal").exists() {
+            assert!(
+                devices.is_empty(),
+                "cooling devices reported without a source"
+            );
+        }
     }
 
     #[test]
@@ -770,7 +812,7 @@ mod tests {
 
     #[test]
     fn test_zone_trip_points_ordered() {
-        let zones = fallback_zones();
+        let zones = sample_zones();
         for z in &zones {
             for i in 1..z.trip_points.len() {
                 assert!(

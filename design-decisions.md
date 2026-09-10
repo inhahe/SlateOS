@@ -70925,8 +70925,90 @@ only a particular C library's. A claim that cannot be true or false is worse
 than a wrong one, because nothing can contradict it. It is now stated as
 musl's, with the numbers.
 
-**Against it, honestly:** 63 of 98 are checked and none is known-bad, but 17
-have still never been looked at. (This paragraph has been
+### Coverage is complete: 76 types, and the last 17 were nearly written off
+
+The remaining seventeen looked like kernel wire formats — `open_how`,
+`clone_args`, `perf_event_attr`, the capability structs, io_uring — and were
+about to be recorded as outside this gate's remit on the strength of musl not
+declaring them. **Probing first showed the toolchain declares thirteen of
+them.** zig ships the Linux uapi headers alongside musl's, so the same
+mechanism checks both.
+
+That changes the rule the gate follows, and the new statement is better than
+the old one: **compare against the header that defines the boundary this type
+crosses.** musl for a libc type, `<linux/openat2.h>` for `struct open_how`. It
+was never really "musl is the oracle"; it was "the other side of the boundary
+is the oracle", and musl happened to be the only boundary in view.
+
+### A fourth state, and this one is checkable too
+
+Four of the seventeen have no definition anywhere — `ndbm.h`, `fts.h` and
+`linux/sysctl.h` are absent from musl and from the uapi headers. Leaving them
+in `BASELINE_UNCOVERED` would be a slow lie: they would sit there for ever
+looking like work nobody had got to.
+
+`NO_ORACLE` records them with the reason, and the reason is **verified**. Each
+entry names the C type and header it claims cannot be found, and the gate
+compiles a probe for it on every run; if the header ever appears, the entry
+fails and the type gets a real check. Only one entry is taken on trust —
+`CapEntryInfo`, which is SlateOS's own and has no counterpart to probe for.
+
+So the three tables now say three different things, and each is enforced:
+
+| table | means | enforced by |
+|---|---|---|
+| `KNOWN_MISMATCH` | measured, wrong, recorded | fails if the type starts passing |
+| `NO_ORACLE` | looked, nothing to compare with | fails if the C type becomes findable |
+| `BASELINE_UNCOVERED` | nobody has looked | may only shrink |
+
+The third is now empty, which is the point.
+
+### `abi_extensible!`, for structs whose size is a version number
+
+`landlock_ruleset_attr` (ours 16, header 24) and `perf_event_attr` (112 against
+144) failed, and neither is a defect. Those syscalls take the structure's size
+explicitly — `landlock_create_ruleset(attr, size, flags)`, `perf_event_open`
+via `attr->size` — precisely so the structure can grow without breaking callers
+built against an older header. Ours being *smaller* is an older ABI version,
+which the kernel is required to accept.
+
+So `abi_extensible!` asserts `sizeof(C) >= ours` and every named field at `==`.
+That still catches the failure that matters — ours being **larger** than the
+kernel knows about — and refuses to let a genuinely short structure hide:
+`statvfs` was short and `statvfs()` takes no size, so it does not qualify. The
+macro's doc says so, because the temptation to reach for it the next time a
+size assertion is inconvenient is obvious.
+
+### Three self-inflicted defects in one sitting, all in the checker
+
+Worth listing together, because they have one cause between them.
+
+* **`str.index("BASELINE_UNCOVERED")` matched inside the module docstring**,
+  which *mentions* the identifier, and the replacement that followed ate the
+  docstring's closing `"""`. The file stopped parsing. Fixed by restoring it
+  and re-applying every edit with anchors that are whole top-level statements
+  rather than words — a word appears in prose, a statement does not.
+* **`BASELINE_UNCOVERED: set[str] = {}` is a `dict`.** The annotation is not
+  checked at run time, so the gate died on `set - dict` the moment the baseline
+  reached the state it exists to reach. `set()`, with the reason written beside
+  it.
+* **`COVERED_RE` matched only `abi!`**, so the four types moved to
+  `abi_extensible!` immediately reported as *uncovered* — which would have had
+  the ratchet demand entries for types it was already checking.
+
+The common cause is a pattern that was right about the case in front of it and
+silently wrong about the next one: an identifier that also occurs in prose, an
+annotation that is not a constructor, a regex that knows one spelling of a
+thing with two. Each was caught within a minute by running the checker, and
+none by reading it.
+
+**Against it, honestly:** coverage is now complete — 76 types checked, none
+known-bad, five accounted for in `NO_ORACLE` — and "complete" is a claim
+about the *set of types*, not about the depth of each. Five are checked by
+size alone because ours flattens a union or a nested struct, and one
+(`CapEntryInfo`) is taken on trust. The honest summary is that every type
+which crosses the boundary is now accounted for, and that accounting is
+itself enforced. (This paragraph has been
 rewritten three times in one session — 15, 28, 42, 62 — which is the ratchet
 working as intended rather than a correction to it. The number in it will keep
 going stale; the two ratchets in the script are the copies that cannot.) The most dangerous names are in

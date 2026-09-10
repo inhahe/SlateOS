@@ -88,6 +88,54 @@ macro_rules! abi {
     }};
 }
 
+/// Like [`abi`], for a kernel struct that is **extensible by size**.
+///
+/// Some syscalls take the structure's size as an explicit argument —
+/// `landlock_create_ruleset(attr, size, flags)`, `perf_event_open` via
+/// `attr->size`, `clone3`, `openat2` — precisely so the structure can grow
+/// without breaking callers built against an older header. For those, ours
+/// being *smaller* than the header is not a defect: it is an older ABI
+/// version, and the kernel is required to accept it.
+///
+/// So the size assertion is `>=` rather than `==`. That still catches the
+/// failure that matters — ours being **larger** than the kernel knows about,
+/// which would have the kernel read past what it understands — and it still
+/// checks every named field at `==`, which is where a real layout error would
+/// show.
+///
+/// **Use this only where the syscall genuinely takes a size.** A `statvfs` that
+/// is short is short; only an explicit size argument makes a shorter structure
+/// a version rather than a bug.
+macro_rules! abi_extensible {
+    ($out:expr, $hdrs:expr, $rust:ty, $cty:literal, $hdr:literal
+     $(, $f:ident $(as $cn:literal)? )* $(,)?) => {{
+        $hdrs.insert($hdr);
+        let _ = writeln!(
+            $out,
+            "_Static_assert(sizeof({}) >= {}, \"{} size (extensible: ours may be an older version)\");",
+            $cty,
+            core::mem::size_of::<$rust>(),
+            $cty
+        );
+        $(
+            {
+                #[allow(unused_mut, unused_assignments)]
+                let mut cname: &str = stringify!($f);
+                $( cname = $cn; )?
+                let _ = writeln!(
+                    $out,
+                    "_Static_assert(offsetof({}, {}) == {}, \"{}.{}\");",
+                    $cty,
+                    cname,
+                    core::mem::offset_of!($rust, $f),
+                    $cty,
+                    cname
+                );
+            }
+        )*
+    }};
+}
+
 /// The C translation unit to compile against musl.
 ///
 /// Public to the crate rather than private to the test so that the test is a
@@ -786,6 +834,134 @@ pub(crate) fn abi_asserts() -> String {
         "struct timex",
         "sys/timex.h"
     );
+
+    // --- the kernel-ABI structs, checked against the kernel's own uapi -------
+    //
+    // These do not cross a *C library* boundary; they cross the **syscall**
+    // boundary. That does not put them outside this gate — it changes which
+    // header is the oracle, and zig ships the Linux uapi headers alongside
+    // musl's, so the same mechanism checks both. The rule the gate follows is
+    // "compare against the header that defines the boundary this type
+    // crosses", and for `struct open_how` that is `<linux/openat2.h>`.
+    //
+    // This was nearly got wrong by assumption: the twelve below were about to
+    // be written off as "kernel formats, out of remit" on the strength of
+    // musl not declaring them. Probing first showed it declares eleven and the
+    // uapi supplies the rest.
+    abi!(
+        out,
+        hdrs,
+        crate::sys_capability::CapUserHeader,
+        "struct __user_cap_header_struct",
+        "linux/capability.h",
+        version,
+        pid
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::sys_capability::CapUserData,
+        "struct __user_cap_data_struct",
+        "linux/capability.h",
+        effective,
+        permitted,
+        inheritable
+    );
+    // 16 against the header's 24: the header has grown a `scoped` field that
+    // this kernel's ABI version does not have. `landlock_create_ruleset` takes
+    // the size, so a 16-byte attr is a valid older request.
+    abi_extensible!(
+        out,
+        hdrs,
+        crate::linux_landlock::LandlockRulesetAttr,
+        "struct landlock_ruleset_attr",
+        "linux/landlock.h",
+        handled_access_fs,
+        handled_access_net
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::linux_aio_abi::IoEvent,
+        "struct io_event",
+        "linux/aio_abi.h",
+        data,
+        obj,
+        res,
+        res2
+    );
+    abi_extensible!(
+        out,
+        hdrs,
+        crate::file::OpenHow,
+        "struct open_how",
+        "linux/openat2.h",
+        flags,
+        mode,
+        resolve
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::file::FileHandle,
+        "struct file_handle",
+        "fcntl.h",
+        handle_bytes,
+        handle_type
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::file::StatxTimestamp,
+        "struct statx_timestamp",
+        "sys/stat.h",
+        tv_sec,
+        tv_nsec
+    );
+
+    // Size only: each of these has a union or a bitfield where ours has a
+    // flattened field, so the *names* cannot correspond even where the bytes
+    // do -- `perf_event_attr`'s `sample_period`/`sample_freq` union is ours
+    // as `sample_period_or_freq`, and `io_uring_params` nests two `*_off`
+    // structs. The size is the part a caller depends on.
+    // 112 against the header's 144. `perf_event_open` reads `attr->size` and
+    // accepts every historical value of it (PERF_ATTR_SIZE_VER0 was 64), so a
+    // smaller structure is a version rather than a defect.
+    abi_extensible!(
+        out,
+        hdrs,
+        crate::linux_perf_event::PerfEventAttr,
+        "struct perf_event_attr",
+        "linux/perf_event.h"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::linux_aio_abi::Iocb,
+        "struct iocb",
+        "linux/aio_abi.h"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::linux_io_uring::IoUringParams,
+        "struct io_uring_params",
+        "linux/io_uring.h"
+    );
+    abi_extensible!(
+        out,
+        hdrs,
+        crate::process::CloneArgs,
+        "struct clone_args",
+        "linux/sched.h"
+    );
+    abi!(out, hdrs, crate::file::Statx, "struct statx", "sys/stat.h");
+
+    // `va_list` is `struct __va_list_tag[1]` and the tag type is incomplete in
+    // clang's headers, so only the size can be asked for -- which is the whole
+    // of what matters here: `VaList` is what `va_trampoline!` builds on the
+    // stack for a C variadic callee to walk.
+    abi!(out, hdrs, crate::printf::VaList, "va_list", "stdarg.h");
 
     let mut src = String::new();
     let _ = writeln!(

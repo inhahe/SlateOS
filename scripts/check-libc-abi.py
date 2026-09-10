@@ -111,25 +111,64 @@ KNOWN_MISMATCH: dict[str, str] = {
 #     own stack object is big enough (`PthreadMutexT`, `PthreadAttrT`,
 #     `CpuSetT`, `SemT`) -- **the highest stakes in the list**, because being
 #     smaller than musl's means our writes land past the caller's object.
-BASELINE_UNCOVERED = {
-    "CapEntryInfo",
-    "CapUserData",
-    "CapUserHeader",
-    "CloneArgs",
-    "Dbm",
-    "FileHandle",
-    "Fts",
-    "FtsEnt",
-    "IoEvent",
-    "IoUringParams",
-    "Iocb",
-    "LandlockRulesetAttr",
-    "OpenHow",
-    "PerfEventAttr",
-    "Statx",
-    "SysctlArgs",
-    "VaList",
+# Boundary types with **no external definition to check against**, and why.
+#
+# The third and last state. `KNOWN_MISMATCH` means "measured and wrong"; the
+# baseline below means "nobody has looked"; this means "looked, and there is
+# nothing to compare with". Leaving these in the baseline would be a slow lie --
+# they would sit there for ever looking like work somebody had not got to.
+#
+# Two kinds, and the difference decides whether the entry can be checked:
+#
+#   * a type whose C header this toolchain does not ship. `ndbm.h`, `fts.h` and
+#     `linux/sysctl.h` are absent from musl and from the uapi headers zig
+#     bundles, so there is no oracle -- but the *claim* that they are absent is
+#     itself checkable, and the second tuple element is what checks it. If the
+#     header ever appears, the entry fails and the type gets a real check.
+#   * a type that is ours and has no C counterpart at all: `None`. This cannot
+#     be checked and is the only thing in this file taken on trust, which is why
+#     it is kept to types the tree itself defines.
+NO_ORACLE: dict[str, tuple[str, tuple[str, str] | None]] = {
+    "Dbm": (
+        "`DBM` lives in <ndbm.h>, which musl does not ship. Our ndbm is "
+        "self-contained and the handle is opaque to callers.",
+        ("DBM", "ndbm.h"),
+    ),
+    "Fts": (
+        "`FTS` lives in <fts.h>, which musl does not ship -- a BSD interface "
+        "glibc also carries. Opaque to callers.",
+        ("FTS", "fts.h"),
+    ),
+    "FtsEnt": (
+        "`FTSENT`, same header and reason as `Fts`. Not opaque -- callers read "
+        "it -- so this is the entry here most worth revisiting if a definition "
+        "ever becomes available.",
+        ("FTSENT", "fts.h"),
+    ),
+    "SysctlArgs": (
+        "`struct __sysctl_args` lived in <linux/sysctl.h>, removed from the "
+        "kernel headers along with the syscall it served. Nothing defines it "
+        "any more.",
+        ("struct __sysctl_args", "linux/sysctl.h"),
+    ),
+    "CapEntryInfo": (
+        "SlateOS's own: the record our capability-query syscall returns, with "
+        "no counterpart in any C library or in the Linux uapi.",
+        None,
+    ),
 }
+
+
+# Empty. Every type crossing the C boundary is either checked against a header
+# or listed in NO_ORACLE with the reason there is no header to check it against.
+# The ratchet's remaining job is to refuse a *new* boundary type that is neither.
+#
+# `set()`, not `{}`: an empty brace literal is a **dict** whatever the
+# annotation says, and the annotation is not checked at run time. The first
+# version of this line was `BASELINE_UNCOVERED: set[str] = {}` and the gate
+# died on `set - dict` the moment the baseline reached the state it exists to
+# reach.
+BASELINE_UNCOVERED: set[str] = set()
 
 
 def find_zig() -> str | None:
@@ -227,7 +266,14 @@ def compile_c(zig: str, src: str) -> tuple[list[str], str | None]:
         return msgs, other
 
 
-COVERED_RE = re.compile(r"abi!\(\s*out,\s*hdrs,\s*crate::[\w:]*?(\w+)\s*,")
+# Both macros. `abi_extensible!` was added after this pattern, and the four
+# types that moved to it immediately reported as *uncovered* -- which would
+# have had the ratchet demand entries for types it was already checking. A
+# parser that knows one spelling of a thing with two is quietly wrong the day
+# the second appears.
+COVERED_RE = re.compile(
+    r"abi(?:_extensible)?!\(\s*out,\s*hdrs,\s*crate::[\w:]*?(\w+)\s*,"
+)
 
 
 def covered_types() -> set[str]:
@@ -289,7 +335,7 @@ def check_coverage(baseline: set[str] | None = None) -> list[str]:
     never run is a ratchet nobody knows the sign of.
     """
     known = BASELINE_UNCOVERED if baseline is None else baseline
-    return sorted(boundary_types() - covered_types() - known)
+    return sorted(boundary_types() - covered_types() - known - set(NO_ORACLE))
 
 
 def self_test() -> int:
@@ -335,6 +381,18 @@ def self_test() -> int:
         got, other = compile_c(zig, broken)
         if other is None:
             failures.append("a compile error was reported as a pass")
+
+        # The NO_ORACLE probe, both ways. A type the toolchain genuinely cannot
+        # find must stay quiet; one it can find must be reported, because that
+        # is an exemption that has silently stopped being true.
+        if stale_no_oracle(zig, {"Absent": ("x", ("struct nope_xyzzy", "no_such_hdr_xyzzy.h"))}):
+            failures.append("NO_ORACLE reported a type whose header really is absent")
+        if not stale_no_oracle(zig, {"Present": ("x", ("struct sigaction", "signal.h"))}):
+            failures.append(
+                "NO_ORACLE did NOT report an exemption whose C type is findable"
+            )
+        if stale_no_oracle(zig):
+            failures.append(f"a live NO_ORACLE entry is stale: {stale_no_oracle(zig)}")
 
     covered = covered_types()
     if "Sigaction" not in covered:
@@ -401,6 +459,39 @@ def self_test() -> int:
     return 0
 
 
+def stale_no_oracle(zig: str, table: dict | None = None) -> list[str]:
+    """`NO_ORACLE` entries whose C type the toolchain *can* now find.
+
+    An exemption saying "there is nothing to compare with" stops being true the
+    day the toolchain grows the header, and nothing else in this file would
+    notice — the type would simply never be checked again, quietly, for ever.
+
+    `table` is a parameter so `--self-test` can drive the failing direction. A
+    check whose failure path has never run is a check nobody knows the sign of;
+    that is the third time this file has needed the same sentence, which is why
+    every table in it now takes one.
+    """
+    entries = NO_ORACLE if table is None else table
+    out: list[str] = []
+    for ty, (why, probe) in sorted(entries.items()):
+        if probe is None:
+            continue
+        cty, hdr = probe
+        src = (
+            f"#define _GNU_SOURCE 1\n#include <{hdr}>\n#include <stddef.h>\n"
+            f"size_t probe(void) {{ return sizeof({cty}); }}\n"
+        )
+        msgs, err = compile_c(zig, src)
+        if not msgs and err is None:
+            out.append(
+                f"check-libc-abi: `{ty}` is listed in NO_ORACLE as having no C\n"
+                f"  definition, and `{cty}` from <{hdr}> now compiles. Give it a\n"
+                f"  real `abi!` entry and delete the exemption. Recorded as:\n"
+                f"  {why}"
+            )
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--self-test", "--selftest", action="store_true", dest="selftest")
@@ -411,7 +502,11 @@ def main() -> int:
         return self_test()
 
     if args.print_uncovered:
-        for t in sorted(boundary_types() - covered_types()):
+        # NO_ORACLE is subtracted here too. It was not, and regenerating
+        # the baseline from this put the five accounted-for types straight
+        # back into it -- reintroducing the very conflation between
+        # "unexamined" and "accounted for" that NO_ORACLE exists to end.
+        for t in sorted(boundary_types() - covered_types() - set(NO_ORACLE)):
             print(f'    "{t}",')
         return 0
 
@@ -438,6 +533,10 @@ def main() -> int:
             "machine that can build the image can run this."
         )
         return 1 if problems else 0
+
+    for msg in stale_no_oracle(zig):
+        print(msg)
+        problems += 1
 
     failed, other = compile_c(zig, emit_c())
     known_seen: set[str] = set()

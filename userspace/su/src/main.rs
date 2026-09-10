@@ -553,61 +553,17 @@ fn exec_as_user(
         cmd.current_dir(&target_home);
     }
 
-    // -----------------------------------------------------------------------
-    // Become the target user, for real.
+    // Become the target user, for real. Until 2026-09-10 this program checked
+    // the password and then ran the target's shell under *the caller's*
+    // credentials: the environment said `alice` and every file the shell
+    // created was owned by whoever ran `su`.
     //
-    // Until this change `su` authenticated the user and then ran their shell
-    // as *the caller*: `HOME`, `USER`, `LOGNAME` and `SHELL` all said `alice`
-    // and the process credentials said whatever they had said before. Every
-    // file the shell created was owned by the wrong account, and every
-    // permission check it passed was the caller's.
-    //
-    // `CommandExt::uid`/`gid` make `std` call `setgid` and then `setuid` in
-    // the child, between fork and exec. That order is required and is not
-    // ours to choose: lowering the uid first would discard the privilege
-    // needed to lower the gid, leaving the child in the target's user
-    // identity and the caller's group.
-    //
-    // # This was recorded as blocked, and is not
-    //
-    // `userspace/doas` carries the note that "the real privilege change will
-    // use the kernel's capability system once the POSIX exec layer supports
-    // `setuid`/`setgid` syscalls". That premise has fired: `posix::setuid` and
-    // `posix::setgid` apply real credentials through `set_real_credentials`
-    // and `getuid()` reflects them. They were stubs returning 0 once, which is
-    // presumably when the note was written -- and a stub that reports success
-    // is exactly what keeps a deferral looking current.
-    //
-    // # Supplementary groups are deliberately NOT reset here
-    //
-    // The matching call is `setgroups`, and `posix::setgroups` returns
-    // `ENOSYS` on purpose: the kernel implements it only in the Linux-ABI
-    // table and `posix/src/syscall.rs` has no native number for native libc to
-    // call. See
-    // `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
-    // Asking `std` for it here would make the child call `setgroups`, get
-    // `ENOSYS`, and abort before exec -- `su` would stop working entirely, so
-    // the honest options are "drop uid and gid" or "drop nothing".
-    //
-    // Leaving them is the textbook shape of the leak `posix::setgroups`'s own
-    // doc comment describes: a process that keeps the caller's supplementary
-    // groups and lowers only its uid still holds every group the caller was
-    // in. It is empty *today* -- `getgroups` reports none, so there is nothing
-    // to retain -- but that is a fact about the current kernel and not a
-    // guarantee, and it is the half of the drop that will silently stay
-    // undone. Tracked in `known-issues.md`
-    // (TD-B-USER-SWITCHING-PROGRAMS-CANNOT-RESET-SUPPLEMENTARY-GROUPS).
-    // Read only by the block below, which the host build compiles away. Not
-    // renamed to `_target_gid`: it is genuinely used on the target, and a
-    // leading underscore would tell the next reader the opposite.
-    #[cfg(not(unix))]
-    let _ = target_gid;
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        cmd.gid(target_gid);
-        cmd.uid(target_uid);
-    }
+    // The call lives in `authlib` because four other programs need the same
+    // two lines and one of them -- resetting supplementary groups -- is still
+    // missing system-wide. When lane A's `setgroups` syscall number lands it
+    // has to be added in one place rather than five. See
+    // `authlib::identity` for the ordering rule and what is missing.
+    authlib::identity::become_user(&mut cmd, target_uid, target_gid);
 
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),

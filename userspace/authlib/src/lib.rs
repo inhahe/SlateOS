@@ -14,6 +14,15 @@
 //! entry answers for a username, what a non-verifiable entry means, and
 //! whether the caller is even allowed to ask right now — lives here.
 //!
+//! # A second half, added 2026-09-10
+//!
+//! Verifying a password is only the first half of what these programs do; the
+//! second is *becoming* the user that was verified, and it had the same shape
+//! of problem. Five programs did it, none of them changed any credential the
+//! system checks, and the one piece still missing (`setgroups`, waiting on a
+//! kernel syscall number) needed a single place to land rather than five. See
+//! [`identity`].
+//!
 //! # What it is for
 //!
 //! Every "is this the password?" question on the system: the text-console
@@ -52,6 +61,7 @@
 #![deny(clippy::all, clippy::pedantic)]
 
 mod faillock;
+pub mod identity;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

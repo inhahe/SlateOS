@@ -2487,6 +2487,34 @@ extern "C" fn kernel_main() -> ! {
         case();
     }
 
+    {
+        #[inline(never)]
+        fn case() {
+            // The alternate signal stack, end to end in ring 3. Lane B's fixture;
+            // the kernel half it needs landed in 87ef09d0b. Eleven checks, and the
+            // two negatives are the reason it is worth running: a handler that did
+            // not ask for SA_ONSTACK, and one that asked with no stack registered,
+            // must NOT be relocated -- without those, the suite passes against an
+            // implementation that switches unconditionally, which would put every
+            // handler in the process on one 64 KiB buffer.
+            //
+            // Cannot hang, structurally: every signal is raised with raise(), which
+            // our libc dispatches in-process with no kernel round trip, no read and
+            // no sleep. The kernel side is bounded at 8000 yields regardless.
+            //
+            // Diagnostic, like the rungs above -- but note that severity governs the
+            // KERNEL and not the HARNESS (design-decisions.md 914): a failure here
+            // still reddens every lane's boot test, which is why this rung stayed on
+            // lane-a until a green run.
+            selftest::dispatch_debug(
+                "alternate signal stack (ring 3)",
+                selftest::Severity::Diagnostic,
+                proc::spawn::self_test_ctest_altstack(),
+            );
+        }
+        case();
+    }
+
     // DISABLED 2026-09-09, after it ran for the first time and failed.
     //
     // It is not disabled because it is wrong. It is disabled because it is

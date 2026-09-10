@@ -8984,6 +8984,149 @@ pub fn self_test_cctty() -> KernelResult<()> {
     Ok(())
 }
 
+/// Run `ctest-altstack` in ring 3: the alternate signal stack, end to end.
+///
+/// Lane B's fixture, requested in
+/// `requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md`. Eleven
+/// checks in three groups: that the reported state walks `SS_DISABLE` -> 0 ->
+/// `SS_ONSTACK` -> 0 as POSIX says; that a handler with `SA_ONSTACK` leaves its
+/// frames inside the registered region; and -- the group that makes the suite
+/// worth running -- that a handler *without* `SA_ONSTACK`, and one with it but
+/// no stack registered, leave their frames somewhere else.
+///
+/// Those two negatives are the point. Without them the suite passes against an
+/// implementation that switches unconditionally, which is a worse bug than the
+/// one it was written for: every handler in the process relocated onto a single
+/// 64 KiB buffer, including handlers that never asked and whose authors sized
+/// nothing for it.
+///
+/// **It cannot hang, and that claim is lane B's, checked rather than asserted.**
+/// Every signal here is raised with `raise()`, which in our libc calls
+/// `dispatch_self_signal` directly: synchronous, in-process, no kernel round
+/// trip, nothing read, nothing slept on. The worst case is a wrong exit code.
+/// The distinction matters because the previous fixture from the same lane
+/// arrived with "can fail but cannot hang" and then hung this boot test for two
+/// hours -- `O_NONBLOCK` was set on a descriptor the read arm never consulted.
+/// There is no read in this one at all, which is a structural argument rather
+/// than a promise about a flag.
+///
+/// The kernel-side bound stays anyway: a bounded yield loop, so a fixture that
+/// somehow never exits costs a reported failure and not a boot.
+///
+/// **What this does not cover.** The overflow case -- a handler running on the
+/// alternate stack *because the original one is gone* -- is not in the fixture
+/// yet. Lane B left it out deliberately while the kernel half was missing, since
+/// it would have failed by design rather than by regression. That half landed in
+/// `87ef09d0b`, so it can go in now; lane B said they would add it and I have
+/// told them it is unblocked. Until then this rung proves the decision and the
+/// libc path, not the recovery.
+pub fn self_test_ctest_altstack() -> KernelResult<()> {
+    let Some(ctest_elf) = pathz_test_elf("ctest-altstack", "ctest-altstack")? else {
+        return Ok(());
+    };
+
+    serial_println!(
+        "[spawn] Running alternate signal stack (ring 3, C, native ABI) integration test ({} bytes \
+         ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only after all eleven checks pass.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-altstack"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-altstack",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-altstack spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Bounded: every check in the fixture is synchronous, so reaching this
+    // ceiling means it stopped making progress rather than that it is waiting.
+    let mut became_zombie = false;
+    for _ in 0..8000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-altstack (ring 3) — expected Zombie, got {:?}. Every signal in \
+             this fixture is raised synchronously with no read and no sleep, so a non-zombie state \
+             is not a fixture waiting on something: it is a spin that stopped progressing",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        // The fixture numbers its checks 1-31 in source order and returns the
+        // first that failed, so the code localises the failure without needing
+        // any output from it. Grouping them is all the kernel can usefully add.
+        let hint = match exit_code {
+            Some(c) if (1..=11).contains(&c) => {
+                " — the reported sigaltstack state is wrong (the SS_DISABLE -> 0 \
+                 -> SS_ONSTACK -> 0 walk). This is the libc half and does not \
+                 involve frame placement"
+            }
+            Some(c) if (12..=21).contains(&c) => {
+                " — a handler with SA_ONSTACK did not leave its frames inside the \
+                 registered region, which is the kernel half this rung exists for: \
+                 deliver_pending_signal chose the interrupted stack when it should \
+                 have chosen the alternate one"
+            }
+            Some(c) if (22..=31).contains(&c) => {
+                " — a handler that did NOT ask for SA_ONSTACK, or asked with no \
+                 stack registered, had its frames placed on the alternate stack \
+                 anyway. That is the unconditional-switch bug, and it is worse \
+                 than the one this feature fixes: it relocates every handler in \
+                 the process onto one buffer"
+            }
+            _ => "",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ctest-altstack (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {}{hint}. See services/ctest-altstack/main.c, where the comment above each \
+             numbered check says what it means",
+            exit_code,
+            EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   alternate signal stack (ring 3, native ABI: sigaltstack's reported state walks \
+         SS_DISABLE/0/SS_ONSTACK/0, a handler with SA_ONSTACK runs inside the registered region, \
+         and handlers without it — or with it but no stack — do not): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of **pty-based `^C` signal delivery**.
 ///
 /// The fixture (`services/ctest-pty/`) opens a pty pair, forks, and the parent

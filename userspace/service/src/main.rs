@@ -433,6 +433,52 @@ fn cmd_status(name: &str) {
     }
 }
 
+/// Launch `exec` with no supervisor, returning the new process id.
+///
+/// # Why this spawns where `firejail` and `capsh` refuse
+///
+/// `design-decisions.md` 1019 asks what the caller loses if the program
+/// proceeds. Here the answer is *supervision* -- nothing will restart the
+/// service or track it for a later `service stop`. That is less than was
+/// asked for, but it is not a **constraint being withheld**: nobody is made
+/// less safe by the program running. `firejail` refuses because running
+/// unsandboxed is the one outcome its caller was trying to prevent; starting a
+/// service unsupervised is simply a weaker version of starting it.
+///
+/// So it runs, and says plainly what is missing. Until 2026-09-10 it printed
+/// `Would execute: /usr/sbin/foo` and returned 0, which told a script the
+/// service was up.
+///
+/// # Splitting
+///
+/// The `exec:` line is split on whitespace. That is the whole of it: there is
+/// no quote handling, so a path containing a space cannot be expressed, and
+/// `exec: "/usr/bin/foo --msg=hello world"` passes `world` as a separate
+/// argument. systemd's `ExecStart` does parse quotes; ours does not, and
+/// saying so here is better than a caller discovering it from a truncated
+/// argument.
+fn spawn_unsupervised(exec: &str) -> Result<u32, String> {
+    let (program, args) = split_exec(exec)?;
+    process::Command::new(program)
+        .args(args)
+        .spawn()
+        .map(|child| child.id())
+        .map_err(|e| format!("{program}: {e}"))
+}
+
+/// Split an `exec:` line into a program and its arguments.
+///
+/// Separate from [`spawn_unsupervised`] so the splitting can be tested without
+/// starting a process -- the limitation documented above is a behaviour worth
+/// pinning rather than rediscovering.
+fn split_exec(exec: &str) -> Result<(&str, Vec<&str>), String> {
+    let mut words = exec.split_whitespace();
+    let program = words
+        .next()
+        .ok_or_else(|| "the exec line is empty".to_string())?;
+    Ok((program, words.collect()))
+}
+
 fn cmd_start(name: &str) {
     print!("Starting {}... ", name);
     match send_service_command("START", name) {
@@ -446,9 +492,19 @@ fn cmd_start(name: &str) {
                 eprintln!("No exec path found for service {}", quoteaf_os(name));
                 process::exit(1);
             }
-            // The actual process spawn would use SYS_SPAWN here.
-            println!("Would execute: {exec_path}");
-            println!("(service manager not available for proper lifecycle management)");
+            match spawn_unsupervised(&exec_path) {
+                Ok(pid) => {
+                    println!("started {name} as pid {pid}, UNSUPERVISED");
+                    println!(
+                        "(no service manager: nothing will restart {name} if it \
+                         exits, and `service stop {name}` will not find it)"
+                    );
+                }
+                Err(e) => {
+                    eprintln!("service: cannot start {}: {e}", quoteaf_os(name));
+                    process::exit(1);
+                }
+            }
         }
     }
 }
@@ -709,6 +765,53 @@ fn main() {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_exec_line_splits_into_a_program_and_its_arguments() {
+        let (prog, args) = split_exec("/usr/sbin/sshd -D -e").expect("should split");
+        assert_eq!(prog, "/usr/sbin/sshd");
+        assert_eq!(args, vec!["-D", "-e"]);
+    }
+
+    #[test]
+    fn a_bare_program_has_no_arguments() {
+        let (prog, args) = split_exec("/bin/true").expect("should split");
+        assert_eq!(prog, "/bin/true");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn surrounding_and_repeated_whitespace_is_not_an_argument() {
+        let (prog, args) = split_exec("  /bin/foo   -a    -b  ").expect("should split");
+        assert_eq!(prog, "/bin/foo");
+        assert_eq!(args, vec!["-a", "-b"]);
+    }
+
+    #[test]
+    fn an_empty_exec_line_is_an_error_rather_than_an_empty_program() {
+        assert!(split_exec("").is_err());
+        assert!(split_exec("   ").is_err());
+    }
+
+    /// The documented limitation, pinned so it is a known behaviour rather
+    /// than a surprise: there is NO quote handling, so an argument containing
+    /// a space becomes two arguments and a quoted path keeps its quotes.
+    /// systemd's `ExecStart` parses quotes; this does not.
+    ///
+    /// The test exists to fail if someone adds quote handling without updating
+    /// the doc comment on `spawn_unsupervised`. That is the direction which
+    /// would otherwise go unnoticed, because the new behaviour is the one a
+    /// reader already expects.
+    #[test]
+    fn quotes_are_not_interpreted_and_that_is_deliberate() {
+        let (prog, args) =
+            split_exec("/bin/say --msg=\"hello world\"").expect("should split");
+        assert_eq!(prog, "/bin/say");
+        assert_eq!(args, vec!["--msg=\"hello", "world\""]);
+
+        let (prog, _) = split_exec("\"/opt/my app/bin\"").expect("should split");
+        assert_eq!(prog, "\"/opt/my");
+    }
 
     #[test]
     fn format_uptime_seconds() {

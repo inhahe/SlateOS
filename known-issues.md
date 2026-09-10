@@ -127163,3 +127163,42 @@ Nothing above chooses. The 27 in group 1 look like deletions and the 6 in
 group 2 look like the reverse, but *acting* on 39 commands is a user-visible
 policy and stays the operator's. What has changed is that it can now be decided
 from a table instead of from thirty-nine readings.
+
+
+## TD-B-EVERY-CFG-UNIX-BLOCK-IN-USERSPACE-IS-UNVERIFIED-BY-THE-TEST-LOOP (lane B, 2026-09-10)
+
+**In short:** code inside `#[cfg(unix)]` is never compiled by the command this
+project uses to test, so it can be broken -- not merely wrong, *uncompilable* --
+and every test still passes.
+
+**Why.** `cargo test --target x86_64-pc-windows-gnu` is the standing command in
+`CLAUDE.md` and in every lane's loop. On that target `cfg(unix)` is false, so
+the compiler never looks at those blocks. The real target,
+`x86_64-slateos`, *is* unix, so they are exactly the blocks that run on the
+machine and never on the test rig.
+
+**Found while** fixing `su -`'s login-shell `argv[0]`. The fix is one
+`cmd.arg0(...)` under `#[cfg(unix)]`; it compiled and tested clean on the host
+without the compiler having read it once.
+
+**It is checkable today, with no new tooling.**
+
+```
+cargo check -p su --target x86_64-unknown-linux-gnu
+```
+
+`x86_64-unknown-linux-gnu` is already installed on this machine
+(`rustup target list --installed`). Nothing in the tree appears to run it.
+
+**Who else is exposed.** Every `#[cfg(unix)]` block under `userspace/`,
+including `userspace/sshd`'s `cmd.arg0(login_argv0(...))` -- the call that
+proves the capability exists. Its own comment shows the author knew the host
+build could not see it and reasoned carefully about the `dead_code` allow
+instead, which is the best that could be done without a way to compile it.
+
+**The proper fix is a gate**, and it is small: `cargo check` each crate that
+contains `#[cfg(unix)]` against `x86_64-unknown-linux-gnu` in the pre-push hook,
+with the crate list *derived* by grepping for the attribute rather than
+enumerated. Not built in the same commit as the `su` fix because a gate that is
+wrong about which crates to check is worse than no gate, and getting that right
+is its own piece of work rather than a tail-end of this one.

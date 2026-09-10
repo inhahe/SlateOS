@@ -12,7 +12,7 @@
 //! │   ├── version          Kernel version string (read-only)
 //! │   ├── ostype           OS type identifier (read-only)
 //! │   ├── osrelease        OS release string (read-only)
-//! │   ├── hostname         System hostname (read/write)
+//! │   ├── hostname         System hostname (read-only; see write_file)
 //! │   └── ticks_per_sec    Timer tick rate (read-only)
 //! ├── params/
 //! │   ├── <name>           Sysctl parameters — one file per param (read/write)
@@ -52,8 +52,10 @@
 //! provides a filesystem-based alternative to the `SYS_SYSCTL_SET` syscall,
 //! which is convenient for shell scripts and interactive tuning.
 //!
-//! The hostname is stored in this module (not via sysctl) since it's
-//! a string, not a u64 — it doesn't fit the sysctl integer model.
+//! The hostname is NOT stored in this module.  It is read from
+//! `fs::nameservice`, the single store that `/proc/sys/kernel/hostname`,
+//! `uname(2)` and `gethostname` also read.  This file used to keep its own
+//! copy; see `hostname()` for what that cost.
 
 #![allow(dead_code)]
 
@@ -66,36 +68,33 @@ use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
 
-use crate::sync::PreemptSpinMutex as Mutex;
 
 // ---------------------------------------------------------------------------
 // Hostname state
 // ---------------------------------------------------------------------------
 
-/// System hostname.  Defaults to "mintos" until changed by writing
-/// to `/sys/kernel/hostname`.
-static HOSTNAME: Mutex<String> = Mutex::new(String::new());
-
-/// Get the current hostname.
+/// The hostname this file publishes.  Not stored here -- read from
+/// `fs::nameservice`, which is the one store.
+///
+/// Until 2026-09-10 this module kept `static HOSTNAME: Mutex<String>`, defaulting
+/// to "mintos", written by `/sys/kernel/hostname` and read by nothing else in the
+/// system.  Meanwhile `/proc/sys/kernel/hostname`, `uname(2)` and `gethostname`
+/// all read `fs::nameservice`, which defaults to "localhost".  So the two stores
+/// disagreed from the first instruction of boot, and writing this file changed a
+/// value no other publisher could see -- after which the machine answered
+/// `hostname` one way and `uname -n` the other.
+///
+/// It was not a private mistake.  `get_hostname()` was exported from this module
+/// `for use by other kernel subsystems` and had five callers: two kshell commands
+/// and, worse, three in `vmguest`, which reports the hostname TO THE HYPERVISOR.
+/// An orchestrator identifying this VM by name was told "mintos" regardless of
+/// what the system was actually called.  All five now read `fs::nameservice`.
+///
+/// This is the same defect `crate::uname` was written to end for `ostype`,
+/// `osrelease` and `version` on 2026-08-22 -- one value, several publishers, each
+/// with a private copy.  The hostname is the one that was missed that day.
 fn hostname() -> String {
-    let h = HOSTNAME.lock();
-    if h.is_empty() {
-        String::from("mintos")
-    } else {
-        h.clone()
-    }
-}
-
-/// Set the hostname.  Max 253 characters (DNS limit).
-fn set_hostname(name: &str) -> KernelResult<()> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() || trimmed.len() > 253 {
-        return Err(KernelError::InvalidArgument);
-    }
-    let mut h = HOSTNAME.lock();
-    h.clear();
-    h.push_str(trimmed);
-    Ok(())
+    crate::fs::nameservice::get_hostname()
 }
 
 // ---------------------------------------------------------------------------
@@ -1093,10 +1092,16 @@ impl FileSystem for SysFs {
         let rel = strip_root(path)?;
 
         match classify_path(rel) {
-            SysPath::KernelFile("hostname") => {
-                let text = core::str::from_utf8(data).map_err(|_| KernelError::InvalidArgument)?;
-                set_hostname(text)
-            }
+            // Read-only on purpose.  `SYS_HOSTNAME_SET` gates the hostname behind
+            // `Rights::SET_HOSTNAME` (design-decisions.md 927), and a capability
+            // check needs a process to check against -- which a filesystem write
+            // arriving here does not have.  Leaving this writable would mean the
+            // gate on the syscall could be walked around by anything that can
+            // open a file, which is ambient authority: exactly what this kernel's
+            // design rules out.  Note /sys/kernel/hostname is ours, not Linux's
+            // (Linux writes /proc/sys/kernel/hostname), so nothing portable
+            // depended on it being writable.
+            SysPath::KernelFile("hostname") => Err(KernelError::PermissionDenied),
             SysPath::ParamFile(name) => {
                 // Parse value as decimal u64.
                 let text = core::str::from_utf8(data).map_err(|_| KernelError::InvalidArgument)?;
@@ -1136,10 +1141,10 @@ impl FileSystem for SysFs {
         let perms = if entry.entry_type == EntryType::Directory {
             0o555
         } else {
-            // Writable for param files and hostname, read-only for others.
+            // Writable for param files only; see the write_file arm for hostname.
             let rel = strip_root(path)?;
             match classify_path(rel) {
-                SysPath::ParamFile(_) | SysPath::KernelFile("hostname") => 0o644,
+                SysPath::ParamFile(_) => 0o644,
                 _ => 0o444,
             }
         };
@@ -1200,11 +1205,6 @@ pub fn mount(mount_path: impl AsRef<Path>) -> KernelResult<()> {
 // Kshell integration: `sysctl` command
 // ---------------------------------------------------------------------------
 
-/// Get the current hostname for use by other kernel subsystems.
-#[must_use]
-pub fn get_hostname() -> String {
-    hostname()
-}
 
 // ---------------------------------------------------------------------------
 // Self-test
@@ -1279,21 +1279,45 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[sysfs]   {} == /proc{}: OK", sys_path, proc_path);
     }
 
-    // 3. Hostname read/write.
-    let h1 = fs.read_file(Path::new("/kernel/hostname"))?;
-    assert!(!h1.is_empty(), "hostname should not be empty");
-    serial_println!("[sysfs]   hostname read: OK");
-
-    fs.write_file(Path::new("/kernel/hostname"), b"test-host")?;
-    let h2 = fs.read_file(Path::new("/kernel/hostname"))?;
+    // 3. Hostname: every publisher is a view of one store.
+    //
+    //    Until 2026-09-10 this was a round trip -- write /kernel/hostname, read it
+    //    back, assert they match -- and it could not fail.  Both ends were a
+    //    private static in this module, so it agreed with itself whatever the rest
+    //    of the system believed, and the rest of the system believed something
+    //    else: /proc/sys/kernel/hostname and uname(2) read fs::nameservice.  A
+    //    round trip through one buffer is evidence about the buffer, and it reads
+    //    exactly like evidence about the system.  It is the same mistake as the
+    //    `ostype.starts_with(b"MintOS")` assertion described above, which is why
+    //    that comment is two hundred lines from this bug and did not prevent it.
+    //
+    //    What this asks instead is the question that was wrong: change the one
+    //    store, and check that BOTH files follow.
+    let original = crate::fs::nameservice::get_hostname();
+    crate::fs::nameservice::set_hostname("sysfs-selftest")?;
+    let ours = fs.read_file(Path::new("/kernel/hostname"))?;
+    let theirs = procfs.read_file(Path::new("/sys/kernel/hostname"))?;
+    // Restore before asserting, so a red run does not also leave the machine
+    // called sysfs-selftest for whatever runs next.
+    let restored = crate::fs::nameservice::set_hostname(&original);
+    let want = b"sysfs-selftest\n".to_vec();
     assert!(
-        h2.starts_with(b"test-host"),
-        "hostname should be 'test-host' after write"
+        ours == want && theirs == want,
+        "hostname publishers disagree: /sys/kernel/hostname = {ours:?}, \
+         /proc/sys/kernel/hostname = {theirs:?}, nameservice holds {want:?}"
     );
-    serial_println!("[sysfs]   hostname write: OK");
+    restored?;
+    serial_println!("[sysfs]   hostname == /proc/sys/kernel/hostname: OK");
 
-    // Restore default.
-    fs.write_file(Path::new("/kernel/hostname"), b"mintos")?;
+    // And the file refuses a write, because the capability-gated syscall is the
+    // only writer.  Asserted rather than assumed: a mode bit reading 0444 and a
+    // write_file that quietly succeeds look identical from a directory listing.
+    assert!(
+        fs.write_file(Path::new("/kernel/hostname"), b"nope").is_err(),
+        "/sys/kernel/hostname must refuse a write: SYS_HOSTNAME_SET gates the \
+         hostname, and an unguarded file write would walk around that check"
+    );
+    serial_println!("[sysfs]   hostname write refused: OK");
 
     // 4. Parameter files.
     let params_dir = fs.readdir(Path::new("/params"))?;

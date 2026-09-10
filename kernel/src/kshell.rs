@@ -125051,7 +125051,7 @@ fn cmd_uname(args: &str) {
         parts.push(alloc::string::String::from(crate::uname::SYSNAME));
     }
     if show_n {
-        parts.push(crate::fs::sysfs::get_hostname());
+        parts.push(crate::fs::nameservice::get_hostname());
     }
     if show_r {
         parts.push(alloc::string::String::from(crate::uname::RELEASE));
@@ -130398,7 +130398,7 @@ fn cmd_hostname(args: &str) {
 
     if name.is_empty() {
         // Show current hostname.
-        shell_println!("{}", crate::fs::sysfs::get_hostname());
+        shell_println!("{}", crate::fs::nameservice::get_hostname());
     } else {
         // Set hostname.
         match crate::fs::Vfs::write_file("/sys/kernel/hostname", name.as_bytes()) {

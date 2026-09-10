@@ -41,6 +41,12 @@
  *     is not. Checks 3 and 14.
  *   - **read-back-unchanged** — the kernel accepted the name and dropped it.
  *     Checks 6 and 17.
+ *   - **read-failed-after-a-successful-set** -- the set worked and the reader
+ *     could not run. Checks 22 and 23, split out of 6 and 17 on 2026-09-10
+ *     after a refused `open` of `/proc/sys/kernel/hostname` -- the rung held
+ *     `SET_HOSTNAME` but not `(File, READ)` -- spent a boot test looking like
+ *     the kernel dropping the name. Two faults, one exit code, three layers
+ *     between the symptom and the cause.
  *
  * The round trip is only evidence because its ends differ. See check 6 --
  * the write goes through `SYS_HOSTNAME_SET` and the read through
@@ -149,7 +155,7 @@ int main(void)
      * ---------------------------------------------------------------- */
     memset(orig_host, 0, sizeof orig_host);
     if (gethostname(orig_host, sizeof orig_host - 1) != 0)
-        return 1;
+        return 1; /* the read path is broken before anything was set */
     if (orig_host[0] == '\0')
         return 2;
 
@@ -199,8 +205,21 @@ int main(void)
      *    report of the original four tests that asserted the bug.)
      * ---------------------------------------------------------------- */
     memset(buf, 0, sizeof buf);
+    /*
+     * 22 vs 6: the READ FAILING and the read returning the WRONG NAME are
+     * different faults and used to share this exit code. Lane A spent a boot
+     * test separating them on 2026-09-10: their rung granted
+     * (Process, SET_HOSTNAME) but not (File, READ), so this program's open of
+     * /proc/sys/kernel/hostname was refused, libc fell back to a per-process
+     * buffer holding "localhost", and check 6 reported "the name did not
+     * change" -- true, and three layers away from the cause.
+     *
+     * libc no longer falls back, so a refused open now surfaces here as
+     * gethostname returning -1. That deserves its own code: 22 means the read
+     * path is broken, 6 means the store is.
+     */
     if (gethostname(buf, sizeof buf - 1) != 0)
-        FAIL(6);
+        FAIL(22);
     if (strcmp(buf, probe_host) != 0)
         FAIL(6);
 
@@ -294,10 +313,11 @@ int main(void)
     }
     domain_dirty = 1;
 
-    /* 17. Accepted and kept. */
+    /* 17. Accepted and kept; 23 if the read itself failed. Same split as
+     * 6 and 22, for the same reason. */
     memset(buf, 0, sizeof buf);
     if (getdomainname(buf, sizeof buf - 1) != 0)
-        FAIL(17);
+        FAIL(23);
     if (strcmp(buf, probe_domain) != 0)
         FAIL(17);
 

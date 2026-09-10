@@ -69,11 +69,6 @@ const PROC_VERSION: &[u8] = b"/proc/sys/kernel/version";
 const PROC_HOSTNAME: &[u8] = b"/proc/sys/kernel/hostname";
 const PROC_DOMAINNAME: &[u8] = b"/proc/sys/kernel/domainname";
 
-/// The persistent host name, read when procfs has no answer.  Same two-step
-/// order — live kernel value first, on-disk value second — that `hostname(1)`,
-/// `getty`, `logger` and `sysctl` use, so all of them report one name.
-const ETC_HOSTNAME: &[u8] = b"/etc/hostname";
-
 /// System identification structure.
 ///
 /// Returned by `uname()`.  Each field is a null-terminated C string.
@@ -265,9 +260,22 @@ pub extern "C" fn uname(buf: *mut Utsname) -> i32 {
     uts.domainname = [0u8; UTSNAME_LEN];
 
     fill_from_file(&mut uts.sysname, PROC_OSTYPE, FALLBACK_SYSNAME);
+    // One source, the same one `gethostname` reads.
+    //
+    // `ETC_HOSTNAME` used to sit between these two. It made `uname`'s
+    // `nodename` and `gethostname` capable of disagreeing: `/etc/hostname` is
+    // the PERSISTENT name, set at boot, and nothing keeps it in step with the
+    // live one afterwards -- so a machine renamed since boot reported its new
+    // name from `gethostname` and its old one from `uname`, and each was
+    // internally consistent.
+    //
+    // `services/ctest-hostname`'s check 8 exists to catch exactly that, and
+    // `current_hostname`'s own comment claims the two "cannot disagree". The
+    // claim was true of `gethostname` and false here, which is the shape of a
+    // comment describing one function while sitting above another.
     fill_from_files_or_local(
         &mut uts.nodename,
-        &[PROC_HOSTNAME, ETC_HOSTNAME],
+        &[PROC_HOSTNAME],
         crate::unistd::copy_hostname,
     );
     fill_from_file(&mut uts.release, PROC_OSRELEASE, FALLBACK_RELEASE);

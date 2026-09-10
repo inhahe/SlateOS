@@ -48,20 +48,25 @@ use std::io::{self, Write};
 
 const VERSION: &str = "0.1.0";
 
-/// Run directory for daemon state files.
-const RUN_DIR: &str = "/run/systemd/logind";
-
-/// Session state directory.
-const SESSION_DIR: &str = "/run/systemd/sessions";
-
-/// Seat state directory.
-const SEAT_DIR: &str = "/run/systemd/seats";
-
-/// User state directory.
-const USER_DIR: &str = "/run/systemd/users";
-
-/// Inhibitor lock directory.
-const INHIBIT_DIR: &str = "/run/systemd/inhibit";
+// The five `/run/systemd/*` directories this used to create at start-up are
+// gone, along with the constants that named them.
+//
+// Each was used exactly twice: its own definition, and one `create_dir_all` in
+// `main`. Nothing ever wrote a file into any of them and nothing anywhere in
+// the tree read one -- checked, not assumed. Their doc comments said "Session
+// state directory", "Seat state directory", "Inhibitor lock directory", and
+// described state this daemon does not keep on disk: sessions live in
+// `Daemon::sessions`, a `HashMap`, and are served over the service bus.
+//
+// An empty `/run/systemd/sessions` is not neutral. It is the directory a
+// person or a tool looks in to answer "what sessions are there", and finding
+// it present and empty answers "none" -- while there are sessions, in this
+// process's memory and in `/run/sessions`. A directory that exists is a claim
+// about where state lives, the same way `design-decisions.md` 1006 found that
+// a command that exists is a claim that it works.
+//
+// The larger problem this uncovered is not fixed here; it is written up as
+// `known-issues.md` -> B-TWO-SESSION-REGISTRIES.
 
 /// VT switching device path.
 const VT_MASTER: &str = "/dev/tty0";
@@ -1352,11 +1357,6 @@ fn run_daemon(args: &[String]) -> i32 {
             io::stderr(),
             "logind: would daemonize (not implemented in stub)"
         );
-    }
-
-    // Create runtime directories (best-effort).
-    for dir in &[RUN_DIR, SESSION_DIR, SEAT_DIR, USER_DIR, INHIBIT_DIR] {
-        let _ = std::fs::create_dir_all(dir);
     }
 
     let _ = writeln!(

@@ -340,10 +340,46 @@ pub struct MemInfo {
     pub swap_total_kib: Option<u64>,
     /// `SwapFree`.
     pub swap_free_kib: Option<u64>,
+    /// `Shmem` — memory held in tmpfs and shared mappings. `free` subtracts it
+    /// from the cache column, because a shared page is not reclaimable the way
+    /// a page-cache page is.
+    pub shmem_kib: Option<u64>,
+    /// `SReclaimable` — the reclaimable half of slab. `free` counts it as
+    /// buff/cache rather than as used.
+    pub sreclaimable_kib: Option<u64>,
+    /// `CommitLimit` — **never published by this kernel.** Always `None` here.
+    pub commit_limit_kib: Option<u64>,
+    /// `Committed_AS` — **never published by this kernel.** Always `None` here.
+    pub committed_as_kib: Option<u64>,
+    /// `HighTotal` — **never published by this kernel.** Always `None` here.
+    pub high_total_kib: Option<u64>,
+    /// `LowTotal` — **never published by this kernel.** Always `None` here.
+    pub low_total_kib: Option<u64>,
 }
 
 impl MemInfo {
     /// Parse `/proc/meminfo`.
+    ///
+    /// # Four of these fields are always `None` on SlateOS, on purpose
+    ///
+    /// `CommitLimit`, `Committed_AS`, `HighTotal` and `LowTotal` are parsed
+    /// because the format defines them and a parser should read what it is
+    /// given, but `kernel/src/fs/procfs.rs::gen_meminfo` deliberately does not
+    /// emit any of them, and its reasoning is worth not re-litigating from a
+    /// caller:
+    ///
+    /// - `High*`/`Low*` are a 32-bit-x86 concept. procps substitutes
+    ///   `LowTotal = MemTotal` when they are absent, which is the correct
+    ///   reading on a 64-bit machine — so a caller wanting `-l` output should
+    ///   do that substitution rather than print a zero.
+    /// - `CommitLimit`/`Committed_AS` exist only to report Linux's strict
+    ///   commit accounting (`overcommit_memory = 2`), which this kernel does
+    ///   not perform. Publishing `Committed_AS` without a limit would print a
+    ///   real numerator over a zero denominator in `free -v`, which reads as a
+    ///   machine committed past its limit.
+    ///
+    /// So `None` here means "this kernel does not account for that", not "the
+    /// read failed". A caller must not turn it into `0`.
     #[must_use]
     pub fn parse(content: &[u8]) -> Self {
         let pairs = parse_key_values(content);
@@ -361,6 +397,12 @@ impl MemInfo {
             cached_kib: field("Cached"),
             swap_total_kib: field("SwapTotal"),
             swap_free_kib: field("SwapFree"),
+            shmem_kib: field("Shmem"),
+            sreclaimable_kib: field("SReclaimable"),
+            commit_limit_kib: field("CommitLimit"),
+            committed_as_kib: field("Committed_AS"),
+            high_total_kib: field("HighTotal"),
+            low_total_kib: field("LowTotal"),
         }
     }
 

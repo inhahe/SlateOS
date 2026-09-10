@@ -9,13 +9,8 @@
 //! and swap configuration.
 
 #![deny(clippy::all)]
-// MemInfo::sreclaimable and FstabEntry::{mountpoint, options} mirror the
-// /proc/meminfo and /etc/fstab field vocabulary the real swapon must
-// consume. Dead-code lint cannot see across that future boundary.
-#![allow(dead_code)]
 
 use quoting::quotef_os;
-use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -27,7 +22,6 @@ use std::process;
 
 const VERSION: &str = "0.1.0";
 const PROC_SWAPS: &str = "/proc/swaps";
-const PROC_MEMINFO: &str = "/proc/meminfo";
 const FSTAB_PATH: &str = "/etc/fstab";
 
 // ============================================================================
@@ -54,14 +48,21 @@ struct MemInfo {
     swap_total: u64,
     swap_free: u64,
     shmem: u64,
+    /// Mirrors the `/proc/meminfo` vocabulary the real `swapon` must consume;
+    /// parsed and carried, not yet displayed.
+    #[allow(dead_code)]
     sreclaimable: u64,
 }
 
 /// Fstab entry.
 struct FstabEntry {
     device: String,
+    /// Mirrors the `/etc/fstab` field vocabulary; parsed, not yet used.
+    #[allow(dead_code)]
     mountpoint: String,
     fstype: String,
+    /// Mirrors the `/etc/fstab` field vocabulary; parsed, not yet used.
+    #[allow(dead_code)]
     options: String,
     _dump: u32,
     _pass: u32,
@@ -98,47 +99,32 @@ fn parse_proc_swaps() -> Vec<SwapEntry> {
 }
 
 fn parse_meminfo() -> MemInfo {
-    let content = match read_file(PROC_MEMINFO) {
-        Some(c) => c,
-        None => {
-            return MemInfo {
-                mem_total: 0,
-                mem_free: 0,
-                mem_available: 0,
-                buffers: 0,
-                cached: 0,
-                swap_total: 0,
-                swap_free: 0,
-                shmem: 0,
-                sreclaimable: 0,
-            };
-        }
-    };
-
-    let mut values: HashMap<String, u64> = HashMap::new();
-    for line in content.lines() {
-        if let Some(colon_pos) = line.find(':') {
-            let key = line[..colon_pos].trim().to_string();
-            let val_str = line[colon_pos + 1..].trim();
-            // Remove "kB" suffix if present.
-            let val_str = val_str.strip_suffix(" kB").unwrap_or(val_str);
-            let val_str = val_str.strip_suffix("kB").unwrap_or(val_str);
-            if let Ok(val) = val_str.trim().parse::<u64>() {
-                values.insert(key, val);
-            }
-        }
-    }
-
+    // Through `procinfo`, which is the same parse this did by hand: split on
+    // the colon, trim, strip the `kB`. The difference is that `parse_kib`
+    // refuses a unit it does not recognise instead of stripping what it knows
+    // and parsing whatever is left -- so a hypothetical `16 MB` reads as
+    // absent rather than as 16 KiB, which is the same number in the same font
+    // and off by 1024.
+    //
+    // Absent stays 0 here, as it did before, because every field this uses is
+    // one `gen_meminfo` publishes. The four it does not publish
+    // (CommitLimit, Committed_AS, HighTotal, LowTotal) are not read by this
+    // program, and `procinfo`'s doc explains why they must not be defaulted.
+    let m = procinfo::ProcFs::new()
+        .memory()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     MemInfo {
-        mem_total: values.get("MemTotal").copied().unwrap_or(0),
-        mem_free: values.get("MemFree").copied().unwrap_or(0),
-        mem_available: values.get("MemAvailable").copied().unwrap_or(0),
-        buffers: values.get("Buffers").copied().unwrap_or(0),
-        cached: values.get("Cached").copied().unwrap_or(0),
-        swap_total: values.get("SwapTotal").copied().unwrap_or(0),
-        swap_free: values.get("SwapFree").copied().unwrap_or(0),
-        shmem: values.get("Shmem").copied().unwrap_or(0),
-        sreclaimable: values.get("SReclaimable").copied().unwrap_or(0),
+        mem_total: m.total_kib.unwrap_or(0),
+        mem_free: m.free_kib.unwrap_or(0),
+        mem_available: m.available_kib.unwrap_or(0),
+        buffers: m.buffers_kib.unwrap_or(0),
+        cached: m.cached_kib.unwrap_or(0),
+        swap_total: m.swap_total_kib.unwrap_or(0),
+        swap_free: m.swap_free_kib.unwrap_or(0),
+        shmem: m.shmem_kib.unwrap_or(0),
+        sreclaimable: m.sreclaimable_kib.unwrap_or(0),
     }
 }
 

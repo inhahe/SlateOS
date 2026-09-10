@@ -110,12 +110,22 @@ struct _DaemonConfig {
 
 // ── Device discovery ───────────────────────────────────────────────────
 
+// `simulated_devices` used to sit below this: a "System Firmware" at version
+// 1.0.0 with a plausible well-formed GUID and an `updatable` flag, plus a USB
+// hub. It was returned whenever the device directory could not be read or held
+// nothing -- which is to say, normally.
+//
+// A firmware updater that invents devices invites a firmware write to one of
+// them. The flags said `updatable` and `needs-reboot`, and nothing downstream
+// could tell the entry from a device that exists. `fwupdmgr get-devices` now
+// reports what it enumerated, which where there is no device directory is
+// nothing.
+
 fn discover_devices() -> Vec<Device> {
-    // Read from fwupd device directory or return simulated hardware
     let device_dir = format!("{}/devices", FWUPD_DIR);
     let entries = match std::fs::read_dir(&device_dir) {
         Ok(e) => e,
-        Err(_) => return simulated_devices(),
+        Err(_) => return Vec::new(),
     };
 
     let mut devices = Vec::new();
@@ -128,9 +138,6 @@ fn discover_devices() -> Vec<Device> {
         }
     }
 
-    if devices.is_empty() {
-        return simulated_devices();
-    }
     devices
 }
 
@@ -162,54 +169,6 @@ fn parse_device_file(path: &std::path::Path) -> Option<Device> {
         _update_state: UpdateState::Unknown,
         _checksum: map.get("Checksum").cloned().unwrap_or_default(),
     })
-}
-
-fn simulated_devices() -> Vec<Device> {
-    vec![
-        Device {
-            id: "a]system-firmware-0001".to_string(),
-            name: "System Firmware".to_string(),
-            vendor: "Slate OS Project".to_string(),
-            version: "1.0.0".to_string(),
-            _version_lowest: "0.9.0".to_string(),
-            guid: vec!["230c8b18-8d9b-53ec-838b-6cfc0571051b".to_string()],
-            _flags: vec![
-                "internal".to_string(),
-                "updatable".to_string(),
-                "needs-reboot".to_string(),
-            ],
-            plugin: "uefi_capsule".to_string(),
-            _icon: "computer".to_string(),
-            _update_state: UpdateState::Unknown,
-            _checksum: String::new(),
-        },
-        Device {
-            id: "b]usb-device-0001".to_string(),
-            name: "USB Hub".to_string(),
-            vendor: "Generic".to_string(),
-            version: "2.1.3".to_string(),
-            _version_lowest: "2.0.0".to_string(),
-            guid: vec!["12345678-abcd-ef01-2345-6789abcdef01".to_string()],
-            _flags: vec!["updatable".to_string()],
-            plugin: "usb".to_string(),
-            _icon: "usb".to_string(),
-            _update_state: UpdateState::Unknown,
-            _checksum: String::new(),
-        },
-        Device {
-            id: "c]thunderbolt-controller-0001".to_string(),
-            name: "Thunderbolt Controller".to_string(),
-            vendor: "Intel".to_string(),
-            version: "41.0".to_string(),
-            _version_lowest: "20.0".to_string(),
-            guid: vec!["fedcba98-7654-3210-fedc-ba9876543210".to_string()],
-            _flags: vec!["internal".to_string(), "updatable".to_string()],
-            plugin: "thunderbolt".to_string(),
-            _icon: "thunderbolt".to_string(),
-            _update_state: UpdateState::Unknown,
-            _checksum: String::new(),
-        },
-    ]
 }
 
 fn read_remotes() -> Vec<Remote> {
@@ -671,6 +630,69 @@ fn main() {
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // Sample hardware, for the tests that need some
+    // -----------------------------------------------------------------------
+    //
+    // These were production functions until 2026-09-10, returning invented
+    // hardware whenever the real source could not be read -- which on this
+    // kernel was every run. A few tests borrowed them because they needed
+    // something to iterate over, and that borrowing gave the fabrications a
+    // second set of callers keeping them alive.
+    //
+    // Inside `#[cfg(test)]` they are fine: a test may invent a machine,
+    // because it is asking whether a rule holds over some data and the answer
+    // does not depend on the data being real. The program may not, because it
+    // is reporting what the machine is.
+
+    fn sample_devices() -> Vec<Device> {
+        vec![
+            Device {
+                id: "a]system-firmware-0001".to_string(),
+                name: "System Firmware".to_string(),
+                vendor: "Slate OS Project".to_string(),
+                version: "1.0.0".to_string(),
+                _version_lowest: "0.9.0".to_string(),
+                guid: vec!["230c8b18-8d9b-53ec-838b-6cfc0571051b".to_string()],
+                _flags: vec![
+                    "internal".to_string(),
+                    "updatable".to_string(),
+                    "needs-reboot".to_string(),
+                ],
+                plugin: "uefi_capsule".to_string(),
+                _icon: "computer".to_string(),
+                _update_state: UpdateState::Unknown,
+                _checksum: String::new(),
+            },
+            Device {
+                id: "b]usb-device-0001".to_string(),
+                name: "USB Hub".to_string(),
+                vendor: "Generic".to_string(),
+                version: "2.1.3".to_string(),
+                _version_lowest: "2.0.0".to_string(),
+                guid: vec!["12345678-abcd-ef01-2345-6789abcdef01".to_string()],
+                _flags: vec!["updatable".to_string()],
+                plugin: "usb".to_string(),
+                _icon: "usb".to_string(),
+                _update_state: UpdateState::Unknown,
+                _checksum: String::new(),
+            },
+            Device {
+                id: "c]thunderbolt-controller-0001".to_string(),
+                name: "Thunderbolt Controller".to_string(),
+                vendor: "Intel".to_string(),
+                version: "41.0".to_string(),
+                _version_lowest: "20.0".to_string(),
+                guid: vec!["fedcba98-7654-3210-fedc-ba9876543210".to_string()],
+                _flags: vec!["internal".to_string(), "updatable".to_string()],
+                plugin: "thunderbolt".to_string(),
+                _icon: "thunderbolt".to_string(),
+                _update_state: UpdateState::Unknown,
+                _checksum: String::new(),
+            },
+        ]
+    }
+
     #[test]
     fn test_update_state_display() {
         assert_eq!(format!("{}", UpdateState::Unknown), "unknown");
@@ -689,11 +711,15 @@ mod tests {
     }
 
     #[test]
-    fn test_simulated_devices() {
-        let devices = simulated_devices();
-        assert_eq!(devices.len(), 3);
-        assert!(devices.iter().any(|d| d.name == "System Firmware"));
-        assert!(devices.iter().any(|d| d.name == "USB Hub"));
+    /// A firmware updater with nothing enumerated reports nothing.
+    ///
+    /// This asserted a "System Firmware" and a "USB Hub" existed -- inviting a
+    /// firmware write to a device that does not.
+    fn devices_are_reported_only_where_there_are_any() {
+        assert!(
+            discover_devices().is_empty(),
+            "firmware devices reported without enumerating any"
+        );
     }
 
     #[test]
@@ -704,10 +730,21 @@ mod tests {
         assert!(!remotes[1].enabled);
     }
 
+    /// `discover_devices` reports what it enumerated.
+    ///
+    /// This asserted the list was NON-empty, and passed on every machine --
+    /// because `simulated_devices` supplied a "System Firmware" whenever the
+    /// device directory could not be read. A test that could only ever have
+    /// been satisfied by invented hardware.
     #[test]
     fn test_discover_devices() {
-        let devices = discover_devices();
-        assert!(!devices.is_empty());
+        let dir = format!("{}/devices", FWUPD_DIR);
+        let exists = std::path::Path::new(&dir).is_dir();
+        assert_eq!(
+            discover_devices().is_empty(),
+            !exists,
+            "firmware devices reported without a {dir} to enumerate"
+        );
     }
 
     #[test]
@@ -718,7 +755,7 @@ mod tests {
 
     #[test]
     fn test_device_has_guid() {
-        let devices = simulated_devices();
+        let devices = sample_devices();
         for d in &devices {
             assert!(!d.guid.is_empty(), "Device {} has no GUID", d.name);
         }
@@ -726,7 +763,7 @@ mod tests {
 
     #[test]
     fn test_device_has_plugin() {
-        let devices = simulated_devices();
+        let devices = sample_devices();
         for d in &devices {
             assert!(!d.plugin.is_empty(), "Device {} has no plugin", d.name);
         }

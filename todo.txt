@@ -56713,3 +56713,39 @@ code names the cause -- `services/ctest-hostname/main.c` is the authoritative
 mapping and lane A has the ranges.
 
 `lane-b-ctest-hostname-hold` is deleted, locally and on the remote.
+
+================================================================================
+WORKING PRACTICE: never derive a COUNT from a command that was truncated
+================================================================================
+
+Three times on 2026-09-10 a claim in a commit message was wrong because the
+grep behind it ended in `| head -N` and returned exactly N results. Each time
+the truncation was invisible, because a full result set and a truncated one
+look identical -- N lines, no marker, no warning.
+
+  * "six meminfo hand-parsers, five converted, one deliberately not."
+    `head -12` returned twelve files. There were nine parsers, not six; top,
+    vmstat and sysstat were cut off. Going back for them found sysstat's seven
+    fabricated fallbacks, so the error cost nothing in the end -- but the
+    commit message was published wrong.
+
+  * "systemctl's simulated_units is called from four places."
+    `head -6` returned six lines, two of which were the definitions. There were
+    ten callers. The four missed included `is-active`, which is the one a
+    script branches on and the most consequential subcommand in the crate.
+
+  * The `/proc/meminfo` file count "went up from 8 to 12 while the parsers went
+    down from 6 to 1" -- true, but only noticed because the second run was
+    unbounded.
+
+**The rule.** `| head -N` is for SAMPLING, never for COUNTING. If a number is
+going into a commit message, a notice to another lane, or a decision about what
+to change, produce it with `wc -l` or a script that prints the total, and let
+the listing be separate. If a listing must be capped, say "first N of M" and
+get M.
+
+This is the same defect class the tree is full of -- `head -10` hid an existing
+`since()` test on 2026-09-09 and produced a duplicate plus a comment asserting
+no coverage existed -- and it is worth writing down because knowing about it
+did not stop me repeating it three times in one session. The fix is mechanical
+(don't pipe a count through head), not attentional.

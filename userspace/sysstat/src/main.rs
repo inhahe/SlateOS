@@ -185,51 +185,7 @@ fn read_cpu_stats() -> Vec<CpuStat> {
             return stats;
         }
     }
-    fallback_cpu_stats()
-}
-
-fn fallback_cpu_stats() -> Vec<CpuStat> {
-    vec![
-        CpuStat {
-            name: "cpu".to_string(),
-            user: 50000,
-            nice: 1000,
-            system: 20000,
-            idle: 900000,
-            iowait: 5000,
-            irq: 500,
-            softirq: 200,
-            steal: 0,
-            guest: 0,
-            guest_nice: 0,
-        },
-        CpuStat {
-            name: "cpu0".to_string(),
-            user: 25000,
-            nice: 500,
-            system: 10000,
-            idle: 450000,
-            iowait: 2500,
-            irq: 250,
-            softirq: 100,
-            steal: 0,
-            guest: 0,
-            guest_nice: 0,
-        },
-        CpuStat {
-            name: "cpu1".to_string(),
-            user: 25000,
-            nice: 500,
-            system: 10000,
-            idle: 450000,
-            iowait: 2500,
-            irq: 250,
-            softirq: 100,
-            steal: 0,
-            guest: 0,
-            guest_nice: 0,
-        },
-    ]
+    Vec::new()
 }
 
 fn compute_cpu_usage(prev: &CpuStat, curr: &CpuStat) -> CpuUsage {
@@ -254,6 +210,44 @@ fn compute_cpu_usage(prev: &CpuStat, curr: &CpuStat) -> CpuUsage {
         idle: ((curr.idle.saturating_sub(prev.idle)) as f64 / d) * 100.0,
     }
 }
+
+// ---------------------------------------------------------------------------
+// There were seven `fallback_*` functions here, and they invented measurements
+// ---------------------------------------------------------------------------
+//
+// `fallback_cpu_stats`, `fallback_meminfo`, `fallback_diskstats`,
+// `fallback_net_dev`, `fallback_process_stats`, `fallback_cifs_stats` and
+// `fallback_tape_stats`. Each returned plausible figures when its `/proc`
+// source could not be read, and this program's entire purpose is reporting
+// *measured* system activity.
+//
+// `fallback_net_dev` is the one to hold in mind. It returned an `eth0` with
+// 50 MB received, 100,000 packets, **5 receive errors and 2 drops** -- an
+// interface that does not exist, carrying a plausible fault count. Somebody
+// diagnosing packet loss would have found those five errors and gone looking.
+// `fallback_meminfo` returned a 16 GiB machine with 4 GiB free.
+//
+// THREE OF THEM FIRED ON EVERY RUN. `/proc/net/dev`, `/proc/scsi/tape` and the
+// CIFS stats path are not served by this kernel at all -- no entry for any of
+// them in `kernel/src/fs/procfs.rs` -- so `sar -n DEV` reported invented
+// network counters as measurements, always, not in some degraded corner case.
+//
+// AND SEVEN TESTS ASSERTED THEM. `test_fallback_net_dev` checked
+// `stats[1].iface == "eth0"`, which is a test certifying that the program
+// fabricates, and passing.
+//
+// The readers now return nothing -- an empty `Vec`, or `MemInfo::default()`
+// for the one that returns a struct. Both printers already guard on
+// `total_kb > 0`, so a zeroed memory row costs no division and is visibly not
+// a machine: no real system has zero total memory, where every one of them
+// could have had 16 GiB.
+//
+// Why this survived `scripts/audit-cli-fabrication.py`, which exists to find
+// exactly this: that gate exonerates a whole crate on any single I/O marker,
+// and `sysstat` genuinely reads `/proc/stat` and `/proc/meminfo`. Its own
+// docstring says so -- "any single I/O call anywhere in a crate exonerates
+// every invented answer beside it, so this number has always been a floor".
+// This is what that sentence looks like in a program.
 
 // ---------------------------------------------------------------------------
 // Memory statistics
@@ -314,24 +308,7 @@ fn read_meminfo() -> MemInfo {
             return info;
         }
     }
-    fallback_meminfo()
-}
-
-fn fallback_meminfo() -> MemInfo {
-    MemInfo {
-        total_kb: 16384000,
-        free_kb: 4096000,
-        available_kb: 10240000,
-        buffers_kb: 512000,
-        cached_kb: 6144000,
-        swap_total_kb: 8192000,
-        swap_free_kb: 8000000,
-        active_kb: 5000000,
-        inactive_kb: 4000000,
-        dirty_kb: 128,
-        slab_kb: 300000,
-        committed_kb: 6000000,
-    }
+    MemInfo::default()
 }
 
 // ---------------------------------------------------------------------------
@@ -385,40 +362,7 @@ fn read_diskstats() -> Vec<DiskStat> {
             return stats;
         }
     }
-    fallback_diskstats()
-}
-
-fn fallback_diskstats() -> Vec<DiskStat> {
-    vec![
-        DiskStat {
-            name: "sda".to_string(),
-            reads_completed: 15000,
-            reads_merged: 500,
-            sectors_read: 600000,
-            _read_time_ms: 3000,
-            writes_completed: 8000,
-            writes_merged: 1200,
-            sectors_written: 320000,
-            _write_time_ms: 5000,
-            _io_in_progress: 0,
-            io_time_ms: 6000,
-            weighted_io_time_ms: 8000,
-        },
-        DiskStat {
-            name: "sda1".to_string(),
-            reads_completed: 10000,
-            reads_merged: 300,
-            sectors_read: 400000,
-            _read_time_ms: 2000,
-            writes_completed: 5000,
-            writes_merged: 800,
-            sectors_written: 200000,
-            _write_time_ms: 3000,
-            _io_in_progress: 0,
-            io_time_ms: 4000,
-            weighted_io_time_ms: 5000,
-        },
-    ]
+    Vec::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -466,34 +410,7 @@ fn read_net_dev() -> Vec<NetDevStat> {
             return stats;
         }
     }
-    fallback_net_dev()
-}
-
-fn fallback_net_dev() -> Vec<NetDevStat> {
-    vec![
-        NetDevStat {
-            iface: "lo".to_string(),
-            rx_bytes: 1024000,
-            rx_packets: 5000,
-            rx_errors: 0,
-            rx_dropped: 0,
-            tx_bytes: 1024000,
-            tx_packets: 5000,
-            tx_errors: 0,
-            tx_dropped: 0,
-        },
-        NetDevStat {
-            iface: "eth0".to_string(),
-            rx_bytes: 50000000,
-            rx_packets: 100000,
-            rx_errors: 5,
-            rx_dropped: 2,
-            tx_bytes: 30000000,
-            tx_packets: 80000,
-            tx_errors: 1,
-            tx_dropped: 0,
-        },
-    ]
+    Vec::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -643,53 +560,9 @@ fn read_process_stats(target_pid: Option<u64>) -> Vec<ProcessStat> {
     }
 
     if stats.is_empty() {
-        return fallback_process_stats();
+        return Vec::new();
     }
     stats
-}
-
-fn fallback_process_stats() -> Vec<ProcessStat> {
-    vec![
-        ProcessStat {
-            pid: 1,
-            comm: "init".to_string(),
-            _state: 'S',
-            utime: 100,
-            stime: 50,
-            _num_threads: 1,
-            vsize_kb: 4096,
-            rss_pages: 256,
-            cpu_num: Some(0),
-            read_bytes: 1024000,
-            write_bytes: 512000,
-        },
-        ProcessStat {
-            pid: 42,
-            comm: "kworker".to_string(),
-            _state: 'S',
-            utime: 500,
-            stime: 200,
-            _num_threads: 4,
-            vsize_kb: 8192,
-            rss_pages: 512,
-            cpu_num: Some(1),
-            read_bytes: 2048000,
-            write_bytes: 1024000,
-        },
-        ProcessStat {
-            pid: 100,
-            comm: "bash".to_string(),
-            _state: 'S',
-            utime: 300,
-            stime: 100,
-            _num_threads: 1,
-            vsize_kb: 16384,
-            rss_pages: 1024,
-            cpu_num: Some(0),
-            read_bytes: 512000,
-            write_bytes: 256000,
-        },
-    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -755,20 +628,7 @@ fn read_cifs_stats() -> Vec<CifsStat> {
             return stats;
         }
     }
-    fallback_cifs_stats()
-}
-
-fn fallback_cifs_stats() -> Vec<CifsStat> {
-    vec![CifsStat {
-        share: "\\\\server\\share".to_string(),
-        reads: 1500,
-        read_bytes: 48000000,
-        writes: 800,
-        write_bytes: 24000000,
-        opens: 200,
-        closes: 195,
-        locks: 10,
-    }]
+    Vec::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -807,19 +667,7 @@ fn read_tape_stats() -> Vec<TapeStat> {
             return stats;
         }
     }
-    fallback_tape_stats()
-}
-
-fn fallback_tape_stats() -> Vec<TapeStat> {
-    vec![TapeStat {
-        name: "st0".to_string(),
-        reads: 500,
-        read_kb: 512000,
-        writes: 300,
-        write_kb: 307200,
-        resets: 2,
-        other: 10,
-    }]
+    Vec::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -827,9 +675,23 @@ fn fallback_tape_stats() -> Vec<TapeStat> {
 // ---------------------------------------------------------------------------
 
 fn print_system_header(out: &mut impl Write, tool: &str) {
-    let hostname = read_file_lines("/proc/sys/kernel/hostname")
-        .and_then(|l| l.first().cloned())
-        .unwrap_or_else(|| "slateos".to_string());
+    // `sar`'s report header names the machine the figures came from, so a
+    // wrong name here misattributes a whole report. This used to fall back to
+    // the literal "slateos" -- a plausible machine name printed by a program
+    // that did not know the machine's name. `(unknown)` cannot be mistaken for
+    // one. Through `libcall` because `gethostname` is an `extern "C"` entry
+    // point and the `posix` rlib's copy never reaches the kernel
+    // (`design-decisions.md` 768).
+    let hostname = {
+        let mut buf = [0u8; libcall::HOST_NAME_MAX + 1];
+        libcall::hostname_into(&mut buf)
+            .ok()
+            .and_then(|n| buf.get(..n).map(<[u8]>::to_vec))
+            .and_then(|b| String::from_utf8(b).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "(unknown)".to_string())
+    };
     let release = read_file_lines("/proc/sys/kernel/osrelease")
         .and_then(|l| l.first().cloned())
         .unwrap_or_else(|| "0.1.0".to_string());
@@ -2390,57 +2252,126 @@ mod tests {
     // Fallback data
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn test_fallback_cpu_stats() {
-        let stats = fallback_cpu_stats();
-        assert!(!stats.is_empty());
-        assert_eq!(stats[0].name, "cpu");
-        assert!(stats.len() >= 3);
+    // -----------------------------------------------------------------------
+    // Sample data for the printers
+    // -----------------------------------------------------------------------
+    //
+    // These were the production `fallback_*` functions until 2026-09-10, and
+    // three printer tests borrowed them because they needed some numbers to
+    // format. That borrowing is why the fabrications had a second reason to
+    // exist and a second set of callers to survive.
+    //
+    // They live in `#[cfg(test)]` now, which is where invented numbers belong:
+    // a test may make up a machine, because it is asking "does this row format
+    // correctly", and the answer does not depend on the machine being real.
+    // The program may not, because it is asking "what is this machine doing".
+
+    fn sample_meminfo() -> MemInfo {
+        MemInfo {
+            total_kb: 16_384_000,
+            free_kb: 4_096_000,
+            available_kb: 10_240_000,
+            buffers_kb: 512_000,
+            cached_kb: 6_144_000,
+            swap_total_kb: 8_192_000,
+            swap_free_kb: 8_000_000,
+            active_kb: 5_000_000,
+            inactive_kb: 4_000_000,
+            dirty_kb: 128,
+            slab_kb: 300_000,
+            committed_kb: 6_000_000,
+        }
     }
 
-    #[test]
-    fn test_fallback_meminfo() {
-        let mem = fallback_meminfo();
-        assert!(mem.total_kb > 0);
-        assert!(mem.free_kb > 0);
-        assert!(mem.total_kb > mem.free_kb);
+    fn sample_diskstats() -> Vec<DiskStat> {
+        vec![DiskStat {
+            name: "sda".to_string(),
+            ..DiskStat::default()
+        }]
     }
 
-    #[test]
-    fn test_fallback_diskstats() {
-        let stats = fallback_diskstats();
-        assert!(!stats.is_empty());
-        assert_eq!(stats[0].name, "sda");
+    fn sample_cpu_stats() -> Vec<CpuStat> {
+        vec![CpuStat {
+            name: "cpu".to_string(),
+            user: 50_000,
+            nice: 1_000,
+            system: 20_000,
+            idle: 900_000,
+            iowait: 5_000,
+            irq: 500,
+            softirq: 200,
+            steal: 0,
+            guest: 0,
+            guest_nice: 0,
+        }]
     }
 
+    /// A reader returns data exactly when its source exists.
+    ///
+    /// Stated against the filesystem rather than against a `cfg`, because the
+    /// property is about the machine and not about the compilation target --
+    /// and because a `cfg(not(unix))` assertion is one this crate's own Linux
+    /// gate would never run. `/proc/scsi/tape` and the CIFS stats path are
+    /// absent on the SlateOS kernel, on the Windows host, and on the Linux
+    /// box that gate uses; `/proc/net/dev` is absent on the first two and
+    /// present on the third, which is exactly why the assertion has to ask.
+    ///
+    /// What this used to be able to say is nothing at all: with the
+    /// fabrications in place every one of these returned data on every
+    /// platform, source or no source.
     #[test]
-    fn test_fallback_net_dev() {
-        let stats = fallback_net_dev();
-        assert!(!stats.is_empty());
-        assert_eq!(stats[0].iface, "lo");
-        assert_eq!(stats[1].iface, "eth0");
+    fn a_reader_returns_data_only_when_its_source_exists() {
+        for (path, empty) in [
+            ("/proc/net/dev", read_net_dev().is_empty()),
+            ("/proc/scsi/tape", read_tape_stats().is_empty()),
+        ] {
+            let exists = std::path::Path::new(path).exists();
+            assert_eq!(
+                empty, !exists,
+                "{path} exists={exists} but the reader returned empty={empty}"
+            );
+        }
+        // CIFS reads a directory of per-share files, so "the path exists" is
+        // not the same question; an empty mount table is the ordinary case.
+        assert!(
+            read_cifs_stats().is_empty(),
+            "no CIFS share is mounted anywhere this runs"
+        );
     }
 
+    /// Memory that cannot be read is zero, which is impossible, rather than
+    /// 16 GiB, which is not.
+    ///
+    /// Zero total memory cannot be mistaken for a reading; the printers
+    /// already guard on `total_kb > 0`, so it costs no division either. The
+    /// value this replaces was a 16 GiB machine with 4 GiB free, which is a
+    /// perfectly ordinary thing for a real host to be.
     #[test]
-    fn test_fallback_process_stats() {
-        let stats = fallback_process_stats();
-        assert!(stats.len() >= 3);
-        assert_eq!(stats[0].pid, 1);
-        assert_eq!(stats[0].comm, "init");
+    fn memory_that_cannot_be_read_is_not_a_plausible_machine() {
+        let mem = read_meminfo();
+        if std::path::Path::new("/proc/meminfo").exists() {
+            assert!(mem.total_kb > 0, "a real /proc/meminfo reported no memory");
+        } else {
+            assert_eq!(mem.total_kb, 0, "invented a machine with no source");
+            assert_eq!(mem.free_kb, 0);
+        }
     }
 
+    /// The readers that do have a source still return one.
+    ///
+    /// Asserted so that "returns nothing" is attributable to the source being
+    /// absent rather than to a reader that has stopped working -- which would
+    /// look identical from the empty vector.
     #[test]
-    fn test_fallback_cifs_stats() {
-        let stats = fallback_cifs_stats();
-        assert!(!stats.is_empty());
-        assert!(stats[0].share.contains("server"));
-    }
-
-    #[test]
-    fn test_fallback_tape_stats() {
-        let stats = fallback_tape_stats();
-        assert!(!stats.is_empty());
-        assert_eq!(stats[0].name, "st0");
+    fn the_cpu_and_disk_readers_follow_their_sources_too() {
+        assert_eq!(
+            read_cpu_stats().is_empty(),
+            !std::path::Path::new("/proc/stat").exists()
+        );
+        assert_eq!(
+            read_diskstats().is_empty(),
+            !std::path::Path::new("/proc/diskstats").exists()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2465,10 +2396,22 @@ mod tests {
         assert_eq!(parse_meminfo_value("MemTotal: abc kB"), None);
     }
 
+    /// `read_meminfo` returns what the system has, which on a host is
+    /// nothing.
+    ///
+    /// This asserted `mem.total_kb > 0` and passed on a machine with no
+    /// `/proc/meminfo` at all -- because `fallback_meminfo` handed it a 16 GiB
+    /// machine. The test was green, and what it demonstrated was that the
+    /// program fabricates.
     #[test]
-    fn test_read_meminfo_returns_data() {
+    fn read_meminfo_reports_what_the_system_has() {
         let mem = read_meminfo();
-        assert!(mem.total_kb > 0);
+        if !std::path::Path::new("/proc/meminfo").exists() {
+            assert_eq!(
+                mem.total_kb, 0,
+                "no /proc/meminfo here, so nothing to report"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2490,10 +2433,19 @@ mod tests {
         assert!(parse_diskstat_line(line).is_none());
     }
 
+    /// Same for the disks: an empty list where there is no `/proc/diskstats`.
+    ///
+    /// This asserted the list was non-empty and passed on a host with no
+    /// `/proc` because `fallback_diskstats` invented an `sda`.
     #[test]
-    fn test_read_diskstats_returns_data() {
+    fn read_diskstats_reports_what_the_system_has() {
         let stats = read_diskstats();
-        assert!(!stats.is_empty());
+        if !std::path::Path::new("/proc/diskstats").exists() {
+            assert!(
+                stats.is_empty(),
+                "no /proc/diskstats here, so no disks to report"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2523,10 +2475,21 @@ mod tests {
         assert!(parse_netdev_line(line).is_none());
     }
 
+    /// And the interfaces -- the sharpest of the three.
+    ///
+    /// This asserted `!stats.is_empty()` and passed **everywhere**, including
+    /// on SlateOS, because `/proc/net/dev` is served by no kernel here and
+    /// `fallback_net_dev` supplied an `lo` and an `eth0` with five receive
+    /// errors. A test named `returns_data` that could only ever have been
+    /// satisfied by invented data.
     #[test]
-    fn test_read_net_dev_returns_data() {
-        let stats = read_net_dev();
-        assert!(!stats.is_empty());
+    fn read_net_dev_reports_what_the_system_has() {
+        let exists = std::path::Path::new("/proc/net/dev").exists();
+        assert_eq!(
+            read_net_dev().is_empty(),
+            !exists,
+            "interfaces reported without a /proc/net/dev to read them from"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2905,7 +2868,7 @@ mod tests {
     #[test]
     fn test_print_mem_row() {
         let mut buf = Vec::new();
-        let mem = fallback_meminfo();
+        let mem = sample_meminfo();
         print_mem_row(&mut buf, "12:00:00 PM", &mem);
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("4096000"));
@@ -3034,8 +2997,8 @@ mod tests {
     #[test]
     fn test_print_io_transfer_row() {
         let mut buf = Vec::new();
-        let prev = fallback_diskstats();
-        let curr = fallback_diskstats();
+        let prev = sample_diskstats();
+        let curr = sample_diskstats();
         print_io_transfer_row(&mut buf, "12:00:00 PM", &prev, &curr, 1.0);
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("0.00"));
@@ -3044,8 +3007,8 @@ mod tests {
     #[test]
     fn test_print_iostat_cpu() {
         let mut buf = Vec::new();
-        let prev = fallback_cpu_stats();
-        let curr = fallback_cpu_stats();
+        let prev = sample_cpu_stats();
+        let curr = sample_cpu_stats();
         print_iostat_cpu(&mut buf, &prev, &curr);
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("avg-cpu"));
@@ -3374,9 +3337,14 @@ mod tests {
         let args = vec!["1".to_string(), "1".to_string()];
         run_mpstat(&args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
+        // The header is unconditional; the `all` row needs CPUs to average.
         assert!(output.contains("Slate OS"));
         assert!(output.contains("%usr"));
-        assert!(output.contains("all"));
+        assert_eq!(
+            output.contains("all"),
+            std::path::Path::new("/proc/stat").exists(),
+            "mpstat's aggregate row disagreed with whether /proc/stat exists"
+        );
     }
 
     #[test]
@@ -3390,7 +3358,16 @@ mod tests {
         ];
         run_mpstat(&args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("all"));
+        // The `all` aggregate row exists only when there are CPUs to
+        // aggregate, and that depends on /proc/stat rather than on the
+        // compilation target. Without it mpstat prints its header alone,
+        // which is the honest output and used to be a row of invented
+        // jiffies.
+        assert_eq!(
+            output.contains("all"),
+            std::path::Path::new("/proc/stat").exists(),
+            "mpstat's aggregate row disagreed with whether /proc/stat exists"
+        );
     }
 
     #[test]

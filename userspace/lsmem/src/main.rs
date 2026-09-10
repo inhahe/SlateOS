@@ -194,21 +194,22 @@ fn merge_blocks(blocks: &[MemoryBlock]) -> Vec<MemoryRange> {
     ranges
 }
 
-/// Get total memory from /proc/meminfo as fallback.
+/// Total system memory in bytes, from `/proc/meminfo`, as a fallback when
+/// sysfs has no memory blocks to list.
+///
+/// Through `procinfo` rather than a fourth hand-written `MemTotal:` parser.
+/// The one this replaces accepted `kB` and `KB` but not a bare number, and
+/// silently returned 0 for anything else -- including a value in `MB`, which
+/// would have been off by a factor of 1024 in the direction that looks
+/// plausible. `procinfo::parse_kib` refuses a unit it does not know rather
+/// than guessing, which is the property worth sharing.
 fn get_meminfo_total() -> u64 {
-    if let Ok(content) = fs::read_to_string("/proc/meminfo") {
-        for line in content.lines() {
-            if let Some(val) = line.strip_prefix("MemTotal:") {
-                let val = val.trim();
-                if let Some(kb_str) = val.strip_suffix("kB").or_else(|| val.strip_suffix("KB"))
-                    && let Ok(kb) = kb_str.trim().parse::<u64>()
-                {
-                    return kb * 1024;
-                }
-            }
-        }
-    }
-    0
+    procinfo::ProcFs::new()
+        .memory()
+        .ok()
+        .flatten()
+        .and_then(|m| m.total_kib)
+        .map_or(0, |kib| kib.saturating_mul(1024))
 }
 
 // ============================================================================

@@ -16,7 +16,6 @@ use std::process;
 // ── Constants ──────────────────────────────────────────────────────────
 
 const NUMA_BASE: &str = "/sys/devices/system/node";
-const PROC_MEMINFO: &str = "/proc/meminfo";
 
 // ── Data structures ────────────────────────────────────────────────────
 
@@ -193,22 +192,18 @@ fn read_topology() -> NumaTopology {
 }
 
 fn fallback_topology() -> NumaTopology {
-    // Read /proc/meminfo for total system memory
-    let (total, free) = match std::fs::read_to_string(PROC_MEMINFO) {
-        Ok(s) => {
-            let mut total = 0u64;
-            let mut free = 0u64;
-            for line in s.lines() {
-                if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    total = parse_meminfo_kb(rest);
-                } else if let Some(rest) = line.strip_prefix("MemFree:") {
-                    free = parse_meminfo_kb(rest);
-                }
-            }
-            (total, free)
-        }
-        Err(_) => (0, 0),
-    };
+    // Total system memory, through `procinfo` rather than a hand-written
+    // `MemTotal:`/`MemFree:` scan. Absent stays 0, which is what the caller
+    // showed before and what a single unnamed node means here.
+    let mem = procinfo::ProcFs::new().memory().ok().flatten();
+    let total = mem
+        .as_ref()
+        .and_then(|m| m.total_kib)
+        .map_or(0, |kib| kib.saturating_mul(1024));
+    let free = mem
+        .as_ref()
+        .and_then(|m| m.free_kib)
+        .map_or(0, |kib| kib.saturating_mul(1024));
 
     let ncpus = std::thread::available_parallelism()
         .map(|n| n.get() as u32)

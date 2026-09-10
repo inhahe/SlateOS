@@ -93,10 +93,19 @@ impl std::fmt::Display for RfkillType {
 
 // ── Device discovery ───────────────────────────────────────────────────
 
+// `simulated_devices` used to be here: a `phy0` WLAN, a Bluetooth and a WWAN
+// device, all with `soft_blocked: false`.
+//
+// It fired whenever `/sys/class/rfkill` could not be read, which on this
+// kernel is every run -- sysfs serves no `rfkill` entry. So `rfkill list`
+// always reported three radios and always reported them UNBLOCKED, having
+// looked at nothing. Someone checking whether they had disabled their
+// wireless would have been told, confidently, that they had not.
+
 fn read_devices() -> Vec<RfkillDevice> {
     let entries = match std::fs::read_dir(RFKILL_DIR) {
         Ok(e) => e,
-        Err(_) => return simulated_devices(),
+        Err(_) => return Vec::new(),
     };
 
     let mut devices = Vec::new();
@@ -135,40 +144,11 @@ fn read_devices() -> Vec<RfkillDevice> {
     }
 
     if devices.is_empty() {
-        return simulated_devices();
+        return Vec::new();
     }
 
     devices.sort_by_key(|d| d.id);
     devices
-}
-
-fn simulated_devices() -> Vec<RfkillDevice> {
-    vec![
-        RfkillDevice {
-            id: 0,
-            device_type: RfkillType::Wlan,
-            name: "phy0".to_string(),
-            soft_blocked: false,
-            hard_blocked: false,
-            _persistent: false,
-        },
-        RfkillDevice {
-            id: 1,
-            device_type: RfkillType::Bluetooth,
-            name: "hci0".to_string(),
-            soft_blocked: false,
-            hard_blocked: false,
-            _persistent: false,
-        },
-        RfkillDevice {
-            id: 2,
-            device_type: RfkillType::Wwan,
-            name: "wwan0".to_string(),
-            soft_blocked: true,
-            hard_blocked: false,
-            _persistent: true,
-        },
-    ]
 }
 
 fn read_sysfs(path: &std::path::Path) -> Option<String> {
@@ -528,18 +508,31 @@ mod tests {
     }
 
     #[test]
-    fn test_simulated_devices() {
-        let devices = simulated_devices();
-        assert_eq!(devices.len(), 3);
-        assert_eq!(devices[0].device_type, RfkillType::Wlan);
-        assert_eq!(devices[1].device_type, RfkillType::Bluetooth);
-        assert_eq!(devices[2].device_type, RfkillType::Wwan);
+    /// No rfkill sysfs means no radios, not three unblocked ones.
+    ///
+    /// This asserted three devices with `soft_blocked: false`, which is a test
+    /// certifying that the tool tells you your wireless is enabled without
+    /// having looked.
+    fn radios_are_reported_only_where_there_are_any() {
+        let exists = std::path::Path::new("/sys/class/rfkill").exists();
+        assert_eq!(
+            read_devices().is_empty(),
+            !exists,
+            "radios reported without a /sys/class/rfkill to read them from"
+        );
     }
 
     #[test]
     fn test_read_devices() {
+        // Asserted NON-empty before, and passed everywhere, because
+        // `simulated_devices` supplied three radios whenever
+        // /sys/class/rfkill could not be read.
         let devices = read_devices();
-        assert!(!devices.is_empty());
+        assert_eq!(
+            devices.is_empty(),
+            !std::path::Path::new("/sys/class/rfkill").exists(),
+            "radios reported without a /sys/class/rfkill"
+        );
     }
 
     #[test]

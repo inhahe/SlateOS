@@ -54,7 +54,6 @@ const BEL: &str = "\x07";
 const SHELL: &str = "/bin/sh";
 
 /// Hostname file path.
-const PROC_HOSTNAME: &str = "/proc/sys/kernel/hostname";
 const ETC_HOSTNAME: &str = "/etc/hostname";
 
 // ============================================================================
@@ -62,6 +61,7 @@ const ETC_HOSTNAME: &str = "/etc/hostname";
 // ============================================================================
 
 /// Parsed command-line configuration.
+#[derive(Debug)]
 struct Config {
     /// Interval between runs in seconds.
     interval: f64,
@@ -118,7 +118,25 @@ fn print_usage() {
 /// Parse command-line arguments into a `Config`.
 ///
 /// Returns `None` if the program should exit (help/version were printed).
-fn parse_args(args: &[String]) -> Option<Config> {
+/// Parse the command line.
+///
+/// # Three outcomes, and they used to be two channels
+///
+/// * `Ok(Some(cfg))` -- run this.
+/// * `Ok(None)` -- `--help` or `--version` was printed; exit 0.
+/// * `Err(message)` -- a bad argument; the caller prints it and exits 1.
+///
+/// This returned `Option<Config>` and called `process::exit(1)` from **six**
+/// places inside itself. So the signature described one failure mechanism
+/// while the body used another, and every argument error was untestable: a
+/// test that passed `-n` with nothing after it did not get a value back, it
+/// took the whole test binary down with it. That is how these six paths came
+/// to have no tests at all.
+///
+/// Behaviour is unchanged -- the same messages, the same exit codes, in the
+/// same order. What moved is *where* the process ends, which is now `main`,
+/// once.
+fn parse_args(args: &[String]) -> Result<Option<Config>, String> {
     let mut cfg = Config {
         interval: DEFAULT_INTERVAL,
         differences: false,
@@ -139,16 +157,15 @@ fn parse_args(args: &[String]) -> Option<Config> {
         match arg {
             "-h" | "--help" | "help" => {
                 print_usage();
-                return None;
+                return Ok(None);
             }
             "-v" | "--version" => {
                 println!("watch (Slate OS) {VERSION}");
-                return None;
+                return Ok(None);
             }
             "-n" | "--interval" => {
                 if i + 1 >= args.len() {
-                    eprintln!("watch: -n/--interval requires a numeric argument");
-                    process::exit(1);
+                    return Err("watch: -n/--interval requires a numeric argument".to_string());
                 }
                 i += 1;
                 match args[i].parse::<f64>() {
@@ -156,11 +173,10 @@ fn parse_args(args: &[String]) -> Option<Config> {
                         cfg.interval = val;
                     }
                     _ => {
-                        eprintln!(
+                        return Err(format!(
                             "watch: invalid interval {} (must be a positive number)",
                             quoteaf_os(&args[i])
-                        );
-                        process::exit(1);
+                        ));
                     }
                 }
             }
@@ -198,11 +214,10 @@ fn parse_args(args: &[String]) -> Option<Config> {
                                             cfg.interval = val;
                                         }
                                         _ => {
-                                            eprintln!(
+                                            return Err(format!(
                                                 "watch: invalid interval {} (must be a positive number)",
                                                 quoteaf_os(rest)
-                                            );
-                                            process::exit(1);
+                                            ));
                                         }
                                     }
                                 } else if i + 1 < args.len() {
@@ -212,16 +227,14 @@ fn parse_args(args: &[String]) -> Option<Config> {
                                             cfg.interval = val;
                                         }
                                         _ => {
-                                            eprintln!(
+                                            return Err(format!(
                                                 "watch: invalid interval {} (must be a positive number)",
                                                 quoteaf_os(&args[i])
-                                            );
-                                            process::exit(1);
+                                            ));
                                         }
                                     }
                                 } else {
-                                    eprintln!("watch: -n requires a numeric argument");
-                                    process::exit(1);
+                                    return Err("watch: -n requires a numeric argument".to_string());
                                 }
                                 // After processing 'n' (possibly with inline
                                 // value), remaining chars were already consumed
@@ -251,25 +264,43 @@ fn parse_args(args: &[String]) -> Option<Config> {
     }
 
     if cfg.command.is_empty() {
-        eprintln!("watch: no command specified");
-        eprintln!("Try 'watch --help' for more information.");
-        process::exit(1);
+        return Err(
+            "watch: no command specified\nTry 'watch --help' for more information.".to_string(),
+        );
     }
 
-    Some(cfg)
+    Ok(Some(cfg))
 }
 
 // ============================================================================
 // Hostname helper
 // ============================================================================
 
-/// Read the system hostname for the header line.
+/// The system hostname for the header line, or a marker that is visibly not a
+/// hostname.
+///
+/// # What this replaces
+///
+/// It read `/proc/sys/kernel/hostname`, then `/etc/hostname`, and if neither
+/// gave anything it returned **`"localhost"`** -- a perfectly plausible
+/// machine name, printed by a program that did not know the machine's name.
+/// Nothing downstream could tell that from a machine actually called
+/// `localhost`.
+///
+/// Nine programs in `userspace/` read that file directly and, when the read
+/// failed, gave five different answers between them: an empty string,
+/// `unknown`, `slateos`, `localhost` and `null`. Two of those five are
+/// inventions. This is one of the two.
+///
+/// It now asks `gethostname(3)` through [`libcall`], which is the POSIX
+/// accessor and reads the same file `uname`'s `nodename` does, so the two
+/// cannot disagree. `/etc/hostname` remains as a fallback because it is the
+/// *persistent* name and is genuinely a second source rather than a guess.
+/// The last resort is `(unknown)`, which is not a hostname a machine could
+/// have -- the parentheses are the point.
 fn read_hostname() -> String {
-    if let Ok(content) = std::fs::read_to_string(PROC_HOSTNAME) {
-        let trimmed = content.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
+    if let Some(name) = ask_libc_for_hostname() {
+        return name;
     }
     if let Ok(content) = std::fs::read_to_string(ETC_HOSTNAME) {
         let trimmed = content.trim();
@@ -277,7 +308,29 @@ fn read_hostname() -> String {
             return trimmed.to_string();
         }
     }
-    "localhost".to_string()
+    UNKNOWN_HOSTNAME.to_string()
+}
+
+/// What to print when no source knows the machine's name.
+///
+/// Parenthesised so that it cannot be mistaken for a name: a machine may be
+/// called `localhost` or `unknown`, but none is called `(unknown)`.
+const UNKNOWN_HOSTNAME: &str = "(unknown)";
+
+/// `gethostname(3)`, or `None` if it declines.
+///
+/// Through `libcall` rather than `posix` as a Rust dependency: the rlib copy
+/// of the libc has its syscalls stubbed out, so the Rust path would answer
+/// from a library that never reached the kernel (`design-decisions.md` 768).
+fn ask_libc_for_hostname() -> Option<String> {
+    let mut buf = [0u8; libcall::HOST_NAME_MAX + 1];
+    let n = libcall::hostname_into(&mut buf).ok()?;
+    let name = core::str::from_utf8(buf.get(..n)?).ok()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 // ============================================================================
@@ -671,13 +724,147 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     let cfg = match parse_args(&args) {
-        Some(c) => c,
-        None => {
+        Ok(Some(c)) => c,
+        Ok(None) => {
             // Help or version was printed; exit cleanly.
             process::exit(0);
+        }
+        Err(message) => {
+            // The one place the process ends over a bad argument. It used to
+            // be six places inside `parse_args`.
+            eprintln!("{message}");
+            process::exit(1);
         }
     };
 
     let code = run_watch(&cfg);
     process::exit(code);
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(rest: &[&str]) -> Vec<String> {
+        core::iter::once("watch")
+            .chain(rest.iter().copied())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The marker printed when no source knows the machine's name cannot be
+    /// mistaken for a machine's name.
+    ///
+    /// This is the whole point of the change that added it. `read_hostname`
+    /// used to fall back to `"localhost"`, which is a name a machine can
+    /// actually have -- so a header reading `localhost` was indistinguishable
+    /// from one on a machine really called that. A hostname may contain
+    /// letters, digits, hyphens and dots and nothing else, so the parentheses
+    /// are what make this unambiguous rather than the word inside them.
+    #[test]
+    fn the_unknown_marker_is_not_a_possible_hostname() {
+        assert!(UNKNOWN_HOSTNAME.contains('('));
+        assert!(
+            !UNKNOWN_HOSTNAME
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'),
+            "{UNKNOWN_HOSTNAME} is spelled like a hostname could be"
+        );
+    }
+
+    /// On the host there is no Slate kernel, so libc declines and the caller
+    /// falls through rather than being handed a guess.
+    #[cfg(not(unix))]
+    #[test]
+    fn the_host_has_no_libc_hostname_to_give() {
+        assert_eq!(ask_libc_for_hostname(), None);
+    }
+
+    #[test]
+    fn the_default_interval_is_two_seconds_and_the_command_is_the_rest() {
+        let cfg = parse_args(&argv(&["uptime"])).unwrap().unwrap();
+        assert!((cfg.interval - DEFAULT_INTERVAL).abs() < f64::EPSILON);
+        assert_eq!(cfg.command, vec!["uptime".to_string()]);
+    }
+
+    #[test]
+    fn an_interval_is_taken_from_the_following_argument() {
+        let cfg = parse_args(&argv(&["-n", "0.5", "date"])).unwrap().unwrap();
+        assert!((cfg.interval - 0.5).abs() < f64::EPSILON);
+        assert_eq!(cfg.command, vec!["date".to_string()]);
+    }
+
+    /// An interval with no argument after it is refused rather than defaulted.
+    ///
+    /// This test is the reason `parse_args` returns a `Result` at all. It used
+    /// to call `process::exit(1)` here, so this assertion did not fail -- it
+    /// terminated the test binary, and the six argument-error paths could not
+    /// be tested at all.
+    #[test]
+    fn an_interval_flag_with_nothing_after_it_is_refused() {
+        let err = parse_args(&argv(&["-n"])).unwrap_err();
+        assert!(err.contains("numeric argument"), "{err}");
+    }
+
+    /// Every shape of a bad interval is refused, and says which value it
+    /// refused.
+    #[test]
+    fn a_bad_interval_is_refused_in_each_of_its_spellings() {
+        for args in [
+            vec!["-n", "zero", "date"],
+            vec!["-n", "-1", "date"],
+            vec!["-n", "0", "date"],
+            vec!["-nzero", "date"],
+        ] {
+            let err = parse_args(&argv(&args)).unwrap_err();
+            assert!(
+                err.contains("invalid interval") || err.contains("numeric argument"),
+                "{args:?} gave {err}"
+            );
+        }
+    }
+
+    /// A command is required.
+    #[test]
+    fn no_command_is_refused_with_a_pointer_to_help() {
+        let err = parse_args(&argv(&[])).unwrap_err();
+        assert!(err.contains("no command specified"), "{err}");
+        assert!(err.contains("--help"), "{err}");
+    }
+
+    /// `--help` and `--version` are not errors.
+    #[test]
+    fn help_and_version_report_success_with_nothing_to_run() {
+        assert!(parse_args(&argv(&["--help"])).unwrap().is_none());
+        assert!(parse_args(&argv(&["--version"])).unwrap().is_none());
+    }
+
+    #[test]
+    fn flags_set_their_fields_and_do_not_join_the_command() {
+        let cfg = parse_args(&argv(&["-d", "-t", "-b", "ls", "-l"]))
+            .unwrap()
+            .unwrap();
+        assert!(cfg.differences);
+        assert!(cfg.no_title);
+        assert!(cfg.beep);
+        assert_eq!(cfg.command, vec!["ls".to_string(), "-l".to_string()]);
+    }
+
+    /// Everything after the command is the command's, including things that
+    /// look like watch's own flags.
+    ///
+    /// `watch -n 1 ls -d` runs `ls -d`; it does not turn on watch's
+    /// difference highlighting.
+    #[test]
+    fn a_flag_after_the_command_belongs_to_the_command() {
+        let cfg = parse_args(&argv(&["-n", "1", "ls", "-d"]))
+            .unwrap()
+            .unwrap();
+        assert!(!cfg.differences, "-d after the command was taken by watch");
+        assert_eq!(cfg.command, vec!["ls".to_string(), "-d".to_string()]);
+    }
 }

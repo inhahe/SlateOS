@@ -3,6 +3,8 @@
 //! Usage: uptime
 //!   Reads /proc/uptime for system uptime information.
 
+use coreutils::diag;
+use coreutils::errmsg::strerror;
 use coreutils::stdfd;
 use std::fs;
 use std::process::ExitCode;
@@ -16,21 +18,62 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
-    match fs::read_to_string("/proc/uptime") {
-        Ok(content) => println!("{}", format_uptime_line(&content)),
-        Err(_) => println!("uptime: cannot read /proc/uptime"),
+    let content = match fs::read_to_string("/proc/uptime") {
+        Ok(c) => c,
+        Err(e) => {
+            // This printed `uptime: cannot read /proc/uptime` with `println!`
+            // and then returned SUCCESS. Three things wrong at once, and the
+            // first two are the ones that reach a script:
+            //
+            //   * the diagnostic went to STDOUT, so `up=$(uptime)` captured
+            //     the error message where the uptime should be;
+            //   * the exit status was 0, so `uptime || echo failed` never
+            //     printed anything; and
+            //   * it named no reason, so a permission problem and a missing
+            //     file read identically.
+            //
+            // All three in a crate whose `main` is a funnel for exactly this
+            // discipline -- `stdfd::close_stderr` exists to turn a diagnostic
+            // that could not be *written* into a failure status, while this
+            // one was not written to stderr at all.
+            diag!("uptime: cannot read /proc/uptime: {}", strerror(&e));
+            return ExitCode::FAILURE;
+        }
+    };
+    match format_uptime_line(&content) {
+        Some(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        None => {
+            diag!("uptime: /proc/uptime is not a number of seconds");
+            ExitCode::FAILURE
+        }
     }
-
-    ExitCode::SUCCESS
 }
 
-/// Format `/proc/uptime` content into the human-readable line we print.
-fn format_uptime_line(content: &str) -> String {
+/// Format `/proc/uptime` content into the human-readable line we print, or
+/// `None` if the file does not begin with a number of seconds.
+///
+/// # Why this is an `Option` now
+///
+/// It returned a `String` unconditionally: an empty file gave
+/// `"up (unknown)"`, which is honest, but a *malformed* one went through
+/// `secs_str.parse().unwrap_or(0.0)` and printed `up 00:00`. That is a
+/// machine that booted this minute -- a plausible reading of a real system,
+/// produced from a file that said nothing of the kind, and indistinguishable
+/// from the true answer on a freshly-booted host.
+///
+/// The empty case is folded in with it: `up (unknown)` was the right shape but
+/// still exited 0 and still printed to stdout, so a caller could not act on it
+/// either.
+fn format_uptime_line(content: &str) -> Option<String> {
     let parts: Vec<&str> = content.split_whitespace().collect();
-    let Some(secs_str) = parts.first() else {
-        return "up (unknown)".to_string();
-    };
-    let total_secs: f64 = secs_str.parse().unwrap_or(0.0);
+    let secs_str = parts.first()?;
+    let total_secs: f64 = secs_str.parse().ok()?;
+    if !total_secs.is_finite() || total_secs < 0.0 {
+        return None;
+    }
     let (days, hours, mins) = split_uptime(total_secs);
     let mut out = String::from("up ");
     if days > 0 {
@@ -38,7 +81,7 @@ fn format_uptime_line(content: &str) -> String {
         out.push_str(&format!("{days} day{suffix}, "));
     }
     out.push_str(&format!("{hours:02}:{mins:02}"));
-    out
+    Some(out)
 }
 
 /// Break a total-seconds count into `(days, hours, mins)` for display.
@@ -117,51 +160,72 @@ mod tests {
     #[test]
     fn format_basic_seconds() {
         // 60 seconds -> "up 00:01".
-        assert_eq!(format_uptime_line("60.0 30.0"), "up 00:01");
+        assert_eq!(
+            format_uptime_line("60.0 30.0"),
+            Some("up 00:01".to_string())
+        );
     }
 
     #[test]
     fn format_one_day_singular() {
         let s = format!("{} 0", 86400);
-        assert_eq!(format_uptime_line(&s), "up 1 day, 00:00");
+        assert_eq!(format_uptime_line(&s), Some("up 1 day, 00:00".to_string()));
     }
 
     #[test]
     fn format_two_days_plural() {
         let total = 2 * 86400 + 3 * 3600 + 5 * 60;
         let s = format!("{total} 0");
-        assert_eq!(format_uptime_line(&s), "up 2 days, 03:05");
+        assert_eq!(format_uptime_line(&s), Some("up 2 days, 03:05".to_string()));
     }
 
     #[test]
     fn format_empty_returns_unknown() {
-        assert_eq!(format_uptime_line(""), "up (unknown)");
+        assert_eq!(
+            format_uptime_line(""),
+            None,
+            "an empty /proc/uptime is a failure to report, not an uptime to print"
+        );
     }
 
     #[test]
     fn format_garbage_first_field_is_zero() {
-        assert_eq!(format_uptime_line("garbage 0"), "up 00:00");
+        // This test used to assert `"up 00:00"` -- that garbage input
+        // produces a machine which booted this minute. It certified the
+        // defect: a plausible reading of a real system, generated from a
+        // file that said nothing of the kind, and indistinguishable from
+        // the true answer on a freshly-booted host.
+        assert_eq!(
+            format_uptime_line("garbage 0"),
+            None,
+            "a first field that is not a number is a failure, not zero seconds"
+        );
+        assert_eq!(format_uptime_line("nan 0"), None);
+        assert_eq!(format_uptime_line("-1 0"), None);
     }
 
     #[test]
     fn format_just_seconds_no_idle() {
-        assert_eq!(format_uptime_line("120"), "up 00:02");
+        assert_eq!(format_uptime_line("120"), Some("up 00:02".to_string()));
     }
 
     #[test]
     fn format_multiple_whitespace() {
-        assert_eq!(format_uptime_line("60.0   30.0"), "up 00:01");
+        assert_eq!(
+            format_uptime_line("60.0   30.0"),
+            Some("up 00:01".to_string())
+        );
     }
 
     #[test]
     fn format_zero_seconds() {
-        assert_eq!(format_uptime_line("0 0"), "up 00:00");
+        assert_eq!(format_uptime_line("0 0"), Some("up 00:00".to_string()));
     }
 
     #[test]
     fn format_almost_one_day_no_days_prefix() {
         let total = 86399; // 23:59:59
         let s = format!("{total} 0");
-        assert_eq!(format_uptime_line(&s), "up 23:59");
+        assert_eq!(format_uptime_line(&s), Some("up 23:59".to_string()));
     }
 }

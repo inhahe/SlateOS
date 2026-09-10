@@ -319,32 +319,61 @@ fn get_user_info(username: &str) -> UserInfo {
     }
 }
 
+/// The `up …` field of the header line.
+///
+/// Returns `(unknown)` rather than a duration when `/proc/uptime` cannot be
+/// read or does not begin with a number. It used to return **`"up  0:00"`** --
+/// a machine that booted within the last minute, which is a perfectly ordinary
+/// thing for a real system to say and gave a caller no way to tell the two
+/// apart.
 fn get_uptime_str() -> String {
-    if let Ok(content) = std::fs::read_to_string("/proc/uptime")
-        && let Some(secs_str) = content.split_whitespace().next()
-        && let Ok(secs) = secs_str.parse::<f64>()
-    {
-        let total_secs = secs as u64;
-        let days = total_secs / 86400;
-        let hours = (total_secs % 86400) / 3600;
-        let mins = (total_secs % 3600) / 60;
-
-        if days > 0 {
-            return format!("up {days} day(s), {hours:2}:{mins:02}");
-        }
-        return format!("up {hours:2}:{mins:02}");
-    }
-    "up  0:00".to_string()
+    format_uptime_field(std::fs::read_to_string("/proc/uptime").ok().as_deref())
 }
 
+/// The `load average:` field of the header line.
+///
+/// Returns `(unknown)` rather than three zeroes when `/proc/loadavg` cannot be
+/// read or is short. It used to return **`"load average: 0.00, 0.00, 0.00"`**,
+/// which is what an idle machine reports -- and an idle machine is exactly
+/// what someone running `w` might be trying to confirm.
 fn get_load_avg() -> String {
-    if let Ok(content) = std::fs::read_to_string("/proc/loadavg") {
-        let parts: Vec<&str> = content.split_whitespace().collect();
-        if parts.len() >= 3 {
-            return format!("load average: {}, {}, {}", parts[0], parts[1], parts[2]);
-        }
+    format_load_field(std::fs::read_to_string("/proc/loadavg").ok().as_deref())
+}
+
+/// What `w` prints for a field whose source it could not read.
+///
+/// Parenthesised so that it cannot be read as a value: an uptime may be
+/// `0:00` and a load average may be `0.00`, but neither is ever `(unknown)`.
+const UNKNOWN_FIELD: &str = "(unknown)";
+
+/// Split out of [`get_uptime_str`] so the no-file and malformed-file paths can
+/// be tested, which they could not be while the read was inside the formatter.
+fn format_uptime_field(content: Option<&str>) -> String {
+    let Some(secs) = content
+        .and_then(|c| c.split_whitespace().next().map(str::to_string))
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|s| s.is_finite() && *s >= 0.0)
+    else {
+        return format!("up {UNKNOWN_FIELD}");
+    };
+    let total_secs = secs as u64;
+    let days = total_secs / 86400;
+    let hours = (total_secs % 86400) / 3600;
+    let mins = (total_secs % 3600) / 60;
+    if days > 0 {
+        format!("up {days} day(s), {hours:2}:{mins:02}")
+    } else {
+        format!("up {hours:2}:{mins:02}")
     }
-    "load average: 0.00, 0.00, 0.00".to_string()
+}
+
+/// Split out of [`get_load_avg`] for the same reason.
+fn format_load_field(content: Option<&str>) -> String {
+    let parts: Vec<&str> = content.unwrap_or_default().split_whitespace().collect();
+    match parts.get(..3) {
+        Some([one, five, fifteen]) => format!("load average: {one}, {five}, {fifteen}"),
+        _ => format!("load average: {UNKNOWN_FIELD}"),
+    }
 }
 
 fn get_current_time() -> String {
@@ -762,6 +791,58 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A machine whose uptime cannot be read does not report having just
+    /// booted.
+    ///
+    /// `"up  0:00"` is what this returned, and it is a thing a real system
+    /// says a minute after power-on -- so nothing downstream, and nobody
+    /// reading the header, could tell the two apart.
+    #[test]
+    fn an_unreadable_uptime_is_not_a_freshly_booted_machine() {
+        assert_eq!(format_uptime_field(None), "up (unknown)");
+        assert_eq!(format_uptime_field(Some("")), "up (unknown)");
+        assert_eq!(format_uptime_field(Some("garbage 0")), "up (unknown)");
+        assert_eq!(format_uptime_field(Some("-1 0")), "up (unknown)");
+    }
+
+    /// ...and a readable one still formats as it did.
+    #[test]
+    fn a_readable_uptime_formats_as_before() {
+        assert_eq!(format_uptime_field(Some("60.0 30.0")), "up  0:01");
+        assert_eq!(format_uptime_field(Some("3600 0")), "up  1:00");
+        assert_eq!(format_uptime_field(Some("90000 0")), "up 1 day(s),  1:00");
+    }
+
+    /// A machine whose load cannot be read does not report being idle.
+    ///
+    /// Three zeroes is what an idle machine reports, and confirming a machine
+    /// is idle is one of the reasons to run `w` at all.
+    #[test]
+    fn an_unreadable_load_average_is_not_an_idle_machine() {
+        assert_eq!(format_load_field(None), "load average: (unknown)");
+        assert_eq!(format_load_field(Some("")), "load average: (unknown)");
+        assert_eq!(
+            format_load_field(Some("0.10 0.20")),
+            "load average: (unknown)"
+        );
+    }
+
+    /// ...and a readable one still formats as it did.
+    #[test]
+    fn a_readable_load_average_formats_as_before() {
+        assert_eq!(
+            format_load_field(Some("0.10 0.20 0.30 1/234 5678")),
+            "load average: 0.10, 0.20, 0.30"
+        );
+    }
+
+    /// Neither marker can be mistaken for a value.
+    #[test]
+    fn the_unknown_marker_is_not_a_possible_reading() {
+        assert!(UNKNOWN_FIELD.contains('('));
+        assert!(UNKNOWN_FIELD.parse::<f64>().is_err());
+    }
 
     #[test]
     fn test_detect_personality_w() {

@@ -719,116 +719,6 @@ struct UnitEntry {
 }
 
 /// Return a set of simulated units representing a typical booted system.
-fn simulated_units() -> Vec<UnitEntry> {
-    vec![
-        UnitEntry {
-            name: "init.service",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Running,
-            description: "System and Service Manager",
-        },
-        UnitEntry {
-            name: "network.service",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Running,
-            description: "Network Configuration",
-        },
-        UnitEntry {
-            name: "sshd.service",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Running,
-            description: "OpenSSH Server",
-        },
-        UnitEntry {
-            name: "dbus.service",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Running,
-            description: "D-Bus System Message Bus",
-        },
-        UnitEntry {
-            name: "cron.service",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Running,
-            description: "Task Scheduler",
-        },
-        UnitEntry {
-            name: "logd.service",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Running,
-            description: "System Logging Daemon",
-        },
-        UnitEntry {
-            name: "sysctl.service",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Exited,
-            description: "Apply Kernel Variables",
-        },
-        UnitEntry {
-            name: "basic.target",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Active,
-            description: "Basic System",
-        },
-        UnitEntry {
-            name: "multi-user.target",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Active,
-            description: "Multi-User System",
-        },
-        UnitEntry {
-            name: "graphical.target",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Active,
-            description: "Graphical Interface",
-        },
-        UnitEntry {
-            name: "sockets.target",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Active,
-            description: "Sockets",
-        },
-        UnitEntry {
-            name: "timers.target",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Active,
-            description: "Timers",
-        },
-        UnitEntry {
-            name: "dbus.socket",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Listening,
-            description: "D-Bus System Message Bus Socket",
-        },
-        UnitEntry {
-            name: "logwatch.timer",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Waiting,
-            description: "Daily Log Rotation",
-        },
-        UnitEntry {
-            name: "tmp.mount",
-            load: LoadState::Loaded,
-            active: ActiveState::Active,
-            sub: SubState::Mounted,
-            description: "Temporary Directory",
-        },
-    ]
-}
-
 /// Simulated unit file entries for list-unit-files.
 struct UnitFileEntry {
     name: &'static str,
@@ -836,245 +726,93 @@ struct UnitFileEntry {
     preset: &'static str,
 }
 
-fn simulated_unit_files() -> Vec<UnitFileEntry> {
-    vec![
-        UnitFileEntry {
-            name: "init.service",
-            state: EnableState::Static,
-            preset: "-",
-        },
-        UnitFileEntry {
-            name: "network.service",
-            state: EnableState::Enabled,
-            preset: "enabled",
-        },
-        UnitFileEntry {
-            name: "sshd.service",
-            state: EnableState::Enabled,
-            preset: "enabled",
-        },
-        UnitFileEntry {
-            name: "dbus.service",
-            state: EnableState::Static,
-            preset: "-",
-        },
-        UnitFileEntry {
-            name: "cron.service",
-            state: EnableState::Enabled,
-            preset: "enabled",
-        },
-        UnitFileEntry {
-            name: "logd.service",
-            state: EnableState::Enabled,
-            preset: "enabled",
-        },
-        UnitFileEntry {
-            name: "sysctl.service",
-            state: EnableState::Static,
-            preset: "-",
-        },
-        UnitFileEntry {
-            name: "basic.target",
-            state: EnableState::Static,
-            preset: "-",
-        },
-        UnitFileEntry {
-            name: "multi-user.target",
-            state: EnableState::Static,
-            preset: "-",
-        },
-        UnitFileEntry {
-            name: "graphical.target",
-            state: EnableState::Static,
-            preset: "-",
-        },
-        UnitFileEntry {
-            name: "sockets.target",
-            state: EnableState::Static,
-            preset: "-",
-        },
-        UnitFileEntry {
-            name: "timers.target",
-            state: EnableState::Static,
-            preset: "-",
-        },
-        UnitFileEntry {
-            name: "dbus.socket",
-            state: EnableState::Static,
-            preset: "-",
-        },
-        UnitFileEntry {
-            name: "logwatch.timer",
-            state: EnableState::Enabled,
-            preset: "enabled",
-        },
-        UnitFileEntry {
-            name: "tmp.mount",
-            state: EnableState::Static,
-            preset: "-",
-        },
-        UnitFileEntry {
-            name: "rescue.service",
-            state: EnableState::Disabled,
-            preset: "disabled",
-        },
-    ]
+// ============================================================================
+// What this system can actually be asked about its services
+// ============================================================================
+//
+// `simulated_units` and `simulated_unit_files` used to live here. They were
+// not fallbacks -- they were the ONLY source, and EIGHT subcommands called
+// them unconditionally: list-units, list-unit-files, status, show, is-active,
+// is-enabled, is-failed and cat. So `systemctl status sshd.service` reported
+// `active (running)` and exited 0 having asked nothing, and `systemctl
+// is-active sshd.service` exited 0 -- which is the one a script branches on.
+//
+// A test asserted each of those. `test_status_known_unit` required the words
+// "active" and "OpenSSH Server" in the output of a program that had not
+// looked.
+//
+// WHAT THERE IS TO ASK. The kernel does run a service manager
+// (`kernel/src/fs/servicemgr.rs`) and procfs serves `/proc/servicemgr` -- but
+// only as aggregate counters: service_count, running, total_starts,
+// total_stops, total_failures, ops. No per-unit names or states exist
+// anywhere, and the SYS_SERVICE_* syscalls (280-285) are the name-registration
+// bus, not a unit manager. Enumerating units is genuinely impossible from
+// here, so the honest answer is to say so -- and to say what IS known, because
+// "I cannot list them" and "there are none" are different facts and the
+// counter separates them.
+
+/// The aggregate service figures from `/proc/servicemgr`, if readable.
+///
+/// `(service_count, running)`. `None` means the file could not be read or did
+/// not carry those keys -- never that there are no services.
+fn service_counts() -> Option<(u64, u64)> {
+    let raw = procinfo::ProcFs::new()
+        .read_optional("servicemgr")
+        .ok()
+        .flatten()?;
+    let pairs = procinfo::parse_key_values(&raw);
+    let field = |name: &str| {
+        pairs
+            .iter()
+            .find(|kv| kv.key == name.as_bytes())
+            .and_then(|kv| kv.value_str())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+    };
+    Some((field("service_count")?, field("running")?))
+}
+
+/// The diagnostic every unit-level subcommand shares, on stderr.
+fn no_unit_interface(what: &str) {
+    eprintln!("systemctl: cannot {what}: this system exposes no per-unit interface");
+    match service_counts() {
+        Some((total, running)) => eprintln!(
+            "systemctl: /proc/servicemgr reports {total} service(s), {running} running, \
+             but not their names or states"
+        ),
+        None => eprintln!("systemctl: /proc/servicemgr could not be read either"),
+    }
 }
 
 // ============================================================================
 // Systemctl sub-commands
 // ============================================================================
 
-fn cmd_list_units(out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i32> {
-    let units = simulated_units();
-
-    if !flags.no_legend {
-        writeln!(
-            out,
-            "{:<40} {:<10} {:<10} {:<10} DESCRIPTION",
-            "UNIT", "LOAD", "ACTIVE", "SUB"
-        )?;
-    }
-
-    for u in &units {
-        // Apply type filter.
-        if let Some(ref tf) = flags.type_filter {
-            let ut = UnitType::from_unit_name(u.name);
-            if ut.is_none_or(|t| t.as_str() != tf.as_str()) {
-                continue;
-            }
-        }
-        // Apply state filter.
-        if let Some(ref sf) = flags.state_filter
-            && u.active.as_str() != sf.as_str()
-        {
-            continue;
-        }
-        // Skip inactive unless --all.
-        if !flags.all && u.active == ActiveState::Inactive {
-            continue;
-        }
-        writeln!(
-            out,
-            "{:<40} {:<10} {:<10} {:<10} {}",
-            u.name,
-            u.load.as_str(),
-            u.active.as_str(),
-            u.sub.as_str(),
-            u.description
-        )?;
-    }
-
-    if !flags.no_legend {
-        let shown: usize = units
-            .iter()
-            .filter(|u| {
-                if let Some(ref tf) = flags.type_filter {
-                    let ut = UnitType::from_unit_name(u.name);
-                    if ut.is_none_or(|t| t.as_str() != tf.as_str()) {
-                        return false;
-                    }
-                }
-                if let Some(ref sf) = flags.state_filter
-                    && u.active.as_str() != sf.as_str()
-                {
-                    return false;
-                }
-                flags.all || u.active != ActiveState::Inactive
-            })
-            .count();
-        writeln!(out)?;
-        writeln!(out, "{} loaded units listed.", shown)?;
-    }
-
-    Ok(0)
+fn cmd_list_units(_out: &mut dyn Write, _flags: &SystemctlFlags) -> io::Result<i32> {
+    no_unit_interface("list units");
+    Ok(1)
 }
 
-fn cmd_list_unit_files(out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i32> {
-    let files = simulated_unit_files();
-
-    if !flags.no_legend {
-        writeln!(out, "{:<40} {:<12} PRESET", "UNIT FILE", "STATE")?;
-    }
-
-    for f in &files {
-        if let Some(ref tf) = flags.type_filter {
-            let ut = UnitType::from_unit_name(f.name);
-            if ut.is_none_or(|t| t.as_str() != tf.as_str()) {
-                continue;
-            }
-        }
-        writeln!(out, "{:<40} {:<12} {}", f.name, f.state.as_str(), f.preset)?;
-    }
-
-    if !flags.no_legend {
-        writeln!(out)?;
-        writeln!(out, "{} unit files listed.", files.len())?;
-    }
-    Ok(0)
+fn cmd_list_unit_files(_out: &mut dyn Write, _flags: &SystemctlFlags) -> io::Result<i32> {
+    no_unit_interface("list unit files");
+    Ok(1)
 }
 
-fn cmd_status(out: &mut dyn Write, unit_name: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
-    let units = simulated_units();
-    if let Some(u) = units.iter().find(|e| e.name == unit_name) {
-        writeln!(out, "● {} - {}", u.name, u.description)?;
-        writeln!(
-            out,
-            "     Loaded: {} (/etc/slateos/system/{}; enabled)",
-            u.load.as_str(),
-            u.name
-        )?;
-        writeln!(
-            out,
-            "     Active: {} ({}) since Mon 2026-01-01 00:00:00 UTC; 1h ago",
-            u.active.as_str(),
-            u.sub.as_str()
-        )?;
-        writeln!(out, "   Main PID: 1234 ({})", unit_prefix(u.name))?;
-        writeln!(out, "      Tasks: 1 (limit: 4096)")?;
-        writeln!(out, "     Memory: 2.0M")?;
-        writeln!(out, "        CPU: 50ms")?;
-        Ok(0)
-    } else {
-        writeln!(out, "Unit {} could not be found.", unit_name)?;
-        Ok(4)
-    }
+fn cmd_status(_out: &mut dyn Write, unit_name: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
+    // Deliberately NOT exit 4. systemd's 4 means "no such unit", and this
+    // program cannot tell a unit that does not exist from one it cannot see.
+    // Claiming the former would be the same defect facing the other way.
+    no_unit_interface(&format!("report the status of {unit_name}"));
+    Ok(1)
 }
 
 fn cmd_show(
-    out: &mut dyn Write,
+    _out: &mut dyn Write,
     unit_name: &str,
-    property: Option<&str>,
+    _property: Option<&str>,
     _flags: &SystemctlFlags,
 ) -> io::Result<i32> {
-    let units = simulated_units();
-    if let Some(u) = units.iter().find(|e| e.name == unit_name) {
-        let props: Vec<(&str, String)> = vec![
-            ("Id", u.name.to_string()),
-            ("Description", u.description.to_string()),
-            ("LoadState", u.load.as_str().to_string()),
-            ("ActiveState", u.active.as_str().to_string()),
-            ("SubState", u.sub.as_str().to_string()),
-            ("MainPID", "1234".to_string()),
-            ("MemoryCurrent", "2097152".to_string()),
-            ("TasksCurrent", "1".to_string()),
-        ];
-        if let Some(p) = property {
-            if let Some((_, val)) = props.iter().find(|(k, _)| *k == p) {
-                writeln!(out, "{}={}", p, val)?;
-            } else {
-                writeln!(out, "{}=", p)?;
-            }
-        } else {
-            for (k, v) in &props {
-                writeln!(out, "{}={}", k, v)?;
-            }
-        }
-        Ok(0)
-    } else {
-        writeln!(out, "Unit {} could not be found.", unit_name)?;
-        Ok(4)
-    }
+    no_unit_interface(&format!("show properties of {unit_name}"));
+    Ok(1)
 }
 
 fn cmd_unit_action(
@@ -1134,53 +872,28 @@ fn cmd_unit_action(
 }
 
 fn cmd_is_active(out: &mut dyn Write, unit_name: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
-    let units = simulated_units();
-    if let Some(u) = units.iter().find(|e| e.name == unit_name) {
-        writeln!(out, "{}", u.active.as_str())?;
-        if u.active == ActiveState::Active {
-            Ok(0)
-        } else {
-            Ok(3)
-        }
-    } else {
-        writeln!(out, "inactive")?;
-        Ok(3)
-    }
+    // `unknown` is what systemd prints for a unit it cannot resolve, and the
+    // non-zero status is what a script branches on. This is the subcommand
+    // that mattered most: it used to exit 0 for four hard-coded names, so
+    // `systemctl is-active sshd || start_it` never started anything.
+    writeln!(out, "unknown")?;
+    no_unit_interface(&format!("determine whether {unit_name} is active"));
+    Ok(1)
 }
 
 fn cmd_is_enabled(
-    out: &mut dyn Write,
+    _out: &mut dyn Write,
     unit_name: &str,
     _flags: &SystemctlFlags,
 ) -> io::Result<i32> {
-    let files = simulated_unit_files();
-    if let Some(f) = files.iter().find(|e| e.name == unit_name) {
-        writeln!(out, "{}", f.state.as_str())?;
-        if f.state == EnableState::Enabled {
-            Ok(0)
-        } else {
-            Ok(1)
-        }
-    } else {
-        writeln!(out, "disabled")?;
-        Ok(1)
-    }
+    no_unit_interface(&format!("determine whether {unit_name} is enabled"));
+    Ok(1)
 }
 
 fn cmd_is_failed(out: &mut dyn Write, unit_name: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
-    let units = simulated_units();
-    if let Some(u) = units.iter().find(|e| e.name == unit_name) {
-        if u.active == ActiveState::Failed {
-            writeln!(out, "failed")?;
-            Ok(0)
-        } else {
-            writeln!(out, "{}", u.active.as_str())?;
-            Ok(1)
-        }
-    } else {
-        writeln!(out, "inactive")?;
-        Ok(1)
-    }
+    writeln!(out, "unknown")?;
+    no_unit_interface(&format!("determine whether {unit_name} has failed"));
+    Ok(1)
 }
 
 fn cmd_daemon_reload(out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i32> {
@@ -1190,31 +903,9 @@ fn cmd_daemon_reload(out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<
     Ok(0)
 }
 
-fn cmd_cat_unit(out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
-    // Produce a synthetic unit file for known units.
-    let units = simulated_units();
-    if units.iter().any(|u| u.name == unit_name) {
-        writeln!(out, "# /usr/lib/slateos/system/{}", unit_name)?;
-        writeln!(out, "[Unit]")?;
-        let desc = units
-            .iter()
-            .find(|u| u.name == unit_name)
-            .map_or("Unknown", |u| u.description);
-        writeln!(out, "Description={}", desc)?;
-        writeln!(out)?;
-        if unit_name.ends_with(".service") {
-            writeln!(out, "[Service]")?;
-            writeln!(out, "Type=simple")?;
-            writeln!(out, "ExecStart=/usr/bin/{}", unit_prefix(unit_name))?;
-            writeln!(out)?;
-            writeln!(out, "[Install]")?;
-            writeln!(out, "WantedBy=multi-user.target")?;
-        }
-        Ok(0)
-    } else {
-        writeln!(out, "No files found for {}.", unit_name)?;
-        Ok(1)
-    }
+fn cmd_cat_unit(_out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
+    no_unit_interface(&format!("show the unit file for {unit_name}"));
+    Ok(1)
 }
 
 fn cmd_edit_unit(out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
@@ -1269,48 +960,28 @@ fn cmd_list_timers(out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i3
     Ok(0)
 }
 
-fn cmd_list_sockets(out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i32> {
-    if !flags.no_legend {
-        writeln!(out, "{:<40} {:<10} UNIT", "LISTEN", "TYPE")?;
-    }
-    writeln!(
-        out,
-        "{:<40} {:<10} dbus.socket",
-        "/run/dbus/system_bus_socket", "Stream"
-    )?;
-    if !flags.no_legend {
-        writeln!(out)?;
-        writeln!(out, "1 sockets listed.")?;
-    }
-    Ok(0)
+fn cmd_list_sockets(_out: &mut dyn Write, _flags: &SystemctlFlags) -> io::Result<i32> {
+    // Printed one hard-coded row -- /run/dbus/system_bus_socket, Stream,
+    // dbus.socket -- followed by "1 sockets listed.", whether or not that
+    // socket existed and without enumerating anything. Socket units are unit
+    // state like any other, and there is no per-unit interface to read.
+    no_unit_interface("list sockets");
+    Ok(1)
 }
 
 fn cmd_list_dependencies(
-    out: &mut dyn Write,
+    _out: &mut dyn Write,
     unit_name: &str,
     _flags: &SystemctlFlags,
 ) -> io::Result<i32> {
-    writeln!(out, "{}", unit_name)?;
-    // Produce a synthetic dependency tree.
-    let deps: Vec<&str> = match unit_name {
-        "multi-user.target" => vec![
-            "basic.target",
-            "dbus.service",
-            "network.service",
-            "sshd.service",
-            "cron.service",
-        ],
-        "graphical.target" => vec!["multi-user.target"],
-        _ => vec!["basic.target"],
-    };
-    for (i, d) in deps.iter().enumerate() {
-        if i + 1 < deps.len() {
-            writeln!(out, "├─{}", d)?;
-        } else {
-            writeln!(out, "└─{}", d)?;
-        }
-    }
-    Ok(0)
+    // The comment on the deleted body said it plainly: "Produce a synthetic
+    // dependency tree." It matched three unit names and invented children for
+    // them -- multi-user.target got basic, dbus, network, sshd and cron --
+    // and anything else got a single basic.target. A dependency graph is the
+    // thing you consult to decide what stopping a unit will take down with
+    // it, so an invented one is worse than none.
+    no_unit_interface(&format!("list the dependencies of {unit_name}"));
+    Ok(1)
 }
 
 // ============================================================================
@@ -2787,14 +2458,24 @@ mod tests {
 
     // --- list-units ---
 
+    // Every test below asserted the hard-coded unit list. They are kept, one
+    // for one, rather than deleted -- each now pins the honest contract for
+    // the subcommand it used to certify a fabrication for. The old
+    // expectation is quoted where it is sharpest, so the change reads as a
+    // correction rather than a loosening.
+
+    /// `list-units` refuses rather than listing four hard-coded names.
+    ///
+    /// Asserted `out.contains("init.service")` before -- on a program that had
+    /// asked nothing.
     #[test]
     fn test_list_units_default() {
         let (out, code) = capture(|buf| cmd_list_units(buf, &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.contains("UNIT"));
-        assert!(out.contains("init.service"));
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "printed a unit table anyway: {out}");
     }
 
+    /// A filter cannot make an unavailable listing available.
     #[test]
     fn test_list_units_type_filter() {
         let flags = SystemctlFlags {
@@ -2802,11 +2483,11 @@ mod tests {
             ..Default::default()
         };
         let (out, code) = capture(|buf| cmd_list_units(buf, &flags));
-        assert_eq!(code, 0);
-        assert!(out.contains("basic.target"));
-        assert!(!out.contains("init.service"));
+        assert_eq!(code, 1);
+        assert!(out.is_empty());
     }
 
+    /// Nor can `--no-legend`.
     #[test]
     fn test_list_units_no_legend() {
         let flags = SystemctlFlags {
@@ -2814,9 +2495,8 @@ mod tests {
             ..Default::default()
         };
         let (out, code) = capture(|buf| cmd_list_units(buf, &flags));
-        assert_eq!(code, 0);
-        assert!(!out.contains("UNIT"));
-        assert!(!out.contains("loaded units listed"));
+        assert_eq!(code, 1);
+        assert!(out.is_empty());
     }
 
     // --- list-unit-files ---
@@ -2824,42 +2504,48 @@ mod tests {
     #[test]
     fn test_list_unit_files() {
         let (out, code) = capture(|buf| cmd_list_unit_files(buf, &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.contains("UNIT FILE"));
-        assert!(out.contains("sshd.service"));
-        assert!(out.contains("enabled"));
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "printed a unit-file table anyway: {out}");
     }
 
     #[test]
     fn test_list_unit_files_type_filter() {
         let flags = SystemctlFlags {
-            type_filter: Some("timer".to_string()),
+            type_filter: Some("service".to_string()),
             ..Default::default()
         };
         let (out, code) = capture(|buf| cmd_list_unit_files(buf, &flags));
-        assert_eq!(code, 0);
-        assert!(out.contains("logwatch.timer"));
-        assert!(!out.contains("sshd.service"));
+        assert_eq!(code, 1);
+        assert!(out.is_empty());
     }
 
     // --- status ---
 
+    /// There is no such thing as a known unit here.
+    ///
+    /// This is the sharpest of the sixteen. It asserted that `systemctl status
+    /// sshd.service` printed "active" and "OpenSSH Server" and exited 0 -- so
+    /// an operator checking whether sshd was up was told yes, by a program
+    /// that had not looked, and a passing test said that was correct.
     #[test]
     fn test_status_known_unit() {
         let (out, code) =
             capture(|buf| cmd_status(buf, "sshd.service", &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.contains("sshd.service"));
-        assert!(out.contains("OpenSSH Server"));
-        assert!(out.contains("active"));
+        assert_ne!(code, 0, "reported a service state without a source");
+        assert!(!out.contains("active"), "claimed a state: {out}");
     }
 
+    /// And an unfamiliar name is not reported as absent.
+    ///
+    /// This asserted exit 4, which in systemd means "no such unit". This
+    /// program cannot tell a unit that does not exist from one it cannot see,
+    /// so claiming the former would be the same defect facing the other way.
     #[test]
     fn test_status_unknown_unit() {
-        let (out, code) =
+        let (_out, code) =
             capture(|buf| cmd_status(buf, "nonexistent.service", &SystemctlFlags::default()));
-        assert_eq!(code, 4);
-        assert!(out.contains("could not be found"));
+        assert_eq!(code, 1);
+        assert_ne!(code, 4, "claimed the unit does not exist");
     }
 
     // --- show ---
@@ -2868,9 +2554,8 @@ mod tests {
     fn test_show_all_properties() {
         let (out, code) =
             capture(|buf| cmd_show(buf, "sshd.service", None, &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.contains("Id=sshd.service"));
-        assert!(out.contains("ActiveState=active"));
+        assert_eq!(code, 1);
+        assert!(!out.contains("ActiveState="), "claimed properties: {out}");
     }
 
     #[test]
@@ -2883,55 +2568,63 @@ mod tests {
                 &SystemctlFlags::default(),
             )
         });
-        assert_eq!(code, 0);
-        assert!(out.contains("ActiveState=active"));
-        assert!(!out.contains("Id="));
+        assert_eq!(code, 1);
+        assert!(!out.contains("active"), "claimed a state: {out}");
     }
 
     // --- is-active ---
 
+    /// **The one a script branches on.**
+    ///
+    /// `is-active` used to exit 0 for four hard-coded names, so
+    /// `systemctl is-active sshd || start_it` never started anything. It now
+    /// prints `unknown` -- which is what systemd prints for a unit it cannot
+    /// resolve -- and exits non-zero, so the script takes the safe branch.
     #[test]
     fn test_is_active_active() {
         let (out, code) =
             capture(|buf| cmd_is_active(buf, "sshd.service", &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.trim() == "active");
+        assert_ne!(code, 0, "a script would have concluded sshd is running");
+        assert!(out.contains("unknown"), "{out}");
     }
 
     #[test]
     fn test_is_active_unknown() {
         let (out, code) =
-            capture(|buf| cmd_is_active(buf, "nonexistent.service", &SystemctlFlags::default()));
-        assert_eq!(code, 3);
-        assert!(out.trim() == "inactive");
+            capture(|buf| cmd_is_active(buf, "nope.service", &SystemctlFlags::default()));
+        assert_ne!(code, 0);
+        assert!(out.contains("unknown"));
     }
 
     // --- is-enabled ---
 
     #[test]
     fn test_is_enabled_enabled() {
-        let (out, code) =
+        let (_out, code) =
             capture(|buf| cmd_is_enabled(buf, "sshd.service", &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.trim() == "enabled");
+        assert_ne!(code, 0, "claimed a unit is enabled without a source");
     }
 
     #[test]
     fn test_is_enabled_static() {
-        let (out, code) =
-            capture(|buf| cmd_is_enabled(buf, "init.service", &SystemctlFlags::default()));
-        assert_eq!(code, 1);
-        assert!(out.trim() == "static");
+        let (_out, code) =
+            capture(|buf| cmd_is_enabled(buf, "basic.target", &SystemctlFlags::default()));
+        assert_ne!(code, 0);
     }
 
     // --- is-failed ---
 
+    /// `is-failed` must not answer "no" either.
+    ///
+    /// Exiting non-zero here reads as "not failed", which is the same answer
+    /// it used to give -- but it now says `unknown` on stdout, so a human sees
+    /// the difference even though the status cannot express it.
     #[test]
     fn test_is_failed_not_failed() {
         let (out, code) =
             capture(|buf| cmd_is_failed(buf, "sshd.service", &SystemctlFlags::default()));
-        assert_eq!(code, 1);
-        assert!(out.trim() == "active");
+        assert_ne!(code, 0);
+        assert!(out.contains("unknown"), "{out}");
     }
 
     // --- unit actions ---
@@ -3015,17 +2708,18 @@ mod tests {
     #[test]
     fn test_cat_known_unit() {
         let (out, code) = capture(|buf| cmd_cat_unit(buf, "sshd.service"));
-        assert_eq!(code, 0);
-        assert!(out.contains("[Unit]"));
-        assert!(out.contains("[Service]"));
-        assert!(out.contains("ExecStart="));
+        assert_eq!(code, 1);
+        assert!(
+            out.is_empty(),
+            "printed a unit file it does not have: {out}"
+        );
     }
 
     #[test]
     fn test_cat_unknown_unit() {
-        let (out, code) = capture(|buf| cmd_cat_unit(buf, "nonexistent.service"));
+        let (out, code) = capture(|buf| cmd_cat_unit(buf, "nope.service"));
         assert_eq!(code, 1);
-        assert!(out.contains("No files found"));
+        assert!(out.is_empty());
     }
 
     // --- power commands ---
@@ -3069,21 +2763,27 @@ mod tests {
     #[test]
     fn test_list_sockets() {
         let (out, code) = capture(|buf| cmd_list_sockets(buf, &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.contains("dbus.socket"));
-        assert!(out.contains("Stream"));
+        assert_eq!(code, 1);
+        assert!(
+            out.is_empty(),
+            "listed a socket it did not enumerate: {out}"
+        );
     }
 
     // --- list-dependencies ---
 
+    /// A dependency tree is what you consult before stopping something.
+    ///
+    /// This asserted the invented children of `multi-user.target`. An invented
+    /// graph is worse than no graph: it is the thing you read to decide what
+    /// else goes down.
     #[test]
     fn test_list_dependencies() {
         let (out, code) = capture(|buf| {
             cmd_list_dependencies(buf, "multi-user.target", &SystemctlFlags::default())
         });
-        assert_eq!(code, 0);
-        assert!(out.contains("multi-user.target"));
-        assert!(out.contains("basic.target"));
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "printed a dependency tree: {out}");
     }
 
     // --- systemd-analyze ---

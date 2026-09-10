@@ -21,7 +21,6 @@
 //! ```
 
 use std::env;
-use std::fs;
 use std::process;
 
 // ============================================================================
@@ -65,56 +64,43 @@ struct Config {
 // /proc/meminfo reader
 // ============================================================================
 
-/// Read the contents of a file, returning `None` on any I/O error.
-fn read_file(path: &str) -> Option<String> {
-    fs::read_to_string(path).ok()
-}
-
-/// Extract a numeric value (in kB) for a given key from /proc/meminfo content.
-///
-/// Lines are expected in the form:  `KeyName:       12345 kB`
-/// Returns 0 if the key is not found or the value cannot be parsed.
-fn get_meminfo_value(content: &str, key: &str) -> u64 {
-    for line in content.lines() {
-        if let Some((k, v)) = line.split_once(':')
-            && k.trim() == key
-        {
-            let trimmed = v
-                .trim()
-                .trim_end_matches(" kB")
-                .trim_end_matches(" KB")
-                .trim();
-            return trimmed.parse().unwrap_or(0);
-        }
-    }
-    0
-}
-
 /// Parse `/proc/meminfo` into a `MemInfo` struct.
 ///
 /// Returns `None` if the file cannot be read at all. Individual missing
 /// fields default to 0 rather than causing a failure, so the utility
 /// degrades gracefully when the kernel exposes fewer fields.
+/// `MemAvailable`, or procps' estimate of it when the kernel does not publish
+/// one.
+///
+/// # Absent is not zero
+///
+/// `None` means the kernel does not compute `MemAvailable` -- older kernels do
+/// not -- and procps estimates it as free + buffers + cached. `Some(0)` means
+/// the machine has nothing available, which is a different fact and must
+/// survive.
+///
+/// The code this replaces could not tell those apart. Every field was read as
+/// a bare `u64` with 0 standing for absent, and the estimate fired whenever
+/// `mem_available == 0 && mem_free > 0`. So a machine genuinely out of
+/// available memory -- the one moment the number matters -- had its 0 replaced
+/// by free+buffers+cached and was reported as healthy.
+fn available_or_estimate(available: Option<u64>, free: u64, buffers: u64, cached: u64) -> u64 {
+    available.unwrap_or_else(|| free.saturating_add(buffers).saturating_add(cached))
+}
+
 fn read_meminfo() -> Option<MemInfo> {
-    let content = read_file("/proc/meminfo")?;
+    let m = procinfo::ProcFs::new().memory().ok().flatten()?;
 
-    let mem_total = get_meminfo_value(&content, "MemTotal");
-    let mem_free = get_meminfo_value(&content, "MemFree");
-    let mem_available = get_meminfo_value(&content, "MemAvailable");
-    let buffers = get_meminfo_value(&content, "Buffers");
-    let cached = get_meminfo_value(&content, "Cached");
-    let swap_total = get_meminfo_value(&content, "SwapTotal");
-    let swap_free = get_meminfo_value(&content, "SwapFree");
-    let shmem = get_meminfo_value(&content, "Shmem");
-    let s_reclaimable = get_meminfo_value(&content, "SReclaimable");
+    let mem_total = m.total_kib.unwrap_or(0);
+    let mem_free = m.free_kib.unwrap_or(0);
+    let buffers = m.buffers_kib.unwrap_or(0);
+    let cached = m.cached_kib.unwrap_or(0);
+    let swap_total = m.swap_total_kib.unwrap_or(0);
+    let swap_free = m.swap_free_kib.unwrap_or(0);
+    let shmem = m.shmem_kib.unwrap_or(0);
+    let s_reclaimable = m.sreclaimable_kib.unwrap_or(0);
 
-    // If MemAvailable is missing (older kernels / early Slate OS builds),
-    // estimate it as free + buffers + cached.
-    let mem_available = if mem_available == 0 && mem_free > 0 {
-        mem_free.saturating_add(buffers).saturating_add(cached)
-    } else {
-        mem_available
-    };
+    let mem_available = available_or_estimate(m.available_kib, mem_free, buffers, cached);
 
     Some(MemInfo {
         mem_total,
@@ -575,30 +561,38 @@ fn main() {
 mod tests {
     use super::*;
 
-    /// Simulate /proc/meminfo content for testing the parser.
-    const SAMPLE_MEMINFO: &str = "\
-MemTotal:       16384000 kB
-MemFree:         8192000 kB
-MemAvailable:   12000000 kB
-Buffers:          512000 kB
-Cached:          2048000 kB
-SwapTotal:       4096000 kB
-SwapFree:        4096000 kB
-Shmem:            256000 kB
-SReclaimable:     128000 kB
-";
-
+    /// A kernel that does not publish `MemAvailable` gets procps' estimate.
+    ///
+    /// Replaces `test_get_meminfo_value_basic` and `_missing_key`, which
+    /// tested a `/proc/meminfo` parser this program no longer owns --
+    /// `procinfo::MemInfo` does, and tests it there against the same shapes.
+    /// What is left here is the one decision `free` still makes about the
+    /// numbers.
     #[test]
-    fn test_get_meminfo_value_basic() {
-        assert_eq!(get_meminfo_value(SAMPLE_MEMINFO, "MemTotal"), 16_384_000);
-        assert_eq!(get_meminfo_value(SAMPLE_MEMINFO, "MemFree"), 8_192_000);
-        assert_eq!(get_meminfo_value(SAMPLE_MEMINFO, "Buffers"), 512_000);
-        assert_eq!(get_meminfo_value(SAMPLE_MEMINFO, "SReclaimable"), 128_000);
+    fn an_absent_available_is_estimated_from_free_buffers_and_cached() {
+        assert_eq!(available_or_estimate(None, 100, 20, 30), 150);
+        assert_eq!(available_or_estimate(None, 0, 0, 0), 0);
     }
 
+    /// A published `MemAvailable` is used as it stands, INCLUDING zero.
+    ///
+    /// This is the case the conversion fixed, and the reason the argument is
+    /// an `Option`. A machine with nothing available reports nothing
+    /// available; it used to report free+buffers+cached instead, at exactly
+    /// the moment the figure mattered.
     #[test]
-    fn test_get_meminfo_value_missing_key() {
-        assert_eq!(get_meminfo_value(SAMPLE_MEMINFO, "NonExistent"), 0);
+    fn a_published_available_survives_even_when_it_is_zero() {
+        assert_eq!(
+            available_or_estimate(Some(12_000_000), 100, 20, 30),
+            12_000_000
+        );
+        assert_eq!(available_or_estimate(Some(0), 100, 20, 30), 0);
+    }
+
+    /// The estimate cannot overflow into a small number.
+    #[test]
+    fn the_estimate_saturates_rather_than_wrapping() {
+        assert_eq!(available_or_estimate(None, u64::MAX, 1, 1), u64::MAX);
     }
 
     #[test]
@@ -688,28 +682,39 @@ SReclaimable:     128000 kB
 
     #[test]
     fn test_available_fallback() {
-        // When MemAvailable is 0 (missing), estimate from free + buffers + cached.
-        let content = "\
+        // The comment on this test used to read "When MemAvailable is 0
+        // (missing)" -- stating the conflation as though it were the
+        // definition, and asserting the behaviour that followed from it. The
+        // two cases are separated now, end to end through the real parser.
+        const WITHOUT: &[u8] = b"\
 MemTotal:       16384000 kB
 MemFree:         8192000 kB
 Buffers:          512000 kB
 Cached:          2048000 kB
-SwapTotal:              0 kB
-SwapFree:               0 kB
-Shmem:                  0 kB
-SReclaimable:           0 kB
 ";
-        let mem_free = get_meminfo_value(content, "MemFree");
-        let buffers = get_meminfo_value(content, "Buffers");
-        let cached = get_meminfo_value(content, "Cached");
-        let mem_available = get_meminfo_value(content, "MemAvailable");
+        const WITH_ZERO: &[u8] = b"\
+MemTotal:       16384000 kB
+MemFree:         8192000 kB
+MemAvailable:          0 kB
+Buffers:          512000 kB
+Cached:          2048000 kB
+";
 
-        // MemAvailable is missing, so it returns 0.
-        assert_eq!(mem_available, 0);
+        let absent = procinfo::MemInfo::parse(WITHOUT);
+        assert_eq!(absent.available_kib, None, "the key is not in the file");
+        assert_eq!(
+            available_or_estimate(absent.available_kib, 8_192_000, 512_000, 2_048_000),
+            10_752_000,
+            "an absent MemAvailable is estimated"
+        );
 
-        // Fallback estimate.
-        let estimated = mem_free.saturating_add(buffers).saturating_add(cached);
-        assert_eq!(estimated, 10_752_000);
+        let zero = procinfo::MemInfo::parse(WITH_ZERO);
+        assert_eq!(zero.available_kib, Some(0), "the key is present and zero");
+        assert_eq!(
+            available_or_estimate(zero.available_kib, 8_192_000, 512_000, 2_048_000),
+            0,
+            "a published zero is the answer, not a trigger for the estimate"
+        );
     }
 
     #[test]

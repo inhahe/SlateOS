@@ -4403,6 +4403,70 @@ check_absent_operand_default() {
 
 check_absent_operand_default
 
+# A file read whose failure is indistinguishable from an empty file.
+#
+# Lane B's checker, wired here by lane A because `scripts/boot-test.sh` is lane
+# A's file and `check-gates-are-wired` was refusing the build without it. It was
+# named only in `scripts/pre-boot.py` -- the forty-minute local pre-flight nobody
+# is obliged to run -- which is exactly the case that meta-gate exists to catch:
+# a checker that looks enforced and is not.
+#
+# Verified before wiring rather than after, because running another lane's gate
+# can redden a tree they have not seen: `--check` exits 0 here with "17 pinned
+# site(s), none new", and its own self-test passes. If it ever does fail on lane
+# A's or lane C's tree, the finding is real -- the shape it counts is a defect
+# anywhere -- but the fix belongs to whoever owns the file.
+#
+# Third spelling this week of one defect, and the sibling of the gate directly
+# above. For a value that guards a decision, "I do not know" and "there is
+# nothing there" must not be the same:
+#
+#   check-read-defaults        a read that FAILED           read_to_string().unwrap_or_default()
+#   check-option-refusal       a word that could not PARSE  §600's guessed value
+#   check-absent-operand-...   a word that was never SAID   a numeric default for a missing operand
+#
+# All three were written independently several times each by the lanes that own
+# them, with the rule already stated in three documents. That is the argument for
+# a checker over a rule.
+check_read_defaults() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Read-default check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    if ! run_checker check-read-defaults-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-read-defaults.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-read-defaults.py fails its own" >&2
+        echo "cases, so its verdict on the tree means nothing." >&2
+        return 1
+    fi
+
+    echo "=== Checking that a failed read is not read as an empty file ==="
+    if run_checker check-read-defaults "$py" \
+            "$PROJECT_ROOT/scripts/check-read-defaults.py" --check; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A read_to_string(...).unwrap_or_default()" >&2
+    echo "appeared that the baseline does not pin.  That call collapses three" >&2
+    echo "situations into one empty string: the file is empty, the file is" >&2
+    echo "absent, and the file could not be read.  The third is the defect --" >&2
+    echo "for a value that guards a decision, \"I do not know\" must not look" >&2
+    echo "like \"there is nothing there\"." >&2
+    echo "" >&2
+    echo "The baseline is scripts/read-defaults-baseline.txt and it only shrinks." >&2
+    exit 1
+}
+
+check_read_defaults
+
 # Keep every path-taking VFS entry point behind the one permission gate.
 #
 # This guards the failure mode that no runtime test can see, because both

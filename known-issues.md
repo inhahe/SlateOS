@@ -117150,6 +117150,46 @@ stock clippy", not "clean at the project standard", until step 2 has a number.
 
 ## A-A-THE-LIBC-SHAPE-GATE-WAS-BORN-DEAD-AND-THE-WIRING-GATE-CALLS-IT-WIRED (lane A, 2026-09-04)
 
+**Status: CLOSED 2026-09-10 by lane A — both halves, and both verified by
+experiment rather than by reading.**
+
+*Half one, the specific call.* `find_python` no longer exists anywhere in
+`scripts/boot-test.sh` except inside the comment that records this entry:
+`check_libc_shape()` resolves its own interpreter the way every other gate
+function does. The gate runs; the boot test of 2026-09-10 reports
+`check-libc-shape` reaching a verdict.
+
+*Half two, the class, which is the half worth closing.* The complaint was
+that a gate could fail **before** reaching its `run_checker` call and the
+wiring meta-gate would still count it as wired, because it reads the call
+site textually. `scripts/check-shell-callables.py` now closes that, and it
+was checked by planting the defect rather than by trusting the description:
+a `py="$(totally_invented_helper)" || return 0` inserted into a live gate
+function makes it exit 1 with
+
+    scripts/boot-test.sh:4167: calls `totally_invented_helper`, which is not
+    defined in this file, in anything it sources, as a shell builtin, or on PATH
+
+so the exact shape that was invisible for a week is now named with its file,
+its line and its symbol. The planted line was reverted and the tree verified
+clean afterwards.
+
+*What still is not covered, so this closure is not read as wider than it is.*
+`check-shell-callables` resolves **literal** command-substitution callees. A
+gate that fails before its checker for some other reason — an `if` that is
+never true, a `return 0` on a path nobody expected — is still invisible, and
+there are now three gates in this family rather than one: can it refuse
+(`check-gates-can-refuse`), does anything ask it (`check-gates-are-wired`),
+and does the asking reach it (`check-gate-call-sites`, added today for the
+argument half of the same question). None of them asks whether the shell
+function's body reaches its own `run_checker` line on a normal run.
+
+*Why it sat open.* Nothing was wrong with the fix; the entry simply was not
+marked when the work landed, and a tech-debt list with fixed entries in it
+trains its reader to assume every entry is stale. Found while looking for
+lane A work, by checking whether the defect it describes is still live —
+which is the cheapest thing to do first with any entry this old.
+
 **In short:** a gate added yesterday to check that `libc.a` is carved finely
 enough has **never run, not once, on any host**. Its first line calls a helper
 function that does not exist; the call fails, and the `|| return 0` on that same

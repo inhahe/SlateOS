@@ -121,13 +121,20 @@ fn enumerate_pids() -> Vec<u32> {
     pids
 }
 
-/// Read the command name from /proc/<pid>/stat.
-/// The comm field is enclosed in parentheses and may contain spaces.
+/// The command name for the `COMMAND` column, through [`procinfo`].
+///
+/// Escaped rather than raw, and read as bytes rather than as text: reading
+/// `/proc/<pid>/stat` with `read_to_string` *fails* on a name that is not
+/// UTF-8, which dropped the process from `lsof`'s output entirely -- along with
+/// every open file it was holding, which is the one thing `lsof` exists to
+/// report.
 fn read_command(pid: u32) -> Option<String> {
-    let content = read_file(&format!("/proc/{pid}/stat"))?;
-    let start = content.find('(')?;
-    let end = content.rfind(')')?;
-    content.get(start + 1..end).map(|s| s.to_string())
+    let comm = procinfo::ProcFs::new()
+        .process_stat(u64::from(pid))
+        .ok()
+        .flatten()?
+        .comm;
+    Some(quoting::escape_unprintable(&comm))
 }
 
 /// Read the UID from /proc/<pid>/status.

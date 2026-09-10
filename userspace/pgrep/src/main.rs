@@ -1131,6 +1131,61 @@ impl Options {
     }
 }
 
+/// Compile the pattern text a caller typed into the form the matcher wants.
+///
+/// Lifted out of `parse_args` so that the compilation can be **skipped**:
+/// `pgrep -u alice` with no pattern is a valid invocation and must leave
+/// `Options::pattern` as `None`, which `process_matches` already reads as
+/// "every process passes the pattern stage".
+fn compile_from_args(
+    pattern_str: &str,
+    ignore_case: bool,
+    exact_match: bool,
+) -> Result<CompiledPattern, String> {
+    // Compile the pattern.
+    let pattern_to_compile = if ignore_case {
+        pattern_str.to_lowercase()
+    } else {
+        pattern_str.to_string()
+    };
+
+    let mut compiled = compile_pattern(pattern_to_compile.as_bytes())?;
+    if ignore_case {
+        lower_pattern(&mut compiled);
+    }
+
+    // If exact match, wrap with ^...$ anchors if not already present.
+    if exact_match {
+        for branch in &mut compiled.branches {
+            let has_start = branch
+                .first()
+                .is_some_and(|e| matches!(e.token, Token::StartAnchor));
+            let has_end = branch
+                .last()
+                .is_some_and(|e| matches!(e.token, Token::EndAnchor));
+            if !has_start {
+                branch.insert(
+                    0,
+                    PatternElement {
+                        token: Token::StartAnchor,
+                        min_rep: 1,
+                        max_rep: 1,
+                    },
+                );
+            }
+            if !has_end {
+                branch.push(PatternElement {
+                    token: Token::EndAnchor,
+                    min_rep: 1,
+                    max_rep: 1,
+                });
+            }
+        }
+    }
+
+    Ok(compiled)
+}
+
 /// Parse command-line arguments. Returns Err for usage errors.
 fn parse_args(args: &[String]) -> Result<Options, String> {
     let mode = args.first().map(|a| detect_mode(a)).unwrap_or(Mode::Pgrep);
@@ -1328,52 +1383,34 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         i += 1;
     }
 
-    if !saw_pattern {
+    // **A selector is enough on its own.** `pgrep -u alice`, `pgrep -P 1` and
+    // `pkill -t tty1` are all valid in procps: the selectors stand alone and
+    // list every process matching them. This program used to answer "no
+    // pattern specified" to all of them, which meant `pkill -u <user>` -- the
+    // ordinary way to end a user's sessions -- could not be run at all.
+    //
+    // Found on 2026-09-10 by a test that wanted a process selected by `-P`
+    // alone and could not have one.
+    let has_selector = opts.parent_pid.is_some()
+        || opts.filter_euid.is_some()
+        || opts.filter_ruid.is_some()
+        || opts.filter_pgrp.is_some()
+        || opts.filter_tty.is_some();
+
+    if !saw_pattern && !has_selector {
         return Err("no pattern specified".to_string());
     }
 
-    // Compile the pattern.
-    let pattern_to_compile = if opts.ignore_case {
-        opts.pattern_str.to_lowercase()
-    } else {
-        opts.pattern_str.clone()
-    };
-
-    let mut compiled = compile_pattern(pattern_to_compile.as_bytes())?;
-    if opts.ignore_case {
-        lower_pattern(&mut compiled);
+    // No pattern means no pattern stage, not an empty pattern: an empty one
+    // would match every process, which happens to be the same answer here and
+    // would stop being so the moment `-v` inverted it.
+    if saw_pattern {
+        opts.pattern = Some(compile_from_args(
+            &opts.pattern_str,
+            opts.ignore_case,
+            opts.exact_match,
+        )?);
     }
-
-    // If exact match, wrap with ^...$ anchors if not already present.
-    if opts.exact_match {
-        for branch in &mut compiled.branches {
-            let has_start = branch
-                .first()
-                .is_some_and(|e| matches!(e.token, Token::StartAnchor));
-            let has_end = branch
-                .last()
-                .is_some_and(|e| matches!(e.token, Token::EndAnchor));
-            if !has_start {
-                branch.insert(
-                    0,
-                    PatternElement {
-                        token: Token::StartAnchor,
-                        min_rep: 1,
-                        max_rep: 1,
-                    },
-                );
-            }
-            if !has_end {
-                branch.push(PatternElement {
-                    token: Token::EndAnchor,
-                    min_rep: 1,
-                    max_rep: 1,
-                });
-            }
-        }
-    }
-
-    opts.pattern = Some(compiled);
     Ok(opts)
 }
 
@@ -2057,6 +2094,71 @@ mod tests {
             ruid: 1000,
             euid: 1000,
         }
+    }
+
+    // ---- a selector is a complete request ----
+
+    /// `pgrep -P 1` with no pattern lists the children of pid 1.
+    ///
+    /// procps accepts this and so must we: the selector-only forms are how
+    /// `pkill -u <user>` ends a user's sessions, and this program used to
+    /// answer "no pattern specified" to every one of them.
+    #[test]
+    fn a_selector_alone_is_a_complete_invocation() {
+        let args = vec!["pgrep".to_string(), "-P".to_string(), "1".to_string()];
+        let opts = parse_args(&args).expect("a selector is enough on its own");
+        assert!(
+            opts.pattern.is_none(),
+            "no pattern was given, so there is no pattern stage"
+        );
+
+        let child = make_proc(10, b"anything-at-all", b"");
+        assert!(process_matches(&child, &opts, 999));
+    }
+
+    /// And the selector is still applied -- accepting the invocation must not
+    /// mean accepting every process.
+    #[test]
+    fn a_selector_alone_still_selects() {
+        let args = vec!["pgrep".to_string(), "-P".to_string(), "7".to_string()];
+        let opts = parse_args(&args).expect("a selector is enough on its own");
+        let child_of_one = make_proc(10, b"proc", b"");
+        assert!(
+            !process_matches(&child_of_one, &opts, 999),
+            "the fixture's ppid is 1, not 7"
+        );
+    }
+
+    /// Neither a pattern nor a selector is still an error: `pgrep` with no
+    /// arguments must not list every process on the machine, which is what a
+    /// blanket "accept it" would have done.
+    #[test]
+    fn neither_a_pattern_nor_a_selector_is_refused() {
+        let args = vec!["pgrep".to_string()];
+        assert!(parse_args(&args).is_err());
+    }
+
+    /// **`-v` with a selector and no pattern inverts the selector, not a
+    /// vacuous pattern.**
+    ///
+    /// This is why the absent pattern is `None` rather than an empty compiled
+    /// pattern. An empty pattern matches everything, which is the same answer
+    /// as "no pattern stage" -- until `-v` negates it, at which point one
+    /// selects everything and the other selects nothing.
+    #[test]
+    fn inverting_a_selector_only_request_does_not_invert_a_phantom_pattern() {
+        let args = vec![
+            "pgrep".to_string(),
+            "-v".to_string(),
+            "-P".to_string(),
+            "1".to_string(),
+        ];
+        let opts = parse_args(&args).expect("a selector is enough on its own");
+        let child_of_one = make_proc(10, b"proc", b"");
+        assert!(
+            process_matches(&child_of_one, &opts, 999),
+            "`-v` has no pattern to invert here, so the selector still decides"
+        );
     }
 
     /// **A process whose name is not UTF-8 must still be findable.**

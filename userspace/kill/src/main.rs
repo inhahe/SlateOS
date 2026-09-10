@@ -447,20 +447,25 @@ fn continue_process(pid: u64) -> Result<u32, String> {
 // Process name resolution (for killall mode)
 // ============================================================================
 
-/// Read the process name from /proc/<pid>/stat (field 2, in parentheses).
-fn read_process_name(pid: u64) -> Option<String> {
-    let path = format!("/proc/{pid}/stat");
-    let content = fs::read_to_string(&path).ok()?;
-
-    // Format: "<pid> (<name>) <state> ..."
-    // The name itself may contain spaces and parentheses, so we find the
-    // first '(' and last ')' to extract it correctly.
-    let open = content.find('(')?;
-    let close = content.rfind(')')?;
-    if close <= open {
-        return None;
-    }
-    Some(content[open.saturating_add(1)..close].to_string())
+/// The process name, **as bytes**, through [`procinfo`].
+///
+/// `read_to_string` on `/proc/<pid>/stat` *fails* when the name is not UTF-8,
+/// and the `.ok()` made that a `None` -- so `killall <name>` could not see such
+/// a process at all, and it could not be killed by name. Exactly the shape
+/// `pgrep`/`pkill` had.
+///
+/// Bytes rather than a `String` for the comparison as well as the read: the
+/// target comes from `argv`, which is bytes on this system, and comparing what
+/// the kernel reported against what the user typed is a byte comparison or it
+/// is a guess.
+fn read_process_name(pid: u64) -> Option<Vec<u8>> {
+    Some(
+        procinfo::ProcFs::new()
+            .process_stat(pid)
+            .ok()
+            .flatten()?
+            .comm,
+    )
 }
 
 /// Find all PIDs whose process name matches the given target name.
@@ -484,8 +489,11 @@ fn find_pids_by_name(target: &str) -> Vec<u64> {
             Err(_) => continue,
         };
 
+        // Bytes on both sides. `target` is what the user typed and
+        // `proc_name` is what the kernel reported; comparing them after
+        // decoding either one is a comparison of two guesses.
         if let Some(proc_name) = read_process_name(pid)
-            && proc_name == target
+            && proc_name == target.as_bytes()
         {
             pids.push(pid);
         }
@@ -1167,5 +1175,87 @@ fn main() {
 
     if any_failed {
         process::exit(1);
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+/// **This crate had no tests at all before 2026-09-10.** A program whose whole
+/// job is to send signals, with a signal-name table, a `killall` personality
+/// selected by `argv[0]`, and an argument parser -- and nothing asserted about
+/// any of it.
+///
+/// What is covered is the part that is a pure function of its input. Sending a
+/// signal is not: it needs a live process, and a test that sent one would be
+/// testing the kernel.
+#[cfg(test)]
+mod tests {
+    use super::{is_killall_invocation, signal_by_name, signal_by_number};
+
+    /// Both spellings reach the same signal. `kill -TERM` and `kill -SIGTERM`
+    /// are both in every script anyone has ever written.
+    #[test]
+    fn a_signal_is_found_with_or_without_the_sig_prefix() {
+        let bare = signal_by_name("TERM").expect("TERM is a signal");
+        let prefixed = signal_by_name("SIGTERM").expect("SIGTERM is the same signal");
+        assert_eq!(bare.number, prefixed.number);
+        assert_eq!(bare.name, "TERM");
+    }
+
+    /// And case does not matter, which is what `to_uppercase` is for.
+    #[test]
+    fn a_signal_name_is_case_insensitive() {
+        let lower = signal_by_name("sigkill").expect("sigkill is SIGKILL");
+        assert_eq!(lower.name, "KILL");
+    }
+
+    /// A name that is not a signal is `None`, not a default.
+    ///
+    /// The direction that matters: `kill -SIGFOO 123` must refuse rather than
+    /// quietly picking a signal, because the caller believes they asked for
+    /// something specific.
+    #[test]
+    fn an_unknown_signal_name_is_refused() {
+        assert!(signal_by_name("NOTASIGNAL").is_none());
+        assert!(signal_by_name("").is_none());
+        // "SIG" alone strips to the empty string, which must not match the
+        // first entry or anything else.
+        assert!(signal_by_name("SIG").is_none());
+    }
+
+    /// Signal 0 is a real signal -- the existence check -- and must not be
+    /// confused with "no signal".
+    #[test]
+    fn signal_zero_is_the_existence_check() {
+        let null = signal_by_number(0).expect("0 is a signal");
+        assert_eq!(null.name, "NULL");
+    }
+
+    /// Every entry is reachable by both of its keys, and the two agree. A
+    /// table is exactly the kind of thing that grows an entry reachable by
+    /// number and not by name.
+    #[test]
+    fn every_table_entry_is_reachable_by_number_and_by_name() {
+        for entry in super::SIGNAL_TABLE {
+            let by_number = signal_by_number(entry.number).expect("reachable by number");
+            let by_name = signal_by_name(entry.name).expect("reachable by name");
+            assert_eq!(by_number.name, entry.name);
+            assert_eq!(by_name.number, entry.number);
+        }
+    }
+
+    /// The `killall` personality is chosen by the **basename** of `argv[0]`,
+    /// so an absolute path selects it and a longer name does not.
+    #[test]
+    fn killall_is_selected_by_the_basename_of_argv0() {
+        assert!(is_killall_invocation("killall"));
+        assert!(is_killall_invocation("/usr/bin/killall"));
+        assert!(!is_killall_invocation("kill"));
+        assert!(!is_killall_invocation("/usr/bin/kill"));
+        // Not a prefix or suffix match: these are different programs.
+        assert!(!is_killall_invocation("killall5"));
+        assert!(!is_killall_invocation("mykillall"));
     }
 }

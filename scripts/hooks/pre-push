@@ -784,7 +784,7 @@ if [ "$suites_failed" = "1" ]; then
 
 pre-push: REFUSING to push — a tooling script's own test suite fails.
 
-The script's `--selftest` passing does not cover this. That asks whether the
+The script's \`--selftest\` passing does not cover this. That asks whether the
 checker's RULE still holds against fixtures the checker carries; the suite
 above asks whether the SCRIPT still behaves — its exit codes, its output
 format, and the advice it prints to whoever it refuses.

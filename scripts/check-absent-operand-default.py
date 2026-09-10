@@ -41,6 +41,32 @@ So the definition lives here, in code, and the count lives in
 "78 of 800 remain" trustworthy, and the reason asking *its* checker which entries
 dropped — rather than grepping — is what kept batch 46's arithmetic right.
 
+Two rules, one ledger
+=====================
+
+**Rule A -- an invented NUMBER.** A default that parses as a base-10 integer,
+in any `parts.get(n).unwrap_or(&"0")` form. This was the original rule and it
+is a proxy: it guesses that a number is an identifier. It stays because it
+reaches arms whose command prints no synopsis at all, and because it recognises
+the `match parts.get(n).unwrap_or(...).parse()` form that rule B's let-binding
+matcher does not.
+
+**Rule B -- a broken PROMISE.** The command's own printed help marks the operand
+required -- angle brackets, the convention this file keeps in 2348 documented
+positions across 269 commands -- and the code supplies a value anyway. This is
+the better question. It needs no judgment at all: the tree states the
+requirement and the tree states the violation, so the checker only puts them
+side by side. It also sees string defaults, which are 78 of its 83 findings and
+were wholly invisible to rule A. `apppermissions` prints `grant <app> <perm>`
+and grants the storage permission to an application named "app".
+
+They share ONE ledger. Measured at af70253de the overlap is 3 of 37 and 83,
+which makes two ledgers look safe -- but that near-disjointness is an artifact
+of rule B's matcher, not a property of the populations: broaden it to the
+`match` form and most of A falls inside B. Two ledgers over one family is how a
+burn-down double-counts, which is the thing this lane warned lane B about the
+same afternoon this rule was written.
+
 What counts
 ===========
 
@@ -154,6 +180,12 @@ LEDGER_HEADER = (
     "#\n"
     "# The number may only go DOWN. An entry claiming more sites than exist fails\n"
     "# too, because that is how a fixed site stays counted.\n"
+    "# ONE exception, and it must be auditable. The number may rise when the RULE\n"
+    "# changes -- a better question finds sites that were always there. When that\n"
+    "# happens the re-pin belongs in the same commit as the rule change, so the\n"
+    "# diff shows a new detector next to the new total. A re-pin on its own, with\n"
+    "# no rule change beside it, is the ratchet being filed off.\n"
+    "#\n"
     "#\n"
     "# An `allow <function> <literal>` line exempts one (function, default) pair.\n"
     "# The criterion is the command's OWN printed synopsis and nothing else: square\n"
@@ -334,6 +366,132 @@ def sites(text: str) -> list[tuple[str, int, str]]:
     return found
 
 
+OPS_RX = r"(?: *(?:<[^<>\s]+>|\[[^\[\]\s]+\]))+"
+Q = chr(34)
+
+# `fn cmd_foo(` -- one kshell command per function.
+CMD_FN = re.compile(r"^(?:pub )?fn (cmd_[a-z0-9_]+)\s*\(", re.M)
+
+# A match arm at command level: `"sub" => {` or `"sub" | "s" | "disc-mode" => {`.
+# The alternatives accept ANY character but a quote. An earlier draft spelled them
+# `[a-z0-9_]+`, which cannot match the hyphen in "disc-mode"; that arm header then
+# failed to match, the previous arm's span ran on through it, and findings were
+# attributed to the wrong subcommand. Arm boundaries decide attribution, so they
+# are the one pattern here that must not be approximate.
+CMD_ARM = re.compile(
+    r"^        (" + Q + r"[^" + Q + r"]+" + Q +
+    r"(?:\s*\|\s*" + Q + r"[^" + Q + r"]+" + Q + r")*)\s*=>",
+    re.M,
+)
+
+# The two shapes kshell prints its own synopsis in:
+#   shell_println!("  grant <app> <perm>  Grant permission");
+#   shell_println!("Usage: apppermissions grant <app> <perm>");
+SYN_SUMMARY = re.compile(
+    r"shell_println!\(\s*" + Q + r"  ([a-z0-9_-]+)(" + OPS_RX + r")", re.I
+)
+SYN_USAGE = re.compile(
+    r"shell_println!\(\s*" + Q + r"Usage: \S+ ([a-z0-9_-]+)(" + OPS_RX + r")", re.I
+)
+
+# `let host = parts.get(1).copied().unwrap_or("127.0.0.1")` -- name, index, default.
+LET_DEFAULT = re.compile(
+    r"let (\w+)(?:\s*:\s*[^=]+)? = parts\s*\.\s*get\(\s*(\d+)\s*\)\s*"
+    r"(?:\.\s*copied\(\)\s*)?\.\s*unwrap_or\(\s*&?" + Q + r"([^" + Q + r"]*)" + Q + r"\s*\)"
+)
+IS_EMPTY = re.compile(r"(\w+)\s*\.\s*is_empty\(\)")
+
+
+def operand_shape(text: str) -> tuple[str, ...]:
+    """Per position, `<` if the help prints it required, `[` if optional.
+
+    Only the bracket is kept. Two help lines for one subcommand routinely disagree
+    on the placeholder NAME -- `<t1,t2,...>` against `<tag1,tag2,...>` -- while
+    agreeing exactly on what is required, and an earlier draft compared the names
+    and skipped 490 arms as "ambiguous" for a purely cosmetic difference.
+    """
+    return tuple(o[0] for o in re.findall(r"<[^<>\s]+>|\[[^\[\]\s]+\]", text))
+
+
+def promised_sites(text: str) -> list[tuple[str, int, str, str]]:
+    """Rule B: (function, line, default, detail) per broken promise.
+
+    An operand the command's own help prints in angle brackets must not have a
+    default. This needs no judgment and no ledger of opinions: the tree states the
+    requirement and the tree states the violation, so the checker only has to put
+    them side by side.
+
+    Three classes are deliberately NOT reported, each for a reason that was
+    established by reading the code rather than by reasoning about it:
+
+    * **A default of the empty string.** It is the established spelling for "the
+      operator said nothing", and 269 sites pair it with `if x.is_empty() { usage;
+      return; }`, which is the correct idiom and the most common thing these
+      commands do. Counting it produced a first measurement of 376 that was mostly
+      correct code. An empty string also rarely names a real object, so even the
+      90 sites that never test it fail in the callee rather than acting on the
+      wrong thing.
+
+    * **A default that cannot be reached.** Operands are positional, so if the arm
+      refuses when a LATER operand is empty, reaching the work requires that later
+      operand, which requires this one. `netshare mount` defaults its remote path
+      to "/" and was reported, alarmingly, as turning a missing path into the
+      filesystem root -- but success there needs operand 3, which guarantees
+      operand 2. The default is dead. That headline was this checker's bug.
+
+    * **An arm whose help disagrees with itself** about whether a position is
+      required. Skipped rather than guessed, and a position is checked only where
+      every printed synopsis for that subcommand calls it required. A gate that
+      overstates gets switched off.
+    """
+    found: list[tuple[str, int, str, str]] = []
+    fns = [(m.start(), m.group(1)) for m in CMD_FN.finditer(text)]
+    for i, (start, fname) in enumerate(fns):
+        end = fns[i + 1][0] if i + 1 < len(fns) else len(text)
+        body = text[start:end]
+
+        synopses: dict[str, set[tuple[str, ...]]] = {}
+        for rx in (SYN_SUMMARY, SYN_USAGE):
+            for h in rx.finditer(body):
+                synopses.setdefault(h.group(1), set()).add(operand_shape(h.group(2)))
+        if not synopses:
+            continue
+
+        arms = [(a.start(), a.group(1)) for a in CMD_ARM.finditer(body)]
+        for j, (astart, header) in enumerate(arms):
+            aend = arms[j + 1][0] if j + 1 < len(arms) else len(body)
+            arm = body[astart:aend]
+            names = re.findall(Q + r"([^" + Q + r"]+)" + Q, header)
+            variants: set[tuple[str, ...]] = set()
+            for n in names:
+                variants |= synopses.get(n, set())
+            if not variants:
+                continue
+
+            at_index: dict[int, tuple[str, str, int]] = {}
+            var_index: dict[str, int] = {}
+            for d in LET_DEFAULT.finditer(arm):
+                var_index[d.group(1)] = int(d.group(2))
+                at_index[int(d.group(2))] = (d.group(1), d.group(3), d.start())
+            refused = {var_index[v] for v in IS_EMPTY.findall(arm) if v in var_index}
+
+            for k in range(1, min(len(v) for v in variants) + 1):
+                if not all(v[k - 1] == "<" for v in variants):
+                    continue                      # some synopsis calls it optional
+                if k not in at_index:
+                    continue
+                _var, default, off = at_index[k]
+                if default == "":
+                    continue                      # refusable sentinel
+                if any(r > k for r in refused):
+                    continue                      # unreachable: a later operand is refused
+                line = text.count(chr(10), 0, start + astart + off) + 1
+                found.append(
+                    (fname, line, default, f"{names[0]} operand {k} is printed required")
+                )
+    return found
+
+
 def read_ledger() -> tuple[dict[str, int], set[tuple[str, str]], list[str]]:
     """(counts, allowed, raw allow lines).
 
@@ -361,11 +519,38 @@ def read_ledger() -> tuple[dict[str, int], set[tuple[str, str]], list[str]]:
     return counts, allowed, raw
 
 
+def all_sites(text: str) -> list[tuple[str, int, str, str]]:
+    """Both rules, deduplicated by line, in file order.
+
+    Rule A (`sites`) asks whether an invented value is a NUMBER. Rule B
+    (`promised_sites`) asks whether the command's own help printed the operand as
+    REQUIRED. B is the better question -- it needs no judgment and covers string
+    defaults, which are 78 of its 83 findings -- but A still earns its place,
+    because it reaches arms whose command prints no synopsis at all, and because it
+    recognises the `match parts.get(n).unwrap_or(&"0").parse()` form that B's
+    `let`-binding matcher does not.
+
+    They are unioned into ONE ledger deliberately. Measured at af70253de the
+    overlap is only 3 of 34 and 83, which makes two separate ledgers look safe, but
+    that near-disjointness is an artifact of B's matcher rather than a property of
+    the populations: broaden it to the `match` form and most of A falls inside B.
+    Two ledgers over one family is how a burn-down double-counts, and a count
+    nobody can trust is worse than no count because it gets quoted.
+    """
+    seen: dict[int, tuple[str, int, str, str]] = {}
+    for name, line, dflt in sites(text):
+        seen[line] = (name, line, dflt, "a numeric default for an absent operand")
+    for name, line, dflt, detail in promised_sites(text):
+        # Rule B's reason is the more specific of the two, so it wins the label.
+        seen[line] = (name, line, dflt, detail)
+    return [seen[k] for k in sorted(seen)]
+
+
 def counted(text: str, allowed: set[tuple[str, str]] | None = None) -> dict[str, int]:
     """Sites per function, excluding blessed (function, literal) pairs."""
     allowed = allowed or set()
     tally: dict[str, int] = defaultdict(int)
-    for name, _line, dflt in sites(text):
+    for name, _line, dflt, _detail in all_sites(text):
         if (name, dflt) in allowed:
             continue
         tally[name] += 1
@@ -391,16 +576,16 @@ def main() -> int:
         return 2
 
     text = KSHELL.read_text(encoding="utf-8", errors="replace")
-    found = sites(text)
+    found = all_sites(text)
 
     ledger, allowed, raw_allow = read_ledger()
 
     if args.list:
-        for name, line, dflt in found:
+        for name, line, dflt, detail in found:
             mark = "  [allowed: its own help prints square brackets]" if (name, dflt) in allowed else ""
             print(
                 f"kernel/src/kshell.rs:{line}: {name} defaults a missing operand "
-                f"to {dflt}{mark}"
+                f"to {dflt} -- {detail}{mark}"
             )
         tally = counted(text, allowed)
         print(
@@ -438,7 +623,7 @@ def main() -> int:
     # A blessing that matches nothing is the same defect as a count that claims
     # too much, and is how a fixed site stays exempt: the next real site in that
     # function with that literal inherits an exemption written for code that is gone.
-    live_pairs = {(name, dflt) for name, _line, dflt in found}
+    live_pairs = {(name, dflt) for name, _line, dflt, _detail in found}
     stale = sorted(pair for pair in allowed if pair not in live_pairs)
 
     if over:
@@ -586,6 +771,109 @@ def self_test() -> int:
         + "}" + chr(10)
     )
     check("masking preserves line numbers", [ln for _n, ln, _d in sites(shifted)], [3])
+
+    # ---- rule B: the help promised the operand was required -----------------
+    #
+    # These pin the three deliberate exclusions and the two parser defects that
+    # made earlier measurements of this population wrong while looking right.
+
+    def fixture(help_lines: list[str], arms: list[str]) -> str:
+        body = ["fn cmd_x(parts: &[&str]) {", "    match sub {"]
+        body += arms
+        body += ["        _ => {"]
+        body += ['            shell_println!("' + h + '");' for h in help_lines]
+        body += ["        }", "    }", "}"]
+        return chr(10).join(body) + chr(10)
+
+    def arm(name: str, lets: list[str]) -> list[str]:
+        return ['        "' + name + '" => {'] + ["            " + l for l in lets] + ["        }"]
+
+    DQ = chr(34)
+
+    def default_let(var: str, idx: int, val: str) -> str:
+        return ("let " + var + " = parts.get(" + str(idx) + ").copied().unwrap_or("
+                + DQ + val + DQ + ");")
+
+    # A required operand with an invented value is the defect.
+    f = fixture(["  grant <app> <perm>"], arm("grant", [default_let("app", 1, "app")]))
+    check("a required operand with a default is reported", counted(f), {"cmd_x": 1})
+
+    # An optional one is not. This is the whole reason the criterion is the printed
+    # synopsis: `sharesheet history [count]` defaulting to 10 rows is correct.
+    f = fixture(["  history [count]"], arm("history", [default_let("n", 1, "10")]))
+    check("an optional operand with a default is not reported", promised_sites(f), [])
+
+    # The empty string is the established "the operator said nothing" spelling, and
+    # 269 sites pair it with an is_empty() refusal. Counting it gave a first
+    # measurement of 376 that was mostly correct code.
+    f = fixture(["  grant <app> <perm>"], arm("grant", [default_let("app", 1, "")]))
+    check("an empty default is not reported", promised_sites(f), [])
+
+    # Operands are positional, so refusing a LATER one makes this default dead.
+    # `netshare mount` defaults a remote path to "/" and was reported, wrongly, as
+    # turning a missing path into the filesystem root.
+    f = fixture(
+        ["  mount <host> <remote> <point>"],
+        arm("mount", [
+            default_let("host", 1, ""),
+            default_let("remote", 2, "/"),
+            default_let("point", 3, ""),
+            "if host.is_empty() || point.is_empty() { return; }",
+        ]),
+    )
+    check("a default a later refusal makes unreachable is not reported", promised_sites(f), [])
+
+    # ...but the same shape with nothing refused downstream IS reported, or the
+    # exclusion above would silently swallow the live case too.
+    f = fixture(
+        ["  mount <host> <remote> <point>"],
+        arm("mount", [default_let("host", 1, ""), default_let("remote", 2, "/")]),
+    )
+    check("the same default with no later refusal is reported", counted(f), {"cmd_x": 1})
+
+    # THE HYPHEN. An alias pattern of [a-z0-9_]+ cannot match "disc-mode", so this
+    # arm header did not match, the previous arm's span ran on through it, and the
+    # finding was attributed to the previous subcommand -- reported once as
+    # `cmd_bluetooth / name` for code in the discoverable arm.
+    f = fixture(
+        ["  name <label>", "  disc-mode <on|off>"],
+        arm("name", [default_let("label", 1, "")])
+        + ['        "disc-mode" | "disc" => {',
+           "            " + default_let("on", 1, "on"),
+           "        }"],
+    )
+    got = promised_sites(f)
+    check("a hyphenated alias does not leak the arm boundary",
+          [(fn, d) for fn, _ln, d, _dt in got], [("cmd_x", "on")])
+    check("and the finding names the right subcommand",
+          [dt.split()[0] for _f, _l, _d, dt in got], ["disc-mode"])
+
+    # Two help lines for one subcommand routinely differ only in placeholder name.
+    # Comparing names skipped 490 arms as ambiguous over a cosmetic difference.
+    f = fixture(
+        ["  set <path> <t1,t2,...>", "Usage: tag set <path> <tag1,tag2,...>"],
+        arm("set", [default_let("p", 1, "."), default_let("t", 2, "")]),
+    )
+    check("synopses differing only in operand name agree", counted(f), {"cmd_x": 1})
+
+    # But a real disagreement about whether a position is required is skipped, not
+    # guessed. A gate that overstates gets switched off.
+    f = fixture(
+        ["  sync <src> <dst>", "Usage: dirsync sync <src> [dst]"],
+        arm("sync", [default_let("src", 1, ""), default_let("dst", 2, "/tmp")]),
+    )
+    check("a genuine disagreement is skipped", promised_sites(f), [])
+
+    # The `Usage:` form alone must work: some arms print only that.
+    f = fixture(
+        ["Usage: drvmon register <bus>"],
+        arm("register", [default_let("bus", 1, "pci")]),
+    )
+    check("the Usage: form is recognised on its own", counted(f), {"cmd_x": 1})
+
+    # An arm with no printed synopsis at all is rule A's business, not rule B's.
+    f = fixture(["  other <thing>"], arm("undocumented", [default_let("x", 1, "pci")]))
+    check("an arm with no synopsis is not rule B's business", promised_sites(f), [])
 
     # The blessing mechanism. A default of 300 in `screensaver timeout [secs]` is
     # the documented value of an optional operand, not a guess at which saver the

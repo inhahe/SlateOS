@@ -179,8 +179,17 @@ _EXTRACTS_NAME = re.compile(
 # names are enumerated rather than left open because `x == "…"` matches far too
 # much; a dispatch that invents a sixth name for the variable is a false
 # negative, which is the safe direction.
+# `=> Personality::X`, and also `=> Some(Personality::X)` / `=> Ok(...)`. The
+# wrapper is not cosmetic: `userspace/cron`'s dispatch returns Option so that an
+# unimplemented name cannot fall through to `at`, and when that change was made
+# this regex stopped matching, silently taking SEVEN personalities and TWO
+# shadowing pairs out of the count. It was caught only because the expected
+# number had been predicted before the run -- "6 shadowing, down from 8" reads
+# as progress otherwise, which is the failure this gate exists to detect,
+# committed by the gate itself.
 _CHAIN = re.compile(
-    r'((?:"[a-z][a-z0-9_.+-]{0,20}"\s*\|\s*)*"[a-z][a-z0-9_.+-]{0,20}")\s*=>\s*Personality::'
+    r'((?:"[a-z][a-z0-9_.+-]{0,20}"\s*\|\s*)*"[a-z][a-z0-9_.+-]{0,20}")'
+    r'\s*=>\s*(?:Some\(|Ok\()?Personality::'
 )
 _LITERAL = re.compile(r'"([a-z][a-z0-9_.+-]{0,20})"')
 _NAMEVAR = (
@@ -393,6 +402,23 @@ fn run(all: &[String]) -> i32 {
     expect("a subcommand is not a personality",
            invocation_aliases(subcmd, "cron"), {"crond", "crontab"})
 
+    # THE WRAPPED ARM. `=> Some(Personality::X)` is what a dispatch returning
+    # Option looks like, and `cron` became one so that an unimplemented name
+    # could not fall through to `at`. The unwrapped regex stopped matching and
+    # the personality count silently dropped by seven.
+    wrapped = """
+fn detect_personality(argv0: &str) -> Option<Personality> {
+    let lower = argv0.to_ascii_lowercase();
+    match lower.as_str() {
+        "crontab" => Some(Personality::Crontab),
+        "atq" | "atrm" => Some(Personality::Atq),
+        _ => None,
+    }
+}
+"""
+    expect("an arm wrapped in Some() is still a dispatch arm",
+           invocation_aliases(wrapped, "cron"), {"crontab", "atq", "atrm"})
+
     # NO REGRESSION on the two shapes that already worked.
     enum_arm = """
 fn p(argv0: &str) -> Personality {
@@ -582,6 +608,29 @@ def main() -> int:
             "# Remove a line by deleting the shadowing branch -- the name belongs to",
             "# whichever program performs the operation. Do NOT add one to turn a red",
             "# --check green.",
+            "#",
+            "# THE ONE TEST FOR WHETHER A GROWTH IS LEGITIMATE: the added alias must",
+            "# be REACHABLE IN A REVISION THAT PREDATES THE COMMIT ADDING IT. Two",
+            "# ways that happens, and neither is a new defect:",
+            "#",
+            "#   the detector learned to see it -- 2026-09-10, cron:crond and",
+            "#       cron:crontab, when it stopped guessing the name of the variable",
+            "#       holding argv0 and started following the assignment chain.",
+            "#",
+            "#   the source made it explicit -- 2026-09-10, cron:at, when the",
+            "#       dispatch stopped falling through to `at` in a default arm that",
+            "#       carried no string literal. The crate always answered to `at`;",
+            "#       there was simply nothing for a gate to match on.",
+            "#",
+            "# A line added with neither -- no detector change, no source change, the",
+            "# alias genuinely new -- is somebody turning a red gate green.",
+            "#",
+            "# This paragraph lives in scripts/multicall-aliases.py, not here.",
+            "# An earlier copy was written directly into this file and the next",
+            "# --update-baseline deleted it, silently, because the header is",
+            "# regenerated wholesale. Policy written into a generated file is one",
+            "# regeneration from being lost, and nothing reports the loss: the gate",
+            "# stays green, the entries stay right, and only the reasoning goes.",
             "",
         ]
         shadow_body += sorted(f"{c}:{a}" for c, a, _ in shadowed)

@@ -12,10 +12,33 @@
 # Remove a line by deleting the shadowing branch -- the name belongs to
 # whichever program performs the operation. Do NOT add one to turn a red
 # --check green.
+#
+# THE ONE TEST FOR WHETHER A GROWTH IS LEGITIMATE: the added alias must
+# be REACHABLE IN A REVISION THAT PREDATES THE COMMIT ADDING IT. Two
+# ways that happens, and neither is a new defect:
+#
+#   the detector learned to see it -- 2026-09-10, cron:crond and
+#       cron:crontab, when it stopped guessing the name of the variable
+#       holding argv0 and started following the assignment chain.
+#
+#   the source made it explicit -- 2026-09-10, cron:at, when the
+#       dispatch stopped falling through to `at` in a default arm that
+#       carried no string literal. The crate always answered to `at`;
+#       there was simply nothing for a gate to match on.
+#
+# A line added with neither -- no detector change, no source change, the
+# alias genuinely new -- is somebody turning a red gate green.
+#
+# This paragraph lives in scripts/multicall-aliases.py, not here.
+# An earlier copy was written directly into this file and the next
+# --update-baseline deleted it, silently, because the header is
+# regenerated wholesale. Policy written into a generated file is one
+# regeneration from being lost, and nothing reports the loss: the gate
+# stays green, the entries stay right, and only the reasoning goes.
 
 chown:chmod
 chpasswd:passwd
-cron:crond
+cron:at
 cron:crontab
 head:tail
 pv:fuser

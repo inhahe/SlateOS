@@ -61,6 +61,12 @@ BASELINE = Path(__file__).resolve().parent / "read-defaults-baseline.txt"
 # NOT a lifetime -- `'a` has no closing quote and must pass through untouched.
 _CHAR_LITERAL = re.compile(r"'(?:\\u\{[0-9a-fA-F]{1,6}\}|\\.|[^\\'\n])'")
 
+# A raw-string opener: `r"`, `r#"`, `br##"`. Backslash is NOT an escape inside
+# one, so `r"a\"` ends at that quote -- treating it as an escape swallows the
+# terminator and pairs every later quote one off. `b"` is deliberately absent:
+# a byte string is escaped like an ordinary one.
+_RAW_OPEN = re.compile(r'b?r(#*)"')
+
 PATTERN = re.compile(
     r"(?:fs::)?read_to_string\s*\((?:[^()]|\([^()]*\))*\)\s*(?:\n\s*)?\.unwrap_or_default\s*\(\s*\)",
     re.S,
@@ -107,6 +113,14 @@ def strip_noise(src: str) -> str:
             for k in range(i, min(i + 2, n)):
                 out[k] = " "
             i += 2
+        elif (c in "rb") and (_m := _RAW_OPEN.match(src, i)):
+            close = '"' + "#" * len(_m.group(1))
+            end = src.find(close, _m.end())
+            end = n if end < 0 else end + len(close)
+            for k in range(i, end):
+                if src[k] != "\n":
+                    out[k] = " "
+            i = end
         elif c == "'":
             # A CHAR LITERAL, not a lifetime. `'a` / `'static` fall through to
             # the catch-all below and are left alone; only a complete literal
@@ -208,12 +222,89 @@ HEADER = """\
 """
 
 
+def _self_test() -> int:
+    """Fixtures for `strip_noise`, which has been wrong twice.
+
+    Both times it failed in the direction that looks fine: the scan still
+    produced a plausible list of sites, still passed `--check`, and still
+    refused when a line was unpinned. Nothing in the output said the input had
+    been misread. These pin the cases by name so a third rewrite cannot lose
+    them silently.
+    """
+    failures = 0
+
+    def expect(label: str, got: object, want: object) -> None:
+        nonlocal failures
+        ok = got == want
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'}  {label}")
+        if not ok:
+            print(f"          got  {got!r}")
+            print(f"          want {want!r}")
+
+    # THE SHIPPED BUG. `find('"')` is a char literal holding a double quote and
+    # appears in more than thirty crates. Without the char branch it opened a
+    # string that ran to the next quote anywhere later in the file, after which
+    # code was blanked as string and string contents stood as code.
+    src = 'let end = rest.find(\'"\')?;\nlet x = "hidden";\n'
+    out = strip_noise(src)
+    expect("a char literal holding a quote does not open a string",
+           "rest.find(" in out, True)
+    expect("...and the string after it is still blanked",
+           "hidden" in out, False)
+
+    # Lifetimes are not char literals and must survive: they have no closing
+    # quote, so blanking on sight would eat the rest of the line.
+    expect("a lifetime is left alone",
+           "'a" in strip_noise("fn f<'a>(s: &'a str) {}"), True)
+
+    # A raw string does not process escapes, so `r"a\"` ends at that quote.
+    # Treating the backslash as an escape swallows the terminator.
+    out = strip_noise('let re = r"a\\";\nlet y = "seen";\n')
+    expect("a raw string ending in a backslash terminates there",
+           "seen" in out, False)
+    expect("...and the code after it survives",
+           "let y =" in out, True)
+
+    # Hashed raw strings close only on the matching hash count.
+    out = strip_noise('let a = r#"x"y"#;\nlet b = "gone";\n')
+    expect("a hashed raw string spans an inner quote",
+           "let b =" in out, True)
+    expect("...and the following string is blanked",
+           "gone" in out, False)
+
+    # An ordinary string DOES process escapes.
+    out = strip_noise('let a = "x\\"y";\nlet b = 1;\n')
+    expect("an escaped quote does not end an ordinary string",
+           "let b = 1" in out, True)
+
+    expect("a line comment goes",
+           "note" in strip_noise("let a = 1; // note\n"), False)
+    expect("a block comment goes",
+           "note" in strip_noise("let a = /* note */ 1;"), False)
+
+    # Length is preserved so match offsets index the original -- the property
+    # `survey` relies on to show real argument text in the baseline.
+    for probe in ["let a = \"x\";", "// c\n", "r#\"q\"#", "'\\n'"]:
+        expect(f"length preserved: {probe!r}",
+               len(strip_noise(probe)), len(probe))
+
+    print(f"check-read-defaults: self-test "
+          f"{'FAILED' if failures else 'passed'} ({failures} failure(s))")
+    return 1 if failures else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true",
                     help="exit 1 if a site appeared that is not pinned")
     ap.add_argument("--update-baseline", action="store_true", dest="update")
+    ap.add_argument("--self-test", "--selftest", dest="self_test",
+                    action="store_true", help="run this script's own fixtures")
     args = ap.parse_args()
+
+    if args.self_test:
+        return _self_test()
 
     found = survey()
 

@@ -399,6 +399,14 @@ def main() -> int:
         ("scan-unwrap.py", "--summary", "unwrap/expect in kernel production paths"),
         ("scan-orphan-modules.py", "--check", "newly unreachable library modules"),
         ("audit-cli-fabrication.py", "--check", "commands that state facts they did not measure"),
+        # The checker's own fixtures run BEFORE its verdict, which is the rule
+        # `scripts/hooks/pre-push` states for raced-globals: "--check passing
+        # means nothing unless --selftest passed first." Its `strip_noise` has
+        # been wrong twice -- a char literal holding a quote, and a raw string
+        # ending in a backslash -- and both times the wrong version still
+        # produced a plausible list and still passed --check.
+        ("check-read-defaults.py", "--self-test",
+         "the read-defaults checker's own fixtures"),
         ("check-read-defaults.py", "--check",
          "reads whose failure is indistinguishable from an empty file"),
     ):

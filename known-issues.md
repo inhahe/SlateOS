@@ -127230,3 +127230,78 @@ with the crate list *derived* by grepping for the attribute rather than
 enumerated. Not built in the same commit as the `su` fix because a gate that is
 wrong about which crates to check is worse than no gate, and getting that right
 is its own piece of work rather than a tail-end of this one.
+
+
+## TD-B-USER-SWITCHING-PROGRAMS-CANNOT-RESET-SUPPLEMENTARY-GROUPS (lane B, 2026-09-10)
+
+**In short:** when a program switches to another user, it can now change that
+user's main identity for real, but it cannot clear the *extra* group
+memberships the original user had. Right now nobody has any extra groups, so
+nothing leaks. The moment the kernel starts tracking them, every user switch
+carries the old user's extra groups into the new session.
+
+**Where.** `userspace/su/src/main.rs`, `exec_as_user`. The same will apply to
+`doas`, `sudo`, `login` and `sshd` as each gains its privilege drop.
+
+**Why it is not simply done.** `posix::setgroups` returns `ENOSYS`
+deliberately -- the kernel implements it only in the Linux-ABI table
+(`kernel/src/syscall/linux.rs`) and `posix/src/syscall.rs` has no native number
+for native libc to call. Filed as
+`requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
+`std`'s `CommandExt::groups` makes the child call `setgroups` between fork and
+exec; on `ENOSYS` the child aborts and never execs, so requesting it today does
+not leave `su` half-working, it leaves `su` not working.
+
+**Why `ENOSYS` is the right answer and not a bug.** `posix::setgroups`'s own
+doc comment argues it: a stub returning 0 would let privilege-dropping code
+ship believing it had dropped something. That reasoning is why this entry
+exists at all -- the failure is visible instead of silent.
+
+**The shape of the leak.** A process that keeps the caller's supplementary
+groups and lowers only its uid still holds every group the caller was in. That
+is the textbook version, and it is what this code does. It is *empty today*:
+`posix::getgroups` reports zero groups, so there is nothing to retain. That is
+a fact about the current kernel, not a guarantee, and it is precisely the kind
+of fact that stops being true without anyone revisiting the code that depends
+on it.
+
+**The fix, when the syscall lands.** Set the target's groups in the child
+before `setgid`/`setuid` -- `CommandExt::groups` if it is stable by then,
+otherwise a `pre_exec` closure calling `setgroups` directly. The ordering is
+not optional: groups, then gid, then uid, because each step drops the privilege
+the previous one needed.
+
+
+## TD-B-FOUR-MORE-PROGRAMS-RUN-A-SHELL-AS-THE-WRONG-USER (lane B, 2026-09-10)
+
+**In short:** four programs still check who you are and then run the new user's
+shell under the *old* user's identity. `su` was fixed on 2026-09-10; these were
+found by the same look and are not yet done.
+
+| Program | What it does today |
+|---|---|
+| `userspace/doas` | `exec_command` sets `UID`/`GID` *environment variables* as "hints" and calls no credential syscall. |
+| `userspace/sudo` | No `setuid`/`setgid`/`CommandExt::uid` anywhere in `src/`. |
+| `userspace/sshd` | Same -- it sets `argv[0]` for a login shell but never the identity. |
+| `userspace/login` | Its success path is still `eprintln!("login: would exec shell ...")`; it execs nothing at all yet. |
+
+**The premise that expired.** `doas` carries the note that "the real privilege
+change will use the kernel's capability system once the POSIX exec layer
+supports `setuid`/`setgid` syscalls". That has fired: `posix::setuid` and
+`posix::setgid` apply real credentials through `set_real_credentials` and
+`getuid()` reflects them. They were stubs returning 0 once -- which is the
+interesting part, because **a stub that reports success is what keeps a
+deferral looking current**. Nothing about the note went stale in a visible way;
+the capability arrived under it.
+
+**What "wrong user" costs today.** Less than it sounds, and more than nothing.
+Every process is uid 0 in the current model, so the shell was already root and
+the switch was cosmetic either way. What changes with the fix is that the
+switch becomes real *first*, so the code is correct before the model tightens
+rather than after -- and `su`'s fix proves the mechanism works, which is what
+makes the other four a conversion rather than a design.
+
+**Do them the way `su` was done:** resolve `(uid, gid)` from the record and
+refuse if the record cannot name a uid (a session whose owner has no name must
+not start), then `CommandExt::gid` before `CommandExt::uid`. `login` needs its
+exec built first; see `todo.txt`.

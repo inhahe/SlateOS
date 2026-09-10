@@ -39,6 +39,20 @@
 //! on the stored entry, which is a valid setting for itself. Root (uid 0) can
 //! switch to any user without a password.
 //!
+//! # Becoming the user
+//!
+//! The authenticated identity is applied to the child for real: `setgid` then
+//! `setuid`, in that order, between fork and exec. Before 2026-09-10 this
+//! program checked the password and then ran the target's shell under *the
+//! caller's* credentials -- the environment said `alice`, and every file the
+//! shell created was owned by whoever ran `su`.
+//!
+//! **Supplementary groups are not reset**, because `posix::setgroups` returns
+//! `ENOSYS` and asking for them would abort the exec. Today that leaks
+//! nothing, since `getgroups` reports none; it stops being nothing the moment
+//! the kernel grows the syscall. See `known-issues.md`
+//! (TD-B-USER-SWITCHING-PROGRAMS-CANNOT-RESET-SUPPLEMENTARY-GROUPS).
+//!
 //! # Session tracking
 //!
 //! On login-shell switches, writes a session file to `/run/sessions/`
@@ -160,6 +174,25 @@ fn login_argv0(shell: &OsStr) -> std::ffi::OsString {
 /// The record's login shell, or the system default.
 fn shell_of(record: &Record) -> String {
     record.shell().unwrap_or_else(|| "/bin/sh".to_string())
+}
+
+/// The numeric identity the child must actually run as, or `None` if the
+/// record cannot name one.
+///
+/// **`None` is a refusal, not a default.** This used to be
+/// `record.uid().unwrap_or(u32::MAX)`, which was harmless while nothing acted
+/// on the number -- it only picked a `PATH`. Now that it is passed to
+/// `setuid`, a record with no `uid:` would start a shell owned by uid
+/// 4294967295: an identity belonging to nobody, holding whatever a
+/// nonexistent user's permissions turn out to be. A session whose owner
+/// cannot be named must not start.
+///
+/// The gid falls back to the uid because a record with no `gid:` of its own
+/// belongs to its user-private group, which `useradd` numbers after the uid --
+/// the same rule `useradd`'s own `primary_gid` applies.
+fn target_ids(record: &Record) -> Option<(u32, u32)> {
+    let uid = record.uid()?;
+    Some((uid, record.gid().unwrap_or(uid)))
 }
 
 // ============================================================================
@@ -427,7 +460,14 @@ fn exec_as_user(
     let target_shell = shell_of(target);
     let target_home = home_of(target);
     let target_name = name_of(target);
-    let target_uid = target.uid().unwrap_or(u32::MAX);
+    // Resolved before the command is built, and before any credential is
+    // changed: everything below this line assumes the identity is known.
+    let Some((target_uid, target_gid)) = target_ids(target) else {
+        eprintln!(
+            "su: {target_name} has no uid in the account database; refusing to start a session"
+        );
+        return 1;
+    };
     // `-s` names a path, and a path on this OS is bytes; the database's own
     // `shell:` field comes from YAML and so is text. Both are borrowed as
     // `&OsStr`, which is the type that can hold either.
@@ -511,6 +551,62 @@ fn exec_as_user(
     // Set working directory for login shells.
     if login_mode {
         cmd.current_dir(&target_home);
+    }
+
+    // -----------------------------------------------------------------------
+    // Become the target user, for real.
+    //
+    // Until this change `su` authenticated the user and then ran their shell
+    // as *the caller*: `HOME`, `USER`, `LOGNAME` and `SHELL` all said `alice`
+    // and the process credentials said whatever they had said before. Every
+    // file the shell created was owned by the wrong account, and every
+    // permission check it passed was the caller's.
+    //
+    // `CommandExt::uid`/`gid` make `std` call `setgid` and then `setuid` in
+    // the child, between fork and exec. That order is required and is not
+    // ours to choose: lowering the uid first would discard the privilege
+    // needed to lower the gid, leaving the child in the target's user
+    // identity and the caller's group.
+    //
+    // # This was recorded as blocked, and is not
+    //
+    // `userspace/doas` carries the note that "the real privilege change will
+    // use the kernel's capability system once the POSIX exec layer supports
+    // `setuid`/`setgid` syscalls". That premise has fired: `posix::setuid` and
+    // `posix::setgid` apply real credentials through `set_real_credentials`
+    // and `getuid()` reflects them. They were stubs returning 0 once, which is
+    // presumably when the note was written -- and a stub that reports success
+    // is exactly what keeps a deferral looking current.
+    //
+    // # Supplementary groups are deliberately NOT reset here
+    //
+    // The matching call is `setgroups`, and `posix::setgroups` returns
+    // `ENOSYS` on purpose: the kernel implements it only in the Linux-ABI
+    // table and `posix/src/syscall.rs` has no native number for native libc to
+    // call. See
+    // `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
+    // Asking `std` for it here would make the child call `setgroups`, get
+    // `ENOSYS`, and abort before exec -- `su` would stop working entirely, so
+    // the honest options are "drop uid and gid" or "drop nothing".
+    //
+    // Leaving them is the textbook shape of the leak `posix::setgroups`'s own
+    // doc comment describes: a process that keeps the caller's supplementary
+    // groups and lowers only its uid still holds every group the caller was
+    // in. It is empty *today* -- `getgroups` reports none, so there is nothing
+    // to retain -- but that is a fact about the current kernel and not a
+    // guarantee, and it is the half of the drop that will silently stay
+    // undone. Tracked in `known-issues.md`
+    // (TD-B-USER-SWITCHING-PROGRAMS-CANNOT-RESET-SUPPLEMENTARY-GROUPS).
+    // Read only by the block below, which the host build compiles away. Not
+    // renamed to `_target_gid`: it is genuinely used on the target, and a
+    // leading underscore would tell the next reader the opposite.
+    #[cfg(not(unix))]
+    let _ = target_gid;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.gid(target_gid);
+        cmd.uid(target_uid);
     }
 
     match cmd.status() {
@@ -849,6 +945,55 @@ mod tests {
         assert_eq!(super::login_argv0_bytes(b""), b"-".to_vec());
     }
     use super::*;
+
+    // --- The identity the child is given ---
+
+    /// A record naming both numbers yields both.
+    #[test]
+    fn target_ids_takes_the_uid_and_gid_the_record_names() {
+        let mut r = Record::new();
+        r.set(userdb::field::USERNAME, "alice");
+        r.set_uid(1000);
+        r.set_gid(50);
+        assert_eq!(target_ids(&r), Some((1000, 50)));
+    }
+
+    /// No `gid:` means the user-private group, which `useradd` numbers after
+    /// the uid. Falling back to 0 here would hand every such account root's
+    /// group, which is the failure worth naming: the fallback is not a
+    /// formality.
+    #[test]
+    fn target_ids_falls_back_to_the_user_private_group_not_to_zero() {
+        let mut r = Record::new();
+        r.set(userdb::field::USERNAME, "alice");
+        r.set_uid(1000);
+        assert_eq!(target_ids(&r), Some((1000, 1000)));
+    }
+
+    /// A record that cannot name its owner gets no session at all.
+    ///
+    /// This is the case that used to be `unwrap_or(u32::MAX)`. Harmless while
+    /// the number only chose a `PATH`; now it is passed to `setuid`, where it
+    /// would start a shell owned by an identity belonging to nobody.
+    #[test]
+    fn target_ids_refuses_a_record_with_no_uid() {
+        let mut r = Record::new();
+        r.set(userdb::field::USERNAME, "alice");
+        assert_eq!(target_ids(&r), None);
+    }
+
+    /// Root is a real answer, not a missing one -- `Some((0, 0))` and never
+    /// `None`, which an `unwrap_or_default` somewhere in this path would
+    /// blur into each other.
+    #[test]
+    fn target_ids_distinguishes_root_from_absent() {
+        let mut r = Record::new();
+        r.set(userdb::field::USERNAME, "root");
+        r.set_uid(0);
+        r.set_gid(0);
+        assert_eq!(target_ids(&r), Some((0, 0)));
+        assert_ne!(target_ids(&r), None);
+    }
 
     // --- User database parsing ---
     //

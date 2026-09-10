@@ -3989,9 +3989,15 @@ fn gen_snapshots() -> Vec<u8> {
             // Octal-escaped: this is a fixed-column, line-oriented table, and a
             // root path containing a newline would otherwise forge a row.
             let root = mangle_mount_field(snap.root_path.as_bytes());
+            // Escaped for the same reason `root` beside it is: a field holding a
+            // space splits one column into two, and one holding a newline forges
+            // a row. Escaping the path but not the name left the row parseable by
+            // no single rule -- reported by lane C in
+            // requests/c-a-proc-snapshots-escapes-the-path-but-not-the-name.md.
+            let name = mangle_mount_field(snap.name.as_bytes());
             s.push_str(&format!(
                 "{:>4}  {:20}  {:30}  {:>8}  {:>12}  {}\n",
-                snap.id.0, snap.name, root, snap.file_count, snap.total_bytes, parent_str
+                snap.id.0, name, root, snap.file_count, snap.total_bytes, parent_str
             ));
         }
     }
@@ -7426,14 +7432,20 @@ fn gen_dyndns() -> Vec<u8> {
             "ID", "NAME", "PROVIDER", "HOSTNAME", "STATUS", "IP"
         ));
         for e in &entries {
+            // Every free-text field here is escaped, not only the name lane C
+            // reported: `hostname` and `last_ip` are equally unvalidated, and a
+            // rule that holds for part of a row is not a rule a parser can use.
+            // The separators are *single* spaces, so an unescaped space is not
+            // merely ambiguous -- it is indistinguishable from a column break.
+            // `provider` and `status` are enum `Debug` and cannot hold one.
             out.push_str(&format!(
                 "{:<4} {:<15} {:<10} {:<25} {:<10} {}\n",
                 e.id,
-                e.name,
+                mangle_mount_field(e.name.as_bytes()),
                 format!("{:?}", e.provider),
-                e.hostname,
+                mangle_mount_field(e.hostname.as_bytes()),
                 format!("{:?}", e.status),
-                e.last_ip
+                mangle_mount_field(e.last_ip.as_bytes())
             ));
         }
     }

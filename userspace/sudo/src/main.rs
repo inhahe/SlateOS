@@ -2367,7 +2367,27 @@ fn get_user_groups(username: &str) -> Vec<String> {
 ///
 /// Root's values are not special-cased away from the database any more: an
 /// administrator who set root's shell had it ignored.
-fn get_user_info(username: &str) -> (String, String) {
+/// What `sudo` needs to know about the user it is about to become.
+struct TargetUser {
+    home: String,
+    shell: String,
+    /// `(uid, gid)`, or `None` if the account database cannot name them.
+    ///
+    /// Kept beside `home` and `shell` rather than looked up separately on
+    /// purpose. A second `UserDb::load` would be a second read of the same
+    /// file, and the two could disagree -- the account could be edited between
+    /// them -- which would mean running with one record's home directory under
+    /// another record's uid. One read, one answer.
+    ids: Option<(u32, u32)>,
+}
+
+/// Look the target user up once.
+///
+/// `home` and `shell` fall back to conventional defaults for an account the
+/// database does not have, because a missing shell is survivable. `ids` does
+/// not fall back: there is no safe default for "which user to run as", and
+/// the caller refuses rather than inventing one.
+fn get_user_info(username: &str) -> TargetUser {
     let default_home = if username == "root" {
         "/root".to_string()
     } else {
@@ -2376,19 +2396,30 @@ fn get_user_info(username: &str) -> (String, String) {
     let default_shell = "/bin/sh".to_string();
 
     let Ok(db) = userdb::UserDb::load(userdb::DEFAULT_PATH) else {
-        return (default_home, default_shell);
+        return TargetUser {
+            home: default_home,
+            shell: default_shell,
+            ids: None,
+        };
     };
     let Some(record) = db.find(username) else {
-        return (default_home, default_shell);
+        return TargetUser {
+            home: default_home,
+            shell: default_shell,
+            ids: None,
+        };
     };
 
-    (
-        record
+    TargetUser {
+        home: record
             .home()
             .filter(|h| !h.is_empty())
             .unwrap_or(default_home),
-        record.shell().unwrap_or(default_shell),
-    )
+        shell: record.shell().unwrap_or(default_shell),
+        // No `gid:` of its own means the user-private group, which `useradd`
+        // numbers after the uid.
+        ids: record.uid().map(|uid| (uid, record.gid().unwrap_or(uid))),
+    }
 }
 
 // ============================================================================
@@ -2933,7 +2964,8 @@ fn run_sudo(args: &[OsString]) -> i32 {
     }
 
     // Determine the actual command.
-    let (target_home, target_shell) = get_user_info(&opts.target_user);
+    let target = get_user_info(&opts.target_user);
+    let (target_home, target_shell) = (target.home.clone(), target.shell.clone());
     let effective_command: Vec<OsString> = if opts.command.is_empty() {
         // -i or -s without command: run the target user's shell.
         vec![OsString::from(target_shell.clone())]
@@ -3101,6 +3133,20 @@ fn run_sudo(args: &[OsString]) -> i32 {
     } else {
         cmd
     };
+
+    // Become the target user. Until now `sudo` authorised the command against
+    // `/etc/sudoers` and then ran it as the caller: the environment named the
+    // target and every credential the system checks named whoever typed
+    // `sudo`. See `authlib::identity::become_user` for the ordering rule and
+    // for the one part of the drop that is still missing everywhere.
+    let Some((target_uid, target_gid)) = target.ids else {
+        eprintln!(
+            "sudo: {} has no uid in the account database; refusing to run a command as an account that cannot be named",
+            quoteaf_os(&opts.target_user)
+        );
+        return 1;
+    };
+    authlib::identity::become_user(&mut cmd, target_uid, target_gid);
 
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),

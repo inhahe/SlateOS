@@ -127272,7 +127272,7 @@ not optional: groups, then gid, then uid, because each step drops the privilege
 the previous one needed.
 
 
-## TD-B-FOUR-MORE-PROGRAMS-RUN-A-SHELL-AS-THE-WRONG-USER (lane B, 2026-09-10)
+## ~~TD-B-FOUR-MORE-PROGRAMS-RUN-A-SHELL-AS-THE-WRONG-USER~~ (lane B, 2026-09-10) -- CLOSED the same day, and it was three, not four
 
 **In short:** four programs still check who you are and then run the new user's
 shell under the *old* user's identity. `su` was fixed on 2026-09-10; these were
@@ -127282,7 +127282,7 @@ found by the same look and are not yet done.
 |---|---|
 | `userspace/doas` | `exec_command` sets `UID`/`GID` *environment variables* as "hints" and calls no credential syscall. |
 | `userspace/sudo` | No `setuid`/`setgid`/`CommandExt::uid` anywhere in `src/`. |
-| `userspace/sshd` | Same -- it sets `argv[0]` for a login shell but never the identity. |
+| ~~`userspace/sshd`~~ | **This row was wrong.** sshd has done it correctly all along -- see the correction below. |
 | `userspace/login` | Its success path is still `eprintln!("login: would exec shell ...")`; it execs nothing at all yet. |
 
 **The premise that expired.** `doas` carries the note that "the real privilege
@@ -127301,10 +127301,49 @@ switch becomes real *first*, so the code is correct before the model tightens
 rather than after -- and `su`'s fix proves the mechanism works, which is what
 makes the other four a conversion rather than a design.
 
-**Do them the way `su` was done:** resolve `(uid, gid)` from the record and
-refuse if the record cannot name a uid (a session whose owner has no name must
-not start), then `CommandExt::gid` before `CommandExt::uid`. `login` needs its
-exec built first; see `todo.txt`.
+**Done 2026-09-10.** `doas` and `sudo` now call
+`authlib::identity::become_user`, `sudo` refusing outright when the target
+account has no uid -- there is no safe default for "which user to run as".
+`doas`'s `UID`/`GID` environment "hints" are deleted rather than kept alongside:
+they were read as an *identity* by six other programs, so `doas` was
+manufacturing the spoofed environment they trusted (see the entry above).
+`login` remains, and it is a different job -- its success path still prints
+"would exec shell" and execs nothing at all; see `todo.txt`.
+
+---
+
+**CORRECTION: `sshd` never had this bug, and the row above was my error.**
+
+`session_command` and `login_shell_command` have both been calling
+`cmd.gid(user.gid)` then `cmd.uid(user.uid)` since they were written, under doc
+comments that state the reasoning exactly: "sshd binds port 22 and therefore
+runs as root; if it spawned a session without dropping to the authenticated
+account, every user who could log in would get root". It even orders gid before
+uid deliberately, with a comment explaining that `std` would order them
+correctly anyway and that writing them this way saves the reader having to know.
+
+**How the survey got it wrong**, because the mechanism matters more than the
+mistake. The command was a `grep` for `\.uid(|\.gid(|setuid|...` piped through
+a `grep -v` meant to drop *reads* of a record's fields -- `record.`, `user.`,
+`target.` -- so that `user.uid()` lookups would not drown the signal. The lines
+that prove sshd correct are:
+
+    cmd.gid(user.gid);
+    cmd.uid(user.uid);
+
+They contain `user.`. The filter built to remove the noise removed exactly the
+evidence, the program printed "NO uid/gid drop found", and that was written
+into a tracking entry as a fact about the program.
+
+This is the same defect this tree keeps finding in its own tooling: **a command
+that answered a narrower question than the one being asked, whose answer was
+then reported at the width of the question.** The grep answered "which lines
+mention uid/gid and do not mention a record field", and it was reported as
+"which programs drop privileges".
+
+sshd is converted to `become_user` anyway -- not as a fix, but because it is the
+fourth caller and the argument for the shared function is that the missing
+`setgroups` must land in one place.
 
 
 ## ~~TD-B-FIVE-PROGRAMS-STILL-TAKE-THE-CALLERS-IDENTITY-FROM-THE-ENVIRONMENT~~ (lane B, 2026-09-10) -- CLOSED the same day, and it was six
@@ -127394,6 +127433,52 @@ exporting a variable, which is precisely the spoofing bash refuses when it
 ignores an inherited `UID=`". The shell refused what six privileged programs
 accepted. **A correct answer already in the tree does not propagate by
 existing.**
+
+
+## TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME (lane B, 2026-09-10)
+
+**In short:** `cargo test -p <name>` takes a *package* name. Everyone types the
+*directory* name, because for 2944 of this workspace's 2955 crates they are the
+same string. For five they are not, and the directory name belongs to a
+different crate -- so the command compiles, runs a test suite, prints a green
+result and exits 0, having tested a crate nobody touched.
+
+| Directory | Its package | `-p <directory>` actually reaches | Lane |
+|---|---|---|---|
+| `apps/backup` | `backup-app` | the `backup` crate | C |
+| `apps/indexer` | `indexer-app` | the `indexer` crate | C |
+| `apps/sysinfo` | `sysinfo-app` | the `sysinfo` crate | C |
+| `apps/tmux` | `tmux-app` | the `tmux` crate | C |
+| `userspace/login` | `login-cli` | `init/login` | B |
+
+**How it was found.** Giving `userspace/login` its exec on 2026-09-10. Every
+`cargo test -p login` that tick, and a `cargo fmt -p login`, went to
+`init/login` -- a different program, never edited. It surfaced only because the
+test count did not move after three tests were added: 53 `#[test]` in the file,
+46 collected, and the 46 collected names turned out not to be in the file at
+all. Nothing else would have said a word.
+
+**The asymmetry that makes this worth a gate.** A mistyped `-p` that matches no
+package fails loudly and immediately. The dangerous case is the one that
+*resolves*, to somebody else. Six other crates in the tree have a package name
+that differs from their directory -- `gui/toolkit` is `guitk`,
+`toolchain/stubs` is `slateos-stubs` -- and they are harmless for exactly this
+reason: nothing claims `toolkit` or `stubs`.
+
+**Gate 18 (`scripts/check-crate-names.py`) stops it growing**, and only that:
+the five above are baselined, because four are lane C's to rename and a gate
+that refuses every lane's push over pre-existing state is a gate that gets
+bypassed. The baseline may only shrink -- resolving one and leaving it listed
+is also a failure, so the list cannot rot into things that used to be true.
+
+**The fix, for whoever owns each crate:** rename the package to match its
+directory, or rename the directory to match the package. For `userspace/login`
+both names are honestly "login", which is why it was named around in the first
+place; the collision is with `init/login`, a login *manager*, so renaming that
+directory to `init/loginmgr` (or its package) is probably the better end state.
+Not done here: `init/**` is lane B's, but the rename touches every Cargo.toml
+that depends on it and is worth doing deliberately rather than as a tail-end of
+an unrelated commit.
 
 ---
 

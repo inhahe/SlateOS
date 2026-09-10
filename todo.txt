@@ -55606,7 +55606,7 @@ sentence*: the enforcement gap is closed, so the cost of leaving the redesign
 undecided is lower than it was. The `/etc/groups.yaml` question above is
 untouched and stays in `open-questions.md`.
 
-## login cannot make a user change an expired password (lane B, 2026-09-06)
+## ~~login cannot make a user change an expired password~~ (lane B, 2026-09-06) -- DONE 2026-09-10
 
 `/etc/shadow`'s aging fields describe two different endings for a password that
 has reached its maximum age:
@@ -55628,9 +55628,41 @@ behaviour when `PASS_MAX_DAYS` has passed but the inactive period has not,
 which is the common case; what is missing is the refusal when there is no
 inactive period at all, where shadow-utils forces the change instead.
 
-Do this when `login` can exec: the same change that replaces the `would exec
-shell` line. The order matters -- `passwd` must run *before* the shell, with
-the user's own uid, and the shell must not start if it fails.
+~~Do this when `login` can exec: the same change that replaces the `would exec
+shell` line.~~ The trigger fired on 2026-09-10, in the commit that gave `login`
+its exec, and this was done in the one after it. The order instruction was
+right and was followed exactly: `passwd` runs before the shell, with the user's
+own uid, and the shell does not start if it fails.
+
+**One thing the entry above had wrong, and it is worth keeping.** It scoped the
+missing work to "the refusal when there is no inactive period at all", on the
+reading that shadow-utils lets an expired password log in with a warning while
+an inactive grace is still running. That would make setting an `inactive`
+period *weaken* `PASS_MAX_DAYS` from a deadline into a suggestion, which is
+backwards -- `inactive` is an additional deadline after which the account dies,
+not a licence to keep using a password that is already past its maximum age.
+The change is now forced whenever the password is due, and the inactive period
+keeps the job it already had: past `changed + max + inactive` the account is
+refused outright. See `design-decisions.md` 1015.
+
+**And a bug the work uncovered: `passwd -e` did nothing.** It writes
+`changed = 0`, which is `/etc/shadow`'s sentinel for "must change at next
+login" -- and nothing at login read it. `check_account_expired` never looked at
+it and `expiry_warning` needs a `max_days` to say anything, so on an account
+with no maximum age the command printed "password for alice expired" and
+changed nothing whatever about the next login. `password_change_required` reads
+it now, as a flag rather than a date, so it holds with a broken clock too.
+
+**A dependency this creates, which is not yet verified.** The forced change
+runs `passwd` as the *user*, so `passwd` must be able to write the account
+database while unprivileged -- on a real system that means setuid root.
+`userspace/newgrp` already assumes setuid binaries work ("newgrp runs setuid
+root precisely so that it *can* read this file"), but nothing here has tested
+that the kernel honours it. If it does not, the symptom is specific: every
+account with an expired password is refused with "login: password change
+failed; no session started" instead of being let in with a warning. That is the
+correct behaviour for an expired password and the wrong reason for it, so if it
+shows up, check setuid before changing this code.
 
 ## credmanager: what a credential manager still cannot do
 

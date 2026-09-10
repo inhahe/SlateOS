@@ -1,236 +1,233 @@
 #!/usr/bin/env python3
-"""Report crates whose package name differs from their directory name.
+"""Refuse a crate whose directory name is a *different* crate's package name.
 
-Why this exists
-===============
+Why
+---
 
-`cargo` selects a crate by **package name**, not by path. Four crates under
-`apps/` carry an `-app` suffix, because a crate of the bare name already exists
-**in this repository**, under `userspace/`:
+The standing command in `CLAUDE.md`, and in every lane's loop, is
 
-    apps/sysinfo   -> package `sysinfo-app`   (userspace/sysinfo owns `sysinfo`)
-    apps/tmux      -> package `tmux-app`      (userspace/tmux owns `tmux`)
-    apps/backup    -> package `backup-app`    (userspace/backup owns `backup`)
-    apps/indexer   -> package `indexer-app`   (userspace/indexer owns `indexer`)
+    cargo test -p <crate> --target x86_64-pc-windows-gnu
 
-Those are not duplicates: each `userspace/` crate is the command-line tool and
-each `apps/` crate is the graphical one for the same subject. They are also in
-different lanes -- `userspace/**` is lane B, `apps/**` is lane C -- so a
-mis-aimed `-p` crosses a lane boundary as well as a crate one.
+`-p` takes a **package** name. Everybody types the **directory** name, because
+for 2944 of this workspace's 2955 crates they are the same string. For five of
+them they are not, and the directory name belongs to a different crate -- so
+the command succeeds, prints a green result, and tests something else.
 
-So `cargo test -p sysinfo` does **not** test `apps/sysinfo`. On 2026-09-04 it
-tested `userspace/sysinfo`, which has no tests, and reported
+Found on 2026-09-10 giving `userspace/login` its exec. That crate's package is
+`login-cli`; `login` is `init/login`, an unrelated program. Every
+`cargo test -p login` and the `cargo fmt -p login` went to `init/login`. It
+surfaced only because the count did not move after three tests were added --
+53 `#[test]` in the file, 46 collected -- and the collected names turned out
+not to be in the file at all. Nothing else would have said a word: the wrong
+crate compiled, its tests passed, and the exit code was 0.
 
-    running 0 tests
-    test result: ok. 0 passed; 0 failed
+**A wrong `-p` is silent in both directions that matter.** If the directory
+name is not any package's name, cargo errors and you find out immediately.
+The dangerous case is exactly the one this checks: the name resolves, to
+somebody else.
 
-and `cargo clippy -p sysinfo -- -D warnings` reported no findings — both about
-a different crate in a different lane. The intended package had 62 tests. The
-zero is the only reason anyone noticed; had `userspace/sysinfo` happened to
-carry a plausible-looking test count, the mistake would have passed unremarked.
+What it does *not* do
+---------------------
 
-That is the failure this guards: **a check that runs, passes, and is about the
-wrong thing.** It is the same shape as `apps/installer`'s build script, which
-made `cargo clippy -p installer -- -D warnings` stop before it analysed the
-crate at all — the crate looked clean while carrying 142 findings.
+It does not forbid a package name that differs from its directory. That is
+often deliberate -- `gui/toolkit` is `guitk`, `toolchain/stubs` is
+`slateos-stubs` -- and harmless, because nothing else claims `toolkit` or
+`stubs`, so a mistyped `-p toolkit` fails loudly.
 
-What it does
-============
-
-Walks every `Cargo.toml` under the directories it is given (default `apps` and
-`userspace`),
-compares `package.name` to the directory name, and prints the mismatches. It
-**fails only on an unrecorded one**: the four above are expected and listed in
-`KNOWN`, each with the reason it cannot simply be renamed. A new mismatch means
-either a new collision worth recording here, or a typo worth fixing.
-
-The point of listing rather than forbidding is that the renames are correct. The
-cost is not the name; it is that `-p <directory>` silently addresses a different
-crate, and nothing said so anywhere until this file.
+Only the *collisions* matter, and only new ones fail: the five that already
+exist are recorded in `KNOWN_COLLISIONS` below, because four of them are
+another lane's to rename and a gate that refuses every lane's push over
+pre-existing state is a gate that gets bypassed. The list may only shrink --
+resolving one and leaving it listed is also a failure, so it cannot rot into
+a list of things that used to be true.
 
 Usage
-=====
+-----
 
-    python scripts/check-crate-names.py [--self-test] [DIR ...]
+    python scripts/check-crate-names.py
+    python scripts/check-crate-names.py --self-test
+    python scripts/check-crate-names.py --list
 
-Exit codes: 0 nothing unexpected, 1 an unrecorded mismatch.
+Exit codes: 0 pass, 1 a new collision (or a stale baseline entry), 2 the
+checker could not run.
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
 
-# Directory name -> (package name, why it cannot just be the directory name).
-KNOWN: dict[str, tuple[str, str]] = {
-    "sysinfo": ("sysinfo-app", "userspace/sysinfo owns `sysinfo`"),
-    "tmux": ("tmux-app", "userspace/tmux owns `tmux`"),
-    "backup": ("backup-app", "userspace/backup owns `backup`"),
-    "indexer": ("indexer-app", "userspace/indexer owns `indexer`"),
-    # Found by this gate on its first run over `userspace/` -- the pattern is
-    # not confined to `apps/`.
-    "login": ("login-cli", "init/login owns `login`"),
+REPO = Path(__file__).resolve().parent.parent
+
+NAME_RE = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.M)
+
+# Collisions that existed when this gate was written. `dir path -> package`.
+#
+# Each of these is a crate you cannot reach with `cargo -p <its directory
+# name>`: that name belongs to the crate in the second column of the comment,
+# and cargo will happily act on that one instead.
+#
+# This list may only SHRINK. Resolving one without removing it here is a
+# failure, so it cannot become a list of things that used to be true.
+KNOWN_COLLISIONS: dict[str, str] = {
+    # `-p backup` reaches the `backup` crate, not this one.
+    "apps/backup": "backup-app",
+    # `-p indexer` reaches the `indexer` crate.
+    "apps/indexer": "indexer-app",
+    # `-p sysinfo` reaches the `sysinfo` crate.
+    "apps/sysinfo": "sysinfo-app",
+    # `-p tmux` reaches the `tmux` crate.
+    "apps/tmux": "tmux-app",
+    # `-p login` reaches `init/login`. This is the one that cost a tick.
+    "userspace/login": "login-cli",
 }
 
-_NAME_RE = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.MULTILINE)
 
+def crates(root: Path) -> dict[str, str]:
+    """Every crate under `root`, as `posix/relative/dir -> package name`.
 
-def package_name(manifest: Path) -> str | None:
-    """The `[package] name` of a manifest, or `None` if it has no package."""
-    try:
-        text = manifest.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    # Only the `[package]` section: a `[dependencies]` entry can also carry a
-    # `name` key, and matching the first `name =` in the file would find it.
-    start = text.find("[package]")
-    if start < 0:
-        return None
-    end = text.find("\n[", start + len("[package]"))
-    section = text[start:] if end < 0 else text[start:end]
-    m = _NAME_RE.search(section)
-    return m.group(1) if m else None
-
-
-def scan(roots: list[Path]) -> list[tuple[str, str]]:
-    """Every (directory, package) pair whose names differ, sorted."""
-    found: list[tuple[str, str]] = []
-    for root in roots:
-        if not root.is_dir():
+    A `Cargo.toml` with no `src/` beside it is a workspace root, not a crate.
+    """
+    found: dict[str, str] = {}
+    for tom in root.rglob("Cargo.toml"):
+        parts = tom.parts
+        if "target" in parts or ".git" in parts:
             continue
-        for manifest in sorted(root.glob("*/Cargo.toml")):
-            pkg = package_name(manifest)
-            if pkg is None:
-                continue
-            directory = manifest.parent.name
-            if pkg != directory:
-                found.append((directory, pkg))
+        if not (tom.parent / "src").is_dir():
+            continue
+        m = NAME_RE.search(tom.read_text(encoding="utf-8", errors="surrogateescape"))
+        if not m:
+            continue
+        rel = tom.parent.relative_to(root).as_posix()
+        found[rel] = m.group(1)
     return found
 
 
-def report(found: list[tuple[str, str]]) -> int:
-    """Print the findings and return the exit code."""
-    unexpected = [(d, p) for d, p in found if KNOWN.get(d, (None, None))[0] != p]
-    for directory, pkg in found:
-        if (directory, pkg) in unexpected:
+def collisions(found: dict[str, str]) -> dict[str, str]:
+    """Crates whose directory name is a *different* crate's package name."""
+    by_package = {pkg: d for d, pkg in found.items()}
+    out: dict[str, str] = {}
+    for d, pkg in found.items():
+        dirname = d.rsplit("/", 1)[-1]
+        if dirname == pkg:
             continue
-        why = KNOWN[directory][1]
-        print(f"  ok      {directory:<12} -> {pkg:<14} ({why})")
-    for directory, pkg in unexpected:
-        expected = KNOWN.get(directory)
-        if expected is None:
-            print(
-                f"  UNKNOWN {directory:<12} -> {pkg:<14} "
-                f"(`cargo ... -p {directory}` will not address this crate)"
-            )
-        else:
-            print(
-                f"  CHANGED {directory:<12} -> {pkg:<14} "
-                f"(recorded as `{expected[0]}`)"
-            )
-    if unexpected:
-        print()
+        owner = by_package.get(dirname)
+        if owner is not None and owner != d:
+            out[d] = pkg
+    return out
+
+
+def report(found: dict[str, str], live: dict[str, str]) -> int:
+    by_package = {pkg: d for d, pkg in found.items()}
+    new = {d: pkg for d, pkg in live.items() if d not in KNOWN_COLLISIONS}
+    stale = sorted(set(KNOWN_COLLISIONS) - set(live))
+
+    if not new and not stale:
         print(
-            f"{len(unexpected)} crate(s) whose package name is not what this file "
-            "records."
+            f"check-crate-names: OK ({len(found)} crates; "
+            f"{len(live)} known name collisions, none new)"
         )
+        return 0
+
+    if new:
+        print("check-crate-names: a crate's directory name belongs to ANOTHER crate.\n")
+        for d in sorted(new):
+            dirname = d.rsplit("/", 1)[-1]
+            print(f"  {d}")
+            print(f"      package name:  {new[d]}")
+            print(f"      `-p {dirname}` reaches: {by_package.get(dirname)}")
         print(
-            "Either add it to KNOWN with the reason it cannot be renamed, or "
-            "rename it to match its directory."
+            "\n  So `cargo test -p <directory name>` on this crate silently tests a\n"
+            "  different one, passes, and exits 0. Either rename the package to match\n"
+            "  its directory, rename the directory, or -- if the collision is\n"
+            "  deliberate -- add it to KNOWN_COLLISIONS in this file with a comment\n"
+            "  saying which crate the directory name reaches instead."
         )
+
+    if stale:
+        print(
+            "\ncheck-crate-names: KNOWN_COLLISIONS lists crates that no longer collide:"
+        )
+        for d in stale:
+            print(f"  {d}")
+        print(
+            "  Remove them. The list may only shrink, and an entry that is no longer\n"
+            "  true makes the rest of it less believable."
+        )
+    return 1
+
+
+def self_test() -> int:
+    """Fixtures over the pure functions, in both directions."""
+    failures: list[str] = []
+
+    # The shape that must be caught: `a/login` is package `login-cli`, and
+    # `login` is somebody else's package name.
+    caught = collisions(
+        {"userspace/login": "login-cli", "init/login": "login", "posix": "posix"}
+    )
+    if caught != {"userspace/login": "login-cli"}:
+        failures.append(f"the collision was not detected: got {caught}")
+
+    # A package name that differs from its directory but collides with nothing
+    # is fine -- `-p toolkit` fails loudly, which needs no gate.
+    quiet = collisions({"gui/toolkit": "guitk", "posix": "posix"})
+    if quiet:
+        failures.append(f"a harmless rename was reported as a collision: {quiet}")
+
+    # A crate whose directory matches its own package is never a collision,
+    # even though its name is obviously "taken" -- by itself.
+    same = collisions({"posix": "posix", "userspace/su": "su"})
+    if same:
+        failures.append(f"a crate collided with itself: {same}")
+
+    # Two crates in different directories with the same directory *name* but
+    # matching packages cannot happen (cargo forbids duplicate packages), so
+    # the only asymmetric case is the one above.
+
+    live = collisions(crates(REPO))
+    for d in KNOWN_COLLISIONS:
+        if d not in live:
+            failures.append(
+                f"KNOWN_COLLISIONS names `{d}`, which the derivation does not find"
+            )
+
+    for f in failures:
+        print(f"check-crate-names --self-test: FAIL: {f}")
+    if failures:
         return 1
-    print(f"{len(found)} recorded mismatch(es); no unrecorded ones.")
+    print(
+        f"check-crate-names --self-test: OK "
+        f"({len(live)} live collisions, {len(KNOWN_COLLISIONS)} baselined)"
+    )
     return 0
 
 
-def _self_test() -> int:
-    """Check the scanner against manifests written for the purpose.
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--self-test", "--selftest", action="store_true", dest="selftest")
+    ap.add_argument("--list", action="store_true")
+    args = ap.parse_args()
 
-    A scanner that has stopped scanning reports zero findings in exactly the
-    way a clean tree does, which is the failure this guards against elsewhere;
-    it would be a poor joke to ship one here without a test.
-    """
-    import tempfile
+    if args.selftest:
+        return self_test()
 
-    cases = 0
-    failures = 0
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp) / "apps"
-        def crate(directory: str, body: str) -> None:
-            d = root / directory
-            d.mkdir(parents=True)
-            # newline="" so the fixture holds the exact bytes the literal
-            # spells: text mode on Windows would turn each \n into \r\n, and a
-            # scanner test that reads back CRLF is grading a different file
-            # than the one the case describes.
-            (d / "Cargo.toml").write_text(body, encoding="utf-8", newline="")
+    found = crates(REPO)
+    if not found:
+        print("check-crate-names: found no crates at all, which cannot be right")
+        return 2
 
-        crate("matching", '[package]\nname = "matching"\nversion = "0.1.0"\n')
-        crate("renamed", '[package]\nname = "renamed-app"\nversion = "0.1.0"\n')
-        # A `name` key outside `[package]` must not be mistaken for the
-        # package's own: this is what a dependency table looks like.
-        crate(
-            "decoy",
-            '[package]\nname = "decoy"\n\n[dependencies.foo]\nname = "not-the-package"\n',
-        )
-        # A manifest with no `[package]` at all (a virtual manifest) is skipped
-        # rather than reported.
-        crate("virtual", '[workspace]\nmembers = []\n')
+    if args.list:
+        for d in sorted(found):
+            dirname = d.rsplit("/", 1)[-1]
+            mark = "" if dirname == found[d] else f"   (dir '{dirname}')"
+            print(f"{found[d]}{mark}")
+        return 0
 
-        found = dict(scan([root]))
-        cases += 1
-        if "matching" in found:
-            print("FAIL: a matching name was reported as a mismatch")
-            failures += 1
-        cases += 1
-        if found.get("renamed") != "renamed-app":
-            print(f"FAIL: renamed crate not detected, got {found.get('renamed')!r}")
-            failures += 1
-        cases += 1
-        if "decoy" in found:
-            print("FAIL: a `name` in a dependency table was read as the package name")
-            failures += 1
-        cases += 1
-        if "virtual" in found:
-            print("FAIL: a manifest with no [package] was reported")
-            failures += 1
-
-    # And that an unrecorded mismatch is actually refused. `report` prints, and
-    # its output here would read as real findings, so it is captured.
-    import contextlib
-    import io
-
-    def quiet_report(pairs: list[tuple[str, str]]) -> int:
-        with contextlib.redirect_stdout(io.StringIO()):
-            return report(pairs)
-
-    cases += 1
-    if quiet_report([("brand-new", "brand-new-app")]) == 0:
-        print("FAIL: an unrecorded mismatch was accepted")
-        failures += 1
-    cases += 1
-    if quiet_report([("sysinfo", KNOWN["sysinfo"][0])]) != 0:
-        print("FAIL: a recorded mismatch was refused")
-        failures += 1
-    cases += 1
-    # A directory that is recorded but now carries a *different* package name
-    # is a change worth refusing, not a silent pass.
-    if quiet_report([("sysinfo", "sysinfo-gui")]) == 0:
-        print("FAIL: a changed package name was accepted")
-        failures += 1
-
-    print(f"selftest: {cases - failures}/{cases} cases pass")
-    return 1 if failures else 0
-
-
-def main(argv: list[str]) -> int:
-    args = [a for a in argv[1:] if not a.startswith("--")]
-    if "--self-test" in argv[1:] or "--selftest" in argv[1:]:
-        return _self_test()
-    roots = [Path(a) for a in args] or [Path("apps"), Path("userspace")]
-    return report(scan(roots))
+    return report(found, collisions(found))
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    sys.exit(main())

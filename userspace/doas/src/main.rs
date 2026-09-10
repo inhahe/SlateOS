@@ -755,10 +755,29 @@ fn set_env_var(env_map: &mut Vec<(OsString, OsString)>, key: &str, value: &str) 
 
 /// Execute a command as the target user.
 ///
-/// On Slate OS, `setuid`/`setgid` are actual syscalls that change the process
-/// identity. For now we set the UID/GID environment hints and invoke the
-/// command. The real privilege change will use the kernel's capability system
-/// once the POSIX exec layer supports `setuid`/`setgid` syscalls.
+/// # The deferral this replaces
+///
+/// This function used to carry the note: "On Slate OS, `setuid`/`setgid` are
+/// actual syscalls that change the process identity. For now we set the
+/// UID/GID environment hints and invoke the command. The real privilege change
+/// will use the kernel's capability system once the POSIX exec layer supports
+/// `setuid`/`setgid` syscalls."
+///
+/// That premise had already fired: `posix::setuid` and `posix::setgid` apply
+/// real credentials through `set_real_credentials`. They were stubs returning
+/// `0` once, which is presumably when the note was written -- and a stub that
+/// reports success is what keeps a deferral looking current, because there is
+/// no compile error to trip over and no failing call to investigate.
+///
+/// # The "hints" are gone, and they were part of the problem
+///
+/// The `UID` and `GID` environment variables set here were a stand-in for the
+/// credential change. They were also *read*, as an identity, by `chage`,
+/// `newgrp`, `passwd`, `polkit`, `crontab` and `sudo` -- so this program was
+/// manufacturing exactly the spoofed environment those programs trusted. Every
+/// one of them now asks `getuid(2)` instead, so the hints have no readers at
+/// all, and a fabricated identity claim injected into a child's environment is
+/// not something to leave lying around for the next reader to start believing.
 fn exec_command(
     target: &PasswdEntry,
     command: &str,
@@ -772,9 +791,7 @@ fn exec_command(
         cmd.env(key, val);
     }
 
-    // Set UID/GID hints in the environment for the POSIX layer.
-    cmd.env("UID", target.uid.to_string());
-    cmd.env("GID", target.gid.to_string());
+    authlib::identity::become_user(&mut cmd, target.uid, target.gid);
 
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),

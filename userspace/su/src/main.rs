@@ -125,52 +125,6 @@ fn home_of(record: &Record) -> String {
     }
 }
 
-/// `argv[0]` for a login shell: its basename with a hyphen in front.
-///
-/// The convention every Bourne-family shell uses to decide whether to read its
-/// login profile. `/bin/bash` becomes `-bash`.
-///
-/// # Bytes, and why this half is separate from its caller
-///
-/// A shell path on this OS may hold any byte but `/` and NUL, so the rule has
-/// to be expressed over bytes. Converting bytes *to* an `OsString` is only
-/// possible through `std::os::unix::ffi`, which does not exist on the Windows
-/// host these tests are compiled for -- so a single `OsStr -> OsString`
-/// function could not be called by any test at all.
-///
-/// Splitting it leaves the rule testable everywhere and the three-line
-/// conversion unix-only. The same shape as separating a parser from its
-/// reader, for the same reason: the part with the decisions in it should not
-/// be the part that needs a particular platform to run.
-/// Dead only on a non-unix *host* build, which is how this crate's tests are
-/// compiled -- there the `arg0` call that uses it is `#[cfg]`-ed away. The
-/// allow is conditioned rather than unconditional for `userspace/sshd`'s
-/// reason, stated at its own `login_argv0`: on the real target, `dead_code`
-/// here would mean the login-shell convention had been dropped from the spawn
-/// path, and that is a warning worth keeping.
-#[cfg_attr(not(unix), allow(dead_code))]
-fn login_argv0_bytes(shell: &[u8]) -> Vec<u8> {
-    let base = match shell.iter().rposition(|b| *b == b'/') {
-        // A trailing slash leaves nothing after it; the whole path is the best
-        // answer available and is at least not empty.
-        Some(i) if i.saturating_add(1) < shell.len() => {
-            shell.get(i.saturating_add(1)..).unwrap_or(shell)
-        }
-        _ => shell,
-    };
-    let mut out = Vec::with_capacity(base.len().saturating_add(1));
-    out.push(b'-');
-    out.extend_from_slice(base);
-    out
-}
-
-/// [`login_argv0_bytes`] as an `OsString`, for handing to `CommandExt::arg0`.
-#[cfg(unix)]
-fn login_argv0(shell: &OsStr) -> std::ffi::OsString {
-    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-    std::ffi::OsString::from_vec(login_argv0_bytes(shell.as_bytes()))
-}
-
 /// The record's login shell, or the system default.
 fn shell_of(record: &Record) -> String {
     record.shell().unwrap_or_else(|| "/bin/sh".to_string())
@@ -476,7 +430,7 @@ fn exec_as_user(
     #[cfg(unix)]
     if login_mode {
         use std::os::unix::process::CommandExt as _;
-        cmd.arg0(login_argv0(shell));
+        cmd.arg0(authlib::identity::login_argv0(shell));
     }
 
     if login_mode && !preserve_env {
@@ -845,35 +799,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
 
-    /// The convention: basename, hyphen in front.
-    #[test]
-    fn login_argv0_is_the_basename_with_a_hyphen() {
-        assert_eq!(super::login_argv0_bytes(b"/bin/bash"), b"-bash");
-        assert_eq!(super::login_argv0_bytes(b"/usr/local/bin/osh"), b"-osh");
-        // Already bare: no directory to strip.
-        assert_eq!(super::login_argv0_bytes(b"sh"), b"-sh");
-    }
+    // The `login_argv0` tests that stood here moved to `authlib::identity`
+    // along with the function, when `userspace/login` became its third caller.
 
-    /// A shell path may hold any byte but `/` and NUL, so the rule is over
-    /// bytes and a name that is not UTF-8 survives it.
-    #[test]
-    fn login_argv0_keeps_bytes_that_are_not_utf8() {
-        assert_eq!(
-            super::login_argv0_bytes(b"/bin/o\xffh"),
-            b"-o\xffh".to_vec()
-        );
-    }
-
-    /// Degenerate paths must still produce something a shell can be called by.
-    /// A trailing slash has no basename, so the whole path is the best answer
-    /// available -- and is at least not the empty `argv[0]`, which would leave
-    /// the shell unable to name itself in its own diagnostics.
-    #[test]
-    fn login_argv0_never_returns_a_bare_hyphen() {
-        assert_eq!(super::login_argv0_bytes(b"/bin/"), b"-/bin/".to_vec());
-        assert_eq!(super::login_argv0_bytes(b"/"), b"-/".to_vec());
-        assert_eq!(super::login_argv0_bytes(b""), b"-".to_vec());
-    }
     use super::*;
 
     // --- The identity the child is given ---

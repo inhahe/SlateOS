@@ -25,6 +25,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::process;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -37,6 +38,11 @@ const DEFAULT_ROOT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/b
 const MOTD_FILE: &str = "/etc/motd";
 const NOLOGIN_FILE: &str = "/etc/nologin";
 const SECURETTY_FILE: &str = "/etc/securetty";
+/// The program a forced password change runs. Not searched for on `PATH`: the
+/// `PATH` in play at this point is the one being built for the *user's*
+/// session, and resolving a privileged helper through a variable is how a
+/// program ends up running whatever was first on it.
+const PASSWD_COMMAND: &str = "/usr/bin/passwd";
 // `PASSWD_FILE` and `SHADOW_FILE` stood here. The account comes from
 // `userdb::DEFAULT_PATH` now: §353 makes those two files generated from it, so
 // reading them was reading a copy -- and, worse, reading *two* copies, which is
@@ -295,6 +301,40 @@ fn check_account_expired(creds: &Credentials, today: Option<i64>) -> Result<(), 
     Ok(())
 }
 
+/// Whether this account must change its password before a session may start.
+///
+/// # The two ways a password becomes due
+///
+/// **`changed == 0`.** That is `/etc/shadow`'s sentinel for "must be changed
+/// at the next login", and it is exactly what `passwd -e` writes -- see
+/// `cmd_expire` in `userspace/passwd`. It is a *flag*, not a date, so it holds
+/// whether or not the clock works and whether or not a maximum age is set.
+/// Before this function existed nothing at login read it at all, so `passwd -e`
+/// printed "password for alice expired" and changed nothing about alice's next
+/// login.
+///
+/// **Past the maximum age.** `changed + max_days` is the day the password is
+/// due; on and after it, it is due. A `max_days` of `0` therefore means "change
+/// it at every login", which is what shadow means by it too. Absent fields are
+/// no policy rather than a policy of zero, which is why they are `Option`.
+///
+/// # Why an unknown clock does not force a change
+///
+/// The date arm needs `today` and gives up without it, for the reason
+/// [`check_account_expired`] gives: a dead battery must not lock out every
+/// account on the machine. The sentinel arm is not a date and is unaffected --
+/// an administrator who ran `passwd -e` said so directly, and no clock is
+/// involved in reading it back.
+fn password_change_required(aging: &userdb::Aging, today: Option<i64>) -> bool {
+    if aging.changed == Some(0) {
+        return true;
+    }
+    let (Some(changed), Some(max), Some(today)) = (aging.changed, aging.max_days, today) else {
+        return false;
+    };
+    changed.checked_add(max).is_some_and(|due| today >= due)
+}
+
 /// How many days until the password must be changed, if that is soon enough
 /// for the account's warning period to have started.
 ///
@@ -543,13 +583,27 @@ fn refuse_attempt(auth: &mut authlib::Authenticator, username: &str) -> &'static
 /// respawn because it is a file. The per-process cap stays, because it is what
 /// stops a *single* invocation spinning; the tally is what makes the next one
 /// slower.
+/// What a successful authentication produced.
+///
+/// A struct rather than the `(user, env)` tuple it replaces because the third
+/// member is a *decision* -- whether the session may start at all before the
+/// password is changed -- and a bare `bool` in a tuple position is exactly the
+/// kind of thing a caller reads past.
+struct Session {
+    user: PasswdEntry,
+    env: HashMap<OsString, OsString>,
+    /// The password is past its maximum age, or `passwd -e` has flagged it.
+    /// The session does not start until it has been changed.
+    must_change_password: bool,
+}
+
 fn do_login(
     cfg: &Config,
     auth: &mut authlib::Authenticator,
     users_yaml: &std::path::Path,
     reader: &mut dyn BufRead,
     writer: &mut dyn Write,
-) -> Result<(PasswdEntry, HashMap<OsString, OsString>), LoginError> {
+) -> Result<Session, LoginError> {
     let mut attempts = 0u32;
 
     loop {
@@ -721,7 +775,11 @@ fn do_login(
             let _ = check_mail(writer, &username);
         }
 
-        return Ok((user, env_map));
+        return Ok(Session {
+            must_change_password: password_change_required(&creds.aging, userdb::today()),
+            user,
+            env: env_map,
+        });
     }
 }
 
@@ -745,6 +803,166 @@ fn print_help() {
 
 fn print_version() {
     println!("login (Slate OS) 0.1.0");
+}
+
+// ---------------------------------------------------------------------------
+// Starting the session
+// ---------------------------------------------------------------------------
+
+/// The command that runs `user`'s login shell -- program, environment and
+/// `argv[0]`, but not the working directory.
+///
+/// The directory is left out because it is the one setting that can fail for a
+/// reason that is not the caller's fault: a home directory may be missing, on
+/// an unmounted filesystem, or unreadable. [`spawn_login_shell`] therefore
+/// builds this twice and tries two directories, which needs a builder rather
+/// than a `Command` (which is not `Clone`).
+///
+/// Everything that is *not* the directory lives here, so it is impossible for
+/// one of the two attempts to get it right and the other wrong.
+fn build_login_command(
+    user: &PasswdEntry,
+    env_map: &HashMap<OsString, OsString>,
+) -> process::Command {
+    let mut cmd = process::Command::new(&user.shell);
+
+    // The session's environment is exactly what `build_environment` decided
+    // and nothing else. `env_clear` first because this process inherited
+    // whatever spawned it -- `getty`, or an operator's shell -- and a login
+    // session must not start with a stranger's variables in it.
+    cmd.env_clear();
+    for (key, value) in env_map {
+        cmd.env(key, value);
+    }
+
+    // `login` starts a *login* shell, always: that is the whole job. The
+    // leading hyphen on `argv[0]` is how a shell is told so, and therefore
+    // whether it reads `/etc/profile` and the user's own profile.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.arg0(authlib::identity::login_argv0(user.shell.as_os_str()));
+    }
+
+    // And become the user. `login` runs as root -- it has to, to read the
+    // shadow half of the account database -- so a session started without this
+    // would hand root to everyone who could type a correct password.
+    authlib::identity::become_user(&mut cmd, user.uid, user.gid);
+
+    cmd
+}
+
+/// Start the login shell, from the user's home directory if that works and
+/// from `/` if it does not.
+///
+/// # Why two attempts rather than a check
+///
+/// Asking whether the home directory exists and then using it is two separate
+/// facts about a filesystem that other processes are also writing to, and the
+/// answer can change in between. Trying it is one fact. This also covers the
+/// cases a check would miss -- a directory that exists but cannot be entered,
+/// a stale mount -- without enumerating them.
+///
+/// An empty home is skipped rather than tried: `Command::current_dir("")`
+/// fails rather than meaning "wherever we are", which is the bug `su` hit
+/// (see `home_of` there).
+///
+/// # Why the first error is discarded
+///
+/// If the retry also fails, its error is the one that describes why no session
+/// could start at all -- the shell being missing, say, which the first attempt
+/// would have reported as a directory problem. If the retry succeeds there was
+/// nothing to report. Same reasoning as `userspace/sshd`'s `spawn_session`.
+fn spawn_login_shell(
+    user: &PasswdEntry,
+    env_map: &HashMap<OsString, OsString>,
+) -> io::Result<process::Child> {
+    if !user.home_dir.as_os_str().is_empty() {
+        let mut cmd = build_login_command(user, env_map);
+        cmd.current_dir(&user.home_dir);
+        if let Ok(child) = cmd.spawn() {
+            return Ok(child);
+        }
+    }
+    let mut cmd = build_login_command(user, env_map);
+    cmd.current_dir("/");
+    cmd.spawn()
+}
+
+/// Make the user change their password, and report whether they did.
+///
+/// # As the user, not as root
+///
+/// `login` is root -- it has to be, to read the shadow half of the account
+/// database -- and `passwd` running as root does not ask for the current
+/// password (see its `cmd_change_password`, which checks `caller_uid != 0`).
+/// Running it as the user keeps the check in place. It also means the change
+/// is subject to exactly the policy any other `passwd` run is subject to,
+/// rather than a second, more permissive path that exists only here. That is
+/// the same argument `authlib` was built on: one implementation, and callers
+/// that cannot have their own.
+///
+/// # If it fails, there is no session
+///
+/// That is what "expired" means. A password past its maximum age is not a
+/// warning with a session attached; the session is what is being withheld
+/// until it is changed. Letting the user in anyway would make `PASS_MAX_DAYS`
+/// a suggestion, which is the behaviour this replaces.
+///
+/// **The dependency this creates is real and is written down in `todo.txt`:**
+/// `passwd` must be able to write the account database while running as an
+/// ordinary user, which on a real system means it is setuid root. If that is
+/// not yet honoured here, the symptom is specific and worth recognising --
+/// every account with an expired password is refused with "password change
+/// failed" rather than being let in with a warning.
+fn force_password_change(user: &PasswdEntry) -> bool {
+    let mut cmd = process::Command::new(PASSWD_COMMAND);
+    cmd.arg(&user.username);
+    authlib::identity::become_user(&mut cmd, user.uid, user.gid);
+    match cmd.status() {
+        Ok(status) => status.success(),
+        Err(e) => {
+            eprintln!("login: cannot run {PASSWD_COMMAND}: {e}");
+            false
+        }
+    }
+}
+
+/// Run the session and report the shell's own exit status.
+///
+/// # `spawn` and wait, not `exec`
+///
+/// A traditional `login` replaces itself with the shell, so the shell inherits
+/// its pid and its terminal. `std::os::unix::process::CommandExt::exec` would
+/// do that. It is not used here, and the reason is not squeamishness: `exec`
+/// applies the uid and gid change *in this process* and only then replaces the
+/// image, so a failure to execute the shell leaves `login` already stripped of
+/// the privilege it would need to report the failure anywhere but stderr, and
+/// unable to retry from `/`. Spawning keeps the retry above possible and keeps
+/// the diagnostic path intact.
+///
+/// The cost is one extra process in the tree per session, and a `login` that
+/// lingers as the shell's parent. Recorded in `todo.txt`: if session and
+/// process-group handling later needs the shell to *be* the login process, the
+/// change is to exec after the directory has been settled, which is a
+/// different shape from what is written here.
+fn run_session(user: &PasswdEntry, env_map: &HashMap<OsString, OsString>) -> i32 {
+    match spawn_login_shell(user, env_map) {
+        Ok(mut child) => match child.wait() {
+            Ok(status) => status.code().unwrap_or(1),
+            Err(e) => {
+                eprintln!("login: {} exited abnormally: {e}", user.shell.display());
+                1
+            }
+        },
+        Err(e) => {
+            eprintln!(
+                "login: cannot start {}: {e}",
+                quoting::quoteaf_os(user.shell.as_os_str())
+            );
+            1
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -787,25 +1005,18 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
     let users_yaml = std::path::Path::new(userdb::DEFAULT_PATH);
     match do_login(&cfg, &mut auth, users_yaml, &mut reader, &mut writer) {
-        Ok((user, env_map)) => {
-            // In a real OS, we would:
-            // 1. setuid/setgid to the user
-            // 2. chdir to home directory
-            // 3. exec the user's shell
-            eprintln!(
-                "login: would exec shell {} as user {} (uid={}, gid={})",
-                user.shell.display(),
-                user.username,
-                user.uid,
-                user.gid
-            );
-            eprintln!(
-                "login: environment: HOME={}",
-                env_map
-                    .get(OsStr::new("HOME"))
-                    .map_or_else(String::new, quoting::quoteaf_os)
-            );
-            0
+        Ok(session) => {
+            // Before the shell, and only then. A password that is due is the
+            // reason the session has not started yet, so a change that does
+            // not happen is a session that does not start.
+            if session.must_change_password {
+                eprintln!("login: your password has expired and must be changed now.");
+                if !force_password_change(&session.user) {
+                    eprintln!("login: password change failed; no session started");
+                    return 1;
+                }
+            }
+            run_session(&session.user, &session.env)
         }
         Err(e) => {
             eprintln!("login: {e}");
@@ -823,6 +1034,81 @@ mod tests {
     use super::*;
     use scratchdir::ScratchDir;
     use std::io::Cursor;
+
+    // ---- the command that starts the session ----
+
+    fn probe_user() -> PasswdEntry {
+        PasswdEntry {
+            username: "alice".to_string(),
+            uid: 1000,
+            gid: 100,
+            gecos: String::new(),
+            home_dir: PathBuf::from("/home/alice"),
+            shell: PathBuf::from("/bin/osh"),
+        }
+    }
+
+    /// The shell that runs is the one the account names.
+    #[test]
+    fn the_session_runs_the_accounts_own_shell() {
+        let env_map = HashMap::new();
+        let cmd = build_login_command(&probe_user(), &env_map);
+        assert_eq!(cmd.get_program(), OsStr::new("/bin/osh"));
+    }
+
+    /// The child's environment is exactly what `build_environment` decided --
+    /// no variable missing and none invented.
+    #[test]
+    fn the_session_environment_is_exactly_what_was_built() {
+        let mut env_map = HashMap::new();
+        env_map.insert(OsString::from("HOME"), OsString::from("/home/alice"));
+        env_map.insert(OsString::from("SHELL"), OsString::from("/bin/osh"));
+        env_map.insert(OsString::from("USER"), OsString::from("alice"));
+
+        let cmd = build_login_command(&probe_user(), &env_map);
+        let mut got: Vec<(OsString, Option<OsString>)> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_os_string(), v.map(std::ffi::OsStr::to_os_string)))
+            .collect();
+        got.sort();
+
+        let mut want: Vec<(OsString, Option<OsString>)> = env_map
+            .iter()
+            .map(|(k, v)| (k.clone(), Some(v.clone())))
+            .collect();
+        want.sort();
+
+        assert_eq!(got, want);
+    }
+
+    /// A variable set for a *value* that is not text still reaches the shell.
+    ///
+    /// `TERM` and the rest arrive from a database and from the caller, and on
+    /// this OS an environment value may hold any byte but NUL. The map is
+    /// `OsString`-keyed and `OsString`-valued the whole way for that reason;
+    /// this pins that nothing in the hand-off narrows it to `String`.
+    #[test]
+    fn a_session_variable_that_is_not_text_survives() {
+        let mut env_map = HashMap::new();
+        env_map.insert(OsString::from("TERM"), not_text());
+
+        let cmd = build_login_command(&probe_user(), &env_map);
+        let got: Vec<(OsString, Option<OsString>)> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_os_string(), v.map(std::ffi::OsStr::to_os_string)))
+            .collect();
+        assert_eq!(got, vec![(OsString::from("TERM"), Some(not_text()))]);
+    }
+
+    // NOT covered here, and stated rather than left for the reader to assume:
+    // the `env_clear()` itself. `Command::get_envs` reports the variables
+    // explicitly set for the child and says nothing about whether the parent's
+    // are inherited, so no assertion over the getters can tell a cleared
+    // environment from an added-to one. Proving it would mean spawning a real
+    // child that prints its environment, which is a host-shell-specific test
+    // for a one-line call. The consequence if it is ever deleted: a login
+    // session inherits `getty`'s variables, which the test above would still
+    // pass.
 
     /// The command line, as `env::args_os` would deliver it.
     fn argv(parts: &[&str]) -> Vec<OsString> {
@@ -1523,8 +1809,8 @@ mod tests {
         let mut writer = Vec::new();
         let mut auth = scratch_authenticator();
 
-        let (user, env_map) =
-            do_login(&cfg, &mut auth, &path, &mut reader, &mut writer).expect("login");
+        let session = do_login(&cfg, &mut auth, &path, &mut reader, &mut writer).expect("login");
+        let (user, env_map) = (session.user, session.env);
 
         assert_eq!(user.username, "alice");
         assert_eq!(user.uid, 1000);
@@ -1549,6 +1835,136 @@ mod tests {
 
         assert!(do_login(&cfg, &mut auth, &path, &mut reader, &mut writer).is_err());
         assert_eq!(auth.failures("alice"), 1);
+    }
+
+    // ---- when a password is due ----
+
+    fn aging(changed: Option<i64>, max: Option<i64>) -> userdb::Aging {
+        userdb::Aging {
+            changed,
+            max_days: max,
+            ..userdb::Aging::default()
+        }
+    }
+
+    /// `passwd -e` writes `changed = 0`, and that must reach the next login.
+    ///
+    /// **Nothing read this before.** `cmd_expire` in `userspace/passwd` set the
+    /// field and printed "password for alice expired"; `check_account_expired`
+    /// did not look at it and `expiry_warning` needs a `max_days` to say
+    /// anything. So the command reported success and changed nothing at all
+    /// about the account's next login.
+    #[test]
+    fn the_expire_sentinel_forces_a_change() {
+        assert!(password_change_required(&aging(Some(0), None), Some(20000)));
+        // A flag, not a date: no maximum age and no working clock are both
+        // irrelevant to an administrator having said so directly.
+        assert!(password_change_required(&aging(Some(0), None), None));
+    }
+
+    /// Past the maximum age, and on the day itself.
+    #[test]
+    fn a_password_past_its_maximum_age_is_due() {
+        // Set on day 19000, good for 90 days: due on 19090.
+        assert!(password_change_required(
+            &aging(Some(19000), Some(90)),
+            Some(19091)
+        ));
+        assert!(password_change_required(
+            &aging(Some(19000), Some(90)),
+            Some(19090)
+        ));
+        assert!(!password_change_required(
+            &aging(Some(19000), Some(90)),
+            Some(19089)
+        ));
+    }
+
+    /// No maximum age is no policy, not a policy of zero.
+    #[test]
+    fn an_account_with_no_maximum_age_is_never_due() {
+        assert!(!password_change_required(
+            &aging(Some(19000), None),
+            Some(99999)
+        ));
+        assert!(!password_change_required(
+            &aging(None, Some(90)),
+            Some(99999)
+        ));
+        assert!(!password_change_required(
+            &userdb::Aging::default(),
+            Some(99999)
+        ));
+    }
+
+    /// A maximum of zero means "change it at every login", which is what
+    /// shadow means by it. It is a real policy and is not filtered out.
+    #[test]
+    fn a_maximum_age_of_zero_is_due_every_day() {
+        assert!(password_change_required(
+            &aging(Some(19000), Some(0)),
+            Some(19000)
+        ));
+    }
+
+    /// **A dead clock must not force every account on the machine to change
+    /// its password**, for the same reason `check_account_expired` does not let
+    /// one lock every account out. The date arm gives up without a date; only
+    /// the explicit sentinel survives an unknown today.
+    #[test]
+    fn an_unusable_clock_makes_no_password_due() {
+        assert!(!password_change_required(
+            &aging(Some(19000), Some(90)),
+            None
+        ));
+    }
+
+    /// End to end: an account flagged by `passwd -e` reaches `main` with the
+    /// session withheld, having authenticated successfully.
+    #[test]
+    fn an_expired_password_authenticates_but_does_not_release_the_session() {
+        let scratch = ScratchDir::new("login-end-to-end-must-change");
+        let path = scratch_db(&scratch, &aging(Some(0), None), false);
+        let cfg = Config {
+            username: Some(OsString::from("alice")),
+            ..Default::default()
+        };
+        let mut reader = Cursor::new(
+            b"correct horse
+"
+            .as_slice(),
+        );
+        let mut writer = Vec::new();
+        let mut auth = scratch_authenticator();
+
+        let session = do_login(&cfg, &mut auth, &path, &mut reader, &mut writer)
+            .expect("the password is correct, so the login succeeds");
+        assert!(
+            session.must_change_password,
+            "the session must not start until the password is changed"
+        );
+    }
+
+    /// And the ordinary case still releases it, so the flag above is not
+    /// simply always set.
+    #[test]
+    fn an_account_with_no_aging_policy_releases_the_session() {
+        let scratch = ScratchDir::new("login-end-to-end-no-policy");
+        let path = scratch_db(&scratch, &userdb::Aging::default(), false);
+        let cfg = Config {
+            username: Some(OsString::from("alice")),
+            ..Default::default()
+        };
+        let mut reader = Cursor::new(
+            b"correct horse
+"
+            .as_slice(),
+        );
+        let mut writer = Vec::new();
+        let mut auth = scratch_authenticator();
+
+        let session = do_login(&cfg, &mut auth, &path, &mut reader, &mut writer).expect("login");
+        assert!(!session.must_change_password);
     }
 
     /// A locked account is refused with the right password, and is refused

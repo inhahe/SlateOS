@@ -161,6 +161,14 @@ fn parse_u64(bytes: &[u8]) -> Option<u64> {
     as_str(trim(bytes))?.parse().ok()
 }
 
+/// Parse a **signed** ASCII decimal out of a byte field.
+///
+/// `nice` is the only signed thing `/proc` reports that this crate reads, and
+/// it goes negative for every process a user has bothered to prioritise.
+fn parse_i64(bytes: &[u8]) -> Option<i64> {
+    as_str(trim(bytes))?.parse().ok()
+}
+
 /// Parse an ASCII decimal/float out of a byte field.
 fn parse_f64(bytes: &[u8]) -> Option<f64> {
     as_str(trim(bytes))?.parse().ok()
@@ -899,6 +907,15 @@ impl ProcFs {
         Ok(pids)
     }
 
+    /// `/proc/stat`'s CPU lines, parsed.
+    ///
+    /// # Errors
+    ///
+    /// Any read error other than "no such file", which is `Ok(None)`.
+    pub fn cpu_stats(&self) -> io::Result<Option<CpuStats>> {
+        Ok(self.read_optional("stat")?.map(|c| CpuStats::parse(&c)))
+    }
+
     /// `/proc/<pid>/stat`, parsed.
     ///
     /// # Errors
@@ -1031,21 +1048,18 @@ impl ProcessStat {
         if close < open {
             return None;
         }
-        let pid = num(content.get(..open)?)?;
+        let pid = parse_u64(content.get(..open)?)?;
         let comm = content.get(open.saturating_add(1)..close)?.to_vec();
         // `close + 1` is the space; the state letter follows it.
         let rest = content.get(close.saturating_add(2)..)?;
-        let fields: Vec<&[u8]> = rest
-            .split(|b| b.is_ascii_whitespace())
-            .filter(|f| !f.is_empty())
-            .collect();
+        let fields = split_ws(rest);
         // `stat`'s field 24 (rss) is index 21 here, and it is the last one
         // anything reads. Fewer than that and the line is not usable.
         if fields.len() < 22 {
             return None;
         }
-        let at = |i: usize| -> u64 { fields.get(i).and_then(|f| num(f)).unwrap_or(0) };
-        let at_i = |i: usize| -> i64 { fields.get(i).and_then(|f| inum(f)).unwrap_or(0) };
+        let at = |i: usize| -> u64 { fields.get(i).and_then(|f| parse_u64(f)).unwrap_or(0) };
+        let at_i = |i: usize| -> i64 { fields.get(i).and_then(|f| parse_i64(f)).unwrap_or(0) };
         Some(Self {
             pid,
             comm,
@@ -1060,7 +1074,7 @@ impl ProcessStat {
             nice: at_i(16),
             // A process always has at least the one thread running it, so zero
             // here means "the kernel did not say", not "no threads".
-            num_threads: fields.get(17).and_then(|f| num(f)).unwrap_or(1),
+            num_threads: fields.get(17).and_then(|f| parse_u64(f)).unwrap_or(1),
             vsize_bytes: at(20),
             rss_pages: at(21),
         })
@@ -1100,17 +1114,14 @@ impl ProcessStatm {
     /// Parse `/proc/<pid>/statm`: seven whitespace-separated page counts.
     #[must_use]
     pub fn parse(content: &[u8]) -> Option<Self> {
-        let f: Vec<&[u8]> = content
-            .split(|b| b.is_ascii_whitespace())
-            .filter(|x| !x.is_empty())
-            .collect();
+        let f = split_ws(content);
         if f.len() < 3 {
             return None;
         }
         Some(Self {
-            size_pages: f.first().and_then(|x| num(x)).unwrap_or(0),
-            resident_pages: f.get(1).and_then(|x| num(x)).unwrap_or(0),
-            shared_pages: f.get(2).and_then(|x| num(x)).unwrap_or(0),
+            size_pages: f.first().and_then(|x| parse_u64(x)).unwrap_or(0),
+            resident_pages: f.get(1).and_then(|x| parse_u64(x)).unwrap_or(0),
+            shared_pages: f.get(2).and_then(|x| parse_u64(x)).unwrap_or(0),
         })
     }
 
@@ -1129,11 +1140,8 @@ impl ProcessStatm {
 #[must_use]
 pub fn status_uid(content: &[u8]) -> Option<u32> {
     let value = key_value(content, "Uid")?;
-    let first = value
-        .split(|b| b.is_ascii_whitespace())
-        .find(|f| !f.is_empty())?
-        .to_vec();
-    num(&first).and_then(|v| u32::try_from(v).ok())
+    let first = split_ws(&value).first().copied()?.to_vec();
+    parse_u64(&first).and_then(|v| u32::try_from(v).ok())
 }
 
 /// `/proc/<pid>/cmdline` split into its arguments.
@@ -1154,16 +1162,160 @@ pub fn cmdline_args(content: &[u8]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// An unsigned decimal field, or `None` if it is not one.
-fn num(field: &[u8]) -> Option<u64> {
-    let text = core::str::from_utf8(field).ok()?.trim();
-    text.parse().ok()
+// ---------------------------------------------------------------------------
+// /proc/stat: CPU time
+// ---------------------------------------------------------------------------
+
+/// One `cpu` line of `/proc/stat`: time in ticks since boot, by category.
+///
+/// All ten fields Linux publishes, not the seven a viewer happens to show. The
+/// two that get left out are the two that matter here:
+///
+/// * **`steal`** is time the hypervisor gave to somebody else. SlateOS
+///   develops and tests under QEMU, so this is not hypothetical — and a reader
+///   that omits it computes a *total* smaller than the truth, which makes every
+///   process's CPU percentage larger than the truth. The error is invisible
+///   because the numbers stay plausible.
+/// * **`guest`** and **`guest_nice`** must be left out of the total for the
+///   opposite reason: Linux already counts them inside `user` and `nice`, so
+///   adding them again double-counts. They are carried because a caller may
+///   want to *show* them, and dropped from [`CpuTimes::total`] because a caller
+///   summing the struct's fields would otherwise be wrong.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CpuTimes {
+    /// Normal processes in user mode.
+    pub user: u64,
+    /// Niced processes in user mode.
+    pub nice: u64,
+    /// Processes in kernel mode.
+    pub system: u64,
+    /// Twiddling thumbs.
+    pub idle: u64,
+    /// Waiting for I/O.
+    pub iowait: u64,
+    /// Servicing hardware interrupts.
+    pub irq: u64,
+    /// Servicing soft interrupts.
+    pub softirq: u64,
+    /// Involuntary wait: the hypervisor was running something else.
+    pub steal: u64,
+    /// Running a guest. **Already counted in `user`.**
+    pub guest: u64,
+    /// Running a niced guest. **Already counted in `nice`.**
+    pub guest_nice: u64,
 }
 
-/// A signed decimal field.
-fn inum(field: &[u8]) -> Option<i64> {
-    let text = core::str::from_utf8(field).ok()?.trim();
-    text.parse().ok()
+impl CpuTimes {
+    /// Parse one `cpu`/`cpuN` line, with the CPU's index when it has one.
+    ///
+    /// `Ok((None, times))` is the aggregate `cpu ` line; `Some(n)` is `cpuN`.
+    /// Returns `None` for any other line, so a caller can hand it every line of
+    /// the file.
+    ///
+    /// A short line is accepted, not rejected: `iowait` arrived in 2.5.41 and
+    /// `steal` in 2.6.11, so a kernel that publishes seven fields is publishing
+    /// a valid older format rather than a broken one. Missing fields read as
+    /// zero. The previous reader required seven and silently dropped any CPU
+    /// with fewer, which turns an older kernel into an empty CPU list.
+    #[must_use]
+    pub fn parse_line(line: &[u8]) -> Option<(Option<u64>, Self)> {
+        let fields = split_ws(line);
+        let label = fields.first()?;
+        let rest = label.strip_prefix(b"cpu".as_slice())?;
+        let index = if rest.is_empty() {
+            None
+        } else {
+            Some(parse_u64(rest)?)
+        };
+        let at = |i: usize| -> u64 { fields.get(i).and_then(|f| parse_u64(f)).unwrap_or(0) };
+        Some((
+            index,
+            Self {
+                user: at(1),
+                nice: at(2),
+                system: at(3),
+                idle: at(4),
+                iowait: at(5),
+                irq: at(6),
+                softirq: at(7),
+                steal: at(8),
+                guest: at(9),
+                guest_nice: at(10),
+            },
+        ))
+    }
+
+    /// Total time in ticks — everything except `guest` and `guest_nice`.
+    ///
+    /// See [`CpuTimes`] for why those two are excluded and `steal` is not.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.user
+            .saturating_add(self.nice)
+            .saturating_add(self.system)
+            .saturating_add(self.idle)
+            .saturating_add(self.iowait)
+            .saturating_add(self.irq)
+            .saturating_add(self.softirq)
+            .saturating_add(self.steal)
+    }
+
+    /// Time not spent idle or waiting for I/O.
+    ///
+    /// `iowait` counts as not-busy, which is the convention `top` and `htop`
+    /// use and is arguable either way — a disk-bound machine is *doing*
+    /// something. It is stated here so that a caller who disagrees knows to
+    /// compute their own rather than discovering the choice from a graph.
+    #[must_use]
+    pub fn busy(&self) -> u64 {
+        self.total()
+            .saturating_sub(self.idle)
+            .saturating_sub(self.iowait)
+    }
+}
+
+/// The CPU half of `/proc/stat`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CpuStats {
+    /// The aggregate `cpu ` line, if the kernel published one.
+    pub total: Option<CpuTimes>,
+    /// The `cpuN` lines, in file order — which is CPU-index order in practice
+    /// but is not promised by `proc(5)`.
+    pub per_cpu: Vec<CpuTimes>,
+}
+
+impl CpuStats {
+    /// Parse every `cpu` line of `/proc/stat` in **one** pass.
+    ///
+    /// The reader this replaces opened `/proc/stat` a second time when it found
+    /// no `cpuN` lines, so on a single-CPU machine it read the file twice and
+    /// could see two different instants.
+    #[must_use]
+    pub fn parse(content: &[u8]) -> Self {
+        let mut out = Self::default();
+        for line in content.split(|b| *b == b'\n') {
+            match CpuTimes::parse_line(line) {
+                Some((None, times)) => out.total = Some(times),
+                Some((Some(_), times)) => out.per_cpu.push(times),
+                None => {}
+            }
+        }
+        out
+    }
+
+    /// Per-CPU times, falling back to the aggregate when the kernel published
+    /// no `cpuN` lines.
+    ///
+    /// A caller drawing one bar per CPU wants this rather than `per_cpu`: one
+    /// bar for the whole machine is a better answer than no bars.
+    #[must_use]
+    pub fn per_cpu_or_total(&self) -> Vec<CpuTimes> {
+        if self.per_cpu.is_empty() {
+            self.total.into_iter().collect()
+        } else {
+            self.per_cpu.clone()
+        }
+    }
 }
 
 #[cfg(test)]

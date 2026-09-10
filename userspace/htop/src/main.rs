@@ -536,23 +536,10 @@ fn read_key() -> Key {
 // Data structures
 // ============================================================================
 
-/// Per-CPU statistics from /proc/stat.
-#[derive(Clone, Default)]
-struct CpuStat {
-    user: u64,
-    nice: u64,
-    system: u64,
-    idle: u64,
-    iowait: u64,
-    irq: u64,
-    softirq: u64,
-}
-
-impl CpuStat {
-    fn total(&self) -> u64 {
-        self.user + self.nice + self.system + self.idle + self.iowait + self.irq + self.softirq
-    }
-}
+// `CpuStat` used to be declared here, with seven of the ten fields
+// `/proc/stat` publishes and a `total()` that omitted `steal`. It is
+// `procinfo::CpuTimes` now -- see that type for why the missing fields
+// mattered under QEMU.
 
 /// Per-process information scraped from /proc/<pid>/.
 #[derive(Clone)]
@@ -725,61 +712,21 @@ fn read_meminfo() -> MemInfo {
     mem
 }
 
-/// Read per-CPU stats from /proc/stat.
-fn read_cpu_stats() -> Vec<CpuStat> {
-    let mut cpus = Vec::new();
-    if let Some(stat) = read_file("/proc/stat") {
-        for line in stat.lines() {
-            // Skip the aggregate "cpu " line; only read per-core "cpuN" lines.
-            if line.starts_with("cpu") && !line.starts_with("cpu ") {
-                let parts: Vec<u64> = line
-                    .split_whitespace()
-                    .skip(1) // skip "cpuN" label
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
-                if parts.len() >= 7 {
-                    cpus.push(CpuStat {
-                        user: parts[0],
-                        nice: parts[1],
-                        system: parts[2],
-                        idle: parts[3],
-                        iowait: *parts.get(4).unwrap_or(&0),
-                        irq: *parts.get(5).unwrap_or(&0),
-                        softirq: *parts.get(6).unwrap_or(&0),
-                    });
-                }
-            }
-        }
-    }
-    // If no per-CPU lines found, try the aggregate line as a single CPU.
-    if cpus.is_empty()
-        && let Some(stat) = read_file("/proc/stat")
-    {
-        for line in stat.lines() {
-            if let Some(rest) = line.strip_prefix("cpu ") {
-                let parts: Vec<u64> = rest
-                    .split_whitespace()
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
-                if parts.len() >= 7 {
-                    cpus.push(CpuStat {
-                        user: parts[0],
-                        nice: parts[1],
-                        system: parts[2],
-                        idle: parts[3],
-                        iowait: *parts.get(4).unwrap_or(&0),
-                        irq: *parts.get(5).unwrap_or(&0),
-                        softirq: *parts.get(6).unwrap_or(&0),
-                    });
-                }
-                break;
-            }
-        }
-    }
-    cpus
+/// Read uptime in seconds from /proc/uptime.
+/// Per-CPU times, through [`procinfo`].
+///
+/// One read of `/proc/stat`, not two: the reader this replaces opened the file
+/// a second time when it found no `cpuN` lines, so on a single-CPU machine it
+/// compared two different instants.
+fn read_cpu_times() -> Vec<procinfo::CpuTimes> {
+    procinfo::ProcFs::new()
+        .cpu_stats()
+        .ok()
+        .flatten()
+        .map(|s| s.per_cpu_or_total())
+        .unwrap_or_default()
 }
 
-/// Read uptime in seconds from /proc/uptime.
 fn read_uptime() -> u64 {
     read_file("/proc/uptime")
         .and_then(|s| s.split_whitespace().next().map(|v| v.to_string()))
@@ -1147,7 +1094,7 @@ struct App {
     /// Previous aggregate CPU total.
     prev_cpu_total: u64,
     /// Per-CPU stats (previous snapshot).
-    prev_cpu_stats: Vec<CpuStat>,
+    prev_cpu_stats: Vec<procinfo::CpuTimes>,
     /// Memory info.
     mem: MemInfo,
     /// Cursor position in the process list (0-based).
@@ -1173,7 +1120,7 @@ struct App {
 impl App {
     fn new(config: Config) -> Self {
         let (rows, cols) = terminal_size();
-        let cpu_stats = read_cpu_stats();
+        let cpu_stats = read_cpu_times();
         let num_cpus = cpu_stats.len().max(1);
         Self {
             term_rows: rows,
@@ -1220,7 +1167,7 @@ impl App {
         self.uptime = read_uptime();
         self.load = read_loadavg();
 
-        let cpu_stats = read_cpu_stats();
+        let cpu_stats = read_cpu_times();
         self.num_cpus = cpu_stats.len().max(1);
 
         let mut procs = read_all_processes(self.mem.total_kb);

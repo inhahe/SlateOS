@@ -126869,13 +126869,11 @@ program has its own output format and its own idea of which fields it needs,
 and the useful unit is one program per commit.
 
 **One down, nine to go.** `htop` moved on 2026-09-10 -- its per-process
-reading, which is where the crate's per-process half came from. Its private
-`PAGE_SIZE_KB` is gone with it. What `htop` still parses itself is
-`/proc/meminfo`, `/proc/stat`, `/proc/uptime` and `/proc/loadavg`; the crate
-has `MemInfo`, `Uptime` and `LoadAvg` for three of those, and **no per-CPU
-tick reader at all** -- `/proc/stat`'s `cpuN` lines have no counterpart in
-`procinfo`, and `apps/procexplorer` will want them for a CPU percentage. That
-is the next thing to add rather than the next program to convert.
+reading, which is where the crate's per-process half came from, and then its
+CPU reading. Its private `PAGE_SIZE_KB` and its own `CpuStat` are gone with
+them. What `htop` still parses itself is `/proc/meminfo`, `/proc/uptime` and
+`/proc/loadavg`, for all three of which the crate already has a type; moving
+them is mechanical and is the small remainder of this program's share.
 
 Remaining: `ps`, `free`, `coreutils`'s `free`, `earlyoom`, `iostat`, `hwinfo`,
 `lsmem`, `numactl`, `hwclock`. `ps` is the one that still carries its own
@@ -126884,3 +126882,34 @@ Remaining: `ps`, `free`, `coreutils`'s `free`, `earlyoom`, `iostat`, `hwinfo`,
 **Not urgent, and worth saying why.** Every one of the ten works today. This is
 the debt of ten right answers with nothing keeping them right, not a list of
 bugs.
+
+
+## TD-B-HTOPS-CPU-BARS-SHOW-TIME-SINCE-BOOT-NOT-RECENT-ACTIVITY (lane B, 2026-09-10)
+
+**In short:** the per-CPU bars along the top of `htop` show how the machine has
+spent its time *since it booted*, not how it is spending it now. After a few
+hours of uptime they barely move, whatever the machine is doing.
+
+**Where.** `userspace/htop/src/main.rs`, the CPU-bar block in the renderer:
+
+```rust
+let total = stat.total().max(1) as f64;
+let user_frac = stat.user as f64 / total;
+```
+
+`stat` is the *cumulative* counter from `/proc/stat`. Real `htop` divides the
+**delta** between two samples, which is why its bars move.
+
+**The program already has what it needs.** `App` keeps `prev_cpu_stats` and
+uses it for the per-process percentages; the bars are the one consumer that
+reads the current sample alone. The fix is to subtract field by field and
+divide by the delta of [`procinfo::CpuTimes::total`].
+
+**Found while** moving the reader into `procinfo`, not by anyone watching the
+bars -- which is the point worth recording. A display that is *always* wrong in
+the same direction looks like a design choice rather than a defect, and nobody
+reports it.
+
+**Deliberately not fixed in the same commit** as the extraction: that commit's
+claim is "behaviour is unchanged except where it was wrong to read", and
+changing what the bars *mean* is a different claim that deserves its own diff.

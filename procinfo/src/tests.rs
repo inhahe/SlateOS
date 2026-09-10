@@ -833,3 +833,123 @@ fn a_kernel_thread_is_an_empty_cmdline_not_a_missing_one() {
     assert_eq!(procfs.process_cmdline(3).unwrap(), Some(vec![]));
     assert_eq!(procfs.process_cmdline(4).unwrap(), None);
 }
+
+// ---------------------------------------------------------------------------
+// /proc/stat: CPU time
+// ---------------------------------------------------------------------------
+
+/// A `/proc/stat` with an aggregate line, two CPUs, and the non-CPU lines a
+/// real one carries — so the parser is asked to ignore things, not just to
+/// read things.
+const STAT: &[u8] = b"cpu  100 20 30 400 5 6 7 8 9 10\n\
+cpu0 50 10 15 200 2 3 3 4 4 5\n\
+cpu1 50 10 15 200 3 3 4 4 5 5\n\
+intr 12345 0 0\n\
+ctxt 999\n\
+btime 1700000000\n\
+processes 42\n\
+procs_running 3\n\
+procs_blocked 1\n";
+
+#[test]
+fn cpu_stats_reads_the_aggregate_and_each_cpu() {
+    let st = CpuStats::parse(STAT);
+    let total = st.total.unwrap();
+    assert_eq!(total.user, 100);
+    assert_eq!(total.nice, 20);
+    assert_eq!(total.system, 30);
+    assert_eq!(total.idle, 400);
+    assert_eq!(total.iowait, 5);
+    assert_eq!(total.irq, 6);
+    assert_eq!(total.softirq, 7);
+    assert_eq!(total.steal, 8);
+    assert_eq!(total.guest, 9);
+    assert_eq!(total.guest_nice, 10);
+    assert_eq!(st.per_cpu.len(), 2);
+    assert_eq!(st.per_cpu[0].user, 50);
+    assert_eq!(st.per_cpu[1].iowait, 3);
+}
+
+/// `steal` is in the total and `guest`/`guest_nice` are not.
+///
+/// Both halves are load-bearing and for opposite reasons. Omitting `steal`
+/// makes the total too small, so every process's CPU percentage comes out too
+/// large — and SlateOS develops under QEMU, where `steal` is exactly the field
+/// that is non-zero. Including `guest` double-counts, because Linux already
+/// counts it inside `user`.
+#[test]
+fn total_includes_steal_and_excludes_guest() {
+    let t = CpuStats::parse(STAT).total.unwrap();
+    assert_eq!(t.total(), 100 + 20 + 30 + 400 + 5 + 6 + 7 + 8);
+    // The two ways of getting it wrong, stated as what they would produce:
+    assert_ne!(
+        t.total(),
+        100 + 20 + 30 + 400 + 5 + 6 + 7,
+        "steal was dropped"
+    );
+    assert_ne!(
+        t.total(),
+        100 + 20 + 30 + 400 + 5 + 6 + 7 + 8 + 9 + 10,
+        "guest was double-counted"
+    );
+    assert_eq!(t.busy(), t.total() - 400 - 5);
+}
+
+/// An older kernel publishes fewer fields, and that is a valid file rather
+/// than a broken one — `iowait` arrived in 2.5.41 and `steal` in 2.6.11. The
+/// reader this replaces required seven fields and silently dropped any CPU
+/// line with fewer, turning an older kernel into an empty CPU list.
+#[test]
+fn a_short_cpu_line_reads_the_fields_it_has() {
+    let st = CpuStats::parse(b"cpu  1 2 3 4\ncpu0 1 2 3 4\n");
+    let t = st.total.unwrap();
+    assert_eq!((t.user, t.nice, t.system, t.idle), (1, 2, 3, 4));
+    assert_eq!(t.iowait, 0);
+    assert_eq!(t.steal, 0);
+    assert_eq!(t.total(), 10);
+    assert_eq!(
+        st.per_cpu.len(),
+        1,
+        "the short cpu0 line must not be dropped"
+    );
+}
+
+/// Lines that are not CPU lines are ignored, including ones that merely start
+/// with the same letters.
+#[test]
+fn non_cpu_lines_are_ignored() {
+    assert!(CpuTimes::parse_line(b"intr 1 2 3").is_none());
+    assert!(CpuTimes::parse_line(b"ctxt 999").is_none());
+    assert!(CpuTimes::parse_line(b"").is_none());
+    // `cpu` followed by something that is not a number is not `cpuN`.
+    assert!(CpuTimes::parse_line(b"cpufreq 1 2 3").is_none());
+    assert_eq!(CpuTimes::parse_line(b"cpu 1 2 3").unwrap().0, None);
+    assert_eq!(CpuTimes::parse_line(b"cpu7 1 2 3").unwrap().0, Some(7));
+}
+
+/// One bar for the whole machine beats no bars.
+#[test]
+fn per_cpu_falls_back_to_the_aggregate() {
+    let one = CpuStats::parse(b"cpu  1 2 3 4 5 6 7 8\n");
+    assert!(one.per_cpu.is_empty());
+    assert_eq!(one.per_cpu_or_total().len(), 1);
+    assert_eq!(CpuStats::parse(STAT).per_cpu_or_total().len(), 2);
+    assert!(CpuStats::parse(b"intr 1\n").per_cpu_or_total().is_empty());
+}
+
+/// The whole file is read once. The reader this replaces opened `/proc/stat` a
+/// second time when it found no `cpuN` lines, so on a single-CPU machine it
+/// read two different instants and compared them.
+#[test]
+fn procfs_reads_cpu_stats_from_a_fixture() {
+    let fx = Fixture::new("cpustat");
+    fx.write("stat", STAT);
+    let st = fx.procfs().cpu_stats().unwrap().unwrap();
+    assert_eq!(st.per_cpu.len(), 2);
+    assert!(st.total.is_some());
+    // …and the scheduler counters in the same file still parse, since both
+    // readers see every line.
+    let sched = SchedCounters::parse(STAT);
+    assert_eq!(sched.running, Some(3));
+    assert_eq!(sched.blocked, Some(1));
+}

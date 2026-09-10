@@ -18,3 +18,6 @@ description = "SlateOS package manager — content-addressed store with atomic g
 quoting = { path = "../quoting" }
 httpclient = { path = "../../net/httpclient" }
 sha2 = { path = "../../sha2" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

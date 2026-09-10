@@ -127825,3 +127825,44 @@ not UTF-8 cannot be named on the command line at all: `mkfs` and `fsck` read
 argv through `env::args()`, which panics on such an argument. That is
 B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT, not this entry, and the tests say so
 where a reader would otherwise take it for a parsing failure.
+
+
+## TD-B-SURVEY-FOR-GUARDS-THAT-FAIL-OPEN (lane B, 2026-09-10)
+
+**In short:** after fixing `mkfs`/`fsck`, I ran the check I had just told the
+other two lanes to run: grep this lane for a guard that answers "safe to
+proceed" when it could not tell. One more turned up, in the package manager,
+and it destroyed user data rather than a filesystem.
+
+**Method, so it can be repeated.** 134 sites in lane B match
+`Err(_) => return false`, `Err(_) => false` or `unwrap_or(false)`. Most are
+harmless -- a shell option that defaults to off, a "is this a symlink" that
+falls back to no. What narrows it is asking **which way `false` points**: a
+guard is dangerous when `false` means *go ahead*. Deriving the set that way --
+every `-> bool` function containing a fail-open arm, then reading the names --
+gave 165 functions, of which all but a handful were `userspace/oils` shell-option
+accessors.
+
+**What it found: `userspace/pkg`'s `is_user_modified`.** It guarded
+`deploy_config`, which overwrites a config file on upgrade unless the user has
+edited it. It returned `false` -- "not modified", therefore overwrite -- in two
+cases where it had no idea:
+
+* the file could not be **read**, though the caller had already established it
+  exists, so the failure is a permission problem, an I/O error or a race; and
+* the installed version had **no recorded checksum**, which is the state of any
+  package installed by an older `pkg` or any database that lost the field.
+
+The second is the one that would have been met in practice: on such a system
+*every* user-edited config was silently replaced on the next upgrade, with the
+notice that exists for exactly that case never printed.
+
+Renamed to `must_preserve`, because the question the caller asks is "may I
+overwrite this?" and the old name answered a different one. Both arms now
+preserve, which costs a `.pkg-new` file and a notice when the file really was
+untouched -- `rpm`'s `.rpmnew` bargain. Four tests, where there were none.
+
+**What it did not find**, which is worth recording so nobody repeats the sweep:
+no guard named `is_mounted`, `is_busy`, `is_in_use`, `is_locked`, `is_readonly`,
+`is_running`, `is_active`, `in_use`, `is_protected`, `is_immutable` or
+`is_open` fails open anywhere in lane B. The two that did are fixed.

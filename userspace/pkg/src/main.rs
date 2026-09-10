@@ -1609,13 +1609,42 @@ impl ConfigFileTracker {
     ///
     /// Compares the current file on disk to its expected CAS hash.
     /// Returns true if the file exists and has been modified.
-    fn is_user_modified(path: &Path, expected_hash: &str) -> bool {
+    /// Whether an existing config file must be preserved rather than replaced.
+    ///
+    /// # This answers "may I overwrite it?", so it fails **closed**
+    ///
+    /// The caller is about to replace the file. "I cannot tell whether the
+    /// user edited it" therefore has to mean *keep it*, and the code this
+    /// replaces meant the opposite in two places:
+    ///
+    /// * **An unreadable file was reported as unmodified.** The caller has
+    ///   already established the file *exists*; `fs::read` failing after that
+    ///   is a permission problem, an I/O error, or a race -- none of which is
+    ///   evidence that the contents match what the package shipped. The old
+    ///   `Err(_) => false` overwrote it.
+    /// * **A missing recorded hash was reported as unmodified.** `old_hash` is
+    ///   empty when the installed version's metadata does not carry one --
+    ///   a package installed by an older `pkg`, or a database that lost the
+    ///   field. Every user-edited config on such a system was silently
+    ///   clobbered by the next upgrade.
+    ///
+    /// Failing closed costs a `.pkg-new` file and a notice where the file
+    /// really was untouched. Failing open costs the user's edits, and says
+    /// nothing. That is `rpm`'s `.rpmnew` bargain and it is the right one.
+    ///
+    /// The fresh-install case is not affected: [`Self::deploy_config`] checks
+    /// `dst.exists()` first, so a file that is not there yet is simply
+    /// written.
+    fn must_preserve(path: &Path, expected_hash: &str) -> bool {
         if expected_hash.is_empty() {
-            return false;
+            // No recorded hash: nothing to compare against, so the contents
+            // cannot be shown to be the package's own.
+            return true;
         }
         match fs::read(path) {
             Ok(data) => sha2::sha256_hex(&data).as_str() != expected_hash,
-            Err(_) => false, // file doesn't exist or unreadable — not "modified"
+            // Exists (the caller checked) but cannot be read.
+            Err(_) => true,
         }
     }
 
@@ -1630,12 +1659,18 @@ impl ConfigFileTracker {
         dst: &Path,
         old_hash: &str,
     ) -> io::Result<bool> {
-        if dst.exists() && Self::is_user_modified(dst, old_hash) {
-            // User modified the config — don't clobber it
+        if dst.exists() && Self::must_preserve(dst, old_hash) {
+            // Either the user edited it, or we cannot show that they did not.
+            // Both keep the file that is there.
             let new_path = PathBuf::from(format!("{}.pkg-new", dst.display()));
             cas.deploy_hardlink(hash, &new_path)?;
+            let why = if old_hash.is_empty() {
+                "no recorded checksum for the installed version"
+            } else {
+                "modified by user"
+            };
             eprintln!(
-                "  notice: {} modified by user — new version saved as {}",
+                "  notice: {} kept ({why}) — new version saved as {}",
                 dst.display(),
                 new_path.display()
             );
@@ -4899,6 +4934,75 @@ fn is_local_pkg_path(arg: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    // ---- the config-overwrite guard ----
+    //
+    // `must_preserve` decides whether an upgrade may replace a config file the
+    // user may have edited. Nothing covered it, and it answered "go ahead" in
+    // two cases where it could not tell.
+
+    use scratchdir::ScratchDir;
+    use std::path::Path;
+
+    fn write(scratch: &ScratchDir, name: &str, body: &[u8]) -> std::path::PathBuf {
+        let path = scratch.path(name);
+        std::fs::write(&path, body).expect("write fixture config");
+        path
+    }
+
+    /// Untouched since the package shipped it: safe to replace.
+    #[test]
+    fn a_config_matching_its_recorded_hash_may_be_replaced() {
+        let scratch = ScratchDir::new("pkg-config-clean");
+        let path = write(&scratch, "app.conf", b"key = value\n");
+        let hash = sha2::sha256_hex(b"key = value\n");
+        let hash = hash.as_str();
+        assert!(!ConfigFileTracker::must_preserve(&path, hash));
+    }
+
+    /// Edited: keep it.
+    #[test]
+    fn an_edited_config_is_preserved() {
+        let scratch = ScratchDir::new("pkg-config-edited");
+        let path = write(&scratch, "app.conf", b"key = mine\n");
+        let shipped = sha2::sha256_hex(b"key = value\n");
+        let shipped = shipped.as_str();
+        assert!(ConfigFileTracker::must_preserve(&path, shipped));
+    }
+
+    /// **Unreadable is not "unmodified".**
+    ///
+    /// The caller has already established the file exists, so a read failing
+    /// after that is a permission problem, an I/O error or a race -- none of
+    /// which is evidence that the contents are the package's own. The code
+    /// this replaces returned `false` here and overwrote the file.
+    #[test]
+    fn a_config_that_cannot_be_read_is_preserved() {
+        let scratch = ScratchDir::new("pkg-config-unreadable");
+        let missing = scratch.path("not-there.conf");
+        let hash = sha2::sha256_hex(b"anything");
+        let hash = hash.as_str();
+        assert!(
+            ConfigFileTracker::must_preserve(Path::new(&missing), hash),
+            "a file we cannot read is not a file we can show is unmodified"
+        );
+    }
+
+    /// **No recorded hash is not "unmodified" either.**
+    ///
+    /// `old_hash` is empty when the installed version's metadata does not
+    /// carry one -- a package installed by an older `pkg`, or a database that
+    /// lost the field. Every user-edited config on such a system was silently
+    /// clobbered by the next upgrade.
+    #[test]
+    fn a_config_with_no_recorded_hash_is_preserved() {
+        let scratch = ScratchDir::new("pkg-config-nohash");
+        let path = write(&scratch, "app.conf", b"key = value\n");
+        assert!(
+            ConfigFileTracker::must_preserve(&path, ""),
+            "nothing to compare against is not the same as comparing equal"
+        );
+    }
     use super::*;
 
     /// The store's blob names are SHA-256 digests, so what they are *is* part

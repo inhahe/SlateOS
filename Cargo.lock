@@ -13286,6 +13286,10 @@ dependencies = [
 [[package]]
 name = "pgrep"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+]
 
 [[package]]
 name = "phaser-cli"
@@ -14142,6 +14146,7 @@ dependencies = [
 name = "pstree"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
 ]
 
@@ -18265,6 +18270,10 @@ dependencies = [
 [[package]]
 name = "top"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+]
 
 [[package]]
 name = "topgrade"

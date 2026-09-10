@@ -43,7 +43,15 @@ const ASCII_SPACE: &str = "    ";
 struct ProcessInfo {
     pid: u32,
     ppid: u32,
-    name: String,
+    /// The command name, **as bytes**.
+    ///
+    /// `read_to_string` on `/proc/<pid>/stat` *fails* for a name that is not
+    /// UTF-8, so such a process used to vanish from the tree -- **and its
+    /// children with it**, since a tree is built by matching each process's
+    /// `ppid` against a parent that has to be present. One unreadable name
+    /// could therefore hide an entire subtree, which is a stronger effect than
+    /// the same bug had in `pgrep` or `top`.
+    name: Vec<u8>,
     uid: u32,
     threads: u32,
     // Parsed from /proc/<pid>/stat; consumed by the future -S option
@@ -89,23 +97,20 @@ fn read_file(path: &str) -> Option<String> {
     fs::read_to_string(path).ok()
 }
 
-/// Read process info from /proc/<pid>/stat.
+/// Read process info from `/proc/<pid>/stat`, through [`procinfo`].
+///
+/// The `(comm)` field and the positional fields after it used to be parsed
+/// here. `procinfo` names them, and reads the file as bytes -- see
+/// [`ProcessInfo::name`] for what reading it as text cost.
 fn read_proc_stat(pid: u32) -> Option<ProcessInfo> {
-    let stat_content = read_file(&format!("/proc/{pid}/stat"))?;
-
-    // Parse comm field (in parens, may contain spaces).
-    let open_paren = stat_content.find('(')?;
-    let close_paren = stat_content.rfind(')')?;
-    let name = stat_content[open_paren + 1..close_paren].to_string();
-
-    // Fields after the closing paren.
-    let rest = stat_content[close_paren + 2..].trim();
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-
-    // Field 0 = state, Field 1 = ppid, Field 17 = num_threads.
-    let state = fields.first().and_then(|s| s.chars().next()).unwrap_or('?');
-    let ppid: u32 = fields.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let threads: u32 = fields.get(17).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let stat = procinfo::ProcFs::new()
+        .process_stat(u64::from(pid))
+        .ok()
+        .flatten()?;
+    let name = stat.comm;
+    let state = char::from(stat.state);
+    let ppid = u32::try_from(stat.ppid).unwrap_or(0);
+    let threads = u32::try_from(stat.num_threads).unwrap_or(1);
 
     // Read UID from /proc/<pid>/status.
     let uid = read_proc_uid(pid);
@@ -215,12 +220,13 @@ fn format_process(info: &ProcessInfo, opts: &Options) -> String {
     let name = if opts.long_format || opts.show_args {
         let cmdline = read_proc_cmdline(info.pid);
         if cmdline.is_empty() {
-            format!("{{{}}}", info.name) // Kernel thread: {name}
+            // Kernel thread: {name}
+            format!("{{{}}}", quoting::escape_unprintable(&info.name))
         } else {
             cmdline
         }
     } else {
-        info.name.clone()
+        quoting::escape_unprintable(&info.name)
     };
     parts.push(name);
 
@@ -293,13 +299,13 @@ fn render_tree(ctx: &mut TreeCtx<'_, '_>, pid: u32, prefix: &str, is_last: bool,
                 .procs
                 .get(a)
                 .map(|p| &p.name)
-                .unwrap_or(&String::new())
+                .unwrap_or(&Vec::new())
                 .clone();
             let name_b = ctx
                 .procs
                 .get(b)
                 .map(|p| &p.name)
-                .unwrap_or(&String::new())
+                .unwrap_or(&Vec::new())
                 .clone();
             name_a.cmp(&name_b)
         });
@@ -308,7 +314,7 @@ fn render_tree(ctx: &mut TreeCtx<'_, '_>, pid: u32, prefix: &str, is_last: bool,
     // Compact mode: merge children with same name.
     if ctx.opts.compact {
         let mut merged: Vec<(u32, u32)> = Vec::new(); // (pid, count)
-        let mut prev_name = String::new();
+        let mut prev_name: Vec<u8> = Vec::new();
         for &kid_pid in &kids {
             let kid_name = ctx
                 .procs
@@ -338,7 +344,8 @@ fn render_tree(ctx: &mut TreeCtx<'_, '_>, pid: u32, prefix: &str, is_last: bool,
             let kid_is_last = idx + 1 == merged.len();
             if count > 1 {
                 let kid_info = ctx.procs.get(&kid_pid);
-                let name = kid_info.map(|p| &p.name).cloned().unwrap_or_default();
+                let name =
+                    kid_info.map_or_else(String::new, |p| quoting::escape_unprintable(&p.name));
                 let connector = if kid_is_last { last } else { branch };
                 let _ = writeln!(ctx.out, "{child_prefix}{connector}{count}*[{name}]");
             } else {
@@ -524,11 +531,13 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn make_proc(pid: u32, ppid: u32, name: &str) -> ProcessInfo {
+    /// `&[u8]`, so a fixture can hold a name this program must not drop --
+    /// and, with it, every child of that process.
+    fn make_proc(pid: u32, ppid: u32, name: &[u8]) -> ProcessInfo {
         ProcessInfo {
             pid,
             ppid,
-            name: name.to_string(),
+            name: name.to_vec(),
             uid: 0,
             threads: 1,
             state: 'S',
@@ -539,10 +548,10 @@ mod tests {
     #[test]
     fn test_build_children_map() {
         let mut procs = HashMap::new();
-        procs.insert(1, make_proc(1, 0, "init"));
-        procs.insert(2, make_proc(2, 1, "bash"));
-        procs.insert(3, make_proc(3, 1, "sshd"));
-        procs.insert(4, make_proc(4, 2, "vim"));
+        procs.insert(1, make_proc(1, 0, b"init"));
+        procs.insert(2, make_proc(2, 1, b"bash"));
+        procs.insert(3, make_proc(3, 1, b"sshd"));
+        procs.insert(4, make_proc(4, 2, b"vim"));
 
         let children = build_children_map(&procs);
         assert_eq!(children.get(&1).unwrap(), &[2, 3]);
@@ -550,9 +559,55 @@ mod tests {
         assert!(!children.contains_key(&3) || children.get(&3).unwrap().is_empty());
     }
 
+    /// **A name that is not UTF-8 is shown, not dropped.**
+    ///
+    /// `/proc/<pid>/stat` was read with `read_to_string`, which fails on such
+    /// a name, so the process disappeared -- **and every child with it**,
+    /// because a tree is assembled by matching each process's `ppid` against a
+    /// parent that has to be present. One unreadable name could hide an
+    /// arbitrarily large subtree, which is a bigger effect than the same bug
+    /// had in `pgrep` or `top`.
+    #[test]
+    fn a_name_that_is_not_utf8_still_appears() {
+        let info = make_proc(42, 1, b"ser\xffver");
+        let opts = Options {
+            show_pids: false,
+            show_uid: false,
+            show_threads: false,
+            ascii: false,
+            compact: true,
+            root_pid: None,
+            highlight_pid: None,
+            show_kernel: false,
+            long_format: false,
+            sort_by_name: false,
+            show_args: false,
+            numeric_uid: false,
+        };
+        let shown = format_process(&info, &opts);
+        assert!(!shown.is_empty(), "the process must still be rendered");
+        assert!(shown.starts_with("ser"), "the readable part stays readable");
+        assert!(
+            !shown.contains('\u{fffd}'),
+            "no replacement character: that is a guess about what the byte meant"
+        );
+    }
+
+    /// Two children with the same name still merge in compact mode when that
+    /// name is not text -- the comparison is over bytes, so it neither breaks
+    /// nor starts merging things that differ.
+    #[test]
+    fn compaction_compares_names_that_are_not_text() {
+        let a = make_proc(2, 1, b"w\xffrker");
+        let b = make_proc(3, 1, b"w\xffrker");
+        let c = make_proc(4, 1, b"w\xferker");
+        assert_eq!(a.name, b.name, "identical bytes are identical names");
+        assert_ne!(a.name, c.name, "one byte apart is a different name");
+    }
+
     #[test]
     fn test_format_process_basic() {
-        let info = make_proc(42, 1, "bash");
+        let info = make_proc(42, 1, b"bash");
         let opts = Options {
             show_pids: false,
             show_uid: false,
@@ -572,7 +627,7 @@ mod tests {
 
     #[test]
     fn test_format_process_with_pid() {
-        let info = make_proc(42, 1, "bash");
+        let info = make_proc(42, 1, b"bash");
         let opts = Options {
             show_pids: true,
             show_uid: false,
@@ -595,7 +650,7 @@ mod tests {
         let info = ProcessInfo {
             pid: 42,
             ppid: 1,
-            name: "bash".to_string(),
+            name: b"bash".to_vec(),
             uid: 1000,
             threads: 1,
             state: 'S',
@@ -623,7 +678,7 @@ mod tests {
         let info = ProcessInfo {
             pid: 42,
             ppid: 1,
-            name: "bash".to_string(),
+            name: b"bash".to_vec(),
             uid: 1000,
             threads: 1,
             state: 'S',
@@ -648,7 +703,7 @@ mod tests {
 
     #[test]
     fn test_format_process_with_threads() {
-        let mut info = make_proc(42, 1, "java");
+        let mut info = make_proc(42, 1, b"java");
         info.threads = 16;
         let opts = Options {
             show_pids: false,
@@ -669,7 +724,7 @@ mod tests {
 
     #[test]
     fn test_format_process_single_thread() {
-        let info = make_proc(42, 1, "bash");
+        let info = make_proc(42, 1, b"bash");
         let opts = Options {
             show_pids: false,
             show_uid: false,
@@ -693,7 +748,7 @@ mod tests {
         let mut info = ProcessInfo {
             pid: 42,
             ppid: 1,
-            name: "httpd".to_string(),
+            name: b"httpd".to_vec(),
             uid: 33,
             threads: 4,
             state: 'S',
@@ -748,11 +803,11 @@ mod tests {
     #[test]
     fn test_children_map_sorted() {
         let mut procs = HashMap::new();
-        procs.insert(1, make_proc(1, 0, "init"));
-        procs.insert(5, make_proc(5, 1, "e"));
-        procs.insert(3, make_proc(3, 1, "c"));
-        procs.insert(7, make_proc(7, 1, "g"));
-        procs.insert(2, make_proc(2, 1, "b"));
+        procs.insert(1, make_proc(1, 0, b"init"));
+        procs.insert(5, make_proc(5, 1, b"e"));
+        procs.insert(3, make_proc(3, 1, b"c"));
+        procs.insert(7, make_proc(7, 1, b"g"));
+        procs.insert(2, make_proc(2, 1, b"b"));
 
         let children = build_children_map(&procs);
         let kids = children.get(&1).unwrap();
@@ -762,10 +817,10 @@ mod tests {
 
     #[test]
     fn test_process_info_clone() {
-        let info = make_proc(1, 0, "init");
+        let info = make_proc(1, 0, b"init");
         let cloned = info.clone();
         assert_eq!(cloned.pid, 1);
-        assert_eq!(cloned.name, "init");
+        assert_eq!(cloned.name, b"init");
     }
 
     #[test]

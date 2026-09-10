@@ -28,7 +28,14 @@ use std::process;
 #[derive(Clone)]
 struct ProcessInfo {
     pid: u32,
-    name: String,
+    /// The command name, **as bytes**.
+    ///
+    /// A process whose name is not UTF-8 used to be dropped from the display
+    /// entirely: `/proc/<pid>/stat` was read with `read_to_string`, which
+    /// *fails* on such a name, and the `.ok()` made that a `None`. Every
+    /// number on that line -- state, ppid, the CPU times, RSS -- went with it,
+    /// though none of them is text.
+    name: Vec<u8>,
     state: char,
     #[allow(dead_code)] // Available for future parent-child tree view.
     ppid: u32,
@@ -215,39 +222,24 @@ fn read_system_summary() -> SystemSummary {
 
 /// Read information about a single process from /proc/<pid>/.
 fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
-    let stat_path = format!("/proc/{pid}/stat");
-    let stat_content = read_file(&stat_path)?;
+    // Every field below used to be parsed here: the `(comm)` by hand, the rest
+    // by index into `split_whitespace`, and the uid by taking the first column
+    // of `Uid:`. `procinfo` names them instead, and reads the file as bytes.
+    let proc = procinfo::ProcFs::new();
+    let stat = proc.process_stat(u64::from(pid)).ok().flatten()?;
+    let name = stat.comm;
+    let state = char::from(stat.state);
+    let ppid = u32::try_from(stat.ppid).unwrap_or(0);
+    let threads = u32::try_from(stat.num_threads).unwrap_or(1);
+    let priority = i32::try_from(stat.priority).unwrap_or(0);
+    let nice = i32::try_from(stat.nice).unwrap_or(0);
 
-    // /proc/<pid>/stat format:
-    // pid (comm) state ppid pgrp session tty_nr tpgid flags
-    // minflt cminflt majflt cmajflt utime stime cutime cstime
-    // priority nice num_threads itrealvalue starttime vsize rss ...
-    //
-    // comm can contain spaces and parentheses, so find the last ')'.
-    let comm_start = stat_content.find('(')?;
-    let comm_end = stat_content.rfind(')')?;
-    let name = stat_content[comm_start + 1..comm_end].to_string();
-    let rest = &stat_content[comm_end + 2..]; // skip ") "
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-
-    if fields.len() < 20 {
-        return None;
-    }
-
-    let state = fields[0].chars().next().unwrap_or('?');
-    let ppid: u32 = fields[1].parse().unwrap_or(0);
-    let utime: u64 = fields[11].parse().unwrap_or(0);
-    let stime: u64 = fields[12].parse().unwrap_or(0);
-    let priority: i32 = fields[15].parse().unwrap_or(0);
-    let nice: i32 = fields[16].parse().unwrap_or(0);
-    let threads: u32 = fields[17].parse().unwrap_or(1);
-    let vsize_bytes: u64 = fields[20].parse().unwrap_or(0);
-    let rss_pages: u64 = fields[21].parse().unwrap_or(0);
-
-    // Our OS uses 16 KiB pages.
-    let rss_kb = rss_pages * 16;
-    let vsize_kb = vsize_bytes / 1024;
-    let cpu_ticks = utime + stime;
+    // 16 KiB pages, from `procinfo` rather than a literal `16` here. It was
+    // the literal, with a comment saying what it meant -- and a page size is a
+    // fact about the kernel, not about `top`.
+    let rss_kb = stat.rss_pages.saturating_mul(procinfo::PAGE_SIZE_KIB);
+    let vsize_kb = stat.vsize_bytes / 1024;
+    let cpu_ticks = stat.utime_ticks.saturating_add(stat.stime_ticks);
 
     let mem_pct = if mem_total_kb > 0 {
         (rss_kb as f64 / mem_total_kb as f64) * 100.0
@@ -255,23 +247,21 @@ fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
         0.0
     };
 
-    // Format CPU time as HH:MM:SS (assuming 100 ticks per second).
-    let total_secs = cpu_ticks / 100;
+    // Format CPU time as HH:MM:SS.
+    let total_secs = cpu_ticks / procinfo::TICKS_PER_SEC;
     let hours = total_secs / 3600;
     let mins = (total_secs % 3600) / 60;
     let secs = total_secs % 60;
     let time_str = format!("{hours:02}:{mins:02}:{secs:02}");
 
-    // Read UID from /proc/<pid>/status.
-    let uid = read_file(&format!("/proc/{pid}/status"))
-        .and_then(|content| {
-            for line in content.lines() {
-                if let Some(val) = line.strip_prefix("Uid:") {
-                    return val.split_whitespace().next().and_then(|s| s.parse().ok());
-                }
-            }
-            None
-        })
+    // An absent `/proc/<pid>/status` leaves the uid at 0 rather than dropping
+    // the process: it exists -- its `stat` was just read -- and every other
+    // column is still true.
+    let uid = proc
+        .process_status(u64::from(pid))
+        .ok()
+        .flatten()
+        .and_then(|status| status.uid)
         .unwrap_or(0);
 
     Some(ProcessInfo {
@@ -461,12 +451,25 @@ fn print_process(p: &ProcessInfo) {
         p.cpu_pct,
         p.mem_pct,
         p.time_str,
-        if p.name.len() > 16 {
-            &p.name[..16]
-        } else {
-            &p.name
-        },
+        shown_name(&p.name),
     );
+}
+
+/// The command name as it appears in the `COMMAND` column: escaped, then cut
+/// to sixteen characters.
+///
+/// **Escaped before it is cut, and cut by characters.** The code this replaces
+/// was `&p.name[..16]` on a `String`, which panics outright when byte 16 falls
+/// inside a multi-byte character -- a latent crash on any process whose name
+/// is not pure ASCII. Cutting an escaped `String` by `chars()` cannot panic
+/// and cannot exceed the column, whatever bytes the name holds.
+///
+/// Escaping also stops a process name containing a terminal escape sequence
+/// from rewriting the screen of whoever ran `top` -- the same class as the
+/// newline injection already fixed in `su`, and `top` redraws continuously,
+/// so it would be re-applied every second.
+fn shown_name(name: &[u8]) -> String {
+    quoting::escape_unprintable(name).chars().take(16).collect()
 }
 
 /// Sort processes by the selected field.
@@ -482,7 +485,13 @@ fn sort_processes(procs: &mut [ProcessInfo], field: SortField, reverse: bool) {
                 .mem_pct
                 .partial_cmp(&b.mem_pct)
                 .unwrap_or(std::cmp::Ordering::Equal),
-            SortField::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            // ASCII folding, which is what `to_lowercase` did here in
+            // practice: the name was built by decoding UTF-8 that had already
+            // been rejected for anything non-ASCII.
+            SortField::Name => a
+                .name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase()),
             SortField::Time => a.cpu_ticks.cmp(&b.cpu_ticks),
             SortField::Rss => a.rss_kb.cmp(&b.rss_kb),
             SortField::Vsize => a.vsize_kb.cmp(&b.vsize_kb),
@@ -785,4 +794,74 @@ fn main() {
     }
 
     run(&config);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// **This crate had no tests at all before 2026-09-10.** A process viewer with
+/// a column-formatting rule, a sort, and a `/proc` parser, and nothing
+/// asserted about any of it -- which is how `&p.name[..16]` sat there as a
+/// latent panic.
+///
+/// What is covered here is the part that is a pure function of its input. The
+/// reader is not: it needs a real `/proc`, and `procinfo` is where its parsing
+/// now lives and is tested against fixtures.
+#[cfg(test)]
+mod tests {
+    use super::shown_name;
+
+    /// A short name is shown as itself.
+    #[test]
+    fn a_short_name_is_unchanged() {
+        assert_eq!(shown_name(b"bash"), "bash");
+    }
+
+    /// Sixteen characters is the column, and a longer name is cut to it.
+    #[test]
+    fn a_long_name_is_cut_to_the_column() {
+        let shown = shown_name(b"a-very-long-process-name-indeed");
+        assert_eq!(shown.chars().count(), 16);
+        assert_eq!(shown, "a-very-long-proc");
+    }
+
+    /// **The panic this replaced.**
+    ///
+    /// `&p.name[..16]` on a `String` panics when byte 16 falls inside a
+    /// multi-byte character. `é` is two bytes, so a name of fifteen ASCII
+    /// characters followed by one `é` has its sixteenth byte inside that
+    /// character -- and `top` would have died drawing its own process list.
+    #[test]
+    fn a_name_whose_sixteenth_byte_splits_a_character_does_not_panic() {
+        let name = "abcdefghijklmnoé";
+        assert_eq!(name.len(), 17, "fifteen ASCII bytes plus a two-byte char");
+        let shown = shown_name(name.as_bytes());
+        assert_eq!(shown.chars().count(), 16);
+        assert!(shown.ends_with('é'), "and the character survives whole");
+    }
+
+    /// A name that is not UTF-8 at all is shown escaped, not dropped and not
+    /// replaced by U+FFFD -- the process is real and its name is what it is.
+    #[test]
+    fn a_name_that_is_not_utf8_is_escaped_rather_than_lost() {
+        let shown = shown_name(b"ser\xffver");
+        assert!(!shown.is_empty(), "the process must still appear");
+        assert!(shown.starts_with("ser"), "the readable part stays readable");
+        assert!(
+            !shown.contains('\u{fffd}'),
+            "no replacement character: that is a guess about what the byte meant"
+        );
+    }
+
+    /// A terminal escape in a process name must not reach the terminal. `top`
+    /// redraws every second, so an unescaped one would be re-applied forever.
+    #[test]
+    fn a_terminal_escape_in_a_name_is_defanged() {
+        let shown = shown_name(b"\x1b[2Jevil");
+        assert!(
+            !shown.contains('\u{1b}'),
+            "the escape byte itself must not survive into the output"
+        );
+    }
 }

@@ -126972,6 +126972,42 @@ delta and the context-switch delta would have described different instants.
 each opened `/proc/stat` for `btime` alone, and `hwclock` hand-parsed
 `/proc/uptime` beside it, so converting the two removed three parsers.
 
+**46 with `userspace/pgrep`**, which was the one worth seeking out rather than
+taking on contact: it read `/proc/<pid>/stat` through `read_to_string`, so a
+process whose name is not UTF-8 was dropped from the listing entirely -- and
+`pgrep` and `pkill` are the same binary, so such a process could not be
+signalled by name at all. `userspace/top` followed the same day; `userspace/pstree` followed the same
+day, which closes the set.
+
+**Five more programs still read `/proc/<pid>/stat` by hand** -- `kill`, `lsof`,
+`strace`, `sysstat` and `who` -- found by running the grep rather than assuming
+the three were all of them. Seven further hits were `/proc/<pid>/status`, a
+different file: "stat" being a prefix of "status" is a trap for exactly this
+kind of sweep.
+
+**And the running count in this entry is a running count, not a measurement.**
+The 50 above was derived; every figure since has been that number minus one per
+conversion, and nothing re-derived it. What *is* measured, today: **86** files
+under `userspace/` and `apps/` open a `/proc` path without `procinfo`, down
+from the 95 recorded above. The "opens something `procinfo` already parses"
+subset has not been re-derived since, and should be before anyone quotes it.
+
+**`pstree`'s version was the worst of the three.** A tree is assembled by
+matching each process's `ppid` against a parent that has to be present, so one
+process dropped for having an unreadable name took **every descendant with
+it** -- an arbitrarily large subtree missing, with nothing to say so. In
+`pgrep` and `top` the same defect loses one row.
+
+`top` carried two more things worth naming. Its `COMMAND` column was
+`&p.name[..16]` on a `String` -- **a panic** whenever byte 16 falls inside a
+multi-byte character, so any process whose name held one non-ASCII character in
+the wrong place would have killed the viewer as it drew its own list. And the
+crate had **no tests at all**: a process viewer with a column rule, a sort and
+a `/proc` parser, none of it asserted, which is how that slice sat there. It
+has five now, covering the cut, the panic, a name that is not UTF-8, and a
+terminal escape in a name -- which matters more in `top` than elsewhere because
+it redraws every second, so an unescaped one is re-applied forever.
+
 They also showed why "each program has its own copy" is not a neutral
 arrangement even when every copy works. `uptime` stripped `"btime "` with the
 trailing space; `hwclock` stripped `"btime"` without it, so a line named

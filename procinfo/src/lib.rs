@@ -1285,8 +1285,14 @@ pub struct ProcessStatus {
     /// carries real, effective, saved-set and filesystem in that order.
     ///
     /// A caller wanting the effective UID wants another field here, not a
-    /// different index at the call site.
+    /// different index at the call site -- which is [`Self::euid`], added on
+    /// 2026-09-10 when `userspace/pgrep` became the first caller to need it.
     pub uid: Option<u32>,
+    /// The **effective** UID -- the second column of the same `Uid:` line.
+    ///
+    /// The one a permission check is about, and the one `pgrep -U` versus
+    /// `pgrep -u` distinguishes: `-u` selects on effective, `-U` on real.
+    pub euid: Option<u32>,
     /// The real GID, from `Gid:`, on the same four-column rule.
     pub gid: Option<u32>,
     /// Supplementary groups, from `Groups:`. Empty is a real answer: a process
@@ -1303,10 +1309,13 @@ impl ProcessStatus {
     /// Parse `/proc/<pid>/status`.
     #[must_use]
     pub fn parse(content: &[u8]) -> Self {
-        let first_id = |key: &str| -> Option<u32> {
+        // `Uid:` and `Gid:` carry real, effective, saved-set and filesystem in
+        // that order. Indexing that line is the thing this crate exists to do
+        // once: four columns, one meaning each, named rather than counted.
+        let nth_id = |key: &str, n: usize| -> Option<u32> {
             let value = key_value(content, key)?;
-            let first = split_ws(&value).first().copied()?.to_vec();
-            parse_u64(&first).and_then(|v| u32::try_from(v).ok())
+            let field = split_ws(&value).get(n).copied()?.to_vec();
+            parse_u64(&field).and_then(|v| u32::try_from(v).ok())
         };
         let groups = key_value(content, "Groups").map_or_else(Vec::new, |value| {
             split_ws(&value)
@@ -1316,8 +1325,9 @@ impl ProcessStatus {
                 .collect()
         });
         Self {
-            uid: first_id("Uid"),
-            gid: first_id("Gid"),
+            uid: nth_id("Uid", 0),
+            euid: nth_id("Uid", 1),
+            gid: nth_id("Gid", 0),
             groups,
             vm_size_kib: key_value(content, "VmSize").and_then(|v| parse_kib(&v)),
             vm_rss_kib: key_value(content, "VmRSS").and_then(|v| parse_kib(&v)),

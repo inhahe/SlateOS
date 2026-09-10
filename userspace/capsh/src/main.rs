@@ -1063,12 +1063,25 @@ fn run_capsh(args: &[String]) -> i32 {
                 eprintln!("capsh: -- requires a command");
                 return 1;
             }
-            // In the real OS, we would apply all state changes and exec.
-            // For now, report what would happen.
-            println!("capsh: would exec {:?}", cmd_args);
-            println!("  with capabilities:");
+            // The capability state is still printed, because working out
+            // what the flags mean is real work and is worth showing. What is
+            // NOT done is the exec, and the exit status says so.
+            //
+            // `exec` itself is available -- `getty` uses it as of this change.
+            // But capsh's contract is "make these capability changes, THEN
+            // exec", and this program cannot make them: the changes are
+            // kernel state and nothing here applies them. Exec'ing anyway
+            // would hand the caller a process with MORE authority than they
+            // asked for, which is the precise inverse of the request. Same
+            // decision as `cgexec` and `firejail`; the opposite of `getty`,
+            // which drops nothing.
+            eprintln!("capsh: capability changes are not applied on this system");
+            eprintln!("capsh: the requested state, had it been applied, would be:");
             state.print();
-            return 0;
+            eprintln!(
+                "capsh: refusing to exec {cmd_args:?} with unchanged capabilities"
+            );
+            return 1;
         } else {
             eprintln!("capsh: unknown option {}", quoteaf_os(arg));
             eprintln!("Try 'capsh --help' for more information.");
@@ -2947,8 +2960,19 @@ mod tests {
         assert_eq!(run_capsh(&[String::from("--")]), 1);
     }
 
+    /// `--` with a command REFUSES, and the exit status is the whole assertion.
+    ///
+    /// This asserted 0 until 2026-09-10, when capsh printed "would exec" and
+    /// exited successfully having neither applied the capability changes nor
+    /// run the command. A test that pins that is a test certifying the stub:
+    /// it passes precisely because the program does nothing, and it would have
+    /// gone on passing for as long as that remained true.
+    ///
+    /// Exec is available. What is not available is applying the capability
+    /// changes first, and exec'ing without them would hand the caller a
+    /// process holding MORE authority than they asked to keep.
     #[test]
-    fn test_capsh_exec_with_command() {
+    fn test_capsh_exec_with_command_refuses() {
         assert_eq!(
             run_capsh(&[
                 String::from("--"),
@@ -2956,7 +2980,7 @@ mod tests {
                 String::from("-c"),
                 String::from("echo hello"),
             ]),
-            0
+            1
         );
     }
 

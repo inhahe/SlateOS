@@ -1122,26 +1122,30 @@ fn run_firejail(args: &[String]) -> i32 {
         eprintln!("firejail: warning: {e}");
     }
 
-    if !config.quiet {
-        println!("Sandbox {sandbox_name} started (PID {our_pid})");
-    }
-
-    // In the real implementation, we would exec the program here.
-    // For now, report that we would launch it.
-    if !config.quiet {
-        let prog_args = if program_args.len() > 1 {
-            program_args[1..].join(" ")
-        } else {
-            String::new()
-        };
-        if prog_args.is_empty() {
-            println!("Would execute: {program}");
-        } else {
-            println!("Would execute: {program} {prog_args}");
-        }
-    }
-
-    0
+    // REFUSING, RATHER THAN RUNNING THE PROGRAM UNSANDBOXED.
+    //
+    // This used to print "Sandbox <name> started (PID <pid>)" followed by
+    // "Would execute: <program>", and exit 0. The first line was a statement
+    // of fact and it was false -- no namespace was unshared, no filesystem was
+    // remounted, no seccomp filter was installed. Nothing was started.
+    //
+    // The obvious repair is to exec the program, since `exec` is available and
+    // `getty` was wired to it in this same change. That repair would be WRONG
+    // HERE, and the difference is the whole point: a caller who typed
+    // `firejail <program>` did not ask for the program to run, they asked for
+    // it to run CONFINED. Running it unconfined is not a degraded version of
+    // that request -- it is the one outcome the request exists to prevent, and
+    // it would be delivered to someone who believes the opposite.
+    //
+    // Same reasoning as `cgexec`, which now refuses when it cannot join the
+    // cgroup, and the opposite conclusion from `getty`, whose exec drops
+    // nothing and whose whole job is the exec.
+    let _ = our_pid;
+    eprintln!("firejail: cannot create the sandbox {sandbox_name} on this system");
+    eprintln!("firejail: the profile was parsed and validated, but namespaces,");
+    eprintln!("firejail: filesystem restrictions and seccomp filters are not wired");
+    eprintln!("firejail: refusing to run {program} unconfined");
+    1
 }
 
 /// Extract the basename of a program path (without directories or .exe suffix).

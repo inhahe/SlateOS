@@ -28,6 +28,7 @@ use std::env;
 use std::ffi::OsString;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process;
 
 // ---------------------------------------------------------------------------
 // Personality detection
@@ -702,17 +703,79 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let mut writer = stdout.lock();
 
     match run_getty(&cfg, &mut reader, &mut writer) {
-        Ok(Some((_program, args))) => {
-            // In a real OS, we would exec() the login program here.
-            // For now, print what we would execute.
-            eprintln!("getty: would exec: {}", args.join(" "));
-            0
-        }
+        Ok(Some((program, args))) => exec_login(&program, &args),
         Ok(None) => 0,
         Err(e) => {
             eprintln!("getty: {e}");
             1
         }
+    }
+}
+
+/// Become the login program. Returns only if that could not be done.
+///
+/// # Why this execs rather than spawning
+///
+/// getty's whole job is to open the terminal, work out who is logging in, and
+/// hand the terminal to `login(1)`. It is not supervising anything afterwards,
+/// so `exec` is the right call and not merely the convenient one: the login
+/// program inherits this process's terminal, its session, and its process id,
+/// which is what `init` is watching. Spawning and waiting would leave a getty
+/// sitting between `init` and the user's shell for no purpose, and would
+/// swallow the signal disposition along the way.
+///
+/// # Until 2026-09-10 this printed instead
+///
+///     // In a real OS, we would exec() the login program here.
+///     eprintln!("getty: would exec: {}", args.join(" "));
+///
+/// The premise was wrong rather than the code: `exec` is available, and
+/// `userspace/cgroup`'s `cgexec` was wired to the same call the day before
+/// this. Nothing spawns getty yet, so the effect was invisible -- but what it
+/// meant was that the program standing between this OS and a console login
+/// announced the login it was not performing, and exited 0.
+///
+/// `args[0]` is argv[0] by construction in [`run_getty`], and is passed
+/// through `arg0` rather than dropped, because `login(1)` is one of the
+/// programs that reads its own argv[0] -- a leading `-` is how a login shell
+/// is told it is one.
+fn exec_login(program: &Path, args: &[String]) -> i32 {
+    let mut cmd = process::Command::new(program);
+    if let Some((argv0, rest)) = args.split_first() {
+        cmd.args(rest);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            cmd.arg0(argv0);
+        }
+        #[cfg(not(unix))]
+        {
+            // The development host cannot set argv[0] separately. It is not
+            // the platform this ships on; the arm exists so the crate builds
+            // and its tests run here.
+            let _ = argv0;
+        }
+    }
+
+    #[cfg(unix)]
+    let err = {
+        use std::os::unix::process::CommandExt as _;
+        // Only returns on failure.
+        cmd.exec()
+    };
+    #[cfg(not(unix))]
+    let err = match cmd.status() {
+        Ok(st) => return st.code().unwrap_or(1),
+        Err(e) => e,
+    };
+
+    eprintln!("getty: {}: {err}", program.display());
+    // The shell convention callers already expect: 127 for a login program
+    // that is not there, 126 for one that is but cannot be run.
+    if err.kind() == io::ErrorKind::NotFound {
+        127
+    } else {
+        126
     }
 }
 

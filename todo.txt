@@ -56585,3 +56585,63 @@ suspicious one is `userspace/less`, which writes `/proc/self/tty_raw` (also not
 a real path) and then does the real `termios` work unconditionally -- so the
 write is dead rather than harmful, but its doc comment describes a fallback
 branch the code does not have.
+
+================================================================================
+HOLD: `services/ctest-hostname` and the posix hostname wiring land TOGETHER,
+and only after lane A says `(Process, SET_HOSTNAME)` is on `main`
+================================================================================
+
+**Where the work is.** Written, compiling and linking clean, on the branch
+`lane-b-ctest-hostname-hold` (`origin/lane-b-ctest-hostname-hold`), and
+deliberately **not** on `lane-b`. It is off the lane branch rather than merely
+unmerged because the tick loop merges `lane-b` to `main` at the end of every
+green tick, so "remember not to merge" is not a mechanism. Lane C recorded the
+same lesson on 2026-09-09 after reading a message that said "not an instruction
+to stop", not running `check-lane-signals.py`, and building a whole feature
+through a live halt.
+
+**Why it cannot land yet.** Two independent reasons, either of which reddens
+the boot test *for all three lanes*:
+
+1. `scripts/create-ext4-rootfs.sh` stages fixtures by glob --
+   `for elf in "$ROOT_DIR"/services/ctest-*/*.elf` at line 1605 -- so the
+   `.elf` merely existing on `main` arms lane A's rung. Nothing else has to be
+   edited for it to start running.
+2. The only grant of `(Process, SET_HOSTNAME)` in the tree is lane A's
+   `self_test_ctest_hostname` in `kernel/src/proc/spawn.rs`. It is committed on
+   `lane-a` and **not on `main`**. Without it the fixture exits 4.
+
+And a third that is mine: `posix`'s `sethostname`/`setdomainname` still return
+`ENOSYS` because they are not wired to `SYS_HOSTNAME_SET` (1072) /
+`SYS_DOMAINNAME_SET` (1073). Without that wiring the fixture exits 3. So the
+fixture and the wiring are one landing, not two.
+
+**The landing sequence, when lane A's second notice says `main` has the grant:**
+
+1. `git fetch origin && git merge origin/main` on `lane-b`; confirm
+   `SYS_HOSTNAME_SET` is really in `kernel/src/syscall/number.rs` on `main`
+   rather than taking the notice's word for it.
+2. Wire `posix::unistd::sethostname` and `setdomainname` to 1072/1073, keeping
+   every argument check in Linux's order ahead of the syscall. Delete the
+   `ENOSYS` arms and the doc paragraphs that explain them, *including* the
+   sethostname doc's note about outliving its code -- that note is about the
+   defect, and leaving it above working code repeats the failure it describes.
+3. `git merge lane-b-ctest-hostname-hold` into `lane-b`.
+4. Rebuild the fixture: `FASTPY_ZIG=... PYTHONPATH="D:/visual studio
+   projects/fastpy" python services/ctest-hostname/build.py`, after rebuilding
+   the sysroot, since step 2 changes the very code it tests and a stale
+   `libc.a` fails it for the wrong reason.
+5. `cargo test -p posix --target x86_64-pc-windows-gnu`; the host tests that
+   assert `ENOSYS` today must be rewritten, not deleted -- on the host there is
+   still no kernel, so what they should assert is whatever the host arm now
+   does.
+6. Merge to `main`, then send lane A the exit-code ranges **read out of
+   `main.c`**, not from memory. They asked for it that way: the altstack rung
+   shipped hints for checks "1-31" against a fixture that already had 37,
+   because the hints were written from a description.
+7. Delete `lane-b-ctest-hostname-hold` from `origin` once merged.
+
+**Do not** land the fixture alone "to get it out of the way", and do not land
+the wiring alone either -- the wiring without the fixture is the state this
+lane has already been in twice, where the only evidence that setting a name
+works is that the code looks like it should.

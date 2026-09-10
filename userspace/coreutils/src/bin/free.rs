@@ -480,6 +480,31 @@ struct Raw {
 /// to the next newline, so a key it does not know costs nothing and a line
 /// without a `:` is skipped. Trailing units (`kB`) are ignored because
 /// `strtoul` stops at the first non-digit.
+/// Parse `/proc/meminfo` the way procps does.
+///
+/// # Deliberately not `procinfo::MemInfo`
+///
+/// On 2026-09-10 five of the six hand-written meminfo parsers in `userspace/`
+/// were replaced by the shared one. This is the sixth, and it stays, because
+/// the two have **opposite parsing policies and both are correct for their
+/// jobs**:
+///
+/// - [`read_ul`] below is a reimplementation of C's `strtoul`: skip leading
+///   whitespace, take digits, stop at the first non-digit, saturate on
+///   overflow. It accepts a bare number, ignores any suffix, and is what
+///   procps actually does.
+/// - `procinfo::parse_kib` **refuses a unit it does not recognise**, so that
+///   `16 MB` reads as absent rather than as `16` KiB -- the same number in the
+///   same font, off by 1024.
+///
+/// That refusal is the right default for a shared reader, and the wrong
+/// behaviour for this binary, whose entire purpose is to match upstream `free`
+/// including on malformed input. Converting it would be uniformity bought with
+/// fidelity, which is the trade this crate exists to refuse.
+///
+/// So if a later sweep for `/proc/meminfo` finds this file: it is not an
+/// oversight. Change it only if the goal changes from "behave like procps" to
+/// something else.
 fn parse_meminfo(text: &[u8]) -> Raw {
     let mut raw = Raw::default();
     for line in text.split(|&c| c == b'\n') {

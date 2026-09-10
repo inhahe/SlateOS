@@ -1190,6 +1190,9 @@ version = "0.1.0"
 [[package]]
 name = "free"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "freecell"
@@ -3475,6 +3478,7 @@ name = "swapon"
 version = "0.1.0"
 dependencies = [
  "libcall",
+ "procinfo",
  "quoting",
 ]
 

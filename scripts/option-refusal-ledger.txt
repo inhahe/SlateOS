@@ -49,8 +49,6 @@ cmd_alloc_trace 1
 cmd_applaunch 1
 cmd_apppermissions 1
 cmd_appstore 1
-cmd_assoc 1
-cmd_authbroker 1
 cmd_bluetooth 1
 cmd_bootcfg 1
 cmd_cliphistory 1
@@ -62,19 +60,16 @@ cmd_dmevent 1
 cmd_dnssettings 1
 cmd_faceunlock 1
 cmd_filerules 1
-cmd_fileshare 1
 cmd_filevault 1
 cmd_findex 1
 cmd_fnotify 1
 cmd_focussession 1
 cmd_fscache 1
-cmd_fswatch 1
 cmd_ftrace 1
 cmd_futexstat 1
 cmd_head_input 1
 cmd_hwmonitor 1
 cmd_ime 1
-cmd_ionice 1
 cmd_iosched 1
 cmd_kernlog 1
 cmd_kmod 1
@@ -102,7 +97,6 @@ cmd_remotedesktop 1
 cmd_rundialog 1
 cmd_schedwait 1
 cmd_screensaver 1
-cmd_secpolicy 1
 cmd_secureboot 1
 cmd_secureerase 1
 cmd_sharesheet 1

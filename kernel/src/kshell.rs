@@ -23295,6 +23295,149 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         set_exit(0);
     }
 
+    serial_println!(
+        "  kshell::self_test 123: the guessed value was a correct default for an \
+         ABSENT operand, so \"you did not say\" and \"you said something I could \
+         not read\" were the same answer -- and one of the three could not serve \
+         the absent case at all"
+    );
+    {
+        // Rung 123 -- batch 45 of the §600 burn-down:
+        // `fswatch read`'s count, `assoc add`'s priority, `ionice set`'s level.
+        //
+        // What picks these three out is that the fallback is *right* for an
+        // operand that is missing. `[PRIORITY]` and `[level]` are optional and
+        // 100 and 4 are their documented defaults, so the code reads correctly at
+        // a glance and the guess is invisible: the same value answers both "you
+        // omitted it" and "you typed something I could not parse".
+        //
+        // `fswatch read` is the sharpest of the three, because there the fallback
+        // could not serve the absent case even in principle. The default is
+        // applied *above* as the string "20" when the operand is missing, so the
+        // `parse` is only ever reached with a word the operator actually typed,
+        // and `unwrap_or(20)`'s only reachable purpose was to swallow a malformed
+        // one. `fswatch read 3 abc` read twenty events and said nothing.
+        //
+        // Two of the three sit directly below an operand that already refuses --
+        // `fswatch`'s watch id, `ionice`'s class, both of which name the
+        // unreadable word. One operand refusing and the next guessing inside the
+        // same command is the clearest evidence available that this was an
+        // oversight and not a policy.
+        //
+        // Both arms are asserted for each, which is what makes this a test of the
+        // parsing rather than of the refusal: a command that rejected everything
+        // would satisfy the first half of each pair and fail the second.
+
+        // `fswatch read` -- a malformed count is refused by name.
+        let out = capture_command("fswatch read 1 abc");
+        assert_output_contains(
+            "fswatch read names the unreadable count",
+            &out,
+            b"Invalid event count: abc",
+        );
+        assert_eq!(last_exit(), 1, "`fswatch read 1 abc` errors");
+
+        // `assoc add` -- an unreadable optional priority is refused, and the
+        // three-operand form still registers.
+        let out = capture_command("assoc add text/plain /bin/ed ed 1O");
+        assert_output_contains(
+            "assoc add names the unreadable priority",
+            &out,
+            b"Invalid priority: 1O",
+        );
+        assert_eq!(last_exit(), 1, "`assoc add ... 1O` errors");
+
+        // `ionice set` -- an unreadable optional level is refused. The task id is
+        // deliberately one that need not exist: the refusal must happen while
+        // reading the operands, before anything is looked up, so this asserts the
+        // order as well as the message.
+        let out = capture_command("ionice set 1 rt 1O");
+        assert_output_contains(
+            "ionice set names the unreadable level",
+            &out,
+            b"Invalid level: 1O",
+        );
+        assert_eq!(last_exit(), 1, "`ionice set 1 rt 1O` errors");
+
+        // And the absent operand still takes its default rather than erroring --
+        // the half a burn-down batch is most likely to break. `ionice set` with no
+        // level must not complain about a level.
+        let out = capture_command("ionice set 1 be");
+        assert_output_lacks(
+            "an omitted level is not reported as unreadable",
+            &out,
+            b"Invalid level",
+        );
+    }
+
+    serial_println!(
+        "  kshell::self_test 124: the guessed value was a valid object id, so the \
+         command acted on a real share and a real policy entity that the operator \
+         never named -- and printed a success line about them"
+    );
+    {
+        // Rung 124 -- batch 46 of the §600 burn-down: `cmd_fileshare`,
+        // `cmd_secpolicy`, `cmd_authbroker`. 81 -> 78.
+        //
+        // The theme is the harm rather than the value: `0` here is not a
+        // placeholder, it is a live object. So the command did not fail and did
+        // not do nothing -- it succeeded against something else.
+        //
+        //   * `share access abc rw` called set_share_access(0, ReadWrite) and
+        //     printed "Share #0: Read/Write". A write to an object nobody named,
+        //     reported as success, naming a share the operator never typed.
+        //   * `secpolicy label abc user admin` labelled entity 0; with no id at
+        //     all it read entity 0's label back as though it had been asked for.
+        //   * `authbroker revoke abc` is the near-miss and the distinction is
+        //     worth keeping: grant ids start at 1, so the guess fell into an
+        //     `id == 0` sentinel and the command refused. A sentinel that happens
+        //     to catch a guess is luck rather than a check, and it named nothing
+        //     -- the operator got a usage line, which describes the form of the
+        //     command rather than the fault in theirs.
+        //
+        // Both arms for each, because the half a batch breaks is the working one.
+
+        let out = capture_command("share access abc rw");
+        assert_output_contains(
+            "share access names the unreadable id",
+            &out,
+            b"not a share id: abc",
+        );
+        assert_eq!(last_exit(), 1, "`share access abc rw` errors");
+        assert_output_lacks(
+            "and does not report a share it never touched",
+            &out,
+            b"Share #0",
+        );
+
+        let out = capture_command("secpolicy label abc user");
+        assert_output_contains(
+            "secpolicy label names the unreadable entity id",
+            &out,
+            b"not an entity id: abc",
+        );
+        assert_eq!(last_exit(), 1, "`secpolicy label abc user` errors");
+
+        let out = capture_command("authbroker revoke abc");
+        assert_output_contains(
+            "authbroker revoke names the word instead of printing usage",
+            &out,
+            b"not a grant id: abc",
+        );
+        assert_eq!(last_exit(), 1, "`authbroker revoke abc` errors");
+
+        // The working arm: a well-formed id still reaches the subsystem. `share
+        // access 1 ro` may fail because share 1 does not exist, which is a
+        // different answer from "not a share id" and is the one that proves the
+        // parse still parses.
+        let out = capture_command("share access 1 ro");
+        assert_output_lacks(
+            "a well-formed share id is not rejected as unreadable",
+            &out,
+            b"not a share id",
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -28039,7 +28182,23 @@ fn cmd_assoc(args: &str) {
             let mime = parts[1];
             let app_path = parts[2];
             let app_name = parts[3];
-            let priority: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(100);
+            // `[PRIORITY]` is optional, so 100 is the right answer when it is
+            // ABSENT and the wrong one when it is present and unreadable. The
+            // `and_then(...).ok()` folded those two into one, so
+            // `assoc add text/plain /bin/ed ed 1O` registered the association at
+            // the default priority and printed no complaint -- and priority
+            // decides which application actually opens the file type.
+            let priority: u32 = match parts.get(4) {
+                None => 100,
+                Some(s) => match s.parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        shell_println!("Invalid priority: {} (expected a number)", s);
+                        set_exit(1);
+                        return;
+                    }
+                },
+            };
 
             associations::register(mime, app_path, app_name, priority, true);
             shell_println!(
@@ -32278,7 +32437,23 @@ fn cmd_fswatch(args: &str) {
                     return;
                 }
             };
-            let count: usize = count_str.parse().unwrap_or(20);
+            // The default 20 is already applied above, as the string `"20"` when
+            // the operand is absent. So this `parse` is only ever reached with a
+            // word the operator actually typed, and an `unwrap_or(20)` here could
+            // not serve the absent case -- its only reachable purpose was to
+            // swallow a malformed one. `fswatch read 3 abc` read twenty events
+            // and said nothing.
+            //
+            // The `id` parse three lines above refuses correctly, which is what
+            // makes this an oversight rather than a policy.
+            let count: usize = match count_str.parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    shell_println!("Invalid event count: {}", count_str);
+                    set_exit(1);
+                    return;
+                }
+            };
 
             match notify::read_events(id, count) {
                 Ok(events) => {
@@ -34119,7 +34294,27 @@ fn cmd_ionice(args: &str) {
                     return;
                 }
             };
-            let level: u8 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
+            // Same shape as `assoc add`'s priority: `[level]` is optional, so 4
+            // is correct when absent and silently wrong when present and
+            // unreadable. `ionice set 7 rt 1O` set real-time class at level 4
+            // rather than the level asked for, and real-time I/O priority is not
+            // a setting to get silently.
+            //
+            // Note the class argument directly above already refuses an
+            // unreadable word by name. One operand refusing and the next guessing
+            // inside the same command is the clearest sign this was never a
+            // decision.
+            let level: u8 = match parts.get(3) {
+                None => 4,
+                Some(s) => match s.parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        shell_println!("Invalid level: {} (expected a number)", s);
+                        set_exit(1);
+                        return;
+                    }
+                },
+            };
             let prio = IoPriority::new(class, level);
             match ioprio::set_ioprio(task_id, prio) {
                 Ok(()) => shell_println!("Set task {} I/O priority: {}", task_id, prio.display()),
@@ -61866,7 +62061,21 @@ fn cmd_fileshare(args: &str) {
         }
         "access" => {
             if parts.len() >= 3 {
-                let id: u32 = parts[1].parse().unwrap_or(0);
+                // Was `unwrap_or(0)`, and share 0 is a real share. So
+                // `share access abc rw` called set_share_access(0, ReadWrite)
+                // and printed "Share #0: Read/Write" as the confirmation -- a
+                // write to an object the operator never named, reported as
+                // success. The worst shape in this batch, because the output
+                // looks like the command worked and names a share the user did
+                // not type.
+                let id: u32 = match parts[1].parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        shell_println!("share access: not a share id: {}", parts[1]);
+                        set_exit(1);
+                        return;
+                    }
+                };
                 let access = match parts[2] {
                     "rw" | "readwrite" => fileshare::ShareAccess::ReadWrite,
                     "full" => fileshare::ShareAccess::FullControl,
@@ -100488,7 +100697,19 @@ fn cmd_secpolicy(args: &str) {
                 return;
             }
             secpolicy::init_defaults();
-            let id = id_str.parse::<u32>().unwrap_or(0);
+            // Entity 0 is a real entity, and both the absent operand (`id_str`
+            // defaults to "0" above) and an unreadable one arrived there. So
+            // `secpolicy label abc user admin` labelled entity 0, and
+            // `secpolicy label` with no id read entity 0's label back as though
+            // it had been asked for.
+            let id = match id_str.parse::<u32>() {
+                Ok(v) => v,
+                Err(_) => {
+                    shell_println!("secpolicy label: not an entity id: {}", id_str);
+                    set_exit(1);
+                    return;
+                }
+            };
             if label.is_empty() {
                 match secpolicy::get_label(id, etype) {
                     Some(l) => shell_println!("Label for {}:{}: {}", etype, id, l),
@@ -101027,10 +101248,29 @@ fn cmd_authbroker(args: &str) {
             }
         }
         "revoke" => {
-            let id_str = parts.get(1).copied().unwrap_or("0");
-            let id = id_str.parse::<u32>().unwrap_or(0);
-            if id == 0 {
+            // The near-miss of this batch, and worth keeping the distinction.
+            // This one was never silently wrong: grant ids start at 1, so the
+            // `unwrap_or(0)` guess fell straight into the `id == 0` sentinel below
+            // and the command refused. What it could not do was say what was
+            // wrong -- `authbroker revoke abc` printed a usage line, which tells
+            // the operator the form of the command and not that their word was
+            // unreadable. A sentinel that happens to catch a guess is luck rather
+            // than a check, and it names nothing.
+            let Some(id_str) = parts.get(1).copied() else {
                 shell_println!("Usage: authbroker revoke <grant_id>");
+                set_exit(1);
+                return;
+            };
+            let id = match id_str.parse::<u32>() {
+                Ok(v) => v,
+                Err(_) => {
+                    shell_println!("authbroker revoke: not a grant id: {}", id_str);
+                    set_exit(1);
+                    return;
+                }
+            };
+            if id == 0 {
+                shell_println!("authbroker revoke: grant ids start at 1");
                 set_exit(1);
                 return;
             }

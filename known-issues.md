@@ -85452,8 +85452,76 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **84 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **78 of 800 remain**
 
+> **Burn-down log.** 2026-09-10 (forty-sixth batch): **the guessed value was a
+> valid object id, so the command succeeded against something else.** 81 → 78;
+> `cmd_fileshare`, `cmd_secpolicy` and `cmd_authbroker` left the ledger. Pinned by
+> self-test rung 124.
+>
+> The theme is the harm rather than the value. `0` in these spaces is not a
+> placeholder, it is a live object, so the command neither failed nor did nothing:
+>
+> | Command | With an unreadable id it | |
+> |---|---|---|
+> | `share access abc rw` | called `set_share_access(0, ReadWrite)` and printed **`Share #0: Read/Write`** | a write to an object nobody named, reported as success |
+> | `secpolicy label abc user admin` | labelled entity 0; with no id at all it *read* entity 0's label back | |
+> | `authbroker revoke abc` | refused — grant ids start at 1, so the guess hit an `id == 0` sentinel | but printed a usage line, which names the form of the command and not the fault in theirs |
+>
+> `authbroker` is the near-miss and the distinction is worth keeping: **a sentinel
+> that happens to catch a guess is luck rather than a check.** It was never
+> silently wrong, and it could not say what was wrong either.
+>
+> **Method note, after batch 45 got this wrong.** The sites were chosen by asking
+> `check-option-refusal.py` which ledger entries dropped, not by pattern-matching
+> the source. My own regex for "a guessed value" disagrees with the checker's —
+> it matches 14 sites of the shape `parts.get(1).unwrap_or(&"0").parse()` that the
+> ledger does not count, because there the parse *does* refuse and the default
+> serves an absent operand. Those are a real defect and a different one; see
+> `TD-A-AN-ABSENT-OPERAND-DEFAULTS-TO-A-LIVE-OBJECT-ID`. Using the checker as the
+> oracle is what kept this batch's arithmetic right.
+>
+> **Burn-down log.** 2026-09-10 (forty-fifth batch): **the guess was a correct
+> default for an ABSENT operand.** 84 → 81 across 84 → 81 functions;
+> `fswatch read`'s count, `assoc add`'s priority and `ionice set`'s level left
+> the ledger. Pinned by self-test rung 123.
+>
+> These three survived forty-four batches because the code reads correctly.
+> `[PRIORITY]` and `[level]` are optional and 100 and 4 are their documented
+> defaults, so the fallback is *right* — for the operand that is missing. The
+> same value then answered "you omitted it" and "you typed something I could not
+> parse", and only the second is a mistake.
+>
+> `fswatch read` is the sharpest, because there the fallback could not serve the
+> absent case even in principle: the default is applied above as the string
+> `"20"`, so the `parse` is only ever reached with a word the operator typed and
+> `unwrap_or(20)`'s only reachable purpose was to swallow a malformed one.
+> `fswatch read 3 abc` read twenty events and said nothing.
+>
+> Two of the three sit directly below an operand that already refuses by name —
+> `fswatch`'s watch id, `ionice`'s class. One operand refusing and the next
+> guessing inside the same command is the clearest evidence available that this
+> was an oversight rather than a policy.
+>
+> **On the count — and a correction to what this log first said.** It claimed the
+> ledger was "a number, not a list" and that 84 → 81 could not be verified. That
+> is false. `scripts/option-refusal-ledger.txt` enumerates all of it, one line per
+> enclosing function with a count, and `scripts/check-option-refusal.py` enforces
+> it in both directions: a new guessed-value site in an unlisted function fails,
+> and an entry claiming MORE sites than exist is *also* reported, because that
+> means the site was fixed and the count was not lowered.
+>
+> Which is exactly what happened here. This batch was committed without touching
+> the ledger, and the boot test refused in 116 s with
+> `cmd_assoc: 1 fewer than expected`, and the same for `cmd_fswatch` and
+> `cmd_ionice`. The three entries are now removed and the gate reports
+> **81 guessed-value sites across 81 functions**, which is the count in this
+> heading rather than an assumption behind it.
+>
+> The hedge was worse than the arithmetic it was protecting: it asserted that
+> something could not be verified without looking for the thing that verifies it,
+> and the verifier is named in the error message the gate prints.
+>
 > **Burn-down log.** 2026-08-30 (forty-fourth batch): **the guesses whose value
 > was the widest one its space has.** 91 → 84 across 91 → 84 functions;
 > `cmd_fwsettings`, `cmd_namespace`, `cmd_autostart`, `cmd_pidns`,
@@ -128923,3 +128991,82 @@ mistake `cal` and `earlyoom` nearly suffered under 1006.
 
 None is urgent: every one of the six names has a working producer today, so no
 command is missing. What is at risk is the pair silently disagreeing.
+## TD-A-AN-ABSENT-OPERAND-DEFAULTS-TO-A-LIVE-OBJECT-ID (lane A, 2026-09-10) — **open**
+
+**In short:** several shell commands, when given no argument at all, act on object
+number 0 or 1 instead of asking for one. `filevault unlock` with nothing after it
+tries to unlock vault 0 with an empty password. It is a cousin of the §600
+guessed-value backlog and is *not* counted by it, so it needs its own record or it
+will be filed as already-handled.
+
+### The shape
+
+    let id: u32 = match parts.get(1).unwrap_or(&"0").parse() { … };
+
+The `match` refuses an *unreadable* id correctly — that is why
+`check-option-refusal.py` does not count these. What it cannot see is that the
+default `"0"` is supplied for an **absent** operand and then parses perfectly, so
+a missing id becomes a real one.
+
+**The size of this population is not reliably known, and that is the finding.**
+Three attempts at counting it gave three answers, each from a slightly different
+pattern:
+
+| pattern searched | sites |
+|---|---|
+| `parts.get(1).unwrap_or(&"0").parse()` | 14 |
+| ...plus the `&"1"` variant | 31 |
+| `parts.get(N).unwrap_or(&"<literal>").parse()`, any index, any literal | **37** |
+
+None of those is wrong; they are answers to three different questions, and the
+first two were published here as though they were answers to this one. A fourth
+pattern would give a fourth number.
+
+**None are fixed.** An earlier draft said two had been "fixed in passing". They
+had not: the edit failed on an ambiguous match — the block appears 14 times, so
+the replacement refused rather than guessing which was meant — and the draft was
+written from the intention instead of from the file.
+
+Two examples of the harm, both still live:
+
+* `filevault unlock` — bare, it attempts vault 0 with the empty password that
+  `parts.get(2)` also defaults to;
+* `screensaver preview` — bare, it previews saver 1.
+
+**And the obvious way to triage them does not work either.** Whether requiring the
+operand is correct depends on whether the command documents it as optional, so the
+usage string should decide it. It cannot: of the 37 sites, **34 have no `Usage:`
+line within 60 lines**, and of the 3 that do, all three matched a *neighbouring
+match arm's* usage string rather than their own. A sweep built on that would
+require operands that a command had deliberately made optional.
+
+### Why it is worth its own entry
+
+The §600 ledger is a *count of a specific spelling*, and the checker's error
+message is what makes the count trustworthy. This defect passes that checker by
+construction: it refuses the unreadable word, which is what the checker looks for.
+So it will not appear in the burn-down however far that goes, and anyone reading
+"78 of 800 remain" would reasonably assume the class was fully enumerated.
+
+### The fix
+
+Require the operand. `parts.get(1)` returning `None` is *"you did not say"*, and
+the usage line is the answer to it — as distinct from `"you said something I could
+not read"`, which the existing `match` already handles by name. The two fixed
+sites show the shape.
+
+**The prerequisite is a checker, not a sweep, and that is the lesson from §600
+next door.** What makes "78 of 800 remain" trustworthy is not diligence — it is
+`check-option-refusal.py` plus a ledger that fails in both directions, so a new
+site cannot appear unnoticed and a fixed one cannot stay counted. This class has
+no such definition, which is why three greps gave three numbers.
+
+The definable version is narrower than the harm and is exactly what a checker can
+see: **`parts.get(N).unwrap_or(&"<literal>")` where the literal parses as a
+number** — a missing operand silently becoming a numeric value. Whether that
+number names a live object is judgment and belongs in the per-site review; the
+pattern is mechanical and countable.
+
+So the order is: write the checker, pin the ledger, then sweep against it. Fixing
+sites first would repeat what happened above — a population that is 14 or 31 or 37
+depending on who asks, and no marker saying how far a partial pass got.

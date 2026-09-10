@@ -38,6 +38,11 @@ const DEFAULT_ROOT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/b
 const MOTD_FILE: &str = "/etc/motd";
 const NOLOGIN_FILE: &str = "/etc/nologin";
 const SECURETTY_FILE: &str = "/etc/securetty";
+/// The program a forced password change runs. Not searched for on `PATH`: the
+/// `PATH` in play at this point is the one being built for the *user's*
+/// session, and resolving a privileged helper through a variable is how a
+/// program ends up running whatever was first on it.
+const PASSWD_COMMAND: &str = "/usr/bin/passwd";
 // `PASSWD_FILE` and `SHADOW_FILE` stood here. The account comes from
 // `userdb::DEFAULT_PATH` now: §353 makes those two files generated from it, so
 // reading them was reading a copy -- and, worse, reading *two* copies, which is
@@ -296,6 +301,40 @@ fn check_account_expired(creds: &Credentials, today: Option<i64>) -> Result<(), 
     Ok(())
 }
 
+/// Whether this account must change its password before a session may start.
+///
+/// # The two ways a password becomes due
+///
+/// **`changed == 0`.** That is `/etc/shadow`'s sentinel for "must be changed
+/// at the next login", and it is exactly what `passwd -e` writes -- see
+/// `cmd_expire` in `userspace/passwd`. It is a *flag*, not a date, so it holds
+/// whether or not the clock works and whether or not a maximum age is set.
+/// Before this function existed nothing at login read it at all, so `passwd -e`
+/// printed "password for alice expired" and changed nothing about alice's next
+/// login.
+///
+/// **Past the maximum age.** `changed + max_days` is the day the password is
+/// due; on and after it, it is due. A `max_days` of `0` therefore means "change
+/// it at every login", which is what shadow means by it too. Absent fields are
+/// no policy rather than a policy of zero, which is why they are `Option`.
+///
+/// # Why an unknown clock does not force a change
+///
+/// The date arm needs `today` and gives up without it, for the reason
+/// [`check_account_expired`] gives: a dead battery must not lock out every
+/// account on the machine. The sentinel arm is not a date and is unaffected --
+/// an administrator who ran `passwd -e` said so directly, and no clock is
+/// involved in reading it back.
+fn password_change_required(aging: &userdb::Aging, today: Option<i64>) -> bool {
+    if aging.changed == Some(0) {
+        return true;
+    }
+    let (Some(changed), Some(max), Some(today)) = (aging.changed, aging.max_days, today) else {
+        return false;
+    };
+    changed.checked_add(max).is_some_and(|due| today >= due)
+}
+
 /// How many days until the password must be changed, if that is soon enough
 /// for the account's warning period to have started.
 ///
@@ -544,13 +583,27 @@ fn refuse_attempt(auth: &mut authlib::Authenticator, username: &str) -> &'static
 /// respawn because it is a file. The per-process cap stays, because it is what
 /// stops a *single* invocation spinning; the tally is what makes the next one
 /// slower.
+/// What a successful authentication produced.
+///
+/// A struct rather than the `(user, env)` tuple it replaces because the third
+/// member is a *decision* -- whether the session may start at all before the
+/// password is changed -- and a bare `bool` in a tuple position is exactly the
+/// kind of thing a caller reads past.
+struct Session {
+    user: PasswdEntry,
+    env: HashMap<OsString, OsString>,
+    /// The password is past its maximum age, or `passwd -e` has flagged it.
+    /// The session does not start until it has been changed.
+    must_change_password: bool,
+}
+
 fn do_login(
     cfg: &Config,
     auth: &mut authlib::Authenticator,
     users_yaml: &std::path::Path,
     reader: &mut dyn BufRead,
     writer: &mut dyn Write,
-) -> Result<(PasswdEntry, HashMap<OsString, OsString>), LoginError> {
+) -> Result<Session, LoginError> {
     let mut attempts = 0u32;
 
     loop {
@@ -722,7 +775,11 @@ fn do_login(
             let _ = check_mail(writer, &username);
         }
 
-        return Ok((user, env_map));
+        return Ok(Session {
+            must_change_password: password_change_required(&creds.aging, userdb::today()),
+            user,
+            env: env_map,
+        });
     }
 }
 
@@ -832,6 +889,45 @@ fn spawn_login_shell(
     cmd.spawn()
 }
 
+/// Make the user change their password, and report whether they did.
+///
+/// # As the user, not as root
+///
+/// `login` is root -- it has to be, to read the shadow half of the account
+/// database -- and `passwd` running as root does not ask for the current
+/// password (see its `cmd_change_password`, which checks `caller_uid != 0`).
+/// Running it as the user keeps the check in place. It also means the change
+/// is subject to exactly the policy any other `passwd` run is subject to,
+/// rather than a second, more permissive path that exists only here. That is
+/// the same argument `authlib` was built on: one implementation, and callers
+/// that cannot have their own.
+///
+/// # If it fails, there is no session
+///
+/// That is what "expired" means. A password past its maximum age is not a
+/// warning with a session attached; the session is what is being withheld
+/// until it is changed. Letting the user in anyway would make `PASS_MAX_DAYS`
+/// a suggestion, which is the behaviour this replaces.
+///
+/// **The dependency this creates is real and is written down in `todo.txt`:**
+/// `passwd` must be able to write the account database while running as an
+/// ordinary user, which on a real system means it is setuid root. If that is
+/// not yet honoured here, the symptom is specific and worth recognising --
+/// every account with an expired password is refused with "password change
+/// failed" rather than being let in with a warning.
+fn force_password_change(user: &PasswdEntry) -> bool {
+    let mut cmd = process::Command::new(PASSWD_COMMAND);
+    cmd.arg(&user.username);
+    authlib::identity::become_user(&mut cmd, user.uid, user.gid);
+    match cmd.status() {
+        Ok(status) => status.success(),
+        Err(e) => {
+            eprintln!("login: cannot run {PASSWD_COMMAND}: {e}");
+            false
+        }
+    }
+}
+
 /// Run the session and report the shell's own exit status.
 ///
 /// # `spawn` and wait, not `exec`
@@ -909,7 +1005,19 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
     let users_yaml = std::path::Path::new(userdb::DEFAULT_PATH);
     match do_login(&cfg, &mut auth, users_yaml, &mut reader, &mut writer) {
-        Ok((user, env_map)) => run_session(&user, &env_map),
+        Ok(session) => {
+            // Before the shell, and only then. A password that is due is the
+            // reason the session has not started yet, so a change that does
+            // not happen is a session that does not start.
+            if session.must_change_password {
+                eprintln!("login: your password has expired and must be changed now.");
+                if !force_password_change(&session.user) {
+                    eprintln!("login: password change failed; no session started");
+                    return 1;
+                }
+            }
+            run_session(&session.user, &session.env)
+        }
         Err(e) => {
             eprintln!("login: {e}");
             1
@@ -1701,8 +1809,8 @@ mod tests {
         let mut writer = Vec::new();
         let mut auth = scratch_authenticator();
 
-        let (user, env_map) =
-            do_login(&cfg, &mut auth, &path, &mut reader, &mut writer).expect("login");
+        let session = do_login(&cfg, &mut auth, &path, &mut reader, &mut writer).expect("login");
+        let (user, env_map) = (session.user, session.env);
 
         assert_eq!(user.username, "alice");
         assert_eq!(user.uid, 1000);
@@ -1727,6 +1835,136 @@ mod tests {
 
         assert!(do_login(&cfg, &mut auth, &path, &mut reader, &mut writer).is_err());
         assert_eq!(auth.failures("alice"), 1);
+    }
+
+    // ---- when a password is due ----
+
+    fn aging(changed: Option<i64>, max: Option<i64>) -> userdb::Aging {
+        userdb::Aging {
+            changed,
+            max_days: max,
+            ..userdb::Aging::default()
+        }
+    }
+
+    /// `passwd -e` writes `changed = 0`, and that must reach the next login.
+    ///
+    /// **Nothing read this before.** `cmd_expire` in `userspace/passwd` set the
+    /// field and printed "password for alice expired"; `check_account_expired`
+    /// did not look at it and `expiry_warning` needs a `max_days` to say
+    /// anything. So the command reported success and changed nothing at all
+    /// about the account's next login.
+    #[test]
+    fn the_expire_sentinel_forces_a_change() {
+        assert!(password_change_required(&aging(Some(0), None), Some(20000)));
+        // A flag, not a date: no maximum age and no working clock are both
+        // irrelevant to an administrator having said so directly.
+        assert!(password_change_required(&aging(Some(0), None), None));
+    }
+
+    /// Past the maximum age, and on the day itself.
+    #[test]
+    fn a_password_past_its_maximum_age_is_due() {
+        // Set on day 19000, good for 90 days: due on 19090.
+        assert!(password_change_required(
+            &aging(Some(19000), Some(90)),
+            Some(19091)
+        ));
+        assert!(password_change_required(
+            &aging(Some(19000), Some(90)),
+            Some(19090)
+        ));
+        assert!(!password_change_required(
+            &aging(Some(19000), Some(90)),
+            Some(19089)
+        ));
+    }
+
+    /// No maximum age is no policy, not a policy of zero.
+    #[test]
+    fn an_account_with_no_maximum_age_is_never_due() {
+        assert!(!password_change_required(
+            &aging(Some(19000), None),
+            Some(99999)
+        ));
+        assert!(!password_change_required(
+            &aging(None, Some(90)),
+            Some(99999)
+        ));
+        assert!(!password_change_required(
+            &userdb::Aging::default(),
+            Some(99999)
+        ));
+    }
+
+    /// A maximum of zero means "change it at every login", which is what
+    /// shadow means by it. It is a real policy and is not filtered out.
+    #[test]
+    fn a_maximum_age_of_zero_is_due_every_day() {
+        assert!(password_change_required(
+            &aging(Some(19000), Some(0)),
+            Some(19000)
+        ));
+    }
+
+    /// **A dead clock must not force every account on the machine to change
+    /// its password**, for the same reason `check_account_expired` does not let
+    /// one lock every account out. The date arm gives up without a date; only
+    /// the explicit sentinel survives an unknown today.
+    #[test]
+    fn an_unusable_clock_makes_no_password_due() {
+        assert!(!password_change_required(
+            &aging(Some(19000), Some(90)),
+            None
+        ));
+    }
+
+    /// End to end: an account flagged by `passwd -e` reaches `main` with the
+    /// session withheld, having authenticated successfully.
+    #[test]
+    fn an_expired_password_authenticates_but_does_not_release_the_session() {
+        let scratch = ScratchDir::new("login-end-to-end-must-change");
+        let path = scratch_db(&scratch, &aging(Some(0), None), false);
+        let cfg = Config {
+            username: Some(OsString::from("alice")),
+            ..Default::default()
+        };
+        let mut reader = Cursor::new(
+            b"correct horse
+"
+            .as_slice(),
+        );
+        let mut writer = Vec::new();
+        let mut auth = scratch_authenticator();
+
+        let session = do_login(&cfg, &mut auth, &path, &mut reader, &mut writer)
+            .expect("the password is correct, so the login succeeds");
+        assert!(
+            session.must_change_password,
+            "the session must not start until the password is changed"
+        );
+    }
+
+    /// And the ordinary case still releases it, so the flag above is not
+    /// simply always set.
+    #[test]
+    fn an_account_with_no_aging_policy_releases_the_session() {
+        let scratch = ScratchDir::new("login-end-to-end-no-policy");
+        let path = scratch_db(&scratch, &userdb::Aging::default(), false);
+        let cfg = Config {
+            username: Some(OsString::from("alice")),
+            ..Default::default()
+        };
+        let mut reader = Cursor::new(
+            b"correct horse
+"
+            .as_slice(),
+        );
+        let mut writer = Vec::new();
+        let mut auth = scratch_authenticator();
+
+        let session = do_login(&cfg, &mut auth, &path, &mut reader, &mut writer).expect("login");
+        assert!(!session.must_change_password);
     }
 
     /// A locked account is refused with the right password, and is refused

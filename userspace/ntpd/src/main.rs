@@ -19,6 +19,7 @@ use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::net::UdpSocket;
+use std::path::Path;
 use std::process;
 use std::time::Duration;
 
@@ -1184,7 +1185,28 @@ struct NtpdOpts {
 
 fn run_ntpd(opts: &NtpdOpts) -> Result<(), String> {
     // Load configuration.
-    let config_content = fs::read_to_string(&opts.config_path).unwrap_or_default();
+    //
+    // An ABSENT config is fine: `ntpd` on a system without one uses the
+    // built-in servers, which is what a fresh install wants. An UNREADABLE one
+    // is not, and the difference matters more here than the shape suggests --
+    // `DEFAULT_SERVERS` are `pool.ntp.org`, `time.google.com` and
+    // `time.cloudflare.com`, all on the public internet.
+    //
+    // So `unwrap_or_default()` meant that an administrator who had restricted
+    // time sync to internal servers, and whose config then became unreadable,
+    // would silently be taking the system clock from three hosts outside their
+    // network. The clock feeds certificate validity, so that is not only a
+    // configuration surprise.
+    //
+    // `read_to_string` also failed for the whole file on a single non-UTF-8
+    // byte, which a comment naming a server's owner is enough to produce.
+    let config_content =
+        optionalfile::read_or_empty(Path::new(&opts.config_path)).map_err(|e| {
+            format!(
+                "{}: {e}; refusing to fall back to the public default servers",
+                opts.config_path
+            )
+        })?;
     let directives = parse_config(&config_content);
 
     let servers = servers_from_config(&directives);

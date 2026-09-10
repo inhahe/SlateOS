@@ -1155,6 +1155,7 @@ version = "0.1.0"
 name = "hostnamectl"
 version = "0.1.0"
 dependencies = [
+ "optionalfile",
  "scratchdir",
 ]
 
@@ -1925,6 +1926,9 @@ version = "0.1.0"
 [[package]]
 name = "ntpd"
 version = "0.1.0"
+dependencies = [
+ "optionalfile",
+]
 
 [[package]]
 name = "numactl"
@@ -1945,6 +1949,13 @@ dependencies = [
  "charwidth",
  "ere",
  "tzrules",
+]
+
+[[package]]
+name = "optionalfile"
+version = "0.1.0"
+dependencies = [
+ "scratchdir",
 ]
 
 [[package]]
@@ -2743,6 +2754,7 @@ name = "sudo"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "optionalfile",
  "quoting",
  "scratchdir",
  "userdb",
@@ -3272,6 +3284,7 @@ version = "0.1.0"
 name = "xdg"
 version = "0.1.0"
 dependencies = [
+ "optionalfile",
  "quoting",
  "scratchdir",
 ]

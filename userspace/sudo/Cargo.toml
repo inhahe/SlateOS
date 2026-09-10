@@ -13,6 +13,9 @@ description = "SlateOS sudo utility"
 # else on the system: it is the prompt that grants root. See
 # `design-decisions.md` §354.
 [dependencies]
+# Reading a file whose absence is normal but whose unreadability is not;
+# see that crate's docs for the four programs that each wrote it wrong.
+optionalfile = { path = "../../optionalfile" }
 # sudo names the command, the target user and the host in the line it prints
 # when it refuses. It is the privilege boundary, so a word an unprivileged
 # caller chooses is reaching the most privileged output on the system -- and

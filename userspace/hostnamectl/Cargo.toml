@@ -8,3 +8,6 @@ description = "SlateOS hostnamectl utility"
 scratchdir = { path = "../scratchdir" }
 
 [dependencies]
+# Reading a file whose absence is normal but whose unreadability is not;
+# see that crate's docs for the four programs that each wrote it wrong.
+optionalfile = { path = "../../optionalfile" }

@@ -312,40 +312,8 @@ fn set_hostname(name: &str) -> io::Result<()> {
 /// `NotFound` is the one failure that means "start fresh"; everything else
 /// means we could not read it, which is not the same thing. Same defect as
 /// visudo's over /etc/sudoers and xdg's over mimeapps.list.
-/// The current contents of a file that is about to be rewritten from them.
-///
-/// Three outcomes, and conflating any two of them loses data:
-///
-/// * the file is there and readable -- its text
-/// * the file does not exist -- empty, and rewriting it is creation
-/// * anything else -- an error, because "we could not read it" is NOT "there
-///   is nothing in it", and the caller is about to replace the file with
-///   whatever it parsed
-///
-/// Not-valid-UTF-8 is refused rather than converted: the rewrite works in
-/// text, so accepting it would drop those bytes on the next write.
-///
-/// The same decision appears in `userspace/sudo`'s visudo and
-/// `userspace/xdg`'s mimeapps.list handling. If a fourth caller turns up it
-/// wants a crate of its own -- ideally with the atomic-write half too, since
-/// all three currently `fs::write` in place and would lose the file to a crash
-/// mid-write.
-fn contents_before_rewrite(path: &Path) -> io::Result<String> {
-    match fs::read(path) {
-        Ok(bytes) => String::from_utf8(bytes).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "the file holds bytes that are not valid UTF-8; refusing to \
-                 rewrite it, because doing so would drop them",
-            )
-        }),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(e),
-    }
-}
-
 fn set_machine_info_field(key: &str, value: &str) -> io::Result<()> {
-    let content = contents_before_rewrite(Path::new(ETC_MACHINE_INFO))?;
+    let content = optionalfile::read_or_empty(Path::new(ETC_MACHINE_INFO))?;
     let mut lines: Vec<String> = Vec::new();
     let mut found = false;
 
@@ -821,63 +789,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_existing_file_reads_back_as_itself() {
-        let scratch = scratchdir::ScratchDir::new("rewrite-read");
-        let p = scratch.path("f");
-        fs::write(&p, b"KEY=\"value\"\n").expect("write");
-        assert_eq!(
-            contents_before_rewrite(&p).expect("should read"),
-            "KEY=\"value\"\n"
-        );
-    }
-
-    /// The one failure that legitimately means "empty": there is no file yet,
-    /// and the rewrite is creating it.
-    #[test]
-    fn a_missing_file_is_empty_rather_than_an_error() {
-        let scratch = scratchdir::ScratchDir::new("rewrite-absent");
-        assert_eq!(
-            contents_before_rewrite(&scratch.path("nope"))
-                .ok()
-                .as_deref(),
-            Some("")
-        );
-    }
-
-    /// THE CASE THIS EXISTS FOR. The caller rebuilds the file from what it
-    /// read, so an unreadable file read as empty means the rewrite DELETES
-    /// everything that was in it.
-    ///
-    /// A directory where the file belongs gives a non-NotFound read error on
-    /// every platform, without touching permissions.
-    #[test]
-    fn an_unreadable_file_is_an_error_and_not_an_empty_rewrite() {
-        let scratch = scratchdir::ScratchDir::new("rewrite-blocked");
-        let p = scratch.path("f");
-        fs::create_dir(&p).expect("a directory where the file goes");
-        let got = contents_before_rewrite(&p);
-        assert!(
-            got.is_err(),
-            "an unreadable file must not rewrite as empty: {:?}",
-            got.err()
-        );
-    }
-
-    /// One byte is enough, and it needs no unusual permissions -- which is
-    /// what made `read_to_string(..).unwrap_or_default()` reachable in
-    /// ordinary use.
-    #[test]
-    fn a_single_non_utf8_byte_is_refused_rather_than_dropped() {
-        let scratch = scratchdir::ScratchDir::new("rewrite-bytes");
-        let p = scratch.path("f");
-        fs::write(&p, b"NAME=\"Jos\xe9\"\nOTHER=\"keep\"\n").expect("write");
-        assert!(
-            contents_before_rewrite(&p).is_err(),
-            "one latin-1 byte must not cost the whole file"
-        );
-    }
 
     #[test]
     fn test_unquote() {

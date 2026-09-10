@@ -1,5 +1,5 @@
 #!/bin/sh
-# Sixteen gates at the push boundary. Any one of them aborts the push.
+# Seventeen gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -21,6 +21,8 @@
 #  16. Refuse to publish a C-visible `#[repr(C)]` type whose field offsets
 #      disagree with musl's, or a new one that crosses the boundary with
 #      no entry in posix/src/abi_layout.rs.
+#  17. Refuse to publish `#[cfg(unix)]` code that does not compile — the code
+#      the Windows-target test command never reads.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented, and it was wrong again the moment gate 13 was written --
@@ -2611,6 +2613,77 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 17 — compile the `#[cfg(unix)]` code that `cargo test` never reads.
+#
+# WHAT IT CATCHES. Code that does not compile at all. The standing test command
+# here is `cargo test --target x86_64-pc-windows-gnu`, on which `cfg(unix)` is
+# false — so the compiler never looks inside those blocks, while the real
+# target `x86_64-slateos` *is* unix. They are exactly the code that runs on the
+# machine and is compiled by nothing that tests it.
+#
+# Found on 2026-09-10 giving `su -` its login-shell `argv[0]`: one
+# `cmd.arg0(...)` under `#[cfg(unix)]`, which built and tested clean on the host
+# without the compiler having read it. 57 crates in this tree contain such
+# blocks and `userspace/coreutils` alone has 533 of them.
+#
+# COST. One `cargo check` with every `-p` at once, against
+# `x86_64-unknown-linux-gnu`: about 7 seconds warm, ~15 cold. Not the slateos
+# target — that needs `-Zbuild-std` and a built sysroot, which is minutes, and
+# any unix target reads the same lines.
+#
+# SCOPE. Any Rust source, because the crate list is *derived* from which files
+# contain a unix-gated block: a file that grows its first one joins the gate by
+# existing, and a `touches` list naming crates would be the enumerated thing
+# this deliberately avoids.
+# ---------------------------------------------------------------------------
+cfgunix="${repo_root:-.}/scripts/check-cfg-unix.py"
+skip_cfgunix=0
+if [ "${ALLOW_UNCHECKED_CFG_UNIX:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNCHECKED_CFG_UNIX=1 set — skipping the cfg(unix) gate." >&2
+    skip_cfgunix=1
+fi
+[ -n "$py" ] || skip_cfgunix=1
+[ -f "$cfgunix" ] || skip_cfgunix=1
+touches '*.rs' scripts/check-cfg-unix.py || skip_cfgunix=1
+note_gate cfg-unix "$skip_cfgunix"
+
+if [ "$skip_cfgunix" != "1" ]; then
+    if ! run_checker cfg-unix-selftest "$py" "$cfgunix" --self-test; then
+        echo "pre-push: check-cfg-unix.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        skip_cfgunix=refused
+    fi
+fi
+
+if [ "$skip_cfgunix" = "refused" ] || { [ "$skip_cfgunix" != "1" ] && ! run_checker cfg-unix "$py" "$cfgunix"; }; then
+    cat >&2 <<'EOF'
+
+pre-push: REFUSING to push — `#[cfg(unix)]` code does not compile.
+
+This is code `cargo test --target x86_64-pc-windows-gnu` never reads, because
+`cfg(unix)` is false there. It is compiled on the real target, so a failure
+here is a build break on the machine, not a portability nicety.
+
+Reproduce exactly what the hook saw:
+
+    python scripts/check-cfg-unix.py
+
+or narrow it to one crate:
+
+    cargo check -p <crate> --target x86_64-unknown-linux-gnu
+
+If the target is missing, `rustup target add x86_64-unknown-linux-gnu`; the
+checker says so by name rather than passing silently.
+
+Full output is kept at the path named above.
+
+To push anyway:
+    ALLOW_UNCHECKED_CFG_UNIX=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # The tally. Unconditional, and on stderr with the rest of the hook's output.
 #
 # This is the line whose absence means "the hook did not run" — the one reading
@@ -2632,7 +2705,8 @@ fi
 #
 # Gate 13 (`bands`) made it 13 on 2026-09-05, gate 14 (`headings`) made it
 # 14 the same day, gate 15 (`release-staleness`) made it 15 on 2026-09-07, and
-# gate 16 (`libc-abi`) made it 16 on 2026-09-09; if you add a gate, bump both.
+# gate 16 (`libc-abi`) made it 16 on 2026-09-09, and gate 17 (`cfg-unix`) made
+# it 17 on 2026-09-10; if you add a gate, bump both.
 #
 # A refusing gate exits before this, so the tally is not a claim that the push
 # passed — only a record of what was asked.

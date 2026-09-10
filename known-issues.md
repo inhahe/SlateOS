@@ -127165,7 +127165,7 @@ policy and stays the operator's. What has changed is that it can now be decided
 from a table instead of from thirty-nine readings.
 
 
-## TD-B-EVERY-CFG-UNIX-BLOCK-IN-USERSPACE-IS-UNVERIFIED-BY-THE-TEST-LOOP (lane B, 2026-09-10)
+## TD-B-EVERY-CFG-UNIX-BLOCK-IN-USERSPACE-IS-UNVERIFIED-BY-THE-TEST-LOOP (lane B, 2026-09-10) -- FIXED the same day
 
 **In short:** code inside `#[cfg(unix)]` is never compiled by the command this
 project uses to test, so it can be broken -- not merely wrong, *uncompilable* --
@@ -127195,6 +127195,34 @@ including `userspace/sshd`'s `cmd.arg0(login_argv0(...))` -- the call that
 proves the capability exists. Its own comment shows the author knew the host
 build could not see it and reasoned carefully about the `dead_code` allow
 instead, which is the best that could be done without a way to compile it.
+
+**Fixed** as `scripts/check-cfg-unix.py`, pre-push gate 17, built the way the
+paragraph below proposed: `cargo check` against `x86_64-unknown-linux-gnu`, with
+the crate list **derived** by scanning for the attribute so that a file grows
+into the gate by existing.
+
+**How much code this was.** The derivation finds **57 crates**, and
+`userspace/coreutils` alone holds **533** unix-gated blocks. All 57 compile
+today -- the gate went in green, which is the only honest time to add one.
+
+**Cost: about 7 seconds warm**, 15 cold, because it is one `cargo check` with
+every `-p` rather than 57 invocations paying for the dependency graph each
+time.
+
+**`x86_64-unknown-linux-gnu`, not `x86_64-slateos`**, deliberately: the point is
+to compile the unix branch, not to reproduce the target. slateos needs
+`-Zbuild-std` and a built sysroot, which is minutes and a nightly, and would
+make the gate too expensive to run on every push. Any unix target reads the
+same lines.
+
+**The self-test asserts the premise, not just the plumbing.** It compiles a
+`#[cfg(unix)]` block containing a plain type error twice, and requires it to
+**pass** on `x86_64-pc-windows-gnu` and **fail** on the unix target. If that
+ever stops being true the gate is buying nothing, and the fixture says so in
+those words -- which is the check that a gate for an invisible defect most
+needs, since nothing else would notice it had become useless.
+
+The original proposal, kept for the record:
 
 **The proper fix is a gate**, and it is small: `cargo check` each crate that
 contains `#[cfg(unix)]` against `x86_64-unknown-linux-gnu` in the pre-push hook,

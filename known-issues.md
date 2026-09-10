@@ -128252,7 +128252,35 @@ B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT, not this entry, and the tests say so
 where a reader would otherwise take it for a parsing failure.
 
 
-## TD-B-THE-UNIX-HALF-GATE-CANNOT-LINK-ON-THIS-HOST (lane B, 2026-09-10) — open
+## ~~TD-B-THE-UNIX-HALF-GATE-CANNOT-LINK-ON-THIS-HOST~~ (lane B, 2026-09-10) — FIXED the same day
+
+**Fixed by `--no-test`.** The gate asks whether the *other* arm COMPILES.
+Running the linux tests additionally requires a `cc` for
+`x86_64-unknown-linux-gnu` to link with — which this machine lacks — and then
+requires **executing a linux binary on Windows**, which is not possible at all.
+So compile-only is not a weakening; it is the only thing this gate could ever
+have meant here. `scripts/coreutils-check.sh --only linux --no-test` reports
+`clean (linux half checked)` for `userspace/udevd`, and the udevd symlink arm
+that this entry was blocking is restored.
+
+**And a correction to this entry, which was on `main`.** It said the fix "is a
+change to raise rather than make" because `scripts/coreutils-check.sh` is
+"shared with the boot test". It is not: `scripts/boot-test.sh` references it
+**zero** times. Its only readers are the push hook, two gate-wiring checkers,
+and its own test suite — all lane B's. I asserted a lane boundary I had not
+checked and used it to defer a fix I could have made immediately. Thirteenth
+adjacent claim of the day and the first where the consequence was inaction
+rather than a wrong number.
+
+**Also fixed:** the refusal text's "Reproduce and iterate with" command omitted
+`--no-test`, so following the hook's own instructions no longer reproduced what
+the hook ran. That is the same shape as lane A's design-decisions-bands advice
+pointing at a heading instead of a section end — a gate whose instructions do
+not lead to the state it checked.
+
+### Original entry
+
+
 
 **In short:** pre-push gate 12 compiles the unix half of a changed crate by
 building it for `x86_64-unknown-linux-gnu`. That target has no linker on this

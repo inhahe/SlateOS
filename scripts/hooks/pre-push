@@ -2372,8 +2372,19 @@ if [ "$skip_unixhalf" != "1" ]; then
     # uninstalled. Usage errors here exit 64, not 2, so a future renamed flag
     # cannot be read as that decline; see the script's "## Exit codes".
     # shellcheck disable=SC2086
+    # `--no-test` is not a weakening; it is the only thing this gate could
+    # ever have meant on this host. The question it asks is whether the OTHER
+    # arm COMPILES. Running the linux tests additionally needs a `cc` for
+    # x86_64-unknown-linux-gnu to link with, which this machine lacks, and
+    # then needs to EXECUTE a linux binary on Windows, which is not possible
+    # at all. Without this flag the gate failed with "linker `cc` not found"
+    # the first time it had a crate to check -- and because it takes its
+    # scope from the files a push changes, it failed exactly when it had work
+    # and passed the rest of the time, which from the tally is
+    # indistinguishable from a gate doing its job. See known-issues
+    # TD-B-THE-UNIX-HALF-GATE-CANNOT-LINK-ON-THIS-HOST.
     if ! run_checker --may-skip coreutils-unix-half \
-                     bash "$cucheck" --only linux $_uh_scope; then
+                     bash "$cucheck" --only linux --no-test $_uh_scope; then
         unixhalf_failed=1
     fi
     # run_checker returns 0 for an allowed skip, so the gate has to correct its
@@ -2406,13 +2417,13 @@ The crates named are the ones this push changed that contain a
 platform-conditional arm at all. A crate you edited and do not see there has
 none, so compiling it for Linux would have compiled the same source twice.
 
-Reproduce and iterate with:
+Reproduce exactly what the gate ran:
 
-    bash scripts/coreutils-check.sh --only linux $_uh_scope
+    bash scripts/coreutils-check.sh --only linux --no-test $_uh_scope
 
 and narrow it while fixing:
 
-    bash scripts/coreutils-check.sh --only linux --no-test $_uh_scope
+    bash scripts/coreutils-check.sh --only linux --no-test --no-clippy $_uh_scope
     bash scripts/coreutils-check.sh --only linux --no-clippy $_uh_scope -- chown
 
 Full output is kept at the path named above.

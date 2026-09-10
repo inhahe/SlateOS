@@ -1362,26 +1362,35 @@ fn create_dev_symlink(link: &str, target_name: &str, log_level: LogLevel) {
     // Remove existing link first.
     let _ = fs::remove_file(&link_path);
 
-    // NOTHING IS WRITTEN. This used to create a regular file containing
-    // "-> sda1" "for portability", which resolves to nothing: every caller
-    // that follows the link gets its contents instead of the device.
+    // A REAL symlink. This used to create a regular file containing
+    // "-> sda1", justified as portability -- but `posix::file::symlink` exists
+    // and `userspace/backup` already has this exact pattern, so the
+    // portability problem was solved in this tree and this did not use the
+    // solution. A text file at /dev/disk/by-uuid/<uuid> resolves to nothing:
+    // every caller that follows the link gets its contents instead.
     //
-    // A real symlink is what belongs here -- `posix::file::symlink` exists and
-    // `userspace/backup` calls `std::os::unix::fs::symlink` under a
-    // unix-gated arm. That is written and then reverted, deliberately: adding
-    // the first unix-gated arm to this crate brings it into pre-push gate
-    // 12, which compiles the unix half by building for
-    // x86_64-unknown-linux-gnu, and this host has no `cc` to link with. The
-    // gate then fails for a reason that has nothing to do with the code.
-    //
-    // So the arm is not added until that is resolved -- see known-issues
-    // TD-B-THE-UNIX-HALF-GATE-CANNOT-LINK-ON-THIS-HOST. What does NOT wait is
-    // the decoy: a missing link is a visible failure, a text file pretending
-    // to be one is not, and that distinction does not depend on a linker.
-    if log_level >= LogLevel::Debug {
-        eprintln!(
-            "udevd: not creating {link_path} -> {target_name}: symlink              creation is not wired up, and a text marker in its place would              be followed as if it were the device"
-        );
+    // This arm was written, reverted, and restored within the hour. Adding the
+    // first unix-gated arm to this crate brought it into pre-push gate 12,
+    // which compiled the other half by BUILDING AND TESTING for
+    // x86_64-unknown-linux-gnu -- and this host has no `cc` to link with, nor
+    // any way to execute a linux binary. The gate now compiles that arm
+    // without linking, which is the question it was always asking.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        if let Err(e) = symlink(target_name, &link_path) {
+            eprintln!("udevd: symlink {link_path} -> {target_name}: {e}");
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // The development host. Saying so beats writing a decoy the host would
+        // then treat as an ordinary file.
+        if log_level >= LogLevel::Debug {
+            eprintln!(
+                "udevd: not creating {link_path} -> {target_name}: symlinks                  are unavailable on this build host"
+            );
+        }
     }
 }
 

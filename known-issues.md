@@ -85452,8 +85452,36 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **84 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **81 of 800 remain**
 
+> **Burn-down log.** 2026-09-10 (forty-fifth batch): **the guess was a correct
+> default for an ABSENT operand.** 84 → 81 across 84 → 81 functions;
+> `fswatch read`'s count, `assoc add`'s priority and `ionice set`'s level left
+> the ledger. Pinned by self-test rung 123.
+>
+> These three survived forty-four batches because the code reads correctly.
+> `[PRIORITY]` and `[level]` are optional and 100 and 4 are their documented
+> defaults, so the fallback is *right* — for the operand that is missing. The
+> same value then answered "you omitted it" and "you typed something I could not
+> parse", and only the second is a mistake.
+>
+> `fswatch read` is the sharpest, because there the fallback could not serve the
+> absent case even in principle: the default is applied above as the string
+> `"20"`, so the `parse` is only ever reached with a word the operator typed and
+> `unwrap_or(20)`'s only reachable purpose was to swallow a malformed one.
+> `fswatch read 3 abc` read twenty events and said nothing.
+>
+> Two of the three sit directly below an operand that already refuses by name —
+> `fswatch`'s watch id, `ionice`'s class. One operand refusing and the next
+> guessing inside the same command is the clearest evidence available that this
+> was an oversight rather than a policy.
+>
+> **On the count.** The ledger is a number, not a list: §600 states the rule and
+> nothing enumerates the remaining sites. So 84 → 81 assumes these three were
+> among the counted 84, which is consistent with their being textbook instances
+> of the class but cannot be verified from here. Whoever next re-derives the
+> population should treat the number as approximate in that direction.
+>
 > **Burn-down log.** 2026-08-30 (forty-fourth batch): **the guesses whose value
 > was the widest one its space has.** 91 → 84 across 91 → 84 functions;
 > `cmd_fwsettings`, `cmd_namespace`, `cmd_autostart`, `cmd_pidns`,

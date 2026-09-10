@@ -23295,6 +23295,81 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         set_exit(0);
     }
 
+    serial_println!(
+        "  kshell::self_test 123: the guessed value was a correct default for an \
+         ABSENT operand, so \"you did not say\" and \"you said something I could \
+         not read\" were the same answer -- and one of the three could not serve \
+         the absent case at all"
+    );
+    {
+        // Rung 123 -- batch 45 of the §600 burn-down:
+        // `fswatch read`'s count, `assoc add`'s priority, `ionice set`'s level.
+        //
+        // What picks these three out is that the fallback is *right* for an
+        // operand that is missing. `[PRIORITY]` and `[level]` are optional and
+        // 100 and 4 are their documented defaults, so the code reads correctly at
+        // a glance and the guess is invisible: the same value answers both "you
+        // omitted it" and "you typed something I could not parse".
+        //
+        // `fswatch read` is the sharpest of the three, because there the fallback
+        // could not serve the absent case even in principle. The default is
+        // applied *above* as the string "20" when the operand is missing, so the
+        // `parse` is only ever reached with a word the operator actually typed,
+        // and `unwrap_or(20)`'s only reachable purpose was to swallow a malformed
+        // one. `fswatch read 3 abc` read twenty events and said nothing.
+        //
+        // Two of the three sit directly below an operand that already refuses --
+        // `fswatch`'s watch id, `ionice`'s class, both of which name the
+        // unreadable word. One operand refusing and the next guessing inside the
+        // same command is the clearest evidence available that this was an
+        // oversight and not a policy.
+        //
+        // Both arms are asserted for each, which is what makes this a test of the
+        // parsing rather than of the refusal: a command that rejected everything
+        // would satisfy the first half of each pair and fail the second.
+
+        // `fswatch read` -- a malformed count is refused by name.
+        let out = capture_command("fswatch read 1 abc");
+        assert_output_contains(
+            "fswatch read names the unreadable count",
+            &out,
+            b"Invalid event count: abc",
+        );
+        assert_eq!(last_exit(), 1, "`fswatch read 1 abc` errors");
+
+        // `assoc add` -- an unreadable optional priority is refused, and the
+        // three-operand form still registers.
+        let out = capture_command("assoc add text/plain /bin/ed ed 1O");
+        assert_output_contains(
+            "assoc add names the unreadable priority",
+            &out,
+            b"Invalid priority: 1O",
+        );
+        assert_eq!(last_exit(), 1, "`assoc add ... 1O` errors");
+
+        // `ionice set` -- an unreadable optional level is refused. The task id is
+        // deliberately one that need not exist: the refusal must happen while
+        // reading the operands, before anything is looked up, so this asserts the
+        // order as well as the message.
+        let out = capture_command("ionice set 1 rt 1O");
+        assert_output_contains(
+            "ionice set names the unreadable level",
+            &out,
+            b"Invalid level: 1O",
+        );
+        assert_eq!(last_exit(), 1, "`ionice set 1 rt 1O` errors");
+
+        // And the absent operand still takes its default rather than erroring --
+        // the half a burn-down batch is most likely to break. `ionice set` with no
+        // level must not complain about a level.
+        let out = capture_command("ionice set 1 be");
+        assert_output_lacks(
+            "an omitted level is not reported as unreadable",
+            &out,
+            b"Invalid level",
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -28039,7 +28114,23 @@ fn cmd_assoc(args: &str) {
             let mime = parts[1];
             let app_path = parts[2];
             let app_name = parts[3];
-            let priority: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(100);
+            // `[PRIORITY]` is optional, so 100 is the right answer when it is
+            // ABSENT and the wrong one when it is present and unreadable. The
+            // `and_then(...).ok()` folded those two into one, so
+            // `assoc add text/plain /bin/ed ed 1O` registered the association at
+            // the default priority and printed no complaint -- and priority
+            // decides which application actually opens the file type.
+            let priority: u32 = match parts.get(4) {
+                None => 100,
+                Some(s) => match s.parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        shell_println!("Invalid priority: {} (expected a number)", s);
+                        set_exit(1);
+                        return;
+                    }
+                },
+            };
 
             associations::register(mime, app_path, app_name, priority, true);
             shell_println!(
@@ -32278,7 +32369,23 @@ fn cmd_fswatch(args: &str) {
                     return;
                 }
             };
-            let count: usize = count_str.parse().unwrap_or(20);
+            // The default 20 is already applied above, as the string `"20"` when
+            // the operand is absent. So this `parse` is only ever reached with a
+            // word the operator actually typed, and an `unwrap_or(20)` here could
+            // not serve the absent case -- its only reachable purpose was to
+            // swallow a malformed one. `fswatch read 3 abc` read twenty events
+            // and said nothing.
+            //
+            // The `id` parse three lines above refuses correctly, which is what
+            // makes this an oversight rather than a policy.
+            let count: usize = match count_str.parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    shell_println!("Invalid event count: {}", count_str);
+                    set_exit(1);
+                    return;
+                }
+            };
 
             match notify::read_events(id, count) {
                 Ok(events) => {
@@ -34119,7 +34226,27 @@ fn cmd_ionice(args: &str) {
                     return;
                 }
             };
-            let level: u8 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
+            // Same shape as `assoc add`'s priority: `[level]` is optional, so 4
+            // is correct when absent and silently wrong when present and
+            // unreadable. `ionice set 7 rt 1O` set real-time class at level 4
+            // rather than the level asked for, and real-time I/O priority is not
+            // a setting to get silently.
+            //
+            // Note the class argument directly above already refuses an
+            // unreadable word by name. One operand refusing and the next guessing
+            // inside the same command is the clearest sign this was never a
+            // decision.
+            let level: u8 = match parts.get(3) {
+                None => 4,
+                Some(s) => match s.parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        shell_println!("Invalid level: {} (expected a number)", s);
+                        set_exit(1);
+                        return;
+                    }
+                },
+            };
             let prio = IoPriority::new(class, level);
             match ioprio::set_ioprio(task_id, prio) {
                 Ok(()) => shell_println!("Set task {} I/O priority: {}", task_id, prio.display()),

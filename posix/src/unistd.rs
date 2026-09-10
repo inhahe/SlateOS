@@ -1056,24 +1056,130 @@ process_global! {
     fn hostname_len_ptr() -> usize = 9; // "localhost".len()
 }
 
-/// Copy the current hostname into `out`, returning the number of bytes
-/// written (excluding any null terminator).  Truncates if `out` is
-/// smaller than the stored hostname; never null-terminates — the caller
-/// owns null-termination semantics.
+/// Read a `/proc/sys/kernel/` name file into `out`, minus its trailing
+/// newline. Returns the byte count, or `None` if the file cannot be read.
 ///
-/// Used by `utsname::uname()` so the utsname `nodename` field reflects
-/// the same hostname that `gethostname()` / `sethostname()` see, instead
-/// of a hardcoded "localhost".
-pub(crate) fn copy_hostname(out: &mut [u8]) -> usize {
+/// # Why a file, and not a syscall
+///
+/// **There is no native syscall number for the hostname at all.** The kernel
+/// holds it in `fs::nameservice`, which is reachable only from the Linux-ABI
+/// table -- established by lane A's audit of handlers reachable from that
+/// table and from no native number (2026-09-10), and confirmed by grepping
+/// `kernel/src/syscall/number.rs`, whose only `DOMAIN` matches are the
+/// unrelated `SYS_DMA_DOMAIN_*`. `/proc/sys/kernel/hostname` is the one
+/// interface this library can reach, and the kernel's own procfs self-test
+/// asserts the file exists.
+///
+/// A `SYS_HOSTNAME` pair is requested in
+/// `requests/b-a-no-native-syscall-reports-the-hostname.md`; when it lands,
+/// this becomes a syscall and the file read goes away.
+#[cfg(target_os = "none")]
+fn read_kernel_name(path: &[u8], out: &mut [u8]) -> Option<usize> {
+    let fd = crate::file::open(path.as_ptr(), crate::fcntl::O_RDONLY, 0);
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; HOST_NAME_MAX + 2];
+    let n = crate::file::read(fd, buf.as_mut_ptr(), buf.len());
+    let _ = crate::file::close(fd);
+    if n <= 0 {
+        return None;
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let mut len = (n as usize).min(buf.len());
+    // procfs terminates these with a newline; the hostname does not include it.
+    while len > 0 && matches!(buf.get(len.wrapping_sub(1)), Some(b'\n' | b'\r')) {
+        len = len.wrapping_sub(1);
+    }
+    // An empty file is not a hostname. Falling back is better than reporting
+    // the empty string, which no caller can do anything with.
+    if len == 0 {
+        return None;
+    }
+    let copy = len.min(out.len());
+    let mut i = 0;
+    while i < copy {
+        if let (Some(dst), Some(src)) = (out.get_mut(i), buf.get(i)) {
+            *dst = *src;
+        }
+        i = i.wrapping_add(1);
+    }
+    Some(copy)
+}
+
+#[cfg(not(target_os = "none"))]
+fn read_kernel_name(_path: &[u8], _out: &mut [u8]) -> Option<usize> {
+    // The host build has no `/proc`; every caller falls back to the stored
+    // buffer, which is what the tests below assert against.
+    None
+}
+
+/// The system's hostname: the kernel's if it can be read, else the stored one.
+///
+/// # What this replaces, and why it mattered
+///
+/// `gethostname`, `getdomainname` and `uname`'s `nodename` all read a
+/// **process-local static buffer** initialised to `"localhost"`. Nothing ever
+/// asked the kernel. So on every SlateOS system, `hostname` and `uname -n`
+/// answered `localhost` regardless of what the machine was actually called --
+/// while the eight programs that read `/proc/sys/kernel/hostname` directly
+/// got the real name. The system disagreed with itself about its own name,
+/// depending on which path a program took.
+///
+/// `sethostname()` wrote that same buffer and returned `0`, so a program that
+/// set the hostname and read it back got its own value and concluded it had
+/// worked. **That is a worse failure than `setgroups`' `ENOSYS`**: it is a
+/// self-consistent lie rather than an honest refusal.
+fn current_hostname(out: &mut [u8]) -> usize {
+    // `/proc/sys/kernel/hostname` first and `/etc/hostname` second, which is
+    // the order the rest of the tree already uses: `osh` fills `$HOSTNAME`
+    // from exactly this pair in exactly this sequence, `dhcpcd` writes both
+    // when a lease supplies a name, and `sysctl` maps `kernel.hostname` onto
+    // the first. Matching it is the point -- a libc that agreed with the
+    // kernel but not with the shell would have replaced one disagreement
+    // with another.
+    if let Some(n) = read_kernel_name(b"/proc/sys/kernel/hostname\0", out) {
+        return n;
+    }
+    if let Some(n) = read_kernel_name(b"/etc/hostname\0", out) {
+        return n;
+    }
+    stored_hostname(out)
+}
+
+/// Overwrite the stored hostname. **Tests only.**
+///
+/// `sethostname` used to do this and return `0`, which was the bug: the write
+/// was invisible outside the process. It now refuses, and this exists so that
+/// what *derives* from the hostname -- `gethostid`, `uname`'s `nodename` --
+/// can still be exercised against more than one value. A test seam is the
+/// honest place for that; a public function that half-works is not.
+#[cfg(test)]
+pub(crate) fn set_stored_hostname_for_test(name: &[u8]) {
+    let len = name.len().min(HOST_NAME_MAX);
+    // SAFETY: single-address-space test harness; `len <= HOST_NAME_MAX` and
+    // the buffer is `HOST_NAME_MAX + 1` bytes, so index `len` is in bounds.
+    unsafe {
+        let buf = hostname_buf_ptr().cast::<u8>();
+        let mut i = 0;
+        while i < len {
+            *buf.add(i) = name.get(i).copied().unwrap_or(0);
+            i = i.wrapping_add(1);
+        }
+        *buf.add(len) = 0;
+        *hostname_len_ptr() = len;
+    }
+}
+
+/// The stored hostname buffer, which is the fallback for [`current_hostname`].
+fn stored_hostname(out: &mut [u8]) -> usize {
     // SAFETY: Single-address-space, no concurrent writes during the read.
-    // Same access pattern as `gethostname()` above.
     let (src_ptr, src_len) = unsafe { (hostname_buf_ptr().cast_const(), *hostname_len_ptr()) };
     let n = core::cmp::min(out.len(), src_len);
     let mut i = 0;
     while i < n {
-        // SAFETY: i < src_len <= HOST_NAME_MAX, the hostname buffer is at
-        // least HOST_NAME_MAX + 1 bytes, and out[i] is in-bounds because
-        // i < n <= out.len().
+        // SAFETY: i < src_len <= HOST_NAME_MAX and the buffer is
+        // HOST_NAME_MAX + 1 bytes; `out.get_mut` bounds the destination.
         unsafe {
             let b = *src_ptr.cast::<u8>().add(i);
             if let Some(slot) = out.get_mut(i) {
@@ -1083,6 +1189,18 @@ pub(crate) fn copy_hostname(out: &mut [u8]) -> usize {
         i = i.wrapping_add(1);
     }
     n
+}
+
+/// Copy the current hostname into `out`, returning the number of bytes
+/// written (excluding any null terminator).  Truncates if `out` is
+/// smaller than the stored hostname; never null-terminates — the caller
+/// owns null-termination semantics.
+///
+/// Used by `utsname::uname()` so the utsname `nodename` field reflects
+/// the same hostname that `gethostname()` / `sethostname()` see, instead
+/// of a hardcoded "localhost".
+pub(crate) fn copy_hostname(out: &mut [u8]) -> usize {
+    current_hostname(out)
 }
 
 process_global! {
@@ -1166,9 +1284,11 @@ pub(crate) fn copy_domainname(out: &mut [u8]) -> usize {
 ///    (`design-decisions.md` §303).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
-    // SAFETY: single-address-space, no concurrent writes during read.
-    // Use raw pointers to comply with Rust 2024 `static_mut_refs` rules.
-    let (hostname_ptr, hlen) = unsafe { (hostname_buf_ptr().cast_const(), *hostname_len_ptr()) };
+    // The *system's* hostname, not this process's copy of a default. See
+    // `current_hostname`, which is also what `uname`'s `nodename` reads, so
+    // the two cannot disagree.
+    let mut host = [0u8; HOST_NAME_MAX + 1];
+    let hlen = current_hostname(&mut host);
     let needed = hlen.wrapping_add(1); // +null
     let copy = if len < needed { len } else { needed };
 
@@ -1180,13 +1300,11 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
 
     let mut idx: usize = 0;
     while idx < copy {
-        // SAFETY: idx < copy <= needed = hlen + 1, which is within the
-        // HOST_NAME_MAX+1-byte hostname buffer; and copy <= len, so
-        // `name.add(idx)` is within the caller's buffer.  `name` is non-null
-        // whenever `copy > 0`.
+        // SAFETY: `copy <= len`, so `name.add(idx)` is within the caller's
+        // buffer, and `name` is non-null whenever `copy > 0`. The source byte
+        // is `0` past `hlen`, which is the null terminator the caller expects.
         unsafe {
-            let byte = *hostname_ptr.cast::<u8>().add(idx);
-            *name.add(idx) = byte;
+            *name.add(idx) = host.get(idx).copied().unwrap_or(0);
         }
         idx = idx.wrapping_add(1);
     }
@@ -1863,20 +1981,27 @@ pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
         return -1;
     }
 
-    // SAFETY: single-address-space, no concurrent access.
-    // Use raw pointers to comply with Rust 2024 `static_mut_refs` rules.
-    unsafe {
-        let buf_ptr = hostname_buf_ptr().cast::<u8>();
-        let mut idx = 0;
-        while idx < len {
-            *buf_ptr.add(idx) = *name.add(idx);
-            idx = idx.wrapping_add(1);
-        }
-        // Null-terminate the stored hostname.
-        *buf_ptr.add(len) = 0;
-        *hostname_len_ptr() = len;
-    }
-    0
+    // 4. And here it stops, because there is nowhere to put it.
+    //
+    // This used to write a process-local buffer and return 0. `gethostname`
+    // read that same buffer, so a program could set the hostname, read it
+    // back, get its own value and conclude it had worked -- while no other
+    // process on the system, and not the kernel, had heard anything. A
+    // self-consistent lie, which is a worse failure than `setgroups`'
+    // `ENOSYS`: that one at least tells the caller.
+    //
+    // There is no native syscall number for the hostname. The kernel holds it
+    // in `fs::nameservice`, reachable only from the Linux-ABI table. Requested
+    // in `requests/b-a-no-native-syscall-reports-the-hostname.md`; when the
+    // number exists this becomes a syscall and the `ENOSYS` goes away.
+    //
+    // The capability check above still runs first, and deliberately: an
+    // unprivileged caller must learn it is unprivileged, which is true and
+    // will stay true, rather than that the call is unimplemented, which is
+    // temporary.
+    let _ = (name, len);
+    errno::set_errno(errno::ENOSYS);
+    -1
 }
 
 // ---------------------------------------------------------------------------
@@ -5443,24 +5568,22 @@ mod tests {
         }
     }
 
+    /// **`sethostname` does not set the hostname, and now says so.**
+    ///
+    /// This test read `test_sethostname_roundtrip` and asserted that setting
+    /// the hostname and reading it back agreed. It did agree -- both ends were
+    /// the same process-local buffer, which nothing outside the process could
+    /// see and the kernel never heard about. The round trip was the evidence
+    /// that it worked, and it was the bug.
+    ///
+    /// There is no native syscall number for the hostname; see
+    /// `requests/b-a-no-native-syscall-reports-the-hostname.md`.
     #[test]
-    fn test_sethostname_roundtrip() {
-        // Save the original hostname.
-        let mut orig = [0u8; 256];
-        gethostname(orig.as_mut_ptr(), orig.len());
-        let orig_len = unsafe { crate::string::strlen(orig.as_ptr()) };
-
-        // Set a new hostname.
+    fn test_sethostname_reports_that_it_cannot() {
+        errno::set_errno(0);
         let new_name = b"test-host";
-        assert_eq!(sethostname(new_name.as_ptr(), new_name.len()), 0);
-
-        // Verify it was set.
-        let mut buf = [0u8; 256];
-        assert_eq!(gethostname(buf.as_mut_ptr(), buf.len()), 0);
-        assert_eq!(&buf[..new_name.len()], new_name);
-
-        // Restore the original.
-        sethostname(orig.as_ptr(), orig_len);
+        assert_eq!(sethostname(new_name.as_ptr(), new_name.len()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
@@ -5720,17 +5843,17 @@ mod tests {
         /// `copy_from_user(_, NULL, 0)` is a no-op.  Phase 167
         /// restores that semantics — pre-Phase-167 we returned
         /// EFAULT here, diverging from Linux.
+        /// `sethostname(NULL, 0)` passes every argument check and then
+        /// fails on `ENOSYS` like any other call. It used to return `0`.
         #[test]
-        fn test_sethostname_phase167_null_len_zero_succeeds_with_cap() {
+        fn test_sethostname_phase167_null_len_zero_reaches_enosys_with_cap() {
             let _g = CapGuard::snapshot();
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SYS_ADMIN
             ));
             errno::set_errno(0);
-            assert_eq!(sethostname(core::ptr::null(), 0), 0);
-            // Re-set to localhost to avoid bleeding into later tests.
-            let localhost = b"localhost";
-            let _ = sethostname(localhost.as_ptr(), localhost.len());
+            assert_eq!(sethostname(core::ptr::null(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
 
         /// Same for `setdomainname(NULL, 0)`.
@@ -5823,13 +5946,21 @@ mod tests {
                 assert_eq!(errno::get_errno(), errno::EPERM);
             } // guard drops here -> cap restored
 
-            // With caps back, sethostname succeeds.
+            // With caps back, the capability check no longer fires -- the
+            // call still fails, on ENOSYS, and that is what "recovery" means
+            // here. This used to assert a successful write.
+            errno::set_errno(0);
             let new_name = b"phase167-recover";
-            assert_eq!(sethostname(new_name.as_ptr(), new_name.len()), 0);
+            assert_eq!(sethostname(new_name.as_ptr(), new_name.len()), -1);
+            assert_eq!(
+                errno::get_errno(),
+                errno::ENOSYS,
+                "the capability check passed, so the failure must be the missing syscall"
+            );
 
-            // Restore the original hostname so later tests see the
-            // baseline.
-            sethostname(orig.as_ptr(), orig_len);
+            // Restore the stored hostname so later tests see the baseline.
+            let _ = orig_len;
+            set_stored_hostname_for_test(b"localhost");
         }
 
         // -- Sentinels --------------------------------------------------------
@@ -5889,25 +6020,23 @@ mod tests {
         /// (the existing test_sethostname_roundtrip exercises this
         /// without explicit cap check; we add an explicit assertion
         /// to lock it down).
+        /// With `CAP_SYS_ADMIN` the capability check passes and the call
+        /// still fails -- on `ENOSYS`, not `EPERM`.
+        ///
+        /// The order matters and is deliberate: an unprivileged caller must
+        /// learn it is unprivileged, which is true and will stay true, rather
+        /// than that the call is unimplemented, which is temporary. This test
+        /// read `..._default_cap_still_writes` and asserted the write landed.
         #[test]
-        fn test_sethostname_phase167_default_cap_still_writes() {
+        fn test_sethostname_phase167_with_cap_fails_on_enosys_not_eperm() {
             let _g = CapGuard::snapshot();
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SYS_ADMIN
             ));
-
-            // Save and restore.
-            let mut orig = [0u8; 256];
-            gethostname(orig.as_mut_ptr(), orig.len());
-            let orig_len = unsafe { crate::string::strlen(orig.as_ptr()) };
-
+            errno::set_errno(0);
             let new_name = b"phase167-default";
-            assert_eq!(sethostname(new_name.as_ptr(), new_name.len()), 0);
-            let mut buf = [0u8; 256];
-            assert_eq!(gethostname(buf.as_mut_ptr(), buf.len()), 0);
-            assert_eq!(&buf[..new_name.len()], new_name);
-
-            sethostname(orig.as_ptr(), orig_len);
+            assert_eq!(sethostname(new_name.as_ptr(), new_name.len()), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
     }
 
@@ -8670,7 +8799,7 @@ mod tests {
         reset_hostid_for_test();
         // Pin the hostname so the derived hash is deterministic.
         let name = b"hostid-test-A";
-        assert_eq!(sethostname(name.as_ptr(), name.len()), 0);
+        set_stored_hostname_for_test(name);
 
         let id = gethostid();
         // Re-derive locally and compare.
@@ -8679,38 +8808,38 @@ mod tests {
 
         // Restore default hostname for other tests.
         let restore = b"localhost";
-        let _ = sethostname(restore.as_ptr(), restore.len());
+        set_stored_hostname_for_test(restore);
     }
 
     #[test]
     fn test_gethostid_stable_within_hostname() {
         reset_hostid_for_test();
         let name = b"hostid-test-B";
-        assert_eq!(sethostname(name.as_ptr(), name.len()), 0);
+        set_stored_hostname_for_test(name);
 
         let a = gethostid();
         let b = gethostid();
         assert_eq!(a, b, "gethostid must be stable while hostname is unchanged");
 
         let restore = b"localhost";
-        let _ = sethostname(restore.as_ptr(), restore.len());
+        set_stored_hostname_for_test(restore);
     }
 
     #[test]
     fn test_gethostid_changes_with_hostname() {
         reset_hostid_for_test();
         let n1 = b"hostid-test-C1";
-        let _ = sethostname(n1.as_ptr(), n1.len());
+        set_stored_hostname_for_test(n1);
         let id1 = gethostid();
 
         let n2 = b"hostid-test-C2-different";
-        let _ = sethostname(n2.as_ptr(), n2.len());
+        set_stored_hostname_for_test(n2);
         let id2 = gethostid();
 
         assert_ne!(id1, id2, "different hostnames must hash to different ids");
 
         let restore = b"localhost";
-        let _ = sethostname(restore.as_ptr(), restore.len());
+        set_stored_hostname_for_test(restore);
     }
 
     #[test]
@@ -8741,7 +8870,7 @@ mod tests {
     fn test_sethostid_zero_falls_back_to_hostname() {
         reset_hostid_for_test();
         let name = b"hostid-test-D";
-        let _ = sethostname(name.as_ptr(), name.len());
+        set_stored_hostname_for_test(name);
         let derived = gethostid();
 
         // sethostid(0) must not turn off gethostid — it should keep
@@ -8751,7 +8880,7 @@ mod tests {
 
         reset_hostid_for_test();
         let restore = b"localhost";
-        let _ = sethostname(restore.as_ptr(), restore.len());
+        set_stored_hostname_for_test(restore);
     }
 
     #[test]

@@ -65212,7 +65212,7 @@ that could have caught this.
 
 ---
 
-## B-POSIX-HOSTNAME-IS-PROCESS-LOCAL (lane B, 2026-08-22) — OPEN
+## B-POSIX-HOSTNAME-IS-PROCESS-LOCAL (lane B, 2026-08-22) — READ SIDE FIXED 2026-09-10; write side needs a syscall
 
 **In short:** `gethostname()` and `sethostname()` — the two C functions any
 program uses to ask or set what this machine is called — do not actually talk
@@ -65268,6 +65268,58 @@ currently broken by it — but they are the obvious thing for a ported C program
 to call, and it would get `localhost` with no indication anything was amiss.
 
 ---
+
+
+### Fixed on the read side — 2026-09-10
+
+`gethostname`, `getdomainname` and `uname`'s `nodename` now read
+`/proc/sys/kernel/hostname`, then `/etc/hostname`, then the stored buffer.
+That is the same pair in the same order the rest of the tree already uses:
+`osh` fills `$HOSTNAME` from exactly it, `dhcpcd` writes both when a lease
+supplies a name, and `sysctl` maps `kernel.hostname` onto the first. Matching
+the existing order was the point -- a libc that agreed with the kernel but not
+with the shell would have replaced one disagreement with another.
+
+**`sethostname` and `setdomainname` return `ENOSYS` now instead of `0`.** They
+wrote a process-local buffer that `gethostname` then read back, so a program
+could set the hostname, read it, get its own value and conclude it had worked.
+That is worse than `setgroups`' honest refusal in the one way that matters:
+
+| | `setgroups` | `sethostname` (before) |
+|---|---|---|
+| what it did | nothing | nothing observable |
+| what it returned | `-1`, `ENOSYS` | **`0`** |
+| what the caller learned | the truth | that it had worked |
+
+The `CAP_SYS_ADMIN` check still runs **first**, deliberately: an unprivileged
+caller should learn it is unprivileged, which is permanent, rather than that
+the call is unimplemented, which is not.
+
+### Why the write side is still open
+
+**There is no native syscall number for the hostname at all.** The kernel holds
+it in `fs::nameservice`, reachable only from the Linux-ABI table. Established
+by lane A's audit of handlers reachable from that table and from no native
+number (notice of 2026-09-10T07:09:56Z) -- `fs::nameservice` was the single
+module that survived their triage of fourteen -- and confirmed by grepping
+`kernel/src/syscall/number.rs`, whose only `DOMAIN` matches are the unrelated
+`SYS_DMA_DOMAIN_*`.
+
+Requested as `requests/b-a-no-native-syscall-reports-the-hostname.md`. When the
+number exists, `sethostname` becomes a syscall and the `ENOSYS` goes away.
+
+### Four tests were asserting the bug
+
+`test_sethostname_roundtrip` set the hostname, read it back, and asserted they
+agreed. They did agree -- both ends were the same buffer -- so the round trip
+was the *evidence that it worked*, and it was the defect. Likewise
+`uname_nodename_tracks_sethostname`, and two `phase167` tests asserting the
+write landed. All four now assert the refusal.
+
+`sethostname` no longer being a way to change the hostname does take away the
+only means of *varying* it, which `gethostid` needs -- it hashes the name.
+That is what `set_stored_hostname_for_test` is for: a test seam is the honest
+place for it, and a public function that half-works is not.
 
 ## B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT (lane B, 2026-08-22) — OPEN
 

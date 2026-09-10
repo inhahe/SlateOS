@@ -637,23 +637,36 @@ mod tests {
     // uname — nodename reflects the hostname set via sethostname()
     // -----------------------------------------------------------------------
 
+    /// `uname`'s `nodename` is the same hostname `gethostname` reports.
+    ///
+    /// It read `uname_nodename_tracks_sethostname` and drove the change
+    /// through `sethostname`, which wrote a process-local buffer and returned
+    /// `0` -- so the test passed while neither function had anything to do
+    /// with the system's actual name. Both now read
+    /// `unistd::current_hostname`, which asks the kernel first; the property
+    /// worth asserting is that they agree, whatever it answers.
     #[test]
-    fn uname_nodename_tracks_sethostname() {
-        // Save default state via gethostname so we can restore it.
-        let mut saved = [0u8; 256];
-        let _ = crate::unistd::gethostname(saved.as_mut_ptr(), saved.len());
+    fn uname_nodename_is_the_hostname_gethostname_reports() {
+        crate::unistd::set_stored_hostname_for_test(b"uname-node-test");
 
-        // Change the hostname.
-        let new_name = b"uname-test-host";
-        let rc = crate::unistd::sethostname(new_name.as_ptr(), new_name.len());
-        assert_eq!(rc, 0);
+        // SAFETY: `Utsname` is an all-array `repr(C)` struct, so an
+        // all-zero value is valid -- the same construction the two tests
+        // above use.
+        let mut uts = unsafe { mem::zeroed::<Utsname>() };
+        assert_eq!(uname(&raw mut uts), 0);
 
-        // uname must now report the new hostname.
-        assert_eq!(field(&sample().nodename), new_name);
+        let mut host = [0u8; 256];
+        assert_eq!(crate::unistd::gethostname(host.as_mut_ptr(), host.len()), 0);
 
-        // Restore the default hostname for other tests.
-        let restore = b"localhost";
-        let _ = crate::unistd::sethostname(restore.as_ptr(), restore.len());
+        let node_len = uts.nodename.iter().position(|b| *b == 0).unwrap_or(0);
+        let host_len = host.iter().position(|b| *b == 0).unwrap_or(0);
+        assert_eq!(
+            uts.nodename.get(..node_len),
+            host.get(..host_len),
+            "uname's nodename and gethostname must be one answer, not two"
+        );
+
+        crate::unistd::set_stored_hostname_for_test(b"localhost");
     }
 
     #[test]

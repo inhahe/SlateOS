@@ -1161,8 +1161,74 @@ fn log_msg(level: u32, msg: &str) {
 // Job execution
 // ============================================================================
 
+/// The user this process is running as, or `None` if it cannot be determined.
+///
+/// `None` is a real answer and is the input to [`may_run_as`]'s fail-closed
+/// arm. A plausible default here -- `"root"` being the tempting one -- would
+/// let every job run, which is precisely what the check exists to stop.
+fn current_user() -> Option<String> {
+    for key in ["USER", "LOGNAME"] {
+        // An empty USER is not a name; accepting one would let a stripped
+        // environment satisfy the comparison below.
+        if let Ok(v) = std::env::var(key)
+            && !v.is_empty()
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Whether a job declared for `want` may be run by a process that is
+/// `running_as`.
+///
+/// # Why this refuses instead of running the job as root
+///
+/// This daemon cannot change user: there is no `setuid`, `setgid` or
+/// `setgroups` anywhere in it, or in any of the other four cron crates. A
+/// crontab that names a user is stating a LIMIT on the job -- "this runs as
+/// `backup`, with `backup`'s access and no more" -- so running it as root
+/// instead hands it every authority its author withheld.
+/// `design-decisions.md` 1019 puts the test as: what does the caller lose if
+/// we proceed? The containment they asked for. `cgexec` makes the same call
+/// when it cannot place a process in the cgroup it was given.
+///
+/// # What made this urgent rather than theoretical
+///
+/// `execute_command` did not merely ignore the user. It set `USER`, `LOGNAME`
+/// and `HOME=/home/<user>` in the child, and logged `(<user>) CMD (...)` --
+/// real cron's own syslog format. So the job's environment claimed an identity
+/// the process did not have, and the log recorded it as fact. Every visible
+/// surface agreed and all of them were wrong.
+///
+/// # The unknown case fails closed
+///
+/// If we cannot tell who we are, we cannot tell whether we are the declared
+/// user. "I do not know" must not be worth the same as "yes".
+fn may_run_as(want: &str, running_as: Option<&str>) -> Result<(), String> {
+    match running_as {
+        Some(me) if me == want => Ok(()),
+        Some(me) => Err(format!(
+            "declared user {want:?}, running as {me:?}, and crond2 cannot \
+             change user -- running it would give the job authority its \
+             crontab withheld, and log it as {want:?}"
+        )),
+        None => Err(format!(
+            "declared user {want:?} and the current user is unknown, so it \
+             cannot be confirmed -- refusing rather than guessing"
+        )),
+    }
+}
+
 /// Execute a cron command with the given environment.
 fn execute_command(command: &str, user: &str, env_vars: &HashMap<String, String>) {
+    if let Err(why) = may_run_as(user, current_user().as_deref()) {
+        // Logged at level 0 so it is visible at any verbosity: a job that did
+        // not run is not a detail. Deliberately NOT in the `(user) CMD (...)`
+        // format, which asserts that a job ran as that user.
+        log_msg(0, &format!("REFUSED ({user}) CMD ({command}): {why}"));
+        return;
+    }
     log_msg(1, &format!("({user}) CMD ({command})"));
 
     let shell = env_vars
@@ -1632,6 +1698,37 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- the declared user is a limit, not a label ------------------------
+
+    #[test]
+    fn a_job_declared_for_another_user_is_refused() {
+        let err = may_run_as("backup", Some("root")).expect_err("must refuse");
+        assert!(err.contains("backup"), "message names neither user: {err}");
+        assert!(err.contains("root"), "message names neither user: {err}");
+    }
+
+    #[test]
+    fn a_job_declared_for_us_runs() {
+        assert!(may_run_as("backup", Some("backup")).is_ok());
+    }
+
+    #[test]
+    fn an_unknown_current_user_refuses_rather_than_assuming() {
+        // The arm that matters. If this ever returns Ok, every crontab entry
+        // runs as whoever started the daemon while the log names someone else.
+        let err = may_run_as("backup", None).expect_err("unknown must refuse");
+        assert!(err.contains("unknown"), "unhelpful message: {err}");
+    }
+
+    #[test]
+    fn root_is_not_special_cased() {
+        // A tempting shortcut is "root may run anything", which is true of a
+        // daemon that can drop privileges and false of this one. Running a
+        // backup job as root IS the defect, so root must be refused like any
+        // other mismatch until this crate can actually change user.
+        assert!(may_run_as("backup", Some("root")).is_err());
+    }
     // Fixed names under the system temp directory raced between
     // concurrent test binaries; see scratchdir's module docs.
     use scratchdir::ScratchDir;

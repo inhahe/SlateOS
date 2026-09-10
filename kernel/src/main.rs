@@ -2599,21 +2599,38 @@ extern "C" fn kernel_main() -> ! {
     // Reported to lane B in
     // `requests/b-a-run-the-ctest-pty-fixture-so-a-synthesised-ctrl-c-is-finally-tested.md`.
     //
-    // RE-ENABLE when lane B's fixture yields in that spin. One line: restore
-    // the `selftest::dispatch_debug` call below and drop the entry from
-    // `ALLOWLIST` in `scripts/check-self-tests-wired.py`.
+    // RE-ENABLED 2026-09-10, and on a different basis than the note above
+    // specified -- worth recording, because the stated precondition is still not
+    // met.
     //
-    // {
-    //     #[inline(never)]
-    //     fn case() {
-    //         selftest::dispatch_debug(
-    //             "pty ^C signal delivery (ring 3)",
-    //             selftest::Severity::Diagnostic,
-    //             proc::spawn::self_test_ctest_pty(),
-    //         );
-    //     }
-    //     case();
-    // }
+    // That note said to re-enable once lane B's fixture YIELDS in its spin. It
+    // does not. Their fix gates every read on `poll(&pfd, 1, 0)`, and our
+    // `poll` with a zero timeout does not yield: `poll_core` passes `Some(0)` to
+    // `ipc::multiwait::wait_multiple`, which returns `Ok(0)` immediately rather
+    // than parking. So the spin surrenders the CPU no more than it did before.
+    //
+    // What DID change is the cost: 2,000,000 iterations each now enter the
+    // kernel, which under TCG is seconds rather than milliseconds, and the
+    // scheduler preempts on the timer regardless of whether anyone yields. The
+    // parent therefore gets to write 0x03 long before the child exhausts its
+    // budget and closes the last slave, which is the exit-44 race.
+    //
+    // That is a timing argument, not an invariant, and it is being re-enabled
+    // because a boot test settles it and nothing else will: the path has never
+    // executed. If 44 returns, the fix is `sched_yield()` in the fixture's spin
+    // (lane B's side) rather than anything here, and the re-disable is this
+    // comment plus the ALLOWLIST entry again.
+    {
+        #[inline(never)]
+        fn case() {
+            selftest::dispatch_debug(
+                "pty ^C signal delivery (ring 3)",
+                selftest::Severity::Diagnostic,
+                proc::spawn::self_test_ctest_pty(),
+            );
+        }
+        case();
+    }
 
     {
         #[inline(never)]

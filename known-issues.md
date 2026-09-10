@@ -128294,6 +128294,23 @@ indistinguishable from one with nothing to say.
 **The work, when someone does it:** pick a crate, add the two lines, fix what
 it reports. The count may only fall.
 
+**A worked example, with the real number.** `userspace/at` (1,900 lines) was
+put through it on 2026-09-10. With the test module exempted the way the covered
+crates do it — `#[cfg(test)] #[allow(clippy::unwrap_used, ...)]` — the
+NON-TEST count was **102**: 55 arithmetic side-effects, 44 indexing/slicing
+panics, 3 others. Spread across the file, not concentrated, so there is no
+cheap subset. Budget accordingly: this is a crate-sized job each, not a sweep.
+
+The enablement was then reverted and `at` stays on this list, because 99
+visible warnings on one crate while 133 are silent is noise without a plan.
+What was kept is what the lints *found*: `day_of_week` indexed
+`T[(m - 1) as usize]` with no range guard, so month 0 became `usize::MAX` and
+panicked — and `month` is a `u32` straight off a parsed timespec. Both calendar
+helpers now delegate to `civildate`, which computes rather than indexes.
+
+**The lints are an instrument, and using one without keeping it installed is a
+legitimate outcome.** The panic was the deliverable.
+
 ## ~~TD-B-THE-UNIX-HALF-GATE-CANNOT-LINK-ON-THIS-HOST~~ (lane B, 2026-09-10) — FIXED the same day
 
 **Fixed by `--no-test`.** The gate asks whether the *other* arm COMPILES.

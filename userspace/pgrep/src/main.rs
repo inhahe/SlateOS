@@ -348,20 +348,20 @@ fn send_signal(pid: u64, action: SignalAction) -> Result<(), String> {
                 Ok(resp) if ipc_response_ok(&resp) => Ok(()),
                 _ => {
                     // Fallback to direct kill.
-                    force_kill(pid, 143)
+                    force_kill(pid, killconv::exit_code_for_signal(killconv::SIGTERM))
                         .map(|_| ())
                         .map_err(|e| format!("failed to terminate {pid}: error {e}"))
                 }
             }
         }
-        SignalAction::Kill => force_kill(pid, 137)
+        SignalAction::Kill => force_kill(pid, killconv::exit_code_for_signal(killconv::SIGKILL))
             .map(|_| ())
             .map_err(|e| format!("failed to kill {pid}: error {e}")),
         SignalAction::Hup => {
             let cmd = format!("PROCESS_HANGUP {pid}");
             match send_process_command(&cmd) {
                 Ok(resp) if ipc_response_ok(&resp) => Ok(()),
-                _ => force_kill(pid, 129)
+                _ => force_kill(pid, killconv::exit_code_for_signal(killconv::SIGHUP))
                     .map(|_| ())
                     .map_err(|e| format!("failed to HUP {pid}: error {e}")),
             }
@@ -370,7 +370,7 @@ fn send_signal(pid: u64, action: SignalAction) -> Result<(), String> {
             let cmd = format!("PROCESS_INTERRUPT {pid}");
             match send_process_command(&cmd) {
                 Ok(resp) if ipc_response_ok(&resp) => Ok(()),
-                _ => force_kill(pid, 130)
+                _ => force_kill(pid, killconv::exit_code_for_signal(killconv::SIGINT))
                     .map(|_| ())
                     .map_err(|e| format!("failed to INT {pid}: error {e}")),
             }

@@ -129464,7 +129464,27 @@ this was written — worth reading its commit first, because the lesson there
 was that the *failure* path is where the design decision lives: it now refuses
 rather than running a command outside the constraints it was asked for.
 
-## B-THREE-COPIES-OF-THE-KILL-CONVENTION-AND-ONE-HAD-DIVERGED (lane B, 2026-09-10) — one fixed, duplication open
+## ~~B-THREE-COPIES-OF-THE-KILL-CONVENTION-AND-ONE-HAD-DIVERGED~~ (lane B, 2026-09-10) — CLOSED
+
+**Closed by extraction.** `killconv` holds the convention:
+`exit_code_for_signal(SIGKILL) == 137`, with named constants and the inverse.
+All nine call sites across `kill`, `pgrep` and `htop` now name a signal instead
+of writing a number, and no bare `128 + N` literal remains in the lane.
+
+**The syscall stub deliberately stayed put.** Moving inline assembly between
+crates buys nothing: the three copies are identical and mechanical, and the
+defect was never there. What was worth centralising is the arithmetic **nobody
+can check by looking** — the difference between `9` and `137` is invisible at
+every point a test can reach, because the value is only observable from the
+parent of the killed process.
+
+`killconv` carries five tests including the two that would have caught the
+original bug: that `exit_code_for_signal(SIGKILL) != SIGKILL`, and that no
+status in `0..=128` is ever read back as a signal death. It also saturates a
+signal above 127 rather than wrapping into the range a program uses for its own
+exit status — the same confusion in the other direction.
+
+### Original entry
 
 **In short:** `SYS_PROCESS_KILL` (506) takes a PID and an **exit code**, not a
 signal number. The tree's convention for "killed by signal N" is the shell's

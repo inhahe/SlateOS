@@ -2029,7 +2029,14 @@ impl App {
         // and as an exit code it is indistinguishable from a program that
         // exited normally with status 9. Three copies of this call site, and
         // this was the one that diverged.
-        let ret = unsafe { syscall3(SYS_PROCESS_KILL, u64::from(pid), 137, 0) };
+        let ret = unsafe {
+            syscall3(
+                SYS_PROCESS_KILL,
+                u64::from(pid),
+                killconv::exit_code_for_signal(killconv::SIGKILL),
+                0,
+            )
+        };
 
         if ret >= 0 {
             self.status_msg = format!("Killed PID {pid} ({name})");

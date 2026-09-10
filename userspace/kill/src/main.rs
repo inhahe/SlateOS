@@ -618,7 +618,7 @@ fn execute_kill(pid: u64, action: Action, verbose: bool) -> KillResult {
             }
 
             // Fallback: direct kill with exit code 143 (SIGTERM equivalent).
-            match force_kill(pid, 143) {
+            match force_kill(pid, killconv::exit_code_for_signal(killconv::SIGTERM)) {
                 Ok(threads) => KillResult {
                     success: true,
                     message: format!("terminated {pid} ({threads} thread(s))"),
@@ -635,7 +635,7 @@ fn execute_kill(pid: u64, action: Action, verbose: bool) -> KillResult {
                 eprintln!("kill: force killing {pid}");
             }
             // No IPC attempt — go straight to the kernel.
-            match force_kill(pid, 137) {
+            match force_kill(pid, killconv::exit_code_for_signal(killconv::SIGKILL)) {
                 Ok(threads) => KillResult {
                     success: true,
                     message: format!("killed {pid} ({threads} thread(s))"),
@@ -661,7 +661,7 @@ fn execute_kill(pid: u64, action: Action, verbose: bool) -> KillResult {
                         eprintln!("kill: IPC HUP failed ({e}), falling back to terminate");
                     }
                     // Fallback: terminate with HUP-equivalent code.
-                    match force_kill(pid, 129) {
+                    match force_kill(pid, killconv::exit_code_for_signal(killconv::SIGHUP)) {
                         Ok(threads) => KillResult {
                             success: true,
                             message: format!("terminated {pid} with HUP ({threads} thread(s))"),
@@ -688,7 +688,7 @@ fn execute_kill(pid: u64, action: Action, verbose: bool) -> KillResult {
                     if verbose {
                         eprintln!("kill: IPC INT failed ({e}), falling back to terminate");
                     }
-                    match force_kill(pid, 130) {
+                    match force_kill(pid, killconv::exit_code_for_signal(killconv::SIGINT)) {
                         Ok(threads) => KillResult {
                             success: true,
                             message: format!("terminated {pid} with INT ({threads} thread(s))"),

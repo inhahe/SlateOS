@@ -56553,3 +56553,35 @@ two programs, pointing at different directories. `su` and `who` use
 `/run/sessions`, so that is the live one and `loginctl` reads the right place;
 `logind`'s store appears to be aspirational. Worth confirming that is deliberate
 before anything depends on either.
+
+
+## powerctl syncs nothing before powering off (lane B, 2026-09-10)
+
+`try_sync_filesystems` in `userspace/powerctl/src/main.rs` writes `"1"` to
+`/proc/sys/vm/sync`, and if that fails, to `/sys/kernel/sync`. **Neither path
+exists** -- neither is a real Linux interface and the kernel serves neither. So
+both writes fail, the function returns *silently*, and `direct_shutdown`,
+`direct_reboot` and `direct_hibernate` go on to power the machine down with
+dirty filesystem buffers unflushed.
+
+**`posix::sync()` is real and has been all along.** It issues the kernel's
+`SYS_FS_SYNC` (641), which is the same flush `fsync(2)` performs but global --
+a valid superset of POSIX `sync(2)`. One call replaces both invented writes.
+
+Same shape as `userspace/swapon`, fixed 2026-09-10: an invented `/proc` path
+standing in for a libc interface that already exists. The difference is the
+consequence -- swapon failed loudly and told you the wrong reason; this fails
+silently before a power-off, which is when a sync matters most.
+
+**Also in the same file, and deliberately left alone:** `direct_shutdown` and
+friends write `/proc/acpi/power` and `/sys/power/state`. Those are *best-effort
+fallbacks for when the service manager is unreachable*, they say so, and when
+nothing works they print "System NOT powered off." That is the right shape for
+a fallback and is not a defect -- only the sync is.
+
+**Found by** sweeping for writes to literal `/proc` and `/sys` paths, after
+`swapon` turned up the same pattern. 19 such sites in the lane; the other
+suspicious one is `userspace/less`, which writes `/proc/self/tty_raw` (also not
+a real path) and then does the real `termios` work unconditionally -- so the
+write is dead rather than harmful, but its doc comment describes a fallback
+branch the code does not have.

@@ -817,6 +817,29 @@ pub fn extract_entry_at_limited<R: ReadAt>(
     entry: &ZipEntry,
     limit: usize,
 ) -> core::result::Result<Vec<u8>, RangedError<R::Error>> {
+    let raw = entry_data_at(r, entry)?;
+    decompress_checked(&raw, entry, limit).map_err(RangedError::Zip)
+}
+
+/// Read one member's bytes *as stored*, without decompressing them.
+///
+/// The pass-through primitive: hand the result to
+/// [`ZipWriter::copy_entry`] and the member crosses into another archive
+/// without ever being inflated. Also what [`extract_entry_at_limited`] reads
+/// before decompressing, so the two cannot disagree about where a member's
+/// bytes are.
+///
+/// Two reads: the local header, then the extent.
+///
+/// # Errors
+///
+/// - [`RangedError::Read`] if the source fails.
+/// - [`RangedError::Zip`] with [`Error::CorruptedData`] if the local header is
+///   missing or the extent runs past the end of the source.
+pub fn entry_data_at<R: ReadAt>(
+    r: &mut R,
+    entry: &ZipEntry,
+) -> core::result::Result<Vec<u8>, RangedError<R::Error>> {
     let total_len = r.len().map_err(RangedError::Read)?;
     let header = read_exact_at(r, entry.local_header_offset, 30)?;
     if le_u32(&header, 0) != LOCAL_SIG {
@@ -837,9 +860,7 @@ pub fn extract_entry_at_limited<R: ReadAt>(
         return Err(RangedError::Zip(Error::CorruptedData));
     }
     let comp_len = usize::try_from(entry.compressed_size).map_err(|_| Error::CorruptedData)?;
-    let raw = read_exact_at(r, data_start, comp_len)?;
-
-    decompress_checked(&raw, entry, limit).map_err(RangedError::Zip)
+    read_exact_at(r, data_start, comp_len)
 }
 
 // ---------------------------------------------------------------------------
@@ -849,9 +870,14 @@ pub fn extract_entry_at_limited<R: ReadAt>(
 /// Append a central directory and its end records to `out`.
 ///
 /// Split out of [`create`] so a streaming writer can emit the same trailer
-/// without building the archive in memory first. `cd_start` is passed in
-/// rather than measured from `out`, because a stream knows where it is and a
-/// buffer's length is only the same answer by coincidence.
+/// without building the archive in memory first.
+///
+/// **`out` must be a fresh buffer**, not the archive so far. Every absolute
+/// offset written here is `cd_start + out.len()`, so passing a buffer that
+/// already holds the members would double-count them — and the result is a
+/// directory pointing at the wrong place, which no amount of reading the code
+/// makes visible. `create` therefore builds the trailer separately and appends
+/// it, exactly as a streaming caller does.
 ///
 /// `dir` must be in the order the members were written: the directory's order
 /// is the archive's order, and readers that list entries show it.
@@ -904,9 +930,11 @@ fn append_central_directory(out: &mut Vec<u8>, dir: &[DirRecord], cd_start: u64)
         out.extend_from_slice(&extra_field);
     }
 
-    // The length *after* the directory, not where it started -- these are
-    // different numbers and conflating them writes a zero-size directory.
-    let cd_end = out.len() as u64;
+    // Absolute, not relative: `out` is the whole archive when `create` calls
+    // this and only the trailer when a streaming writer does, so a bare
+    // `out.len()` means two different things. Anchoring on `cd_start` means
+    // the same thing in both.
+    let cd_end = cd_start.saturating_add(out.len() as u64);
     let cd_size = cd_end.wrapping_sub(cd_start);
     let entry_count = dir.len() as u64;
 
@@ -918,7 +946,7 @@ fn append_central_directory(out: &mut Vec<u8>, dir: &[DirRecord], cd_start: u64)
 
     if need_zip64_eocd {
         // ZIP64 end of central directory record (56 bytes).
-        let zip64_eocd_off = out.len() as u64;
+        let zip64_eocd_off = cd_start.saturating_add(out.len() as u64);
         write_u32(out, ZIP64_EOCD_SIG);
         write_u64(out, 44); // size of remaining record
         write_u16(out, 45); // version made by
@@ -973,26 +1001,37 @@ fn append_central_directory(out: &mut Vec<u8>, dir: &[DirRecord], cd_start: u64)
 /// "how much exists now" are the two numbers that, conflated during the
 /// previous extraction, made every archive declare a zero-length central
 /// directory while 22 tests stayed green.
-fn append_local_and_data(out: &mut Vec<u8>, at_offset: u64, entry: &ZipWriteEntry) -> DirRecord {
-    let crc32 = if entry.data.is_empty() {
-        0u32
-    } else {
-        crc32::crc32(&entry.data)
-    };
+/// What the ZIP format records about one member, independent of where its
+/// bytes came from.
+///
+/// Exists so [`append_member`] is the single definition of a local header and
+/// its central-directory record. A member being compressed now and a member
+/// copied across from another archive differ only in how these fields were
+/// obtained, and nothing downstream of here should be able to tell.
+struct MemberMeta<'a> {
+    name: &'a [u8],
+    method: u16,
+    crc32: u32,
+    comp_size: u64,
+    uncomp_size: u64,
+    dos_datetime: u32,
+}
 
-    let (compressed, method) = if entry.store_only || entry.data.is_empty() {
-        (entry.data.clone(), 0u16)
-    } else {
-        let deflated = deflate::deflate(&entry.data);
-        if deflated.len() < entry.data.len() {
-            (deflated, 8u16)
-        } else {
-            (entry.data.clone(), 0u16)
-        }
-    };
-
-    let uncomp_size = entry.data.len() as u64;
-    let comp_size = compressed.len() as u64;
+/// Append a member's local header, name, ZIP64 extra field and `data` to
+/// `out`, returning its central-directory record.
+///
+/// `data` is written verbatim: already compressed if `meta.method` says so.
+/// That is what lets a member be copied between archives without inflating it.
+fn append_member(
+    out: &mut Vec<u8>,
+    at_offset: u64,
+    meta: &MemberMeta<'_>,
+    data: &[u8],
+) -> DirRecord {
+    let method = meta.method;
+    let crc32 = meta.crc32;
+    let comp_size = meta.comp_size;
+    let uncomp_size = meta.uncomp_size;
     let header_offset = at_offset;
 
     // Determine if ZIP64 extra field is needed for this entry.
@@ -1043,27 +1082,65 @@ fn append_local_and_data(out: &mut Vec<u8>, at_offset: u64, entry: &ZipWriteEntr
     // would need the same calendar -- see design-decisions.md §621 and
     // `ZipWriteEntry::dos_datetime`.  The read side does range-check, which
     // is where a bad pair is actually consumed.
-    write_u16(out, (entry.dos_datetime & 0xFFFF) as u16); // mod time
-    write_u16(out, (entry.dos_datetime >> 16) as u16); // mod date
+    write_u16(out, (meta.dos_datetime & 0xFFFF) as u16); // mod time
+    write_u16(out, (meta.dos_datetime >> 16) as u16); // mod date
     write_u32(out, crc32);
     write_u32(out, comp32);
     write_u32(out, uncomp32);
-    write_u16(out, entry.name.len() as u16);
+    write_u16(out, meta.name.len() as u16);
     write_u16(out, extra_field.len() as u16);
-    out.extend_from_slice(entry.name.as_slice());
+    out.extend_from_slice(meta.name);
     out.extend_from_slice(&extra_field);
-    out.extend_from_slice(&compressed);
+    out.extend_from_slice(data);
 
     DirRecord {
-        name: entry.name.clone(),
+        name: meta.name.to_vec(),
         method,
         crc32,
         comp_size,
         uncomp_size,
         header_offset,
         need_zip64,
-        dos_datetime: entry.dos_datetime,
+        dos_datetime: meta.dos_datetime,
     }
+}
+
+fn append_local_and_data(out: &mut Vec<u8>, at_offset: u64, entry: &ZipWriteEntry) -> DirRecord {
+    let crc32 = if entry.data.is_empty() {
+        0u32
+    } else {
+        crc32::crc32(&entry.data)
+    };
+
+    let (compressed, method) = if entry.store_only || entry.data.is_empty() {
+        (entry.data.clone(), 0u16)
+    } else {
+        let deflated = deflate::deflate(&entry.data);
+        if deflated.len() < entry.data.len() {
+            (deflated, 8u16)
+        } else {
+            (entry.data.clone(), 0u16)
+        }
+    };
+
+    let uncomp_size = entry.data.len() as u64;
+    let comp_size = compressed.len() as u64;
+
+    // The format itself lives in `append_member`, so a freshly compressed
+    // member and one copied from another archive cannot disagree about it.
+    append_member(
+        out,
+        at_offset,
+        &MemberMeta {
+            name: entry.name.as_slice(),
+            method,
+            crc32,
+            comp_size,
+            uncomp_size,
+            dos_datetime: entry.dos_datetime,
+        },
+        &compressed,
+    )
 }
 
 /// Create a ZIP archive in memory from a list of entries.
@@ -1089,7 +1166,9 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
     // The trailer is shared with the streaming writer; see
     // `append_central_directory`.
     let cd_start = archive.len() as u64;
-    append_central_directory(&mut archive, &directory_entries, cd_start);
+    let mut trailer = Vec::new();
+    append_central_directory(&mut trailer, &directory_entries, cd_start);
+    archive.extend_from_slice(&trailer);
     archive
 }
 
@@ -1128,6 +1207,167 @@ struct DirRecord {
 // panicking would turn a failing test into a passing one. This block was simply
 // never added here, which left 76 warnings standing in a workspace whose value
 // depends on a warning meaning something.
+// ---------------------------------------------------------------------------
+// Public API — streaming writing (WriteStream / ZipWriter)
+// ---------------------------------------------------------------------------
+
+/// A sink that takes bytes in order.
+///
+/// Implemented by the caller, for the same reason [`ReadAt`] is: this crate is
+/// `no_std` and has no file of its own. `Self::Error` is yours and comes back
+/// unchanged, so a failed write is never reported as a malformed archive.
+pub trait WriteStream {
+    /// Whatever writing this sink can fail with.
+    type Error;
+
+    /// Write all of `buf`, or fail.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the underlying sink fails with.
+    fn write_all(&mut self, buf: &[u8]) -> core::result::Result<(), Self::Error>;
+}
+
+/// `Vec<u8>` is a sink that cannot fail, so [`create`] and a streaming caller
+/// can share one code path.
+impl WriteStream for Vec<u8> {
+    type Error = core::convert::Infallible;
+
+    fn write_all(&mut self, buf: &[u8]) -> core::result::Result<(), Self::Error> {
+        self.extend_from_slice(buf);
+        Ok(())
+    }
+}
+
+/// Build an archive without holding it in memory.
+///
+/// [`create`] is the whole-archive form and is fine when the result is small.
+/// This is for the case lane C measured, where it is not: rebuilding an archive
+/// with `create` holds the old one, every member's *plaintext*, and the new one
+/// at once, so the peak is not the archive's size but roughly
+/// `old + Σ uncompressed + new` — and the middle term is unbounded, since a
+/// 500 MB archive of zeros carries hundreds of gigabytes of plaintext and still
+/// passes any check made on the file's size.
+///
+/// Two things remove it. Members stream out as they are added, so the new
+/// archive is never accumulated; and [`ZipWriter::copy_entry`] takes a member's
+/// *compressed* bytes and passes them through untouched, so a member being
+/// carried across from another archive is never inflated at all. Peak becomes
+/// one member, and for copied members one member's compressed size.
+///
+/// The directory is buffered, because ZIP puts it at the end and there is no
+/// way round that — one `DirRecord` per member, not one member's data.
+pub struct ZipWriter<W: WriteStream> {
+    sink: W,
+    /// Bytes written so far, which is where the next member begins. Counted
+    /// rather than measured: a stream has no length to ask for.
+    offset: u64,
+    dir: Vec<DirRecord>,
+}
+
+impl<W: WriteStream> ZipWriter<W> {
+    /// Start writing an archive into `sink`.
+    pub const fn new(sink: W) -> Self {
+        Self {
+            sink,
+            offset: 0,
+            dir: Vec::new(),
+        }
+    }
+
+    /// How many bytes have been written so far.
+    #[must_use]
+    pub const fn bytes_written(&self) -> u64 {
+        self.offset
+    }
+
+    /// How many members have been added so far.
+    #[must_use]
+    pub fn member_count(&self) -> usize {
+        self.dir.len()
+    }
+
+    /// Whether no member has been added yet.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.dir.is_empty()
+    }
+
+    /// Compress `entry` if worthwhile and write it out.
+    ///
+    /// Exactly what [`create`] does per member, including the store-vs-deflate
+    /// decision, because it is the same function underneath.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the sink fails with.
+    pub fn add_entry(&mut self, entry: &ZipWriteEntry) -> core::result::Result<(), W::Error> {
+        let mut buf = Vec::new();
+        let rec = append_local_and_data(&mut buf, self.offset, entry);
+        self.emit(&buf, rec)
+    }
+
+    /// Write a member straight across from another archive, without inflating
+    /// it.
+    ///
+    /// `compressed` is the member's stored bytes exactly as
+    /// [`entry_data_at`] returned them, and `entry` is its record from the
+    /// source archive. The CRC, the sizes and the compression method are the
+    /// source's, unexamined and unchanged — which is the whole point: nothing
+    /// here decompresses, recompresses or re-checksums, so carrying a member
+    /// between archives costs its compressed size and no CPU.
+    ///
+    /// Because nothing is verified, a corrupt member is copied faithfully as a
+    /// corrupt member. Verify on the way in — [`extract_entry_at`] does — if the
+    /// source is not trusted.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the sink fails with.
+    pub fn copy_entry(
+        &mut self,
+        entry: &ZipEntry,
+        compressed: &[u8],
+    ) -> core::result::Result<(), W::Error> {
+        let mut buf = Vec::new();
+        let rec = append_member(
+            &mut buf,
+            self.offset,
+            &MemberMeta {
+                name: entry.name.as_slice(),
+                method: entry.method,
+                crc32: entry.crc32,
+                comp_size: entry.compressed_size,
+                uncomp_size: entry.uncompressed_size,
+                dos_datetime: entry.dos_datetime,
+            },
+            compressed,
+        );
+        self.emit(&buf, rec)
+    }
+
+    /// Push one member's bytes and remember its record.
+    fn emit(&mut self, bytes: &[u8], rec: DirRecord) -> core::result::Result<(), W::Error> {
+        self.sink.write_all(bytes)?;
+        self.offset = self.offset.saturating_add(bytes.len() as u64);
+        self.dir.push(rec);
+        Ok(())
+    }
+
+    /// Write the central directory and end records, and give the sink back.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the sink fails with.
+    pub fn finish(mut self) -> core::result::Result<W, W::Error> {
+        let mut trailer = Vec::new();
+        append_central_directory(&mut trailer, &self.dir, self.offset);
+        self.sink.write_all(&trailer)?;
+        self.offset = self.offset.saturating_add(trailer.len() as u64);
+        Ok(self.sink)
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -1820,5 +2060,226 @@ mod tests {
             Err(RangedError::Zip(Error::CorruptedData)) => {}
             other => panic!("expected Zip(CorruptedData) from the CRC check, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming writing (ZipWriter)
+    // -----------------------------------------------------------------------
+
+    /// A sink that records what it was given and can be told to fail, so the
+    /// tests can check that a sink failure stays a sink failure.
+    #[derive(Debug)]
+    struct VecSink {
+        bytes: Vec<u8>,
+        writes: usize,
+        fail_after: Option<usize>,
+    }
+
+    /// A sink error of a type this crate knows nothing about.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct DiskFull(u16);
+
+    impl VecSink {
+        fn new() -> Self {
+            Self {
+                bytes: Vec::new(),
+                writes: 0,
+                fail_after: None,
+            }
+        }
+        fn failing_after(n: usize) -> Self {
+            Self {
+                bytes: Vec::new(),
+                writes: 0,
+                fail_after: Some(n),
+            }
+        }
+    }
+
+    impl WriteStream for VecSink {
+        type Error = DiskFull;
+        fn write_all(&mut self, buf: &[u8]) -> core::result::Result<(), DiskFull> {
+            if let Some(n) = self.fail_after {
+                if self.writes >= n {
+                    return Err(DiskFull(28));
+                }
+            }
+            self.writes += 1;
+            self.bytes.extend_from_slice(buf);
+            Ok(())
+        }
+    }
+
+    fn sample_entries() -> Vec<ZipWriteEntry> {
+        vec![
+            ZipWriteEntry {
+                name: b"a.txt".to_vec(),
+                data: b"hello world".to_vec(),
+                store_only: false,
+                dos_datetime: 0,
+            },
+            ZipWriteEntry {
+                name: b"dir/b.bin".to_vec(),
+                data: vec![7u8; 5000],
+                store_only: false,
+                dos_datetime: 0,
+            },
+            ZipWriteEntry {
+                name: b"c.raw".to_vec(),
+                data: b"stored".to_vec(),
+                store_only: true,
+                dos_datetime: 0,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_streamed_archive_is_byte_identical_to_create() {
+        // The strongest statement available: the two writers share
+        // append_member and append_central_directory, so if they ever disagree
+        // about a single byte, one of them has grown its own copy of the format.
+        let entries = sample_entries();
+        let expected = create(&entries);
+
+        let mut w = ZipWriter::new(VecSink::new());
+        for e in &entries {
+            w.add_entry(e).expect("add");
+        }
+        let sink = w.finish().expect("finish");
+
+        assert_eq!(
+            sink.bytes, expected,
+            "streamed archive differs from create()'s"
+        );
+    }
+
+    #[test]
+    fn a_streamed_archive_is_readable_by_both_readers() {
+        let entries = sample_entries();
+        let mut w = ZipWriter::new(VecSink::new());
+        for e in &entries {
+            w.add_entry(e).expect("add");
+        }
+        let archive = w.finish().expect("finish").bytes;
+
+        let sliced = parse(&archive).expect("slice parse");
+        assert_eq!(sliced.len(), 3);
+        let mut src = SliceSource::new(archive.clone());
+        let ranged = parse_at(&mut src).expect("ranged parse");
+        assert_eq!(ranged.len(), 3);
+        for (i, e) in sliced.iter().enumerate() {
+            assert_eq!(
+                extract_entry(&archive, e).expect("extract"),
+                entries[i].data
+            );
+        }
+    }
+
+    #[test]
+    fn copy_entry_carries_a_member_across_without_inflating_it() {
+        // The point of the write half. The member is read as stored bytes and
+        // written as stored bytes; nothing in between ever holds its plaintext.
+        let entries = sample_entries();
+        let source = create(&entries);
+        let source_records = parse(&source).expect("parse source");
+
+        let mut src = SliceSource::new(source.clone());
+        let mut w = ZipWriter::new(VecSink::new());
+        for rec in &source_records {
+            let raw = entry_data_at(&mut src, rec).expect("stored bytes");
+            // The bytes handed over are the compressed ones, which for the
+            // 5000-byte run is far smaller than the plaintext: that difference
+            // is the memory this API exists to not spend.
+            assert_eq!(raw.len() as u64, rec.compressed_size);
+            w.copy_entry(rec, &raw).expect("copy");
+        }
+        let copied = w.finish().expect("finish").bytes;
+
+        // The copy is a valid archive with the same contents.
+        let copied_records = parse(&copied).expect("parse copy");
+        assert_eq!(copied_records.len(), source_records.len());
+        for (c, s) in copied_records.iter().zip(source_records.iter()) {
+            assert_eq!(c.name, s.name);
+            assert_eq!(c.method, s.method, "a copy must not re-choose the codec");
+            assert_eq!(c.crc32, s.crc32, "a copy must not re-checksum");
+            assert_eq!(c.compressed_size, s.compressed_size);
+            assert_eq!(c.uncompressed_size, s.uncompressed_size);
+        }
+        for (i, rec) in copied_records.iter().enumerate() {
+            assert_eq!(
+                extract_entry(&copied, rec).expect("extract"),
+                entries[i].data
+            );
+        }
+    }
+
+    #[test]
+    fn copy_entry_of_a_deflated_member_really_was_deflated() {
+        // Guards the assertion above from passing vacuously: if every member
+        // happened to be stored, "the codec was preserved" would be trivially
+        // true and the pass-through untested.
+        let entries = sample_entries();
+        let source = create(&entries);
+        let records = parse(&source).expect("parse");
+        let deflated = records.iter().filter(|r| r.method == 8).count();
+        assert!(
+            deflated > 0,
+            "fixture has no deflated member; the copy test proves nothing"
+        );
+    }
+
+    #[test]
+    fn a_sink_failure_is_reported_as_the_sink_s_own_error() {
+        let entries = sample_entries();
+        let mut w = ZipWriter::new(VecSink::failing_after(0));
+        match w.add_entry(&entries[0]) {
+            Err(DiskFull(28)) => {}
+            other => panic!("expected the sink's own error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sink_failure_in_finish_is_not_lost() {
+        // finish writes the trailer, which is the one write a caller is most
+        // likely to forget can fail -- an archive missing its directory is not
+        // an archive.
+        let entries = sample_entries();
+        let mut w = ZipWriter::new(VecSink::failing_after(3));
+        for e in &entries {
+            w.add_entry(e).expect("add");
+        }
+        match w.finish() {
+            Err(DiskFull(28)) => {}
+            other => panic!("expected the sink's error from finish, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_archive_still_has_a_directory() {
+        let w: ZipWriter<VecSink> = ZipWriter::new(VecSink::new());
+        assert!(w.is_empty());
+        let bytes = w.finish().expect("finish").bytes;
+        assert_eq!(parse(&bytes).expect("parse empty").len(), 0);
+        assert_eq!(
+            bytes,
+            create(&[]),
+            "an empty stream differs from create(&[])"
+        );
+    }
+
+    #[test]
+    fn bytes_written_tracks_the_sink() {
+        let entries = sample_entries();
+        let mut w = ZipWriter::new(VecSink::new());
+        for e in &entries {
+            w.add_entry(e).expect("add");
+        }
+        let before_trailer = w.bytes_written();
+        assert_eq!(w.member_count(), 3);
+        let bytes = w.finish().expect("finish").bytes;
+        // The counter is what the central directory's offset is computed from,
+        // so if it drifted from reality the directory would point at nothing.
+        assert!(before_trailer < bytes.len() as u64);
+        assert_eq!(parse(&bytes).expect("parse").len(), 3);
     }
 }

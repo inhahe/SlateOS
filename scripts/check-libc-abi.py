@@ -87,17 +87,18 @@ MUSL_TARGET = "x86_64-linux-musl"
 # Keyed by the C type name as it appears in the assertion message, because that
 # is what the compiler gives back. Every entry must name a known-issues key.
 KNOWN_MISMATCH = {
-    "struct aiocb": "B-AIOCB-FIELD-ORDER-IS-NOT-MUSLS -- musl is 136 bytes and "
-                    "orders the fields fildes/lio_opcode/reqprio/buf/nbytes/"
-                    "sigevent/offset; ours is 168 and starts fildes/offset/buf",
-    "struct sysinfo": "B-SYSINFO-IS-368-BYTES-AGAINST-MUSLS-112 -- every counter "
-                      "widened to u64 where musl uses long plus a __f pad",
-    "struct utmpx": "B-UTMPX-IS-400-BYTES-AGAINST-MUSLS-384 -- ut_tv lands at 344 "
-                    "rather than 340, so everything after it is shifted",
+    "struct aiocb": "B-AIOCB-FIELD-ORDER-IS-NOT-MUSLS -- ours 136, musl 168. "
+                    "musl: fildes 0, lio_opcode 4, reqprio 8, buf 16, "
+                    "nbytes 24, sigevent 32 (64 bytes), 32 bytes of musl's own "
+                    "state, offset 128, 32 more to 168",
     "struct msqid_ds": "B-SYSV-IPC-DS-STRUCTS-FLATTEN-IPC-PERM-AND-COME-UP-SHORT "
-                       "-- 80 against musl's 120",
+                       "-- ours 80, musl 120. musl: msg_perm(48) 0, stime 48, "
+                       "rtime 56, ctime 64, cbytes 72, qnum 80, qbytes 88, "
+                       "lspid 96, lrpid 100, __unused[2] 104",
     "struct shmid_ds": "B-SYSV-IPC-DS-STRUCTS-FLATTEN-IPC-PERM-AND-COME-UP-SHORT "
-                       "-- 72 against musl's 112",
+                       "-- ours 72, musl 112. musl: shm_perm(48) 0, segsz 48, "
+                       "atime 56, dtime 64, ctime 72, cpid 80, lpid 84, "
+                       "nattch 88, __unused[2] 96",
 }
 
 

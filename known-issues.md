@@ -126644,20 +126644,21 @@ Both now assert 128 against musl's own number.
 ## B-AIOCB-FIELD-ORDER-IS-NOT-MUSLS (lane B, 2026-09-09) -- KNOWN, unfixed
 
 **In short:** the structure used to queue an asynchronous read or write has its
-fields in a different order from the C library's, and is the wrong size.
+fields in a different order from the C library's, and is smaller.
 
 | | ours | musl |
 |---|---|---|
-| `sizeof(struct aiocb)` | 168 | 136 |
+| `sizeof(struct aiocb)` | 136 | **168** |
 | `aio_offset` | 8 | 128 |
 | `aio_reqprio` | 32 | 8 |
 | `aio_sigevent` | 36 | 32 |
 | `aio_lio_opcode` | 100 | 4 |
 
 musl orders it `aio_fildes, aio_lio_opcode, aio_reqprio, aio_buf, aio_nbytes,
-aio_sigevent, …, aio_offset`; ours opens `aio_fildes, aio_offset, aio_buf`.
+aio_sigevent`, then 32 bytes of its own private state, then `aio_offset` at
+128 and more private state to 168. Ours opens `aio_fildes, aio_offset, aio_buf`.
 `aio_sigevent` is also an opaque `[u8; 64]` placeholder here rather than a real
-`struct sigevent`.
+`struct sigevent` — which is at least the right *size*, measured.
 
 **Where.** `posix/src/aio.rs`.
 
@@ -126672,42 +126673,66 @@ it on every push without refusing, and which **fails** if it ever starts
 passing without the entry being deleted.
 
 
-## B-SYSINFO-IS-368-BYTES-AGAINST-MUSLS-112 (lane B, 2026-09-09) -- KNOWN, unfixed
+## B-SYSINFO-IS-112-BYTES-AGAINST-MUSLS-368 (lane B, 2026-09-09) -- FIXED the same day
 
-**In short:** the structure `sysinfo()` fills in is more than three times the
-size of the C library's, so a caller's 112-byte variable is written 368 bytes
-of data -- **256 bytes past the end of it**.
+**In short:** the structure `sysinfo()` fills in is a third of the size of the
+C library's, so a caller's 368-byte variable gets 112 bytes written and 256
+left as it found them.
 
 **Where.** `posix/src/unistd.rs`, `struct Sysinfo`.
 
-**This is the one entry here that can corrupt a caller's stack**, which is why
-it is the first of the three to fix. Every counter was widened to `u64` where
-musl uses `unsigned long` for some and `unsigned short`/`unsigned int` for
-`procs` and `mem_unit`, and musl's trailing `char __f[]` pad is absent.
+**Every named field is at the right offset**, measured: `uptime` 0, `loads` 8,
+`totalram` 32 … `mem_unit` 104. What is missing is musl's trailing
+`char __reserved[256]`, which is the whole of the difference. So the fix is one
+field, and the effect until then is an under-fill rather than an overrun.
 
-**Why it is recorded rather than fixed today.** Same reason as the others --
-scope -- but with a shorter fuse: it should be fixed before anything calls
-`sysinfo()` from C. Nothing does today.
+**Correction, and it is mine.** This entry first said the reverse — that ours
+was 368 against musl's 112, and that it therefore wrote 256 bytes *past* the
+caller's object. That reads the gate's `'368 == 112'` the wrong way round: the
+assertion is `sizeof(C type) == <our size>`, so the left number is musl's. A
+confident direction stated without re-reading the numbers is the exact defect
+this whole family of entries is about, committed while writing them up.
 
-**Registered in `KNOWN_MISMATCH`.**
+**Fixed** by adding musl's `__reserved[256]` — one field, as predicted, and
+`u8` rather than a wider word so it lands at 108 where musl puts it rather
+than at 112 behind an alignment we would have invented.
 
 
-## B-UTMPX-IS-400-BYTES-AGAINST-MUSLS-384 (lane B, 2026-09-09) -- KNOWN, unfixed
+## B-UTMPX-IS-384-BYTES-AGAINST-MUSLS-400 (lane B, 2026-09-09) -- FIXED the same day
 
-**In short:** the login-record structure is 16 bytes larger than the C
-library's and its last three fields are at the wrong offsets, so `who`, `last`
+**In short:** the login-record structure is 16 bytes smaller than the C
+library's and its last two fields are at the wrong offsets, so `who`, `last`
 and anything reading `/var/run/utmp` through the C API sees the time and
 address fields shifted.
 
 | | ours | musl |
 |---|---|---|
-| `sizeof(struct utmpx)` | 400 | 384 |
-| `ut_tv` | 344 | 340 |
-| `ut_addr_v6` | 360 | 348 |
+| `sizeof(struct utmpx)` | 384 | **400** |
+| `ut_tv` | 340 | **344** |
+| `ut_addr_v6` | 348 | **360** |
+
+**The cause, measured rather than assumed:** musl's `ut_tv` is a full
+`struct timeval` — **16 bytes**, `time_t` plus `suseconds_t`, both 8 — and ours
+is a pair of `i32`s modelled on glibc's `__int32_t` variant. That is 8 bytes
+short and 8-aligned rather than 4, which is where both the offset shift and the
+missing 16 bytes come from; musl also carries `char __unused[20]` at the end.
 
 Everything up to and including `ut_session` is at the correct offset, so the
 type, pid, line, id, user and host all read correctly -- which is why nothing
 noticed.
+
+**Correction:** this entry first gave the two columns the wrong way round.
+
+**Fixed** by widening `UtmpxTimeval` to two `i64`s, which is a real
+`struct timeval`. The trailing `__unused[20]` turned out to be **already
+present**, as `_reserved`, documented "reserved for future use" — which is what
+it looks like from this side and not what it is. It is now documented as musl's.
+
+Worth recording: the first attempt at this fix *added* a second 20-byte field,
+because the struct was read as far as the fields the gate had named and no
+further. The gate caught it immediately — 416 against 400 — which is the third
+time in two days that reading only as far as the question took me produced a
+confident wrong edit.
 
 **Where.** `posix/src/utmpx.rs`.
 

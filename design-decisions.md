@@ -70779,10 +70779,21 @@ the exemption behind, and an exemption for a defect that no longer exists is
 how an exemption list starts covering real ones. Every entry must name a
 `known-issues.md` key.
 
-Five types are in it: `aiocb` (wrong field order *and* size), `sysinfo` (368
-against 112 — the only one here that writes past a caller's object), `utmpx`
-(400 against 384, last three fields shifted), and the two System V IPC status
-structures, which flatten `ipc_perm` and come up short.
+Five types are in it, and **all five are ours being smaller than musl's**:
+`aiocb` (136 against 168, and the field order differs too), `sysinfo` (112
+against 368 — every named field at the right offset, musl's trailing
+`__reserved[256]` absent), `utmpx` (384 against 400, because musl's `ut_tv` is a
+full 16-byte `struct timeval` and ours is two `i32`s), and the two System V IPC
+status structures, which flatten `ipc_perm` and come up short.
+
+**The first version of this paragraph had three of those backwards**, including
+a claim that `sysinfo` wrote 256 bytes *past* the caller's object. The gate
+prints `'368 == 112'`, and the assertion is `sizeof(C type) == <our size>`, so
+the left number is musl's — read the other way it inverts every one of these.
+Recorded rather than quietly fixed because it is the same defect as everything
+else in §1010 and §1011: a confident direction stated without re-reading the
+number it came from, committed *while writing up* a family of bugs of exactly
+that kind.
 
 **Fixed rather than listed: `fd_set`.** 32 bytes against the C library's 128,
 so every `select()` read and wrote the front quarter of the caller's own
@@ -70830,7 +70841,51 @@ The summary line was also saying "0 mismatches" while the lines above it listed
 five. A summary that contradicts its own detail trains the reader to skip the
 detail.
 
-**Against it, honestly:** 62 of 98 are checked, 5 of those are known-bad and
+### Two of the five fixed, and the same conflation a third time
+
+`sysinfo` and `utmpx` are closed. Both fixes were one field, once the layouts
+were **measured** rather than reasoned about — a program compiled with
+`zig cc --target=x86_64-linux-musl` and run under WSL, printing every offset.
+That took one command and settled four types at once; the two left are left
+because they need structural work, not because anything about them is unknown.
+Their measured layouts are recorded in `KNOWN_MISMATCH` itself, so the next
+attempt starts from numbers rather than from a header.
+
+`sysinfo` produced the kernel/libc conflation for the **third** time in two
+days. Its test read:
+
+```rust
+// Linux struct sysinfo is 112 bytes on x86_64.
+assert_eq!(core::mem::size_of::<Sysinfo>(), 112);
+```
+
+That sentence is true. The kernel's `struct sysinfo` ends
+`char _f[20-2*sizeof(long)-sizeof(int)]` and comes to 112. musl's userspace one
+ends `char __reserved[256]` and comes to 368. Same name, same header name, two
+structures — exactly `sigaction` again, and exactly `regmatch_t` again.
+
+Which boundary governs was **checked** this time rather than assumed:
+`unistd::sysinfo` fills the caller's structure field by field from
+`SYS_CLOCK_MONOTONIC` and a process count, and never hands it to the kernel. So
+the only boundary is with C, and musl's number wins. Had it been a struct we
+pass *to* the kernel, 112 would have been right and the gate's entry would have
+been the error.
+
+### And one I got wrong while fixing it
+
+The first `utmpx` patch *added* musl's trailing `__unused[20]`. The struct
+already had it, as `_reserved`, documented "reserved for future use" — which is
+what it looks like from this side and not what it is. The result was 416 against
+400, caught by the gate on the next run.
+
+The cause is the same one this whole entry keeps circling: the struct was read
+as far as the fields the gate had named and no further. Three times in two days
+now, and the pattern is specific enough to state as a rule — **when a tool
+reports a defect at a location, the unit of reading is the whole declaration,
+not the lines the tool pointed at.** The gate catching it in seconds is the
+argument for the gate; needing it caught is the argument for the rule.
+
+**Against it, honestly:** 62 of 98 are checked, 3 of those are known-bad and
 unfixed, and 17 have still never been looked at. (This paragraph has been
 rewritten three times in one session — 15, 28, 42, 62 — which is the ratchet
 working as intended rather than a correction to it. The number in it will keep

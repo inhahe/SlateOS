@@ -1,5 +1,5 @@
 #!/bin/sh
-# Nineteen gates at the push boundary. Any one of them aborts the push.
+# Twenty gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -626,6 +626,64 @@ if [ "$skip_readdef" != "1" ]; then
             fi
         done
     fi
+fi
+
+# ---------------------------------------------------------------------------
+# A tooling script's own suite, for every scripts/*.py being pushed.
+#
+# 22 scripts have a paired scripts/test-<name>.py. main went red three times on
+# 2026-09-10 because somebody edited one and ran only the checker's
+# `--selftest` -- once me, twice lane A. Both are worth running and they answer
+# DIFFERENT questions: `--selftest` asks whether the checker's rule still holds
+# against fixtures it carries, and `test-<name>.py` asks whether the script
+# still behaves -- its exit codes, its output format, the advice it prints.
+# Lane A's failure was in advice text, which no fixture of the checker's own
+# could have seen: the advice said "insert after line <heading>", so following
+# it produced the violation the checker then reported.
+#
+# Targeted, not blanket. All 35 suites take over ten minutes, and a gate that
+# adds ten minutes to every push is a gate that gets bypassed. An ordinary push
+# runs none of these.
+# ---------------------------------------------------------------------------
+skip_suites=0
+touches scripts/ || skip_suites=1
+[ -n "${pushed_shas# }" ] || skip_suites=1
+note_gate tooling-suites "$skip_suites"
+
+suites_failed=0
+if [ "$skip_suites" != "1" ]; then
+    # The same revision range `touches` uses, turned into file names.
+    # `git diff` does not understand `--not --remotes`; that is rev-list
+    # syntax, so the commits are listed first and then asked for their paths.
+    # shellcheck disable=SC2086
+    changed_scripts=$(git rev-list $pushed_shas --not --remotes="$remote_name"                           2>/dev/null                       | xargs -r git diff-tree --no-commit-id --name-only -r                           2>/dev/null                       | grep -E '^scripts/[^/]+\.py$' | sort -u)
+    for f in $changed_scripts; do
+        base=$(basename "$f")
+        case "$base" in
+            test-*) continue ;;   # a suite is not its own subject
+        esac
+        suite="${repo_root:-.}/scripts/test-$base"
+        [ -f "$suite" ] || continue
+        if ! run_checker "suite-$base" "$py" "$suite"; then
+            suites_failed=1
+        fi
+    done
+fi
+
+if [ "$suites_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a tooling script's own test suite fails.
+
+The script's `--selftest` passing does not cover this. That asks whether the
+checker's RULE still holds against fixtures the checker carries; the suite
+above asks whether the SCRIPT still behaves — its exit codes, its output
+format, and the advice it prints to whoever it refuses.
+
+Three of 2026-09-10's red builds were exactly this, each found seventeen
+minutes into a boot test by a suite that runs in seconds here.
+EOF
+    fail=1
 fi
 
 if [ "$readdef_failed" = "1" ]; then

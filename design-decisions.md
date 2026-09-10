@@ -66505,8 +66505,41 @@ grant "may rename the machine every other process on it reports", and a bit that
 means two things is a bit that gets granted for one of them. `Rights` is a `u64`
 with bits to spare.
 
-**The cost, stated plainly, because it is real.** Nothing grants
-`(Process, SET_HOSTNAME)` yet, so `sethostname` goes from returning `0` and
+**CORRECTION, 2026-09-10, and it invalidates the paragraph that followed.**
+Lane B checked this claim and it is false; I verified their four findings against
+my own tree rather than taking them:
+
+* `Rights::ALL` is `Self(u64::MAX)` -- every bit, not an enumeration of the
+  declared rights -- so it contained `1 << 20` the instant `SET_HOSTNAME` was
+  declared (`kernel/src/cap/rights.rs:205`).
+* `kernel/src/main.rs:9542` grants the init process
+  `(ResourceType::Process, 0, Rights::ALL)`, class-wide.
+* `pcb::has_capability_type` takes no `resource_id` and never consults one, so a
+  class-wide grant satisfies it.
+* `pcb.rs:1674` -- fork does `parent.cap_table.clone()`, while a fresh
+  `Process::new` starts empty.
+
+**So the reachable set was never empty: it is init, plus everything forked from
+it that nothing has narrowed since.** PID 1 passed this gate the moment the bit
+existed. The original paragraph read:
+
+> Nothing grants `(Process, SET_HOSTNAME)` yet, so `sethostname` goes from
+> returning `0` and lying to returning `PermissionDenied` for everyone.
+
+which was wrong in both halves, and wrong in the direction that matters: I
+recorded a privileged write as unreachable when it was reachable from PID 1 and
+its descendants. The hazard is general and is recorded separately in
+`known-issues.md` -> `TD-A-A-NEW-RIGHT-IS-GRANTED-BEFORE-ANYONE-DECIDES-WHO-HOLDS-IT`:
+because `ALL` is a wildcard rather than a list, **every right added to this enum
+in future is granted to init retroactively, before the decision about who should
+hold it is taken.**
+
+What survives of the original reasoning: the capability is still the right gate,
+and still better than the `uid == 0` check the Linux-ABI handler uses. What does
+not survive is the claim that it was inert.
+
+**The cost as originally stated, now known to be wrong.** It read that nothing
+grants `(Process, SET_HOSTNAME)`, so `sethostname` goes from returning `0` and
 lying to returning `PermissionDenied` for everyone. The grant side is `init`'s,
 which is lane B's tree. That is a worse *user-visible* outcome than "it works"
 and a better one than "it lies", and it is the state lane B asked for when they

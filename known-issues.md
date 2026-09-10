@@ -128290,6 +128290,134 @@ bytes, the way `sysfs.rs`'s `version`/`ostype`/`osrelease` tests already do
 after the 2026-08-22 fix in that same file -- the pattern is present two
 hundred lines above the bug.
 
+## TD-A-A-NEW-RIGHT-IS-GRANTED-BEFORE-ANYONE-DECIDES-WHO-HOLDS-IT (lane A, 2026-09-10) — **open**
+
+**In short:** the kernel hands out permissions as tokens, and the most privileged
+process is given "all of them" as a wildcard rather than as a list. So the moment
+a programmer invents a *new* permission, that process already holds it — before
+anyone has decided whether it should. It happened today: a right was added to gate
+renaming the machine, its author recorded that nothing held it yet, and process
+number 1 held it immediately.
+
+### The four facts, each verified in the tree
+
+| | where | what |
+|---|---|---|
+| `Rights::ALL` is a wildcard | `kernel/src/cap/rights.rs:205` | `pub const ALL: Self = Self(u64::MAX)` — every bit, not a union of the declared rights |
+| init is granted it class-wide | `kernel/src/main.rs:9542` | `(ResourceType::Process, 0, Rights::ALL)` |
+| the check ignores the resource id | `kernel/src/proc/pcb.rs` | `has_capability_type(pid, type, rights)` takes no id, so a class-wide grant satisfies any per-object query |
+| fork clones the table | `kernel/src/proc/pcb.rs:1674` | `parent.cap_table.clone()`; a fresh `Process::new` starts empty |
+
+Together: **the holder set for any new right is init plus every descendant of init
+that nothing has narrowed.** Not empty, and not small.
+
+### Why this is the interesting shape rather than a typo
+
+`ALL = u64::MAX` is defensible on its own terms — init is the root process and is
+meant to have broad authority. What makes it a defect is the *interaction with
+adding a bit*: a wildcard grant cannot distinguish "every right that exists" from
+"every right that will ever exist", so the decision about who holds a new
+privilege is taken by whoever declares the constant, silently, and usually without
+noticing. `Rights::DISTINCT` exists a few lines above and already enumerates the
+declared rights, so the information needed to do better is present.
+
+Found because lane B disputed a claim in `design-decisions.md` §927 — that nothing
+granted `SET_HOSTNAME` — and was right. §927 now carries the correction.
+
+### What the fix looks like, and why it is not applied here
+
+Three options, and the choice is a capability-model decision rather than a bug
+fix, which is why this is an entry and not a commit:
+
+1. **An explicit `Rights::INIT`** enumerating what the init process gets, used at
+   `main.rs:9542` instead of `ALL`. Adding a right then requires a deliberate line
+   if init should have it. Smallest change, targets the hazard exactly.
+2. **`ALL` becomes the union of `DISTINCT`.** Honest about "every *declared*
+   right" and removes the undefined-bit semantics — but does *not* fix this,
+   because adding to `DISTINCT` still widens `ALL`.
+3. **Make the grant per-object** rather than class-wide (`resource_id == 0`), so
+   `has_capability_type` has something to discriminate on. Much larger, and the
+   class-wide design is deliberate: a comment at the grant site says a token
+   nobody holds is indistinguishable from leaving the operation denied.
+
+(1) is the one that matches the shape of the problem. It is not applied here
+because a change to how the root process is granted authority deserves more than
+an edit made while clearing a backlog, and because `Rights::ALL` has five other
+grant sites (`cap/groups.rs`, `cap/request.rs`, `ipc/channel.rs`, `main.rs`) that
+want reading first.
+
+### Impact today
+
+`SET_HOSTNAME` is the only right added since the wildcard became load-bearing, and
+its accept path is reachable from PID 1 — which is, ironically, *useful*: it means
+the hostname round-trip can be tested without the grant lane A added for a
+fixture. The general risk is for the next right, and it scales with how privileged
+that right is.
+
+## TD-A-A-FIXTURE-THAT-WAS-NEVER-BUILT-IS-INVISIBLE-TO-THE-IMAGE-CHECK (lane A, 2026-09-10) — **open**
+
+**In short:** a ring-3 test fixture can arrive in the tree, never be compiled on
+this machine, and the boot test will pass without ever running it — reporting
+green for a test that did not happen. It happened today with the fixture for the
+hostname syscalls, on the same day both lanes were writing to each other about
+exactly this failure mode.
+
+### The mechanism, precisely
+
+`scripts/ctest-fixtures.py image-check` is the pre-boot verifier. It compares two
+sets:
+
+* `recorded` — what `rootfs.ext4.manifest` says was staged into the image;
+* `actual` — `_staged_artifacts()`, the fixture **ELFs that exist in the tree**.
+
+A fixture *recipe* (`services/ctest-<name>/build.py` plus its source) whose ELF has
+never been built appears in **neither set**, so it cannot drift and is not
+reported. `image-check` said `ok rootfs.ext4 (78 staged artifacts match the tree)`,
+which was true and said nothing about the 79th the tree defines.
+
+The only thing that *does* notice is `scripts/create-ext4-rootfs.sh:1886`
+(`ERROR: N of M fixture ELFs have not been built here`) — and that runs only when
+the image is repacked. The boot test had found `Prerequisites OK
+(limine,services,rootfs)` and skipped the repack, so nothing asked.
+
+The rung then did exactly what it is designed to do and said so:
+
+    [spawn]   SKIP: ctest-hostname — prerequisite missing: /mnt/tests/ctest-hostname.elf
+
+A loud skip, not a silent pass — `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT` was fixed
+for this reason. But one line in a 3,200-line serial log does not stop
+`=== Boot test PASSED ===` from being printed, and the run is recorded as green.
+
+### Why it is worth a gate rather than vigilance
+
+This is the third member of a family already in this file: a check that cannot see
+the thing it is about. `check-gates-are-wired` counts a call site, not a call site
+that works; `check-unreachable-mutators` exited 0 and nothing ran it; and here the
+image verifier compares what was built against what was staged, with no term for
+what should have been built. In each case the absent thing is absent from the
+evidence too.
+
+### The fix
+
+`cmd_image_check` should enumerate fixture *recipes* — the same
+`services/ctest-*/build.py` and `services/fastpy-*/build.py` glob
+`create-ext4-rootfs.sh` uses — and report any whose `<dir>/<dirname>.elf` does not
+exist, as its own class of drift rather than folded into the hash comparison. The
+wording matters: the remedy is two steps, `ctest-fixtures.py build` and then the
+repack, and a message naming only the repack sends the reader to a script that
+will refuse.
+
+Scoped to the case where an image exists. A tree with no image already returns
+early and says so, which is correct — a fresh clone with no toolchain has no ELFs
+and nothing to verify.
+
+### Reproduction
+
+Land a new `services/ctest-*/` with a source and no ELF, then run
+`python scripts/ctest-fixtures.py image-check` against an existing image. It
+reports OK. Build the ELF and it correctly reports the image STALE, which is the
+asymmetry: the check sees a fixture that is *newer* than the image but not one that
+is *missing* from it.
 ## B-TWO-SESSION-REGISTRIES (lane B, 2026-09-10) — open
 
 **In short:** this system keeps two separate lists of who is logged in. The

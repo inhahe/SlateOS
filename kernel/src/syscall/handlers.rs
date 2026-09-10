@@ -7061,7 +7061,36 @@ fn uts_name_set(
     };
 
     match apply(name) {
-        Ok(()) => SyscallResult::ok(0),
+        Ok(()) => {
+            // TEMPORARY root-cause instrumentation, 2026-09-10. ctest-hostname
+            // returns 6 -- "the call reported success and the name did not
+            // change" -- and every path I can read is correct: the ABI matches
+            // libc's syscall2(nr, ptr, len), copy_from_user's argument order
+            // matches every other call site, init_defaults is idempotent,
+            // procfs's gen_sys("kernel/hostname") serves from this same
+            // nameservice state, and libc's read_kernel_name strips the
+            // trailing newline that gen_sys adds. So the next thing to do is
+            // look, not read.
+            //
+            // The fixture restores the name on success AND on failure (its
+            // FAIL() macro restores first), so observing from the rung after it
+            // exits cannot distinguish "never stored" from "stored and put
+            // back". This prints what was copied out of user memory and what the
+            // store reads back immediately afterwards, which separates a write
+            // that did not happen from a write of the wrong bytes.
+            //
+            // Remove once the cause is known. See todo.txt.
+            // Both readbacks, because this helper serves the host name and the
+            // domain name and printing only one would misattribute the other.
+            serial_println!(
+                "[uts] stored {} byte(s) {:?}; host now {:?}, domain now {:?}",
+                name.len(),
+                name,
+                crate::fs::nameservice::get_hostname(),
+                crate::fs::nameservice::get_domain()
+            );
+            SyscallResult::ok(0)
+        }
         Err(e) => SyscallResult::err(e),
     }
 }

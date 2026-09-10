@@ -774,6 +774,43 @@ check_sysroot_identity() {
     fi
 
     if [ -z "$resolved" ]; then
+        # ASK WHETHER THE REPAIR IS IN FORCE BEFORE WARNING THAT IT IS NOT.
+        #
+        # `scripts/ctest-fixtures.py` computes this worktree's sysroot in
+        # `_slateos_sysroot_env` and assigns it into the child environment beside
+        # that call, so every fixture build gets FASTPY_SLATEOS_SYSROOT and
+        # fastpy's sibling fallback never runs. The fixtures in the image ARE
+        # linked against a named libc.a -- this process simply cannot see which,
+        # because the variable is exported to the child and not to us.
+        #
+        # Until 2026-09-10 this branch warned unconditionally that "the fixtures
+        # in the image were linked without one -- their Path-Z rungs cannot be
+        # attributed to any posix/ revision". That was TRUE when written and FALSE
+        # once lane B landed the repair this very message recommends, and it fired
+        # on every lane-A boot test in between. A warning that is always printed
+        # and no longer true is the failure this function's own header names:
+        # "tuned out within a day, which is the failure mode a gate cannot
+        # recover from."
+        #
+        # Matched on the ASSIGNMENT rather than a line number, and on the builder
+        # rather than on fastpy, because the mirror of fastpy's path search is
+        # what drifted in the first place -- this file computed
+        # `<worktree>/../fastpy/../os/...` on E: while fastpy computed
+        # `D:/.../os/...`, so the two disagreed about the very thing the header
+        # says they must not. If lane B renames `child_env`, this check FAILS
+        # CLOSED: the warning returns, which is noisy but safe. The opposite
+        # polarity would be a gate that went quiet when its subject moved.
+        local builder="$PROJECT_ROOT/scripts/ctest-fixtures.py"
+        if [ -f "$builder" ] && grep -qE 'child_env\[.FASTPY_SLATEOS_SYSROOT.\]' "$builder"; then
+            echo "    fixture libc: supplied by scripts/ctest-fixtures.py"
+            echo "                  (_slateos_sysroot_env exports"
+            echo "                  FASTPY_SLATEOS_SYSROOT per build, so fastpy's"
+            echo "                  sibling-checkout fallback is not reached). Not"
+            echo "                  byte-compared here: the value is exported to the"
+            echo "                  child, so this process cannot read it back."
+            return 0
+        fi
+
         # Say which of the two possible causes this is.  The message used to
         # read "something this host can no longer name", which describes a
         # missing or unidentifiable libc -- and that is not what happened.  Ours

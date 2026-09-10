@@ -128918,23 +128918,37 @@ The `match` refuses an *unreadable* id correctly — that is why
 default `"0"` is supplied for an **absent** operand and then parses perfectly, so
 a missing id becomes a real one.
 
-**31 sites** in `kernel/src/kshell.rs` use exactly this spelling — **14** with the
-default `&"0"` and **17** with `&"1"` — across `share`, `unregister`, `remove`,
-`unbind`, `trigger`, `lock`, `autolock`, `preview` and others.
+**The size of this population is not reliably known, and that is the finding.**
+Three attempts at counting it gave three answers, each from a slightly different
+pattern:
 
-**None are fixed.** An earlier draft of this entry said two had been "fixed in
-passing" as examples; they had not. The edit that would have done it failed on an
-ambiguous match — that exact block appears 14 times, so the replacement refused
-rather than guessing which one was meant — and the draft was written from the
-intention instead of from the file. Counting the sites afterwards is what caught
-it, and the second count is why the figure above is 31 rather than the 14 first
-recorded: looking for `&"1"` as well as `&"0"` was not part of the original look.
+| pattern searched | sites |
+|---|---|
+| `parts.get(1).unwrap_or(&"0").parse()` | 14 |
+| ...plus the `&"1"` variant | 31 |
+| `parts.get(N).unwrap_or(&"<literal>").parse()`, any index, any literal | **37** |
+
+None of those is wrong; they are answers to three different questions, and the
+first two were published here as though they were answers to this one. A fourth
+pattern would give a fourth number.
+
+**None are fixed.** An earlier draft said two had been "fixed in passing". They
+had not: the edit failed on an ambiguous match — the block appears 14 times, so
+the replacement refused rather than guessing which was meant — and the draft was
+written from the intention instead of from the file.
 
 Two examples of the harm, both still live:
 
 * `filevault unlock` — bare, it attempts vault 0 with the empty password that
   `parts.get(2)` also defaults to;
 * `screensaver preview` — bare, it previews saver 1.
+
+**And the obvious way to triage them does not work either.** Whether requiring the
+operand is correct depends on whether the command documents it as optional, so the
+usage string should decide it. It cannot: of the 37 sites, **34 have no `Usage:`
+line within 60 lines**, and of the 3 that do, all three matched a *neighbouring
+match arm's* usage string rather than their own. A sweep built on that would
+require operands that a command had deliberately made optional.
 
 ### Why it is worth its own entry
 
@@ -128951,7 +128965,18 @@ the usage line is the answer to it — as distinct from `"you said something I c
 not read"`, which the existing `match` already handles by name. The two fixed
 sites show the shape.
 
-All 31 remain, and they should be done as a sweep with a count pinned somewhere a
-checker reads — the §600 ledger's own mechanism is what makes that backlog
-trustworthy, and this one currently has no equivalent. A partial pass over a
-population nothing counts leaves no marker saying how far it got.
+**The prerequisite is a checker, not a sweep, and that is the lesson from §600
+next door.** What makes "78 of 800 remain" trustworthy is not diligence — it is
+`check-option-refusal.py` plus a ledger that fails in both directions, so a new
+site cannot appear unnoticed and a fixed one cannot stay counted. This class has
+no such definition, which is why three greps gave three numbers.
+
+The definable version is narrower than the harm and is exactly what a checker can
+see: **`parts.get(N).unwrap_or(&"<literal>")` where the literal parses as a
+number** — a missing operand silently becoming a numeric value. Whether that
+number names a live object is judgment and belongs in the per-site review; the
+pattern is mechanical and countable.
+
+So the order is: write the checker, pin the ledger, then sweep against it. Fixing
+sites first would repeat what happened above — a population that is 14 or 31 or 37
+depending on who asks, and no marker saying how far a partial pass got.

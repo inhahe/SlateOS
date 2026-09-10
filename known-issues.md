@@ -123571,12 +123571,38 @@ that recorded the stack and reported it back while still running every handler
 on the interrupted stack would have converted an honest decline into the
 `setgroups` shape.
 
-**What is left is one kernel write.** The kernel builds the `SignalContext` on
-the interrupted thread's stack and points `RSP` at it before jumping to
+~~**What is left is one kernel write.**~~ The kernel builds the `SignalContext`
+on the interrupted thread's stack and points `RSP` at it before jumping to
 `__signal_trampoline`, so when the interrupted stack is the one that just ran
 out, the fault happens in the kernel's own store -- before any libc code exists
 to switch away from it. Filed as
 `requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md`.
+
+### Both halves are connected -- 2026-09-10
+
+Lane A landed `SYS_SIGNAL_ALTSTACK` (1071), and `posix` now calls it. The
+kernel could not do this alone and the reason is worth keeping: **it builds
+signal frames and has never recorded `sa_flags`** -- those live in libc. So it
+cannot tell whether the signal it is about to deliver asked for the alternate
+stack, and either default is wrong. Always using it steals the stack from
+handlers that never asked; never using it leaves `SA_ONSTACK` unimplemented for
+every frame the kernel builds, which is exactly the stack-overflow case the
+feature exists for.
+
+So the syscall reports **both** halves together -- `(sp, size, onstack_mask)`,
+the stack from `sigaltstack` and the mask from `sigaction` -- because a kernel
+holding one without the other can decide nothing. `posix::publish_altstack`
+calls it after either half changes.
+
+**The result is deliberately ignored**, which is the one judgement call here. A
+kernel without the syscall answers `ENOSYS`, and that must not make
+`sigaltstack` fail: the userspace half still works, since `run_handler`
+switches stacks for every signal libc delivers itself. Failing the call would
+take away a working feature to punish a kernel for not having a newer one. The
+kernel's own error cases -- a size too small for a frame, an `sp + size` that
+overflows -- are both rejected by `sigaltstack` before the syscall is reached,
+so a rejection would mean the two validations disagree, which is a bug in one
+of them rather than something to report to the application.
 
 So the title is now too broad. There *is* an alternate signal stack; what a
 stack-overflow handler still cannot do is reach it.

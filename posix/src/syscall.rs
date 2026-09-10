@@ -37,6 +37,14 @@ pub const SYS_SLEEP: u64 = 11;
 /// and interrupt timing, none of which an unprivileged process can see.
 /// See [`crate::random`].
 pub const SYS_GETRANDOM: u64 = 90;
+/// `(sp, size, onstack_mask) -> 0`. Tell the kernel where this process's
+/// alternate signal stack is and which signals may use it; `size == 0`
+/// unregisters. The mask has bit `n - 1` set for each signal installed with
+/// `SA_ONSTACK`, because the kernel builds signal frames and has never
+/// recorded `sa_flags` -- those live here. See `kernel/src/syscall/number.rs`
+/// for the full contract and for why this is a syscall rather than a pointer
+/// the kernel reads at delivery time.
+pub const SYS_SIGNAL_ALTSTACK: u64 = 1071;
 
 // Console I/O
 pub const SYS_CONSOLE_WRITE: u64 = 100;

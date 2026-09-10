@@ -529,6 +529,11 @@ pub unsafe extern "C" fn sigaction(
         {
             *slot = new_act;
         }
+
+        // The kernel needs the `SA_ONSTACK` set as well as the stack itself,
+        // and it has just changed. Only on the store path: a
+        // `sigaction(sig, NULL, &old)` enquiry changes nothing to report.
+        publish_altstack();
     }
 
     0
@@ -773,6 +778,74 @@ fn altstack() -> AltStack {
     // SAFETY: `altstack_ptr()` is this process's only view of the value, and
     // `AltStack` is `Copy`, so nothing escapes the read.
     unsafe { *altstack_ptr() }
+}
+
+/// Which signals were installed with `SA_ONSTACK`, in the shape the kernel
+/// asked for: bit `n - 1` set for signal `n`.
+///
+/// The kernel needs this because it builds signal frames and has never
+/// recorded `sa_flags` -- those live here, in libc. Without the mask it cannot
+/// tell whether the signal it is about to deliver asked for the alternate
+/// stack, and either default is wrong: always using it steals the stack from
+/// handlers that never asked, never using it leaves `SA_ONSTACK` unimplemented
+/// for anything the kernel delivers.
+///
+/// `NSIG` is 65, so the highest signal is 64 and the highest bit is 63 -- the
+/// mask fits a `u64` exactly, with no room spare.
+///
+/// The bit is computed by [`sigmask_bit`] rather than here. That function
+/// already answers "which bit is signal `n`" for `sigprocmask` and for the
+/// handler block mask, and it answers `0` for anything outside `[1, 64]` --
+/// which covers index 0, unused because signals are 1-based, without a special
+/// case. Two spellings of one bit position is how the two disagree later.
+fn onstack_mask() -> u64 {
+    // SAFETY: `actions_ptr()` is this process's own table and this is a read.
+    let actions = unsafe { &*actions_ptr() };
+    let mut mask = 0u64;
+    for (idx, action) in actions.iter().enumerate().take(NSIG as usize) {
+        if action.sa_flags & SA_ONSTACK == 0 {
+            continue;
+        }
+        if let Ok(signum) = i32::try_from(idx) {
+            mask |= sigmask_bit(signum);
+        }
+    }
+    mask
+}
+
+/// Tell the kernel both halves of the alternate-stack decision.
+///
+/// Called after anything that changes either half -- the stack itself, from
+/// [`sigaltstack`], or the set of handlers that asked for it, from
+/// [`sigaction`]. The kernel holds neither on its own: the stack comes from
+/// `sigaltstack` and the flags from `sigaction`, and a kernel holding one
+/// without the other can decide nothing.
+///
+/// # The result is deliberately ignored
+///
+/// Two reasons, and neither is laziness.
+///
+/// A kernel that does not implement `SYS_SIGNAL_ALTSTACK` answers `ENOSYS`,
+/// and that must not make `sigaltstack` fail. The userspace half still works
+/// without it -- [`run_handler`] switches stacks for every signal this library
+/// delivers itself -- so the syscall is what extends `SA_ONSTACK` to frames
+/// the *kernel* builds. Failing the call would take away a working feature to
+/// punish a kernel for not having a newer one.
+///
+/// The kernel's own error cases are a `size` too small to hold a frame and an
+/// `sp + size` that overflows, and [`sigaltstack`] rejects both before it gets
+/// here. So a rejection would mean our validation and the kernel's disagree,
+/// which is a bug in one of them rather than a condition to report to the
+/// caller -- and reporting it as `sigaltstack` failing would send the
+/// application looking in the wrong place.
+fn publish_altstack() {
+    let alt = altstack();
+    let _ = crate::syscall::syscall3(
+        crate::syscall::SYS_SIGNAL_ALTSTACK,
+        alt.sp as u64,
+        alt.size as u64,
+        onstack_mask(),
+    );
 }
 
 /// The stack pointer a handler should start from, or `None` when this signal
@@ -1962,6 +2035,11 @@ pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
         }
     }
 
+    // After `oss` is filled, not before: `oss` reports the stack as it was on
+    // entry, and publishing first would leave the kernel holding the new stack
+    // while a caller that then failed to read `oss` believed the old one.
+    publish_altstack();
+
     0
 }
 
@@ -2405,6 +2483,88 @@ mod tests {
     fn clear() {
         let off = stack_at(0, 0, SS_DISABLE);
         assert_eq!(sigaltstack(&raw const off, core::ptr::null_mut()), 0);
+    }
+
+    // ---- the SA_ONSTACK mask the kernel is told about ----
+    //
+    // `onstack_mask()` is process-global, so these assert only the bit for the
+    // signal they install and never the whole word: another test installing a
+    // handler concurrently would otherwise flip an unrelated bit and fail
+    // these at random. `SIGXFSZ` and `SIGPROF` are used because no other test
+    // in this file installs a handler for either.
+
+    /// Install `flags` for `signum`, and put it back afterwards.
+    fn with_flags(signum: i32, flags: u32, body: impl FnOnce()) {
+        let act = Sigaction {
+            sa_handler: SIG_IGN,
+            sa_mask: SigsetT::EMPTY,
+            sa_flags: flags,
+            sa_restorer: 0,
+        };
+        // SAFETY: `act` is a valid `Sigaction` and `oldact` is null.
+        unsafe {
+            sigaction(signum, &raw const act, core::ptr::null_mut());
+        }
+        body();
+        let restore = Sigaction {
+            sa_handler: SIG_DFL,
+            sa_mask: SigsetT::EMPTY,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
+        // SAFETY: as above.
+        unsafe {
+            sigaction(signum, &raw const restore, core::ptr::null_mut());
+        }
+    }
+
+    /// The bit appears when the handler asks for the alternate stack, and only
+    /// then. Without this the kernel cannot tell which signals asked, and
+    /// either default it could pick is wrong -- see `publish_altstack`.
+    #[test]
+    fn onstack_mask_follows_the_sa_onstack_flag() {
+        let bit = sigmask_bit(SIGXFSZ);
+        assert_ne!(bit, 0, "SIGXFSZ must be representable in the low word");
+
+        with_flags(SIGXFSZ, SA_RESTART, || {
+            assert_eq!(
+                onstack_mask() & bit,
+                0,
+                "a handler that did not ask for the alternate stack claimed it"
+            );
+        });
+
+        with_flags(SIGXFSZ, SA_ONSTACK, || {
+            assert_eq!(
+                onstack_mask() & bit,
+                bit,
+                "a handler that asked for the alternate stack was not reported"
+            );
+        });
+
+        // And it is gone again once the handler is restored to the default:
+        // the mask is rebuilt from the table rather than accumulated, so a
+        // flag that is taken away has to disappear from it.
+        assert_eq!(onstack_mask() & bit, 0);
+    }
+
+    /// One signal's flag does not set another's bit -- the off-by-one that
+    /// `n - 1` invites, caught by using two signals rather than one.
+    #[test]
+    fn onstack_mask_does_not_bleed_between_signals() {
+        let mine = sigmask_bit(SIGPROF);
+        let neighbour = sigmask_bit(SIGPROF - 1);
+        assert_ne!(mine, neighbour);
+
+        with_flags(SIGPROF, SA_ONSTACK, || {
+            let mask = onstack_mask();
+            assert_eq!(mask & mine, mine, "SIGPROF's own bit must be set");
+            assert_eq!(
+                mask & neighbour,
+                0,
+                "the bit for the signal below SIGPROF must not be set: the mask is                  bit n-1 for signal n, and shifting by n would set this one"
+            );
+        });
     }
 
     /// The three reported states are genuinely different, and "registered but

@@ -24,7 +24,6 @@ userspace/accerciser-cli/src/main.rs:argv-as-string
 userspace/acl/src/main.rs:argv-as-string
 userspace/acpi/src/main.rs:argv-as-string
 userspace/aerc-cli/src/main.rs:argv-as-string
-userspace/age/src/main.rs:argv-as-string
 userspace/aircrack-cli/src/main.rs:argv-as-string
 userspace/alitu-cli/src/main.rs:argv-as-string
 userspace/anki-cli/src/main.rs:argv-as-string

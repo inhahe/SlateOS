@@ -57,6 +57,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = Path(__file__).resolve().parent / "read-defaults-baseline.txt"
 
+# A complete char literal: `'x'`, `'\n'`, `'\''`, `'\u{1F600}'`. Deliberately
+# NOT a lifetime -- `'a` has no closing quote and must pass through untouched.
+_CHAR_LITERAL = re.compile(r"'(?:\\u\{[0-9a-fA-F]{1,6}\}|\\.|[^\\'\n])'")
+
 PATTERN = re.compile(
     r"(?:fs::)?read_to_string\s*\((?:[^()]|\([^()]*\))*\)\s*(?:\n\s*)?\.unwrap_or_default\s*\(\s*\)",
     re.S,
@@ -69,6 +73,23 @@ def strip_noise(src: str) -> str:
     Without this the scan matches its own documentation: the four fixes above
     each carry a doc comment quoting the line they replaced, and an earlier
     version of this query counted all of them as live code.
+
+    # The char-literal case, which the first version got wrong
+
+    `rest.find('"')` is a char literal holding a double quote, and it appears
+    in more than thirty crates here. Without the `'` branch below, that `"`
+    opened a string that ran to the next `"` anywhere later in the file --
+    after which every quote was paired one off, so real code was blanked as
+    string and string contents were left as code.
+
+    It failed silently and in the direction that looks fine: the scan still
+    produced a plausible list. It was caught because a survey of `dbus` matched
+    the word "simulated" INSIDE a println! whose text should have been blanked,
+    and the blanked line showed the string contents surviving while the
+    delimiters had gone.
+
+    Lifetimes are not char literals -- `'a` and `'static` must pass through --
+    so the branch matches only a complete `'x'`, `'\\n'` or `'\\u{1F600}'`.
     """
     out = list(src)
     i, n = 0, len(src)
@@ -86,6 +107,17 @@ def strip_noise(src: str) -> str:
             for k in range(i, min(i + 2, n)):
                 out[k] = " "
             i += 2
+        elif c == "'":
+            # A CHAR LITERAL, not a lifetime. `'a` / `'static` fall through to
+            # the catch-all below and are left alone; only a complete literal
+            # is blanked, so `find('\"')` cannot open a string.
+            m = _CHAR_LITERAL.match(src, i)
+            if m:
+                for k in range(i, m.end()):
+                    out[k] = " "
+                i = m.end()
+            else:
+                i += 1
         elif c == '"':
             j = i + 1
             while j < n:

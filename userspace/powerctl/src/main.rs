@@ -266,15 +266,77 @@ const SCHEDULE_FILE: &str = "/run/powerctl/scheduled";
 ///
 /// The file format is one line: `<unix_epoch_seconds> <action>\n`
 /// where action is "shutdown" or "reboot".
+/// Seconds since boot, or `None` if that cannot be determined.
+///
+/// The `None` matters. Both callers used to spell this
+/// `…parse::<f64>().ok()).unwrap_or(0.0) as u64`, which turns "I cannot read
+/// the clock" into "the machine booted this instant" -- and both callers were
+/// measuring a *deadline* against it. In [`write_schedule`] that silently
+/// produced a target of `minutes * 60`, i.e. a moment already long past on any
+/// machine that had been up a while; in `cmd_status` it made the remaining
+/// time read as the entire target. For a value guarding a shutdown, "I do not
+/// know" and a specific number must not be the same value.
+fn read_uptime() -> Option<u64> {
+    let raw = read_file("/proc/uptime")?;
+    let secs = raw.split_whitespace().next()?.parse::<f64>().ok()?;
+    if secs.is_finite() && secs >= 0.0 {
+        Some(secs as u64)
+    } else {
+        None
+    }
+}
+
+/// What a schedule file says about *now*.
+///
+/// Split out from `cmd_status` so the three cases can be tested without a
+/// `/proc`. The old code computed `target.saturating_sub(uptime)` and printed
+/// only when the result was non-zero, which collapsed two of these into
+/// silence: an unreadable clock and an overdue deadline both printed nothing,
+/// or worse, an unreadable clock printed the full target as the time
+/// remaining.
+#[derive(Debug, PartialEq, Eq)]
+enum ScheduleState {
+    /// The deadline is this many seconds away.
+    Pending(u64),
+    /// The deadline passed this many seconds ago and nothing acted on it.
+    Overdue(u64),
+    /// `/proc/uptime` is unreadable, so the distance is not computable.
+    UnknownClock,
+}
+
+/// Classify a stored deadline against the current uptime.
+fn schedule_state(target: u64, now: Option<u64>) -> ScheduleState {
+    let Some(now) = now else {
+        return ScheduleState::UnknownClock;
+    };
+    if target > now {
+        ScheduleState::Pending(target.saturating_sub(now))
+    } else {
+        ScheduleState::Overdue(now.saturating_sub(target))
+    }
+}
+
+/// Whether a service-manager response counts as acceptance.
+///
+/// Extracted from `orderly_shutdown`, where the rule was written as "starts
+/// with OK or ACK, otherwise accept unless it starts with ERR" -- three
+/// branches whose first two are wholly subsumed by the third. The rule is, and
+/// always was, exactly this one line. It is deliberately generous: an
+/// unrecognised reply from a manager that is *there* still means the command
+/// was received, which is a different thing from no manager at all.
+fn response_accepted(resp: &str) -> bool {
+    !resp.trim().trim_end_matches('\0').starts_with("ERR")
+}
+
 fn write_schedule(minutes: u64, action: &str) -> Result<(), String> {
-    // Read current uptime to compute the target time.
-    let uptime_secs = read_file("/proc/uptime")
-        .and_then(|s| {
-            s.split_whitespace()
-                .next()
-                .and_then(|v| v.parse::<f64>().ok())
-        })
-        .unwrap_or(0.0) as u64;
+    // A deadline measured from an unknown origin is not a deadline. Refusing
+    // here is what stops `powerctl schedule` reporting success on a target
+    // that means "already due".
+    let Some(uptime_secs) = read_uptime() else {
+        return Err(
+            "cannot read /proc/uptime, so there is no clock to schedule against".to_string(),
+        );
+    };
 
     let target_secs = uptime_secs.saturating_add(minutes.saturating_mul(60));
     let content = format!("{target_secs} {action}\n");
@@ -324,14 +386,17 @@ fn orderly_shutdown(action: &str) -> bool {
     match send_ipc_command(command) {
         Ok(resp) => {
             let trimmed = resp.trim().trim_end_matches('\0');
-            if trimmed.starts_with("OK") || trimmed.starts_with("ACK") {
-                true
-            } else {
+            if !trimmed.starts_with("OK") && !trimmed.starts_with("ACK") {
+                // Worth showing, whether or not it counts as acceptance.
                 eprintln!("service manager responded: {trimmed}");
-                // A response that is not an error still counts as handled --
-                // the service manager accepted the command.
-                !trimmed.starts_with("ERR")
             }
+            // The rule itself lives in one place now. It used to be written
+            // out here as three branches -- OK, ACK, otherwise-not-ERR -- of
+            // which the first two are entirely subsumed by the third, so the
+            // same rule stated twice could not have disagreed with itself
+            // *yet*. `cmd_schedule` needed it too, and two copies of a rule
+            // that currently agree is how they stop agreeing.
+            response_accepted(&resp)
         }
         Err(_) => false,
     }
@@ -341,14 +406,39 @@ fn orderly_shutdown(action: &str) -> bool {
 // Direct-syscall fallbacks
 // ============================================================================
 
-/// Attempt a filesystem sync via /proc/sys/vm/sync (write "1").
+/// Flush every filesystem to stable storage before the machine stops.
+///
+/// # What this replaces, and why it mattered
+///
+/// It wrote `"1"` to `/proc/sys/vm/sync`, and if that failed, to
+/// `/sys/kernel/sync`. **Neither path exists** -- neither is a real Linux
+/// interface and this kernel serves neither -- so both writes failed, the
+/// function returned *silently*, and [`direct_shutdown`], [`direct_reboot`]
+/// and [`direct_hibernate`] went on to stop the machine with dirty buffers
+/// unflushed.
+///
+/// The `if …is_ok() { return; }` looked like a check and was one, but of the
+/// wrong thing: it asked whether a write to a nonexistent file had succeeded,
+/// not whether a sync had happened. A test of the wrong proposition reads
+/// exactly like a test of the right one.
+///
+/// `posix::unistd::sync` issues the kernel's `SYS_FS_SYNC` -- the same flush
+/// `fsync(2)` performs, but for every mounted filesystem rather than one
+/// descriptor, which is a valid superset of POSIX's `sync(2)` guarantee. It
+/// has been available the whole time.
+///
+/// # There is nothing to check
+///
+/// `sync(2)` returns `void`: POSIX defines it as scheduling the writes, with
+/// no failure to report. So this function cannot tell its callers whether the
+/// flush reached the platter, and neither could the code it replaces -- the
+/// difference is that this one actually asks the kernel.
+///
+/// Not called from [`direct_suspend`], deliberately: suspend keeps RAM powered
+/// and the buffers with it, so there is nothing to flush and a needless full
+/// sync would only delay the suspend.
 fn try_sync_filesystems() {
-    // Try the procfs knob first.
-    if fs::write("/proc/sys/vm/sync", "1").is_ok() {
-        return;
-    }
-    // Try the sysfs alternative.
-    let _ = fs::write("/sys/kernel/sync", "1");
+    posix::unistd::sync();
 }
 
 /// Power off the machine directly when the service manager is unreachable.
@@ -497,29 +587,30 @@ fn cmd_status() {
     println!("  ACPI states:   {acpi_state}");
 
     // Uptime.
-    if let Some(uptime_str) = read_file("/proc/uptime")
-        && let Some(secs_str) = uptime_str.split_whitespace().next()
-        && let Ok(secs) = secs_str.parse::<f64>()
-    {
-        println!("  Uptime:        {}", format_duration(secs as u64));
+    if let Some(secs) = read_uptime() {
+        println!("  Uptime:        {}", format_duration(secs));
     }
 
     // Scheduled operation.
     if let Some((target, action)) = read_schedule() {
-        let uptime = read_file("/proc/uptime")
-            .and_then(|s| {
-                s.split_whitespace()
-                    .next()
-                    .and_then(|v| v.parse::<f64>().ok())
-            })
-            .unwrap_or(0.0) as u64;
-
-        let remaining = target.saturating_sub(uptime);
-        if remaining > 0 {
-            println!(
-                "  Scheduled:     {action} in {}",
-                format_duration(remaining)
-            );
+        match schedule_state(target, read_uptime()) {
+            ScheduleState::Pending(remaining) => {
+                println!(
+                    "  Scheduled:     {action} in {}",
+                    format_duration(remaining)
+                );
+            }
+            ScheduleState::Overdue(late) => {
+                println!(
+                    "  Scheduled:     {action} was due {} ago and did not run",
+                    format_duration(late)
+                );
+            }
+            ScheduleState::UnknownClock => {
+                println!(
+                    "  Scheduled:     {action}, time remaining unknown (/proc/uptime unreadable)"
+                );
+            }
         }
     }
 
@@ -588,19 +679,35 @@ fn cmd_schedule(args: &[String]) {
 
     match write_schedule(minutes, action) {
         Ok(()) => {
-            println!(
-                "Scheduled {action} in {minutes} minute{}.",
-                if minutes == 1 { "" } else { "s" }
-            );
-            println!("Run 'powerctl cancel' to abort.");
-
-            // Also inform the service manager so it can set up its own timer.
+            // Ask the service manager to arm its timer *before* saying
+            // anything, because whether it accepted is the whole difference
+            // between a schedule and a file. This used to print "Scheduled
+            // shutdown in 5 minutes." and "Run 'powerctl cancel' to abort."
+            // first, and demote a total failure to a trailing "note:" -- so
+            // the one case where the machine will certainly not shut down
+            // read as the success case with a footnote.
             let ipc_cmd = format!("SCHEDULE_POWER {minutes} {action}");
-            if let Err(e) = send_ipc_command(&ipc_cmd) {
-                eprintln!(
-                    "note: could not notify service manager ({e}); \
-                     schedule file written to {SCHEDULE_FILE}"
-                );
+            let plural = if minutes == 1 { "" } else { "s" };
+            match send_ipc_command(&ipc_cmd) {
+                Ok(resp) if response_accepted(&resp) => {
+                    println!("Scheduled {action} in {minutes} minute{plural}.");
+                    println!("Run 'powerctl cancel' to abort.");
+                }
+                Ok(resp) => {
+                    let trimmed = resp.trim().trim_end_matches('\0');
+                    eprintln!("error: the service manager refused: {trimmed}");
+                    eprintln!("Nothing is scheduled; the machine will not {action} on its own.");
+                    process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("error: no service manager to run the schedule ({e}).");
+                    eprintln!(
+                        "The request is recorded in {SCHEDULE_FILE} and 'powerctl status' \
+                         will show it, but nothing exists to fire it: the machine will NOT \
+                         {action} on its own. Run 'powerctl {action}' when you want it."
+                    );
+                    process::exit(1);
+                }
             }
         }
         Err(e) => {
@@ -729,6 +836,57 @@ fn main() {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// The deadline is in the future.
+    #[test]
+    fn a_future_deadline_is_pending_with_the_distance_to_it() {
+        assert_eq!(schedule_state(600, Some(300)), ScheduleState::Pending(300));
+        assert_eq!(schedule_state(1, Some(0)), ScheduleState::Pending(1));
+    }
+
+    /// A deadline that has passed is reported, not silently dropped.
+    ///
+    /// The old code printed the schedule only when `target - uptime` was
+    /// non-zero, so the moment a deadline passed the line vanished from
+    /// `powerctl status` -- while the file was still there and `powerctl
+    /// cancel` still had something to cancel. Since nothing in the system
+    /// currently fires these deadlines, *every* schedule ends up here.
+    #[test]
+    fn a_passed_deadline_is_overdue_not_silence() {
+        assert_eq!(schedule_state(300, Some(600)), ScheduleState::Overdue(300));
+        // Exactly due counts as overdue: the instant is not in the future.
+        assert_eq!(schedule_state(300, Some(300)), ScheduleState::Overdue(0));
+    }
+
+    /// An unreadable clock is its own answer, not zero.
+    ///
+    /// This is the case the whole change exists for. With `unwrap_or(0.0)`,
+    /// `schedule_state(600, None)` would have been `Pending(600)` -- a
+    /// confident ten minutes derived from no clock at all.
+    #[test]
+    fn an_unreadable_clock_is_not_a_reading_of_zero() {
+        assert_eq!(schedule_state(600, None), ScheduleState::UnknownClock);
+        assert_ne!(schedule_state(600, None), schedule_state(600, Some(0)));
+    }
+
+    /// The acceptance rule, including the part that surprised me.
+    #[test]
+    fn only_an_err_prefix_counts_as_refusal() {
+        assert!(response_accepted("OK"));
+        assert!(response_accepted("ACK scheduled"));
+        assert!(!response_accepted("ERR unknown command"));
+        // Trailing NULs and whitespace are stripped before the test.
+        assert!(!response_accepted("ERR busy\0"));
+        assert!(!response_accepted("  ERR busy  "));
+        // An unrecognised reply from a manager that is *there* is acceptance:
+        // the command was received. That is the documented rule, and it is
+        // what `orderly_shutdown`'s three branches already amounted to.
+        assert!(response_accepted("WAT"));
+        assert!(response_accepted(""));
+        // Case matters, and "ERROR" still starts with "ERR".
+        assert!(!response_accepted("ERROR: nope"));
+        assert!(response_accepted("err lowercase is not the protocol"));
+    }
 
     #[test]
     fn format_duration_seconds() {

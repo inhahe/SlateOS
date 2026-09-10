@@ -1296,11 +1296,69 @@ fn write_resolv_conf(lease: &LeaseInfo) {
     }
 }
 
-/// Set the system hostname.
+/// Why the running hostname could not be set.
+///
+/// Split out so it can be tested, and kept to the errnos this one call can
+/// actually produce -- a table of every errno would be a second `strerror`,
+/// and the point is to say something true about *this* call.
+fn sethostname_errno_text(e: i32) -> String {
+    match e {
+        posix::errno::ENOSYS => {
+            "this kernel has no syscall for it yet (the name is still recorded in /etc/hostname)"
+                .to_string()
+        }
+        posix::errno::EPERM => "not permitted".to_string(),
+        posix::errno::EINVAL => "the name is longer than the kernel allows".to_string(),
+        posix::errno::EFAULT => "bad name pointer".to_string(),
+        other => format!("errno {other}"),
+    }
+}
+
+/// Set the system hostname from the lease: persistently, and at runtime.
+///
+/// Two stores, which fail in different ways and used to fail silently in both.
+///
+/// `/etc/hostname` is the persistent one, read at boot. That write is real,
+/// and its failure is now reported -- it was discarded with `let _ =`, two
+/// functions below `write_resolv_conf`, which reports its own. The habit was
+/// there in the same file and was not applied here.
+///
+/// The runtime store is the interesting half. This used to write
+/// `/proc/sys/kernel/hostname`, which **cannot succeed**: procfs implements
+/// `write_file` for exactly one path, `/proc/<pid>/oom_score_adj`, and returns
+/// `NotSupported` for every other. With the result discarded, every
+/// DHCP-supplied hostname was dropped in silence while
+/// `/proc/sys/kernel/hostname` went on reporting the old name -- and the read
+/// side working is what made the write side look plausible.
+///
+/// It now goes through `posix::unistd::sethostname`. That returns `ENOSYS`
+/// today, for the honest reason that no syscall number exists yet, so the
+/// observable behaviour is unchanged *except* that the failure is now
+/// reported. The reason to route it through `posix` rather than at some other
+/// file is that when lane A's `SYS_HOSTNAME_SET` reaches `main` and `posix` is
+/// wired to it, this call starts working with no change here.
+///
+/// Deliberately **not** `/sys/kernel/hostname`, which does accept writes:
+/// `kernel/src/fs/sysfs.rs` keeps a private `HOSTNAME` static that nothing
+/// else in the system reads, so writing it would set a second hostname that
+/// disagrees with the one `/proc/sys/kernel/hostname`, `uname` and
+/// `gethostname` all report. See the known-issues entry filed with this
+/// change; a write that appears to work and sets a decoy is worse than one
+/// that fails.
 fn set_hostname(name: &str) {
-    // Write to /etc/hostname and /proc/sys/kernel/hostname.
-    let _ = fs::write("/etc/hostname", format!("{name}\n"));
-    let _ = fs::write("/proc/sys/kernel/hostname", name);
+    if let Err(e) = fs::write("/etc/hostname", format!("{name}\n")) {
+        eprintln!("dhcpcd: warning: failed to write /etc/hostname: {e}");
+    }
+
+    // `sethostname` is `extern "C"` but not `unsafe fn`; the obligation is
+    // still real, and `name` outliving the call is what discharges it.
+    let rc = posix::unistd::sethostname(name.as_ptr(), name.len());
+    if rc != 0 {
+        eprintln!(
+            "dhcpcd: warning: could not set the running hostname to {name}: {}",
+            sethostname_errno_text(posix::errno::get_errno())
+        );
+    }
 }
 
 /// Write lease info to the lease file.
@@ -1856,6 +1914,38 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every errno this call can produce says something specific.
+    #[test]
+    fn the_sethostname_failure_text_names_the_actual_reason() {
+        assert!(sethostname_errno_text(posix::errno::ENOSYS).contains("no syscall"));
+        // The ENOSYS text must also say the name was not simply lost, because
+        // that is the case a user will actually hit today.
+        assert!(sethostname_errno_text(posix::errno::ENOSYS).contains("/etc/hostname"));
+        assert_eq!(sethostname_errno_text(posix::errno::EPERM), "not permitted");
+        assert!(sethostname_errno_text(posix::errno::EINVAL).contains("longer"));
+        assert_eq!(sethostname_errno_text(4242), "errno 4242");
+    }
+
+    /// No errno maps to silence, which is what the old code did with all of
+    /// them.
+    #[test]
+    fn no_failure_is_reported_as_an_empty_string() {
+        for e in [
+            posix::errno::ENOSYS,
+            posix::errno::EPERM,
+            posix::errno::EINVAL,
+            posix::errno::EFAULT,
+            0,
+            -1,
+            12345,
+        ] {
+            assert!(
+                !sethostname_errno_text(e).trim().is_empty(),
+                "errno {e} produced no explanation"
+            );
+        }
+    }
 
     // ---- SYS_NET_IF_CONFIG lease-record building ----
 

@@ -125468,6 +125468,60 @@ detour today on the way to merging a caret-width change.
 target regardless of `--target` on the command line and let the plain workspace
 command work. That is lane A's file, so it is written here rather than done.
 
+## TD-C-OVERLAY0-IS-A-DISABLED-INK-AND-SOME-LIVE-TEXT-IS-DRAWN-IN-IT
+
+**Date:** 2026-09-09. **Lane:** C.
+**Where:** `gui/appearance/src/lib.rs` (`LIGHT_OVERLAY0 = #9CA0B0`); about ten
+draw sites, `apps/editor/src/main.rs:2329` and `:2345` among them.
+
+**In short:** the palette has a deliberately faint grey for things that are
+switched off, so that "disabled" looks disabled. A handful of places use it for
+text that is *not* disabled — the editor's status bar draws the live cursor
+position and line count in it — and at that colour the text is close to
+unreadable: 2.30 : 1 against the page, where 4.5 is the floor.
+
+**The ink is not the bug.** `overlay0` fails 4.5 on all six panes, by design:
+
+| ink | base | mantle | crust | surface0 | surface1 | surface2 |
+|---|---|---|---|---|---|---|
+| text | 18.57 | 17.27 | 15.87 | 13.60 | 11.55 | 9.71 |
+| subtext1 | 10.50 | 9.77 | 8.98 | 7.69 | 6.53 | 5.49 |
+| subtext0 | 9.58 | 8.91 | 8.19 | 7.02 | 5.96 | 5.01 |
+| accent | 9.03 | 8.40 | 7.72 | 6.61 | 5.62 | 4.72 |
+| **overlay0** | **2.30** | **2.14** | **1.97** | **1.69** | **1.43** | **1.20** |
+
+WCAG exempts disabled controls precisely so that off can look off, and most of
+the 829 uses are that: `if self.enabled { pal.text } else { pal.overlay0 }` in
+`apps/alarmclock`, the same shape in `apps/dictionary`. Those are correct and
+should stay.
+
+**The bug is the sites where nothing is disabled.** `apps/editor`'s status bar
+is the clearest: `tree.text(8.0, bar_y + 5.0, &pos_text, …overlay0, 11.0)` draws
+"Ln 12, Col 4" — live, always-current information — at 2.30 : 1 and 11 px. A
+first pass counts about ten draws that are not behind an enabled/live
+conditional; each needs reading individually, because "not behind a conditional"
+is not the same as "not disabled".
+
+**Proper fix:** audit those ten. Anything conveying live state moves to
+`subtext0`; anything genuinely marking disabled or placeholder stays. Note that
+*placeholder* text is **not** exempt under WCAG even though disabled is, so the
+three placeholder uses need deciding rather than assuming.
+
+**Why it went unnoticed, and the wider point.** `overlay0` was absent from
+`scripts/contrast-explorer.html` until today, and the guard added with §826 —
+`light_inks_clear_the_contrast_floor_on_every_surface` — checks four inks and
+does not include it. So both instruments that would have shown this were
+looking at a palette with one fewer ink than the palette has. The tool now
+includes it; the guard deliberately still does not, because asserting a known
+and partly-legitimate failure means either a red build or a muted test. That
+is the same reasoning as the thirteen accents in
+`TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS`, and it should be revisited
+once the ten sites are triaged: after that, a guard could assert overlay0 is
+used *only* in exempt positions, which is the property that actually matters.
+
+**Also found in the same survey:** `overlay1` and `overlay2` are declared and
+used **zero** times anywhere in `gui` or `apps`. They are dead palette rungs.
+
 ## TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY
 
 **Date:** 2026-09-09. **Lane:** C.

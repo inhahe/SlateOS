@@ -8,6 +8,15 @@
   h1 { font-size:17px; margin:0 0 4px; font-weight:650; }
   header p { margin:0; color:#5c6070; max-width:75ch; }
   .wrap { display:grid; grid-template-columns:340px 1fr; gap:22px; padding:18px 24px 40px; align-items:start; }
+  /* The controls stay put and scroll on their own, so a colour can be changed
+     while looking at whichever example is on screen. Without this the only way
+     to reach the controls from the bottom of the page was to scroll back up,
+     which loses the thing you were judging. */
+  .wrap > div:first-child { position:sticky; top:12px; max-height:calc(100vh - 24px);
+                            overflow-y:auto; overscroll-behavior:contain; padding-right:4px; }
+  .wrap > div:first-child::-webkit-scrollbar { width:10px; }
+  .wrap > div:first-child::-webkit-scrollbar-thumb { background:#c8ccd6; border-radius:5px; }
+  .wrap > div:first-child::-webkit-scrollbar-track { background:#eceef3; border-radius:5px; }
   .panel { background:#fff; border:1px solid #dfe2e8; border-radius:10px; padding:14px 16px; }
   .panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:#6a6f80; margin:0 0 10px; font-weight:650; }
   .uc { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
@@ -95,6 +104,7 @@
     <div class="row"><label>Secondary (subtext0)</label><input type="color" id="c_sec"><input type="text" id="t_sec"></div>
     <div class="row"><label>Secondary (subtext1)</label><input type="color" id="c_sec1"><input type="text" id="t_sec1"></div>
     <div class="row"><label>Accent text</label><input type="color" id="c_acc"><input type="text" id="t_acc"></div>
+    <div class="row"><label>Disabled / hint (overlay0)</label><input type="color" id="c_ovl"><input type="text" id="t_ovl"></div>
     <div class="row"><label>Page (unshaded)</label><input type="color" id="c_page"><input type="text" id="t_page"></div>
     <div class="row"><label>Card being measured</label><input type="color" id="c_card"><input type="text" id="t_card"></div>
     <p class="note" style="margin-top:6px">Feeds the preview at the top and the contrast table &mdash; it is
@@ -193,7 +203,16 @@
     </div>
 
     <div class="panel" style="margin-top:18px">
-      <h2>Ink vs ink &mdash; how far apart the four text colours are</h2>
+      <h2>Pane vs pane &mdash; how many background colours are really here</h2>
+      <table>
+        <thead><tr><th>step</th><th class="num">separation</th><th>reads as</th></tr></thead>
+        <tbody id="panesep"></tbody>
+      </table>
+      <p class="note" id="panesep_note"></p>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>Ink vs ink &mdash; how far apart the text colours are</h2>
       <table>
         <thead><tr><th>pair</th><th class="num">separation</th><th>reads as</th></tr></thead>
         <tbody id="sep"></tbody>
@@ -290,7 +309,12 @@ const PRESETS = {
 const SHIPPED_LADDER = { mantle:'#E6E9EF', crust:'#DCE0E8', s0:'#CCD0DA', s1:'#BCC0CC', s2:'#ACB0BE' };
 
 const $ = id => document.getElementById(id);
-const KEYS = ['main','sec','sec1','acc','page','card'];
+const KEYS = ['main','sec','sec1','acc','ovl','page','card'];
+// overlay0 was missing from this tool entirely until 2026-09-09, though the
+// palette declares it and the tree uses it 829 times -- more than surface1.
+// Its absence is why the ink tables looked easier to satisfy than the real
+// palette is. Presets that predate it inherit the shipped value.
+const INK_DEFAULTS = { ovl: '#9CA0B0' };
 // The five panes, in ladder order. Kept separate from KEYS because they live on
 // `cur.ladder` rather than on `cur` -- and because until 2026-09-09 they were
 // not editable at all, which is the bug this fixes: the examples read the
@@ -300,7 +324,7 @@ const LKEYS = ['mantle','crust','s0','s1','s2'];
 // Every preset gets a ladder, whether it declared one or not. Presets `cur`,
 // `a` and `b` did not, and used to fall through to SHIPPED_LADDER at each read
 // site -- which is exactly what made them un-editable.
-const withLadder = pre => ({ ...pre, ladder: { ...(pre.ladder || SHIPPED_LADDER) } });
+const withLadder = pre => ({ ...INK_DEFAULTS, ...pre, ladder: { ...(pre.ladder || SHIPPED_LADDER) } });
 let cur = withLadder(PRESETS.cur);
 // Whether to chip each element with the pane it is drawn from.
 let showTags = true;
@@ -338,7 +362,7 @@ const badge = (r, lim) => r >= 7 && lim === 4.5
 // discussion.
 function renderFullPages() {
   const L = cur.ladder;
-  const ink = cur.main, dim = cur.sec1, acc = cur.acc, page = cur.page;
+  const ink = cur.main, dim = cur.sec1, acc = cur.acc, page = cur.page, off = cur.ovl;
   const esc = t => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
   // A filled surface, or the same element outlined. `edge` overrides the
@@ -381,6 +405,7 @@ function renderFullPages() {
           <div class="r" style="${surf(b, L.s0)}">
             <div class="g"><div style="${T1}">Guest</div>
               <div class="t2s" style="${T2}">Saved network</div></div>
+            <div style="color:${off}">Forget</div>${tag('overlay0')}
           </div>
           <div class="sec" style="${T2}">Options</div>
           <div class="r" style="${surf(b, L.s0)}">
@@ -480,6 +505,21 @@ function renderFullPages() {
     'Two things are easiest to judge here and nowhere else: the shaded column puts <b>five</b> different greys ' +
     'on screen at once in a single window, and in the bordered column the accent has to carry selection by ' +
     'itself &mdash; which is why the selected row and nav item are outlined in it rather than filled.' +
+    '<br><br><b>Why the selected menu item and the selected settings row are not the same colour.</b> ' +
+    'Because selection here is not a colour, it is a <em>step</em>: a thing lifts one rung above whatever it ' +
+    'is sitting on. A menu sits on <code>base</code>, so its selected row is <code>surface0</code>. A settings ' +
+    'row is already <code>surface0</code>, so <em>its</em> selected row is <code>surface1</code>. They look ' +
+    'different because they are one step above different things. Making them match means setting ' +
+    '<code>surface0</code> = <code>surface1</code> &mdash; and then the selected settings row becomes ' +
+    'identical to the unselected ones, which is the thing you were trying to show. ' +
+    '<b>That is a real argument for the bordered column:</b> an accent outline means &ldquo;selected&rdquo; ' +
+    'and means the same thing everywhere, because it does not depend on what is underneath it. A shade ' +
+    'cannot, and never will be able to.' +
+    '<br><br><b>About <code>overlay0</code>, the fifth ink.</b> It fails 4.5 on every pane and is meant to &mdash; ' +
+    'it marks <em>disabled</em> things, and WCAG exempts disabled controls precisely so that &ldquo;switched ' +
+    'off&rdquo; can look switched off. Do not try to make it pass; if it did, it would stop reading as ' +
+    'disabled. It is shown here because it is real (829 uses in the tree, more than <code>surface1</code>) and ' +
+    'because its absence made these tables look easier to satisfy than the palette actually is.' +
     '<br><br><b>Which of these are drawn from shipped code.</b> The settings window and the context menu are: ' +
     'the row fills, the menu panel and its hovered row all follow what <code>apps/settings</code> and ' +
     '<code>gui/desktop/src/context_ext.rs</code> actually do today. The <b>file manager is illustrative</b> ' +
@@ -577,7 +617,8 @@ function renderAllSurfaces() {
     ['surface1 (542)',     L.s1,     ''],
     ['surface2 (159)',     L.s2,     'the deepest card'],
   ];
-  const inks = [['main', cur.main], ['subtext1', cur.sec1], ['subtext0', cur.sec], ['accent', cur.acc]];
+  const inks = [['main', cur.main], ['subtext1', cur.sec1], ['subtext0', cur.sec], ['accent', cur.acc],
+                ['overlay0', cur.ovl]];
 
   // Flag a ladder that does not descend -- option 1 inverts it, and that is
   // easy to miss by eye when the colours are close.
@@ -633,7 +674,8 @@ function render() {
   const rows = [];
   for (const [bgName, bg] of [['page (unshaded)', cur.page], ['card (shaded)', cur.card]])
     for (const [inkName, ink] of [['main text', cur.main], ['secondary (subtext0)', cur.sec],
-                                 ['secondary (subtext1)', cur.sec1], ['accent', cur.acc]]) {
+                                 ['secondary (subtext1)', cur.sec1], ['accent', cur.acc],
+                                 ['disabled / hint (overlay0)', cur.ovl]]) {
       const r = ratio(ink, bg);
       rows.push(`<tr><td>${inkName}</td><td>${bgName}</td><td class="num">${r.toFixed(2)}</td>` +
                 `<td>${badge(r,4.5)}</td><td>${badge(r,3.0)}</td></tr>`);
@@ -643,10 +685,40 @@ function render() {
   renderUseCases();
   renderFullPages();
 
-  // Ink against ink. Six pairs, because four inks have six.
-  const NAME = { main:'main', sec:'subtext0', sec1:'subtext1', acc:'accent' };
-  const pairs = [['main','sec'],['main','sec1'],['main','acc'],
-                 ['sec','sec1'],['sec','acc'],['sec1','acc']];
+  // Pane against pane. The question this answers is not "can you read on it"
+  // but "is this a different colour at all" -- six named rungs are only six
+  // colours if the steps between them are visible.
+  const ladderRungs = [['base', cur.page], ['mantle', cur.ladder.mantle], ['crust', cur.ladder.crust],
+                       ['surface0', cur.ladder.s0], ['surface1', cur.ladder.s1],
+                       ['surface2', cur.ladder.s2]];
+  let distinct = 1, merged = [];
+  $('panesep').innerHTML = ladderRungs.slice(1).map(([name, hex], i) => {
+    const [prevName, prevHex] = ladderRungs[i];
+    const r = ratio(hex, prevHex);
+    // Same thresholds the ink table uses, for the same reason: they are a
+    // reading of the number, not a standard, and the number is always shown.
+    const reads = r < 1.10 ? '<span class="badge fail">one colour</span>'
+                : r < 1.30 ? '<span class="badge fail">barely distinct</span>'
+                : '<span class="badge pass">distinct</span>';
+    if (r < 1.10) merged.push(prevName + '/' + name); else distinct++;
+    return `<tr><td>${prevName} &rarr; ${name}</td><td class="num">${r.toFixed(2)}</td><td>${reads}</td></tr>`;
+  }).join('');
+  $('panesep_note').innerHTML =
+    `<b>Six named rungs, ${distinct} colour${distinct === 1 ? '' : 's'} you can actually see.</b> ` +
+    (merged.length
+      ? `These steps fall below the 1.10 the ink table calls &ldquo;one colour&rdquo;, so by this page's own ` +
+        `standard they are not separate shades: <code>${merged.join('</code>, <code>')}</code>. `
+      : `Every step clears 1.10. `) +
+    `That is the answer to &ldquo;do we need six&rdquo;: only where a step is visible does the rung earn its ` +
+    `place. Worth knowing while you judge it &mdash; a pane does not have to clear 4.5 against anything. ` +
+    `<b>4.5 is for ink on a pane, never pane on pane.</b> Two panes only need to be far enough apart to be ` +
+    `told apart, which is what this table measures, so adding rungs costs contrast nowhere; it costs only ` +
+    `the ink that has to stay readable on the <em>darkest</em> one.`;
+
+  // Ink against ink. Ten pairs, because five inks have ten.
+  const NAME = { main:'main', sec:'subtext0', sec1:'subtext1', acc:'accent', ovl:'overlay0' };
+  const INKS = ['main','sec','sec1','acc','ovl'];
+  const pairs = INKS.flatMap((x, i) => INKS.slice(i + 1).map(y => [x, y]));
   $('sep').innerHTML = pairs.map(([x, y]) => {
     const r = ratio(cur[x], cur[y]);
     // 1.10 and 1.30 are judgement, not standard: WCAG says nothing about ink

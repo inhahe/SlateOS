@@ -58,6 +58,26 @@ const probe = script + `
   render();
   globalThis.__ink = document.getElementById('fp').innerHTML.includes(MARK);
 
+  // overlay0 is an ink like any other: editing it must reach the examples and
+  // both tables. It was absent from this tool entirely until 2026-09-09.
+  cur = withLadder(PRESETS.cur);
+  cur.ovl = MARK;
+  render();
+  globalThis.__ovl = {
+    fp: document.getElementById('fp').innerHTML.includes(MARK),
+    tbl: document.getElementById('tbl').innerHTML.includes('overlay0'),
+    sep: document.getElementById('sep').innerHTML.includes('overlay0'),
+    strip: document.getElementById('allsurf').innerHTML.includes(MARK),
+  };
+  // The pane-vs-pane table must exist and must react to a pane change.
+  cur = withLadder(PRESETS.cur); render();
+  const psBefore = document.getElementById('panesep').innerHTML;
+  cur = withLadder(PRESETS.cur); cur.ladder.s1 = MARK; render();
+  globalThis.__panesep = {
+    rows: (psBefore.match(/<tr>/g) || []).length,
+    reacts: document.getElementById('panesep').innerHTML !== psBefore,
+  };
+
   // Labels on and off.
   cur = withLadder(PRESETS.cur);
   showTags = true;  render();
@@ -144,6 +164,19 @@ if (!global.__ink) bad++;
   console.log((ok ? 'ok    ' : 'FAIL  ') + 'use-case strip is labelled too (' + on.length + ' on, ' +
               off.length + ' off)');
   if (!ok) bad++;
+}
+{
+  const o = global.__ovl || {};
+  for (const [what, ok] of [['examples', o.fp], ['contrast table', o.tbl],
+                            ['ink-vs-ink table', o.sep], ['surface strip', o.strip]]) {
+    console.log((ok ? 'ok    ' : 'FAIL  ') + 'overlay0 reaches the ' + what);
+    if (!ok) bad++;
+  }
+  const ps = global.__panesep || {};
+  const psOk = ps.rows === 5 && ps.reacts;
+  console.log((psOk ? 'ok    ' : 'FAIL  ') + 'pane-vs-pane table has 5 steps and reacts (' +
+              ps.rows + ' rows, reacts:' + !!ps.reacts + ')');
+  if (!psOk) bad++;
 }
 console.log('populated ids: ' + Object.keys(store).filter(k => store[k].innerHTML).join(', '));
 process.exit(bad ? 1 : 0);

@@ -24,7 +24,6 @@ fn print_out(msg: &[u8]) {
     }
 }
 
-#[allow(dead_code)]
 fn print_err(msg: &[u8]) {
     #[cfg(not(test))]
     {
@@ -35,6 +34,78 @@ fn print_err(msg: &[u8]) {
     {
         let _ = msg;
     }
+}
+
+/// Bytes of a device fdisk needs before it can describe it: 34 sectors of
+/// 512, which covers the MBR (LBA 0), the GPT header (LBA 1) and a 128-entry
+/// partition array (LBA 2..=33).
+const DISK_HEAD_LEN: usize = 34 * 512;
+
+/// The device path as the operating system takes it, without forcing UTF-8.
+///
+/// SlateOS paths allow every byte except `/` and NUL, so a device name need not
+/// be UTF-8. This was `from_utf8(dev).unwrap_or("/dev/sda")`, which did not
+/// merely lose information: a non-UTF-8 argument silently became a **different
+/// device**, and every line printed afterwards described `/dev/sda` under the
+/// name the user had typed.
+#[cfg(unix)]
+fn device_path(dev: &[u8]) -> Result<std::path::PathBuf, &'static [u8]> {
+    use std::os::unix::ffi::OsStrExt as _;
+    Ok(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(dev)))
+}
+
+/// The development host has no byte-oriented path API, so a name it cannot
+/// express is refused rather than approximated. Opening a lossily-converted
+/// name would open a different file, which is the defect this replaced.
+#[cfg(not(unix))]
+fn device_path(dev: &[u8]) -> Result<std::path::PathBuf, &'static [u8]> {
+    match core::str::from_utf8(dev) {
+        Ok(s) => Ok(std::path::PathBuf::from(s)),
+        Err(_) => Err(b"device name is not valid UTF-8, and this host has no way to open it"),
+    }
+}
+
+/// Read the head of `dev`, or say why not.
+///
+/// # Why a failure here is fatal instead of falling back
+///
+/// Every line fdisk prints is a claim about what is on this disk. Until
+/// 2026-09-10 an open that failed, or a read that returned nothing, fell
+/// through to `build_test_gpt_disk()` -- so `fdisk -l /dev/sdX` against a
+/// device that does not exist printed a complete, plausible GPT with real
+/// looking partition GUIDs and sizes, and exited 0. A partition table for a
+/// disk we could not read is not a weaker answer than the truth; it is an
+/// answer about a different disk, and it is the answer a user would repartition
+/// from. `design-decisions.md` 1006.
+///
+/// # Why a short read is not an error
+///
+/// A disk image smaller than 34 sectors genuinely has no GPT array at LBA 2,
+/// and the zero-filled tail parses as exactly that absence. Fewer than 512
+/// bytes IS refused, because below one sector there is not even an MBR to
+/// describe, and a zeroed first sector would otherwise be reported as "no
+/// partition table" -- a statement about the disk, made from a fact about the
+/// read.
+fn read_disk_head(dev: &[u8]) -> Result<[u8; DISK_HEAD_LEN], &'static [u8]> {
+    use std::io::Read as _;
+    let path = device_path(dev)?;
+    let mut f = std::fs::File::open(path).map_err(|_| &b"cannot open"[..])?;
+    let mut buf = [0u8; DISK_HEAD_LEN];
+    let mut filled = 0usize;
+    while let Some(rest) = buf.get_mut(filled..) {
+        if rest.is_empty() {
+            break;
+        }
+        match f.read(rest) {
+            Ok(0) => break,
+            Ok(n) => filled = filled.saturating_add(n),
+            Err(_) => return Err(b"read failed"),
+        }
+    }
+    if filled < 512 {
+        return Err(b"read fewer than 512 bytes: there is no partition table here");
+    }
+    Ok(buf)
 }
 
 // ── C String / Byte Helpers ──────────────────────────────────────────
@@ -371,6 +442,9 @@ fn write_le_u32(buf: &mut [u8], off: usize, val: u32) {
     }
 }
 
+// Only the test fixtures build a partition table; fdisk describes disks
+// and does not write them (see known-issues B-FDISK-CANNOT-PARTITION).
+#[cfg(test)]
 fn write_le_u64(buf: &mut [u8], off: usize, val: u64) {
     let b = val.to_le_bytes();
     if off + 8 <= buf.len() {
@@ -1611,6 +1685,9 @@ fn align_up_1mib(lba: u64, sector_size: u64) -> u64 {
 // ── Serialization Helpers ────────────────────────────────────────────
 
 /// Build a protective MBR for a GPT disk.
+// Only the test fixtures build a partition table; fdisk describes disks
+// and does not write them (see known-issues B-FDISK-CANNOT-PARTITION).
+#[cfg(test)]
 fn build_protective_mbr(disk_sectors: u64) -> [u8; 512] {
     let mut mbr = [0u8; 512];
     // Partition entry 1 at offset 446: protective MBR entry
@@ -1649,6 +1726,9 @@ fn build_protective_mbr(disk_sectors: u64) -> [u8; 512] {
 /// "GUID Partition Table Header"; collapsing them into a struct would
 /// only shuffle the same 9 inputs across a constructor boundary.
 #[allow(clippy::too_many_arguments)]
+// Only the test fixtures build a partition table; fdisk describes disks
+// and does not write them (see known-issues B-FDISK-CANNOT-PARTITION).
+#[cfg(test)]
 fn build_gpt_header(
     disk_guid: &[u8; 16],
     my_lba: u64,
@@ -1687,6 +1767,9 @@ fn build_gpt_header(
 }
 
 /// Serialize a GPT partition entry to 128 bytes.
+// Only the test fixtures build a partition table; fdisk describes disks
+// and does not write them (see known-issues B-FDISK-CANNOT-PARTITION).
+#[cfg(test)]
 fn serialize_gpt_entry(part: &GptPartition) -> [u8; 128] {
     let mut buf = [0u8; 128];
     buf[0..16].copy_from_slice(&part.type_guid);
@@ -3218,9 +3301,14 @@ fn print_version(out: &mut OutBuf, personality: Personality) {
 
 // ── Simulated Disk Data for Testing ──────────────────────────────────
 
-/// Build a minimal simulated disk image for listing (when no real device is available).
-/// In a real Slate OS environment, we would read from /dev/sdX. This provides a
+/// A minimal GPT disk image, for tests only.
+///
+/// This was reachable from `main` as the fallback for a device that could
+/// not be read, which is how `fdisk -l` came to print a partition table for
+/// a disk that was never opened. It is `#[cfg(test)]` now so that cannot
+/// recur by someone calling it.
 /// fallback that shows the tool is functional.
+#[cfg(test)]
 fn build_test_gpt_disk() -> ([u8; 17408], u64, u64) {
     let mut disk = [0u8; 17408]; // 34 sectors * 512
     let total_sectors: u64 = 2097152; // ~1 GiB at 512 bytes/sector
@@ -3288,6 +3376,7 @@ fn build_test_gpt_disk() -> ([u8; 17408], u64, u64) {
 
 /// Build a minimal MBR test disk image.
 #[allow(dead_code)]
+#[cfg(test)]
 fn build_test_mbr_disk() -> ([u8; 512], u64, u64) {
     let mut mbr = [0u8; 512];
     let total_sectors: u64 = 2097152;
@@ -3392,36 +3481,27 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         return 0;
     }
 
-    // Try to read the device. On real Slate OS we read /dev/sdX.
-    // For now, use simulated data when the device read fails.
     let sector_size: u64 = 512;
     let hw_sector_size: u64 = 512;
 
-    // Attempt to read actual device file
-    #[cfg(not(test))]
-    let disk_data = {
-        use std::io::Read as _;
-        let result = std::fs::File::open(core::str::from_utf8(dev).unwrap_or("/dev/sda"));
-        match result {
-            Ok(mut f) => {
-                let mut buf = [0u8; 17408];
-                let _ = f.read(&mut buf);
-                Some(buf)
-            }
-            Err(_) => None,
+    // Read the device, and stop if we cannot. See `read_disk_head` for why
+    // there is no fallback here any more.
+    let raw = match read_disk_head(dev) {
+        Ok(buf) => buf,
+        Err(why) => {
+            out.flush();
+            print_err(b"fdisk: ");
+            print_err(dev);
+            print_err(b": ");
+            print_err(why);
+            print_err(b"\n");
+            return 1;
         }
     };
-    #[cfg(test)]
-    let disk_data: Option<[u8; 17408]> = None;
-
-    let (raw, total_sectors) = if let Some(data) = disk_data {
-        // Estimate total sectors from device (we'd normally read /sys/block/*/size)
-        (data, 0u64)
-    } else {
-        // Simulated data for demonstration
-        let (d, ts, _) = build_test_gpt_disk();
-        (d, ts)
-    };
+    // The size is derived from the label below; `/sys/block/*/size` is not
+    // readable from here, and guessing it was part of what this function used
+    // to do with a fabricated disk.
+    let total_sectors = 0u64;
 
     let label = parse_disk_label(&raw);
 

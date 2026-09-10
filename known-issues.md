@@ -128688,3 +128688,50 @@ begin.
 to be inert rather than partly-real, which is worth expecting again: some of
 these 115 will collapse into rule 2 the moment a weak marker is examined,
 rather than needing a judgement call at all.
+
+## B-FDISK-CANNOT-PARTITION (lane B, 2026-09-10) — open, and honest about it
+
+**In short:** `userspace/fdisk` reads a disk and describes its partition table
+accurately. It cannot *change* one. There is no `File::create`, no
+`OpenOptions`, and no write to any device anywhere in its 4,789 lines — the
+only `write_all` calls in the crate go to stdout and stderr.
+
+**It does not claim otherwise, and that is why this is an entry rather than a
+deletion.** It prints no "partition table has been altered", no "Syncing
+disks", no "The partition table has been written". Asked to work
+interactively it prints its help and exits 0. Under `design-decisions.md` 1006
+the test is whether a command states a fact it did not measure, and every fact
+this one states — partition types, GUIDs, start and end sectors, sizes — it
+read off the actual device. A viewer named `fdisk` is a misleading *name*, not
+a fabricated *answer*.
+
+### What is actually there
+
+`build_protective_mbr`, `build_gpt_header` and `serialize_gpt_entry` construct
+real GPT structures with correct CRCs, and are tested. Until today they were
+reachable only from `build_test_gpt_disk`, an in-memory fixture; they are
+`#[cfg(test)]` now, because leaving write-shaped machinery reachable from a
+program that cannot write is how somebody later wires it to a device by
+accident and discovers the missing half at the worst moment.
+
+So the pieces for a real implementation exist and are half of the job. The
+missing half is the dangerous half: opening the device for writing, writing
+LBA 0/1, the mirror header at the last sector, re-reading to confirm, and
+telling the kernel to re-scan.
+
+### What the fix looks like
+
+Not "make the stub work". A partition writer that is 90% correct destroys
+disks, so the order matters: write to a file-backed image first, verify it
+round-trips through this crate's own parser *and* through the host's `sfdisk
+--json`, and only then allow a block device — behind an explicit confirmation,
+with the mirror header and CRCs written before anything else is touched.
+
+The differential harnesses in `scripts/{sed,awk,expr,cat}-diff.sh` are the
+model: compare against the real tool on identical input and name every
+deliberate divergence.
+
+**Until then the name is the problem.** Worth considering whether the crate
+should install as something that does not promise partitioning, the way
+`login-cli` and `loginmgr` were separated in 4182acf8d after two programs both
+answered to `login`.

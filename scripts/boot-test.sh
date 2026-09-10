@@ -3714,6 +3714,71 @@ check_gates_are_wired() {
 
 check_gates_are_wired
 
+# The third way a gate can be inert, and the last of the triad.
+#
+#   check-gates-can-refuse   -- CAN this gate ever say no?
+#   check-gates-are-wired    -- does anything ASK it?
+#   check-gate-call-sites    -- does the asking REACH it?
+#
+# All three failures are absences, which is why each needs its own check: a gate
+# that cannot refuse, a gate nobody calls, and a gate called with arguments it
+# rejects all produce the same green log.
+#
+# The third one cost this tree a red trunk on 2026-09-10. `check-crate-names.py`
+# was widened to walk the whole workspace and its hand-rolled `argv` scan became
+# argparse; the scan had *used* unknown positionals, argparse rejects them, and
+# its only caller still passed `apps userspace`. The gate exited 2, this harness
+# refused to build -- correctly -- and `origin/main` was red for all three lanes
+# until someone read the log. Being wired was not enough, and the wiring
+# analyser said so: it counts a call site, not a call site that works.
+#
+# It runs here, immediately after the wiring check and long before the build,
+# because it is a statement about the two hundred gates below it. Learning that
+# one of them could not be reached is worth most when it is learned first.
+check_gate_call_sites() {
+    if ! run_checker check-gate-call-sites-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-gate-call-sites.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The gate-call-site analyser fails its" >&2
+        echo "own cases, so it is no longer reading these call sites correctly." >&2
+        echo "Its cases include the two false positives that make this check" >&2
+        echo "worth having -- a flag that takes a value, and a flag dispatched" >&2
+        echo "before argparse exists -- so a failure here means it is about to" >&2
+        echo "block a lane over a call site that is fine." >&2
+        return 1
+    fi
+
+    echo "=== Checking that every gate call site matches its script's interface ==="
+    if run_checker check-gate-call-sites "$py" \
+            "$PROJECT_ROOT/scripts/check-gate-call-sites.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A gate is invoked with arguments its" >&2
+    echo "script does not accept, so that gate is not running.  Each line" >&2
+    echo "above is one of:" >&2
+    echo "" >&2
+    echo "  * a positional passed to a parser that declares none -- argparse" >&2
+    echo "    exits 2 and the gate reaches no verdict at all;" >&2
+    echo "  * a flag the parser does not declare and that appears nowhere in" >&2
+    echo "    the script;" >&2
+    echo "  * a flag passed to a checker that scans sys.argv by hand, which" >&2
+    echo "    does not refuse it but IGNORES it -- so the gate answers a" >&2
+    echo "    different question from the one asked and prints OK.  That is" >&2
+    echo "    the silent half, and the reason this check is not only about" >&2
+    echo "    exit 2;" >&2
+    echo "  * a call site whose script path could not be resolved, reported" >&2
+    echo "    rather than skipped so the gap is not mistaken for coverage." >&2
+    echo "" >&2
+    echo "Fix the call site, or the script, so the two agree.  If a checker's" >&2
+    echo "interface changed on purpose, update every run_checker line naming" >&2
+    echo "it -- in this file and in scripts/hooks/pre-push." >&2
+    exit 1
+}
+
+check_gate_call_sites
+
 # The harness's own first act, checked before anything trusts a run of it.
 #
 # boot-test.sh copies itself to a snapshot and re-execs, so that an edit

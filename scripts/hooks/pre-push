@@ -2764,6 +2764,81 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# GATE 19: every gate call site must speak the interface its script has now.
+#
+# A gate lives in two files -- the checker, and the `run_checker` line that
+# names it -- and nothing type-checks one against the other. On 2026-09-10 they
+# drifted and `origin/main` was red for all three lanes: `check-crate-names.py`
+# was widened to walk the whole workspace and its hand-rolled `argv` scan became
+# argparse, the hand-rolled scan had *used* unknown positionals, argparse
+# rejects them, and the only caller still passed `apps userspace`. The gate
+# exited 2 -- "no verdict" -- and the boot test correctly refused to build.
+#
+# That refusal worked. This gate exists because of WHERE it worked: the boot
+# test is the slowest thing in this tree and runs after a push, so the cost of
+# learning it was a red trunk for three lanes plus a boot test. The same fact is
+# available here in well under a second, before the push.
+#
+# It covers the silent half too, which is the worse one. A hand-rolled
+# `sys.argv` scan does not exit 2 on a flag it does not know; it IGNORES it. So
+# `--self-test` passed to a checker that has stopped handling `--self-test` runs
+# the checker's MAIN pass and prints OK -- a self-test gate reporting success
+# having tested nothing. Exit 2 is loud; this is not.
+#
+# NOT a judgement on any gate's verdict. Only on whether the gate is reachable.
+#
+# COST: reads two shell files and the checkers they name, no compilation. It
+# runs on every push rather than narrowing by `touches` because the drift is
+# created by editing EITHER side, and a merge can deliver one side without the
+# push appearing to touch it. The tree is clean as this is installed, so there
+# is no pre-existing state to baseline and no lane is blocked by another's.
+# ---------------------------------------------------------------------------
+gatesites="${repo_root:-.}/scripts/check-gate-call-sites.py"
+skip_gatesites=0
+if [ "${ALLOW_GATE_CALL_SITE_DRIFT:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_GATE_CALL_SITE_DRIFT=1 set — skipping the gate-call-site gate." >&2
+    skip_gatesites=1
+fi
+[ -n "$py" ] || skip_gatesites=1
+[ -f "$gatesites" ] || skip_gatesites=1
+note_gate gate-call-sites "$skip_gatesites"
+
+if [ "$skip_gatesites" != "1" ]; then
+    if ! run_checker gate-call-sites-selftest "$py" "$gatesites" --self-test; then
+        echo "pre-push: check-gate-call-sites.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        skip_gatesites=refused
+    fi
+fi
+
+if [ "$skip_gatesites" = "refused" ] || { [ "$skip_gatesites" != "1" ] && ! run_checker gate-call-sites "$py" "$gatesites"; }; then
+    cat >&2 <<'EOF'
+
+pre-push: REFUSING to push — a gate is invoked with arguments its script does
+not accept, so that gate is not running.
+
+Either argparse exits 2 and the checker reaches no verdict at all, or a
+hand-rolled argv scan ignores the flag and the checker answers a different
+question from the one the call site asked. Both read as a healthy gate from
+outside; neither checks what it claims to.
+
+Reproduce exactly what the hook saw:
+
+    python scripts/check-gate-call-sites.py
+
+Fix the call site, or the script, so the two agree. If a checker's interface
+changed on purpose, update every `run_checker` line that names it — in
+scripts/boot-test.sh and in this hook.
+
+Full output is kept at the path named above.
+
+To push anyway:
+    ALLOW_GATE_CALL_SITE_DRIFT=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # The tally. Unconditional, and on stderr with the rest of the hook's output.
 #
 # This is the line whose absence means "the hook did not run" — the one reading
@@ -2786,7 +2861,8 @@ fi
 # Gate 13 (`bands`) made it 13 on 2026-09-05, gate 14 (`headings`) made it
 # 14 the same day, gate 15 (`release-staleness`) made it 15 on 2026-09-07, and
 # gate 16 (`libc-abi`) made it 16 on 2026-09-09, gate 17 (`cfg-unix`) made
-# it 17 on 2026-09-10 and gate 18 (`crate-names`) made it 18 the same day; if
+# it 17 on 2026-09-10, gate 18 (`crate-names`) made it 18 the same day, and
+# gate 19 (`gate-call-sites`) made it 19 also on 2026-09-10; if
 # you add a gate, bump both.
 #
 # A refusing gate exits before this, so the tally is not a claim that the push

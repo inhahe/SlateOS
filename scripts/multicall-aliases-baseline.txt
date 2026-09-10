@@ -33,8 +33,6 @@ perf:perf-top
 pv:shred
 pv:truncate
 rfkill:rfkill-event
-snap:snap-confine
-snap:snapd
 ss:sockstat
 sudo:sudoedit
 sudo:sudoreplay
@@ -51,7 +49,6 @@ systemctl:systemd-escape
 systemctl:systemd-notify
 systemctl:systemd-path
 systemctl:systemd-tmpfiles
-systemd-resolved:systemd-resolve
 upower:upowerd
 w:finger
 w:pinky

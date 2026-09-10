@@ -128843,3 +128843,48 @@ Linux-compatible tool whose `-s` argument is a signal, so it goes through
 `SYS_SIGNAL_SEND` — which takes the signal number the user actually named. Two
 mechanisms, two meanings; picking by what the caller said rather than by which
 one was nearest is the point.
+
+## B-SIX-COMMAND-NAMES-HAVE-TWO-IMPLEMENTATIONS (lane B, 2026-09-10) — pinned, not fixed
+
+**In short:** Six crates answer to a command name that a *different* crate or
+coreutils bin already produces an executable for. The shadowing branch cannot
+be reached, and the two implementations can drift apart with nothing noticing.
+
+| Shadowing crate | Name | Real producer |
+|---|---|---|
+| `userspace/chown` | `chmod` | coreutils bin |
+| `userspace/chpasswd` | `passwd` | `userspace/passwd` |
+| `userspace/head` | `tail` | coreutils bin |
+| `userspace/pv` | `fuser` | `userspace/fuser` |
+| `userspace/sysstat` | `iostat` | `userspace/iostat` |
+| `userspace/who` | `w` | `userspace/w` |
+
+### Why this is now pinned rather than left as a printout
+
+`scripts/multicall-aliases.py` has reported these for months and **exited 0**,
+so nothing ever had to act on them. That is how `userspace/udisks`'s `umount`
+personality survived: it printed `would unmount` beside `userspace/mount`,
+which unmounts for real, and which of the two a user got was decided by
+whichever binary the rootfs installed at `/bin/umount`. It was found by hand on
+2026-09-10 while reading the crate for an unrelated reason — not by the gate
+that was reporting it.
+
+Shadowing is a ratchet now, in `scripts/multicall-shadowed-baseline.txt`, so a
+**seventh** cannot appear silently. These six are pinned as known.
+
+### What the fix is, per case
+
+Delete the shadowing branch: the name belongs to whichever program performs
+the operation, which is what `design-decisions.md` 1019 says and what
+`4182acf8d` did for `login`/`loginmgr`.
+
+**But read before deleting.** "Shadowed" means the branch is unreachable, not
+that it is worse. If the shadowing implementation is the better one, the fix is
+to make *it* the producer and delete the other — `head`'s `tail` and
+`sysstat`'s `iostat` are the two most likely to be worth that comparison,
+because in both cases the pair was probably written together and the standalone
+crate may be the thinner of the two. Deleting by verdict without reading is the
+mistake `cal` and `earlyoom` nearly suffered under 1006.
+
+None is urgent: every one of the six names has a working producer today, so no
+command is missing. What is at risk is the pair silently disagreeing.

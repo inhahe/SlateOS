@@ -222,20 +222,6 @@ fn read_volume_name(device: &str) -> Option<String> {
 // Unmount helper
 // ============================================================================
 
-fn unmount_device(device: &str, verbose: bool) -> bool {
-    if let Some(mountpoint) = find_mountpoint_for_device(device) {
-        if verbose {
-            eprintln!("eject: unmounting {mountpoint}");
-        }
-        // In a real OS, call umount syscall.
-        eprintln!("eject: would call umount(\"{}\")", mountpoint);
-        true
-    } else {
-        // Not mounted.
-        true
-    }
-}
-
 // ============================================================================
 // Eject operations (stubs for actual ioctl calls)
 // ============================================================================
@@ -259,75 +245,42 @@ fn do_eject(opts: &EjectOptions) -> i32 {
         return 1;
     }
 
-    match &opts.action {
-        EjectAction::Eject => {
-            if !opts.no_unmount && !unmount_device(device, opts.verbose) {
-                eprintln!("eject: unmount of {device} failed");
-                if !opts.force {
-                    return 1;
-                }
-            }
-            if opts.verbose {
-                eprintln!("eject: ejecting {device}");
-            }
-            // Would call ioctl(fd, CDROMEJECT, 0) or similar.
-            eprintln!("eject: would call CDROMEJECT on {device}");
-            0
-        }
-        EjectAction::Close => {
-            if opts.verbose {
-                eprintln!("eject: closing tray on {device}");
-            }
-            eprintln!("eject: would call CDROMCLOSETRAY on {device}");
-            0
-        }
-        EjectAction::ToggleTray => {
-            if opts.verbose {
-                eprintln!("eject: toggling tray on {device}");
-            }
-            eprintln!("eject: would toggle tray on {device}");
-            0
-        }
-        EjectAction::Lock => {
-            if opts.verbose {
-                eprintln!("eject: locking {device}");
-            }
-            eprintln!("eject: would call CDROM_LOCKDOOR(1) on {device}");
-            0
-        }
-        EjectAction::Unlock => {
-            if opts.verbose {
-                eprintln!("eject: unlocking {device}");
-            }
-            eprintln!("eject: would call CDROM_LOCKDOOR(0) on {device}");
-            0
-        }
-        EjectAction::SetAutoEject(enable) => {
-            let state = if *enable { "on" } else { "off" };
-            if opts.verbose {
-                eprintln!("eject: setting auto-eject {state} on {device}");
-            }
-            eprintln!(
-                "eject: would call CDROMEJECT_SW({}) on {device}",
-                if *enable { 1 } else { 0 }
-            );
-            0
-        }
-        EjectAction::DisplaySpeed => {
-            if opts.verbose {
-                eprintln!("eject: querying speed of {device}");
-            }
-            eprintln!("eject: would query CDROM_SELECT_SPEED on {device}");
-            0
-        }
-        EjectAction::SetSpeed(speed) => {
-            if opts.verbose {
-                eprintln!("eject: setting speed to {speed}x on {device}");
-            }
-            eprintln!("eject: would call CDROM_SELECT_SPEED({speed}) on {device}");
-            0
-        }
+    // REFUSING, AND BEFORE TOUCHING ANYTHING.
+    //
+    // Every arm of this match used to print `eject: would call CDROMEJECT on
+    // /dev/sr0` and return 0, so `eject /dev/sr0` reported success and the
+    // tray stayed shut. There is no CD-ROM driver in this kernel at all --
+    // `CDROMEJECT`, `CDROMCLOSETRAY`, `CDROM_LOCKDOOR` and
+    // `CDROM_SELECT_SPEED` appear nowhere in `kernel/src`, so this is a
+    // missing facility rather than an unwritten call.
+    //
+    // THE ORDER MATTERS AND IS THE INTERESTING PART. `eject` unmounts before
+    // it ejects, and unmounting IS available -- `posix` exports `umount` and
+    // `userspace/mount` performs it. Doing that half would leave the caller
+    // with a filesystem unmounted and a disc still locked in the drive, while
+    // believing it was safe to take out. A partial action here is worse than
+    // none, so the refusal comes first. Same reasoning as `cgexec`, which
+    // refuses rather than running a command outside the limits it was given
+    // (`design-decisions.md` 1019).
+    let what = match &opts.action {
+        EjectAction::Eject => "eject the medium",
+        EjectAction::Close => "close the tray",
+        EjectAction::ToggleTray => "toggle the tray",
+        EjectAction::Lock => "lock the door",
+        EjectAction::Unlock => "unlock the door",
+        EjectAction::SetAutoEject(_) => "set auto-eject",
+        EjectAction::DisplaySpeed => "query the drive speed",
+        EjectAction::SetSpeed(_) => "set the drive speed",
+    };
+    eprintln!("eject: cannot {what} on {device}: this kernel has no CD-ROM driver");
+    if !opts.no_unmount && find_mountpoint_for_device(device).is_some() {
+        eprintln!(
+            "eject: {device} is still mounted and has NOT been unmounted -- \
+             unmounting without ejecting would suggest the medium is safe to remove"
+        );
+        eprintln!("eject: use `umount {device}` if that is what you meant");
     }
+    1
 }
 
 // ============================================================================
@@ -552,9 +505,4 @@ mod tests {
         assert!(!opts.no_unmount);
     }
 
-    #[test]
-    fn test_unmount_nonexistent() {
-        // Should succeed (not mounted = nothing to unmount).
-        assert!(unmount_device("/dev/nonexistent_device_xyz", false));
-    }
 }

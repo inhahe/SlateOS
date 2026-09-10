@@ -37678,7 +37678,7 @@ of them guard logging in and unlocking the screen.
 | `kernel/src/crypto.rs` | A | one-shot |
 | `posix/src/sha2.rs` | B | one-shot, has the FIPS million-`a` vector |
 | `posix/src/crypt.rs` | B | via `sha2` |
-| `init/login/src/main.rs` | B | block compression + one-shot |
+| `init/loginmgr/src/main.rs` | B | block compression + one-shot |
 | `userspace/coreutils/src/bin/sha256sum.rs` | B | one-shot |
 | `userspace/backup/src/main.rs` | B | streaming |
 | `kernel/src/oci.rs` | A | digest string |
@@ -39283,7 +39283,7 @@ carries a test affordance.
 
 **In short:** SlateOS keeps its own user database at `/etc/users.yaml`, separate
 from the POSIX `/etc/shadow`. Seven programs read it and two of them write it —
-`init/login` (the graphical login manager) and `userspace/useradm` (the account
+`init/loginmgr` (the graphical login manager) and `userspace/useradm` (the account
 management CLI) — and the two disagree about what the file looks like. Setting
 a password with `useradm passwd` produces an entry the login screen cannot
 authenticate against, and each tool silently deletes the fields the other owns
@@ -39293,7 +39293,7 @@ different tools, no agreement, and no test that compares them.**
 
 ### The disagreements, measured against the code
 
-| | `useradm` | `init/login` |
+| | `useradm` | `init/loginmgr` |
 |---|---|---|
 | Salt field | `salt:` | `password_salt:` |
 | What is hashed | `sha256(hex_text_of_salt ‖ password)` | `sha256(raw_salt_bytes ‖ password)` |
@@ -39301,10 +39301,10 @@ different tools, no agreement, and no test that compares them.**
 | Home | `home:` | `home_dir:` |
 | Admin flag | `admin:` | `is_admin:` |
 | Only in `useradm` | `groups:`, `locked:` | — |
-| Only in `init/login` | — | `auto_login:`, `last_login_timestamp:`, `login_count:` |
+| Only in `init/loginmgr` | — | `auto_login:`, `last_login_timestamp:`, `login_count:` |
 
 Two independent reasons a `useradm`-set password fails at the login screen:
-`init/login` looks for `password_salt:` and finds only `salt:`, so it hashes
+`init/loginmgr` looks for `password_salt:` and finds only `salt:`, so it hashes
 with an *empty* salt; and even given the salt it would hash the decoded bytes
 where `useradm` hashed the hex text. Either alone is fatal.
 
@@ -39314,7 +39314,7 @@ wrote drops `auto_login`, `last_login_timestamp` and `login_count`, and the
 login manager writing back drops `groups` and `locked` — including the group
 memberships that `sudo` and `polkit` make authorisation decisions from.
 
-`init/login/src/main.rs`: `hash_password` ~379, `authenticate` ~982,
+`init/loginmgr/src/main.rs`: `hash_password` ~379, `authenticate` ~982,
 `serialize_users_yaml` ~514, `parse_users_yaml` ~541.
 `userspace/useradm/src/main.rs`: `hash_password` ~177, `read_users` ~86,
 `write_users` ~144.
@@ -39364,7 +39364,7 @@ carries, so a preserved field cannot go stale. 23 tests in `userdb`, 5 new in
 `hash_password`, `read_users`, `write_users`, `generate_salt`, `sha256_hex`
 and the local SHA-256 are deleted from `useradm`; `hash_password`,
 `serialize_users_yaml`, `parse_users_yaml`, `sha256`, `bytes_to_hex` and
-`hex_to_bytes` are deleted from `init/login`.
+`hex_to_bytes` are deleted from `init/loginmgr`.
 
 Eight collateral defects fixed in passing, listed in §330 — the two that
 matter most: a read failure produced an *empty* database that the next save
@@ -39406,7 +39406,7 @@ screen — the `avatar_path:` field in `/etc/users.yaml`, which `useradm mod
 with the user's initials for every account, so setting an avatar appears to
 work, reports success, and changes nothing anyone can see.
 
-`init/login/src/main.rs`: `UserAccount::avatar_path` carries an
+`init/loginmgr/src/main.rs`: `UserAccount::avatar_path` carries an
 `#[allow(dead_code)]` precisely because no drawing code calls it; the avatar is
 rendered by the initials-and-circle path in the user-tile drawing code, with no
 branch on whether a path is set.
@@ -46189,7 +46189,7 @@ picture. Today the whole chain is: lock screen checks a password nobody
 supplied → asks logind to unlock → logind unlocks unconditionally. The
 authentication is decorative end to end.
 
-### Not a duplicate of `init/login`
+### Not a duplicate of `init/loginmgr`
 
 It looks like one and is not. A *login* screen authenticates someone who has no
 session; a *lock* screen re-checks someone who already has one. Real systems
@@ -122933,7 +122933,7 @@ excluded every crate outside `userspace/`. Two exist:
 
 | Crate | Lane | How it broke |
 |---|---|---|
-| `init/login` | B (mine) | two-argument `with_stores`, twice |
+| `init/loginmgr` | B (mine) | two-argument `with_stores`, twice |
 | `apps/lockscreen` | C | two-argument `with_stores`, **and** `authlib::shadow::lookup`, which no longer exists at all -- fixed by lane C in `d9f1f540e` |
 
 `main` did not build for a day. The boot test builds the whole workspace, so it
@@ -122990,7 +122990,7 @@ grep being narrow is how *I* missed it, and the absence of any build covering
 stripping blanket `#![allow(dead_code)]` out of `apps/`, which made clippy look
 at the crate for the first time, and the errors fell out. It fixed
 `apps/lockscreen` in `d9f1f540e` and merged it in `97219f95c` before I had
-finished writing the request asking it to. My `init/login` half was the only
+finished writing the request asking it to. My `init/loginmgr` half was the only
 part still outstanding by then.
 
 **Timing, measured rather than assumed (2026-09-07):** lane C measured all 143
@@ -127435,7 +127435,7 @@ accepted. **A correct answer already in the tree does not propagate by
 existing.**
 
 
-## TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME (lane B, 2026-09-10)
+## TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME (lane B, 2026-09-10) -- four left; lane B's is fixed
 
 **In short:** `cargo test -p <name>` takes a *package* name. Everyone types the
 *directory* name, because for 2944 of this workspace's 2955 crates they are the
@@ -127449,11 +127449,11 @@ result and exits 0, having tested a crate nobody touched.
 | `apps/indexer` | `indexer-app` | the `indexer` crate | C |
 | `apps/sysinfo` | `sysinfo-app` | the `sysinfo` crate | C |
 | `apps/tmux` | `tmux-app` | the `tmux` crate | C |
-| `userspace/login` | `login-cli` | `init/login` | B |
+| ~~`userspace/login`~~ | ~~`login-cli`~~ | ~~`init/loginmgr`~~ | B -- **fixed 2026-09-10**, see below |
 
 **How it was found.** Giving `userspace/login` its exec on 2026-09-10. Every
 `cargo test -p login` that tick, and a `cargo fmt -p login`, went to
-`init/login` -- a different program, never edited. It surfaced only because the
+`init/loginmgr` -- a different program, never edited. It surfaced only because the
 test count did not move after three tests were added: 53 `#[test]` in the file,
 46 collected, and the 46 collected names turned out not to be in the file at
 all. Nothing else would have said a word.
@@ -127472,10 +127472,25 @@ bypassed. The baseline may only shrink -- resolving one and leaving it listed
 is also a failure, so the list cannot rot into things that used to be true.
 
 **The fix, for whoever owns each crate:** rename the package to match its
-directory, or rename the directory to match the package. For `userspace/login`
-both names are honestly "login", which is why it was named around in the first
-place; the collision is with `init/login`, a login *manager*, so renaming that
-directory to `init/loginmgr` (or its package) is probably the better end state.
-Not done here: `init/**` is lane B's, but the rename touches every Cargo.toml
-that depends on it and is worth doing deliberately rather than as a tail-end of
-an unrelated commit.
+directory, or rename the directory to match the package.
+
+**Lane B's is done, 2026-09-10, and it was not cosmetic.** `init/loginmgr` is the
+graphical Display Manager; `userspace/login` is the console `login(1)`. Neither
+declared a `[[bin]]`, so the binary named `login` was **the Display Manager's**,
+while the console program built as `login-cli` -- and `userspace/getty` execs
+`/bin/login`. Nothing populates a rootfs yet, so nothing had failed; the first
+person to write that manifest would have installed the display manager where
+getty looks for the console login program, and the symptom would have been a
+graphical login trying to start on a serial console.
+
+So the console program took the name it should always have had: `userspace/login`
+is now the package `login`, and the manager is `loginmgr` in `init/loginmgr`.
+The blast radius was smaller than this entry originally guessed -- both are leaf
+binaries and nothing depends on either by path, so it was two `name =` lines and
+a `git mv`. "Touches every Cargo.toml that depends on it" was an assumption; the
+grep that would have checked it takes a second.
+
+**The four remaining are lane C's** (`apps/backup`, `apps/indexer`,
+`apps/sysinfo`, `apps/tmux`), and each has the same second question worth
+asking: which crate currently owns the *binary* name, and is it the one that
+should?

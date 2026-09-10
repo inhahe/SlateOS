@@ -65,7 +65,6 @@ userspace/fw
 userspace/getopt
 userspace/getty
 userspace/gzip
-userspace/head
 userspace/hexdump
 userspace/hostname
 userspace/htop

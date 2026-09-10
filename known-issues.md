@@ -129600,7 +129600,7 @@ be reached, and the two implementations can drift apart with nothing noticing.
 |---|---|---|
 | `userspace/chown` | `chmod` | coreutils bin |
 | `userspace/chpasswd` | `passwd` | `userspace/passwd` |
-| `userspace/head` | `tail` | coreutils bin |
+| ~~`userspace/head`~~ | ~~`tail`~~ | ~~coreutils bin~~ — **crate deleted 2026-09-10** |
 | `userspace/pv` | `fuser` | `userspace/fuser` |
 | `userspace/sysstat` | `iostat` | `userspace/iostat` |
 | `userspace/who` | `w` | `userspace/w` |
@@ -129648,6 +129648,25 @@ Shadowing is a ratchet now, in `scripts/multicall-shadowed-baseline.txt`, so a
 Delete the shadowing branch: the name belongs to whichever program performs
 the operation, which is what `design-decisions.md` 1019 says and what
 `4182acf8d` did for `login`/`loginmgr`.
+
+**`head:tail` is resolved, and reading is what resolved it.** The pair looked
+like a refactor: `Tool::Tail` threads through fifteen sites in
+`userspace/head`, so removing the shadowed name meant rewriting the crate —
+which has **zero tests** in 1,115 lines. Then the obvious question: coreutils
+provides `tail`, but does it provide `head`?
+
+| | lines | tests |
+|---|---|---|
+| `coreutils/src/bin/head.rs` | 1,284 | 22 |
+| `coreutils/src/bin/tail.rs` | 2,471 | 31 |
+| `userspace/head` | 1,115 | **0** |
+
+Both, both larger, both tested. So it was never a refactor: the crate
+duplicated two commands that coreutils implements more completely, and it is
+deleted. Every option `userspace/head` accepted is accepted by one of the two —
+checked against **both** binaries together, because comparing against
+`coreutils/head` alone showed nine "missing" flags that are all tail's
+(`--follow`, `--pid`, `--sleep-interval`).
 
 **But read before deleting.** "Shadowed" means the branch is unreachable, not
 that it is worse. If the shadowing implementation is the better one, the fix is

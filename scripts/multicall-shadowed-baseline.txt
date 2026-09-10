@@ -40,7 +40,6 @@ chown:chmod
 chpasswd:passwd
 cron:at
 cron:crontab
-head:tail
 pv:fuser
 sysstat:iostat
 who:w

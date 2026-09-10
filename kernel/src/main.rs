@@ -773,6 +773,17 @@ extern "C" fn kernel_main() -> ! {
             );
 
             cputime::init();
+            // Before init, not after, because init is this conversion's FIRST
+            // caller: it reads the CMOS clock and converts it, and the conversion
+            // used to index a 12-element month table with whatever the hardware
+            // said. A test placed after init would run after the panic it exists to
+            // prevent -- which is what the RTC's own bounds check does, eight
+            // thousand lines later at step 23, at Diagnostic severity.
+            selftest::dispatch(
+                "timekeeping",
+                selftest::Severity::Integrity,
+                timekeeping::self_test(),
+            );
             timekeeping::init();
 
             console::boot_step(console::BootStatus::Running, "Virtual memory");

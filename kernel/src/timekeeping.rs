@@ -252,6 +252,104 @@ pub fn set_realtime(target_epoch_ns: u64) {
 /// Days in each month (non-leap year).
 const DAYS_IN_MONTH: [u16; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
+/// Self-test: the epoch conversion is total, and agrees with the kernel's other one.
+///
+/// `Severity::Integrity` rather than `Diagnostic`, and the distinction is worth
+/// stating: every input below is a literal, so this test cannot fail because a
+/// machine is odd -- only because the code is wrong. `rtc::self_test` is correctly
+/// Diagnostic for the opposite reason: its subject is the hardware.
+///
+/// TOTALITY. `datetime_to_epoch` indexes a 12-element table with a month that
+/// arrives from the CMOS registers. Until 2026-09-10 nothing on the path checked
+/// it: the only bounds check in the kernel lived inside `rtc::self_test`, which
+/// reports and does not gate, and which runs *after* `timekeeping::init` has
+/// already converted the date. Month 14 is the first that panicked -- the loop runs
+/// `1..dt.month` and indexes `m - 1`, so the first out-of-range index needs
+/// `dt.month - 2 >= 12` -- and 14 is therefore the case that must stay here even if
+/// the others look redundant.
+///
+/// AGREEMENT. `fs::iso9660::datetime_to_epoch` is an independent implementation of
+/// the same function for a different source: Hinnant's algorithm, no table, total
+/// already. Comparing them turns a duplicate into an oracle, which is worth more
+/// than the duplication costs -- a rewrite of either now has something to disagree
+/// with that was not written by the same hand on the same afternoon. (Lane B keeps
+/// `cal`'s old Zeller implementation in `civildate` for this reason, across ~146,000
+/// dates; this is the same idea with the copy the kernel already had.)
+pub fn self_test() -> Result<(), &'static str> {
+    // A fixed anchor first: if this is wrong, every comparison below is two
+    // implementations agreeing about the wrong thing.
+    let epoch_zero = rtc::DateTime {
+        year: 1970,
+        month: 1,
+        day: 1,
+        hour: 0,
+        minute: 0,
+        second: 0,
+    };
+    if datetime_to_epoch(&epoch_zero) != 0 {
+        return Err("1970-01-01T00:00:00 is not epoch 0");
+    }
+
+    // Agreement across leap years, century boundaries and month ends.
+    for &(year, month, day, hour, minute, second) in &[
+        (1970u16, 1u8, 1u8, 0u8, 0u8, 0u8),
+        (1972, 2, 29, 12, 0, 0),
+        (1999, 12, 31, 23, 59, 59),
+        (2000, 2, 29, 0, 0, 1),
+        (2000, 3, 1, 0, 0, 0),
+        (2026, 1, 1, 0, 0, 0),
+        (2026, 9, 10, 17, 45, 3),
+        (2100, 3, 1, 0, 0, 0),
+    ] {
+        let dt = rtc::DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        };
+        let ours = datetime_to_epoch(&dt);
+        let theirs = crate::fs::iso9660::datetime_to_epoch(
+            u32::from(year),
+            u32::from(month),
+            u32::from(day),
+            u32::from(hour),
+            u32::from(minute),
+            u32::from(second),
+        );
+        if ours != theirs {
+            return Err("timekeeping and iso9660 disagree about a date");
+        }
+    }
+
+    // Totality. A dead CMOS battery yields arbitrary BCD, so these are reachable
+    // inputs, not hypotheticals. Before the clamp, 14 panicked the kernel here.
+    for bogus in [0u8, 13, 14, 20, 255] {
+        let dt = rtc::DateTime {
+            year: 2026,
+            month: bogus,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
+        };
+        let got = datetime_to_epoch(&dt);
+        let clamped = rtc::DateTime {
+            month: bogus.clamp(1, 12),
+            ..dt
+        };
+        if got != datetime_to_epoch(&clamped) {
+            return Err("an out-of-range month did not clamp");
+        }
+    }
+
+    crate::serial_println!(
+        "[timekeeping]   epoch conversion: total, and agrees with fs::iso9660 on 8 dates"
+    );
+    Ok(())
+}
+
 /// Convert a `DateTime` to Unix epoch seconds.
 ///
 /// Assumes UTC (the RTC should be set to UTC on this OS).
@@ -265,8 +363,43 @@ fn datetime_to_epoch(dt: &rtc::DateTime) -> u64 {
         days += if is_leap_year(y) { 366 } else { 365 };
     }
 
+    // The month bounds the index into a 12-element table, and nothing on the path
+    // to here has checked it.
+    //
+    // `rtc::read_datetime` reports what the CMOS registers said, and does so
+    // deliberately: `rtc::self_test` exists to warn about an implausible value, and
+    // it can only see one if the reader does not quietly repair it. But
+    // `timekeeping::init` calls `read_datetime` DIRECTLY, not through the self-test,
+    // and that self-test is dispatched at Diagnostic severity -- it reports and does
+    // not gate. So the only bounds check on the hardware month in this kernel lives
+    // in a test, downstream of the code that would panic.
+    //
+    // A dead CMOS battery yields arbitrary BCD. `for m in 1..dt.month` then indexes
+    // `DAYS_IN_MONTH` up to `dt.month - 2`, so any month >= 14 panics the kernel
+    // during `timekeeping::init`, before anything has been logged about why.
+    //
+    // Clamped rather than refused, because boot needs a wall clock and a
+    // wrong-but-bounded one is recoverable where a panic is not. Clamped HERE rather
+    // than in the reader, for the reason above. And announced, because a silent
+    // clamp makes every timestamp for this boot wrong with nothing saying so, which
+    // is the shape this lane spent 2026-09-10 removing from a dozen other places.
+    //
+    // `fs::iso9660::datetime_to_epoch` is this same function for a different source
+    // and was already total: `month.clamp(1, 12)`, `wrapping_*` throughout, and no
+    // table to index. Two implementations of one calendar, and only one of them
+    // could be reached with a month of 14.
+    let month = dt.month.clamp(1, 12);
+    if month != dt.month {
+        crate::serial_println!(
+            "[timekeeping] WARNING: RTC reported month {}; clamped to {}. The boot \
+             wall-clock is wrong -- see rtc::self_test.",
+            dt.month,
+            month
+        );
+    }
+
     // Full months in the current year.
-    for m in 1..dt.month {
+    for m in 1..month {
         days += u64::from(DAYS_IN_MONTH[(m - 1) as usize]);
         if m == 2 && is_leap_year(dt.year) {
             days += 1;

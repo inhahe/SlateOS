@@ -2826,17 +2826,13 @@ fn session_command(
     cmd.stdout(process::Stdio::piped());
     cmd.stderr(process::Stdio::piped());
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // Group first: after the uid drops, the process can no longer choose
-        // its group, so a uid-then-gid order would leave the session in the
-        // daemon's group. (`std` orders the two calls correctly on its own;
-        // writing them in this order keeps the reader from having to know
-        // that.)
-        cmd.gid(user.gid);
-        cmd.uid(user.uid);
-    }
+    // Group first, then uid: after the uid drops the process can no longer
+    // choose its group. That rule, and the one part of the drop that is still
+    // missing everywhere (supplementary groups, waiting on a kernel syscall
+    // number), live in `authlib::identity::become_user` -- which this file
+    // reached independently and correctly, and which now shares the one place
+    // the missing call has to land.
+    authlib::identity::become_user(&mut cmd, user.uid, user.gid);
 
     cmd
 }
@@ -2942,15 +2938,12 @@ fn login_shell_command(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-
         cmd.arg0(login_argv0(&user.shell));
-
-        // Group first: after the uid drops the process can no longer choose its
-        // group. (`std` orders the two correctly on its own; writing them in
-        // this order keeps the reader from having to know that.)
-        cmd.gid(user.gid);
-        cmd.uid(user.uid);
     }
+
+    // See `session_command`: the ordering rule and the missing `setgroups` are
+    // both in `authlib::identity::become_user`.
+    authlib::identity::become_user(&mut cmd, user.uid, user.gid);
 
     cmd
 }

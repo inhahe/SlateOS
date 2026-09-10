@@ -71173,6 +71173,18 @@ Logged as TD-B-FOUR-MORE-PROGRAMS-RUN-A-SHELL-AS-THE-WRONG-USER. `su` first
 because it is the smallest complete case and proves the mechanism; the rest are
 a conversion rather than a design, and `login` needs its exec built first.
 
+**Correction, same day: `sshd` did not have the hole.** It has been calling
+`cmd.gid(user.gid)` then `cmd.uid(user.uid)` since it was written, and its doc
+comments give the reasoning this entry gives, including the gid-before-uid
+order. The claim above came from a survey `grep` whose `grep -v` filter --
+written to drop *reads* of a record's fields (`user.uid()`) so they would not
+drown the signal -- also dropped `cmd.uid(user.uid)`, which is the evidence.
+The program printed "NO uid/gid drop found" and that was recorded as a fact
+about the program. It is the same defect as §1011's classifier and §1014's
+dead check: **a command that answered a narrower question than the one being
+asked, whose answer was reported at the width of the question.** Three
+programs, not four. Details in `known-issues.md` under that entry.
+
 ## 1014. Identity comes from the kernel, "I do not know" is not root, and the rule that decides is a function
 
 **Date:** 2026-09-10

@@ -182,14 +182,29 @@ struct RegexProgram {
 
 /// Match position for a sub-expression.
 ///
-/// Layout matches glibc/musl `regmatch_t` (`regoff_t` = `int`).
+/// # `regoff_t` is `long` here, and the comment above this used to say `int`
+///
+/// It said "Layout matches glibc/musl `regmatch_t` (`regoff_t` = `int`)",
+/// which is true of glibc and false of musl -- and musl is the C library every
+/// port in this tree links against. Measured:
+///
+/// | | glibc | musl |
+/// |---|---|---|
+/// | `regoff_t` | 4 | **8** |
+/// | `regmatch_t` | 8 | **16** |
+///
+/// So a C program declaring `regmatch_t m[10]` gave `regexec` a 160-byte array
+/// and got 80 bytes written into the front of it, with every element after the
+/// first landing at the wrong offset and every position truncated to 32 bits.
+/// Found by `scripts/check-libc-abi.py` on the day it was written; see
+/// `design-decisions.md` §1011 and §1010 for the family.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RegMatch {
     /// Start of match (byte offset), or -1 if not matched.
-    pub rm_so: i32,
+    pub rm_so: isize,
     /// End of match (byte offset past last char), or -1 if not matched.
-    pub rm_eo: i32,
+    pub rm_eo: isize,
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +305,7 @@ pub unsafe extern "C" fn regexec(
         if try_match(compiled, string_arg, slen, pos, eflags, &mut groups) {
             // Store whole match.
             if let Some(g0) = groups.get_mut(0) {
-                g0.rm_so = pos as i32;
+                g0.rm_so = pos as isize;
                 // rm_eo was set by the match engine.
             }
 
@@ -1090,7 +1105,7 @@ fn exec_recursive(
             Inst::Match => {
                 // Set the end of group 0.
                 if let Some(g0) = groups.get_mut(0) {
-                    g0.rm_eo = cur_sp as i32;
+                    g0.rm_eo = cur_sp as isize;
                 }
                 return true;
             }
@@ -1148,14 +1163,14 @@ fn exec_recursive(
 
             Inst::GroupStart(gid) => {
                 if let Some(grp) = groups.get_mut(gid as usize) {
-                    grp.rm_so = cur_sp as i32;
+                    grp.rm_so = cur_sp as isize;
                 }
                 cur_pc = cur_pc.wrapping_add(1);
             }
 
             Inst::GroupEnd(gid) => {
                 if let Some(grp) = groups.get_mut(gid as usize) {
-                    grp.rm_eo = cur_sp as i32;
+                    grp.rm_eo = cur_sp as isize;
                 }
                 cur_pc = cur_pc.wrapping_add(1);
             }
@@ -1650,7 +1665,7 @@ mod tests {
             }; MAX_GROUPS];
             if try_match(prog, text.as_ptr(), slen, pos, eflags, &mut groups) {
                 if let Some(g0) = groups.get_mut(0) {
-                    g0.rm_so = pos as i32;
+                    g0.rm_so = pos as isize;
                 }
                 return Some(groups);
             }
@@ -2386,11 +2401,27 @@ mod tests {
         assert_eq!(REG_ESPACE, 12);
     }
 
+    /// `regoff_t` is **`long`** in musl, so `regmatch_t` is 16 bytes.
+    ///
+    /// This test used to assert 8, on the stated grounds "glibc/musl:
+    /// regoff_t is `int` (i32)". It is `int` in glibc and `long` in musl, and
+    /// musl is the C library every port in this tree links against. Measured
+    /// on both, the same program compiled twice:
+    ///
+    /// ```text
+    /// glibc: regoff_t=4 regmatch_t=8  rm_eo@4
+    /// musl:  regoff_t=8 regmatch_t=16 rm_eo@8
+    /// ```
+    ///
+    /// A test naming two libraries and describing one is worse than a test
+    /// naming neither: it reads as though the question was asked.
+    /// `scripts/check-libc-abi.py` now asks it on every push.
     #[test]
     fn regmatch_layout() {
-        // glibc/musl: regoff_t is `int` (i32), so regmatch_t is 8 bytes.
-        assert_eq!(core::mem::size_of::<RegMatch>(), 8);
-        assert_eq!(core::mem::align_of::<RegMatch>(), 4);
+        assert_eq!(core::mem::size_of::<RegMatch>(), 16);
+        assert_eq!(core::mem::align_of::<RegMatch>(), 8);
+        assert_eq!(core::mem::offset_of!(RegMatch, rm_so), 0);
+        assert_eq!(core::mem::offset_of!(RegMatch, rm_eo), 8);
     }
 
     // -------------------------------------------------------------------

@@ -44,11 +44,37 @@ pub const SCHED_DEADLINE: i32 = 6;
 // ---------------------------------------------------------------------------
 
 /// Scheduling parameters.
+///
+/// # Why the padding is here and not an oversight
+///
+/// musl's `struct sched_param` is **48 bytes**, not 4: after `sched_priority`
+/// it carries five reserved fields that POSIX permits and that musl uses to
+/// keep room for the sporadic-server parameters. glibc's is 4. Measured:
+///
+/// ```text
+/// glibc: sched_param=4   musl: sched_param=48   (sched_priority at 0 in both)
+/// ```
+///
+/// Ours was 4, matching glibc, while every port in this tree links musl. The
+/// priority itself is at offset 0 either way, so reading one worked; what did
+/// not is a `sched_getparam` that is supposed to fill the caller's object and
+/// filled a twelfth of it. Found by `scripts/check-libc-abi.py`; see
+/// `design-decisions.md` §1011.
+///
+/// The reserved fields are named as musl names them and are not to be read or
+/// written — they exist so that `sizeof` agrees, which is the whole contract a
+/// caller relies on when it puts one of these on its stack.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct SchedParam {
     /// Scheduling priority.
     pub sched_priority: i32,
+    /// musl's `__reserved1`.
+    pub __reserved1: i32,
+    /// musl's `__reserved2`: two `{ time_t; long }` pairs.
+    pub __reserved2: [[i64; 2]; 2],
+    /// musl's `__reserved3`.
+    pub __reserved3: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -822,7 +848,10 @@ mod tests {
 
     #[test]
     fn test_sched_setscheduler_succeeds() {
-        let param = SchedParam { sched_priority: 50 };
+        let param = SchedParam {
+            sched_priority: 50,
+            ..SchedParam::default()
+        };
         assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const param), 0);
     }
 
@@ -840,7 +869,10 @@ mod tests {
 
     #[test]
     fn test_sched_getparam_fills_zero_priority() {
-        let mut param = SchedParam { sched_priority: 99 };
+        let mut param = SchedParam {
+            sched_priority: 99,
+            ..SchedParam::default()
+        };
         let ret = sched_getparam(0, &raw mut param);
         assert_eq!(ret, 0);
         assert_eq!(param.sched_priority, 0);
@@ -858,7 +890,10 @@ mod tests {
     fn test_sched_setparam_succeeds() {
         // sched_setparam adjusts priority within the *current* policy.
         // We report every task as SCHED_OTHER, so priority must be 0.
-        let param = SchedParam { sched_priority: 0 };
+        let param = SchedParam {
+            sched_priority: 0,
+            ..SchedParam::default()
+        };
         assert_eq!(sched_setparam(0, &raw const param), 0);
     }
 
@@ -1035,9 +1070,24 @@ mod tests {
 
     // -- SchedParam layout --
 
+    /// musl's `struct sched_param` is **48** bytes, not 4.
+    ///
+    /// This asserted 4, which is glibc's. musl carries five reserved fields
+    /// after `sched_priority` — POSIX permits them and musl uses them to keep
+    /// room for the sporadic-server parameters. Measured on both:
+    ///
+    /// ```text
+    /// glibc: sched_param=4    musl: sched_param=48   (priority at 0 in both)
+    /// ```
+    ///
+    /// The priority being at offset 0 either way is why reading one worked and
+    /// nothing noticed; what did not work is a `sched_getparam` meant to fill
+    /// the caller's object filling a twelfth of it.
     #[test]
     fn test_sched_param_size() {
-        assert_eq!(core::mem::size_of::<SchedParam>(), 4);
+        assert_eq!(core::mem::size_of::<SchedParam>(), 48);
+        // The field a caller actually reads is where it always was.
+        assert_eq!(core::mem::offset_of!(SchedParam, sched_priority), 0);
     }
 
     // -- CPU set manipulation --
@@ -1424,25 +1474,36 @@ mod tests {
         // Phase 74: only the six SCHED_* constants are accepted.  Unknown
         // policies (e.g. 99) now yield EINVAL — see
         // test_sched_setscheduler_unknown_policy_einval.
-        let param = SchedParam { sched_priority: 0 };
+        let param = SchedParam {
+            sched_priority: 0,
+            ..SchedParam::default()
+        };
         assert_eq!(sched_setscheduler(0, SCHED_OTHER, &raw const param), 0);
         assert_eq!(sched_setscheduler(0, SCHED_BATCH, &raw const param), 0);
         assert_eq!(sched_setscheduler(0, SCHED_IDLE, &raw const param), 0);
-        let rt = SchedParam { sched_priority: 50 };
+        let rt = SchedParam {
+            sched_priority: 50,
+            ..SchedParam::default()
+        };
         assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const rt), 0);
         assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const rt), 0);
     }
 
     // -- SchedParam layout --
 
+    /// 8, not 4: the reserved fields musl carries are `time_t`/`long` pairs.
+    /// See [`test_sched_param_size`].
     #[test]
     fn test_sched_param_alignment() {
-        assert_eq!(core::mem::align_of::<SchedParam>(), 4);
+        assert_eq!(core::mem::align_of::<SchedParam>(), 8);
     }
 
     #[test]
     fn test_sched_param_field_access() {
-        let p = SchedParam { sched_priority: 42 };
+        let p = SchedParam {
+            sched_priority: 42,
+            ..SchedParam::default()
+        };
         assert_eq!(p.sched_priority, 42);
     }
 
@@ -1450,7 +1511,10 @@ mod tests {
 
     #[test]
     fn test_sched_getparam_pid_zero() {
-        let mut param = SchedParam { sched_priority: 99 };
+        let mut param = SchedParam {
+            sched_priority: 99,
+            ..SchedParam::default()
+        };
         let ret = sched_getparam(0, &raw mut param);
         assert_eq!(ret, 0);
         assert_eq!(param.sched_priority, 0);
@@ -1553,7 +1617,10 @@ mod tests {
 
     #[test]
     fn test_sched_setscheduler_unknown_policy_einval() {
-        let param = SchedParam { sched_priority: 0 };
+        let param = SchedParam {
+            sched_priority: 0,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, 99, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1564,7 +1631,10 @@ mod tests {
         // Linux skipped policy 4 (was SCHED_ISO, never released).  Our
         // recognised set follows mainline: 0,1,2,3,5,6 — so 4 must
         // reject.
-        let param = SchedParam { sched_priority: 0 };
+        let param = SchedParam {
+            sched_priority: 0,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, 4, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1572,7 +1642,10 @@ mod tests {
 
     #[test]
     fn test_sched_setscheduler_policy_negative_einval() {
-        let param = SchedParam { sched_priority: 0 };
+        let param = SchedParam {
+            sched_priority: 0,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, -1, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1583,7 +1656,10 @@ mod tests {
     #[test]
     fn test_sched_setscheduler_rr_priority_zero_einval() {
         // SCHED_RR range is [1, 99] — 0 is below min.
-        let param = SchedParam { sched_priority: 0 };
+        let param = SchedParam {
+            sched_priority: 0,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1594,6 +1670,7 @@ mod tests {
         // SCHED_RR max is 99 — 100 is above max.
         let param = SchedParam {
             sched_priority: 100,
+            ..Default::default()
         };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const param), -1);
@@ -1602,7 +1679,10 @@ mod tests {
 
     #[test]
     fn test_sched_setscheduler_fifo_priority_negative_einval() {
-        let param = SchedParam { sched_priority: -5 };
+        let param = SchedParam {
+            sched_priority: -5,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1611,7 +1691,10 @@ mod tests {
     #[test]
     fn test_sched_setscheduler_other_priority_nonzero_einval() {
         // SCHED_OTHER range is [0, 0] — only 0 is valid.
-        let param = SchedParam { sched_priority: 1 };
+        let param = SchedParam {
+            sched_priority: 1,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, SCHED_OTHER, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1619,7 +1702,10 @@ mod tests {
 
     #[test]
     fn test_sched_setscheduler_batch_priority_nonzero_einval() {
-        let param = SchedParam { sched_priority: 5 };
+        let param = SchedParam {
+            sched_priority: 5,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, SCHED_BATCH, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1628,8 +1714,14 @@ mod tests {
     #[test]
     fn test_sched_setscheduler_rr_priority_boundaries_ok() {
         // 1 and 99 are inclusive bounds for SCHED_RR/SCHED_FIFO.
-        let lo = SchedParam { sched_priority: 1 };
-        let hi = SchedParam { sched_priority: 99 };
+        let lo = SchedParam {
+            sched_priority: 1,
+            ..SchedParam::default()
+        };
+        let hi = SchedParam {
+            sched_priority: 99,
+            ..SchedParam::default()
+        };
         assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const lo), 0);
         assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const hi), 0);
     }
@@ -1639,7 +1731,10 @@ mod tests {
     #[test]
     fn test_sched_setparam_nonzero_priority_einval() {
         // Reported policy is SCHED_OTHER → only priority 0 is valid.
-        let param = SchedParam { sched_priority: 50 };
+        let param = SchedParam {
+            sched_priority: 50,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setparam(0, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1647,7 +1742,10 @@ mod tests {
 
     #[test]
     fn test_sched_setparam_negative_priority_einval() {
-        let param = SchedParam { sched_priority: -1 };
+        let param = SchedParam {
+            sched_priority: -1,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setparam(0, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1671,7 +1769,10 @@ mod tests {
 
     #[test]
     fn test_sched_setscheduler_negative_pid_einval() {
-        let param = SchedParam { sched_priority: 0 };
+        let param = SchedParam {
+            sched_priority: 0,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(-1, SCHED_OTHER, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1679,7 +1780,10 @@ mod tests {
 
     #[test]
     fn test_sched_setparam_negative_pid_einval() {
-        let param = SchedParam { sched_priority: 0 };
+        let param = SchedParam {
+            sched_priority: 0,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setparam(-1, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1687,7 +1791,10 @@ mod tests {
 
     #[test]
     fn test_sched_getparam_negative_pid_einval() {
-        let mut param = SchedParam { sched_priority: 99 };
+        let mut param = SchedParam {
+            sched_priority: 99,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_getparam(-1, &raw mut param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1766,7 +1873,10 @@ mod tests {
     fn test_sched_setscheduler_bad_policy_beats_bad_priority() {
         // policy=99 with priority=99 (which would be valid for SCHED_RR).
         // Policy gate fires first.
-        let param = SchedParam { sched_priority: 99 };
+        let param = SchedParam {
+            sched_priority: 99,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, 99, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1780,7 +1890,10 @@ mod tests {
         // straight through as the policy.  If it doesn't match a
         // recognised SCHED_*, we now reject — silently accepting it
         // (old behaviour) hid the misconfiguration.
-        let param = SchedParam { sched_priority: 0 };
+        let param = SchedParam {
+            sched_priority: 0,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, 12345, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1793,6 +1906,7 @@ mod tests {
         // policy=50 is unknown → EINVAL.
         let param = SchedParam {
             sched_priority: SCHED_RR,
+            ..Default::default()
         };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, 50, &raw const param), -1);
@@ -1804,7 +1918,10 @@ mod tests {
         // Caller copies sched_priority=50 from a SCHED_RR example into a
         // sched_setparam call without changing policy.  Since current
         // policy is reported as SCHED_OTHER, the priority must be 0.
-        let param = SchedParam { sched_priority: 50 };
+        let param = SchedParam {
+            sched_priority: 50,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setparam(0, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1816,6 +1933,7 @@ mod tests {
         let lo = sched_get_priority_min(SCHED_RR);
         let param = SchedParam {
             sched_priority: lo - 1,
+            ..Default::default()
         };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const param), -1);
@@ -1827,6 +1945,7 @@ mod tests {
         let hi = sched_get_priority_max(SCHED_RR);
         let param = SchedParam {
             sched_priority: hi + 1,
+            ..Default::default()
         };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const param), -1);
@@ -1841,7 +1960,10 @@ mod tests {
         // priorities must succeed.
         for &p in &[SCHED_OTHER, SCHED_BATCH, SCHED_IDLE, SCHED_DEADLINE] {
             // Range [0, 0] → only 0.
-            let param = SchedParam { sched_priority: 0 };
+            let param = SchedParam {
+                sched_priority: 0,
+                ..SchedParam::default()
+            };
             assert_eq!(sched_setscheduler(0, p, &raw const param), 0);
         }
         for &p in &[SCHED_FIFO, SCHED_RR] {
@@ -1849,6 +1971,7 @@ mod tests {
             for &pri in &[1, 50, 99] {
                 let param = SchedParam {
                     sched_priority: pri,
+                    ..Default::default()
                 };
                 assert_eq!(sched_setscheduler(0, p, &raw const param), 0);
             }
@@ -1857,13 +1980,19 @@ mod tests {
 
     #[test]
     fn test_sched_setparam_workflow_priority_zero_succeeds() {
-        let param = SchedParam { sched_priority: 0 };
+        let param = SchedParam {
+            sched_priority: 0,
+            ..SchedParam::default()
+        };
         assert_eq!(sched_setparam(0, &raw const param), 0);
     }
 
     #[test]
     fn test_sched_getparam_workflow_after_validation_fills_buffer() {
-        let mut param = SchedParam { sched_priority: 99 };
+        let mut param = SchedParam {
+            sched_priority: 99,
+            ..SchedParam::default()
+        };
         assert_eq!(sched_getparam(0, &raw mut param), 0);
         assert_eq!(param.sched_priority, 0);
     }
@@ -2132,7 +2261,10 @@ mod tests {
         fn test_sched_setscheduler_phase170_fifo_no_cap_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
-            let p = SchedParam { sched_priority: 50 };
+            let p = SchedParam {
+                sched_priority: 50,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
@@ -2143,7 +2275,10 @@ mod tests {
         fn test_sched_setscheduler_phase170_rr_no_cap_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
-            let p = SchedParam { sched_priority: 1 };
+            let p = SchedParam {
+                sched_priority: 1,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
@@ -2156,7 +2291,10 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
             // SCHED_DEADLINE's priority range is (0, 0).
-            let p = SchedParam { sched_priority: 0 };
+            let p = SchedParam {
+                sched_priority: 0,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_DEADLINE, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
@@ -2169,7 +2307,10 @@ mod tests {
         fn test_sched_setscheduler_phase170_einval_pid_beats_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
-            let p = SchedParam { sched_priority: 50 };
+            let p = SchedParam {
+                sched_priority: 50,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             // Negative pid + RT policy + no cap → EINVAL (not EPERM).
             assert_eq!(sched_setscheduler(-1, SCHED_FIFO, &raw const p), -1,);
@@ -2182,7 +2323,10 @@ mod tests {
         fn test_sched_setscheduler_phase170_einval_policy_beats_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
-            let p = SchedParam { sched_priority: 50 };
+            let p = SchedParam {
+                sched_priority: 50,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, 99, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -2206,7 +2350,10 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
             // SCHED_FIFO range is [1, 99]; 0 is out of range.
-            let p = SchedParam { sched_priority: 0 };
+            let p = SchedParam {
+                sched_priority: 0,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -2218,7 +2365,10 @@ mod tests {
         fn test_sched_setscheduler_phase170_other_no_cap_ok() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
-            let p = SchedParam { sched_priority: 0 };
+            let p = SchedParam {
+                sched_priority: 0,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_OTHER, &raw const p), 0,);
         }
@@ -2228,7 +2378,10 @@ mod tests {
         fn test_sched_setscheduler_phase170_batch_idle_no_cap_ok() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
-            let p = SchedParam { sched_priority: 0 };
+            let p = SchedParam {
+                sched_priority: 0,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_BATCH, &raw const p), 0,);
             assert_eq!(sched_setscheduler(0, SCHED_IDLE, &raw const p), 0,);
@@ -2243,16 +2396,25 @@ mod tests {
         #[test]
         fn test_sched_setscheduler_phase170_workflow_rt_then_drop_then_fallback() {
             let _g = CapGuard::snapshot();
-            let p_rt = SchedParam { sched_priority: 80 };
+            let p_rt = SchedParam {
+                sched_priority: 80,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p_rt), 0,);
             drop_cap_sys_nice();
-            let p_rr = SchedParam { sched_priority: 50 };
+            let p_rr = SchedParam {
+                sched_priority: 50,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const p_rr), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
             // Fall back to SCHED_OTHER: no cap needed.
-            let p_other = SchedParam { sched_priority: 0 };
+            let p_other = SchedParam {
+                sched_priority: 0,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_OTHER, &raw const p_other), 0,);
         }
@@ -2266,7 +2428,10 @@ mod tests {
         fn test_sched_setscheduler_phase170_positive_pid_no_cap_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
-            let p = SchedParam { sched_priority: 99 };
+            let p = SchedParam {
+                sched_priority: 99,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(1234, SCHED_FIFO, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
@@ -2280,7 +2445,10 @@ mod tests {
         fn test_sched_setscheduler_phase170_recovery_restore_cap() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
-            let p = SchedParam { sched_priority: 25 };
+            let p = SchedParam {
+                sched_priority: 25,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
@@ -2316,10 +2484,16 @@ mod tests {
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SYS_NICE,
             ));
-            let p_rt = SchedParam { sched_priority: 50 };
+            let p_rt = SchedParam {
+                sched_priority: 50,
+                ..SchedParam::default()
+            };
             assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p_rt), 0,);
             assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const p_rt), 0,);
-            let p_dl = SchedParam { sched_priority: 0 };
+            let p_dl = SchedParam {
+                sched_priority: 0,
+                ..SchedParam::default()
+            };
             assert_eq!(sched_setscheduler(0, SCHED_DEADLINE, &raw const p_dl), 0,);
         }
 
@@ -2415,7 +2589,10 @@ mod tests {
             let _g = CapGuard::snapshot();
             set_rtprio_limit(50);
             drop_cap_sys_nice();
-            let p = SchedParam { sched_priority: 50 };
+            let p = SchedParam {
+                sched_priority: 50,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(
                 sched_setscheduler(0, SCHED_FIFO, &raw const p),
@@ -2436,7 +2613,10 @@ mod tests {
             let _g = CapGuard::snapshot();
             set_rtprio_limit(50);
             drop_cap_sys_nice();
-            let p = SchedParam { sched_priority: 51 };
+            let p = SchedParam {
+                sched_priority: 51,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
@@ -2450,7 +2630,10 @@ mod tests {
             let _g = CapGuard::snapshot();
             set_rtprio_limit(99);
             drop_cap_sys_nice();
-            let p = SchedParam { sched_priority: 0 };
+            let p = SchedParam {
+                sched_priority: 0,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(
                 sched_setscheduler(0, SCHED_DEADLINE, &raw const p),
@@ -2482,7 +2665,10 @@ mod tests {
             );
             drop_cap_sys_nice();
             // Even priority 1 — the lowest an RT policy accepts — is denied.
-            let p = SchedParam { sched_priority: 1 };
+            let p = SchedParam {
+                sched_priority: 1,
+                ..SchedParam::default()
+            };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
@@ -2499,6 +2685,7 @@ mod tests {
             // SCHED_FIFO's range is [1, 99]; 100 is out of range.
             let p = SchedParam {
                 sched_priority: 100,
+                ..Default::default()
             };
             errno::set_errno(0);
             assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1);
@@ -2827,7 +3014,10 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(sched_getparam(0, core::ptr::null_mut()), -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
-        let mut param = SchedParam { sched_priority: 99 };
+        let mut param = SchedParam {
+            sched_priority: 99,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_getparam(0, &raw mut param), 0);
         assert_eq!(param.sched_priority, 0);
@@ -2836,7 +3026,10 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(sched_setparam(0, core::ptr::null()), -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
-        let p = SchedParam { sched_priority: 0 };
+        let p = SchedParam {
+            sched_priority: 0,
+            ..SchedParam::default()
+        };
         errno::set_errno(0);
         assert_eq!(sched_setparam(0, &raw const p), 0);
 

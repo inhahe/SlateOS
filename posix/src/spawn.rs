@@ -1260,6 +1260,10 @@ pub extern "C" fn posix_spawnattr_getschedparam(
             schedparam,
             crate::sched::SchedParam {
                 sched_priority: (*attr).schedpriority,
+                // The reserved fields are written as zero rather than left
+                // alone: this is a whole-struct store into the caller's
+                // object, and musl's `sched_param` is 48 bytes.
+                ..crate::sched::SchedParam::default()
             },
         );
     }
@@ -2708,13 +2712,19 @@ mod tests {
             posix_spawnattr_setschedpolicy(attr, crate::sched::SCHED_RR),
             0
         );
-        let param = crate::sched::SchedParam { sched_priority: 42 };
+        let param = crate::sched::SchedParam {
+            sched_priority: 42,
+            ..Default::default()
+        };
         assert_eq!(posix_spawnattr_setschedparam(attr, &raw const param), 0);
 
         let mut got_def = crate::signal::SigsetT::EMPTY;
         let mut got_mask = crate::signal::SigsetT::EMPTY;
         let mut got_pol = 0_i32;
-        let mut got_param = crate::sched::SchedParam { sched_priority: 0 };
+        let mut got_param = crate::sched::SchedParam {
+            sched_priority: 0,
+            ..Default::default()
+        };
         assert_eq!(posix_spawnattr_getsigdefault(attr, &raw mut got_def), 0);
         assert_eq!(posix_spawnattr_getsigmask(attr, &raw mut got_mask), 0);
         assert_eq!(posix_spawnattr_getschedpolicy(attr, &raw mut got_pol), 0);
@@ -2777,7 +2787,10 @@ mod tests {
     #[test]
     fn test_spawnattr_null_arguments_report_efault() {
         let set = crate::signal::SigsetT::EMPTY;
-        let param = crate::sched::SchedParam { sched_priority: 0 };
+        let param = crate::sched::SchedParam {
+            sched_priority: 0,
+            ..Default::default()
+        };
         assert_eq!(
             posix_spawnattr_setsigmask(core::ptr::null_mut(), &raw const set),
             errno::EFAULT

@@ -279,6 +279,100 @@ pub(crate) fn abi_asserts() -> String {
         domainname
     );
 
+    // --- types a C program declares BY VALUE --------------------------------
+    //
+    // The highest stakes in this file, and the reason they came first when the
+    // ratchet started shrinking. A C program writes `pthread_mutex_t m;` on its
+    // own stack and hands us `&m`; if our idea of the type is *smaller* than
+    // musl's, every write we make past our idea lands in the caller's frame.
+    // No field names, deliberately -- musl declares these as unions of
+    // anonymous arrays and the internals are nobody's business. Size and
+    // alignment are the whole contract.
+    abi!(out, hdrs, crate::signal::SigsetT, "sigset_t", "signal.h");
+    abi!(
+        out,
+        hdrs,
+        crate::pthread::PthreadMutexT,
+        "pthread_mutex_t",
+        "pthread.h"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::pthread::PthreadCondT,
+        "pthread_cond_t",
+        "pthread.h"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::pthread::PthreadRwlockT,
+        "pthread_rwlock_t",
+        "pthread.h"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::pthread::PthreadOnceT,
+        "pthread_once_t",
+        "pthread.h"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::pthread::PthreadBarrierT,
+        "pthread_barrier_t",
+        "pthread.h"
+    );
+    abi!(out, hdrs, crate::semaphore::SemT, "sem_t", "semaphore.h");
+    // Two independent `CpuSetT` definitions exist -- `pthread::CpuSetT` with a
+    // `__bits` field and `sched::CpuSetT` with a `bits` field. Both are
+    // checked, because a duplicate type is exactly the thing that drifts.
+    abi!(out, hdrs, crate::pthread::CpuSetT, "cpu_set_t", "sched.h");
+    abi!(out, hdrs, crate::sched::CpuSetT, "cpu_set_t", "sched.h");
+
+    // --- regex: `regex_t` is declared by value too ---------------------------
+    abi!(out, hdrs, crate::regex::RegexT, "regex_t", "regex.h");
+    abi!(
+        out,
+        hdrs,
+        crate::regex::RegMatch,
+        "regmatch_t",
+        "regex.h",
+        rm_so,
+        rm_eo
+    );
+
+    // --- small odds and ends -------------------------------------------------
+    abi!(
+        out,
+        hdrs,
+        crate::sched::SchedParam,
+        "struct sched_param",
+        "sched.h",
+        sched_priority
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::sys_times::Tms,
+        "struct tms",
+        "sys/times.h",
+        tms_utime,
+        tms_stime,
+        tms_cutime,
+        tms_cstime
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::utime::Utimbuf,
+        "struct utimbuf",
+        "utime.h",
+        actime,
+        modtime
+    );
+
     let mut src = String::new();
     let _ = writeln!(
         src,

@@ -70568,8 +70568,59 @@ pushes that touch `posix/src/` or the checker itself -- the only pushes that
 can change either the layouts or the verdict. Without zig it says so by name
 and still runs the coverage ratchet, rather than passing silently.
 
-**Against it, honestly:** 15 of 98 is thin coverage on day one, and the ratchet
-freezes the other 83 rather than fixing them. The most dangerous names are in
+### The gate found two more the same hour, and both were glibc/musl divergences
+
+Coverage went from 15 types to 28 by adding the by-value ones — the entries
+this entry called the scary ones, where a C program puts the object on its own
+stack. Two of the new thirteen failed immediately, and both failed in the same
+way: our type matched **glibc** and the ports link **musl**.
+
+| | glibc | musl | ours, before |
+|---|---|---|---|
+| `regoff_t` | 4 | **8** | 4 |
+| `regmatch_t` | 8 | **16** | 8 |
+| `struct sched_param` | 4 | **48** | 4 |
+
+Measured by compiling one program twice, once with `gcc` under WSL and once
+with `zig cc --target=x86_64-linux-musl`.
+
+**`regmatch_t` is the serious one.** A C program writes `regmatch_t m[10]` and
+calls `regexec(&re, s, 10, m, 0)`. Its array is 160 bytes; we wrote 80 into the
+front of it, with every element after the first landing at the wrong offset and
+every position truncated to 32 bits. Anything using POSIX regex with
+sub-expressions — `sed`, `awk`, `grep -E` through the C API — got wrong offsets
+for every group but the first. Fixed by widening `rm_so`/`rm_eo` to `isize`,
+which is what `regoff_t` is here.
+
+**`sched_param` is mild and worth stating anyway.** `sched_priority` is at
+offset 0 in both, so reading one worked, which is why nothing noticed. What did
+not work is a `sched_getparam` that is supposed to fill the caller's object and
+filled a twelfth of it. Fixed by carrying musl's five reserved fields.
+
+**Three more tests had certified the wrong answer**, and one of them is the
+best example of the shape yet:
+
+```rust
+// glibc/musl: regoff_t is `int` (i32), so regmatch_t is 8 bytes.
+```
+
+It is `int` in glibc and `long` in musl. **A test that names two libraries and
+describes one is worse than a test that names neither**, because it reads as
+though the question had been asked. That is the same defect as §1010's "glibc
+x86_64" comment on the kernel's struct, twice in two days, in code written
+months apart — which is what makes it a class rather than a slip, and why the
+answer had to be a gate rather than three more careful comments.
+
+**This is also the case that justifies choosing musl as the oracle.** Had the
+gate compared against glibc it would have passed all three of these and left
+the `regmatch_t` corruption in place. "The C library every port here already
+links against" was the right reason, and it turned out to be load-bearing
+within the hour.
+
+**Against it, honestly:** 28 of 98 is thin coverage on day one, and the ratchet
+freezes the other 51 rather than fixing them. (15 when this paragraph was
+first written; the by-value batch above took it to 28 within the hour, which
+is the ratchet working as intended rather than a correction to it.) The most dangerous names are in
 that frozen set -- `PthreadMutexT`, `PthreadAttrT`, `CpuSetT`, `SemT` are all
 types a C program declares *by value*, where being smaller than musl's means
 our writes land past the caller's own object. The counter-argument is that a

@@ -68,7 +68,6 @@ use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
 
-
 // ---------------------------------------------------------------------------
 // Hostname state
 // ---------------------------------------------------------------------------
@@ -1205,7 +1204,6 @@ pub fn mount(mount_path: impl AsRef<Path>) -> KernelResult<()> {
 // Kshell integration: `sysctl` command
 // ---------------------------------------------------------------------------
 
-
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
@@ -1313,7 +1311,8 @@ pub fn self_test() -> KernelResult<()> {
     // only writer.  Asserted rather than assumed: a mode bit reading 0444 and a
     // write_file that quietly succeeds look identical from a directory listing.
     assert!(
-        fs.write_file(Path::new("/kernel/hostname"), b"nope").is_err(),
+        fs.write_file(Path::new("/kernel/hostname"), b"nope")
+            .is_err(),
         "/sys/kernel/hostname must refuse a write: SYS_HOSTNAME_SET gates the \
          hostname, and an unguarded file write would walk around that check"
     );

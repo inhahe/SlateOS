@@ -56421,3 +56421,38 @@ The absent pattern is `None`, not an empty compiled pattern. Those are the same
 answer -- everything matches -- right up until `-v` negates it, at which point
 one selects every process and the other selects none. `pgrep -v -P 1` is a real
 invocation, so the difference is reachable, and there is a test for it.
+
+
+## earlyoom knows which process to end and cannot end it (lane B, 2026-09-10)
+
+`userspace/earlyoom` now reads real memory pressure from `/proc/meminfo` and a
+real process table from `/proc`, and picks a real victim by `oom_score`. What
+it cannot do is signal it.
+
+**What it used to do is the reason this entry exists.** The whole program was
+under a header reading `// -- Simulated data --`: `read_meminfo()` returned four
+constants (32 GB total, 2 GB available, commented "(low!)"), and
+`read_processes()` returned four invented processes including pid 1234 named
+`chromium`. So the daemon believed memory was permanently below threshold,
+always chose the same fictional victim, and printed a convincing report about a
+machine that does not exist.
+
+And the kill path was worse than the data. Both arms of the `if config.dryrun`
+were a `println!`, so the only difference between a dry run and a real one was
+the wording -- **and the real one said "sending SIGTERM to pid 1234 (chromium)"
+having sent nothing.** For a daemon whose log is the only evidence anyone has
+that it works, a message claiming an action it did not take is the exact wrong
+failure. It now says it would send, and that signalling is not implemented.
+
+**The fix is small and deliberately not done here.** `posix` has `kill`; the
+work is one call plus deciding what to do when it fails (the process may have
+exited between selection and signal, which is success by any measure). It is
+separate because making a previously-inert daemon start ending processes is a
+change in what the system does to a running machine, not a change in what a
+program reports -- and it deserves its own commit, its own test, and a moment's
+thought about `SIGTERM`-then-`SIGKILL` escalation, which this program parses
+flags for (`--use-sigkill`) and does not implement either.
+
+**Do it when** something actually runs `earlyoom` on a machine under pressure.
+Until then a daemon that reports true pressure and true candidates, and says
+plainly that it cannot act, is more useful than one that claims to have acted.

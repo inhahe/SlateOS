@@ -56645,3 +56645,39 @@ fixture and the wiring are one landing, not two.
 the wiring alone either -- the wiring without the fixture is the state this
 lane has already been in twice, where the only evidence that setting a name
 works is that the code looks like it should.
+
+================================================================================
+`userspace/cal` prints 1 January 2025 when it cannot read the clock
+================================================================================
+
+`current_date()` in `userspace/cal/src/main.rs:87`:
+
+    if let Ok(dur) = SystemTime::now().duration_since(UNIX_EPOCH) {
+        ...
+        return (year, month, day);
+    }
+    (2025, 1, 1) // fallback
+
+The happy path is real -- it reads the clock and does genuine calendar
+arithmetic, which is why `cal` is NOT in the design-decisions 1006 deletion
+set. The fallback is the defect: when the clock cannot be read, `cal` prints a
+calendar for January 2025 with 1 January highlighted as today, and exits 0.
+There is no way for the caller to tell that from a correct answer, which is the
+same shape as the fabricating commands 1006 deletes -- a plausible fact stated
+where the program had none.
+
+Found while checking the 1006 delete-list for false positives, not by the audit
+(the audit had `cal` down as fabricating outright, for the unrelated reason that
+`SystemTime` was not in its marker list).
+
+**The proper fix:** `cal` with no date argument and no clock should say so on
+stderr and exit non-zero, the way it would for an unparseable `--year`. With an
+explicit year/month argument it needs no clock at all and should still work --
+so the refusal belongs in the no-argument path only, and `--highlight-today`
+should degrade to no highlight rather than to a wrong one.
+
+**Also worth checking while there:** the comment above the fallback says "On
+Slate OS this would use the kernel clock; for now use a reasonable default" and
+mentions parsing `/proc/driver/rtc`. `SystemTime::now()` *is* the kernel clock
+on this target, so that comment describes an arrangement that is no longer the
+one in the code beneath it.

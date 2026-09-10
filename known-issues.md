@@ -126976,8 +126976,14 @@ each opened `/proc/stat` for `btime` alone, and `hwclock` hand-parsed
 taking on contact: it read `/proc/<pid>/stat` through `read_to_string`, so a
 process whose name is not UTF-8 was dropped from the listing entirely -- and
 `pgrep` and `pkill` are the same binary, so such a process could not be
-signalled by name at all. `userspace/top` followed the same day; `userspace/pstree`
-is the last of the three.
+signalled by name at all. `userspace/top` followed the same day; `userspace/pstree` followed the same
+day, which closes the set.
+
+**`pstree`'s version was the worst of the three.** A tree is assembled by
+matching each process's `ppid` against a parent that has to be present, so one
+process dropped for having an unreadable name took **every descendant with
+it** -- an arbitrarily large subtree missing, with nothing to say so. In
+`pgrep` and `top` the same defect loses one row.
 
 `top` carried two more things worth naming. Its `COMMAND` column was
 `&p.name[..16]` on a `String` -- **a panic** whenever byte 16 falls inside a

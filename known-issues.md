@@ -126866,9 +126866,20 @@ cosmetic:
 **The fix** is to move each onto `procinfo`, which now covers memory, load,
 uptime, cpuinfo, mounts and the per-process family. Not one change: each
 program has its own output format and its own idea of which fields it needs,
-and the useful unit is one program per commit, starting with `htop` -- whose
-readers the crate's per-process half was extracted from, so it should be the
-easiest and is the one currently duplicating the most.
+and the useful unit is one program per commit.
+
+**One down, nine to go.** `htop` moved on 2026-09-10 -- its per-process
+reading, which is where the crate's per-process half came from. Its private
+`PAGE_SIZE_KB` is gone with it. What `htop` still parses itself is
+`/proc/meminfo`, `/proc/stat`, `/proc/uptime` and `/proc/loadavg`; the crate
+has `MemInfo`, `Uptime` and `LoadAvg` for three of those, and **no per-CPU
+tick reader at all** -- `/proc/stat`'s `cpuN` lines have no counterpart in
+`procinfo`, and `apps/procexplorer` will want them for a CPU percentage. That
+is the next thing to add rather than the next program to convert.
+
+Remaining: `ps`, `free`, `coreutils`'s `free`, `earlyoom`, `iostat`, `hwinfo`,
+`lsmem`, `numactl`, `hwclock`. `ps` is the one that still carries its own
+`const PAGE_SIZE_KB: u64 = 16;`.
 
 **Not urgent, and worth saying why.** Every one of the ten works today. This is
 the debt of ten right answers with nothing keeping them right, not a list of

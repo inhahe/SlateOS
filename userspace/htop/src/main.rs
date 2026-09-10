@@ -27,8 +27,11 @@ use std::process;
 
 const VERSION: &str = "0.1.0";
 
-/// Slate OS uses 16 KiB pages.
-const PAGE_SIZE_KB: u64 = 16;
+// `PAGE_SIZE_KB` used to live here, a private copy of a fact about the kernel.
+// It is `procinfo::PAGE_SIZE_KIB` now, and this program no longer converts
+// pages to KiB itself -- `ProcessStat::rss_kib` and `ProcessStatm::shared_kib`
+// do. `userspace/ps` still has its own copy; see `known-issues.md` ->
+// TD-B-TEN-PROC-PARSERS-IN-USERSPACE-AND-ONE-CRATE.
 
 /// Assumed tick rate (ticks per second).
 const TICKS_PER_SEC: u64 = 100;
@@ -818,36 +821,69 @@ fn uid_to_user(uid: u32) -> String {
     uid.to_string()
 }
 
-/// Read information about a single process from /proc/<pid>/.
-fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
-    let stat_path = format!("/proc/{pid}/stat");
-    let stat_content = read_file(&stat_path)?;
-
-    // /proc/<pid>/stat format: pid (comm) state ppid ...
-    // comm can contain spaces and parentheses, so find the last ')'.
-    let comm_start = stat_content.find('(')?;
-    let comm_end = stat_content.rfind(')')?;
-    let name = stat_content[comm_start + 1..comm_end].to_string();
-    let rest = stat_content.get(comm_end + 2..)?; // skip ") "
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-
-    if fields.len() < 22 {
-        return None;
+/// Bytes from `/proc` rendered for a terminal.
+///
+/// A command name and its arguments are **bytes** -- they come from `argv`,
+/// and our filesystem allows every byte but `/` and NUL. This program has to
+/// put them on a screen, so something has to happen to a byte that is not
+/// valid UTF-8.
+///
+/// What used to happen is that the whole process disappeared: the reader went
+/// through `read_to_string`, which fails on such a name, and `read_process`
+/// returned `None`. A process viewer that hides exactly the processes with
+/// unusual names is worse than one that renders them oddly.
+///
+/// `\xNN` per invalid byte, not `from_utf8_lossy`: `CLAUDE.md` self-review
+/// item 7 forbids the lossy conversion because U+FFFD is silent -- it does not
+/// say a byte was lost, and two different names can become the same string.
+/// This is explicit and does not collide.
+fn display_bytes(raw: &[u8]) -> String {
+    match core::str::from_utf8(raw) {
+        Ok(text) => text.to_string(),
+        Err(_) => {
+            let mut out = String::with_capacity(raw.len());
+            let mut rest = raw;
+            loop {
+                match core::str::from_utf8(rest) {
+                    Ok(text) => {
+                        out.push_str(text);
+                        return out;
+                    }
+                    Err(e) => {
+                        let good = e.valid_up_to();
+                        if let Some(text) =
+                            rest.get(..good).and_then(|b| core::str::from_utf8(b).ok())
+                        {
+                            out.push_str(text);
+                        }
+                        let bad = e.error_len().unwrap_or(1);
+                        for b in rest.get(good..good.saturating_add(bad)).unwrap_or_default() {
+                            out.push_str(&format!("\\x{b:02x}"));
+                        }
+                        let Some(next) = rest.get(good.saturating_add(bad)..) else {
+                            return out;
+                        };
+                        rest = next;
+                    }
+                }
+            }
+        }
     }
+}
 
-    let state = fields[0].chars().next().unwrap_or('?');
-    let ppid: u32 = fields[1].parse().unwrap_or(0);
-    let utime: u64 = fields[11].parse().unwrap_or(0);
-    let stime: u64 = fields[12].parse().unwrap_or(0);
-    let priority: i32 = fields[15].parse().unwrap_or(0);
-    let nice: i32 = fields[16].parse().unwrap_or(0);
-    let threads: u32 = fields[17].parse().unwrap_or(1);
-    let vsize_bytes: u64 = fields[20].parse().unwrap_or(0);
-    let rss_pages: u64 = fields[21].parse().unwrap_or(0);
+/// Read information about a single process, through [`procinfo`].
+///
+/// The parsing this used to do itself now lives in `procinfo`, so that
+/// `apps/procexplorer` gets the same answers -- including the two things this
+/// function got wrong on its own: a `comm` containing spaces and parentheses
+/// (handled by finding the last `)`, which this did correctly) and a name that
+/// is not UTF-8 (which it did not, dropping the process).
+fn read_process(procfs: &procinfo::ProcFs, pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
+    let stat = procfs.process_stat(u64::from(pid)).ok()??;
 
-    let rss_kb = rss_pages.saturating_mul(PAGE_SIZE_KB);
-    let vsize_kb = vsize_bytes / 1024;
-    let cpu_ticks = utime.saturating_add(stime);
+    let name = display_bytes(&stat.comm);
+    let rss_kb = stat.rss_kib();
+    let cpu_ticks = stat.cpu_ticks();
 
     let mem_pct = if mem_total_kb > 0 {
         (rss_kb as f64 / mem_total_kb as f64) * 100.0
@@ -856,9 +892,8 @@ fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
     };
 
     // Format CPU time as H:MM:SS.cc (hundredths).
-    let total_centisecs = cpu_ticks;
-    let total_secs = total_centisecs / TICKS_PER_SEC;
-    let centis = total_centisecs % TICKS_PER_SEC;
+    let total_secs = cpu_ticks / TICKS_PER_SEC;
+    let centis = cpu_ticks % TICKS_PER_SEC;
     let hours = total_secs / 3600;
     let mins = (total_secs % 3600) / 60;
     let secs = total_secs % 60;
@@ -868,33 +903,36 @@ fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
         format!("{mins}:{secs:02}.{centis:02}")
     };
 
-    // Read UID from /proc/<pid>/status.
-    let uid = read_file(&format!("/proc/{pid}/status"))
-        .and_then(|content| {
-            for line in content.lines() {
-                if let Some(val) = line.strip_prefix("Uid:") {
-                    return val.split_whitespace().next().and_then(|s| s.parse().ok());
-                }
-            }
-            None
-        })
+    let uid = procfs
+        .process_uid(u64::from(pid))
+        .ok()
+        .flatten()
         .unwrap_or(0);
 
-    // Read shared memory from /proc/<pid>/statm (field 2).
-    let shr_kb = read_file(&format!("/proc/{pid}/statm"))
-        .and_then(|s| {
-            s.split_whitespace()
-                .nth(2)
-                .and_then(|v| v.parse::<u64>().ok())
-        })
-        .unwrap_or(0)
-        .saturating_mul(PAGE_SIZE_KB);
+    let shr_kb = procfs
+        .process_statm(u64::from(pid))
+        .ok()
+        .flatten()
+        .map_or(0, |m| m.shared_kib());
 
-    // Read full command line from /proc/<pid>/cmdline.
-    let cmdline = read_file(&format!("/proc/{pid}/cmdline"))
-        .map(|s| s.replace('\0', " ").trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("[{name}]"));
+    // An empty argument list is a kernel thread, which is why it shows as
+    // `[name]` rather than blank. `procinfo` distinguishes that from a process
+    // that has exited, which arrives here as `None` and gets the same display
+    // -- the difference does not matter to a viewer, only to the reader.
+    let cmdline = procfs
+        .process_cmdline(u64::from(pid))
+        .ok()
+        .flatten()
+        .filter(|args| !args.is_empty())
+        .map_or_else(
+            || format!("[{name}]"),
+            |args| {
+                args.iter()
+                    .map(|a| display_bytes(a))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            },
+        );
 
     let user = uid_to_user(uid);
 
@@ -902,14 +940,14 @@ fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
         pid,
         name,
         cmdline,
-        state,
-        ppid,
+        state: char::from(stat.state),
+        ppid: u32::try_from(stat.ppid).unwrap_or(0),
         uid,
         user,
-        priority,
-        nice,
-        threads,
-        vsize_kb,
+        priority: i32::try_from(stat.priority).unwrap_or(0),
+        nice: i32::try_from(stat.nice).unwrap_or(0),
+        threads: u32::try_from(stat.num_threads).unwrap_or(1),
+        vsize_kb: stat.vsize_kib(),
         rss_kb,
         shr_kb,
         cpu_ticks,
@@ -921,18 +959,14 @@ fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
 
 /// Enumerate all processes from /proc.
 fn read_all_processes(mem_total_kb: u64) -> Vec<ProcessInfo> {
-    let mut procs = Vec::new();
-    if let Ok(entries) = fs::read_dir("/proc") {
-        for entry in entries.flatten() {
-            if let Some(fname) = entry.file_name().to_str()
-                && let Ok(pid) = fname.parse::<u32>()
-                && let Some(info) = read_process(pid, mem_total_kb)
-            {
-                procs.push(info);
-            }
-        }
-    }
-    procs
+    let procfs = procinfo::ProcFs::new();
+    let Ok(pids) = procfs.process_ids() else {
+        return Vec::new();
+    };
+    pids.into_iter()
+        .filter_map(|pid| u32::try_from(pid).ok())
+        .filter_map(|pid| read_process(&procfs, pid, mem_total_kb))
+        .collect()
 }
 
 /// Compute CPU usage percentages by comparing two snapshots.
@@ -2200,4 +2234,64 @@ fn main() {
 
     let mut app = App::new(config);
     app.run();
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::display_bytes;
+
+    /// The ordinary case costs nothing and changes nothing.
+    #[test]
+    fn valid_utf8_passes_through_unchanged() {
+        assert_eq!(display_bytes(b"bash"), "bash");
+        assert_eq!(display_bytes("na\u{ef}ve".as_bytes()), "na\u{ef}ve");
+        assert_eq!(display_bytes(b""), "");
+    }
+
+    /// An invalid byte is shown, not swallowed. This is the case that used to
+    /// remove the whole process from the list: the old reader went through
+    /// `read_to_string`, which fails, and `read_process` returned `None`.
+    #[test]
+    fn an_invalid_byte_is_shown_as_hex() {
+        assert_eq!(display_bytes(b"od\xffd"), r"od\xffd");
+        assert_eq!(display_bytes(b"\xc3"), r"\xc3");
+    }
+
+    /// The valid parts either side of a bad byte survive intact.
+    #[test]
+    fn text_around_an_invalid_byte_is_kept() {
+        assert_eq!(display_bytes(b"a\xffb\xfec"), r"a\xffb\xfec");
+        // `\xc3\xa9` is a valid `é`; the `\xff` after it is not.
+        assert_eq!(display_bytes(b"\xc3\xa9\xff"), "\u{e9}\\xff");
+    }
+
+    /// The reason this is not `from_utf8_lossy`: that maps every invalid byte
+    /// to U+FFFD, so two different names become the same string and a viewer
+    /// cannot tell one process from another. `CLAUDE.md` self-review item 7
+    /// calls the lossy conversion silent data corruption; here it would be
+    /// corruption of the very thing the user is reading.
+    ///
+    /// The second assertion is the one that makes the point: it shows the
+    /// alternative really does collide, rather than asserting that ours does
+    /// not and leaving the comparison to the reader.
+    #[test]
+    fn two_different_invalid_names_do_not_collide() {
+        assert_ne!(display_bytes(b"x\xff"), display_bytes(b"x\xfe"));
+        assert_eq!(
+            String::from_utf8_lossy(b"x\xff"),
+            String::from_utf8_lossy(b"x\xfe"),
+            "if this ever fails, from_utf8_lossy has changed and this test's premise with it"
+        );
+    }
+
+    /// A truncated multi-byte sequence at the very end has no continuation to
+    /// consume, which is the loop's one exit that is not `Ok`.
+    #[test]
+    fn a_truncated_sequence_at_the_end_terminates() {
+        assert_eq!(display_bytes(b"ok\xe2\x82"), r"ok\xe2\x82");
+    }
 }

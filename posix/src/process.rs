@@ -5181,6 +5181,7 @@ mod tests {
             ru_nsignals: 0,
             ru_nvcsw: 0,
             ru_nivcsw: 0,
+            ..Default::default()
         };
         errno::set_errno(0);
         let ret = wait3(core::ptr::null_mut(), 1 << 5, &raw mut rusage);
@@ -5219,6 +5220,7 @@ mod tests {
             ru_nsignals: 0,
             ru_nvcsw: 0,
             ru_nivcsw: 0,
+            ..Default::default()
         };
         errno::set_errno(0);
         // WEXITED is a waitid-only bit that is NOT in

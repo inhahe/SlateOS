@@ -126496,3 +126496,115 @@ caught it: install a flag and a mask, read them back, assert both survive.
 
 **Adjacent, checked at the same time and clean:** `stack_t` matches musl at
 `ss_sp` 0, `ss_flags` 8, `ss_size` 16, size 24.
+
+
+## B-REGMATCH-T-WAS-HALF-MUSLS-SIZE-SO-EVERY-SUBGROUP-OFFSET-WAS-WRONG (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** the structure `regexec` fills in to report *where* each part of a
+regular expression matched was half the size the C library uses. A program
+asking for ten sub-match positions got an array written a quarter full, with
+every entry after the first at the wrong place.
+
+**Where.** `posix/src/regex.rs`, `struct RegMatch`.
+
+**Cause.** `regoff_t` is `int` in glibc and `long` in musl, and every C port in
+this tree links musl. The struct's own doc comment said "Layout matches
+glibc/musl `regmatch_t` (`regoff_t` = `int`)" -- true of one of the two
+libraries it named.
+
+| | glibc | musl |
+|---|---|---|
+| `regoff_t` | 4 | 8 |
+| `regmatch_t` | 8 | 16 |
+
+Measured by compiling one program twice, `gcc` under WSL and
+`zig cc --target=x86_64-linux-musl`.
+
+**Effect.** `regmatch_t m[10]` is 160 bytes to the caller and was 80 to us, so
+element *n* landed at byte 8n instead of 16n and every offset was truncated to
+32 bits. Only group 0 was ever at the right address. Anything using the POSIX
+regex C API with sub-expressions was affected.
+
+**Fixed** by widening `rm_so`/`rm_eo` to `isize`. Found by
+`scripts/check-libc-abi.py` (design-decisions 1011) within an hour of that gate
+existing, which is the argument for the gate.
+
+**A test certified it**, asserting `size_of::<RegMatch>() == 8` under the
+comment quoted above. Corrected, with the measurement in the doc.
+
+
+## B-SCHED-PARAM-WAS-GLIBCS-4-BYTES-NOT-MUSLS-48 (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** the structure used to get and set a thread's scheduling priority
+was 4 bytes where musl's is 48. Reading a priority worked, because the priority
+is the first field in both; a call meant to *fill in* the caller's structure
+filled a twelfth of it.
+
+**Where.** `posix/src/sched.rs`, `struct SchedParam`.
+
+**Cause.** musl carries five reserved fields after `sched_priority` -- POSIX
+permits them, and musl uses them to keep room for the sporadic-server
+parameters. glibc's struct is 4 bytes. Ours was glibc's.
+
+**Severity is genuinely low** and is recorded so nobody promotes it: the
+priority is at offset 0 in both, so every read and every write of the field
+itself was correct. What was wrong is the whole-struct store in
+`posix_spawnattr_getschedparam` and the size a caller reserves.
+
+**Fixed** by carrying musl's reserved fields, zero-initialised. Two tests that
+asserted 4 bytes and 4-byte alignment corrected with the measurement. Found by
+`scripts/check-libc-abi.py`.
+
+
+## B-ADDRINFO-HAD-AI-ADDR-AND-AI-CANONNAME-TRANSPOSED (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** the structure `getaddrinfo` returns had two of its pointers the
+wrong way round. A program that resolved a hostname and then connected to it
+passed the *name text* to `connect()` where the address should have been.
+
+**Where.** `posix/src/socket.rs`, `struct Addrinfo`.
+
+**Not a glibc/musl divergence** -- both put `ai_addr` before `ai_canonname`.
+Ours was simply wrong.
+
+**Effect.** The canonical loop is
+
+```c
+for (p = res; p; p = p->ai_next)
+    if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
+```
+
+`p->ai_addr` read the canonical-hostname string pointer, so `connect()` was
+handed `ai_addrlen` bytes of a NUL-terminated name and read the first two as a
+`sa_family_t`. Every C network client that resolves a name was affected.
+
+**Fixed** by putting the fields in the C order. Found by
+`scripts/check-libc-abi.py` (design-decisions 1011) on the day that gate was
+written.
+
+
+## B-RUSAGE-AND-STATVFS-WERE-SHORT-OF-MUSLS-SIZE (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** two structures the system fills in for a caller were smaller than
+the C library's, so calls that are supposed to fill the caller's object filled
+the front of it and left the rest untouched.
+
+| | ours, before | musl |
+|---|---|---|
+| `struct rusage` | 144 | 272 |
+| `struct statvfs` | 88 | 112 |
+
+**Where.** `posix/src/resource.rs` and `posix/src/statvfs.rs`.
+
+**Why neither was noticed.** Every *named* field was already at the correct
+offset in both; only the trailing reserved arrays were missing. `getrusage`,
+`wait4` and `statvfs` therefore returned correct values for everything anyone
+reads, and left the tail as the caller's allocator had it.
+
+**Fixed** by carrying musl's `__reserved[16]` and `__f_spare[6]`. Found by
+`scripts/check-libc-abi.py`.
+
+**`statvfs`'s size test could not have caught it**: it asserted
+`size_of::<Statvfs>() == 11 * 8`, restating the declaration it was checking. A
+test whose expected value comes from the thing under test passes for any
+declaration -- and occupies the place a real check would go.

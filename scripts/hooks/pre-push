@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fifteen gates at the push boundary. Any one of them aborts the push.
+# Sixteen gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -18,6 +18,9 @@
 #      numbering band, or missing the `**Lane:**` field that declares it.
 #  14. Refuse to publish a Markdown `---` that renders as a heading.
 #  15. Refuse to publish when the release-profile boot test is stale.
+#  16. Refuse to publish a C-visible `#[repr(C)]` type whose field offsets
+#      disagree with musl's, or a new one that crosses the boundary with
+#      no entry in posix/src/abi_layout.rs.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented, and it was wrong again the moment gate 13 was written --
@@ -2525,6 +2528,89 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 16 — our `#[repr(C)]` types against musl's own headers.
+#
+# WHAT IT CATCHES. A struct a C program fills in and hands to our libc, whose
+# field offsets are not the ones the C library uses. On 2026-09-09
+# `struct sigaction` was found to be the *kernel's* field order under a comment
+# claiming it was glibc's — both are 152 bytes, so the size test that existed
+# passed, and `sa_handler` is at offset 0 in both, so handlers worked and
+# nothing looked wrong for months. Every `sa_flags` a C program passed was
+# silently dropped. See design-decisions.md §1010.
+#
+# WHY A GATE AND NOT A TEST. No Rust test can catch this class. Rust builds a
+# `#[repr(C)]` struct by field *name*, so it agrees with itself whichever order
+# it declares; the layout only matters at a boundary with C, and the crate's
+# own tests have none. The test that existed *certified* the bug. The checker
+# is three programs with no third copy of anything: `posix::abi_layout` prints
+# C whose numbers come from `offset_of!`, `zig cc --target=x86_64-linux-musl`
+# compiles it against musl, and the script derives which types cross the
+# boundary and refuses a *new* one with no entry.
+#
+# COST. It runs `cargo test -p posix --lib` to get the numbers, so on a cold
+# target dir this is minutes rather than seconds. That is why it is scoped to
+# pushes that touch `posix/src/` or the checker: those are the only pushes that
+# can change either the layouts or the verdict.
+#
+# ZIG. Absent, the script says so by name and checks only the coverage ratchet.
+# It is the same compiler the ctest fixtures need, so a machine that can build
+# the image can run this.
+# ---------------------------------------------------------------------------
+abicheck="${repo_root:-.}/scripts/check-libc-abi.py"
+skip_abi=0
+if [ "${ALLOW_UNCHECKED_ABI:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNCHECKED_ABI=1 set — skipping the C-layout gate." >&2
+    skip_abi=1
+fi
+[ -n "$py" ] || skip_abi=1
+[ -f "$abicheck" ] || skip_abi=1
+# The checker and the table it reads are in scope alongside the types, per
+# gate 8's rule: a change to either changes every verdict it gives.
+touches posix/src/ scripts/check-libc-abi.py || skip_abi=1
+note_gate libc-abi "$skip_abi"
+
+if [ "$skip_abi" != "1" ]; then
+    if ! run_checker libc-abi-selftest "$py" "$abicheck" --self-test; then
+        echo "pre-push: check-libc-abi.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        skip_abi=refused
+    fi
+fi
+
+if [ "$skip_abi" = "refused" ] || { [ "$skip_abi" != "1" ] && ! run_checker libc-abi "$py" "$abicheck"; }; then
+    cat >&2 <<'EOF'
+
+pre-push: REFUSING to push — a C-visible type disagrees with musl, or a new
+one crosses the boundary unchecked.
+
+Two different failures print above; they need different fixes.
+
+  * LAYOUT MISMATCH — a `_Static_assert` failed. Our offsets are not the C
+    library's. Fix the Rust struct, not the assertion: musl is the oracle here
+    and the numbers on our side are generated, so an assertion that fails is
+    reporting a real disagreement. Note the two `struct sigaction` layouts are
+    a real pair, not a mistake in the headers — the kernel's is right for
+    `rt_sigaction` and wrong for a libc entry point.
+
+  * unchecked types — a `#[repr(C)]` struct now reaches an exported
+    `extern "C"` function and has no entry in posix/src/abi_layout.rs. Add one
+    line there. If it is a *kernel* wire format rather than a C library type,
+    say so where it is defined and name the function that translates it;
+    BASELINE_UNCOVERED is a ratchet and may only shrink.
+
+Reproduce exactly what the hook saw:
+
+    python scripts/check-libc-abi.py
+
+Full output is kept at the path named above.
+
+To push anyway:
+    ALLOW_UNCHECKED_ABI=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # The tally. Unconditional, and on stderr with the rest of the hook's output.
 #
 # This is the line whose absence means "the hook did not run" — the one reading
@@ -2545,8 +2631,8 @@ fi
 #     grep -o '^[[:space:]]*note_gate [a-z0-9-]*' "$0" | awk '{print $2}' | sort -u | wc -l
 #
 # Gate 13 (`bands`) made it 13 on 2026-09-05, gate 14 (`headings`) made it
-# 14 the same day, and gate 15 (`release-staleness`) made it 15 on
-# 2026-09-07; if you add a gate, bump both.
+# 14 the same day, gate 15 (`release-staleness`) made it 15 on 2026-09-07, and
+# gate 16 (`libc-abi`) made it 16 on 2026-09-09; if you add a gate, bump both.
 #
 # A refusing gate exits before this, so the tally is not a claim that the push
 # passed — only a record of what was asked.

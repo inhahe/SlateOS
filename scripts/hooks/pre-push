@@ -624,7 +624,7 @@ scripts/read-defaults-baseline.txt to turn this green -- every entry there is a
 site that reports or displays, none rewrites the file it read, and that is what
 makes them tolerable rather than correct.
 EOF
-    fail=1
+    exit 1
 fi
 
 if [ "$raced_failed" = "1" ]; then

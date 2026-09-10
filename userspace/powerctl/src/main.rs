@@ -341,14 +341,39 @@ fn orderly_shutdown(action: &str) -> bool {
 // Direct-syscall fallbacks
 // ============================================================================
 
-/// Attempt a filesystem sync via /proc/sys/vm/sync (write "1").
+/// Flush every filesystem to stable storage before the machine stops.
+///
+/// # What this replaces, and why it mattered
+///
+/// It wrote `"1"` to `/proc/sys/vm/sync`, and if that failed, to
+/// `/sys/kernel/sync`. **Neither path exists** -- neither is a real Linux
+/// interface and this kernel serves neither -- so both writes failed, the
+/// function returned *silently*, and [`direct_shutdown`], [`direct_reboot`]
+/// and [`direct_hibernate`] went on to stop the machine with dirty buffers
+/// unflushed.
+///
+/// The `if …is_ok() { return; }` looked like a check and was one, but of the
+/// wrong thing: it asked whether a write to a nonexistent file had succeeded,
+/// not whether a sync had happened. A test of the wrong proposition reads
+/// exactly like a test of the right one.
+///
+/// `posix::unistd::sync` issues the kernel's `SYS_FS_SYNC` -- the same flush
+/// `fsync(2)` performs, but for every mounted filesystem rather than one
+/// descriptor, which is a valid superset of POSIX's `sync(2)` guarantee. It
+/// has been available the whole time.
+///
+/// # There is nothing to check
+///
+/// `sync(2)` returns `void`: POSIX defines it as scheduling the writes, with
+/// no failure to report. So this function cannot tell its callers whether the
+/// flush reached the platter, and neither could the code it replaces -- the
+/// difference is that this one actually asks the kernel.
+///
+/// Not called from [`direct_suspend`], deliberately: suspend keeps RAM powered
+/// and the buffers with it, so there is nothing to flush and a needless full
+/// sync would only delay the suspend.
 fn try_sync_filesystems() {
-    // Try the procfs knob first.
-    if fs::write("/proc/sys/vm/sync", "1").is_ok() {
-        return;
-    }
-    // Try the sysfs alternative.
-    let _ = fs::write("/sys/kernel/sync", "1");
+    posix::unistd::sync();
 }
 
 /// Power off the machine directly when the service manager is unreachable.

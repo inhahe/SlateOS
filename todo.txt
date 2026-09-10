@@ -56456,3 +56456,40 @@ flags for (`--use-sigkill`) and does not implement either.
 **Do it when** something actually runs `earlyoom` on a machine under pressure.
 Until then a daemon that reports true pressure and true candidates, and says
 plainly that it cannot act, is more useful than one that claims to have acted.
+
+
+## loginctl can inspect sessions and cannot change them (lane B, 2026-09-10)
+
+Eleven of `loginctl`'s subcommands used to print a success line and do nothing:
+`lock-session`, `unlock-session`, `activate-session`, `terminate-session`,
+`terminate-user`, `terminate-seat`, `attach`, `flush-devices`, and the five
+power ones. `loginctl terminate-session 5` said "Session 5 terminated." and
+left it running -- without even checking session 5 existed, so
+`terminate-session bogus` reported terminating a session that never was.
+
+They now check the subject exists (which is real work, and most of the value:
+"no session bogus" beats a false success) and then report that the action is
+not implemented, exiting non-zero. A script that checks the exit status is no
+longer told it worked.
+
+**What each would need.**
+
+*The session, user and seat commands* need something to act on. `logind` keeps
+session state in files under `/run/systemd/sessions` and, by its own comment,
+has no daemon socket -- so there is no peer to ask. Either `loginctl` learns to
+edit that state directly (plausible for `lock`/`unlock`, which are flags on a
+session; not for `terminate`, which has to signal processes) or `logind` grows
+a socket. That is a design question, not a chore.
+
+*The five power commands* have a destination already: `userspace/powerctl`
+reaches the service manager over IPC, and `logind`'s own comment points at
+exactly that path as the thing to mirror. Wiring `loginctl` to it is a
+different program's IPC client rather than a message change, which is why it is
+not in the same commit.
+
+**Also noticed, not acted on.** `loginctl`'s `SESSION_DIR` is `/run/sessions`
+and `logind`'s is `/run/systemd/sessions` -- two constants of the same name in
+two programs, pointing at different directories. `su` and `who` use
+`/run/sessions`, so that is the live one and `loginctl` reads the right place;
+`logind`'s store appears to be aspirational. Worth confirming that is deliberate
+before anything depends on either.

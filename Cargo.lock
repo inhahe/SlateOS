@@ -3563,6 +3563,9 @@ version = "0.1.0"
 [[package]]
 name = "systemctl"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "systemd-resolved"

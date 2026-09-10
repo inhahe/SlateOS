@@ -1,5 +1,5 @@
 #!/bin/sh
-# Twenty gates at the push boundary. Any one of them aborts the push.
+# Twenty-one gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -31,6 +31,8 @@
 #      reaches no verdict, or a hand-rolled argv scan ignores the flag and
 #      answers a different question.
 #  20. Refuse to publish a `scripts/*.py` whose own test suite fails.
+#  21. Refuse to publish a crate that is not subject to the workspace's
+#      own lint policy.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented, and it was wrong again the moment gate 13 was written --
@@ -688,6 +690,93 @@ if [ "$skip_suites" != "1" ]; then
     else
         echo "pre-push: no scripts/*.py in this push has a paired test suite" >&2
     fi
+fi
+
+# Gate 21: every crate is subject to `[workspace.lints]`.
+#
+# CLAUDE.md requires `#![deny(clippy::all, clippy::pedantic)]` in every crate
+# plus five defensive lints in non-test code -- unwrap_used, expect_used,
+# panic, indexing_slicing, arithmetic_side_effects. The workspace declares all
+# of it. A crate is only SUBJECT to it if its manifest says `[lints] workspace
+# = true` or its source carries the inner attribute.
+#
+# On 2026-09-10, 134 of 256 crates under userspace/, services/ and init/ had
+# neither. For those, clippy::all is `warn` rather than `deny`, pedantic is
+# off, and all five defensive lints are off -- so "clippy clean" meant
+# something much weaker for half the tree than for the other half, and nothing
+# in the build said which kind of clean you had.
+#
+# Found sideways. Fixing gate 12 to compile the unix half without linking
+# produced a sweep of all 57 crates with a unix arm, and its output carried
+# `warning: missing [lints] to inherit [workspace.lints]` for crate after
+# crate. The compile was the question; this was the answer to a bigger one.
+#
+# A ratchet, not a fix: adding the lints to one 2,700-line crate produced 147
+# warnings. The baseline records who is exempt today and the list may only
+# shrink.
+skip_wslints=0
+if [ "${ALLOW_UNLINTED_CRATE:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNLINTED_CRATE=1 set — skipping the workspace-lints gate." >&2
+    skip_wslints=1
+fi
+wslints="${repo_root:-.}/scripts/check-workspace-lints.py"
+[ -f "$wslints" ] || skip_wslints=1
+# The baseline is in scope for the reason every ratchet's is: hand-editing the
+# waiver list is the one way to defeat this without the bypass, so the push
+# that carries the edit must re-verify it.
+touches userspace/ services/ init/ \
+        scripts/check-workspace-lints.py scripts/workspace-lints-baseline.txt \
+        || skip_wslints=1
+# Nothing being published is nothing to judge -- and this is what stops the
+# --head loop below degrading to zero runs after note_gate has already recorded
+# the gate as having run.
+[ -n "${pushed_shas# }" ] || skip_wslints=1
+note_gate workspace-lints "$skip_wslints"
+
+wslints_failed=0
+if [ "$skip_wslints" != "1" ]; then
+    # The checker before its verdict: its whole output is a COUNT, the one
+    # shape where a scanner that stopped scanning and a tree that improved
+    # print the same thing. No --head; the fixtures are string literals.
+    if ! run_checker workspace-lints-selftest "$py" "$wslints" --selftest; then
+        echo "pre-push: check-workspace-lints.py FAILED ITS OWN SELF-TEST — its count is not trustworthy." >&2
+        wslints_failed=1
+    else
+        for sha in $pushed_shas; do
+            if ! run_checker "workspace-lints-$sha" "$py" "$wslints" \
+                             --check --head "$sha"; then
+                wslints_failed=1
+            fi
+        done
+    fi
+fi
+
+if [ "$wslints_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a crate is not subject to the workspace's lint
+policy.
+
+For a crate without \`[lints] workspace = true\`, \`clippy::all\` is *warn*
+rather than *deny*, \`pedantic\` is off entirely, and all five of CLAUDE.md's
+defensive lints — unwrap_used, expect_used, panic, indexing_slicing,
+arithmetic_side_effects — are off. Running clippy on it and seeing nothing
+means much less than it does elsewhere in this tree, and nothing else says so.
+
+Add to the crate's Cargo.toml:
+
+    [lints]
+    workspace = true
+
+Do NOT add a line to scripts/workspace-lints-baseline.txt instead. That list
+records the 134 crates that were already like this when the gate was written;
+a NEW one arriving unlinted is the thing this gate exists to stop.
+
+To push anyway:
+
+    ALLOW_UNLINTED_CRATE=1 git push \$remote_name ...
+EOF
+    fail=1
 fi
 
 if [ "$suites_failed" = "1" ]; then

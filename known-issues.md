@@ -128252,6 +128252,48 @@ B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT, not this entry, and the tests say so
 where a reader would otherwise take it for a parsing failure.
 
 
+## TD-B-HALF-THE-TREE-IS-NOT-SUBJECT-TO-THE-LINT-POLICY (lane B, 2026-09-10) — ratcheted, 134 open
+
+**In short:** CLAUDE.md requires `#![deny(clippy::all, clippy::pedantic)]` in
+every crate plus five defensive lints in non-test code. **134 of 256 crates**
+under `userspace/`, `services/` and `init/` are subject to none of it. For
+those, `clippy::all` is *warn* rather than *deny*, `pedantic` is off entirely,
+and `unwrap_used`, `expect_used`, `panic`, `indexing_slicing` and
+`arithmetic_side_effects` are all off — so "clippy clean" means something much
+weaker for half the tree than the other half, and nothing in the build says
+which kind of clean you got.
+
+**Including crates I reported clean today.** `crond`, `crontab`, `cpio` and
+`at` are all on the list. Those reports were true and much less informative
+than they sounded.
+
+**How it was found, which is the repeatable part.** Not by looking for it. Gate
+12 compiles the unix-gated half of a changed crate by building for linux; it
+had been running `cargo test`, needing a cross-linker this host lacks, so it
+had never compiled anything. Fixing that produced a sweep of all 57 crates with
+a unix arm — all clean — whose output carried, crate after crate:
+
+    warning: missing `[lints]` to inherit `[workspace.lints]`
+
+The compile was the question. This was the answer to a larger one nobody had
+asked. Third time this week the useful finding came from a check aimed
+elsewhere.
+
+**Why a ratchet and not a fix.** Adding `[lints] workspace = true` to one
+2,700-line crate (`userspace/crond`) produced **147 warnings**: 68 unwraps, 42
+arithmetic side-effects, 33 indexing and slicing panics. Across 134 crates that
+is a programme, not a commit. `scripts/check-workspace-lints.py` with
+`scripts/workspace-lints-baseline.txt` records who is exempt today and refuses
+a *new* one; pre-push gate 21 runs it per pushed sha.
+
+**Proven able to refuse before it was wired**, by stripping `[lints]` from
+`userspace/ar` and confirming `--check` exits 1, then restoring and confirming
+0 and a clean tree. A ratchet that has never been observed to refuse is
+indistinguishable from one with nothing to say.
+
+**The work, when someone does it:** pick a crate, add the two lines, fix what
+it reports. The count may only fall.
+
 ## ~~TD-B-THE-UNIX-HALF-GATE-CANNOT-LINK-ON-THIS-HOST~~ (lane B, 2026-09-10) — FIXED the same day
 
 **Fixed by `--no-test`.** The gate asks whether the *other* arm COMPILES.

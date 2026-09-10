@@ -12,7 +12,6 @@ ar:ranlib
 ar:strip
 blkid:findfs
 cal:ncal
-cron:anacron
 cron:atq
 cron:atrm
 cron:batch

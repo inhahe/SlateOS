@@ -2515,6 +2515,30 @@ extern "C" fn kernel_main() -> ! {
         case();
     }
 
+    {
+        // The hostname round trip, and the only place in the tree that grants
+        // `(Process, SET_HOSTNAME)`.
+        //
+        // `services/ctest-hostname/` does not exist yet and this rung therefore
+        // self-skips -- loudly, via pathz_test_elf, so the skip is reported
+        // rather than passing in silence. That is the intended state: lane B
+        // held the fixture back because until the grant existed it could only
+        // fail, and a failing ctest-* reddens all three lanes. Landing the grant
+        // is what unblocks them, so the rung ships first and the fixture follows.
+        //
+        // Severity governs the KERNEL and not the HARNESS (design-decisions.md
+        // 914): when the fixture lands, a failure here reddens every lane's boot
+        // test regardless of this being Diagnostic.
+        let case = || {
+            selftest::dispatch_debug(
+                "hostname round trip (ring 3)",
+                selftest::Severity::Diagnostic,
+                proc::spawn::self_test_ctest_hostname(),
+            );
+        };
+        case();
+    }
+
     // DISABLED 2026-09-09, after it ran for the first time and failed.
     //
     // It is not disabled because it is wrong. It is disabled because it is

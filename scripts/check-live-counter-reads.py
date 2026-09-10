@@ -141,6 +141,10 @@ Exit status: 0 clean, 1 unaccounted sites found, 2 bad usage.
 """
 
 import pathlib
+
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from rustlex import strip_noise  # noqa: E402
 import re
 import sys
 
@@ -199,57 +203,6 @@ _PAT_LET = re.compile(r"\b(?:if|while)\s+$")
 
 # Call-graph levels the return-taint fixpoint will chase. See `resolve_returns`.
 ROUNDS = 6
-
-
-def strip_noise(src: str) -> str:
-    """Blank out line comments, block comments and string literals.
-
-    Comments in this tree quote code constantly -- this file's own docstring
-    quotes `let t = totals();` -- so a scan that reads them finds calls that
-    are not there. Newlines are preserved so line numbers stay true.
-    """
-    out = []
-    i, n = 0, len(src)
-    while i < n:
-        c = src[i]
-        if c == "/" and i + 1 < n and src[i + 1] == "/":
-            while i < n and src[i] != "\n":
-                out.append(" ")
-                i += 1
-        elif c == "/" and i + 1 < n and src[i + 1] == "*":
-            depth = 1
-            out.append("  ")
-            i += 2
-            while i < n and depth:
-                if src.startswith("/*", i):
-                    depth += 1
-                    out.append("  ")
-                    i += 2
-                elif src.startswith("*/", i):
-                    depth -= 1
-                    out.append("  ")
-                    i += 2
-                else:
-                    out.append("\n" if src[i] == "\n" else " ")
-                    i += 1
-        elif c == '"':
-            out.append(" ")
-            i += 1
-            while i < n:
-                if src[i] == "\\":
-                    out.append("  ")
-                    i += 2
-                    continue
-                if src[i] == '"':
-                    out.append(" ")
-                    i += 1
-                    break
-                out.append("\n" if src[i] == "\n" else " ")
-                i += 1
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
 
 
 def functions(src: str):

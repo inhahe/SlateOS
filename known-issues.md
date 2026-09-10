@@ -128252,6 +128252,50 @@ B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT, not this entry, and the tests say so
 where a reader would otherwise take it for a parsing failure.
 
 
+## TD-B-TWELVE-COPIES-OF-ONE-RUST-LEXER (lane B, 2026-09-10) — three consolidated, one deliberately not
+
+**In short:** twelve scripts under `scripts/` define a Rust comment/string
+masker. Only one handled raw strings, so the bug fixed there — `r"a\"` ends at
+that quote, because a backslash is not an escape inside a raw string — was live
+in three others. `scripts/rustlex.py` is now the one implementation, with the
+fixtures beside it. Three checkers converted; **one was reverted, and that is
+the useful part.**
+
+**Why one implementation.** The function has been wrong three separate times
+across its copies: a char literal holding a quote (`rest.find('"')`, in thirty-odd
+crates) opening a string that ran to the next quote anywhere later; a raw string
+ending in a backslash swallowing its terminator; and lane A's `mask_noncode`
+blanking string *bodies* when the pattern it measures **is** a string literal,
+taking a real count of 37 to 0 with the gate green. Every one failed toward
+silence.
+
+**The one that could not be converted, and why it matters more than the three
+that could.** `check-one-libc-per-process` reported a NEW error on
+`posix/src/crypt.rs:470` — a line that is plainly inside
+`pub extern "C" fn crypt`. The two lexers differ by exactly one observable:
+
+    source   pub extern "C" fn crypt() { ... }
+    local    pub extern " " fn crypt() { ... }     <- keeps the quotes
+    shared   pub extern     fn crypt() { ... }     <- blanks them too
+
+The checker finds its subject by matching `extern "`. Blanking the delimiters
+destroys the marker it needs, so every `extern "C"` function became "not an
+extern C function" and its contents became findings.
+
+**Two functions with the same name, the same docstring and the same stated
+job can differ in a detail one caller depends on, and nothing shows it until
+you swap them.** That is an argument for consolidating carefully rather than
+against consolidating — but it is why each conversion was verified by *diffing
+the checker's output before and after* rather than by running it and seeing it
+pass. Three produced byte-identical output. The fourth did not, and was
+reverted rather than argued with.
+
+**Still eight copies**, including `strip_comments` in five scripts and
+`mask_noncode` in one. They were not touched because this tick established that
+the names lie: whether they mask strings, whether they keep delimiters, and
+whether they know raw strings all vary. Each needs the same before/after diff,
+which is a tick's work each rather than a sweep.
+
 ## TD-B-THE-2285-DELETIONS-PREDATE-THEIR-INSTRUMENT'S-FIX (lane B, 2026-09-10) — checked, no impact
 
 **In short:** `ccefac978` at 05:51 deleted 2,285 commands on the strength of

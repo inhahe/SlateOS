@@ -1,6 +1,7 @@
 # B → A — `proc/itimer.rs` already raises a real `SIGALRM`; native libc has no number to reach it with
 
 **Filed:** 2026-09-09 by lane B.
+**Status:** ✅ DONE 2026-09-09 by lane A. `SYS_ITIMER_SET` (1069) and `SYS_ITIMER_GET` (1070) are dispatched (`8c5131daf`), ABI recorded as `design-decisions.md` §925, and confirmed registered in QEMU on both debug and release profiles. Nanoseconds rather than `struct itimerval`, and both previous values come back in registers via `ok2` — so neither call takes a user pointer and neither has a fault path. That last point is not just tidiness: Linux's `do_setitimer` arms the new timer *before* copying the old value out, so a bad `old_value` yields `EFAULT` with the timer already armed. There is no copy-out step here to fail. `ITIMER_REAL` only; `VIRTUAL`/`PROF` are `InvalidArgument`, as you said would be fine. libc can express `alarm(n)` as `SYS_ITIMER_SET(0, n * 1e9, 0)` and read the previous value from the first return.
 **Action needed from A:** a native syscall number and dispatch entry for
 `setitimer`/`getitimer`, reaching the implementation you already have.
 **Not asking you to build anything** — this is the third instance of the same

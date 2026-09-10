@@ -25,6 +25,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::process;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -748,6 +749,127 @@ fn print_version() {
 }
 
 // ---------------------------------------------------------------------------
+// Starting the session
+// ---------------------------------------------------------------------------
+
+/// The command that runs `user`'s login shell -- program, environment and
+/// `argv[0]`, but not the working directory.
+///
+/// The directory is left out because it is the one setting that can fail for a
+/// reason that is not the caller's fault: a home directory may be missing, on
+/// an unmounted filesystem, or unreadable. [`spawn_login_shell`] therefore
+/// builds this twice and tries two directories, which needs a builder rather
+/// than a `Command` (which is not `Clone`).
+///
+/// Everything that is *not* the directory lives here, so it is impossible for
+/// one of the two attempts to get it right and the other wrong.
+fn build_login_command(
+    user: &PasswdEntry,
+    env_map: &HashMap<OsString, OsString>,
+) -> process::Command {
+    let mut cmd = process::Command::new(&user.shell);
+
+    // The session's environment is exactly what `build_environment` decided
+    // and nothing else. `env_clear` first because this process inherited
+    // whatever spawned it -- `getty`, or an operator's shell -- and a login
+    // session must not start with a stranger's variables in it.
+    cmd.env_clear();
+    for (key, value) in env_map {
+        cmd.env(key, value);
+    }
+
+    // `login` starts a *login* shell, always: that is the whole job. The
+    // leading hyphen on `argv[0]` is how a shell is told so, and therefore
+    // whether it reads `/etc/profile` and the user's own profile.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.arg0(authlib::identity::login_argv0(user.shell.as_os_str()));
+    }
+
+    // And become the user. `login` runs as root -- it has to, to read the
+    // shadow half of the account database -- so a session started without this
+    // would hand root to everyone who could type a correct password.
+    authlib::identity::become_user(&mut cmd, user.uid, user.gid);
+
+    cmd
+}
+
+/// Start the login shell, from the user's home directory if that works and
+/// from `/` if it does not.
+///
+/// # Why two attempts rather than a check
+///
+/// Asking whether the home directory exists and then using it is two separate
+/// facts about a filesystem that other processes are also writing to, and the
+/// answer can change in between. Trying it is one fact. This also covers the
+/// cases a check would miss -- a directory that exists but cannot be entered,
+/// a stale mount -- without enumerating them.
+///
+/// An empty home is skipped rather than tried: `Command::current_dir("")`
+/// fails rather than meaning "wherever we are", which is the bug `su` hit
+/// (see `home_of` there).
+///
+/// # Why the first error is discarded
+///
+/// If the retry also fails, its error is the one that describes why no session
+/// could start at all -- the shell being missing, say, which the first attempt
+/// would have reported as a directory problem. If the retry succeeds there was
+/// nothing to report. Same reasoning as `userspace/sshd`'s `spawn_session`.
+fn spawn_login_shell(
+    user: &PasswdEntry,
+    env_map: &HashMap<OsString, OsString>,
+) -> io::Result<process::Child> {
+    if !user.home_dir.as_os_str().is_empty() {
+        let mut cmd = build_login_command(user, env_map);
+        cmd.current_dir(&user.home_dir);
+        if let Ok(child) = cmd.spawn() {
+            return Ok(child);
+        }
+    }
+    let mut cmd = build_login_command(user, env_map);
+    cmd.current_dir("/");
+    cmd.spawn()
+}
+
+/// Run the session and report the shell's own exit status.
+///
+/// # `spawn` and wait, not `exec`
+///
+/// A traditional `login` replaces itself with the shell, so the shell inherits
+/// its pid and its terminal. `std::os::unix::process::CommandExt::exec` would
+/// do that. It is not used here, and the reason is not squeamishness: `exec`
+/// applies the uid and gid change *in this process* and only then replaces the
+/// image, so a failure to execute the shell leaves `login` already stripped of
+/// the privilege it would need to report the failure anywhere but stderr, and
+/// unable to retry from `/`. Spawning keeps the retry above possible and keeps
+/// the diagnostic path intact.
+///
+/// The cost is one extra process in the tree per session, and a `login` that
+/// lingers as the shell's parent. Recorded in `todo.txt`: if session and
+/// process-group handling later needs the shell to *be* the login process, the
+/// change is to exec after the directory has been settled, which is a
+/// different shape from what is written here.
+fn run_session(user: &PasswdEntry, env_map: &HashMap<OsString, OsString>) -> i32 {
+    match spawn_login_shell(user, env_map) {
+        Ok(mut child) => match child.wait() {
+            Ok(status) => status.code().unwrap_or(1),
+            Err(e) => {
+                eprintln!("login: {} exited abnormally: {e}", user.shell.display());
+                1
+            }
+        },
+        Err(e) => {
+            eprintln!(
+                "login: cannot start {}: {e}",
+                quoting::quoteaf_os(user.shell.as_os_str())
+            );
+            1
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -787,26 +909,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 
     let users_yaml = std::path::Path::new(userdb::DEFAULT_PATH);
     match do_login(&cfg, &mut auth, users_yaml, &mut reader, &mut writer) {
-        Ok((user, env_map)) => {
-            // In a real OS, we would:
-            // 1. setuid/setgid to the user
-            // 2. chdir to home directory
-            // 3. exec the user's shell
-            eprintln!(
-                "login: would exec shell {} as user {} (uid={}, gid={})",
-                user.shell.display(),
-                user.username,
-                user.uid,
-                user.gid
-            );
-            eprintln!(
-                "login: environment: HOME={}",
-                env_map
-                    .get(OsStr::new("HOME"))
-                    .map_or_else(String::new, quoting::quoteaf_os)
-            );
-            0
-        }
+        Ok((user, env_map)) => run_session(&user, &env_map),
         Err(e) => {
             eprintln!("login: {e}");
             1
@@ -823,6 +926,81 @@ mod tests {
     use super::*;
     use scratchdir::ScratchDir;
     use std::io::Cursor;
+
+    // ---- the command that starts the session ----
+
+    fn probe_user() -> PasswdEntry {
+        PasswdEntry {
+            username: "alice".to_string(),
+            uid: 1000,
+            gid: 100,
+            gecos: String::new(),
+            home_dir: PathBuf::from("/home/alice"),
+            shell: PathBuf::from("/bin/osh"),
+        }
+    }
+
+    /// The shell that runs is the one the account names.
+    #[test]
+    fn the_session_runs_the_accounts_own_shell() {
+        let env_map = HashMap::new();
+        let cmd = build_login_command(&probe_user(), &env_map);
+        assert_eq!(cmd.get_program(), OsStr::new("/bin/osh"));
+    }
+
+    /// The child's environment is exactly what `build_environment` decided --
+    /// no variable missing and none invented.
+    #[test]
+    fn the_session_environment_is_exactly_what_was_built() {
+        let mut env_map = HashMap::new();
+        env_map.insert(OsString::from("HOME"), OsString::from("/home/alice"));
+        env_map.insert(OsString::from("SHELL"), OsString::from("/bin/osh"));
+        env_map.insert(OsString::from("USER"), OsString::from("alice"));
+
+        let cmd = build_login_command(&probe_user(), &env_map);
+        let mut got: Vec<(OsString, Option<OsString>)> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_os_string(), v.map(std::ffi::OsStr::to_os_string)))
+            .collect();
+        got.sort();
+
+        let mut want: Vec<(OsString, Option<OsString>)> = env_map
+            .iter()
+            .map(|(k, v)| (k.clone(), Some(v.clone())))
+            .collect();
+        want.sort();
+
+        assert_eq!(got, want);
+    }
+
+    /// A variable set for a *value* that is not text still reaches the shell.
+    ///
+    /// `TERM` and the rest arrive from a database and from the caller, and on
+    /// this OS an environment value may hold any byte but NUL. The map is
+    /// `OsString`-keyed and `OsString`-valued the whole way for that reason;
+    /// this pins that nothing in the hand-off narrows it to `String`.
+    #[test]
+    fn a_session_variable_that_is_not_text_survives() {
+        let mut env_map = HashMap::new();
+        env_map.insert(OsString::from("TERM"), not_text());
+
+        let cmd = build_login_command(&probe_user(), &env_map);
+        let got: Vec<(OsString, Option<OsString>)> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_os_string(), v.map(std::ffi::OsStr::to_os_string)))
+            .collect();
+        assert_eq!(got, vec![(OsString::from("TERM"), Some(not_text()))]);
+    }
+
+    // NOT covered here, and stated rather than left for the reader to assume:
+    // the `env_clear()` itself. `Command::get_envs` reports the variables
+    // explicitly set for the child and says nothing about whether the parent's
+    // are inherited, so no assertion over the getters can tell a cleared
+    // environment from an added-to one. Proving it would mean spawning a real
+    // child that prints its environment, which is a host-shell-specific test
+    // for a one-line call. The consequence if it is ever deleted: a login
+    // session inherits `getty`'s variables, which the test above would still
+    // pass.
 
     /// The command line, as `env::args_os` would deliver it.
     fn argv(parts: &[&str]) -> Vec<OsString> {

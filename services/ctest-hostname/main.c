@@ -42,6 +42,11 @@
  *   - **read-back-unchanged** — the kernel accepted the name and dropped it.
  *     Checks 6 and 17.
  *
+ * The round trip is only evidence because its ends differ. See check 6 --
+ * the write goes through `SYS_HOSTNAME_SET` and the read through
+ * `/proc/sys/kernel/hostname`, and if those ever share an implementation this
+ * fixture goes back to testing a buffer against itself.
+ *
  * And one class that only a fixture reading *two* sources can see:
  *
  *   - **disagreement** — the set succeeded, `gethostname` reports the new
@@ -167,6 +172,31 @@ int main(void)
     /* ---------------------------------------------------------------- *
      * 6. It took. This is the "accepted and dropped it" check, and it is
      *    the one no host test could ever have made.
+     *
+     *    READ THIS BEFORE CHANGING THE NEXT FOUR LINES. This check is a
+     *    round trip, and a round trip is exactly what the defect this
+     *    fixture guards was made of: `sethostname` wrote a process-local
+     *    buffer, `gethostname` read that same buffer, they agreed, and the
+     *    agreement WAS the evidence it worked. The test passed for the whole
+     *    life of the bug.
+     *
+     *    What makes this round trip valid is that the two ends are now
+     *    genuinely different mechanisms. The write goes through
+     *    `SYS_HOSTNAME_SET` into the kernel's `fs::nameservice`; the read
+     *    goes through `gethostname`, which libc serves by reading
+     *    `/proc/sys/kernel/hostname` -- a file the kernel generates from
+     *    that same store, through code that shares nothing with the setter.
+     *
+     *    So the invariant is: **the write path and the read path must not
+     *    share an implementation.** If `gethostname` is ever "optimised" to
+     *    answer from a cached buffer that `sethostname` fills, this check
+     *    silently becomes self-referential again, still passes, and stops
+     *    testing anything. Check 7 exists partly as insurance against that,
+     *    since it reads the file directly -- but 6 is the one that would
+     *    rot quietly, so the warning belongs here.
+     *
+     *    (Lane A raised this, correctly, having taken the point from my own
+     *    report of the original four tests that asserted the bug.)
      * ---------------------------------------------------------------- */
     memset(buf, 0, sizeof buf);
     if (gethostname(buf, sizeof buf - 1) != 0)

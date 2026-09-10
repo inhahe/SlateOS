@@ -126976,8 +126976,18 @@ each opened `/proc/stat` for `btime` alone, and `hwclock` hand-parsed
 taking on contact: it read `/proc/<pid>/stat` through `read_to_string`, so a
 process whose name is not UTF-8 was dropped from the listing entirely -- and
 `pgrep` and `pkill` are the same binary, so such a process could not be
-signalled by name at all. `userspace/top` and `userspace/pstree` have the
-identical defect and are next.
+signalled by name at all. `userspace/top` followed the same day; `userspace/pstree`
+is the last of the three.
+
+`top` carried two more things worth naming. Its `COMMAND` column was
+`&p.name[..16]` on a `String` -- **a panic** whenever byte 16 falls inside a
+multi-byte character, so any process whose name held one non-ASCII character in
+the wrong place would have killed the viewer as it drew its own list. And the
+crate had **no tests at all**: a process viewer with a column rule, a sort and
+a `/proc` parser, none of it asserted, which is how that slice sat there. It
+has five now, covering the cut, the panic, a name that is not UTF-8, and a
+terminal escape in a name -- which matters more in `top` than elsewhere because
+it redraws every second, so an unescaped one is re-applied forever.
 
 They also showed why "each program has its own copy" is not a neutral
 arrangement even when every copy works. `uptime` stripped `"btime "` with the

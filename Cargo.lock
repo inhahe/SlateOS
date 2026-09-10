@@ -8628,6 +8628,7 @@ dependencies = [
 name = "kill"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
 ]
 
@@ -9719,6 +9720,10 @@ version = "0.1.0"
 [[package]]
 name = "lsof"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+]
 
 [[package]]
 name = "lspci"
@@ -19639,6 +19644,10 @@ dependencies = [
 [[package]]
 name = "who"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+]
 
 [[package]]
 name = "whois"

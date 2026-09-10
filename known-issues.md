@@ -128991,7 +128991,7 @@ mistake `cal` and `earlyoom` nearly suffered under 1006.
 
 None is urgent: every one of the six names has a working producer today, so no
 command is missing. What is at risk is the pair silently disagreeing.
-## TD-A-AN-ABSENT-OPERAND-DEFAULTS-TO-A-LIVE-OBJECT-ID (lane A, 2026-09-10) — **open**, now counted: **38 sites across 13 functions**
+## TD-A-AN-ABSENT-OPERAND-DEFAULTS-TO-A-LIVE-OBJECT-ID (lane A, 2026-09-10) — **open**, now counted: **34 sites across 11 functions**, 3 allowed (was stated as 38/13; see the correction note below)
 
 **The counter exists as of 2026-09-10.** `scripts/check-absent-operand-default.py`
 defines the class in code and `scripts/absent-operand-ledger.txt` holds the count,
@@ -129085,3 +129085,122 @@ pattern is mechanical and countable.
 So the order is: write the checker, pin the ledger, then sweep against it. Fixing
 sites first would repeat what happened above — a population that is 14 or 31 or 37
 depending on who asks, and no marker saying how far a partial pass got.
+
+### Correction to the 38/13 count (2026-09-10, same day)
+
+38 was wrong in two ways and both are instructive, which is why this is recorded
+rather than quietly edited.
+
+One of the 38 was a **comment**. `cmd_colortemp` carries a note left behind when
+that site was fixed, quoting the line it replaced. The checker scored the epitaph
+as a body, so a fixed-and-documented site still counted against the ledger, the
+ledger could never reach zero while the explanation existed, and the cheapest way
+to lower the number was to delete the comment. `mask_noncode()` now blanks
+comments; its first draft blanked string bodies too and took the count from 37 to
+0 with the gate passing green, because the measured pattern *is* a string literal.
+
+Six more were blessed as "quantities" on the theory that a default naming an
+object is 0 or 1 while one naming an amount is larger. True of the data, wrong as
+a test: three of the six are defects, and each command says so itself.
+`screensaver` prints `timeout <id> <s>`, `sysanimations` prints `speed <percent>`,
+`filevault` prints `autolock <id> <seconds>`. Angle brackets. The blessing for
+`filevault` was justified in writing with the synopsis `autolock [secs]`, square
+brackets, a string that appears nowhere in the tree: the documentation that
+licensed the exemption was invented. The criterion is now the printed synopsis and
+nothing else, and every `allow` line quotes the help text that licenses it.
+
+## TD-A-KSHELL-PRINTS-AN-OPERAND-AS-REQUIRED-AND-THEN-SUPPLIES-IT (lane A, 2026-09-10) — **open**, 83 sites (a floor)
+
+**In short:** many kernel-shell commands print a help line saying an argument is
+required, and then, if you leave that argument out, quietly make one up and carry
+on. `apppermissions grant` is the clearest case: its own help says
+`grant <app> <perm>`, and running it with no arguments grants the `storage`
+permission to an application literally named `app`. Nothing fails, nothing warns.
+The command reports success for a decision about a subject the operator never
+named.
+
+This is the same family as the entry above, found by a better question. That one
+asks "is the invented value a number?", which is a proxy. This one asks "did the
+command's own help promise this operand was required?", which is the actual
+question, needs no judgment, and reads the answer out of the tree.
+
+### The convention the tree already follows
+
+kshell documents operands the usual way: angle brackets are required, square
+brackets are optional. 2348 required operand positions are documented across 269
+commands, and the overwhelming majority honour it — so this is a minority of sites
+breaking a convention the codebase otherwise keeps, not a missing convention.
+
+Measured on `kernel/src/kshell.rs` at af70253de:
+
+| | sites | meaning |
+|---|---|---|
+| correct | 269 | defaults to the empty string, and something tests it before use |
+| tolerable | 90 | defaults to the empty string, nothing in the arm tests it — an empty string rarely names a real object, so the callee errors rather than acting on the wrong one |
+| dead | 5 | a default that cannot be reached, because success requires a *later* operand and operands are positional |
+| **defect** | **83** | documented required, defaulted to a usable value, nothing refuses it |
+
+Of the 83, **78 are non-numeric** and therefore invisible to
+`check-absent-operand-default.py`, which only counts numeric defaults. Only 3 of
+the 83 are among that checker's 34, so the two populations are nearly disjoint.
+
+Worked examples, each read in full rather than pattern-matched:
+
+```
+apppermissions  help: grant <app> <perm>     code: app -> "app", perm -> "storage"
+contextmenu     help: build <target>         code: target -> "file"
+drvmon          help: register <bus>         code: bus -> "pci"
+netdiag         help: ping <host>            code: host -> "127.0.0.1"
+speechio        help: listen <start|stop>    code: -> "start"
+wintiling       help: create <name>          code: name -> "New"
+```
+
+`netdiag ping` with no host pinging 127.0.0.1 is harmless. `apppermissions grant`
+with no app is a permission decision about an invented subject, and
+`speechio listen` defaulting to `start` means a bare word turns the microphone on.
+Severity varies across the 83; the shape does not.
+
+### Why 83 is a floor, not a count
+
+The matcher recognises `let <var> = parts.get(n)...unwrap_or("...")` and misses
+defaults wrapped in a call — `parse_perm(parts.get(2).copied().unwrap_or("storage"))`
+is a real site in `cmd_apppermissions` that is not among the 83. Sites whose
+command prints two synopses disagreeing about whether a position is required are
+skipped rather than guessed. Both omissions are deliberate: a gate that overstates
+gets switched off.
+
+Two earlier measurements of this same population were wrong and looked right, and
+the corrections are the reason the table above is trusted:
+
+* **376**, from treating the empty string as an invented value. An empty default
+  followed by `if x.is_empty() { usage; return; }` is the correct idiom and the
+  single most common thing these commands do — 269 sites.
+* **138**, from two parser defects. `"discoverable" | "disc-mode"` did not match an
+  alias pattern of `[a-z0-9_]+` — a **hyphen** — so the arm boundary was missed and
+  findings were attributed to the previous subcommand. And `netshare mount` was
+  reported as defaulting a path to the filesystem root when in fact success
+  requires operand 3, which positionally guarantees operand 2, so that default is
+  unreachable. The alarming headline was my parser's bug, not the kernel's.
+
+### The proper fix
+
+Per site: refuse the absent operand with the command's existing usage line, the
+idiom already used 457 times in this file:
+
+```rust
+let Some(app) = parts.get(1) else {
+    shell_println!("Usage: apppermissions grant <app> <perm>");
+    set_exit(1);
+    return;
+};
+```
+
+Structurally, the criterion belongs in a gate, because it is decidable from the
+tree with no judgment: *an operand the command's own help prints in angle brackets
+must not have a default.* That gate should probably absorb
+`check-absent-operand-default.py` rather than sit beside it — the numeric rule is a
+weaker proxy for the same question, and the near-disjointness of the two
+populations is an artifact of this matcher not recognising the
+`match parts.get(n).unwrap_or(&"0").parse()` form rather than a real property. Two
+ledgers counting one family is the double-count this lane warned lane B about the
+same afternoon. Not built yet; the analysis above is the specification.

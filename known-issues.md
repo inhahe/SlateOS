@@ -127761,3 +127761,60 @@ that prints "SKIPPED"/"not installed"/"not found" and then returns 0.
 reasoning, and correct in the same limited way. **A gate that no-ops on a
 missing prerequisite is the single cheapest way for a green tree to be
 unverified**, and it looks identical to a healthy one from the outside.
+
+
+## TD-B-SEVEN-PROGRAMS-STILL-MISREAD-PROC-MOUNTS (lane B, 2026-09-10)
+
+**In short:** `/proc/mounts` escapes a space in a device or mount-point name as
+`\040`, and ten programs parse the file by hand. Nine of the ten do not undo
+that escaping, so a device or mount point whose name contains a space does not
+match the name the user typed. Worse, all ten read the file with
+`read_to_string`, which **fails outright** if any single line holds a byte that
+is not UTF-8 -- taking every other line with it.
+
+`mkfs` and `fsck` were fixed on 2026-09-10 because in those two the failure had
+teeth; the remaining seven are listed below.
+
+**Why `mkfs` and `fsck` came first.** Both call `is_mounted(device)` to decide
+whether it is safe to write to a device, and both were written
+
+```rust
+let content = match fs::read_to_string("/proc/mounts") {
+    Ok(c) => c,
+    Err(_) => return false,          // "not mounted"
+};
+```
+
+So **one mount anywhere on the system with a non-UTF-8 path made every device
+report as unmounted**, and `mkfs` would go on to format a live filesystem. The
+error path answered the safety question in the dangerous direction: "I could
+not read the file" became "nothing is mounted". Both now answer `true` when
+they cannot tell, which is the only defensible default for a check that guards
+a destructive write.
+
+**The escaping half bit the same two functions.** They compared
+`split_whitespace`'s first field against the caller's argument, so a device
+called `/dev/my disk` -- listed as `/dev/my\040disk` -- never matched, and a
+mounted device reported as free. `procinfo::Mount` undoes the escaping; the
+crate's module doc names it as one of the three reasons the crate exists.
+
+**Still to convert** (`/proc/mounts` by hand, no unescaping, `read_to_string`):
+
+| Program | What it uses the file for |
+|---|---|
+| `userspace/df` | which filesystem a path is on, and its usage |
+| `userspace/mount` | whether a target is already mounted, and `-a` bookkeeping |
+| `userspace/findmnt` | the whole of its output |
+| `userspace/lsblk` | mount points beside each block device |
+| `userspace/eject` | whether the device must be unmounted first |
+| `userspace/grub2` | locating the boot filesystem |
+| `userspace/udisks` | mount state per device |
+
+`userspace/diskutil` already unescapes and is the exception; it still reads the
+file as text, so it keeps the whole-file failure.
+
+**A related limitation, pinned rather than fixed.** A device whose *name* is
+not UTF-8 cannot be named on the command line at all: `mkfs` and `fsck` read
+argv through `env::args()`, which panics on such an argument. That is
+B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT, not this entry, and the tests say so
+where a reader would otherwise take it for a parsing failure.

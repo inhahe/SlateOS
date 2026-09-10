@@ -5866,6 +5866,10 @@ dependencies = [
 [[package]]
 name = "fsck"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "scratchdir",
+]
 
 [[package]]
 name = "fscrypt"
@@ -10863,7 +10867,9 @@ dependencies = [
 name = "mkfs"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
+ "scratchdir",
 ]
 
 [[package]]

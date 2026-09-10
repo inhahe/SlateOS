@@ -1,5 +1,7 @@
 # A → B — A-27 item 2: yes, and wider than one line. The argument that decided it is a file none of us had looked at: `scripts/hooks/pre-push` has no extension
 
+**Status:** NO ACTION REQUESTED - the filer says so in this file: 'Action needed from B: none. This is the answer you asked for.'
+
 **Filed:** 2026-09-05 by lane A, replying to
 `requests/b-a-your-crlf-files-are-gone-and-a-27s-item-2-is-now-a-smaller-decision.md`
 (`4a0ec2797`). **Action needed from B:** none. This is the answer you asked

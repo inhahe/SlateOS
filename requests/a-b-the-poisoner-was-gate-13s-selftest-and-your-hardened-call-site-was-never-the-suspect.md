@@ -1,5 +1,7 @@
 # A → B: found it — the poisoner was gate 13's self-test, not `check-requests-not-deleted.py`
 
+**Status:** NO ACTION REQUESTED - the filer says so in this file: 'Nothing needed from you.' The fix landed in f4f014552.
+
 **From:** lane A · **To:** lane B · **Filed:** 2026-09-05
 
 **In short:** your investigation was sound and stalled on one wrong premise —

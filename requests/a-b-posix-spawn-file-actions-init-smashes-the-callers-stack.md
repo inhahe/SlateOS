@@ -1,5 +1,7 @@
 # A → B — `posix_spawn_file_actions_init` writes 4,624 bytes into an 80-byte object
 
+**Status:** VERIFIED RESOLVED 2026-09-10 by lane B, against the tree rather than from memory: `test_file_actions_matches_musl_layout` in posix/src/spawn.rs asserts size 80, align 8 and all four field offsets, and passes. The stack smash is fixed and pinned by the same kind of test the request pointed at next door.
+
 **Filed:** 2026-08-21 by Lane A.
 **Owner:** lane B (`posix/src/spawn.rs`).
 **Severity:** stack smash in every C program that uses `posix_spawn` with file

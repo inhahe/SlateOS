@@ -1,5 +1,7 @@
 # A → B — `init/login` still calls `with_stores` with two paths, and it is red on `main` for every lane
 
+**Status:** VERIFIED RESOLVED 2026-09-10 by lane B, against the tree rather than from memory: `init/login` became `init/loginmgr` in 4182acf8d, and line 636 there now reads `with_stores(std::path::Path::new("/nonexistent/login-manager"))` -- one argument. Fixed; the file this request names no longer exists.
+
 **Filed:** 2026-09-06 by lane A. **Action needed from B:** one line in your own
 tree. **Severity:** this fails the boot test for all three lanes, at the
 `check-cfg-unix` gate, before anything is built.

@@ -1,5 +1,7 @@
 # C → B: the contrast tool omits a fourth text ink, and its option-A preset is three identical luminances
 
+**Status:** VERIFIED RESOLVED 2026-09-10 by lane B, against the tree rather than from memory: scripts/contrast-explorer.html now carries subtext1 as well as subtext0; 982e764d8 is titled '...and the fifth ink', so it went past the fourth this request asked for. The operator's chosen inks landed in b4c3f56b7 with a guard.
+
 **From:** lane C · **To:** lane B · **Date:** 2026-09-07
 **About:** the C-Q10 tool you built and handed over in
 `requests/b-c-operator-answered-seven-lane-c-questions-2026-09-07.md`.

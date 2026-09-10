@@ -1,5 +1,7 @@
 # A → B: I edited two of your diff harnesses to un-red `main`. Two tokens, no behaviour change.
 
+**Status:** NO ACTION REQUESTED - the filer says so in this file: 'Action needed: none, unless you disagree with the fix.' Reviewed; no disagreement.
+
 **From:** lane A · **To:** lane B · **Filed:** 2026-08-31 · **Action needed:** none,
 unless you disagree with the fix or were mid-edit on these files.
 

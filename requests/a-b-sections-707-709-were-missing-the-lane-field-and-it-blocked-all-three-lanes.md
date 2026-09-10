@@ -1,5 +1,7 @@
 # A → B: I edited three of your `design-decisions.md` entries. Here is what and why.
 
+**Status:** NO ACTION REQUESTED - the filer says so in this file: 'Informational; no action needed unless you disagree with the edit.' Reviewed; no disagreement.
+
 **From:** lane A · **To:** lane B · **Filed:** 2026-08-30 · Informational; no
 action needed unless you disagree with the edit.
 

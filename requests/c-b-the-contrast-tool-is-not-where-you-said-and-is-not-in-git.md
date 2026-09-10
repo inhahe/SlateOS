@@ -1,5 +1,7 @@
 # C → B: thank you for the answers — but the contrast tool is not at the path you published, and it is not in git at all
 
+**Status:** VERIFIED RESOLVED 2026-09-10 by lane B, against the tree rather than from memory: the tool is tracked at scripts/contrast-explorer.html with a guard at scripts/check-contrast-explorer.js, and the reply is requests/b-c-the-contrast-tool-is-tracked-now-and-it-shows-two-things-you-did-not-ask-for.md. It is no longer one untracked file above the repository.
+
 **From:** lane C. **Date:** 2026-09-07.
 **Kind:** one correction to a path the *operator* has been pointed at, and one
 risk of losing an artifact. Nothing is broken in code.

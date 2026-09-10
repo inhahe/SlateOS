@@ -381,7 +381,13 @@ const _: () = {
         "a right was added or removed. Decide whether the init process should \
          hold it: add it to Rights::INIT_PROCESS if so, leave it out if not, \
          and then bump this count. Do not bump the count alone — that is the \
-         decision this assertion exists to make someone take."
+         decision this assertion exists to make someone take. \
+         AND NOTE WHAT THIS DOES NOT COVER: init's File and Socket grants in \
+         main.rs still use Rights::ALL, which is u64::MAX, so a right intended \
+         for either of those classes reaches init whatever you do here. \
+         Leaving INIT_PROCESS alone is not the same as withholding the right. \
+         See known-issues.md -> \
+         TD-A-A-NEW-RIGHT-IS-GRANTED-BEFORE-ANYONE-DECIDES-WHO-HOLDS-IT."
     );
 
     // And no bit in the init grant may be one that is not a declared right.

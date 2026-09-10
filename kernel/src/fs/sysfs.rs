@@ -1382,10 +1382,16 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[sysfs]   stat: OK");
 
     // 10. Metadata with permissions.
+    //
+    //     hostname is 0444 as of 2026-09-10, not 0644.  It was writable, and the
+    //     write reached a private static this module kept instead of
+    //     fs::nameservice -- so it changed a value no other publisher could see.
+    //     SYS_HOSTNAME_SET is the only writer now, because a capability check
+    //     needs a subject and a write arriving at write_file has none.
     let hostname_meta = fs.metadata(Path::new("/kernel/hostname"))?;
     assert!(
-        hostname_meta.permissions == 0o644,
-        "hostname should be rw-r--r--"
+        hostname_meta.permissions == 0o444,
+        "hostname should be r--r--r--: the syscall is the only writer"
     );
     let version_meta = fs.metadata(Path::new("/kernel/version"))?;
     assert!(

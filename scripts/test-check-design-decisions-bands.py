@@ -585,8 +585,17 @@ def test_the_insertion_point_reported_is_the_bands_own_tail(mod):
                     if l.startswith("## 554"))
     check_true("the fixture really does put a 600 before the last 500",
                first_600 < last_500)
-    check_true("the reported line is the 500's, not the 600's",
-               f"insert after line {last_500}" in c_row[0])
+    # The END of C's last section, not its heading. Pointing at the heading is
+    # what this assertion used to require, and following that advice literally
+    # puts the new entry between a heading and its body -- which is how section
+    # 928 lost its **Lane:** field on 2026-09-10, reported by this very checker
+    # one run later. A test that pins the heading certifies that defect.
+    end_500 = next((i for i, l in enumerate(lines, 1)
+                    if i > last_500 and l.startswith("## ")), len(lines) + 1) - 1
+    check_true("the reported line is in C's own region, not the 600's",
+               f"insert after line {end_500}" in c_row[0])
+    check_true("and it is the section's end, not its heading",
+               f"insert after line {last_500} " not in c_row[0])
 
 
 def test_an_empty_band_is_anchored_to_the_lanes_previous_band(mod):
@@ -615,8 +624,14 @@ def test_an_empty_band_is_anchored_to_the_lanes_previous_band(mod):
                "first entry is 800" in row[0])
     last_579 = next(i for i, l in enumerate(lines, 1)
                     if l.startswith(f"## {SECT}579") or l.startswith("## 579"))
+    # Again the END of 579, not its heading: see the comment in
+    # test_the_insertion_point_reported_is_the_bands_own_tail.
+    end_579 = next((i for i, l in enumerate(lines, 1)
+                    if i > last_579 and l.startswith("## ")), len(lines) + 1) - 1
     check_true("and it now carries a line to insert after",
-               f"insert after line {last_579}" in row[0])
+               f"insert after line {end_579}" in row[0])
+    check_true("which is the section's end, not its heading",
+               f"insert after line {last_579} " not in row[0])
     check_true("named, so the reader can confirm it by eye",
                "section 579" in row[0])
     check_true("the anchor is not lane A's entry",

@@ -1106,13 +1106,6 @@ name = "hardlink"
 version = "0.1.0"
 
 [[package]]
-name = "head"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "hearts"
 version = "0.1.0"
 dependencies = [

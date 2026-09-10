@@ -127804,8 +127804,8 @@ crate's module doc names it as one of the three reasons the crate exists.
 |---|---|
 | ~~`userspace/df`~~ | ~~which filesystem a path is on, and its usage~~ -- **done 2026-09-10** |
 | ~~`userspace/mount`~~ | ~~whether a target is already mounted~~ -- **done 2026-09-10** |
-| `userspace/findmnt` | the whole of its output |
-| `userspace/lsblk` | mount points beside each block device |
+| ~~`userspace/findmnt`~~ | ~~the whole of its output~~ -- **done 2026-09-10** |
+| ~~`userspace/lsblk`~~ | ~~mount points beside each block device~~ -- **done 2026-09-10** |
 | `userspace/eject` | whether the device must be unmounted first |
 | `userspace/grub2` | locating the boot filesystem |
 | `userspace/udisks` | mount state per device |

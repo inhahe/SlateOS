@@ -5335,6 +5335,10 @@ dependencies = [
 [[package]]
 name = "findmnt"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+]
 
 [[package]]
 name = "fio"
@@ -9692,6 +9696,10 @@ dependencies = [
 [[package]]
 name = "lsblk"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+]
 
 [[package]]
 name = "lsblk-cli"

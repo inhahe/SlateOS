@@ -384,8 +384,14 @@ function renderFullPages() {
                <div class="g" style="${T1}">${esc(n)}</div>
                <div class="t2s" style="${T2}">${['12 KB', '48 KB', '3 KB', '21 KB', '1.4 MB'][i]}</div>
              </div>`).join('')}
-          <div class="menu" style="left:74px;top:64px;${b ? `background:${page};border:1px solid ${L.s2};`
-                                                          : `background:${L.mantle};border:1px solid ${L.s1};`}">
+          <!-- The menu panel is p.base, the same colour as the page behind
+               it, told apart by its border and shadow alone. Not a choice made
+               here: context_ext.rs asserts it. So this panel barely changes
+               between the two columns; only its hovered row does.
+               (No backticks in this comment: it sits inside a template
+               literal, and a stray one ends the string.) -->
+          <div class="menu" style="left:74px;top:64px;background:${page};
+               border:1px solid ${b ? L.s2 : L.s1};">
             <div class="mi" style="${T1}">Open</div>
             <div class="mi" style="${surf(b, L.s0, acc)}${T1}">Rename</div>
             <div class="mi" style="${T1}">Duplicate</div>
@@ -435,7 +441,14 @@ function renderFullPages() {
     '<b>off switch track</b> is <code>surface2</code>. The page behind everything is unshaded. ' +
     'Two things are easiest to judge here and nowhere else: the shaded column puts <b>five</b> different greys ' +
     'on screen at once in a single window, and in the bordered column the accent has to carry selection by ' +
-    'itself &mdash; which is why the selected row and nav item are outlined in it rather than filled.';
+    'itself &mdash; which is why the selected row and nav item are outlined in it rather than filled.' +
+    '<br><br><b>Why the menu looks lighter than the settings rows.</b> It is not an inconsistency in this page: ' +
+    'a menu panel is <code>base</code>, the same colour as the page, and only its <em>hovered</em> row is ' +
+    'filled. A settings page fills <em>every</em> row at <code>surface0</code>, three rungs down. So a menu is ' +
+    'mostly unshaded and a settings list is mostly shaded, and the card question bites the second far harder ' +
+    'than the first. Note also that the tree has <b>two</b> list conventions &mdash; settings pages fill every ' +
+    'row, while the extension list in <code>context_ext.rs</code> leaves rows at <code>mantle</code> and fills ' +
+    'only the selected one. Whichever way this decision goes, those two want reconciling.';
 }
 
 function renderUseCases() {
@@ -466,14 +479,16 @@ function renderUseCases() {
             'With borders it becomes an accent outline, which is stronger and does not need a second shade.' },
 
     { name: 'Context menu &mdash; already bordered today',
-      shaded: `<div style="background:${L.mantle};border:1px solid ${L.s1};border-radius:8px;padding:5px">` +
+      shaded: `<div style="background:${cur.page};border:1px solid ${L.s1};border-radius:8px;padding:5px">` +
               row('Open', '', null, null) + row('Rename', '', L.s0, null) + row('Delete', '', null, null) +
               `</div>`,
       bordered: `<div style="background:${cur.page};border:1px solid ${L.s2};border-radius:8px;padding:5px">` +
                 row('Open', '', null, null) + row('Rename', '', null, acc) + row('Delete', '', null, null) +
                 `</div>`,
-      note: 'This one is already a border in the shipped code &mdash; surface1 is the menu edge. Only the ' +
-            'hovered row is a fill.' },
+      note: 'This one is already a border in the shipped code, and more completely than it looks: the menu ' +
+            'panel is <code>base</code> &mdash; the same colour as the page behind it &mdash; told apart by its ' +
+            'edge and shadow alone. <code>surface1</code> is that edge, and the only fill is the hovered row. ' +
+            'So a menu barely changes between the two columns.' },
 
     { name: 'Toggle row &mdash; where surface2 actually lives',
       shaded: row('Night light', 'Warmer colours after sunset', L.s0, null, sw(true)) +

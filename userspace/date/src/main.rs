@@ -200,9 +200,6 @@ struct DateTime {
 /// Cumulative days before each month in a non-leap year (index 0 = before Jan).
 const DAYS_BEFORE_MONTH: [u32; 13] = [0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
 
-/// Days in each month for a non-leap year (index 0 unused, 1=Jan..12=Dec).
-const DAYS_IN_MONTH: [u32; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
 const WEEKDAY_ABBR: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const WEEKDAY_FULL: [&str; 7] = [
     "Monday",
@@ -240,13 +237,15 @@ fn is_leap_year(year: i64) -> bool {
 
 /// Number of days in a given month (1-based) for a given year.
 fn days_in_month(year: i64, month: u32) -> u32 {
-    if month == 2 && is_leap_year(year) {
-        29
-    } else if (1..=12).contains(&month) {
-        DAYS_IN_MONTH[month as usize]
-    } else {
-        0
-    }
+    // Delegates rather than indexing `DAYS_IN_MONTH[month as usize]` behind a
+    // range check. The check was correct; this is the last calendar function
+    // in the lane that indexed a table at all, and removing it makes "no
+    // calendar function here indexes anything" a property somebody can verify
+    // rather than a habit they have to maintain.
+    let Ok(y) = i32::try_from(year) else {
+        return 0;
+    };
+    civildate::days_in_month(y, month)
 }
 
 /// Day of year (1-366) for the given date.

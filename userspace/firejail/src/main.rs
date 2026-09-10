@@ -781,16 +781,6 @@ fn write_sandbox_file(sandbox_dir: &Path, info: &SandboxInfo) -> Result<(), Stri
         .map_err(|e| format!("cannot write sandbox file {}: {e}", path.display()))
 }
 
-/// Remove the sandbox info file for a given PID.
-fn remove_sandbox_file(sandbox_dir: &Path, pid: u32) -> Result<(), String> {
-    let path = sandbox_dir.join(format!("{pid}.sandbox"));
-    if path.exists() {
-        fs::remove_file(&path)
-            .map_err(|e| format!("cannot remove sandbox file {}: {e}", path.display()))?;
-    }
-    Ok(())
-}
-
 // ============================================================================
 // Profile discovery
 // ============================================================================
@@ -1272,13 +1262,23 @@ fn firejail_join(target: &str) -> i32 {
 
     match found {
         Some(info) => {
-            println!("Joining sandbox {} (PID {})", info.name, info.pid);
+            // The sandbox is real -- these three fields come from the
+            // registry this program maintains -- so they are worth printing
+            // before refusing.
+            println!("Sandbox {} (PID {})", info.name, info.pid);
             println!("  Program: {}", info.program);
             println!("  Network: {}", info.net_mode);
-            // In the real implementation, we would attach to the sandbox's
-            // namespaces and exec a shell.
-            println!("Would attach to sandbox namespace and exec shell");
-            0
+            eprintln!(
+                "firejail: cannot join: attaching to another process's \
+                 namespaces needs setns, which SlateOS does not provide, and \
+                 nothing here enters a namespace."
+            );
+            // NOT 0. This printed "Would attach to sandbox namespace and exec
+            // shell" and returned success. The word "Would" is honest and the
+            // exit code is not, and a script reads the exit code:
+            // `firejail --join x && do_thing` ran `do_thing` believing it was
+            // inside the sandbox.
+            1
         }
         None => {
             eprintln!("firejail: cannot find sandbox: {target}");
@@ -1300,14 +1300,27 @@ fn firejail_shutdown(target: &str) -> i32 {
 
     match found {
         Some(info) => {
-            println!("Shutting down sandbox {} (PID {})", info.name, info.pid);
-            // In the real implementation, we would send a signal to the
-            // sandbox's init process.
-            if let Err(e) = remove_sandbox_file(sandbox_dir, info.pid) {
-                eprintln!("firejail: warning: {e}");
-            }
-            println!("Sandbox terminated");
-            0
+            // THE REGISTRY FILE IS NOT DELETED, and nothing is terminated.
+            //
+            // This printed "Shutting down sandbox X (PID n)", removed the
+            // registry entry, printed "Sandbox terminated" and returned 0 --
+            // having sent no signal to anything. The process kept running,
+            // the record that it existed was gone, and a second `--shutdown`
+            // then said "cannot find sandbox", which reads as confirmation
+            // that the first one worked.
+            //
+            // Destroying the record is worse than doing nothing: it converts
+            // a running sandbox into an untracked one that `--list` cannot
+            // show and `--shutdown` cannot name. 1019 -- what does the caller
+            // lose if we proceed? The ability to find the thing they asked us
+            // to stop.
+            eprintln!(
+                "firejail: cannot shut down {} (PID {}): nothing here signals \
+                 a process, and the registry entry is left in place so the \
+                 sandbox stays findable.",
+                info.name, info.pid
+            );
+            1
         }
         None => {
             eprintln!("firejail: cannot find sandbox: {target}");
@@ -1316,11 +1329,20 @@ fn firejail_shutdown(target: &str) -> i32 {
     }
 }
 
-/// Get the current user name (placeholder for Slate OS).
+/// The current user's name, or `"unknown"` if the environment does not say.
+///
+/// **Not `"root"`.** That was the previous fallback, and the value is stored as
+/// the sandbox's owner and shown by `--list`. An unset environment becoming
+/// the most privileged name in the system is the wrong direction for any
+/// default; in a tool whose subject is confinement it is the wrong direction
+/// twice, because the field exists so somebody can ask who is running this.
+///
+/// `"unknown"` is not a user name any lookup will match, which is the point:
+/// it cannot be mistaken for an answer.
 fn get_current_user() -> String {
     env::var("USER")
         .or_else(|_| env::var("USERNAME"))
-        .unwrap_or_else(|_| String::from("root"))
+        .unwrap_or_else(|_| String::from("unknown"))
 }
 
 /// Print firejail help text.
@@ -1592,23 +1614,35 @@ fn firemon_netstats() -> i32 {
         return 0;
     }
 
-    println!(
-        "{:>6} {:<16} {:<10} {:>12} {:>12}",
-        "PID", "NAME", "NET", "RX(KB)", "TX(KB)"
-    );
-    println!("{}", "-".repeat(60));
+    println!("{:>6} {:<16} {:<10}", "PID", "NAME", "NET");
+    println!("{}", "-".repeat(36));
     for entry in &entries {
-        // In a real implementation, we would read /proc/<pid>/net/dev
-        // or equivalent Slate OS statistics. Placeholder zeros for now.
         println!(
-            "{:>6} {:<16} {:<10} {:>12} {:>12}",
+            "{:>6} {:<16} {:<10}",
             entry.pid,
             truncate_str(&entry.name, 16),
             entry.net_mode,
-            0,
-            0,
         );
     }
+    // THE BYTE COLUMNS ARE GONE, not filled with zeros.
+    //
+    // This printed RX(KB) and TX(KB) with 0 in both for every sandbox, under
+    // the comment "Placeholder zeros for now". A zero in a byte counter is a
+    // MEASUREMENT: it reads as "this sandbox has sent and received nothing",
+    // which is exactly the question `--netstats` is asked and is not one this
+    // program looked up. Nothing here reads /proc/<pid>/net/dev or any
+    // equivalent.
+    //
+    // Omitting the columns is better than refusing the whole command: the PID,
+    // name and network mode ARE known -- they come from the sandbox registry
+    // this program maintains -- so the rows that can be answered still are.
+    // 1006 is about the facts stated, not about the command existing.
+    println!();
+    println!(
+        "note: per-sandbox byte counters are not available -- nothing here \
+         reads /proc/<pid>/net/dev, so the RX/TX columns were removed rather \
+         than filled with zeros."
+    );
 
     0
 }
@@ -1800,9 +1834,21 @@ fn create_symlink(target: &Path, link: &Path) -> Result<(), String> {
     }
     #[cfg(not(unix))]
     {
-        // Fallback: write a marker file indicating this is a firejail symlink.
-        let content = format!("firejail-symlink -> {}\n", target.display());
-        fs::write(link, content).map_err(|e| format!("write marker failed: {e}"))
+        // NO MARKER FILE. This wrote `firejail-symlink -> <target>` as a
+        // regular file, and the caller then printed "Created: <name> -> ..."
+        // and counted it -- a text file reported as a symlink. Anything that
+        // later follows the link gets its contents; anything that checks
+        // whether the profile is installed sees a file and believes it.
+        //
+        // `userspace/udevd` had the identical decoy at /dev/disk/by-uuid and
+        // it was removed an hour ago for the same reason: a missing link is a
+        // visible failure, a text file pretending to be one is not.
+        //
+        // An Err here is honest -- the caller already has an error arm that
+        // prints the reason and counts it -- and on this host nobody is
+        // sandboxing anything, so the failure costs nothing real.
+        let _ = target;
+        Err("symlinks are unavailable on this build host; nothing was created".to_string())
     }
 }
 
@@ -3074,29 +3120,6 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_sandbox_file() {
-        // This is the test that actually failed for lane C under two
-        // overlapping workspace runs: with a fixed directory name the other
-        // run held `555.sandbox` open, and Windows refuses to unlink an open
-        // file, so the removal came back as "Access is denied. (os error 5)"
-        // — a hard failure attributed to `remove_sandbox_file` rather than to
-        // the fixture.
-        let scratch = ScratchDir::new("firejail_rm");
-        let path = scratch.path("555.sandbox");
-        let _ = fs::write(&path, "pid=555\nname=test\n");
-        assert!(path.exists());
-        remove_sandbox_file(scratch.dir(), 555).unwrap();
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn test_remove_sandbox_file_nonexistent() {
-        let scratch = ScratchDir::new("firejail_rm_ne");
-        // Should not error when file does not exist.
-        remove_sandbox_file(scratch.dir(), 9999).unwrap();
-    }
-
-    #[test]
     fn test_read_sandbox_entries_empty_dir() {
         // A private directory is what makes "empty" mean empty: under a shared
         // name a concurrent run's `100.sandbox` is a perfectly good entry, and
@@ -3293,10 +3316,17 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_get_current_user_not_empty() {
-        // Should return at least "root" as fallback.
+    fn test_get_current_user_never_answers_root_by_default() {
+        // Was `test_get_current_user_not_empty`, whose comment read "Should
+        // return at least \"root\" as fallback" -- pinning the defect as the
+        // contract. The value is stored as the sandbox's owner and shown by
+        // `--list`, so an unset environment used to attribute every sandbox
+        // to root.
         let user = get_current_user();
         assert!(!user.is_empty());
+        if std::env::var("USER").is_err() && std::env::var("USERNAME").is_err() {
+            assert_eq!(user, "unknown", "an unset environment must not name root");
+        }
     }
 
     // -----------------------------------------------------------------------

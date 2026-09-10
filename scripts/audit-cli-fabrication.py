@@ -2,10 +2,17 @@
 """One-off measurement: how many `userspace/*` CLI crates print a *report*
 about work they never did?
 
-This is NOT a `check-*.py` gate.  `pre-boot.py` globs `scripts/check-*.py`
-into every lane's gate, and the tree this measures belongs to one lane, so
-naming it that way would hand the other two lanes a red gate they cannot
-clear.  It is a measuring instrument for a `requests/` file, run by hand.
+It began as a measuring instrument for a `requests/` file, run by hand, and
+deliberately not named `check-*.py`: `pre-boot.py` globs those into every
+lane's gate, and with 2,288 hits in one lane's tree that would have handed the
+other two a red gate they could not clear.
+
+**That reason expired on 2026-09-10, when the deletion landed.** The floor is
+now zero, so `--check` is trivially satisfiable by every lane -- the way to
+clear it is to not add a command that lies, which no lane wants to do anyway.
+It is still not named `check-*`, because run bare it prints a report rather
+than a verdict and the glob runs scripts bare; `pre-boot.py` invokes it by
+name with `--check`, exactly as it does `scan-orphan-modules.py --check`.
 
 ## What it looks for
 
@@ -184,11 +191,119 @@ def strip_tests(text: str) -> str:
     return text if idx < 0 else text[:idx]
 
 
+BASELINE = ROOT / "scripts" / "cli-fabrication-baseline.txt"
+
+BASELINE_HEADER = """\
+# Commands pinned by scripts/audit-cli-fabrication.py --check.
+#
+# design-decisions.md 1006 (Decided by: Operator): a command that does not work
+# is deleted, not kept as a refusing stub. 2,285 were deleted on 2026-09-10 and
+# this file is the ratchet that stops a bulk generation putting them back.
+#
+# It is EMPTY, and that is the pinned state. Every name added here is a command
+# that states a fact it did not measure -- so an entry is a defect being
+# tolerated, not a rule being configured.
+#
+# The list may only SHRINK. A name pinned here that no longer fabricates is
+# also a failure: it means the fix landed and the pin outlived it, which is how
+# a baseline rots into a permission slip. Re-pin with:
+#
+#     python scripts/audit-cli-fabrication.py --pin
+"""
+
+
+def read_baseline() -> set[str] | None:
+    """The pinned set, or None if the file is absent."""
+    if not BASELINE.is_file():
+        return None
+    names = set()
+    for line in BASELINE.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            names.add(line)
+    return names
+
+
+def fabricates(name: str, text: str) -> bool:
+    """Does the crate `name`, with sources `text`, state a fact it never looked up?
+
+    Both halves matter and the second is load-bearing: it must *assert*
+    something, and it must contain no call that could have looked. Split out of
+    `main` so `--self-test` can exercise it on synthetic sources -- in
+    particular the two exemptions added on 2026-09-10, which were found by
+    hand and would otherwise be pinned by nothing.
+    """
+    if name in PURE_ARGV:
+        return False
+    body = strip_tests(text)
+    if name not in ALSO_FABRICATING and any(m in body for m in IO_MARKERS):
+        return False
+    return any(p.search(body) for p in FACT_PATTERNS)
+
+
+def _self_test() -> int:
+    failures = 0
+
+    def expect(label: str, got: object, want: object) -> None:
+        nonlocal failures
+        ok = got == want
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'}  {label}")
+        if not ok:
+            print(f"          got {got!r}, want {want!r}")
+
+    FACT = 'fn main() { println!("/dev/sda1: 1024000 sectors, PASS"); }'
+
+    expect("a crate that asserts a fact and touches nothing is flagged",
+           fabricates("probe", FACT), True)
+    expect("...and one that only prints usage is not",
+           fabricates("probe", 'fn main() { println!("usage: probe [-v]"); }'), False)
+
+    # The two exemptions this file gained on 2026-09-10, each pinned by the
+    # program that would have been deleted without it.
+    expect("reading the clock is looking at the world (the `cal` case)",
+           fabricates("probe",
+                      'use std::time::SystemTime;\n' + FACT), False)
+    expect("so is reading /proc through procinfo (the `earlyoom` case)",
+           fabricates("probe", 'let m = procinfo::meminfo();\n' + FACT), False)
+    expect("...and so is libcall, for the same reason",
+           fabricates("probe", 'libcall::sync();\n' + FACT), False)
+
+    # The cost of those exemptions, also pinned.
+    expect("a named exception is flagged despite holding an I/O marker",
+           fabricates("snapper", 'use std::time::SystemTime;\n' + FACT), True)
+    expect("...and the same source under any other name is not",
+           fabricates("notsnapper", 'use std::time::SystemTime;\n' + FACT), False)
+
+    expect("ordinary file I/O still exonerates",
+           fabricates("probe", 'std::fs::read("/x")?;\n' + FACT), False)
+    expect("argv-only tools are exempt by name",
+           fabricates(sorted(PURE_ARGV)[0], FACT), False)
+
+    # Assertions only inside #[cfg(test)] are not claims the program makes.
+    expect("a fact asserted only in tests is not a fact the program states",
+           fabricates("probe",
+                      '#[cfg(test)]\nmod tests {\n' + FACT + '\n}\n'), False)
+
+    print(f"audit-cli-fabrication: self-test "
+          f"{'FAILED' if failures else 'passed'} ({failures} failure(s))")
+    return 1 if failures else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--list", action="store_true", help="print every hit")
     ap.add_argument("--limit", type=int, default=40, help="cap --list output")
+    ap.add_argument("--check", action="store_true",
+                    help="verdict against the pinned baseline; 1 if it rose")
+    ap.add_argument("--pin", action="store_true",
+                    help="rewrite the baseline from the current tree")
+    ap.add_argument("--self-test", "--selftest", dest="self_test",
+                    action="store_true", help="run this script's own fixtures")
     args = ap.parse_args()
+
+    if args.self_test:
+        return _self_test()
 
     userspace = ROOT / "userspace"
     if not userspace.is_dir():
@@ -204,11 +319,43 @@ def main() -> int:
         total += 1
         if crate.name in PURE_ARGV:
             continue
-        body = strip_tests(text)
-        if crate.name not in ALSO_FABRICATING and any(m in body for m in IO_MARKERS):
-            continue
-        if any(p.search(body) for p in FACT_PATTERNS):
+        if fabricates(crate.name, text):
             fabricating.append(crate.name)
+
+    if args.pin:
+        BASELINE.parent.mkdir(parents=True, exist_ok=True)
+        BASELINE.write_text(
+            BASELINE_HEADER + "".join(f"{n}\n" for n in fabricating),
+            encoding="utf-8",
+        )
+        print(f"audit-cli-fabrication: pinned {len(fabricating)} name(s) "
+              f"in {BASELINE.relative_to(ROOT)}")
+        return 0
+
+    if args.check:
+        pinned = read_baseline()
+        if pinned is None:
+            print(f"audit-cli-fabrication: no baseline at "
+                  f"{BASELINE.relative_to(ROOT)}; run --pin", file=sys.stderr)
+            return 2
+        current = set(fabricating)
+        new = sorted(current - pinned)
+        stale = sorted(pinned - current)
+        for n in new:
+            print(f"  ERROR {n} states a fact it did not measure, and is not "
+                  f"pinned", file=sys.stderr)
+        for n in stale:
+            print(f"  ERROR {n} is pinned but no longer fabricates -- the pin "
+                  f"outlived the fix; re-pin", file=sys.stderr)
+        sys.stdout.flush()
+        if new or stale:
+            print(f"audit-cli-fabrication: FAILED ({len(new)} new, "
+                  f"{len(stale)} stale) -- design-decisions.md 1006: a command "
+                  f"that does not work is deleted, not stubbed", file=sys.stderr)
+            return 1
+        print(f"audit-cli-fabrication: OK ({len(current)} pinned, "
+              f"{total} crate(s) scanned)")
+        return 0
 
     print(f"userspace crates with sources : {total}")
     print(f"assert a fact, do no I/O      : {len(fabricating)}")

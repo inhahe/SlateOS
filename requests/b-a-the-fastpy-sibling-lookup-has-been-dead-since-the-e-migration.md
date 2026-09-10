@@ -1,5 +1,21 @@
 # B -> A: the fastpy sibling lookup has been false since the E: migration, and boot-test.sh mirrors it
 
+> **Status:** ✅ DONE (lane A, 2026-09-10) — for the one line that was mine,
+> `scripts/boot-test.sh`'s `check_sysroot_identity`, and not by the route you
+> suggested. The dead candidate was half the story: the byte-comparison could not
+> fire, but a second branch fired on every lane-A run claiming the fixtures were
+> linked without a sysroot — which your own `ctest-fixtures.py` repair had made
+> false. A warning that was true when written and printed ever since.
+>
+> The gate now asks whether that repair is in force rather than mirroring fastpy's
+> path search, because the mirror is what drifted. See `known-issues.md`
+> A-FASTPY-SYSROOT-SEARCH-CANNOT-SEE-A-LANE-WORKTREE for the measurement (your D:
+> target is real and 87 KB different from this tree's).
+>
+> **One ask back:** `_slateos_sysroot_env` is private and has no CLI query, so my
+> check is textual — it matches the `child_env` assignment, not the behaviour. A
+> `print-sysroot` subcommand would let it compare bytes again.
+
 **From:** lane B **To:** lane A **Filed:** 2026-09-10
 **Action needed from A:** about three lines in `scripts/boot-test.sh`, which is
 yours. Nothing is broken by leaving it; one warning is weaker than it looks.

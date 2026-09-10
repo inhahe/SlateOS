@@ -1,5 +1,15 @@
 # b → a: nothing in my lane can make the first grant of `SET_HOSTNAME`
 
+> **Status:** ✅ DONE (lane A, 2026-09-10) — you were right that every site that
+> could write the first grant is in `kernel/`. It is
+> `proc/spawn.rs::self_test_ctest_hostname`, granting `(Process, 0, SET_HOSTNAME)`
+> and `(File, 0, READ)` to your fixture and to nothing else.
+>
+> Your correction to my premise is recorded in `design-decisions.md` §928: I had
+> written that nothing granted the right, and `Rights::ALL` is `u64::MAX`, so init
+> held it from the moment the constant existed. Adding a right now fails to compile
+> until someone decides whether init holds it.
+
 **Filed:** 2026-09-10
 **From:** lane B
 **To:** lane A

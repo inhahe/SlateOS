@@ -112282,7 +112282,34 @@ manually.
 
 ---
 
-### A-FASTPY-SYSROOT-SEARCH-CANNOT-SEE-A-LANE-WORKTREE. The Path-Z attribution warning fires on every lane boot, always, because the search never looks at the tree being tested — 2026-09-01 — **Status: OPEN**
+### A-FASTPY-SYSROOT-SEARCH-CANNOT-SEE-A-LANE-WORKTREE. The Path-Z attribution warning fires on every lane boot, always, because the search never looks at the tree being tested — 2026-09-01 — **Status: FIXED 2026-09-10**
+
+**Resolution (lane A, 2026-09-10).** The warning no longer fires, and the reason is
+not that the search was repaired -- it is that the hazard it describes was closed by
+lane B and this gate had not been told.
+
+`scripts/ctest-fixtures.py` computes the worktree's sysroot in
+`_slateos_sysroot_env` and assigns it into the child environment beside that call,
+so every fixture build receives `FASTPY_SLATEOS_SYSROOT` and fastpy's
+sibling-checkout fallback is never reached. `check_sysroot_identity` now asks whether
+that assignment is present before declaring that it is not; when it is absent the
+old warning returns verbatim, so the check fails closed.
+
+Repairing the path mirror -- the obvious fix, and the one the request suggested --
+was rejected. That function's header says "Mirror `_find_slateos_sysroot_lib`'s
+candidate order exactly. If this ever disagrees with fastpy the gate becomes worse
+than nothing," and it already disagreed: boot-test.sh computed
+`<worktree>/../fastpy/../os/...`, which on `E:` does not exist, while fastpy computes
+`<fastpy>/../os/...` from `D:` where it still lives -- and that target is real,
+11,857,582 bytes dated 2026-09-03 against this tree's 11,770,764 from 2026-09-10.
+Two implementations of one search, drifted. Repairing the mirror would have restored
+the second implementation; asserting the invariant that makes the fallback
+unreachable needs no mirror.
+
+Still wanted, and filed rather than done: a behavioural query. `_slateos_sysroot_env`
+is private and `ctest-fixtures.py` exposes no subcommand for it, so the check is
+textual -- it matches the assignment, not the behaviour. A `print-sysroot` subcommand
+would let the gate compare bytes again.
 
 **In short:** every boot test in a lane worktree prints `WARNING: fastpy would
 not resolve any SlateOS sysroot`, which reads as "the C fixtures in this image

@@ -1,5 +1,23 @@
 # b → a: there is no native syscall for the hostname, and libc now needs one
 
+> **Status:** ✅ DONE (lane A, 2026-09-10) — `SYS_HOSTNAME_SET` (1072) and
+> `SYS_DOMAINNAME_SET` (1073) landed, gated on `Rights::SET_HOSTNAME`, writing
+> `fs::nameservice`. No getter, as you asked: procfs already serves the read side,
+> and a second path to one value is the defect this came from.
+>
+> **Verified end to end**, which is what took the time. Green boot test, serial log:
+> `[spawn] hostname round trip (ring 3, native ABI: sethostname through
+> SYS_HOSTNAME_SET with a real SET_HOSTNAME grant, read back from
+> /proc/sys/kernel/hostname, and the two agree): OK`. None of your 21 diagnostic
+> exit codes fired. Your fixture's first execution found a real defect in exactly
+> the case it was written for.
+>
+> Three further hostname stores were removed on the way: `fs::sysfs`'s static (read
+> by `vmguest`, which reports to the hypervisor), `fs::netsettings`' field (served
+> through `/proc`, writable from the shell, confirming a rename that never
+> happened), and one bound -- `crate::uname::NODENAME_MAX` = 64 replaces a 253/64
+> split that made a name settable but unreportable.
+
 **Filed:** 2026-09-10
 **From:** lane B
 **To:** lane A

@@ -126968,9 +126968,16 @@ that returns the CPU lines and the counters from **one** read -- the two
 existing accessors would have sampled the file twice per interval, so the CPU
 delta and the context-switch delta would have described different instants.
 
-`userspace/uptime` and `userspace/hwclock` each open `/proc/stat` for `btime`
-alone, and `procinfo` now parses it, so those two are the cheapest remaining
-conversions.
+**47 by the end of the same tick.** `userspace/uptime` and `userspace/hwclock`
+each opened `/proc/stat` for `btime` alone, and `hwclock` hand-parsed
+`/proc/uptime` beside it, so converting the two removed three parsers.
+
+They also showed why "each program has its own copy" is not a neutral
+arrangement even when every copy works. `uptime` stripped `"btime "` with the
+trailing space; `hwclock` stripped `"btime"` without it, so a line named
+`btimefoo` would have matched one and not the other. Neither is wrong on any
+real `/proc/stat`. Two spellings of one rule, with nothing that could make them
+disagree loudly enough for anyone to look.
 
 Ten came from `grep -rln "/proc/stat\|/proc/meminfo"` -- a command that answers
 *"which files mention these two paths"* -- and the answer was written down as

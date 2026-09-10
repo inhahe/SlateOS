@@ -128913,10 +128913,29 @@ withheld, which is `design-decisions.md` 1019's refuse case and `cgexec`'s
 precedent — and an undeterminable current user refuses rather than assuming.
 Eleven tests, the crate's first.
 
+**`at` now has a drain, 2026-09-10.** The other half of this entry WAS true
+and is fixed. `at` spooled a job, printed at(1)'s own wording -- `job 3 at
+2026-09-11 03:00` -- and `atq` listed it as pending, while every file in the
+tree naming the at spool (`userspace/at` and `userspace/cron`, and no others)
+contained zero `Command::new`, `execve` or `posix_spawn` in live code. The
+queue was genuine and nothing on the system could ever drain it.
+
+`userspace/at` now answers to `atd`: a per-minute sweep of `/var/spool/at` that
+runs every job whose time has come, in scheduled order, and removes its spool
+file. It lives in that crate because that crate owns the spool format — a drain
+living elsewhere is a second reader of a format with one writer, which is
+exactly how `crond`'s `/etc/cron.d` parser came to disagree with the files it
+read. `cron`'s simulated `atd` personality is deleted (92 lines).
+
+A refused job is **kept**, not discarded: the user was told it was scheduled,
+and dropping it because the daemon could not run it destroys their work to tidy
+up after our own limitation. `atq` still shows it and `atrm` can still remove
+it. Eight tests.
+
 **Still open:** `userspace/crond` reads only `/var/spool/cron/root`
 (`DEFAULT_USER`), so no other user's crontab is ever loaded; `cron` and
-`crond2` are untouched duplicates; and no cron implementation reaches the
-image.
+`crond2` are untouched duplicates; `anacron` is still simulated in `cron`; and
+no cron implementation reaches the image.
 
 ---
 

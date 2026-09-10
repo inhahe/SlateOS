@@ -13,7 +13,6 @@ ar:strip
 blkid:findfs
 cal:ncal
 cron:anacron
-cron:atd
 cron:atq
 cron:atrm
 cron:batch

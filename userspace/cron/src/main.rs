@@ -31,7 +31,6 @@ enum Personality {
     Crontab,
     Anacron,
     At,
-    Atd,
     Batch,
     Atq,
     Atrm,
@@ -43,7 +42,6 @@ impl Personality {
             Self::Crontab => "crontab",
             Self::Anacron => "anacron",
             Self::At => "at",
-            Self::Atd => "atd",
             Self::Batch => "batch",
             Self::Atq => "atq",
             Self::Atrm => "atrm",
@@ -65,7 +63,6 @@ fn detect_personality(argv0: &str) -> Option<Personality> {
     match lower.as_str() {
         "crontab" => Some(Personality::Crontab),
         "anacron" => Some(Personality::Anacron),
-        "atd" => Some(Personality::Atd),
         "batch" => Some(Personality::Batch),
         "atq" => Some(Personality::Atq),
         "atrm" => Some(Personality::Atrm),
@@ -1699,98 +1696,6 @@ fn remove_at_jobs(ids: &[String], out: &mut io::StdoutLock<'_>) -> i32 {
 // atd personality
 // ---------------------------------------------------------------------------
 
-fn run_atd(args: &[String]) -> i32 {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    let mut batch_threshold = 1.5f64;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-l" => {
-                i += 1;
-                if let Some(val) = args.get(i) {
-                    batch_threshold = val.parse().unwrap_or(1.5);
-                }
-            }
-            "--help" | "-h" => {
-                let _ = writeln!(
-                    out,
-                    "Usage: atd [-l load_threshold]\n\n\
-                     At daemon: processes pending one-time jobs.\n\n\
-                     Options:\n  \
-                       -l THRESHOLD  Load average threshold for batch jobs (default: 1.5)"
-                );
-                return 0;
-            }
-            _ => {
-                let _ = writeln!(out, "atd: unknown option '{}'", args[i]);
-                return 1;
-            }
-        }
-        i += 1;
-    }
-
-    let _ = writeln!(out, "atd: starting (batch_threshold={batch_threshold})");
-
-    // Scan spool directory
-    let spool = Path::new(AT_SPOOL_DIR);
-    let entries = match fs::read_dir(spool) {
-        Ok(e) => e,
-        Err(e) => {
-            let _ = writeln!(out, "atd: cannot read {AT_SPOOL_DIR}: {e}");
-            return 1;
-        }
-    };
-
-    let mut pending = 0u32;
-    let mut batch_pending = 0u32;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if let Ok(content) = fs::read_to_string(&path)
-            && let Ok(job) = AtJob::deserialize(&content)
-        {
-            if job.queue == 'b' {
-                batch_pending += 1;
-                let _ = writeln!(
-                    out,
-                    "atd: batch job {} for user '{}' at {:04}-{:02}-{:02} {:02}:{:02}",
-                    job.id,
-                    job.user,
-                    job.time.year,
-                    job.time.month,
-                    job.time.day,
-                    job.time.hour,
-                    job.time.minute,
-                );
-            } else {
-                pending += 1;
-                let _ = writeln!(
-                    out,
-                    "atd: job {} for user '{}' at {:04}-{:02}-{:02} {:02}:{:02}",
-                    job.id,
-                    job.user,
-                    job.time.year,
-                    job.time.month,
-                    job.time.day,
-                    job.time.hour,
-                    job.time.minute,
-                );
-            }
-        }
-    }
-
-    let _ = writeln!(
-        out,
-        "atd: {pending} pending jobs, {batch_pending} batch jobs"
-    );
-    let _ = writeln!(out, "atd: scheduler ready (simulated)");
-
-    0
-}
-
 // ---------------------------------------------------------------------------
 // batch personality (wrapper for at with queue 'b')
 // ---------------------------------------------------------------------------
@@ -1810,7 +1715,7 @@ fn main() {
     let Some(personality) = detect_personality(argv0) else {
         eprintln!(
             "{argv0}: this binary does not implement that command.\n\
-             It answers to: crontab, at, batch, atq, atrm, anacron, atd.\n\
+             It answers to: crontab, at, batch, atq, atrm, anacron.\n\
              The cron daemon is a separate program -- see userspace/crond."
         );
         std::process::exit(2);
@@ -1822,7 +1727,6 @@ fn main() {
         Personality::Crontab => run_crontab(&rest_vec),
         Personality::Anacron => run_anacron(&rest_vec),
         Personality::At => run_at(&rest_vec, Personality::At),
-        Personality::Atd => run_atd(&rest_vec),
         Personality::Batch => run_batch(&rest_vec),
         Personality::Atq => run_at(&rest_vec, Personality::Atq),
         Personality::Atrm => run_at(&rest_vec, Personality::Atrm),
@@ -1882,7 +1786,12 @@ mod tests {
 
     #[test]
     fn test_detect_atd() {
-        assert_eq!(detect_personality("atd"), Some(Personality::Atd));
+        // Deleted 2026-09-10: it printed "atd: scheduler ready (simulated)"
+        // and exited, and `userspace/at` now answers to `atd` with a real
+        // drain -- a per-minute sweep of /var/spool/at that execs the job and
+        // removes it. Two implementations of one daemon name, one of which
+        // does nothing, is the udisks/umount shape.
+        assert_eq!(detect_personality("atd"), None);
     }
 
     #[test]
@@ -1905,7 +1814,6 @@ mod tests {
         assert_eq!(Personality::Crontab.name(), "crontab");
         assert_eq!(Personality::Anacron.name(), "anacron");
         assert_eq!(Personality::At.name(), "at");
-        assert_eq!(Personality::Atd.name(), "atd");
         assert_eq!(Personality::Batch.name(), "batch");
         assert_eq!(Personality::Atq.name(), "atq");
         assert_eq!(Personality::Atrm.name(), "atrm");

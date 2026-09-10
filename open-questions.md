@@ -629,7 +629,7 @@ is right):
 
 - A gate scoped to `apps/` + `gui/` catches a breakage whose **victim** lives in
   those trees. It would have caught my `guitk::Event` one.
-- It would **not** have caught the `authlib` → `init/login` one, because
+- It would **not** have caught the `authlib` → `init/loginmgr` one, because
   `init/` is outside the scope — and that is the same commit that started this
   entry.
 
@@ -718,7 +718,7 @@ same cases, because confidence is what stops you grepping.
 
 | # | Change | Consumer missed | Found by | Author's state |
 |---|---|---|---|---|
-| 1 | `authlib` drops `with_stores`'s second argument (§353) | `init/login` | lane B, later | believed the caller list complete; had grepped `userspace/*/Cargo.toml`, which covers neither `apps/` nor `init/` |
+| 1 | `authlib` drops `with_stores`'s second argument (§353) | `init/loginmgr` | lane B, later | believed the caller list complete; had grepped `userspace/*/Cargo.toml`, which covers neither `apps/` nor `init/` |
 | 2 | the same change | `apps/lockscreen` | lane C, by accident, a day later | same commit, same belief — its message says "no caller changes" |
 | 3 | `guitk::Event` gains `SettingsChanged` | `apps/stickynotes`, `apps/explorer` | lane A's boot test, 30 min in | lane C — me — hours after writing this entry |
 | 4 | the same variant, unmerged in lane B's tree | the same two crates | lane B's own C-Q11 measurement run, rc=101 | lane B, *while measuring the cost of the gate that catches it* |
@@ -812,7 +812,7 @@ written it as "the gate lets one lane block another's merge", and answered that
 this is already true of the boot test. Lane B's version is stronger: *the
 coupling exists whether or not there is a gate.* Today it ran in both
 directions — lane B's `authlib` change broke lane C's lockscreen, and that
-lockscreen then stood between lane B's own `init/login` fix and a green `main`.
+lockscreen then stood between lane B's own `init/loginmgr` fix and a green `main`.
 The gate does not create that coupling. It moves discovery from "another lane
 trips over it days later" to "the lane that caused it, at the moment it caused
 it". The cost lands on whoever merges next *without* the gate; with it, it lands
@@ -836,7 +836,7 @@ What stays open is the gap. Every shared-library change is another chance for a
 breakage that nothing reports and that is found weeks later by somebody who did
 not cause it. **On the day this was raised it happened four
 times** — twice from `authlib`'s single-store change (`apps/lockscreen` and
-`init/login`, two lanes, neither caught by anything but a person looking), and
+`init/loginmgr`, two lanes, neither caught by anything but a person looking), and
 once from my own `guitk::Event` addition, which a boot test caught thirty
 minutes in, and once again from that same variant in lane B's tree, found by
 the run measuring what a gate would cost. All four are fixed; the mechanism

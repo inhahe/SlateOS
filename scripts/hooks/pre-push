@@ -2698,9 +2698,12 @@ fi
 # a crate you did not touch.
 #
 # Found on 2026-09-10 giving `userspace/login` its exec: that crate's package
-# is `login-cli` and `login` is `init/login`. Every `cargo test -p login` that
-# tick, and a `cargo fmt -p login`, went to the other program. It surfaced only
-# because a test count did not move after three tests were added.
+# was `login-cli` and `login` was `init/login`, the graphical Display Manager.
+# Every `cargo test -p login` that tick, and a `cargo fmt -p login`, went to the
+# other program. It surfaced only because a test count did not move after three
+# tests were added. That pair is now resolved -- and resolving it turned up a
+# second defect the collision was hiding: the binary named `login` was the
+# display manager's, and `userspace/getty` execs `/bin/login`.
 #
 # A mistyped `-p` that matches nothing fails loudly and needs no gate. The
 # dangerous case is the one that resolves, to somebody else.

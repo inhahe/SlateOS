@@ -1656,7 +1656,7 @@ Roadmap:
   `guiremote` went to `PROTOCOL_VERSION = 2` — unlike the `FontFamilyTag`
   precedent this changes an *existing* tag's payload, so a v1 decoder would
   desynchronise silently rather than fail. 31 of those sites are in lane B's
-  `init/login`; a required field cannot be added by one lane and filled by
+  `init/loginmgr`; a required field cannot be added by one lane and filled by
   another without a red tree in between, so they were filled in the same commit
   and lane B notified afterwards — see **§429**, which qualifies the `requests/`
   protocol described above for exactly this case and is attributed to Claude,
@@ -3398,7 +3398,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [x] Startup app list (simple serial list, separate from service manager)
   - [x] Disk-idle heuristic for "app is loaded, start next one" (2-3 sec timeout via blkdev::is_idle_for)
   - [x] Explicit readiness notification API
-- [x] Login manager / display manager (init/login):
+- [x] Login manager / display manager (init/loginmgr):
   - [x] User accounts: uid, username, display name, password hash (SHA-256+salt), avatar, admin flag
   - [x] YAML user database (/etc/users.yaml), default root + guest accounts
   - [x] Login UI: avatar circles, password field, power menu, clock, error messages

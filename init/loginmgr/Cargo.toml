@@ -1,5 +1,5 @@
 [package]
-name = "login"
+name = "loginmgr"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS Login Manager — display manager and session launcher"

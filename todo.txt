@@ -55491,7 +55491,7 @@ this was a live difference and not a formality.
 share at the exec layer: `std` already provides it. What is duplicated is four
 lines of basename-and-hyphen, once in `sshd` (over `String`) and once in `su`
 (over bytes, because a shell path may hold any byte but `/` and NUL). Two
-copies of four lines is cheaper than a crate to hold them. If `init/login` or
+copies of four lines is cheaper than a crate to hold them. If `init/loginmgr` or
 `userspace/getty` grows a third, that arithmetic changes -- which is what the
 original instinct was right about, applied to the wrong thing.
 
@@ -55920,7 +55920,7 @@ code under test. Each died on something different:
 | 1-3 | host commit exhaustion; killed before the build (D:, pre-migration) |
 | 4 | `target/` excluded by the migration, so `services/*` binaries were absent |
 | 5 | `open-questions.md` structure — lane B's entry filed below `# Resolved` |
-| 6 | stale merge base: `authlib::with_stores` in `init/login` (lane B, fixed) |
+| 6 | stale merge base: `authlib::with_stores` in `init/loginmgr` (lane B, fixed) |
 | 7 | `guitk::Event::SettingsChanged` unhandled in two apps (lane C, fixed) |
 | 8 | **stopped, not failed** — 21 gates in, zero failures, ended for the hub restart |
 

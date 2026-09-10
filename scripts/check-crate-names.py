@@ -9,17 +9,25 @@ The standing command in `CLAUDE.md`, and in every lane's loop, is
     cargo test -p <crate> --target x86_64-pc-windows-gnu
 
 `-p` takes a **package** name. Everybody types the **directory** name, because
-for 2944 of this workspace's 2955 crates they are the same string. For five of
-them they are not, and the directory name belongs to a different crate -- so
-the command succeeds, prints a green result, and tests something else.
+for almost every crate in this workspace they are the same string. For a few
+they are not, and the directory name belongs to a different crate -- so the
+command succeeds, prints a green result, and tests something else.
 
-Found on 2026-09-10 giving `userspace/login` its exec. That crate's package is
-`login-cli`; `login` is `init/login`, an unrelated program. Every
-`cargo test -p login` and the `cargo fmt -p login` went to `init/login`. It
-surfaced only because the count did not move after three tests were added --
-53 `#[test]` in the file, 46 collected -- and the collected names turned out
-not to be in the file at all. Nothing else would have said a word: the wrong
-crate compiled, its tests passed, and the exit code was 0.
+Found on 2026-09-10 giving `userspace/login` its exec. That crate's package was
+`login-cli`; `login` was `init/login`, an unrelated program -- the graphical
+Display Manager. Every `cargo test -p login` and the `cargo fmt -p login` went
+to it. It surfaced only because the count did not move after three tests were
+added -- 53 `#[test]` in the file, 46 collected -- and the collected names
+turned out not to be in the file at all. Nothing else would have said a word:
+the wrong crate compiled, its tests passed, and the exit code was 0.
+
+That pair is **resolved**, and resolving it fixed a second thing the collision
+was hiding. Neither crate declared a `[[bin]]`, so the binary named `login` was
+the Display Manager's, while the console `login(1)` built as `login-cli` --
+and `userspace/getty` execs `/bin/login`. Whoever first populated a rootfs
+would have installed the display manager where getty looks for the console
+login program. The console program is now the package `login`, and the manager
+is `loginmgr` in `init/loginmgr`.
 
 **A wrong `-p` is silent in both directions that matter.** If the directory
 name is not any package's name, cargo errors and you find out immediately.
@@ -34,12 +42,12 @@ often deliberate -- `gui/toolkit` is `guitk`, `toolchain/stubs` is
 `slateos-stubs` -- and harmless, because nothing else claims `toolkit` or
 `stubs`, so a mistyped `-p toolkit` fails loudly.
 
-Only the *collisions* matter, and only new ones fail: the five that already
-exist are recorded in `KNOWN_COLLISIONS` below, because four of them are
-another lane's to rename and a gate that refuses every lane's push over
-pre-existing state is a gate that gets bypassed. The list may only shrink --
-resolving one and leaving it listed is also a failure, so it cannot rot into
-a list of things that used to be true.
+Only the *collisions* matter, and only new ones fail: those that already exist
+are recorded in `KNOWN_COLLISIONS` below, because they are another lane's to
+rename and a gate that refuses every lane's push over pre-existing state is a
+gate that gets bypassed. The list may only shrink -- resolving one and leaving
+it listed is also a failure, so it cannot rot into a list of things that used
+to be true. It has shrunk once already, on the day it was written.
 
 Usage
 -----
@@ -80,8 +88,6 @@ KNOWN_COLLISIONS: dict[str, str] = {
     "apps/sysinfo": "sysinfo-app",
     # `-p tmux` reaches the `tmux` crate.
     "apps/tmux": "tmux-app",
-    # `-p login` reaches `init/login`. This is the one that cost a tick.
-    "userspace/login": "login-cli",
 }
 
 

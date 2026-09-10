@@ -9488,15 +9488,6 @@ name = "login"
 version = "0.1.0"
 dependencies = [
  "authlib",
- "guitk",
- "userdb",
-]
-
-[[package]]
-name = "login-cli"
-version = "0.1.0"
-dependencies = [
- "authlib",
  "posix",
  "quoting",
  "scratchdir",
@@ -9518,6 +9509,15 @@ dependencies = [
  "libservicebus",
  "posix",
  "scratchdir",
+ "userdb",
+]
+
+[[package]]
+name = "loginmgr"
+version = "0.1.0"
+dependencies = [
+ "authlib",
+ "guitk",
  "userdb",
 ]
 

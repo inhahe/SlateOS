@@ -44,11 +44,7 @@ allow cmd_udp6 5000 # its own help prints `listen <port> [timeout_ms]` -- square
 cmd_audioeq 2
 cmd_filevault 1
 cmd_kbshortcuts 1
-cmd_netdiag 3
-cmd_peninput 1
 cmd_screensaver 1
 cmd_sharesheet 1
 cmd_sysanimations 1
 cmd_vmfrag 1
-cmd_volumeosd 1
-cmd_wintiling 1

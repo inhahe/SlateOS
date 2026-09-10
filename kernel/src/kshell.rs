@@ -80382,7 +80382,12 @@ fn cmd_wintiling(args: &str) {
             }
         }
         "create" | "addws" => {
-            let name = parts.get(1).copied().unwrap_or("New");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: wintiling create <name> [layout]");
+                set_exit(1);
+                return;
+            }
             // `master` is the documented default for an absent layout. The
             // old `_ => MasterStack` catch-all applied it to an unreadable one
             // as well, so `tile create work grd` built a master-stack
@@ -80732,7 +80737,12 @@ fn cmd_peninput(args: &str) {
             let Some(pen_id) = required_num::<u32>(&parts, 1, "pen", sub, "pen id") else {
                 return;
             };
-            let action = parts.get(2).copied().unwrap_or("contact");
+            let action = parts.get(2).copied().unwrap_or("");
+            if action.is_empty() {
+                shell_println!("Usage: peninput sim <id> <action> [x] [y] [p]");
+                set_exit(1);
+                return;
+            }
             // The coordinates and pressure below genuinely are optional — a
             // bare `pen sim 1 contact` is the documented way to plant a
             // mid-tablet touch — so they take `optional_num`, which keeps the
@@ -81309,7 +81319,12 @@ fn cmd_volumeosd(args: &str) {
             }
         }
         "custom" => {
-            let label = parts.get(1).copied().unwrap_or("Info");
+            let label = parts.get(1).copied().unwrap_or("");
+            if label.is_empty() {
+                shell_println!("Usage: volumeosd custom <label> [text]");
+                set_exit(1);
+                return;
+            }
             let text = if parts.len() > 2 {
                 parts[2..].join(" ")
             } else {
@@ -81423,7 +81438,12 @@ fn cmd_netdiag(args: &str) {
             }
         }
         "ping" => {
-            let host = parts.get(1).copied().unwrap_or("127.0.0.1");
+            let host = parts.get(1).copied().unwrap_or("");
+            if host.is_empty() {
+                shell_println!("Usage: netdiag ping <host> [count]");
+                set_exit(1);
+                return;
+            }
             // The count is how much evidence a ping gathers, and the whole
             // point of raising it is to catch a fault that four packets miss:
             // `netdiag ping 10.0.0.1 10O` sent four and reported a clean link
@@ -81444,7 +81464,12 @@ fn cmd_netdiag(args: &str) {
             }
         }
         "trace" | "traceroute" => {
-            let host = parts.get(1).copied().unwrap_or("example.com");
+            let host = parts.get(1).copied().unwrap_or("");
+            if host.is_empty() {
+                shell_println!("Usage: netdiag trace <host>");
+                set_exit(1);
+                return;
+            }
             match netdiag::traceroute(host) {
                 Ok(r) => {
                     shell_println!("Traceroute to {} ({} hops):", host, r.hops.len());
@@ -81467,7 +81492,12 @@ fn cmd_netdiag(args: &str) {
             }
         }
         "dns" | "lookup" => {
-            let name = parts.get(1).copied().unwrap_or("localhost");
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: netdiag dns <name>");
+                set_exit(1);
+                return;
+            }
             match netdiag::dns_lookup(name) {
                 Ok(r) => shell_println!("{} → {} ({}us)", name, r.resolved, r.latency_us),
                 Err(e) => {

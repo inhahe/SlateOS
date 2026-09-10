@@ -1222,10 +1222,43 @@ mod tests {
         }
     }
 
+    /// A scratch directory unique to this *call*, not to this tag.
+    ///
+    /// # The bug this fixes
+    ///
+    /// The name was `coreutils-dirfd-{tag}-{pid}`, and `temp("nul")` is called
+    /// by two different tests. Cargo runs a crate's tests in parallel threads
+    /// of ONE process, so the pid is identical across them and both resolved
+    /// to the same path. The `remove_dir_all` below then made a collision into
+    /// destruction rather than an error: whichever test arrived second deleted
+    /// the first one's directory, and the first failed at
+    /// `Dir::open_root(...).unwrap()` with NotFound -- having already stat'd
+    /// the directory successfully one line earlier, which is what made it look
+    /// like a bug in `open_root`.
+    ///
+    /// It only ever failed on unix, because
+    /// `a_nul_is_refused_in_a_target_as_well_as_in_a_name` is `#[cfg(unix)]`,
+    /// so it never ran on the Windows development host and only the pre-push
+    /// gate's unix build could see it.
+    ///
+    /// A per-call counter removes the whole class rather than the one
+    /// duplicated tag. The pre-emptive `remove_dir_all` is gone with it: the
+    /// path is now new every time, so there is nothing of ours to clean, and
+    /// deleting a path we did not create is precisely how this turned into
+    /// data loss instead of a failed `create_dir_all`.
+    ///
+    /// `scratchdir::ScratchDir` exists for this and coreutils already depends
+    /// on it; migrating the ~30 call sites here is the better end state and is
+    /// recorded in known-issues rather than done under a blocked push.
     fn temp(tag: &str) -> Temp {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
         let mut p = std::env::temp_dir();
-        p.push(format!("coreutils-dirfd-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
+        p.push(format!(
+            "coreutils-dirfd-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&p).unwrap();
         Temp(p)
     }

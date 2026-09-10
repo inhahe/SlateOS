@@ -1,5 +1,5 @@
 #!/bin/sh
-# Eighteen gates at the push boundary. Any one of them aborts the push.
+# Nineteen gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -26,6 +26,10 @@
 #  18. Refuse a crate whose directory name is a different crate's package
 #      name, because `cargo -p <directory>` then tests the other one and
 #      passes.
+#  19. Refuse a gate invoked with arguments its own script does not accept,
+#      because that gate is then not running at all — argparse exits 2 and
+#      reaches no verdict, or a hand-rolled argv scan ignores the flag and
+#      answers a different question.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented, and it was wrong again the moment gate 13 was written --
@@ -2764,7 +2768,7 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# GATE 19: every gate call site must speak the interface its script has now.
+# Gate 19: every gate call site must speak the interface its script has now.
 #
 # A gate lives in two files -- the checker, and the `run_checker` line that
 # names it -- and nothing type-checks one against the other. On 2026-09-10 they

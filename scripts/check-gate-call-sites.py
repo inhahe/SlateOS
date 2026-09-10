@@ -477,14 +477,19 @@ def self_test() -> int:
         with tempfile.TemporaryDirectory() as td:
             tree = pathlib.Path(td)
             (tree / "scripts").mkdir()
+            # newline="" on both: this file is graded by
+            # scripts/check-text-mode-writes.py, and a text-mode write with no
+            # newline= turns every \n into \r\n on Windows. It caught these two
+            # the first time this gate was boot-tested.
             (tree / "scripts" / "handrolled.py").write_text(
-                "import sys\n" + body, encoding="utf-8"
+                "import sys\n" + body, encoding="utf-8", newline=""
             )
             (tree / "scripts" / "boot-test.sh").write_text(
                 '    if ! run_checker hand "$py" '
                 f'"$PROJECT_ROOT/scripts/handrolled.py" {flag}; then\n'
                 "        return 1\n    fi\n",
                 encoding="utf-8",
+                newline="",
             )
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):

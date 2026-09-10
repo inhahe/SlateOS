@@ -127815,7 +127815,7 @@ missing prerequisite is the single cheapest way for a green tree to be
 unverified**, and it looks identical to a healthy one from the outside.
 
 
-## TD-B-SEVEN-PROGRAMS-STILL-MISREAD-PROC-MOUNTS (lane B, 2026-09-10)
+## ~~TD-B-SEVEN-PROGRAMS-STILL-MISREAD-PROC-MOUNTS~~ (lane B, 2026-09-10) -- CLOSED the same day
 
 **In short:** `/proc/mounts` escapes a space in a device or mount-point name as
 `\040`, and ten programs parse the file by hand. Nine of the ten do not undo
@@ -127858,9 +127858,9 @@ crate's module doc names it as one of the three reasons the crate exists.
 | ~~`userspace/mount`~~ | ~~whether a target is already mounted~~ -- **done 2026-09-10** |
 | ~~`userspace/findmnt`~~ | ~~the whole of its output~~ -- **done 2026-09-10** |
 | ~~`userspace/lsblk`~~ | ~~mount points beside each block device~~ -- **done 2026-09-10** |
-| `userspace/eject` | whether the device must be unmounted first |
-| `userspace/grub2` | locating the boot filesystem |
-| `userspace/udisks` | mount state per device |
+| ~~`userspace/eject`~~ | ~~whether the device must be unmounted first~~ -- **done** |
+| ~~`userspace/grub2`~~ | ~~locating the boot filesystem~~ -- **done** |
+| ~~`userspace/udisks`~~ | ~~mount state per device~~ -- **done** |
 
 **`df` and `mount` keep `String` fields and escape at the boundary** rather
 than carrying bytes through their table-formatting code. That is deliberate and
@@ -127869,8 +127869,26 @@ worth stating, because it looks like a half-measure: a space is *printable*, so
 exactly as it did before. Only a byte they could not have typed is escaped --
 and the alternative for such a byte was taking the whole table down with it.
 
-`userspace/diskutil` already unescapes and is the exception; it still reads the
-file as text, so it keeps the whole-file failure.
+`userspace/diskutil` already unescaped and was the exception; it is converted
+too, because **undoing the escaping was only half the problem**. It still read
+the file with `read_to_string`, so one awkward mount left it showing no mount
+points at all and the careful unescaping never ran. Half a correct parser is
+not a correct parser, and the half that was missing was the one that fails
+silently.
+
+**Closed 2026-09-10, derived rather than decremented:** no file under
+`userspace/` or `apps/` parses `/proc/mounts` by hand any more -- checked by
+grepping for the literal path in files that do not use `procinfo`. 72 files
+still open some other `/proc` path without it, down from 95.
+
+**`grub2`'s was the one with consequences.** It picks the device carrying a
+path by longest-prefix match over mount points, so an escaped mount point --
+`/mnt/my backup`, which no real path starts with -- simply never matched,
+the next-longest won, and the bootloader was told the wrong device with
+nothing to indicate it. `eject` and `udisks` used `unwrap_or_default()`, so
+their whole-file failure produced an empty mount table rather than an error:
+"nothing is mounted". In `eject` that is inert today only because its unmount
+is still a `would call umount(...)` stub.
 
 **A related limitation, pinned rather than fixed.** A device whose *name* is
 not UTF-8 cannot be named on the command line at all: `mkfs` and `fsck` read

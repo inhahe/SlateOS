@@ -281,22 +281,34 @@ impl BlockDevice {
 // ============================================================================
 
 /// Parse /proc/mounts and build a map of kernel device name -> mount point.
+/// Kernel device name to mount point, through [`procinfo`].
+///
+/// **This program was the one that already unescaped `\040` by hand**, and it
+/// is converted anyway: undoing the escaping was only half the problem. It
+/// still read the file with `read_to_string`, which fails *entirely* when any
+/// line holds a byte that is not UTF-8 -- so one awkward mount left `diskutil`
+/// showing no mount points at all, and the careful unescaping never ran. Half
+/// a correct parser is not a correct parser, and the half that was missing was
+/// the one that fails silently.
 fn parse_mounts() -> HashMap<String, String> {
     let mut mounts = HashMap::new();
 
-    let content = match read_file("/proc/mounts") {
-        Some(c) => c,
-        None => return mounts,
-    };
-
-    for line in content.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let dev = parts[0];
-            let mount = parts[1];
-            // Strip "/dev/" prefix to get the kernel name.
-            let name = dev.strip_prefix("/dev/").unwrap_or(dev);
-            mounts.insert(name.to_string(), mount.to_string());
+    for m in procinfo::ProcFs::new()
+        .mounts()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    {
+        {
+            // Strip "/dev/" over bytes: the prefix is ASCII, the rest need not
+            // be.
+            let name = m
+                .device
+                .strip_prefix(b"/dev/".as_slice())
+                .unwrap_or(&m.device);
+            let name = quoting::escape_unprintable(name);
+            let mount = quoting::escape_unprintable(&m.mount_point);
+            mounts.insert(name, mount);
         }
     }
 

@@ -1345,8 +1345,6 @@ def _raises(fn: object) -> bool:
 
 
 def main() -> int:
-    # PROBE: force a failure, to be reverted
-    raise SystemExit(1)
     with tempfile.TemporaryDirectory() as tmp:
         work = build_repo(tmp)
         for case in (case_bytes_match_git, case_missing_does_not_desync,

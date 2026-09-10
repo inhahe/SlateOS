@@ -126834,3 +126834,42 @@ has held the correct offsets -- key 0, uid 4 … mode 20, seq 24, size 48 -- the
 whole time. The knowledge was in the tree; the two structures that needed it
 just did not use it, which no test could see because none of them crossed a C
 boundary.
+
+
+## TD-B-TEN-PROC-PARSERS-IN-USERSPACE-AND-ONE-CRATE (lane B, 2026-09-10)
+
+**In short:** ten programs in `userspace/` each parse `/proc` themselves. There
+is now one crate that does it properly, and nine of them still do not use it.
+
+**Found while** fulfilling
+`requests/c-b-extract-htops-proc-readers-into-a-shared-crate.md`. Lane C's
+argument for the crate was that *two* parsers would drift; the count inside
+`userspace/` alone is ten, and twenty-four files across `userspace/` and
+`apps/` touch `/proc` in some form.
+
+**The ten:** `htop`, `ps`, `free`, `coreutils`'s `free`, `earlyoom`, `iostat`,
+`hwinfo`, `lsmem`, `numactl`, `hwclock`.
+
+**Why it matters more than tidiness.** The things these disagree about are not
+cosmetic:
+
+* `/proc/<pid>/stat` reports RSS in **pages**, and SlateOS pages are 16 KiB
+  where every published example assumes 4. `htop` and `ps` each carry a private
+  `const PAGE_SIZE_KB: u64 = 16;`. Both are right today and nothing makes them
+  stay right.
+* The second field of `stat` is the command name in parentheses and may contain
+  spaces *and* parentheses, so it must be found by the **last** `)`. A reader
+  that splits on whitespace mis-numbers every field after it, for exactly the
+  processes worth a second look.
+* A command name is bytes. Reading it as UTF-8 silently drops processes.
+
+**The fix** is to move each onto `procinfo`, which now covers memory, load,
+uptime, cpuinfo, mounts and the per-process family. Not one change: each
+program has its own output format and its own idea of which fields it needs,
+and the useful unit is one program per commit, starting with `htop` -- whose
+readers the crate's per-process half was extracted from, so it should be the
+easiest and is the one currently duplicating the most.
+
+**Not urgent, and worth saying why.** Every one of the ten works today. This is
+the debt of ten right answers with nothing keeping them right, not a list of
+bugs.

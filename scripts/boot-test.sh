@@ -4551,6 +4551,53 @@ check_usage_names() {
 
 check_usage_names
 
+# A block that announces a refusal and then returns success.
+#
+# scripts/hooks/pre-push printed `REFUSING to push` three times on 2026-09-10 and
+# carried on, because each new gate ended `fail=1` and nothing in that file reads a
+# variable called fail. One of the three was the gate written that morning to catch
+# three red builds -- it could not itself fail. The six older refusals in the same
+# file all end `exit 1` on the line after their heredoc.
+#
+# SC2034 found it, which is how it surfaced, and is still the wrong instrument:
+# SC2034 reports the VARIABLE, so one finding concealed two inert gates, and it only
+# fires when nothing anywhere reads the name. A file that reads `fail` for a summary
+# line would silence it while the refusal stayed inert. That is the version that
+# survives, and this gate catches it.
+check_refusals_refuse() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Refusal check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    if ! run_checker check-refusals-refuse-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-refusals-refuse.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-refusals-refuse.py fails its own" >&2
+        echo "cases, so its verdict on the tree means nothing." >&2
+        return 1
+    fi
+
+    echo "=== Checking that an announced refusal actually refuses ==="
+    if run_checker check-refusals-refuse "$py" \
+            "$PROJECT_ROOT/scripts/check-refusals-refuse.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A shell block above announces a refusal and" >&2
+    echo "can still return success.  The text says it is refusing; the block must" >&2
+    echo "reach exit 1, or return 1 in a boot-test gate whose caller aborts." >&2
+    exit 1
+}
+
+check_refusals_refuse
+
 # Keep every path-taking VFS entry point behind the one permission gate.
 #
 # This guards the failure mode that no runtime test can see, because both

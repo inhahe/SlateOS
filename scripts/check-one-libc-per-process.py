@@ -219,6 +219,28 @@ def extern_fn_names(text: str) -> set[str]:
     return {m.group(1) for m in _EXTERN_FN.finditer(text)}
 
 
+_CONST_ITEM = re.compile(r"\bpub\s+(?:const|static)\s+([A-Za-z_]\w*)\s*:")
+
+
+def const_item_names(text: str) -> set[str]:
+    """The `pub const` / `pub static` names a module exports.
+
+    A constant is not a second libc. It is an integer the compiler inlines at the
+    call site: no symbol, no state, no `errno`, nothing for a duplicate copy of
+    the library to disagree about. Naming `posix::unistd::SWAP_FLAG_PREFER`
+    through a Rust path is therefore not the defect this checker exists to find,
+    and reporting it is a false positive.
+
+    That distinction is not academic. On 2026-09-10 this gate reddened `main` for
+    all three lanes with 24 findings against `userspace/swapon`, of which **four**
+    were real -- `swapon`, `swapoff` and two `get_errno` calls -- and twenty were
+    `SWAP_FLAG_*` and `E*` constants. A gate whose output is 83% noise trains its
+    reader to skim, which is precisely how the four that mattered would have been
+    missed. `_is_import_line` below exists for the same reason and says so.
+    """
+    return {m.group(1) for m in _CONST_ITEM.finditer(text)}
+
+
 def line_of(text: str, offset: int) -> int:
     """1-based line number of a byte offset."""
     return text.count("\n", 0, offset) + 1
@@ -308,6 +330,20 @@ def check_callers(root: Path, scan: tuple[str, ...]) -> list[str]:
             else set()
         )
 
+    # Constants are collected for EVERY posix module, not only the allowlisted
+    # ones, because the exemption is needed exactly where the module is *not*
+    # allowlisted. Fails closed: a module whose source cannot be read exempts
+    # nothing, so an unreadable file makes the gate stricter and never laxer.
+    consts: dict[str, set[str]] = {}
+    posix_src = root / "posix" / "src"
+    if posix_src.is_dir():
+        for path in posix_src.glob("*.rs"):
+            try:
+                body = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            consts[path.stem] = const_item_names(strip_noise(body))
+
     for base in sorted(posix_dependents(root, scan)):
         for source in sorted(rust_sources(base)):
             try:
@@ -333,6 +369,11 @@ def check_callers(root: Path, scan: tuple[str, ...]) -> list[str]:
                 module, item = m.group(1), m.group(2)
                 lineno = line_of(text, m.start())
                 if module not in PURE_MODULES:
+                    # A `pub const`/`pub static` is inlined by the compiler, so
+                    # there is no second copy of anything to reach. See
+                    # `const_item_names`.
+                    if item and item in consts.get(module, set()):
+                        continue
                     problems.append(
                         f"{rel}:{lineno}: `posix::{module}` is not a pure module "
                         f"of posix"
@@ -506,6 +547,17 @@ def _self_test() -> int:
             encoding="utf-8", newline="",
         )
 
+        # A module that is NOT on the allowlist, carrying a constant, a static
+        # and a stateful fn. The exemption has to be shown in both directions
+        # against the same module, or "it allows the const" and "it allows the
+        # whole module" are indistinguishable.
+        (tmp / "posix" / "src" / "random.rs").write_text(
+            "pub const RANDOM_MAX: i32 = 256;\n"
+            'pub static RANDOM_NAME: &str = "urandom";\n'
+            "pub fn fill(b: &mut [u8]) {}\n",
+            encoding="utf-8", newline="",
+        )
+
         def crate(name: str, body: str, dep: str = 'posix = { path = "../../posix" }') -> None:
             d = tmp / "userspace" / name / "src"
             d.mkdir(parents=True)
@@ -519,6 +571,13 @@ def _self_test() -> int:
         crate("stateful", "fn f() { posix::random::fill(&mut []); }\n")
         crate("cabi", "fn f() { posix::crypt::crypt_r(core::ptr::null()); }\n")
         crate("prose", "// posix::random::fill is what not to do\nfn f() {}\n")
+        crate("konst", "fn f() -> i32 { posix::random::RANDOM_MAX }\n")
+        crate("statik", "fn f() -> &'static str { posix::random::RANDOM_NAME }\n")
+        # `nosuch` has no `posix/src/nosuch.rs`, so nothing about it can be
+        # proved constant and the reference must still be refused. This is the
+        # fail-closed half: a module whose source cannot be read makes the gate
+        # stricter, never laxer.
+        crate("nosuch", "fn f() { let _ = posix::nosuch::ANYTHING; }\n")
         crate(
             "nodep",
             "fn f() { posix::random::fill(&mut []); }\n",
@@ -532,7 +591,23 @@ def _self_test() -> int:
         expect("allows a pure module", "ed25519" in joined, False)
         expect("ignores prose in a comment", "prose" in joined, False)
         expect("ignores a crate that does not depend on posix", "nodep" in joined, False)
-        expect("exactly two findings", len(found), 2)
+        expect("a pub const is not a second libc", "konst" in joined, False)
+        expect("nor is a pub static", "statik" in joined, False)
+        expect(
+            "but a module whose source cannot be read is still refused",
+            "nosuch" in joined,
+            True,
+        )
+        # The exemption is per *item*, not per module: `random` still has to be
+        # refused for `fill`, even though `RANDOM_MAX` is exempt. Without this
+        # assertion, an exemption that accidentally whitelisted the whole module
+        # would satisfy every other case here.
+        expect(
+            "the const's own module is still refused for its fn",
+            "posix::random" in joined,
+            True,
+        )
+        expect("exactly three findings", len(found), 3)
 
         expect("an honest allowlist passes", check_allowlist(tmp), [])
 

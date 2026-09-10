@@ -128279,6 +128279,159 @@ B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT, not this entry, and the tests say so
 where a reader would otherwise take it for a parsing failure.
 
 
+## TD-B-THE-2285-DELETIONS-PREDATE-THEIR-INSTRUMENT'S-FIX (lane B, 2026-09-10) — checked, no impact
+
+**In short:** `ccefac978` at 05:51 deleted 2,285 commands on the strength of
+`scripts/audit-cli-fabrication.py`. `2db20437e` at 09:22 fixed a bug in that
+script which made it **discard every file after the first test module** — whose
+own docstring names the consequence as a *false positive*, "a crate that
+genuinely reads the world could be reported as doing no I/O". The deletions
+predate the fix by three and a half hours. Checked: **no crate was wrongly
+deleted.**
+
+**Why the blast radius is one crate.** The bug only bites a crate whose sources
+are CONCATENATED — `crate_sources` joins all of `src/**/*.rs`, so the first test
+module in the alphabetically-first file discarded the rest. A single-file crate
+with its tests at the bottom is judged correctly, because the truncation lands
+exactly where the tests begin.
+
+Of the 2,285 deleted crates, **2,284 had one `.rs` file each.** Exactly one,
+`userspace/cryptsetup-cli`, had two.
+
+**And that one judges identically either way.** Restored from `ccefac978~1` and
+re-run: the buggy truncation saw 141 lines, the fixed `strip_tests` sees 143,
+and both find **zero** I/O markers. The deletion was correct.
+
+**Why this was worth an hour.** The docstring warns that the instrument's output
+"was used to delete 2,285 crates" and stops there, so it reads as an open
+liability that nobody had bounded. It is now bounded, by the cheapest possible
+question — how many of the affected crates could the bug even reach — rather
+than by re-auditing 2,285 of them.
+
+**Still open, and smaller.** `strip_tests` matches braces over the RAW text, so
+a `{` or `}` inside a string or comment within a test module unbalances it.
+`check-read-defaults.py`'s `live_code` does the same job over a `strip_noise`
+mask, which is why it cannot. Sharing that lexer rather than copying it is the
+right fix — it has been wrong twice already, and a second copy is the defect
+this file spent the day removing — but it means extracting `strip_noise` into a
+module both import, which is a change to make deliberately rather than in
+passing.
+
+## TD-B-A-GATE-NEEDS-TWO-PROBES-NOT-ONE (lane B, 2026-09-10) — method, and both gates now verified
+
+**In short:** proving a gate RUNS and proving a gate can REFUSE are different
+claims, and neither implies the other. I had a habit for the second on checkers
+and no habit for either on gates, and shipped two gates that printed
+`REFUSING` and let the push through.
+
+**The two failures are distinct and both are real.** Lane A's
+`check_libc_shape` was *born dead* — wired nowhere, so it never ran. My gates 20
+and 21 ran fine and *returned zero*: they set `fail=1`, and nothing in
+`scripts/hooks/pre-push` reads `fail`, while the six older refusals all
+`exit 1`. A gate can fail either test independently.
+
+**Why I had the habit for checkers and not for gates.** A checker's exit code
+*is* its output — you cannot test one without testing its refusal, and I
+planted a probe for all three I wrote today. A gate's exit code is one line
+beneath a block whose visible behaviour, the refusal paragraph, is already
+correct. The eye lands on the paragraph, the paragraph is right, and the line
+after it reads as punctuation.
+
+**Both gates are now verified end to end**, by planting:
+
+| gate | runs | checker refuses | **push stops** |
+|---|---|---|---|
+| 20 tooling-suites | paired `gittree.py` edit shipped with it | forced `test-gittree.py` failure → exit 1 | **exit 1, remote ref unchanged** |
+| 21 workspace-lints | ran in its own push | committed an unlinted crate → exit 1 | **exit 1, remote ref unchanged** |
+
+**And the probe method has a trap I walked into.** My first probe commit used
+`git add -A`, which swept the `fail=1` fix in with the planted breakage.
+`git reset --hard HEAD~1` then discarded **both**, so the second probe ran
+against unfixed code, gate 20 let the push through, and the deliberate breakage
+reached `origin/lane-b`. Undone with a revert commit rather than a force-push.
+
+**The rule that comes out of it: a probe commit must contain only the probe.**
+Bundling it with the fix it is testing means the cleanup can silently undo the
+fix, and the next measurement is of the wrong tree — which is this file's
+recurring subject arriving in the verification procedure.
+
+## TD-B-SWEPT-FOR-MORE-SIMULATED-DUPLICATES (lane B, 2026-09-10) — closed, avahi was the only one
+
+**In short:** after deleting `userspace/avahi` for simulating a service
+`kernel/src/net/mdns.rs` implements for real, I swept for others. There are
+none in lane B. Recorded so the sweep is not repeated, and because the
+discriminator took two tries to get right.
+
+**What does NOT work: the roadmap-text signal.** avahi was found because
+`roadmap.md` marks mDNS/DNS-SD `[x]` twice. Generalised — index every `[x]`
+entry on rare words, report pairs sharing five or more — that produces 118
+pairs and they are almost all legitimate siblings written from one template:
+Sokoban/Klotski/Rush Hour, SysV shm/msg/sem, epoll/inotify, Hearts/Spades. The
+duplicate mark was a real clue about avahi and is not a rule.
+
+**What does work: the same name in both trees, then ask who does the I/O.**
+22 names exist as both a `kernel/src/**` module and a `userspace/*` crate. Most
+are correct layering — the kernel provides a mechanism, userspace provides the
+command, and `tar`, `cpio`, `zip`, `acl` are all that shape. The avahi
+discriminator is narrower: **the userspace side did no I/O of its own domain
+while the kernel side did the real work.**
+
+Applied to the five where it could bite — `arp`, `ftp`, `netstat`, `telnet`,
+`traceroute` — all five do real network I/O (23 to 41 call sites each). And
+`userspace/ssh`, 15 lines against a 2,940-line kernel module, is a deliberate
+shim over its own `lib.rs`, the same shape as `sshd`, with the reason in its
+module doc.
+
+**A measurement trap worth knowing.** The first run of that check piped Rust
+sources through the console and two crates came back with **zero** network I/O
+— `arp` and `telnet` — because their sources contain a U+2192 arrow and the
+Windows console encoder raised `UnicodeEncodeError` mid-pipe. The traceback
+scrolled past above the table and the table read as a finding. Re-run entirely
+in Python they are 25 and 36. **A crate that fails to print looks exactly like
+a crate with nothing in it**, which is this file's recurring theme arriving in
+the measuring instrument rather than the subject.
+
+## TD-B-AVAHI-WAS-A-SIMULATION-OF-A-REAL-KERNEL-SERVICE (lane B, 2026-09-10) — crate deleted
+
+**In short:** `userspace/avahi` was 5,147 lines and 192 tests answering mDNS
+questions from a hardcoded table, while `kernel/src/net/mdns.rs` is a real
+mDNS/DNS-SD responder on the real multicast addresses. Deleted under
+`design-decisions.md` 1006.
+
+**What it did.** `resolve_hostname` was a `match` on the hostname:
+
+```rust
+"slateos-host.local" => {
+    results.push((IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), PROTO_INET));
+```
+
+So `avahi-resolve slateos-host.local` printed an IP address as a fact about the
+network having sent no packet, and any other name resolved to nothing — also a
+fact it had not measured. All six personalities are network operations
+(`avahi-daemon`, `-browse`, `-resolve`, `-publish`, `-autoipd`,
+`-set-host-name`) and the crate did no network I/O of any kind; its only reads
+were of its own config file.
+
+**Why deletion rather than the `wpa` treatment.** `wpa` kept
+`wpa_passphrase`, which is pure computation and needs no I/O. Nothing here is:
+every command asks the network something. The config parser is real, but a
+parser is a component and not a command, and it validated a file no daemon
+would read.
+
+**The real one already exists, one lane over.** `kernel/src/net/mdns.rs`
+exposes `resolve_local`, `resolve_local_v6`, `browse_services`,
+`register_service`, `unregister_service` and `set_hostname` — the exact
+operations the simulation fabricated. They are `pub fn` with no syscall
+surface, so userspace cannot reach them today. Asked in
+`requests/b-a-mdns-has-no-syscall-surface-and-userspace-had-a-simulation-instead.md`.
+
+**How it was found.** Not by reading the crate. Its module doc says "All data
+is simulated" in line 16 — an honest note nobody sees, because a user reads
+`avahi-resolve`'s output and not its source. What made it a deletion rather
+than a note was checking the roadmap and finding mDNS marked done TWICE: once
+for the kernel responder with the real multicast addresses, once for this. Two
+`[x]` entries for one feature is the tell.
+
 ## TD-B-HALF-THE-TREE-IS-NOT-SUBJECT-TO-THE-LINT-POLICY (lane B, 2026-09-10) — ratcheted, 134 open
 
 **In short:** CLAUDE.md requires `#![deny(clippy::all, clippy::pedantic)]` in

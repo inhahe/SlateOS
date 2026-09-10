@@ -105,13 +105,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "avahi"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "awk"
 version = "0.1.0"
 
@@ -531,6 +524,7 @@ dependencies = [
 name = "date"
 version = "0.1.0"
 dependencies = [
+ "civildate",
  "quoting",
 ]
 
@@ -1175,6 +1169,7 @@ version = "0.1.0"
 name = "hwclock"
 version = "0.1.0"
 dependencies = [
+ "civildate",
  "procinfo",
  "quoting",
  "tzrules",

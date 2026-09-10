@@ -26,7 +26,6 @@ userspace/ar/src/main.rs:argv-as-string
 userspace/arp/src/main.rs:argv-as-string
 userspace/at/src/main.rs:argv-as-string
 userspace/audit/src/main.rs:argv-as-string
-userspace/avahi/src/main.rs:argv-as-string
 userspace/awk/src/main.rs:argv-as-string
 userspace/backup/src/main.rs:argv-as-string
 userspace/base64/src/main.rs:argv-as-string

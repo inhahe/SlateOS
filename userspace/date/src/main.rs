@@ -200,9 +200,6 @@ struct DateTime {
 /// Cumulative days before each month in a non-leap year (index 0 = before Jan).
 const DAYS_BEFORE_MONTH: [u32; 13] = [0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
 
-/// Days in each month for a non-leap year (index 0 unused, 1=Jan..12=Dec).
-const DAYS_IN_MONTH: [u32; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
 const WEEKDAY_ABBR: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const WEEKDAY_FULL: [&str; 7] = [
     "Monday",
@@ -240,13 +237,15 @@ fn is_leap_year(year: i64) -> bool {
 
 /// Number of days in a given month (1-based) for a given year.
 fn days_in_month(year: i64, month: u32) -> u32 {
-    if month == 2 && is_leap_year(year) {
-        29
-    } else if (1..=12).contains(&month) {
-        DAYS_IN_MONTH[month as usize]
-    } else {
-        0
-    }
+    // Delegates rather than indexing `DAYS_IN_MONTH[month as usize]` behind a
+    // range check. The check was correct; this is the last calendar function
+    // in the lane that indexed a table at all, and removing it makes "no
+    // calendar function here indexes anything" a property somebody can verify
+    // rather than a habit they have to maintain.
+    let Ok(y) = i32::try_from(year) else {
+        return 0;
+    };
+    civildate::days_in_month(y, month)
 }
 
 /// Day of year (1-366) for the given date.
@@ -260,28 +259,28 @@ fn day_of_year(year: i64, month: u32, day: u32) -> u32 {
     }
     doy
 }
-
-/// Day of week using Tomohiko Sakamoto's algorithm.
+/// Day of week: 0=Mon, 1=Tue, ..., 6=Sun (ISO 8601).
 ///
-/// Returns 0=Monday, 1=Tuesday, ..., 6=Sunday (ISO 8601 convention).
+/// # Why this delegates
+///
+/// It was Sakamoto's algorithm over a twelve-element table indexed as
+/// `T[(m - 1) as usize]`, with no range guard. `month == 0` makes that
+/// `usize::MAX` and panics. Every path here appears to run through
+/// `datetime_to_epoch`, which rejects a month outside 1..=12 -- so this was
+/// probably unreachable today. That is not the standard the fix is held to:
+/// the signature accepts any `u32` and the body handled twelve values, and the
+/// identical code in `userspace/at` WAS reachable, from a parsed timespec.
+/// A calendar function that panics for an input its own type permits is a
+/// landmine whatever today's call graph says.
+///
+/// `civildate::day_of_week` computes from a day count and indexes nothing.
 fn day_of_week(year: i64, month: u32, day: u32) -> u32 {
-    // Sakamoto's algorithm works with 0=Sunday, so we adjust at the end.
-    static T: [i64; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
-
-    let mut y = year;
-    if month < 3 {
-        y -= 1;
-    }
-    let m = month as i64;
-    let d = day as i64;
-
-    // The algorithm gives 0=Sunday, 1=Monday, ..., 6=Saturday.
-    let dow = ((y + y / 4 - y / 100 + y / 400 + T[(m - 1) as usize] + d) % 7 + 7) % 7;
-
-    // Convert to ISO: 0=Monday..6=Sunday.
-    // Sakamoto: 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat
-    // ISO:      0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
-    ((dow + 6) % 7) as u32
+    let Ok(y) = i32::try_from(year) else {
+        // Not `as i32`, which would answer confidently about a different year.
+        return 0;
+    };
+    // `civildate` counts 0=Sunday; this returns ISO, 0=Monday.
+    (civildate::day_of_week(y, month, day) + 6) % 7
 }
 
 /// Convert Unix epoch seconds to broken-down DateTime.
@@ -1266,6 +1265,17 @@ mod tests {
     #[test]
     fn test_day_of_week_known_dates() {
         // 2024-01-01 was Monday.
+        // A month outside the calendar must not panic. This indexed
+        // `T[(m - 1) as usize]` before, so month 0 was `usize::MAX`. The
+        // identical code in `userspace/at` was reachable from a parsed
+        // timespec; here every path appears to run through
+        // `datetime_to_epoch`, which validates -- but the signature takes any
+        // `u32` and the body handled twelve values.
+        for m in [0_u32, 13, 99, u32::MAX] {
+            let _ = day_of_week(2024, m, 1);
+        }
+        // A year outside i32 answers 0 rather than about a different year.
+        assert_eq!(day_of_week(i64::MAX, 1, 1), 0);
         assert_eq!(day_of_week(2024, 1, 1), 0); // Monday
         // 2024-02-29 was Thursday (leap day).
         assert_eq!(day_of_week(2024, 2, 29), 3); // Thursday

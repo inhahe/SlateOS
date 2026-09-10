@@ -3053,166 +3053,69 @@ impl Debugger {
         self.watchpoints.push(wp);
         self.next_wp_id += 1;
     }
+    /// Say that nothing can be run, once and plainly.
+    ///
+    /// Shared by every command that would otherwise report execution. The
+    /// message names the reason rather than the symptom, because "cannot run"
+    /// invites the reader to look for a missing file or a permission, and the
+    /// actual cause is that the platform has no ptrace at all.
+    fn no_inferior(out: &mut dyn Write) {
+        let _ = out.write_all(
+            b"This build cannot run a program.\n\
+              SlateOS has no ptrace: posix::ptrace validates its request and \
+              returns ENOSYS, and this debugger holds no other way to start, \
+              stop or inspect a live process.\n\
+              \n\
+              Static inspection of the file still works: file, info functions, \
+              info variables, disassemble, x, and the breakpoint commands, \
+              which record where you asked to stop.\n",
+        );
+    }
 
     /// Handle the `run` / `r` command.
+    ///
+    /// This printed "Starting program: <path>" and then fabricated a
+    /// breakpoint hit. Nothing started.
     fn cmd_run(&mut self, out: &mut dyn Write) {
-        if self.elf.is_none() {
-            let _ = out.write_all(b"No executable specified. Use \"file\" command.\n");
+        // This check is real and stays ahead of the refusal: without a `file`
+        // the user's mistake is their own and nameable, and telling them about
+        // ptrace instead would answer a question they had not reached yet.
+        if self.binary_path_len == 0 {
+            let _ = out.write_all(
+                b"No executable specified. Use \"file\" command.
+",
+            );
             return;
         }
-
-        let _ = out.write_all(b"Starting program: ");
-        let _ = out.write_all(&self.binary_path[..self.binary_path_len]);
-        let _ = out.write_all(b"\n");
-
-        // Reset registers to initial state
-        let entry = self.elf.as_ref().map_or(0, |e| e.entry_point);
-        self.regs = [0u64; REG_COUNT];
-        self.regs[REG_RIP] = entry;
-        self.regs[REG_RSP] = 0x7fff_fff0_0000; // Typical user stack top
-        self.regs[REG_RFLAGS] = 0x202; // IF set
-        self.regs[REG_CS] = 0x33; // User code segment
-        self.regs[REG_SS] = 0x2b; // User stack segment
-
-        self.inferior_state = InferiorState::Stopped;
-
-        // Check if we hit a breakpoint at entry
-        for bp in &mut self.breakpoints {
-            if bp.enabled && bp.address == entry {
-                bp.hit_count += 1;
-                let _ = out.write_all(b"\nBreakpoint ");
-                let mut nbuf = [0u8; 20];
-                let n = format_u64(bp.id as u64, &mut nbuf);
-                let _ = out.write_all(&nbuf[..n]);
-                let _ = out.write_all(b" at ");
-                let n = format_hex(bp.address, &mut nbuf);
-                let _ = out.write_all(&nbuf[..n]);
-                let _ = out.write_all(b"\n");
-                return;
-            }
-        }
-
-        let _ = out.write_all(b"Program stopped at entry point.\n");
+        Self::no_inferior(out);
     }
 
     /// Handle the `continue` / `c` command.
+    ///
+    /// This printed "Continuing.", then searched its OWN breakpoint list for
+    /// an address above the current RIP, moved RIP there, incremented that
+    /// breakpoint's hit count and printed "Breakpoint N, 0x...". With no
+    /// match it printed "[Inferior 1 exited normally]" -- a report that the
+    /// user's program ran to completion, from a process that had never
+    /// started one.
     fn cmd_continue(&mut self, out: &mut dyn Write) {
-        if self.inferior_state == InferiorState::NotStarted {
-            let _ = out.write_all(b"The program is not being run.\n");
-            return;
-        }
-        if self.inferior_state == InferiorState::Exited {
-            let _ = out.write_all(b"The program is not being run.\n");
-            return;
-        }
-
-        let _ = out.write_all(b"Continuing.\n");
-        self.inferior_state = InferiorState::Running;
-
-        // Simulate hitting next breakpoint or program exit
-        let current_rip = self.regs[REG_RIP];
-        let mut hit_bp = false;
-        for bp in &mut self.breakpoints {
-            if bp.enabled && bp.address > current_rip {
-                bp.hit_count += 1;
-                self.regs[REG_RIP] = bp.address;
-                self.inferior_state = InferiorState::Stopped;
-                let _ = out.write_all(b"\nBreakpoint ");
-                let mut nbuf = [0u8; 20];
-                let n = format_u64(bp.id as u64, &mut nbuf);
-                let _ = out.write_all(&nbuf[..n]);
-                let _ = out.write_all(b", ");
-                let n = format_hex(bp.address, &mut nbuf);
-                let _ = out.write_all(&nbuf[..n]);
-                let _ = out.write_all(b"\n");
-                hit_bp = true;
-                break;
-            }
-        }
-
-        if !hit_bp {
-            self.inferior_state = InferiorState::Exited;
-            let _ = out.write_all(b"\n[Inferior 1 exited normally]\n");
-        }
+        Self::no_inferior(out);
     }
 
     /// Handle the `step` / `s` / `si` command.
+    ///
+    /// This advanced RIP by disassembling the next instruction out of the ELF
+    /// image -- a simulation of execution rather than execution, and one that
+    /// cannot observe a branch, a call, or any value the program computes.
     fn cmd_step(&mut self, out: &mut dyn Write) {
-        if self.inferior_state == InferiorState::NotStarted {
-            let _ = out.write_all(b"The program is not being run.\n");
-            return;
-        }
-        if self.inferior_state == InferiorState::Exited {
-            let _ = out.write_all(b"The program is not being run.\n");
-            return;
-        }
-
-        // Advance RIP by one instruction
-        let current_rip = self.regs[REG_RIP];
-        if let Some(ref elf) = self.elf {
-            if let Some(code) = elf.bytes_at_vaddr(current_rip, 16) {
-                let inst = disasm_one(code, current_rip);
-                self.regs[REG_RIP] = current_rip + inst.len as u64;
-            } else {
-                self.regs[REG_RIP] = current_rip + 1;
-            }
-        } else {
-            self.regs[REG_RIP] = current_rip + 1;
-        }
-
-        // Show current location
-        let mut hex_buf = [0u8; 20];
-        let n = format_hex_padded(self.regs[REG_RIP], &mut hex_buf, 16);
-        let _ = out.write_all(&hex_buf[..n]);
-
-        if let Some(ref elf) = self.elf {
-            if let Some(sym) = elf.find_symbol_at(self.regs[REG_RIP]) {
-                let _ = out.write_all(b" in ");
-                let _ = out.write_all(sym.name_bytes());
-                let _ = out.write_all(b" ()");
-            }
-        }
-        let _ = out.write_all(b"\n");
+        Self::no_inferior(out);
     }
 
-    /// Handle the `next` / `n` / `ni` command (step over).
+    /// Handle the `next` / `n` / `ni` command.
+    ///
+    /// Same simulation as `step`, with the same objection.
     fn cmd_next(&mut self, out: &mut dyn Write) {
-        if self.inferior_state == InferiorState::NotStarted {
-            let _ = out.write_all(b"The program is not being run.\n");
-            return;
-        }
-        if self.inferior_state == InferiorState::Exited {
-            let _ = out.write_all(b"The program is not being run.\n");
-            return;
-        }
-
-        // For step-over, if the current instruction is a call, we advance past it
-        let current_rip = self.regs[REG_RIP];
-        if let Some(ref elf) = self.elf {
-            if let Some(code) = elf.bytes_at_vaddr(current_rip, 16) {
-                let inst = disasm_one(code, current_rip);
-                // Step over: always advance past the instruction
-                self.regs[REG_RIP] = current_rip + inst.len as u64;
-            } else {
-                self.regs[REG_RIP] = current_rip + 1;
-            }
-        } else {
-            self.regs[REG_RIP] = current_rip + 1;
-        }
-
-        // Show current location
-        let mut hex_buf = [0u8; 20];
-        let n = format_hex_padded(self.regs[REG_RIP], &mut hex_buf, 16);
-        let _ = out.write_all(&hex_buf[..n]);
-
-        if let Some(ref elf) = self.elf {
-            if let Some(sym) = elf.find_symbol_at(self.regs[REG_RIP]) {
-                let _ = out.write_all(b" in ");
-                let _ = out.write_all(sym.name_bytes());
-                let _ = out.write_all(b" ()");
-            }
-        }
-        let _ = out.write_all(b"\n");
+        Self::no_inferior(out);
     }
 
     /// Handle the `help` command.
@@ -4763,30 +4666,69 @@ mod tests {
     }
 
     #[test]
-    fn test_cmd_continue_not_running() {
+    fn test_cmd_continue_refuses_rather_than_simulating() {
+        // Was `test_cmd_continue_not_running`, asserting "The program is not
+        // being run" -- which was the honest branch of a command whose other
+        // branch fabricated execution. `continue` used to move RIP and report a
+        // breakpoint hit or a normal exit for a process that had never
+        // started. It now says why nothing can run, in every state.
         let mut dbg = Debugger::new();
         let out = capture(|out| {
             dbg.cmd_continue(out);
         });
-        assert!(out.windows(7).any(|w| w == b"not bei"));
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("cannot run a program"), "unexpected: {text}");
+        assert!(text.contains("ptrace"), "does not name the reason: {text}");
+        // The words that would mean it had observed something.
+        assert!(!text.contains("Breakpoint"), "still reports a stop: {text}");
+        assert!(
+            !text.contains("exited normally"),
+            "still reports an exit: {text}"
+        );
     }
 
     #[test]
-    fn test_cmd_step_not_running() {
+    fn test_cmd_step_refuses_rather_than_simulating() {
+        // Was `test_cmd_step_not_running`, asserting "The program is not
+        // being run" -- which was the honest branch of a command whose other
+        // branch fabricated execution. `step` used to move RIP and report a
+        // breakpoint hit or a normal exit for a process that had never
+        // started. It now says why nothing can run, in every state.
         let mut dbg = Debugger::new();
         let out = capture(|out| {
             dbg.cmd_step(out);
         });
-        assert!(out.windows(7).any(|w| w == b"not bei"));
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("cannot run a program"), "unexpected: {text}");
+        assert!(text.contains("ptrace"), "does not name the reason: {text}");
+        // The words that would mean it had observed something.
+        assert!(!text.contains("Breakpoint"), "still reports a stop: {text}");
+        assert!(
+            !text.contains("exited normally"),
+            "still reports an exit: {text}"
+        );
     }
 
     #[test]
-    fn test_cmd_next_not_running() {
+    fn test_cmd_next_refuses_rather_than_simulating() {
+        // Was `test_cmd_next_not_running`, asserting "The program is not
+        // being run" -- which was the honest branch of a command whose other
+        // branch fabricated execution. `next` used to move RIP and report a
+        // breakpoint hit or a normal exit for a process that had never
+        // started. It now says why nothing can run, in every state.
         let mut dbg = Debugger::new();
         let out = capture(|out| {
             dbg.cmd_next(out);
         });
-        assert!(out.windows(7).any(|w| w == b"not bei"));
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("cannot run a program"), "unexpected: {text}");
+        assert!(text.contains("ptrace"), "does not name the reason: {text}");
+        // The words that would mean it had observed something.
+        assert!(!text.contains("Breakpoint"), "still reports a stop: {text}");
+        assert!(
+            !text.contains("exited normally"),
+            "still reports an exit: {text}"
+        );
     }
 
     #[test]

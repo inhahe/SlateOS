@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS hardware clock and time management"
 [dependencies]
+# The local day_of_week underflowed on year 0, which `--date` accepts.
+civildate = { path = "../../civildate" }
 procinfo = { path = "../../procinfo" }
 # It interpolates `tz` into "warning: unknown timezone {}, using UTC". That
 # value is whatever followed `--timezone`/`--tz` on the command line, and

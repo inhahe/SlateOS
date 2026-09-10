@@ -211,6 +211,82 @@ def scan_is_too_thin(scan: Scan) -> bool:
     return scan.files < MIN_FILES or scan.reads < MIN_READS
 
 
+def live_code(src: str) -> tuple[str, str]:
+    """`src` with test code removed and nothing else.
+
+    # What this replaced
+
+    `src.split("#[cfg(test)]")[0]` -- "everything before the tests", which is
+    only true when the FIRST such attribute is the test module. A
+    `#[cfg(test)]` on a single helper is ordinary, and everything after it was
+    discarded along with the tests.
+
+    Measured before the fix: **35,706 lines across `userspace/`, 7% of the
+    lane, invisible to this checker.** `fdisk/src/main.rs` was read as 21 lines
+    of 3,818; `coreutils/src/bin/tar.rs` as 592 of 5,635.
+
+    The floors did not catch it because they are aggregate. Losing 7% of the
+    corpus leaves 398 live `read_to_string` calls against a floor of 120, and
+    every file was still opened so the file count never moved. **A floor on the
+    total cannot see a hole in the distribution** -- which is worth remembering
+    before trusting one anywhere else.
+
+    # How it works
+
+    Blank each `#[cfg(test)]` item by matching its braces, then cut at the test
+    module. Blanking preserves length, so match offsets still index the
+    original, which is what lets `survey` show real argument text.
+
+    Brace matching runs over the `strip_noise` output: a brace inside a string
+    or a comment must not close an item early, and this file has been wrong
+    about string boundaries twice already.
+    """
+    masked = strip_noise(src)
+    # Both views are blanked at the same offsets and returned together, so
+    # `survey` does not re-run `strip_noise` on the result. Running it twice
+    # per file doubled the honour-head suite's wall clock past ten minutes,
+    # which is a timeout rather than a slowdown.
+    out = list(src)
+    mout = list(masked)
+    i = 0
+    while True:
+        i = masked.find("#[cfg(test)]", i)
+        if i < 0:
+            break
+        # The test module ends the live region; everything after it goes.
+        rest = masked[i + len("#[cfg(test)]"):]
+        head = rest.lstrip()
+        # Skip any further attributes (`#[allow(...)]` is usual on test mods).
+        while head.startswith("#["):
+            close = head.find("]")
+            if close < 0:
+                break
+            head = head[close + 1:].lstrip()
+        if head.startswith("mod "):
+            return "".join(out[:i]), "".join(mout[:i])
+        # A single item: blank it from the attribute to its closing brace.
+        brace = masked.find("{", i)
+        if brace < 0:
+            return "".join(out[:i]), "".join(mout[:i])
+        depth = 0
+        j = brace
+        while j < len(masked):
+            if masked[j] == "{":
+                depth += 1
+            elif masked[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    j += 1
+                    break
+            j += 1
+        for k in range(i, min(j, len(out))):
+            if out[k] != "\n":
+                out[k] = " "
+                mout[k] = " "
+        i = j
+    return "".join(out), "".join(mout)
+
+
 def survey(tree: gittree.Tree) -> Scan:
     """`<crate>: <call>` for every live occurrence.
 
@@ -243,8 +319,7 @@ def survey(tree: gittree.Tree) -> Scan:
             continue
         files += 1
         crate = rel.split("/")[1]
-        original = src.split("#[cfg(test)]")[0]
-        body = strip_noise(original)
+        original, body = live_code(src)
         # Counted AFTER stripping, so a `strip_noise` that blanks too much
         # drives this to zero and trips MIN_READS. Counting before would make
         # the floor blind to precisely the failure it exists to catch.
@@ -387,6 +462,59 @@ def _self_test() -> int:
         expect(f"length preserved: {probe!r}",
                len(strip_noise(probe)), len(probe))
 
+
+    # -----------------------------------------------------------------------
+    # `live_code`: a `#[cfg(test)]` on a HELPER must not hide the rest of the
+    # file. `survey` used to do `src.split("#[cfg(test)]")[0]`, which is
+    # "everything before the tests" only when the first such attribute IS the
+    # test module. Measured before the fix: 35,706 lines across userspace/,
+    # 7% of the lane, invisible -- fdisk/src/main.rs read as 21 lines of
+    # 3,818, tar.rs as 592 of 5,635.
+    #
+    # The floors did not catch it and could not: they are aggregate, and
+    # losing 7% of the corpus leaves 398 live reads against a floor of 120
+    # while every file is still opened so the file count never moves. A floor
+    # on the total cannot see a hole in the distribution.
+    # -----------------------------------------------------------------------
+    helper_first = (
+        "fn a() {}" + chr(10)
+        + "#[cfg(test)]" + chr(10)
+        + "fn helper() { let _ = 1; }" + chr(10)
+        + "fn live() { let x = fs::read_to_string(p).unwrap_or_default(); }" + chr(10)
+        + "#[cfg(test)]" + chr(10)
+        + "mod tests { fn t() {} }" + chr(10)
+    )
+    kept, _ = live_code(helper_first)
+    expect("a #[cfg(test)] helper does not truncate the file",
+           "fn live()" in kept, True)
+    expect("...and the helper itself is still excluded",
+           "fn helper()" in kept, False)
+    expect("...and the test module is still cut",
+           "mod tests" in kept, False)
+    # Blanking preserves position; cutting the test module legitimately
+    # shortens. What `survey` needs is that offsets into the RETURNED text
+    # index the same characters, which holds because it derives both the
+    # match offsets and the displayed text from this one string. Tested on a
+    # file with no test module, where nothing is cut.
+    no_module = (
+        "#[cfg(test)]" + chr(10)
+        + "fn helper() { let _ = 1; }" + chr(10)
+        + "fn live() { let x = fs::read_to_string(p).unwrap_or_default(); }" + chr(10)
+    )
+    blanked, _ = live_code(no_module)
+    expect("blanking an item preserves length", len(blanked), len(no_module))
+    expect("...and the surviving text sits at its original offset",
+           blanked.index("fn live()"), no_module.index("fn live()"))
+
+    # A brace inside a string must not close the item early -- this file has
+    # been wrong about string boundaries twice, so the masking is reused.
+    braces = (
+        "#[cfg(test)]" + chr(10)
+        + 'fn h() { let s = "}"; let _ = s; }' + chr(10)
+        + "fn live() { let x = fs::read_to_string(p).unwrap_or_default(); }" + chr(10)
+    )
+    expect("a brace inside a string does not end the test item early",
+           "fn live()" in live_code(braces)[0], True)
 
     # -----------------------------------------------------------------------
     # `survey` itself. Everything above this line feeds `strip_noise` a string;

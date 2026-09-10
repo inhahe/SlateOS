@@ -749,7 +749,6 @@ pub fn init_defaults() {
         external_ipv6: String::new(),
     };
 
-
     // No phantom Wi-Fi scan results: scans come from wifi_scan() / real radios.
     state.scanned_wifi.clear();
     state.saved_networks.clear();

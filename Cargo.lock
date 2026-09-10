@@ -295,9 +295,6 @@ version = "0.1.0"
 [[package]]
 name = "cal"
 version = "0.1.0"
-dependencies = [
- "notimpl",
-]
 
 [[package]]
 name = "calculator"

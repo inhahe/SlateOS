@@ -654,3 +654,182 @@ fn default_and_new_point_at_the_kernels_proc() {
     assert_eq!(ProcFs::new().root(), Path::new("/proc"));
     assert_eq!(ProcFs::default().root(), Path::new("/proc"));
 }
+
+// ---------------------------------------------------------------------------
+// Per-process: /proc/<pid>/stat, statm, status, cmdline
+// ---------------------------------------------------------------------------
+
+/// A `stat` line with the field numbering `proc(5)` gives, so the indices in
+/// [`ProcessStat::parse`] can be checked against something readable.
+///
+/// Fields 3.. after the comm: state R, ppid 1, … utime 1234 (14), stime 567
+/// (15), … priority 20 (18), nice -5 (19), threads 7 (20), … vsize 4096000
+/// (23), rss 250 (24).
+fn stat_line(comm: &str) -> Vec<u8> {
+    format!(
+        "42 ({comm}) R 1 42 42 0 -1 4194304 100 0 0 0 1234 567 0 0 20 -5 7 0 \
+         99 4096000 250 18446744073709551615 1 2 3 4 5 6 7 8 9"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn process_stat_reads_the_fields_proc5_numbers() {
+    let st = ProcessStat::parse(&stat_line("bash")).unwrap();
+    assert_eq!(st.pid, 42);
+    assert_eq!(st.comm, b"bash");
+    assert_eq!(st.state, b'R');
+    assert_eq!(st.ppid, 1);
+    assert_eq!(st.utime_ticks, 1234);
+    assert_eq!(st.stime_ticks, 567);
+    assert_eq!(st.priority, 20);
+    assert_eq!(st.nice, -5);
+    assert_eq!(st.num_threads, 7);
+    assert_eq!(st.vsize_bytes, 4_096_000);
+    assert_eq!(st.rss_pages, 250);
+    assert_eq!(st.cpu_ticks(), 1234 + 567);
+}
+
+/// The whole reason this is not a `split_whitespace`.
+///
+/// A process may be named `my (odd) name`, and `/proc/<pid>/stat` wraps it in
+/// one more pair of parentheses without escaping anything. Splitting on
+/// whitespace mis-numbers every field after it — so a viewer would report the
+/// wrong parent, the wrong memory and the wrong CPU time for exactly the
+/// processes whose names are worth a second look.
+#[test]
+fn a_comm_with_spaces_and_parentheses_does_not_shift_the_fields() {
+    let st = ProcessStat::parse(&stat_line("my (odd) name")).unwrap();
+    assert_eq!(st.comm, b"my (odd) name");
+    assert_eq!(st.state, b'R');
+    assert_eq!(st.ppid, 1);
+    assert_eq!(st.rss_pages, 250, "fields after comm must not shift");
+}
+
+/// A name that is not UTF-8 is kept, byte for byte.
+///
+/// `htop` read this file through `read_to_string`, so such a process was
+/// dropped from the list entirely rather than shown with an odd name — and our
+/// own filesystem allows every byte but `/` and NUL, so this is not exotic.
+#[test]
+fn a_comm_that_is_not_utf8_survives() {
+    let mut line = b"7 (od".to_vec();
+    line.push(0xff);
+    line.extend_from_slice(b"d) S 1 7 7 0 -1 0 0 0 0 0 1 2 0 0 20 0 1 0 0 1024 3 0 0 0 0 0 0");
+    let st = ProcessStat::parse(&line).unwrap();
+    assert_eq!(st.comm, b"od\xffd");
+    assert_eq!(st.state, b'S');
+    assert!(
+        core::str::from_utf8(&st.comm).is_err(),
+        "the fixture must be non-UTF-8"
+    );
+}
+
+/// Not shaped like `stat` at all: no parentheses, or too few fields.
+#[test]
+fn process_stat_refuses_a_line_that_is_not_stat() {
+    assert!(ProcessStat::parse(b"").is_none());
+    assert!(
+        ProcessStat::parse(b"42 bash R 1").is_none(),
+        "no parentheses"
+    );
+    assert!(
+        ProcessStat::parse(b"42 (bash) R 1 2 3").is_none(),
+        "too few fields"
+    );
+}
+
+/// 16 KiB pages, not 4.
+///
+/// `stat` reports RSS in *pages*, and every `/proc` example on the internet
+/// assumes 4 KiB. `design.txt` fixes SlateOS at 16, so a reader that takes the
+/// internet's word is out by a factor of four and still prints a plausible
+/// number — which is why this has a test rather than a comment.
+#[test]
+fn rss_converts_with_slateos_page_size() {
+    let st = ProcessStat::parse(&stat_line("x")).unwrap();
+    assert_eq!(PAGE_SIZE_KIB, 16);
+    assert_eq!(st.rss_kib(), 250 * 16);
+    // …and vsize is already bytes in the same line, which is the trap.
+    assert_eq!(st.vsize_kib(), 4_096_000 / 1024);
+}
+
+#[test]
+fn statm_reads_three_page_counts() {
+    let m = ProcessStatm::parse(b"1000 250 100 5 0 60 0").unwrap();
+    assert_eq!(m.size_pages, 1000);
+    assert_eq!(m.resident_pages, 250);
+    assert_eq!(m.shared_pages, 100);
+    assert_eq!(m.shared_kib(), 100 * 16);
+    assert!(ProcessStatm::parse(b"1 2").is_none());
+}
+
+/// `Uid:` carries four values and the real UID is the first. Taking a
+/// different one is a one-character change at a call site and a security
+/// question, which is why the choice is made here once.
+#[test]
+fn status_uid_takes_the_real_uid_of_four() {
+    let content = b"Name:\tbash\nUid:\t1000\t1001\t1002\t1003\nGid:\t100\n";
+    assert_eq!(status_uid(content), Some(1000));
+    assert_eq!(status_uid(b"Name:\tbash\n"), None);
+}
+
+/// NUL-separated, NUL-terminated, and not text.
+#[test]
+fn cmdline_splits_on_nul_and_keeps_bytes() {
+    assert_eq!(
+        cmdline_args(b"/bin/ls\0-l\0/tmp\0"),
+        vec![b"/bin/ls".to_vec(), b"-l".to_vec(), b"/tmp".to_vec()],
+        "the trailing NUL must not produce an empty argument"
+    );
+    assert_eq!(
+        cmdline_args(b"a\0\xff\0"),
+        vec![b"a".to_vec(), b"\xff".to_vec()]
+    );
+    // A kernel thread has no command line. Empty, not absent.
+    assert!(cmdline_args(b"").is_empty());
+}
+
+/// The readers, against a fixture `/proc`.
+#[test]
+fn procfs_reads_one_process() {
+    let fx = Fixture::new("process");
+    fx.write("42/stat", &stat_line("bash"));
+    fx.write("42/statm", b"1000 250 100 5 0 60 0");
+    fx.write("42/status", b"Name:\tbash\nUid:\t1000\t1000\t1000\t1000\n");
+    fx.write("42/cmdline", b"/bin/bash\0-i\0");
+    let procfs = fx.procfs();
+
+    let st = procfs.process_stat(42).unwrap().unwrap();
+    assert_eq!(st.comm, b"bash");
+    assert_eq!(procfs.process_statm(42).unwrap().unwrap().shared_pages, 100);
+    assert_eq!(procfs.process_uid(42).unwrap(), Some(1000));
+    assert_eq!(
+        procfs.process_cmdline(42).unwrap().unwrap(),
+        vec![b"/bin/bash".to_vec(), b"-i".to_vec()]
+    );
+    assert_eq!(procfs.process_ids().unwrap(), vec![42]);
+}
+
+/// A process that exits between the listing and the read is `Ok(None)`, not an
+/// error — that race is the normal case for anything walking `/proc`.
+#[test]
+fn a_vanished_process_is_not_an_error() {
+    let fx = Fixture::new("vanished");
+    let procfs = fx.procfs();
+    assert_eq!(procfs.process_stat(999).unwrap(), None);
+    assert_eq!(procfs.process_statm(999).unwrap(), None);
+    assert_eq!(procfs.process_uid(999).unwrap(), None);
+    assert_eq!(procfs.process_cmdline(999).unwrap(), None);
+}
+
+/// A kernel thread and a vanished process gave the same answer before this
+/// crate: both were "no command line". They are different facts.
+#[test]
+fn a_kernel_thread_is_an_empty_cmdline_not_a_missing_one() {
+    let fx = Fixture::new("kthread");
+    fx.write("3/cmdline", b"");
+    let procfs = fx.procfs();
+    assert_eq!(procfs.process_cmdline(3).unwrap(), Some(vec![]));
+    assert_eq!(procfs.process_cmdline(4).unwrap(), None);
+}

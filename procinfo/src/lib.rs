@@ -898,6 +898,272 @@ impl ProcFs {
         pids.sort_unstable();
         Ok(pids)
     }
+
+    /// `/proc/<pid>/stat`, parsed.
+    ///
+    /// # Errors
+    ///
+    /// Any read error other than "no such file", which is `Ok(None)` -- a
+    /// process that exits between [`ProcFs::process_ids`] and this call is the
+    /// normal case, not a failure.
+    pub fn process_stat(&self, pid: u64) -> io::Result<Option<ProcessStat>> {
+        Ok(self
+            .read_optional(&format!("{pid}/stat"))?
+            .and_then(|c| ProcessStat::parse(&c)))
+    }
+
+    /// `/proc/<pid>/statm`, parsed.
+    ///
+    /// # Errors
+    ///
+    /// As [`ProcFs::process_stat`].
+    pub fn process_statm(&self, pid: u64) -> io::Result<Option<ProcessStatm>> {
+        Ok(self
+            .read_optional(&format!("{pid}/statm"))?
+            .and_then(|c| ProcessStatm::parse(&c)))
+    }
+
+    /// The real UID from `/proc/<pid>/status`.
+    ///
+    /// # Errors
+    ///
+    /// As [`ProcFs::process_stat`].
+    pub fn process_uid(&self, pid: u64) -> io::Result<Option<u32>> {
+        Ok(self
+            .read_optional(&format!("{pid}/status"))?
+            .and_then(|c| status_uid(&c)))
+    }
+
+    /// `/proc/<pid>/cmdline`, split into arguments.
+    ///
+    /// `Ok(Some(vec![]))` is a kernel thread; `Ok(None)` is a process that is
+    /// no longer there. The two used to be the same answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`ProcFs::process_stat`].
+    pub fn process_cmdline(&self, pid: u64) -> io::Result<Option<Vec<Vec<u8>>>> {
+        Ok(self
+            .read_optional(&format!("{pid}/cmdline"))?
+            .map(|c| cmdline_args(&c)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-process: /proc/<pid>/stat, statm, status, cmdline
+// ---------------------------------------------------------------------------
+
+/// KiB per page on SlateOS.
+///
+/// `design.txt` fixes this at **16 KiB**, not the 4 KiB every `/proc` example
+/// on the internet assumes, and `/proc/<pid>/stat` reports RSS in *pages* --
+/// so a reader that gets this wrong is out by a factor of four and still
+/// produces plausible numbers.
+///
+/// It lives here because it was a private `const PAGE_SIZE_KB: u64 = 16;` in
+/// both `userspace/htop` and `userspace/ps`, which is one copy per program of
+/// a fact about the kernel. Both were right; nothing made them stay right.
+pub const PAGE_SIZE_KIB: u64 = 16;
+
+/// Scheduler ticks per second, the unit `utime`/`stime` are counted in.
+pub const TICKS_PER_SEC: u64 = 100;
+
+/// One process, as `/proc/<pid>/stat` reports it.
+///
+/// Only the fields something in this tree reads. `stat` has 52 of them and
+/// adding one is a line; carrying all 52 unread would be a claim to have
+/// checked all 52.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessStat {
+    /// Process ID.
+    pub pid: u64,
+    /// The executable name, **as bytes**.
+    ///
+    /// Not a `String`: a command name comes from `argv[0]`, which is bytes,
+    /// and our own filesystem allows every byte but `/` and NUL
+    /// (`CLAUDE.md` self-review item 7). `htop` read this through
+    /// `read_to_string`, so a process whose name is not UTF-8 was skipped
+    /// entirely rather than shown with its name escaped.
+    pub comm: Vec<u8>,
+    /// State letter: `R`, `S`, `D`, `Z`, `T`, …
+    pub state: u8,
+    /// Parent process ID.
+    pub ppid: u64,
+    /// User-mode time in ticks.
+    pub utime_ticks: u64,
+    /// Kernel-mode time in ticks.
+    pub stime_ticks: u64,
+    /// Scheduling priority.
+    pub priority: i64,
+    /// Nice value.
+    pub nice: i64,
+    /// Threads in this process.
+    pub num_threads: u64,
+    /// Virtual memory size, in **bytes** -- `stat` reports this one in bytes
+    /// and the next one in pages, which is the kind of thing this crate exists
+    /// to stop each caller rediscovering.
+    pub vsize_bytes: u64,
+    /// Resident set size, in **pages**. See [`ProcessStat::rss_kib`].
+    pub rss_pages: u64,
+}
+
+impl ProcessStat {
+    /// Parse the single line of `/proc/<pid>/stat`.
+    ///
+    /// # The comm field is why this cannot be a `split_whitespace`
+    ///
+    /// The second field is the executable name in parentheses, and it may
+    /// contain **both spaces and parentheses** -- `(my (odd) name)` is a legal
+    /// value. Splitting on whitespace therefore mis-numbers every field after
+    /// it for exactly the processes most worth looking at. The name runs to the
+    /// **last** `)` in the line, which works because every field after it is
+    /// numeric.
+    ///
+    /// Returns `None` if the line is not shaped like `stat` at all -- no
+    /// parentheses, or too few fields after them. A *missing* field within a
+    /// well-formed line is taken as zero rather than failing the whole read,
+    /// because a kernel that stops exporting field 31 should not blank the
+    /// process table.
+    #[must_use]
+    pub fn parse(content: &[u8]) -> Option<Self> {
+        let open = content.iter().position(|b| *b == b'(')?;
+        let close = content.iter().rposition(|b| *b == b')')?;
+        if close < open {
+            return None;
+        }
+        let pid = num(content.get(..open)?)?;
+        let comm = content.get(open.saturating_add(1)..close)?.to_vec();
+        // `close + 1` is the space; the state letter follows it.
+        let rest = content.get(close.saturating_add(2)..)?;
+        let fields: Vec<&[u8]> = rest
+            .split(|b| b.is_ascii_whitespace())
+            .filter(|f| !f.is_empty())
+            .collect();
+        // `stat`'s field 24 (rss) is index 21 here, and it is the last one
+        // anything reads. Fewer than that and the line is not usable.
+        if fields.len() < 22 {
+            return None;
+        }
+        let at = |i: usize| -> u64 { fields.get(i).and_then(|f| num(f)).unwrap_or(0) };
+        let at_i = |i: usize| -> i64 { fields.get(i).and_then(|f| inum(f)).unwrap_or(0) };
+        Some(Self {
+            pid,
+            comm,
+            state: fields
+                .first()
+                .and_then(|f| f.first().copied())
+                .unwrap_or(b'?'),
+            ppid: at(1),
+            utime_ticks: at(11),
+            stime_ticks: at(12),
+            priority: at_i(15),
+            nice: at_i(16),
+            // A process always has at least the one thread running it, so zero
+            // here means "the kernel did not say", not "no threads".
+            num_threads: fields.get(17).and_then(|f| num(f)).unwrap_or(1),
+            vsize_bytes: at(20),
+            rss_pages: at(21),
+        })
+    }
+
+    /// Total CPU time in ticks.
+    #[must_use]
+    pub fn cpu_ticks(&self) -> u64 {
+        self.utime_ticks.saturating_add(self.stime_ticks)
+    }
+
+    /// Resident set size in KiB, converted with [`PAGE_SIZE_KIB`].
+    #[must_use]
+    pub fn rss_kib(&self) -> u64 {
+        self.rss_pages.saturating_mul(PAGE_SIZE_KIB)
+    }
+
+    /// Virtual size in KiB. `stat` gives bytes here, unlike RSS.
+    #[must_use]
+    pub fn vsize_kib(&self) -> u64 {
+        self.vsize_bytes / 1024
+    }
+}
+
+/// The three fields of `/proc/<pid>/statm` anything here reads, in pages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProcessStatm {
+    /// Total program size.
+    pub size_pages: u64,
+    /// Resident set size.
+    pub resident_pages: u64,
+    /// Resident shared pages.
+    pub shared_pages: u64,
+}
+
+impl ProcessStatm {
+    /// Parse `/proc/<pid>/statm`: seven whitespace-separated page counts.
+    #[must_use]
+    pub fn parse(content: &[u8]) -> Option<Self> {
+        let f: Vec<&[u8]> = content
+            .split(|b| b.is_ascii_whitespace())
+            .filter(|x| !x.is_empty())
+            .collect();
+        if f.len() < 3 {
+            return None;
+        }
+        Some(Self {
+            size_pages: f.first().and_then(|x| num(x)).unwrap_or(0),
+            resident_pages: f.get(1).and_then(|x| num(x)).unwrap_or(0),
+            shared_pages: f.get(2).and_then(|x| num(x)).unwrap_or(0),
+        })
+    }
+
+    /// Shared resident memory in KiB.
+    #[must_use]
+    pub fn shared_kib(&self) -> u64 {
+        self.shared_pages.saturating_mul(PAGE_SIZE_KIB)
+    }
+}
+
+/// The real UID from `/proc/<pid>/status`'s `Uid:` line.
+///
+/// That line carries four values -- real, effective, saved-set and filesystem
+/// -- and this returns the first. A caller wanting the effective UID wants a
+/// different function, not a different index at the call site.
+#[must_use]
+pub fn status_uid(content: &[u8]) -> Option<u32> {
+    let value = key_value(content, "Uid")?;
+    let first = value
+        .split(|b| b.is_ascii_whitespace())
+        .find(|f| !f.is_empty())?
+        .to_vec();
+    num(&first).and_then(|v| u32::try_from(v).ok())
+}
+
+/// `/proc/<pid>/cmdline` split into its arguments.
+///
+/// NUL-separated and NUL-terminated, so the trailing empty element is dropped.
+/// **Bytes**: an argument is not text, and a program whose arguments are not
+/// UTF-8 is exactly the one a process viewer is most useful for.
+///
+/// An empty result means a kernel thread, which has no command line at all --
+/// distinct from a process whose command line we could not read, which is an
+/// `Err` from [`ProcFs::process_cmdline`].
+#[must_use]
+pub fn cmdline_args(content: &[u8]) -> Vec<Vec<u8>> {
+    content
+        .split(|b| *b == 0)
+        .filter(|a| !a.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+/// An unsigned decimal field, or `None` if it is not one.
+fn num(field: &[u8]) -> Option<u64> {
+    let text = core::str::from_utf8(field).ok()?.trim();
+    text.parse().ok()
+}
+
+/// A signed decimal field.
+fn inum(field: &[u8]) -> Option<i64> {
+    let text = core::str::from_utf8(field).ok()?.trim();
+    text.parse().ok()
 }
 
 #[cfg(test)]

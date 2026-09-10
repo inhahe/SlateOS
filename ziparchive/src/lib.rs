@@ -846,6 +846,124 @@ pub fn extract_entry_at_limited<R: ReadAt>(
 // Public API — create (mkzip)
 // ---------------------------------------------------------------------------
 
+/// Append a central directory and its end records to `out`.
+///
+/// Split out of [`create`] so a streaming writer can emit the same trailer
+/// without building the archive in memory first. `cd_start` is passed in
+/// rather than measured from `out`, because a stream knows where it is and a
+/// buffer's length is only the same answer by coincidence.
+///
+/// `dir` must be in the order the members were written: the directory's order
+/// is the archive's order, and readers that list entries show it.
+fn append_central_directory(out: &mut Vec<u8>, dir: &[DirRecord], cd_start: u64) {
+    // --- Central directory ---
+
+    for rec in dir {
+        let (comp32, uncomp32, offset32, extra_field) = if rec.need_zip64 {
+            let mut extra = Vec::with_capacity(28);
+            write_u16(&mut extra, ZIP64_EXTRA_ID);
+            write_u16(&mut extra, 24);
+            write_u64(&mut extra, rec.uncomp_size);
+            write_u64(&mut extra, rec.comp_size);
+            write_u64(&mut extra, rec.header_offset);
+            (0xFFFF_FFFFu32, 0xFFFF_FFFFu32, 0xFFFF_FFFFu32, extra)
+        } else {
+            (
+                rec.comp_size as u32,
+                rec.uncomp_size as u32,
+                rec.header_offset as u32,
+                Vec::new(),
+            )
+        };
+
+        write_u32(out, CENTRAL_SIG);
+        write_u16(out, if rec.need_zip64 { 45 } else { 20 }); // version made by
+        write_u16(out, if rec.need_zip64 { 45 } else { 20 }); // version needed
+        write_u16(out, 0); // bit flag
+        write_u16(out, rec.method);
+        // Must match the local header written above, byte for byte -- a reader
+        // that trusts one and validates against the other would otherwise call
+        // our archives inconsistent.  That is why `DirRecord` carries the pair
+        // forward instead of this loop re-reading `entries`: the two writes
+        // then have one source, and cannot drift apart when one of them is
+        // later edited.  See the local-header comment for why `0` rather than
+        // the DOS minimum date.
+        write_u16(out, (rec.dos_datetime & 0xFFFF) as u16); // mod time
+        write_u16(out, (rec.dos_datetime >> 16) as u16); // mod date
+        write_u32(out, rec.crc32);
+        write_u32(out, comp32);
+        write_u32(out, uncomp32);
+        write_u16(out, rec.name.len() as u16);
+        write_u16(out, extra_field.len() as u16);
+        write_u16(out, 0); // comment length
+        write_u16(out, 0); // disk number start
+        write_u16(out, 0); // internal attrs
+        write_u32(out, 0); // external attrs
+        write_u32(out, offset32);
+        out.extend_from_slice(rec.name.as_slice());
+        out.extend_from_slice(&extra_field);
+    }
+
+    // The length *after* the directory, not where it started -- these are
+    // different numbers and conflating them writes a zero-size directory.
+    let cd_end = out.len() as u64;
+    let cd_size = cd_end.wrapping_sub(cd_start);
+    let entry_count = dir.len() as u64;
+
+    // Determine if ZIP64 EOCD is needed.
+    let need_zip64_eocd = entry_count > 0xFFFE
+        || cd_size > 0xFFFF_FFFE
+        || cd_start > 0xFFFF_FFFE
+        || dir.iter().any(|r| r.need_zip64);
+
+    if need_zip64_eocd {
+        // ZIP64 end of central directory record (56 bytes).
+        let zip64_eocd_off = out.len() as u64;
+        write_u32(out, ZIP64_EOCD_SIG);
+        write_u64(out, 44); // size of remaining record
+        write_u16(out, 45); // version made by
+        write_u16(out, 45); // version needed
+        write_u32(out, 0); // disk number
+        write_u32(out, 0); // disk with CD start
+        write_u64(out, entry_count);
+        write_u64(out, entry_count);
+        write_u64(out, cd_size);
+        write_u64(out, cd_start);
+
+        // ZIP64 end of central directory locator (20 bytes).
+        write_u32(out, ZIP64_LOCATOR_SIG);
+        write_u32(out, 0); // disk with ZIP64 EOCD
+        write_u64(out, zip64_eocd_off);
+        write_u32(out, 1); // total disks
+    }
+
+    // --- Standard End of Central Directory ---
+    let eocd_entries = if entry_count > 0xFFFF {
+        0xFFFFu16
+    } else {
+        entry_count as u16
+    };
+    let eocd_cd_size = if cd_size > 0xFFFF_FFFF {
+        0xFFFF_FFFFu32
+    } else {
+        cd_size as u32
+    };
+    let eocd_cd_off = if cd_start > 0xFFFF_FFFF {
+        0xFFFF_FFFFu32
+    } else {
+        cd_start as u32
+    };
+
+    write_u32(out, EOCD_SIG);
+    write_u16(out, 0); // disk number
+    write_u16(out, 0); // disk with CD
+    write_u16(out, eocd_entries);
+    write_u16(out, eocd_entries);
+    write_u32(out, eocd_cd_size);
+    write_u32(out, eocd_cd_off);
+    write_u16(out, 0); // comment length
+}
+
 /// Create a ZIP archive in memory from a list of entries.
 ///
 /// Each entry's data is compressed with DEFLATE (method 8) unless the
@@ -954,112 +1072,10 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
         });
     }
 
-    // --- Central directory ---
+    // The trailer is shared with the streaming writer; see
+    // `append_central_directory`.
     let cd_start = archive.len() as u64;
-
-    for rec in &directory_entries {
-        let (comp32, uncomp32, offset32, extra_field) = if rec.need_zip64 {
-            let mut extra = Vec::with_capacity(28);
-            write_u16(&mut extra, ZIP64_EXTRA_ID);
-            write_u16(&mut extra, 24);
-            write_u64(&mut extra, rec.uncomp_size);
-            write_u64(&mut extra, rec.comp_size);
-            write_u64(&mut extra, rec.header_offset);
-            (0xFFFF_FFFFu32, 0xFFFF_FFFFu32, 0xFFFF_FFFFu32, extra)
-        } else {
-            (
-                rec.comp_size as u32,
-                rec.uncomp_size as u32,
-                rec.header_offset as u32,
-                Vec::new(),
-            )
-        };
-
-        write_u32(&mut archive, CENTRAL_SIG);
-        write_u16(&mut archive, if rec.need_zip64 { 45 } else { 20 }); // version made by
-        write_u16(&mut archive, if rec.need_zip64 { 45 } else { 20 }); // version needed
-        write_u16(&mut archive, 0); // bit flag
-        write_u16(&mut archive, rec.method);
-        // Must match the local header written above, byte for byte -- a reader
-        // that trusts one and validates against the other would otherwise call
-        // our archives inconsistent.  That is why `DirRecord` carries the pair
-        // forward instead of this loop re-reading `entries`: the two writes
-        // then have one source, and cannot drift apart when one of them is
-        // later edited.  See the local-header comment for why `0` rather than
-        // the DOS minimum date.
-        write_u16(&mut archive, (rec.dos_datetime & 0xFFFF) as u16); // mod time
-        write_u16(&mut archive, (rec.dos_datetime >> 16) as u16); // mod date
-        write_u32(&mut archive, rec.crc32);
-        write_u32(&mut archive, comp32);
-        write_u32(&mut archive, uncomp32);
-        write_u16(&mut archive, rec.name.len() as u16);
-        write_u16(&mut archive, extra_field.len() as u16);
-        write_u16(&mut archive, 0); // comment length
-        write_u16(&mut archive, 0); // disk number start
-        write_u16(&mut archive, 0); // internal attrs
-        write_u32(&mut archive, 0); // external attrs
-        write_u32(&mut archive, offset32);
-        archive.extend_from_slice(rec.name.as_slice());
-        archive.extend_from_slice(&extra_field);
-    }
-
-    let cd_end = archive.len() as u64;
-    let cd_size = cd_end.wrapping_sub(cd_start);
-    let entry_count = directory_entries.len() as u64;
-
-    // Determine if ZIP64 EOCD is needed.
-    let need_zip64_eocd = entry_count > 0xFFFE
-        || cd_size > 0xFFFF_FFFE
-        || cd_start > 0xFFFF_FFFE
-        || directory_entries.iter().any(|r| r.need_zip64);
-
-    if need_zip64_eocd {
-        // ZIP64 end of central directory record (56 bytes).
-        let zip64_eocd_off = archive.len() as u64;
-        write_u32(&mut archive, ZIP64_EOCD_SIG);
-        write_u64(&mut archive, 44); // size of remaining record
-        write_u16(&mut archive, 45); // version made by
-        write_u16(&mut archive, 45); // version needed
-        write_u32(&mut archive, 0); // disk number
-        write_u32(&mut archive, 0); // disk with CD start
-        write_u64(&mut archive, entry_count);
-        write_u64(&mut archive, entry_count);
-        write_u64(&mut archive, cd_size);
-        write_u64(&mut archive, cd_start);
-
-        // ZIP64 end of central directory locator (20 bytes).
-        write_u32(&mut archive, ZIP64_LOCATOR_SIG);
-        write_u32(&mut archive, 0); // disk with ZIP64 EOCD
-        write_u64(&mut archive, zip64_eocd_off);
-        write_u32(&mut archive, 1); // total disks
-    }
-
-    // --- Standard End of Central Directory ---
-    let eocd_entries = if entry_count > 0xFFFF {
-        0xFFFFu16
-    } else {
-        entry_count as u16
-    };
-    let eocd_cd_size = if cd_size > 0xFFFF_FFFF {
-        0xFFFF_FFFFu32
-    } else {
-        cd_size as u32
-    };
-    let eocd_cd_off = if cd_start > 0xFFFF_FFFF {
-        0xFFFF_FFFFu32
-    } else {
-        cd_start as u32
-    };
-
-    write_u32(&mut archive, EOCD_SIG);
-    write_u16(&mut archive, 0); // disk number
-    write_u16(&mut archive, 0); // disk with CD
-    write_u16(&mut archive, eocd_entries);
-    write_u16(&mut archive, eocd_entries);
-    write_u32(&mut archive, eocd_cd_size);
-    write_u32(&mut archive, eocd_cd_off);
-    write_u16(&mut archive, 0); // comment length
-
+    append_central_directory(&mut archive, &directory_entries, cd_start);
     archive
 }
 

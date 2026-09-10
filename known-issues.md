@@ -85146,6 +85146,41 @@ the answer is known:
 | `pagestat` | `record_alloc`, `record_free`, `record_reclaim` |
 | `schedclass` | `record_migration`, `record_slice`, `record_switch` |
 
+### Checked one: `tlbstat`, and it is `pagecache` again
+
+Picked the first target off the table above and read it before touching it.
+`fs/tlbstat.rs` exposes `record_flush`, `record_shootdown`, `record_hit` and
+`record_miss`, none reachable, and its header documents an intended integration
+rather than a deliberate absence — so by the classification above it is a gap.
+
+It is not. `kernel/src/tlb.rs` already keeps `RANGE_FLUSH_COUNT`,
+`FULL_FLUSH_COUNT`, `TOTAL_PAGES_FLUSHED` and `IPI_FLUSH_COUNT` as atomics, with a
+`stats()` accessor. Wiring `record_flush` from the flush path would put a second
+counter beside the kernel's own for one quantity — two sources that can disagree —
+and would do it on a path that runs on every address-space change. That is
+precisely the trade `fs/pagecache.rs` documents and declines, and its remedy
+applies unchanged: **project `tlb::stats()` at read time, do not call `record_*`
+on the hot path.**
+
+Two of the four are not wireable at all, for a reason worth writing down rather
+than discovering twice: `record_hit` and `record_miss` describe events only the
+CPU's performance counters can observe. The kernel cannot know a TLB hit happened.
+Those two are waiting on a PMU, not on wiring.
+
+**And the obvious shortcut does not work.** Looking for "a non-fs module that
+already counts this" by searching for the display module's *name* finds nothing
+for any of the eight — because the counter for `tlbstat` lives in `tlb.rs`, for
+`pagestat` it would be in the allocator, and so on. The names do not match by
+construction. Each module needs reading; there is no grep that answers this, and a
+sweep that appears to answer it will answer "no duplicate exists" for every entry,
+which is the most expensive possible wrong answer here.
+
+So the burn-down's real first question is not "is this unreachable" — the tool
+answers that — but "does the subsystem already count it, and is the path hot".
+Three of the four modules examined so far (`pagecache`, `netdev`, `tlbstat`) came
+back *already counted*. That is not evidence the other 57 are, and it is strong
+evidence against starting any of them by wiring.
+
 **The lesson is the one this whole entry is about, turned on its author.** A tool
 counted 504 things; I sorted them by verb, published eight modules as targets,
 and two of the eight had headers explaining why they are correct -- one of them

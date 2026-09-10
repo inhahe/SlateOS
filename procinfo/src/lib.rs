@@ -625,19 +625,59 @@ fn seconds_to_duration(secs: f64) -> Option<Duration> {
     Duration::try_from_secs_f64(secs).ok()
 }
 
-/// The scheduler counters at the end of `/proc/stat`.
+/// `/proc/stat` in full, from one read: see [`ProcFs::stat`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Stat {
+    /// The `cpu` and `cpuN` lines.
+    pub cpu: CpuStats,
+    /// Everything else. See [`StatCounters`].
+    pub counters: StatCounters,
+}
+
+/// Everything `/proc/stat` says apart from the CPU lines, which are
+/// [`CpuStats`].
+///
+/// # Why it is named for the file rather than for the scheduler
+///
+/// It was `SchedCounters`, holding only `procs_running`, `procs_blocked` and
+/// `processes`. It grew `intr`, `ctxt` and `btime` on 2026-09-10, when
+/// `userspace/vmstat` -- which had its own copy of this parser, and its own
+/// `CpuTimes` beside it -- was converted to use this crate. A boot *timestamp*
+/// is not a scheduler counter, and leaving the name would have meant either a
+/// name that lied or a second struct for the same three-line pass over the
+/// same file.
+///
+/// Every field is `Option` because every line is optional: `proc(5)` does not
+/// promise `btime` or `steal`, and a kernel that omits one is not malformed.
+/// `None` means "the file did not say", which is a different fact from zero
+/// and is the caller's to interpret.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SchedCounters {
+pub struct StatCounters {
     /// `procs_running`: tasks currently on a run queue.
     pub running: Option<u64>,
     /// `procs_blocked`: tasks blocked on I/O.
     pub blocked: Option<u64>,
     /// `processes`: total forks since boot.
     pub forks: Option<u64>,
+    /// `ctxt`: context switches since boot.
+    pub context_switches: Option<u64>,
+    /// `intr`: total interrupts since boot.
+    ///
+    /// The *first* number on the `intr` line. The rest are per-IRQ counts and
+    /// there can be hundreds of them, so a reader that wants the total must
+    /// stop after one field -- which is the bug this being shared prevents.
+    pub interrupts: Option<u64>,
+    /// `btime`: the wall-clock second at which the system booted.
+    ///
+    /// Not a counter, and the reason this struct is named for its file. Two
+    /// other programs read `/proc/stat` for this one number
+    /// (`userspace/uptime`, `userspace/hwclock`) and each parses the file
+    /// itself.
+    pub boot_time: Option<u64>,
 }
 
-impl SchedCounters {
-    /// Parse the `procs_*` and `processes` lines of `/proc/stat`.
+impl StatCounters {
+    /// Parse the non-CPU lines of `/proc/stat` in one pass.
     #[must_use]
     pub fn parse(content: &[u8]) -> Self {
         let mut out = Self::default();
@@ -650,6 +690,11 @@ impl SchedCounters {
                 b"procs_running" => out.running = parse_u64(value),
                 b"procs_blocked" => out.blocked = parse_u64(value),
                 b"processes" => out.forks = parse_u64(value),
+                b"ctxt" => out.context_switches = parse_u64(value),
+                // Only `fields[1]`: the rest of the `intr` line is one count
+                // per IRQ.
+                b"intr" => out.interrupts = parse_u64(value),
+                b"btime" => out.boot_time = parse_u64(value),
                 _ => {}
             }
         }
@@ -871,15 +916,15 @@ impl ProcFs {
             .and_then(Uptime::parse))
     }
 
-    /// The `procs_*` counters of `/proc/stat`.
+    /// The non-CPU lines of `/proc/stat`: see [`StatCounters`].
     ///
     /// # Errors
     /// Propagates any read error other than "not found".
-    pub fn sched_counters(&self) -> io::Result<Option<SchedCounters>> {
+    pub fn stat_counters(&self) -> io::Result<Option<StatCounters>> {
         Ok(self
             .read_optional("stat")?
             .as_deref()
-            .map(SchedCounters::parse))
+            .map(StatCounters::parse))
     }
 
     /// `/proc/net/dev`, parsed.
@@ -960,6 +1005,33 @@ impl ProcFs {
     /// Any read error other than "no such file", which is `Ok(None)`.
     pub fn cpu_stats(&self) -> io::Result<Option<CpuStats>> {
         Ok(self.read_optional("stat")?.map(|c| CpuStats::parse(&c)))
+    }
+
+    /// `/proc/stat`, parsed whole: the CPU lines **and** everything else, from
+    /// a single read.
+    ///
+    /// # Why this exists beside [`ProcFs::cpu_stats`] and
+    /// [`ProcFs::stat_counters`]
+    ///
+    /// A sampler that wants both -- `userspace/vmstat` is the case this was
+    /// written for -- would otherwise read the file twice per sample, and the
+    /// two reads are of *different instants*. The CPU delta and the
+    /// context-switch delta would then describe overlapping but unequal
+    /// intervals: a skew that shows up as percentages which do not quite add
+    /// up, and which is very hard to trace back to its cause.
+    ///
+    /// That is the same argument [`CpuStats::parse`] already makes for reading
+    /// every `cpu` line in one pass rather than reopening the file for the
+    /// `cpuN` lines. This extends it across the CPU/counter boundary.
+    ///
+    /// # Errors
+    ///
+    /// Any read error other than "no such file", which is `Ok(None)`.
+    pub fn stat(&self) -> io::Result<Option<Stat>> {
+        Ok(self.read_optional("stat")?.map(|content| Stat {
+            cpu: CpuStats::parse(&content),
+            counters: StatCounters::parse(&content),
+        }))
     }
 
     /// `/proc/<pid>/stat`, parsed.

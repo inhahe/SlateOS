@@ -126958,6 +126958,20 @@ grepped for:
 | files under `userspace/` and `apps/` that open a `/proc` path and do not use `procinfo` | **95** |
 | of those, files opening something `procinfo` already parses | **50** |
 
+**49 as of 2026-09-10.** `userspace/vmstat` is converted. It was worth taking
+on contact rather than in a sweep, because it had the whole shape of the
+problem in one file: its own `CpuTimes` struct, its own `/proc/stat` parser
+beside it, and its own `cpu_total` and `cpu_delta` which were
+`procinfo::CpuTimes::total` and `::since` field for field. Removing it needed
+three new fields in `procinfo` (`intr`, `ctxt`, `btime`) and a `ProcFs::stat`
+that returns the CPU lines and the counters from **one** read -- the two
+existing accessors would have sampled the file twice per interval, so the CPU
+delta and the context-switch delta would have described different instants.
+
+`userspace/uptime` and `userspace/hwclock` each open `/proc/stat` for `btime`
+alone, and `procinfo` now parses it, so those two are the cheapest remaining
+conversions.
+
 Ten came from `grep -rln "/proc/stat\|/proc/meminfo"` -- a command that answers
 *"which files mention these two paths"* -- and the answer was written down as
 *"which files parse `/proc`"*. Every reader that touches only

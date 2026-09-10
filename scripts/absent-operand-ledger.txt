@@ -1,0 +1,24 @@
+# The counted `absent-operand-becomes-a-number` backlog for
+# scripts/check-absent-operand-default.py.
+#
+# Each line is `<enclosing function> <count>`: that many places inside that
+# function supply a numeric default for an operand the user did not give, so a
+# missing id becomes a real one. See that script's header for why the
+# definition lives in code and the count lives here.
+#
+# The number may only go DOWN. An entry claiming more sites than exist fails
+# too, because that is how a fixed site stays counted.
+#
+cmd_apppermissions 1
+cmd_audioeq 6
+cmd_colortemp 1
+cmd_filevault 4
+cmd_gamemode 1
+cmd_kbshortcuts 3
+cmd_mousegestures 1
+cmd_netprofile 5
+cmd_screensaver 5
+cmd_sharesheet 3
+cmd_surroundsound 5
+cmd_sysanimations 1
+cmd_udp6 2

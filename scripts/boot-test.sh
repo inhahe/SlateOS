@@ -4341,6 +4341,68 @@ check_unreachable_mutators() {
 
 check_unreachable_mutators
 
+# An operand the user did not give, silently becoming a number.
+#
+# Sibling of `check-option-refusal`, and deliberately a separate gate with a
+# separate ledger rather than a second rule inside it. That checker counts a
+# guessed value surviving a FAILED parse; this one counts a numeric default
+# supplied for an ABSENT operand, which then parses perfectly. `filevault unlock`
+# with nothing after it attempted to unlock vault 0 with an empty password --
+# refusing the unreadable word correctly the whole time, which is why the older
+# checker cannot see it.
+#
+# It exists because the population could not be counted. Three hand measurements
+# gave 14, 31 and 37, two of which reached known-issues.md as though they answered
+# the same question; the code-defined answer is 38 across 13 functions. A backlog
+# that cannot be counted the same way twice cannot be burned down, so the counter
+# came before the sweep.
+#
+# Folding it into one ledger would have made "78 of 800" ambiguous, and that number
+# is quoted.
+check_absent_operand_default() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Absent-operand-default check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    if ! run_checker check-absent-operand-default-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-absent-operand-default.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The absent-operand analyser fails its own" >&2
+        echo "cases.  Those cases pin WHAT COUNTS rather than how many there are," >&2
+        echo "which is the only part that must not drift: the count is the tree's" >&2
+        echo "business and changes with every batch." >&2
+        return 1
+    fi
+
+    echo "=== Checking that a missing operand does not become a number ==="
+    if run_checker check-absent-operand-default "$py" \
+            "$PROJECT_ROOT/scripts/check-absent-operand-default.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Either a new site supplies a numeric" >&2
+    echo "default for an operand the user did not give, or a ledger entry" >&2
+    echo "claims more sites than exist." >&2
+    echo "" >&2
+    echo "\`parts.get(n)\` returning None means \"you did not say\", and the" >&2
+    echo "usage line is the answer to it.  That is a different question from" >&2
+    echo "\"you said something I could not read\", which the surrounding match" >&2
+    echo "already answers by name -- which is exactly why this class hid behind" >&2
+    echo "a correct-looking refusal." >&2
+    echo "" >&2
+    echo "Do NOT raise a count to make this pass.  The ledger only shrinks." >&2
+    exit 1
+}
+
+check_absent_operand_default
+
 # Keep every path-taking VFS entry point behind the one permission gate.
 #
 # This guards the failure mode that no runtime test can see, because both

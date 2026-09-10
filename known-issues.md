@@ -128991,7 +128991,22 @@ mistake `cal` and `earlyoom` nearly suffered under 1006.
 
 None is urgent: every one of the six names has a working producer today, so no
 command is missing. What is at risk is the pair silently disagreeing.
-## TD-A-AN-ABSENT-OPERAND-DEFAULTS-TO-A-LIVE-OBJECT-ID (lane A, 2026-09-10) — **open**
+## TD-A-AN-ABSENT-OPERAND-DEFAULTS-TO-A-LIVE-OBJECT-ID (lane A, 2026-09-10) — **open**, now counted: **38 sites across 13 functions**
+
+**The counter exists as of 2026-09-10.** `scripts/check-absent-operand-default.py`
+defines the class in code and `scripts/absent-operand-ledger.txt` holds the count,
+one line per enclosing function, failing in **both** directions — a new site in a
+function that does not allow one, and an entry claiming more than exist. Wired
+into the boot test. Verified by moving a count each way: lowering one reports
+`cmd_audioeq: 1 more than the ledger allows`, raising another reports
+`cmd_colortemp: 2 fewer than it claims`.
+
+So the number below is reproducible, which none of the earlier ones were. It is
+also a **fourth** value — 38, where hand-counting gave 14, 31 and 37 — because it
+is the first one attached to a definition rather than to a grep: it counts
+`parts.get(N).unwrap_or(&"<numeric literal>")` wherever it appears, without
+requiring a `.parse()` on the same line, which is what the earlier patterns all
+keyed on.
 
 **In short:** several shell commands, when given no argument at all, act on object
 number 0 or 1 instead of asking for one. `filevault unlock` with nothing after it

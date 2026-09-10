@@ -34,7 +34,6 @@ userspace/blkid/src/main.rs:argv-as-string
 userspace/blockdev/src/main.rs:argv-as-string
 userspace/bootctl/src/main.rs:argv-as-string
 userspace/capsh/src/main.rs:argv-as-string
-userspace/cargo-bloat/src/main.rs:argv-as-string
 userspace/cgroup/src/main.rs:argv-as-string
 userspace/chattr/src/main.rs:argv-as-string
 userspace/chown/src/main.rs:argv-as-string

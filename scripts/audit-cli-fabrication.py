@@ -320,6 +320,31 @@ def read_baseline() -> set[str] | None:
     return names
 
 
+# Markers are matched on a word boundary, not as bare substrings, because
+# `"nix::" in body` is true of `std::os::unix::ffi::OsStrExt`.
+#
+# That is not hypothetical and the way it surfaced is worth keeping. The only
+# `nix::` in `userspace/cargo-bloat` was inside a line the crate INVENTS:
+#
+#     println!("   0.1%    0.2%   3.1K  std::sys::pal::unix::process");
+#
+# so a fabricated string was read as evidence that the crate had looked at
+# something, and the audit exonerated it with its own fiction. It reads a file
+# nowhere and prints a size table; rule 1 catches it the moment this is fixed.
+#
+# The lookbehind is only for word characters, so `io::stdin` still matches
+# inside `std::io::stdin` (the preceding `:` is not a word character) while
+# `nix::` no longer matches inside `unix::`.
+_MARKER_RE = re.compile(
+    "|".join(f"(?<![A-Za-z0-9_]){re.escape(m)}" for m in IO_MARKERS)
+)
+
+
+def has_io_marker(body: str) -> bool:
+    """Could this crate, in principle, have looked at the world?"""
+    return _MARKER_RE.search(body) is not None
+
+
 def builds_binary(body: str) -> bool:
     """Does this crate produce a command, as opposed to a library?
 
@@ -342,7 +367,7 @@ def reason_to_delete(
     if name in PURE_ARGV:
         return None
     body = strip_tests(text)
-    has_io = any(m in body for m in IO_MARKERS)
+    has_io = has_io_marker(body)
 
     # Rule 1 -- it asserts something it could not have looked up. Named
     # exceptions are checked even though they do hold an I/O marker.
@@ -462,6 +487,21 @@ def _self_test() -> int:
            "states a fact it did not measure")
     expect("argv-only tools are exempt from both rules",
            reason_to_delete(sorted(PURE_ARGV)[0], USAGE), None)
+
+    # The marker matcher must not be fooled by a longer identifier that
+    # happens to end in a marker -- `cargo-bloat` was exonerated by a
+    # fabricated `std::sys::pal::unix::process` in its own output.
+    BLOAT = ('fn main() { println!("   0.1%    0.2%   3.1K  '
+             'std::sys::pal::unix::process"); }')
+    expect("`unix::` in printed text is not evidence of I/O",
+           has_io_marker(BLOAT), False)
+    expect("...so the crate is caught, by rule 1, for the same line",
+           reason_to_delete("cargo-bloat", BLOAT),
+           "states a fact it did not measure")
+    expect("a real nix:: call is still a marker",
+           has_io_marker("let s = nix::sys::stat::stat(p)?;"), True)
+    expect("...and io::stdin still matches inside std::io::stdin",
+           has_io_marker("let mut b = String::new(); std::io::stdin();"), True)
 
     # `builds_binary` is text-only on purpose; pin what it can and cannot see.
     expect("builds_binary sees a plain main", builds_binary(USAGE), True)

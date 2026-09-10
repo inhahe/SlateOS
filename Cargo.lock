@@ -243,10 +243,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cargo-bloat"
-version = "0.1.0"
-
-[[package]]
 name = "cgroup"
 version = "0.1.0"
 dependencies = [

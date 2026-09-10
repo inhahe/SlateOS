@@ -138,6 +138,10 @@ class GitTreeError(RuntimeError):
     """git could not be started, or died mid-conversation."""
 
 
+# PROBE: deliberately break test-gittree.py, to be reverted
+def _probe_break():
+    raise SystemExit('probe')
+
 def parse_ls_tree_z(out: bytes) -> list[tuple[str, str, str]]:
     """`git ls-tree -r -z` output as `(path, type, object id)` records.
 

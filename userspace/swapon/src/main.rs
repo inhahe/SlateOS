@@ -262,8 +262,8 @@ fn cmd_swapon(args: &[String]) {
                     eprintln!("swapon: -p requires an argument");
                     process::exit(1);
                 }
-                priority = Some(args[i].parse().unwrap_or_else(|_| {
-                    eprintln!("swapon: invalid priority: {}", args[i]);
+                priority = Some(parse_priority(&args[i]).unwrap_or_else(|msg| {
+                    eprintln!("swapon: {msg}");
                     process::exit(1);
                 }));
             }
@@ -335,31 +335,112 @@ fn show_swap_summary() {
     }
 }
 
-fn activate_swap(device: &str, priority: Option<i32>, discard: bool, verbose: bool) {
-    // In a real kernel, this would invoke swapon(2) syscall.
-    // We simulate by writing to a hypothetical /proc/sys/swap/activate.
-    let mut cmd = format!("activate {device}");
+/// A `-p` argument, or why it is not one.
+///
+/// **The range check is the point.** The priority is carried in the low 15
+/// bits of `swapflags`, so `swap_flags` masks it -- and a value outside
+/// `0..=32767` does not fail, it *becomes a different priority*. `-p -1`
+/// masked to `0x7FFF`, which is the **maximum**: the caller asked for the
+/// lowest and would have got the highest. `-p 99999` became 1695. Both were
+/// accepted silently.
+///
+/// Rejecting out-of-range values is also what `util-linux` does, and it is the
+/// only way the flag word can be built by masking without the mask changing
+/// the answer.
+fn parse_priority(arg: &str) -> Result<i32, String> {
+    let Ok(p) = arg.parse::<i32>() else {
+        return Err(format!("invalid priority: {arg}"));
+    };
+    if !(0..=posix::unistd::SWAP_FLAG_PRIO_MASK).contains(&p) {
+        return Err(format!(
+            "priority out of range: {p} (must be 0..={})",
+            posix::unistd::SWAP_FLAG_PRIO_MASK
+        ));
+    }
+    Ok(p)
+}
+
+/// The `swapflags` word `swapon(2)` takes, built from the options given.
+///
+/// Split out because it is the only part of activation that decides anything;
+/// the rest is a libc call. `SWAP_FLAG_PREFER` is what makes the low 15 bits
+/// mean a priority at all -- without it the kernel ignores them, so a
+/// `-p` that set the bits and not the flag would be silently dropped.
+fn swap_flags(priority: Option<i32>, discard: bool) -> i32 {
+    let mut flags = 0;
     if let Some(p) = priority {
-        cmd.push_str(&format!(" priority={p}"));
+        flags |= posix::unistd::SWAP_FLAG_PREFER;
+        flags |= p & posix::unistd::SWAP_FLAG_PRIO_MASK;
     }
     if discard {
-        cmd.push_str(" discard=1");
+        flags |= posix::unistd::SWAP_FLAG_DISCARD;
     }
+    flags
+}
 
-    match fs::write("/proc/sys/swap/activate", &cmd) {
-        Ok(()) => {
-            if verbose {
-                println!(
-                    "swapon: {device}: activated{}",
-                    priority
-                        .map(|p| format!(" (priority {p})"))
-                        .unwrap_or_default()
-                );
-            }
+/// Enable swapping on `device`, through `swapon(2)`.
+///
+/// # This used to write to a path that does not exist
+///
+/// The code here was:
+///
+/// ```ignore
+/// // We simulate by writing to a hypothetical /proc/sys/swap/activate.
+/// match fs::write("/proc/sys/swap/activate", &cmd) {
+/// ```
+///
+/// and the comment was accurate: the kernel serves no `/proc/sys/swap`, so
+/// every activation failed with "no such file or directory". That is at least
+/// a failure rather than a false success -- but it is the *wrong* failure, and
+/// it says the wrong thing to whoever reads it: the problem is not a missing
+/// file, it is that swap is not implemented.
+///
+/// `posix::swapon` is the real interface and has been there all along. It
+/// validates its arguments in Linux's own order and returns `ENOSYS`, so the
+/// message now names the actual state of the system -- and when the kernel
+/// grows swap, this program starts working with no change here.
+fn activate_swap(device: &str, priority: Option<i32>, discard: bool, verbose: bool) {
+    let Ok(path) = std::ffi::CString::new(device) else {
+        // A NUL inside the argument. `swapon(2)` takes a C string, so such a
+        // path cannot be expressed to it at all; saying so beats truncating.
+        eprintln!("swapon: {}: path contains a NUL byte", quotef_os(device));
+        return;
+    };
+    // `swapon` is `extern "C"` but not `unsafe fn`, so no block is needed --
+    // the obligation is still real, and `CString` is what discharges it: the
+    // pointer is NUL-terminated and `path` outlives the call.
+    let rc = posix::unistd::swapon(path.as_ptr().cast::<u8>(), swap_flags(priority, discard));
+    if rc == 0 {
+        if verbose {
+            println!(
+                "swapon: {device}: activated{}",
+                priority
+                    .map(|p| format!(" (priority {p})"))
+                    .unwrap_or_default()
+            );
         }
-        Err(e) => {
-            eprintln!("swapon: {}: failed to activate: {e}", quotef_os(device));
-        }
+    } else {
+        eprintln!(
+            "swapon: {}: failed to activate: {}",
+            quotef_os(device),
+            errno_text(posix::errno::get_errno())
+        );
+    }
+}
+
+/// A short description of an `errno` this program can actually receive.
+///
+/// Only the values `swapon(2)` and `swapoff(2)` document, plus a numeric
+/// fallback. A table of every errno would be a second `strerror`, and the
+/// point here is to say something true about *these* calls.
+fn errno_text(e: i32) -> String {
+    match e {
+        posix::errno::EPERM => "not permitted (needs CAP_SYS_ADMIN)".to_string(),
+        posix::errno::EINVAL => "invalid flags".to_string(),
+        posix::errno::ENOENT => "no such file".to_string(),
+        posix::errno::EFAULT => "bad path".to_string(),
+        posix::errno::ENOSYS => "swap is not implemented on this kernel".to_string(),
+        other => format!("errno {other}"),
     }
 }
 
@@ -430,17 +511,26 @@ fn cmd_swapoff(args: &[String]) {
     }
 }
 
+/// Disable swapping on `device`, through `swapoff(2)`. See [`activate_swap`]
+/// for what this replaces.
 fn deactivate_swap(device: &str, verbose: bool) {
-    let cmd = format!("deactivate {device}");
-    match fs::write("/proc/sys/swap/deactivate", &cmd) {
-        Ok(()) => {
-            if verbose {
-                println!("swapoff: {device}: deactivated");
-            }
+    let Ok(path) = std::ffi::CString::new(device) else {
+        eprintln!("swapoff: {}: path contains a NUL byte", quotef_os(device));
+        return;
+    };
+    // As in `activate_swap`: `CString` guarantees the NUL terminator and the
+    // binding keeps the buffer alive across the call.
+    let rc = posix::unistd::swapoff(path.as_ptr().cast::<u8>());
+    if rc == 0 {
+        if verbose {
+            println!("swapoff: {device}: deactivated");
         }
-        Err(e) => {
-            eprintln!("swapoff: {}: failed to deactivate: {e}", quotef_os(device));
-        }
+    } else {
+        eprintln!(
+            "swapoff: {}: failed to deactivate: {}",
+            quotef_os(device),
+            errno_text(posix::errno::get_errno())
+        );
     }
 }
 
@@ -667,6 +757,83 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+
+    // ---- the swapflags word ----
+
+    #[test]
+    fn no_options_is_no_flags() {
+        assert_eq!(swap_flags(None, false), 0);
+    }
+
+    /// **A priority without `SWAP_FLAG_PREFER` is ignored by the kernel.**
+    ///
+    /// The low 15 bits only mean a priority when that flag is set, so setting
+    /// the bits alone would have been a `-p` silently dropped.
+    #[test]
+    fn a_priority_sets_the_prefer_flag_as_well_as_the_bits() {
+        let flags = swap_flags(Some(5), false);
+        assert_ne!(
+            flags & posix::unistd::SWAP_FLAG_PREFER,
+            0,
+            "without PREFER the kernel ignores the priority bits"
+        );
+        assert_eq!(flags & posix::unistd::SWAP_FLAG_PRIO_MASK, 5);
+    }
+
+    #[test]
+    fn discard_is_independent_of_priority() {
+        assert_eq!(
+            swap_flags(None, true) & posix::unistd::SWAP_FLAG_DISCARD,
+            posix::unistd::SWAP_FLAG_DISCARD
+        );
+        let both = swap_flags(Some(7), true);
+        assert_ne!(both & posix::unistd::SWAP_FLAG_PREFER, 0);
+        assert_ne!(both & posix::unistd::SWAP_FLAG_DISCARD, 0);
+        assert_eq!(both & posix::unistd::SWAP_FLAG_PRIO_MASK, 7);
+    }
+
+    // ---- the priority argument ----
+
+    #[test]
+    fn an_ordinary_priority_is_accepted() {
+        assert_eq!(parse_priority("0"), Ok(0));
+        assert_eq!(parse_priority("100"), Ok(100));
+        assert_eq!(
+            parse_priority("32767"),
+            Ok(posix::unistd::SWAP_FLAG_PRIO_MASK)
+        );
+    }
+
+    /// **A negative priority used to become the maximum.**
+    ///
+    /// `swap_flags` masks with `0x7FFF`, so `-1` became `32767` -- the caller
+    /// asked for the lowest priority and would have got the highest, with no
+    /// diagnostic. This is the test that would have caught it.
+    #[test]
+    fn a_negative_priority_is_refused_rather_than_wrapped() {
+        assert!(parse_priority("-1").is_err());
+        // Through a binding so it is not constant-folded away: the point is
+        // to show what the old masking did to the value, not to assert an
+        // identity about a literal.
+        let asked_for: i32 = -1;
+        assert_eq!(asked_for & posix::unistd::SWAP_FLAG_PRIO_MASK, 32767);
+    }
+
+    /// And one above the range became an unrelated number: 99999 masks to
+    /// 1695.
+    #[test]
+    fn a_priority_above_the_range_is_refused_rather_than_masked() {
+        assert!(parse_priority("32768").is_err());
+        assert!(parse_priority("99999").is_err());
+        let asked_for: i32 = 99999;
+        assert_eq!(asked_for & posix::unistd::SWAP_FLAG_PRIO_MASK, 1695);
+    }
+
+    #[test]
+    fn a_priority_that_is_not_a_number_is_refused() {
+        assert!(parse_priority("high").is_err());
+        assert!(parse_priority("").is_err());
+    }
     use super::*;
 
     #[test]

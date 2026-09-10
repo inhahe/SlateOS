@@ -299,48 +299,133 @@ fn show_session(args: &[String]) {
     }
 }
 
+/// Report that a state-changing subcommand is not implemented, and fail.
+///
+/// # Why these print to stderr and exit non-zero
+///
+/// Eight subcommands here used to validate their argument and then print a
+/// success line: `loginctl terminate-session 5` said "Session 5 terminated."
+/// and did nothing. They did not even check the session existed, so
+/// `terminate-session bogus` reported having terminated a session that was
+/// never there.
+///
+/// A script that calls one of these and checks the exit status was told it
+/// worked. That is the failure worth removing: a command that cannot do
+/// something should say so, and a command that says nothing went wrong should
+/// mean it. `earlyoom`'s kill path had the same shape and the same fix
+/// (`todo.txt`, 2026-09-10).
+///
+/// The existence checks in front of each call are **not** cosmetic -- they are
+/// the part of each subcommand that can be done today, and getting
+/// "no such session" instead of a false success is most of the value.
+fn not_implemented(action: &str, subject: &str) -> ! {
+    eprintln!("loginctl: {action} {subject}: not implemented");
+    eprintln!(
+        "loginctl: this needs a session manager to act on; `userspace/logind` \
+         keeps session state in files and has no daemon socket yet. See todo.txt."
+    );
+    process::exit(1);
+}
+
+/// The session with this id, or exit with the error the caller deserves.
+fn require_session(id: &str) -> Session {
+    match read_sessions().into_iter().find(|s| s.id == id) {
+        Some(s) => s,
+        None => {
+            eprintln!("loginctl: no session {}", quoteaf_os(id));
+            process::exit(1);
+        }
+    }
+}
+
+/// Does this argument name this user?
+///
+/// `loginctl` takes "a user name or UID" in one argument, so the two have to
+/// be told apart -- and **the name is tried first, deliberately**. A user
+/// genuinely called `1000` is unusual but legal, and if the numeric reading
+/// won, that account could never be named at all: every attempt would land on
+/// whichever user happens to hold uid 1000.
+///
+/// Split out from [`require_user`] because it is the only part of that
+/// function that decides anything; the rest exits.
+fn user_matches(u: &UserInfo, name_or_uid: &str) -> bool {
+    if u.name == name_or_uid {
+        return true;
+    }
+    name_or_uid.parse::<u32>().is_ok_and(|uid| u.uid == uid)
+}
+
+/// The user with this name or uid, or exit.
+fn require_user(name_or_uid: &str) -> UserInfo {
+    match read_users()
+        .into_iter()
+        .find(|u| user_matches(u, name_or_uid))
+    {
+        Some(u) => u,
+        None => {
+            eprintln!("loginctl: no user {}", quoteaf_os(name_or_uid));
+            process::exit(1);
+        }
+    }
+}
+
+/// The seat with this id, or exit.
+fn require_seat(id: &str) -> Seat {
+    match read_seats().into_iter().find(|s| s.id == id) {
+        Some(s) => s,
+        None => {
+            eprintln!("loginctl: no seat {}", quoteaf_os(id));
+            process::exit(1);
+        }
+    }
+}
+
 fn lock_session(args: &[String]) {
-    let session_id = match args.first() {
+    let id = match args.first() {
         Some(id) => id,
         None => {
             eprintln!("Error: session ID required");
             process::exit(1);
         }
     };
-    println!("Session {} locked.", quoteaf_os(session_id));
+    let _ = require_session(id);
+    not_implemented("lock session", &quoteaf_os(id));
 }
 
 fn unlock_session(args: &[String]) {
-    let session_id = match args.first() {
+    let id = match args.first() {
         Some(id) => id,
         None => {
             eprintln!("Error: session ID required");
             process::exit(1);
         }
     };
-    println!("Session {} unlocked.", quoteaf_os(session_id));
+    let _ = require_session(id);
+    not_implemented("unlock session", &quoteaf_os(id));
 }
 
 fn activate_session(args: &[String]) {
-    let session_id = match args.first() {
+    let id = match args.first() {
         Some(id) => id,
         None => {
             eprintln!("Error: session ID required");
             process::exit(1);
         }
     };
-    println!("Session {} activated.", quoteaf_os(session_id));
+    let _ = require_session(id);
+    not_implemented("activate session", &quoteaf_os(id));
 }
 
 fn terminate_session(args: &[String]) {
-    let session_id = match args.first() {
+    let id = match args.first() {
         Some(id) => id,
         None => {
             eprintln!("Error: session ID required");
             process::exit(1);
         }
     };
-    println!("Session {} terminated.", quoteaf_os(session_id));
+    let _ = require_session(id);
+    not_implemented("terminate session", &quoteaf_os(id));
 }
 
 fn kill_session(args: &[String]) {
@@ -491,14 +576,15 @@ fn disable_linger(args: &[String]) {
 }
 
 fn terminate_user(args: &[String]) {
-    let user = match args.first() {
-        Some(u) => u,
+    let id = match args.first() {
+        Some(id) => id,
         None => {
             eprintln!("Error: user name or UID required");
             process::exit(1);
         }
     };
-    println!("User {} sessions terminated.", quoteaf_os(user));
+    let _ = require_user(id);
+    not_implemented("terminate user", &quoteaf_os(id));
 }
 
 fn kill_user(args: &[String]) {
@@ -625,55 +711,77 @@ fn show_seat(args: &[String]) {
 }
 
 fn attach_device(args: &[String]) {
+    let Some(seat) = args.first() else {
+        eprintln!("Usage: loginctl attach <seat> <device>...");
+        process::exit(1);
+    };
     if args.len() < 2 {
         eprintln!("Usage: loginctl attach <seat> <device>...");
         process::exit(1);
     }
-    let seat = &args[0];
-    for dev in &args[1..] {
-        println!(
-            "Device {} attached to seat {}.",
-            quoteaf_os(dev),
-            quoteaf_os(seat)
-        );
-    }
+    let _ = require_seat(seat);
+    not_implemented("attach device to seat", &quoteaf_os(seat));
 }
 
 fn flush_devices(_args: &[String]) {
-    println!("All device-to-seat assignments flushed.");
+    // The only one with nothing to check first: it names no subject. It said
+    // "All device-to-seat assignments flushed." and flushed nothing.
+    not_implemented("flush device-to-seat assignments", "");
 }
 
 fn terminate_seat(args: &[String]) {
-    let seat_id = match args.first() {
+    let id = match args.first() {
         Some(id) => id,
         None => {
             eprintln!("Error: seat ID required");
             process::exit(1);
         }
     };
-    println!("All sessions on seat {} terminated.", quoteaf_os(seat_id));
+    let _ = require_seat(id);
+    not_implemented("terminate seat", &quoteaf_os(id));
 }
 
 // ── System control ─────────────────────────────────────────────────────
 
+// The five power subcommands. Each printed a present-participle claim --
+// "Powering off...", "Rebooting..." -- and returned. The `show_` prefix on the
+// function names hints that they only display something; the *messages* do
+// not, and the message is what a user or a script sees.
+//
+// These have a real destination, unlike the session commands above:
+// `userspace/powerctl` reaches the service manager over IPC.
+// `userspace/logind`'s own comment says a power change "must be delegated to
+// the service manager over IPC" and points at exactly that path. Wiring
+// `loginctl` to it is a separate piece of work -- it is a different program's
+// IPC client, not a message change -- and is in `todo.txt`.
+
+fn power_not_implemented(msg: &str) -> ! {
+    // The whole sentence, not an interpolated identifier: these are fixed
+    // phrases rather than names, and `scripts/quote-names.py` is right to
+    // refuse `{ident}` in a diagnostic without knowing which it is.
+    eprintln!("loginctl: {msg}");
+    eprintln!("loginctl: use `powerctl`, which reaches the service manager. See todo.txt.");
+    process::exit(1);
+}
+
 fn show_system_poweroff() {
-    println!("Powering off...");
+    power_not_implemented("power off: not implemented");
 }
 
 fn show_system_reboot() {
-    println!("Rebooting...");
+    power_not_implemented("reboot: not implemented");
 }
 
 fn show_system_suspend() {
-    println!("Suspending...");
+    power_not_implemented("suspend: not implemented");
 }
 
 fn show_system_hibernate() {
-    println!("Hibernating...");
+    power_not_implemented("hibernate: not implemented");
 }
 
 fn show_system_hybrid_sleep() {
-    println!("Entering hybrid sleep...");
+    power_not_implemented("hybrid sleep: not implemented");
 }
 
 // ── userdbctl personality ──────────────────────────────────────────────
@@ -1020,6 +1128,65 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+
+    // ---- naming a user ----
+
+    fn sample_user(name: &str, uid: u32) -> UserInfo {
+        UserInfo {
+            uid,
+            name: name.to_string(),
+            state: "active".to_string(),
+            _linger: false,
+            sessions: Vec::new(),
+            _slice: String::new(),
+            since: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_user_is_named_by_its_name() {
+        let alice = sample_user("alice", 1000);
+        assert!(user_matches(&alice, "alice"));
+        assert!(!user_matches(&alice, "bob"));
+    }
+
+    #[test]
+    fn a_user_is_named_by_its_uid() {
+        let alice = sample_user("alice", 1000);
+        assert!(user_matches(&alice, "1000"));
+        assert!(!user_matches(&alice, "1001"));
+    }
+
+    /// **The name wins over the number.**
+    ///
+    /// A user genuinely called `1000` is unusual and legal. If the numeric
+    /// reading won, that account could never be named at all -- every attempt
+    /// would land on whoever holds uid 1000 instead, and `loginctl
+    /// terminate-user 1000` would act on the wrong person.
+    #[test]
+    fn a_user_named_like_a_number_is_reachable() {
+        let odd = sample_user("1000", 4242);
+        let ordinary = sample_user("alice", 1000);
+
+        assert!(user_matches(&odd, "1000"), "its own name must reach it");
+        assert!(
+            user_matches(&ordinary, "1000"),
+            "and the uid still reaches the ordinary account"
+        );
+        // Which one `require_user` picks is then the order of `read_users`,
+        // and that ambiguity is the caller's to live with -- but neither
+        // account is unreachable, which is what the alternative would have
+        // cost.
+    }
+
+    /// An argument that is neither the name nor a number matches nothing --
+    /// in particular, a failed parse must not become uid 0.
+    #[test]
+    fn an_unparseable_argument_matches_nothing() {
+        let root = sample_user("root", 0);
+        assert!(!user_matches(&root, "not-a-user"));
+        assert!(!user_matches(&root, ""));
+    }
     use super::*;
 
     #[test]

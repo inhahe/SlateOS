@@ -1171,6 +1171,64 @@ pub(crate) fn set_stored_hostname_for_test(name: &[u8]) {
     }
 }
 
+/// The system's NIS domain name: the kernel's if it can be read, else the
+/// stored one.
+///
+/// The companion to [`current_hostname`], and it was **left behind** when that
+/// one was written. The commit that fixed `gethostname` said it had fixed
+/// `getdomainname` too; it had not, and this pair kept the whole original
+/// defect for a commit longer — a process-local buffer that `setdomainname`
+/// wrote and `getdomainname` read back, agreeing with itself and with nothing
+/// else on the system.
+///
+/// `/proc/sys/kernel/domainname` is served by the same procfs node list as
+/// `hostname`, and the kernel's own procfs self-test asserts both exist.
+fn current_domain(out: &mut [u8]) -> usize {
+    if let Some(n) = read_kernel_name(b"/proc/sys/kernel/domainname\0", out) {
+        return n;
+    }
+    stored_domain(out)
+}
+
+/// Overwrite the stored domain name. **Tests only.** See
+/// [`set_stored_hostname_for_test`] for why this exists.
+#[cfg(test)]
+pub(crate) fn set_stored_domain_for_test(name: &[u8]) {
+    let len = name.len().min(HOST_NAME_MAX);
+    // SAFETY: single-address-space test harness; `len <= HOST_NAME_MAX` and
+    // the buffer is `HOST_NAME_MAX + 1` bytes, so index `len` is in bounds.
+    unsafe {
+        let buf = domain_buf_ptr().cast::<u8>();
+        let mut i = 0;
+        while i < len {
+            *buf.add(i) = name.get(i).copied().unwrap_or(0);
+            i = i.wrapping_add(1);
+        }
+        *buf.add(len) = 0;
+        *domain_len_ptr() = len;
+    }
+}
+
+/// The stored domain buffer, which is the fallback for [`current_domain`].
+fn stored_domain(out: &mut [u8]) -> usize {
+    // SAFETY: single-address-space, and this is a read.
+    let (src_ptr, src_len) = unsafe { (domain_buf_ptr().cast_const(), *domain_len_ptr()) };
+    let n = core::cmp::min(out.len(), src_len);
+    let mut i = 0;
+    while i < n {
+        // SAFETY: `i < src_len <= HOST_NAME_MAX` and the buffer is
+        // `HOST_NAME_MAX + 1` bytes; `out.get_mut` bounds the destination.
+        unsafe {
+            let b = *src_ptr.cast::<u8>().add(i);
+            if let Some(slot) = out.get_mut(i) {
+                *slot = b;
+            }
+        }
+        i = i.wrapping_add(1);
+    }
+    n
+}
+
 /// The stored hostname buffer, which is the fallback for [`current_hostname`].
 fn stored_hostname(out: &mut [u8]) -> usize {
     // SAFETY: Single-address-space, no concurrent writes during the read.
@@ -1342,8 +1400,9 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
 /// where glibc would have faulted in its `memcpy`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
-    // SAFETY: single-address-space, no concurrent writes during read.
-    let (domain_ptr, dlen) = unsafe { (domain_buf_ptr().cast_const(), *domain_len_ptr()) };
+    // The *system's* domain name. See `current_domain`.
+    let mut domain = [0u8; HOST_NAME_MAX + 1];
+    let dlen = current_domain(&mut domain);
     let needed = dlen.wrapping_add(1); // +null
     if len < needed {
         errno::set_errno(errno::EINVAL);
@@ -1359,8 +1418,7 @@ pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
         // SAFETY: idx < dlen <= HOST_NAME_MAX, the domain buffer is
         // HOST_NAME_MAX+1 bytes, and `name` has at least `needed` bytes.
         unsafe {
-            let byte = *domain_ptr.cast::<u8>().add(idx);
-            *name.add(idx) = byte;
+            *name.add(idx) = domain.get(idx).copied().unwrap_or(0);
         }
         idx = idx.wrapping_add(1);
     }
@@ -1373,8 +1431,12 @@ pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
 
 /// Set the domain name of the host.
 ///
-/// Stores `name[..len]` as the new domain name.  Subsequent calls to
-/// `getdomainname()` will return the new value.
+/// Every argument check below is real and runs in Linux's own order, and then
+/// the call returns `ENOSYS`: there is no native syscall number for the domain
+/// name, exactly as for [`sethostname`]. It used to store `name[..len]` in a
+/// process-local buffer and return `0`, which `getdomainname` then read back —
+/// so a program could set the domain name, read it, get its own value and
+/// conclude the system had one.
 ///
 /// Errors (Linux-matching priority order — `kernel/sys.c::sys_setdomainname`
 /// performs the cap check at the top, before argument validation):
@@ -1383,8 +1445,11 @@ pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
 /// 2. `len > HOST_NAME_MAX`          → `EINVAL`
 /// 3. `name == NULL` when `len > 0`  → `EFAULT`
 ///
-/// `len == 0` is accepted even with a NULL pointer (matches Linux's
-/// `copy_from_user(_, NULL, 0)` short-circuit).
+/// 4. otherwise                      → `ENOSYS`
+///
+/// `len == 0` with a NULL pointer passes the checks (matching Linux's
+/// `copy_from_user(_, NULL, 0)` short-circuit) and then fails on `ENOSYS`
+/// like any other call.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setdomainname(name: *const u8, len: usize) -> i32 {
     // 1. CAP_SYS_ADMIN check first (Phase 167).  The comment that
@@ -1405,18 +1470,19 @@ pub extern "C" fn setdomainname(name: *const u8, len: usize) -> i32 {
         return -1;
     }
 
-    // SAFETY: single-address-space, no concurrent access.
-    unsafe {
-        let buf_ptr = domain_buf_ptr().cast::<u8>();
-        let mut idx = 0;
-        while idx < len {
-            *buf_ptr.add(idx) = *name.add(idx);
-            idx = idx.wrapping_add(1);
-        }
-        *buf_ptr.add(len) = 0;
-        *domain_len_ptr() = len;
-    }
-    0
+    // And here it stops, for the same reason `sethostname` does: there is no
+    // native syscall number for the domain name, so there is nowhere to put
+    // it. See that function and
+    // `requests/b-a-no-native-syscall-reports-the-hostname.md`.
+    //
+    // This used to write a process-local buffer and return 0, and
+    // `getdomainname` read that same buffer -- so a program could set the
+    // domain name, read it back, get its own value and conclude the system had
+    // one. The capability check above still runs first: unprivileged is
+    // permanent, unimplemented is not.
+    let _ = (name, len);
+    errno::set_errno(errno::ENOSYS);
+    -1
 }
 
 /// Get the maximum number of open file descriptors.
@@ -1942,10 +2008,21 @@ pub extern "C" fn sync() {
     }
 }
 
-/// Set the system hostname.
+/// Set the system hostname — or rather, refuse to, for now.
 ///
-/// Stores the hostname in a process-local static buffer.  Retrieved
-/// via `gethostname()`.  Maximum length is 255 bytes (HOST_NAME_MAX).
+/// Every argument check below is real and runs in Linux's own order, and then
+/// the call returns `ENOSYS`: there is no native syscall number for the
+/// hostname yet, so there is nowhere to put the name. See the body for the
+/// full reasoning and `requests/b-a-no-native-syscall-reports-the-hostname.md`
+/// for the request; when the number lands this becomes a syscall.
+///
+/// **This doc comment described the old behaviour for one commit longer than
+/// the code did**, which is worth leaving a mark about. It said "stores the
+/// hostname in a process-local static buffer, retrieved via `gethostname()`" —
+/// a true description of the defect that was removed, sitting above the fix,
+/// where the next reader would have believed it over the code. Changing a
+/// body and leaving its doc is the same failure as a test that certifies a
+/// bug: both are statements that outlived the thing they describe.
 ///
 /// Errors (Linux-matching priority order — `kernel/sys.c::sys_sethostname`
 /// checks the cap first, then the length, then the user pointer):
@@ -1953,9 +2030,11 @@ pub extern "C" fn sync() {
 /// 1. `!CAP_SYS_ADMIN`              → `EPERM`   (Phase 167)
 /// 2. `len > HOST_NAME_MAX`          → `EINVAL`
 /// 3. `name == NULL` when `len > 0`  → `EFAULT`
+/// 4. otherwise                      → `ENOSYS`
 ///
-/// `len == 0` is accepted even with a NULL pointer (matches Linux's
-/// `copy_from_user(_, NULL, 0)` short-circuit).
+/// `len == 0` with a NULL pointer passes the checks (matching Linux's
+/// `copy_from_user(_, NULL, 0)` short-circuit) and then fails on `ENOSYS`
+/// like any other call — it is no longer the one form that succeeds.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
     // 1. CAP_SYS_ADMIN check first (Phase 167) — Linux's
@@ -5628,24 +5707,19 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
+    /// **`setdomainname` does not set the domain name, and now says so.**
+    ///
+    /// The mirror of `test_sethostname_reports_that_it_cannot`, and it
+    /// survived a commit longer: the change that fixed `sethostname` said in
+    /// its message that it had fixed this one too, and had not. The round trip
+    /// agreed because both ends were the same process-local buffer, which is
+    /// what made it look like evidence.
     #[test]
-    fn test_setdomainname_roundtrip() {
-        // Save the original.
-        let mut orig = [0u8; 256];
-        getdomainname(orig.as_mut_ptr(), orig.len());
-        let orig_len = unsafe { crate::string::strlen(orig.as_ptr()) };
-
-        // Set a new domain.
+    fn test_setdomainname_reports_that_it_cannot() {
+        errno::set_errno(0);
         let new_domain = b"example.com";
-        assert_eq!(setdomainname(new_domain.as_ptr(), new_domain.len()), 0);
-
-        // Verify it was set.
-        let mut buf = [0u8; 256];
-        assert_eq!(getdomainname(buf.as_mut_ptr(), buf.len()), 0);
-        assert_eq!(&buf[..new_domain.len()], new_domain);
-
-        // Restore the original.
-        setdomainname(orig.as_ptr(), orig_len);
+        assert_eq!(setdomainname(new_domain.as_ptr(), new_domain.len()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
@@ -5857,17 +5931,18 @@ mod tests {
         }
 
         /// Same for `setdomainname(NULL, 0)`.
+        /// `setdomainname(NULL, 0)` passes every argument check and then
+        /// fails on `ENOSYS`, like any other call. It used to return `0` —
+        /// the one form of this call that "succeeded".
         #[test]
-        fn test_setdomainname_phase167_null_len_zero_succeeds_with_cap() {
+        fn test_setdomainname_phase167_null_len_zero_reaches_enosys_with_cap() {
             let _g = CapGuard::snapshot();
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SYS_ADMIN
             ));
             errno::set_errno(0);
-            assert_eq!(setdomainname(core::ptr::null(), 0), 0);
-            // Restore "(none)" to avoid bleeding into later tests.
-            let none = b"(none)";
-            let _ = setdomainname(none.as_ptr(), none.len());
+            assert_eq!(setdomainname(core::ptr::null(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
 
         /// `sethostname(NULL, 0)` under no cap still returns EPERM

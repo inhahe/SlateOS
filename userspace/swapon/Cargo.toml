@@ -3,6 +3,7 @@ name = "swapon"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+posix = { path = "../../posix" }
 # swapon names swap devices and files by path, supplied by the caller or
 # read out of fstab.
 quoting = { path = "../quoting" }

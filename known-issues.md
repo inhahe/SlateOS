@@ -127605,3 +127605,53 @@ the gate family it would join — so this is written down rather than built.
 questions is a coin-flip on a wasted boot test, and the tree can reach `main`
 in a state where all three lanes' boot tests refuse to build — found only by
 whoever next waits nineteen minutes for it.
+
+
+## TD-B-A-GATE-THAT-PASSES-BY-SKIPPING-IS-REPORTED-AS-HAVING-RUN (lane B, 2026-09-10)
+
+**In short:** the pre-push hook prints a list of the gates that ran. A gate that
+decided internally it could not do its job -- because a tool it needs is absent
+-- exits 0, and appears in that list as though it had run. So the line that
+exists to tell you what was checked cannot distinguish "checked and clean" from
+"could not check".
+
+**Concretely.** `scripts/check-libc-abi.py` (gate 16) compares our `repr(C)`
+types against musl's headers using `zig cc`. With no `zig` on `PATH` and no
+`FASTPY_ZIG` it prints
+
+    check-libc-abi: SKIPPED the layout check -- no `zig` on PATH and no FASTPY_ZIG.
+
+and exits **0**. The hook's tally then reads `ran: ... libc-abi ...`.
+
+**This machine was in that state.** Every push touching `posix/src/` since gate
+16 was written had it skip. The gate that found five real ABI bugs in its first
+hour -- a transposed `addrinfo`, a half-width `regmatch_t` -- was checking
+nothing. Found on 2026-09-10 by running the checker by hand and reading the
+first line of its output, which is not something the hook does.
+
+Fixed *on this machine* by setting `FASTPY_ZIG` as a user environment variable
+pointing at the zig already installed under `D:/utils`; the gate now genuinely
+runs and reports "76 types checked against musl, 0 mismatches". That fixes the
+instance and not the class.
+
+**The class.** There are two kinds of skip and the hook can only see one.
+`note_gate <name> 1` records a gate the *hook* skipped -- wrong file scope,
+`ALLOW_*` set -- and those are listed separately and honestly. A checker that
+skips *itself* is invisible, because `run_checker` sees only an exit code and 0
+means pass.
+
+**The fix.** Give a self-skipping checker a distinct exit code (3, say) and have
+`run_checker` map it to the skipped list rather than the ran list. That is not
+done here because `scripts/run-checker.sh` is **shared with
+`scripts/boot-test.sh`** -- it was deliberately moved out of the hook the day
+the same defect appeared at both boundaries -- so changing its contract affects
+lane A's boot path and deserves a look from whoever owns that, not a tail-end
+edit from an unrelated commit.
+
+**Worth auditing for whoever owns a gate:** grep your own checkers for a path
+that prints "SKIPPED"/"not installed"/"not found" and then returns 0.
+`scripts/check-cfg-unix.py` has one too -- it exits 0 when
+`x86_64-unknown-linux-gnu` is not installed -- written by me, with the same
+reasoning, and correct in the same limited way. **A gate that no-ops on a
+missing prerequisite is the single cheapest way for a green tree to be
+unverified**, and it looks identical to a healthy one from the outside.

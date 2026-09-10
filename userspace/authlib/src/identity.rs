@@ -184,9 +184,111 @@ pub fn caller_gid() -> Option<u32> {
     }
 }
 
+/// `argv[0]` for a login shell: its own basename with a leading `-`.
+///
+/// The leading hyphen is the entire protocol by which a shell is told it is a
+/// *login* shell, and therefore that it should read `/etc/profile` and the
+/// user's own profile. `/bin/bash` becomes `-bash`. Passing `-l` instead works
+/// for some shells and is a syntax error for others, which is why every
+/// `login`, `su` and `sshd` in existence uses the hyphen.
+///
+/// # Why bytes
+///
+/// A shell path on this OS may hold any byte but `/` and NUL, so the rule has
+/// to be expressed over bytes. Keeping it separate from the `OsStr` wrapper
+/// below also keeps it *testable*: converting bytes to an `OsString` is only
+/// possible through `std::os::unix::ffi`, which does not exist on the Windows
+/// host these crates' tests are compiled for, so a single `OsStr -> OsString`
+/// function could not be called by any test at all. The same shape as
+/// separating a parser from its reader, and for the same reason: the part with
+/// the decisions in it should not be the part that needs a particular platform
+/// to run.
+///
+/// # Degenerate paths
+///
+/// A path ending in `/` has no basename. Emitting a bare `-` would name a
+/// shell that does not exist and start no session, so the whole string is used
+/// instead -- still wrong as a shell, but it fails loudly at `spawn` with a
+/// name that says what was configured, rather than becoming a one-character
+/// mystery.
+#[must_use]
+pub fn login_argv0_bytes(shell: &[u8]) -> Vec<u8> {
+    let base = match shell.iter().rposition(|b| *b == b'/') {
+        Some(i) if i.saturating_add(1) < shell.len() => {
+            shell.get(i.saturating_add(1)..).unwrap_or(shell)
+        }
+        _ => shell,
+    };
+    let mut out = Vec::with_capacity(base.len().saturating_add(1));
+    out.push(b'-');
+    out.extend_from_slice(base);
+    out
+}
+
+/// [`login_argv0_bytes`] as an `OsString`, for handing to
+/// `CommandExt::arg0`.
+///
+/// Unix only, because `CommandExt::arg0` is. A caller on the host build has
+/// nothing to pass it to.
+#[cfg(unix)]
+#[must_use]
+pub fn login_argv0(shell: &std::ffi::OsStr) -> std::ffi::OsString {
+    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+    std::ffi::OsString::from_vec(login_argv0_bytes(shell.as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- the login-shell argv[0] ----
+    //
+    // These stood in `userspace/su` (over bytes) and `userspace/sshd` (over
+    // `&str`) as two implementations of one rule. `userspace/login` was the
+    // third caller, which is the point at which two copies stop being cheaper
+    // than one shared function.
+
+    /// The convention: basename, hyphen in front.
+    #[test]
+    fn login_argv0_is_the_basename_with_a_hyphen() {
+        assert_eq!(login_argv0_bytes(b"/bin/bash"), b"-bash");
+        assert_eq!(login_argv0_bytes(b"/usr/local/bin/osh"), b"-osh");
+        assert_eq!(login_argv0_bytes(b"/usr/local/bin/fish"), b"-fish");
+    }
+
+    /// An account record may name the shell without a path at all.
+    #[test]
+    fn login_argv0_needs_no_directory() {
+        assert_eq!(login_argv0_bytes(b"sh"), b"-sh");
+    }
+
+    /// A shell path may hold any byte but `/` and NUL, so the rule is over
+    /// bytes and a name that is not UTF-8 survives it. This is the case the
+    /// `&str` implementation in `sshd` could not have been given.
+    #[test]
+    fn login_argv0_keeps_bytes_that_are_not_utf8() {
+        assert_eq!(login_argv0_bytes(b"/bin/o\xffh"), b"-o\xffh".to_vec());
+    }
+
+    /// Degenerate paths must still produce something a shell can be called by.
+    ///
+    /// A trailing slash has no basename. Emitting `-` alone would name a shell
+    /// that does not exist and start no session; the whole path at least fails
+    /// loudly at `spawn` saying what was configured.
+    #[test]
+    fn login_argv0_never_returns_a_bare_hyphen() {
+        assert_eq!(login_argv0_bytes(b"/bin/"), b"-/bin/".to_vec());
+        assert_eq!(login_argv0_bytes(b"/"), b"-/".to_vec());
+        assert_eq!(login_argv0_bytes(b""), b"-".to_vec());
+    }
+
+    /// The hyphen is the whole point: without it the shell does not read the
+    /// user's profile, and the session comes up with none of the environment a
+    /// login is supposed to set up.
+    #[test]
+    fn login_argv0_keeps_the_hyphen_that_means_login_shell() {
+        assert!(login_argv0_bytes(b"/bin/bash").starts_with(b"-"));
+    }
 
     /// **The environment must not be able to answer this question.**
     ///

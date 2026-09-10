@@ -2880,27 +2880,6 @@ fn spawn_in_home(
     cmd.spawn()
 }
 
-/// The `argv[0]` a login shell expects: its own basename with a leading `-`.
-///
-/// That leading hyphen is the entire protocol by which a shell is told it is a
-/// *login* shell, and therefore that it should read `/etc/profile` and the
-/// user's own profile. Passing `-l` instead works for some shells and is a
-/// syntax error for others, which is why every `login`, `su` and sshd in
-/// existence uses the hyphen.
-///
-/// The sole caller is inside `shell_command`'s `#[cfg(unix)]` block, so on a
-/// non-unix *host* build — which is how this crate's tests are compiled — the
-/// function is genuinely unreachable outside the test module. The allow is
-/// therefore conditioned on `not(unix)` rather than unconditional: on the real
-/// target, `dead_code` here would mean the login-shell convention had been
-/// dropped from the spawn path, and that is a warning worth keeping.
-#[cfg_attr(not(unix), allow(dead_code))]
-fn login_argv0(shell_path: &str) -> String {
-    let base = shell_path.rsplit('/').next().unwrap_or(shell_path);
-    let base = if base.is_empty() { shell_path } else { base };
-    format!("-{base}")
-}
-
 /// Build the `Command` that runs `user`'s login shell — program, environment,
 /// `argv[0]` and identity, but no attachment.
 ///
@@ -2938,7 +2917,9 @@ fn login_shell_command(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        cmd.arg0(login_argv0(&user.shell));
+        cmd.arg0(authlib::identity::login_argv0(std::ffi::OsStr::new(
+            &user.shell,
+        )));
     }
 
     // See `session_command`: the ordering rule and the missing `setgroups` are
@@ -10017,37 +9998,11 @@ Z
         codec.encode(payload, &padding).expect("padding fits")
     }
 
-    // ---- Login shell argv[0] ----
-
-    #[test]
-    fn test_login_argv0_takes_the_basename() {
-        assert_eq!(login_argv0("/bin/bash"), "-bash");
-        assert_eq!(login_argv0("/usr/local/bin/fish"), "-fish");
-    }
-
-    #[test]
-    fn test_login_argv0_bare_name_needs_no_directory() {
-        // A passwd entry may name the shell without a path.
-        assert_eq!(login_argv0("sh"), "-sh");
-    }
-
-    #[test]
-    fn test_login_argv0_trailing_slash_falls_back_to_the_whole_path() {
-        // `rsplit('/')` yields "" for a path ending in a separator. Emitting
-        // "-" would name a shell that does not exist and start no session, so
-        // the whole string is used instead: still wrong as a shell, but it
-        // fails loudly at `spawn` with a name that says what was configured,
-        // rather than silently becoming a one-character mystery.
-        assert_eq!(login_argv0("/bin/"), "-/bin/");
-    }
-
-    #[test]
-    fn test_login_argv0_keeps_the_hyphen_that_means_login_shell() {
-        // The leading hyphen is the whole point: without it the shell does not
-        // read the user's profile, and a session comes up with no PATH set by
-        // the site's configuration.
-        assert!(login_argv0("/bin/bash").starts_with('-'));
-    }
+    // The `login_argv0` tests that stood here moved to `authlib::identity`
+    // along with the function. `sshd`'s copy took a `&str`, so it could not be
+    // given the case a shell path on this OS is allowed to be: one holding a
+    // byte that is not UTF-8. The shared version is over bytes and is tested
+    // with one.
 
     // ---- Terminal size conversion ----
 

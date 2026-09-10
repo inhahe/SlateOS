@@ -1298,13 +1298,27 @@ def selftest() -> int:
     return 1 if failures else 0
 
 
-def report(found: dict[str, list[tuple[int, str, str]]], show_lines: bool) -> int:
+def report(
+    found: dict[str, list[tuple[int, str, str]]],
+    show_lines: bool,
+    scanned: int | None = None,
+) -> int:
+    """Print the findings, and -- separately -- how much was looked at.
+
+    `scanned` is not decoration. Without it every number on the summary line
+    counts something that is wrong, so a clean tree and a scan that lost its
+    subject are spelled identically, and the reassuring reading is the one a
+    reader reaches for. `_no_corpus` makes the same argument above and already
+    holds the number; it was simply never shown on the path a human reads.
+    """
     per_crate: dict[str, int] = {}
     for path, hits in found.items():
         parts = path.split("/")
         crate = "/".join(parts[:2]) if len(parts) > 1 else path
         per_crate[crate] = per_crate.get(crate, 0) + len(hits)
     total = sum(len(v) for v in found.values())
+    if scanned is not None:
+        print(f"inspected {scanned} .rs file(s) under {'/, '.join(ROOTS)}/")
     print(f"{total} violations in {len(found)} files, {len(per_crate)} crates\n")
     for crate, n in sorted(per_crate.items(), key=lambda kv: (-kv[1], kv[0])):
         print(f"{n:5}  {crate}")
@@ -1477,7 +1491,7 @@ def main() -> int:
             # still perfectly reportable. Guarding it here anyway would make
             # the plain listing -- the one mode whose job is to survey a tree
             # nobody has ratcheted yet -- refuse the trees it exists for.
-            return report(seen.found, "--list" in args)
+            return report(seen.found, "--list" in args, seen.scanned)
         if _no_baseline(baseline, head):
             return 2
         return check(seen.found, baseline)
@@ -1497,7 +1511,7 @@ def main() -> int:
         if _no_baseline(disk_baseline, None):
             return 2
         return check(seen.found, disk_baseline)
-    return report(seen.found, "--list" in args)
+    return report(seen.found, "--list" in args, seen.scanned)
 
 
 if __name__ == "__main__":
